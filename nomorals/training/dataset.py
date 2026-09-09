@@ -304,8 +304,13 @@ class DatasetRegistry:
         return Dataset.from_row(row)
 
     def list(self, *, kind: str = "", limit: int = 50) -> list[Dataset]:
-        rows = self.repo.find(kind=kind, limit=limit) if kind else self.repo.find(limit=limit)
-        return [Dataset.from_row(r) for r in rows]
+        # Same trap as elsewhere: find() has no limit parameter, so passing one
+        # filters on a column called "limit" and matches nothing.
+        query = self.repo.query()
+        if kind:
+            query.where("kind = ?", kind)
+        rows = self.db.query(*query.order_by("created_at DESC").limit(limit).build())
+        return [Dataset.from_row(dict(r)) for r in rows]
 
     def delete(self, dataset_id: str, *, remove_file: bool = False) -> int:
         dataset = self.get(dataset_id)

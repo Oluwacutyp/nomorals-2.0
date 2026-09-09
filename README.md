@@ -36,12 +36,12 @@ operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
 | L1 Core | config, errors, retry, rate limits, policy, events, logging, HTTP | ✅ tested |
 | L2 Storage | SQLite, 52 tables, migrations, FTS5, vectors, blobs, queue, backups | ✅ tested |
 | L3 Cognition | memory, embeddings, LLM router, model registry, HF download, **training pipeline** | ✅ tested |
-| L4 Capability | filesystem, sandboxed shell, web, parsers, vision, media | ✅ tested |
+| L4 Capability | filesystem, sandboxed shell, web, parsers, vision, media, **social** | ✅ tested |
 | L5 Agents | task DAG, thread/process/async runtime, budgets, supervisor, orchestrator | ✅ tested |
 | L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
 | L7 Surface | CLI ✅ · HTTP API ✅ · TUI ⬜ | ◐ partial |
 
-**427 tests, all passing, fully offline.** `python3 -m unittest discover -s tests -t .`
+**482 tests, all passing, fully offline.** `python3 -m unittest discover -s tests -t .`
 
 ## Architecture
 
@@ -157,12 +157,12 @@ backups.
 
 ## Honest status
 
-This is a working, tested core — not a finished product. Roughly 18,700 lines of
-Python across 82 files. The stated 100,000-line target is not achievable as
+This is a working, tested core — not a finished product. Roughly 20,400 lines of
+Python across 90 files. The stated 100,000-line target is not achievable as
 quality code in a single pass; padding the tree with filler to hit a number would
 make the system worse, so the count is reported as measured.
 
-Not yet built: the TUI and `social/`. Hugging Face integration is written but **unverified
+Not yet built: the TUI. Hugging Face integration is written but **unverified
 against the live API** — this sandbox has no network access to huggingface.co.
 
 See [`ROADMAP.md`](ROADMAP.md).

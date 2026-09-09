@@ -225,8 +225,13 @@ class TrainingRegistry:
         return self.save(run).status == RunStatus.PROMOTED
 
     def list(self, *, status: str = "", limit: int = 50) -> list[TrainingRun]:
-        rows = self.repo.find(status=status, limit=limit) if status else self.repo.find(limit=limit)
-        return [TrainingRun.from_row(r) for r in rows]
+        # Not repo.find(limit=...): that becomes `WHERE "limit" = 50` and returns
+        # nothing, because find() treats every kwarg as a column filter.
+        query = self.repo.query()
+        if status:
+            query.where("status = ?", status)
+        rows = self.db.query(*query.order_by("created_at DESC").limit(limit).build())
+        return [TrainingRun.from_row(dict(r)) for r in rows]
 
     def interrupted(self) -> list[TrainingRun]:
         """Runs left in flight by a crash. Startup should mark these failed."""

@@ -65,6 +65,23 @@ The native trainer is a single-hidden-layer softmax, not a transformer. It exist
 so the self-improvement loop is exercisable on a phone with nothing installed;
 when torch is present it should be the backend instead.
 
+### L4 Social — `nomorals/social/` (46 tests)
+Multi-platform publishing on official APIs only. One call fans out across every
+connected account on the L5 thread pool, with per-platform failure isolation.
+
+Verified: four platforms at 0.15s each complete in under 0.45s wall (serial would
+be 0.6s), so the fan-out is genuinely parallel. A failing platform does not stop
+the others and does not lose the post.
+
+Two rules it does not bend: official APIs only, and credentials are never stored.
+`Account.credentials` holds `env:NAME`, resolved at call time, because this
+database is backed up to a git repo. A test asserts the resolved token never
+appears in the serialized row.
+
+Bulk posting requires a confirmation token. `social.bulk` is a confirmable
+capability, so a prompt-injected agent cannot blast every connected account on its
+own authority; `publish()` now takes the token and a test asserts the refusal.
+
 ### L7 Surface — partial
 CLI (`nm` / `python3 -m nomorals`) and a threaded stdlib HTTP API with bearer
 auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
@@ -72,10 +89,6 @@ auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
 ## Not done
 
 Ordered by value, not by effort.
-
-### L4 Social — `social/`
-Multi-platform posting, scheduling, engagement collection. Must be restricted to
-official APIs with rate limits (`ARCHITECTURE.md` §10). Nothing written.
 
 ### `storage/models.py`
 The one L2 gap. Tables are defined in migrations and rows come back as
@@ -114,6 +127,10 @@ Learned the hard way; each one cost a debugging cycle.
   `resume_all()` also calls `run()`.
 - **An append-only table has no `updated_at`.** The Repository injects timestamps
   by default; overriding `timestamp_columns` is required for immutable tables.
+- **`Repository.find()` has no `limit` parameter.** It turns every keyword into a
+  `WHERE` clause, so `find(limit=50)` became `WHERE "limit" = 50` and silently
+  matched nothing. Use `repo.query().limit(n).build()`. This bug shipped in three
+  places before a test caught it.
 - **Classify failures by exception type, not by substring-matching the message.**
   The supervisor retried a `BudgetExceeded` three times because its message said
   "out of tokens", not "budget".

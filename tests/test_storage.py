@@ -753,3 +753,43 @@ class ModelDataclassTests(unittest.TestCase):
         self.assertEqual(restored.priority, 5)
 
 
+
+
+class FindLimitTrapTests(unittest.TestCase):
+    """Repository.find() has no limit parameter. Passing one is a silent no-match."""
+
+    def setUp(self):
+        from nomorals.storage.db import Database
+
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.path = handle.name
+        self.db = Database(self.path)
+        self.db.migrate()
+
+    def tearDown(self):
+        self.db.close()
+        Path(self.path).unlink(missing_ok=True)
+
+    def test_find_treats_every_kwarg_as_a_column_filter(self):
+        from nomorals.storage.repository import Repository
+
+        repo = Repository(self.db, "datasets", json_columns=("schema_", "metadata"),
+                          timestamp_columns=("created_at",))
+        for index in range(3):
+            repo.create({"id": f"ds{index}", "name": f"n{index}", "kind": "chat",
+                         "path": f"/tmp/{index}.jsonl", "created_at": 1.0})
+        self.assertEqual(len(repo.find(kind="chat")), 3)
+        # The trap: this looks like a row cap but is WHERE "limit" = 50.
+        self.assertEqual(repo.find(kind="chat", limit=50), [])
+
+    def test_query_builder_is_the_correct_way_to_cap_rows(self):
+        from nomorals.storage.repository import Repository
+
+        repo = Repository(self.db, "datasets", json_columns=("schema_", "metadata"),
+                          timestamp_columns=("created_at",))
+        for index in range(5):
+            repo.create({"id": f"ds{index}", "name": f"n{index}", "kind": "chat",
+                         "path": f"/tmp/{index}.jsonl", "created_at": 1.0})
+        rows = self.db.query(*repo.query().where("kind = ?", "chat").limit(2).build())
+        self.assertEqual(len(rows), 2)
