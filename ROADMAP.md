@@ -50,6 +50,21 @@ The guarantee is at-least-once, not exactly-once: if the process dies after a
 step completes but before the checkpoint lands, that step repeats. Steps must be
 idempotent or record their own completion.
 
+### L3 Training — `nomorals/training/` (54 tests)
+Dataset codecs (ChatML/Alpaca/ShareGPT/OpenAI), a BPE tokenizer trained from
+scratch in stdlib, simhash dedup and quality filtering, a native pure-Python
+next-token trainer with analytic gradients, and a run registry wired to the
+promotion gate.
+
+Verified end to end: train loss falls monotonically (6.62 → 6.38 over 4 epochs,
+eval 5.75 → 5.55), the gate rejects a model scoring 0.153 against an incumbent at
+0.500 and leaves the incumbent live, and a forced promotion is recorded in the run
+row.
+
+The native trainer is a single-hidden-layer softmax, not a transformer. It exists
+so the self-improvement loop is exercisable on a phone with nothing installed;
+when torch is present it should be the backend instead.
+
 ### L7 Surface — partial
 CLI (`nm` / `python3 -m nomorals`) and a threaded stdlib HTTP API with bearer
 auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
@@ -57,16 +72,6 @@ auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
 ## Not done
 
 Ordered by value, not by effort.
-
-### L3 Training — `training/`
-Designed in `ARCHITECTURE.md` §7, zero lines written. Dataset codecs
-(ChatML/Alpaca/ShareGPT), distillation from multiple models, dedup and quality
-filtering, BPE tokenizer trained from scratch, a pure-Python training loop for
-tiny models, config generation for Unsloth and LLaMA-Factory, perplexity
-evaluation.
-
-The promotion gate in `llm/registry.py` is already built and tested — the loop
-that feeds it is not.
 
 ### L4 Social — `social/`
 Multi-platform posting, scheduling, engagement collection. Must be restricted to
