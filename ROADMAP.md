@@ -36,22 +36,27 @@ Task DAG with cycle rejection, hybrid thread/process/async runtime, budgets with
 halving inheritance, supervisor restart ladder, master orchestrator with plan
 repair, 10 role agents.
 
+### L6 Missions — `nomorals/missions/` (37 tests)
+Crash-resumable long-running goals. State, plan, progress, and budget persist to
+SQLite; checkpoints are append-only so a torn write cannot lose the previous
+state. `resume_all()` continues every interrupted mission on startup.
+
+Verified for real: a subprocess is SIGKILLed mid-mission, and a fresh process
+resumes from the persisted checkpoint. The test asserts that steps completed
+before the kill are **not** re-executed, and that two kills in a row still
+converge to a terminal state.
+
+The guarantee is at-least-once, not exactly-once: if the process dies after a
+step completes but before the checkpoint lands, that step repeats. Steps must be
+idempotent or record their own completion.
+
 ### L7 Surface — partial
 CLI (`nm` / `python3 -m nomorals`) and a threaded stdlib HTTP API with bearer
-auth. Both executed end to end.
+auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
 
 ## Not done
 
 Ordered by value, not by effort.
-
-### L6 Missions — the biggest gap
-`ARCHITECTURE.md` §9 specifies this; nothing is written. A mission is a
-long-running autonomous goal that survives restarts: persistent state, checkpoint
-and resume, progress reporting, budget caps across hours, and escalation to the
-operator when stuck. The pieces exist — durable queue, blackboard, supervisor,
-budgets — but nothing composes them into an entity that outlives a process.
-
-This is what turns "run a task" into "keep working on this until it's done."
 
 ### L3 Training — `training/`
 Designed in `ARCHITECTURE.md` §7, zero lines written. Dataset codecs
@@ -85,6 +90,7 @@ Stated plainly, because the difference between written and verified matters:
 - **Video download is unverified.** No `yt-dlp` and no `ffmpeg` are installed
   here. `tools/media.py` reports its own capability honestly via
   `media_capability()`, and the direct-HTTP fallback is the only path exercised.
+- **Video/media tools are unexercised beyond the direct-HTTP path.**
 - **`torch`, `numpy`, `transformers`, `pillow` paths are unexercised.** No
   third-party packages are installable here (PEP 668 externally-managed). Every
   pure-Python fallback is tested; every accelerated path is not.
@@ -98,6 +104,11 @@ Learned the hard way; each one cost a debugging cycle.
 - **Never signal failure through a context manager's `__enter__` return value.**
   The body runs regardless.
 - **Never call `executescript()` inside a transaction** — it implicitly commits.
+- **Reset a cancellation flag in the entry point, not the worker.** Clearing it
+  in `run()` discarded a `cancel()` requested from another thread, because
+  `resume_all()` also calls `run()`.
+- **An append-only table has no `updated_at`.** The Repository injects timestamps
+  by default; overriding `timestamp_columns` is required for immutable tables.
 - **Classify failures by exception type, not by substring-matching the message.**
   The supervisor retried a `BudgetExceeded` three times because its message said
   "out of tokens", not "budget".

@@ -222,6 +222,11 @@ def build_context(
         from ..tools.registry import ToolRegistry
 
         context.tools = ToolRegistry(context)
+        # Register eagerly. Without this, only the CLI ever populated the
+        # registry and every agent ran with zero tools — the research step
+        # failed with "unknown tool 'web_search'; available: []" while the CLI
+        # looked perfectly healthy. register_builtins() is idempotent.
+        context.tools.register_builtins()
 
     from .blackboard import Blackboard
 

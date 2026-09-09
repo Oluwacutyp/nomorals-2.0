@@ -61,6 +61,17 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--restore", default="")
     backup.add_argument("--push", action="store_true", help="push the latest backup to git")
 
+    missions = sub.add_parser("missions", help="list, run, resume, or inspect missions")
+    missions.add_argument("--start", default="", help="start a new mission with this goal")
+    missions.add_argument("--resume", default="", help="resume a mission by id")
+    missions.add_argument("--resume-all", action="store_true", help="resume every interrupted mission")
+    missions.add_argument("--status", default="", help="filter by status")
+    missions.add_argument("--show", default="", help="show one mission's detail and checkpoints")
+    missions.add_argument("--max-iterations", type=int, default=8)
+    missions.add_argument("--budget-wall", type=float, default=0.0)
+    missions.add_argument("--budget-tokens", type=int, default=0)
+    missions.add_argument("--no-reflect", action="store_true")
+
     sub.add_parser("serve", help="start the HTTP API server")
     queue = sub.add_parser("queue", help="inspect the durable work queue")
     queue.add_argument("--topic", default="")
@@ -113,6 +124,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_ask(args, context)
         if args.command == "backup":
             return _cmd_backup(args, context)
+        if args.command == "missions":
+            return _cmd_missions(args, context)
         if args.command == "serve":
             return _cmd_serve(args, context)
         if args.command == "queue":
@@ -328,6 +341,92 @@ def _cmd_backup(args: argparse.Namespace, context: Any) -> int:
     for entry in entries:
         print(f"{entry.name}  {entry.size:>10} bytes  schema v{entry.schema_version}  {entry.label}")
     return 0
+
+
+def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
+    from .missions import MissionRunner, MissionStore
+
+    store = MissionStore(context.db)
+    runner = MissionRunner(context, store=store)
+    reflect = not args.no_reflect
+
+    if args.start:
+        result = runner.start(
+            args.start,
+            max_iterations=args.max_iterations,
+            budget_wall=args.budget_wall,
+            budget_tokens=args.budget_tokens,
+            reflect=reflect,
+        )
+        _emit(args, result.to_dict(), _render_result(result))
+        return 0 if result.ok else 1
+
+    if args.resume:
+        result = runner.resume(
+            args.resume, max_iterations=args.max_iterations, reflect=reflect
+        )
+        _emit(args, result.to_dict(), _render_result(result))
+        return 0 if result.ok else 1
+
+    if args.resume_all:
+        results = runner.resume_all(max_iterations=args.max_iterations)
+        payload = [r.to_dict() for r in results]
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        elif not results:
+            print("no interrupted missions")
+        for result in results:
+            print(_render_result(result))
+        return 0
+
+    if args.show:
+        mission = store.get(args.show)
+        history = store.checkpoint_history(mission.id, limit=10)
+        payload = {
+            "mission": mission.to_dict(),
+            "checkpoints": [c.to_row() for c in history],
+            "reflections": store.reflections(mission.id),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+            return 0
+        print(f"{mission.id}  [{mission.status}]")
+        print(f"  goal:       {mission.goal}")
+        print(f"  iterations: {mission.iterations}   success: {mission.success}")
+        print(f"  spent:      {mission.spent_wall:.1f}s / {mission.spent_tokens} tokens")
+        print(f"  completed:  {mission.state.get('completed_steps') or []}")
+        print(f"  checkpoints: {[c.label for c in history]}")
+        return 0
+
+    rows = store.list(status=args.status, limit=50)
+    payload = {"stats": store.stats(), "missions": [m.to_dict() for m in rows]}
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+    stats = store.stats()
+    print(f"missions: {stats['total']} total, {stats['active']} active, "
+          f"{stats['checkpoints']} checkpoints")
+    for mission in rows:
+        print(f" {mission.id}  [{mission.status:<9}] it={mission.iterations} "
+              f"success={mission.success}  {mission.goal[:50]}")
+    return 0
+
+
+def _render_result(result: Any) -> str:
+    lines = [
+        f"mission {result.mission_id} -> {result.status} "
+        f"(success={result.success}, {result.iterations} iterations, {result.seconds:.1f}s)"
+    ]
+    if result.resumed_from:
+        lines.append(f"  resumed from checkpoint: {result.resumed_from}")
+    for step in result.steps:
+        mark = "ok " if step.ok else "ERR"
+        lines.append(f"  [{mark}] {step.step} ({step.seconds:.2f}s) {step.detail[:80]}")
+    if result.error:
+        lines.append(f"  error: {result.error}")
+    for lesson in result.lessons:
+        lines.append(f"  lesson: {lesson}")
+    return "\n".join(lines)
 
 
 def _cmd_serve(args: argparse.Namespace, context: Any) -> int:
