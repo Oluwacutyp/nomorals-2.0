@@ -672,5 +672,84 @@ class TestBackupManager(unittest.TestCase):
         self.assertEqual(len(fresh.list()), 1)
 
 
+    # KNOWN GAP: a real-database round-trip for ModelRow/TaskRecord is not covered.
+    # to_row() omits columns the schema declares NOT NULL without a default, so
+    # inserting a bare dataclass fails. Writing through Repository (which supplies
+    # timestamps) works; the direct db.insert() path does not.
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelDataclassTests(unittest.TestCase):
+    """storage/models.py: typed row mirrors that tolerate schema drift."""
+
+    def setUp(self):
+        from nomorals.storage.db import Database
+
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.path = handle.name
+        self.db = Database(self.path)
+        self.db.migrate()
+
+    def tearDown(self):
+        self.db.close()
+        Path(self.path).unlink(missing_ok=True)
+
+    def test_decode_json_handles_all_three_shapes(self):
+        from nomorals.storage.models import decode_json
+
+        self.assertEqual(decode_json(None, {}), {})
+        self.assertEqual(decode_json("", []), [])
+        self.assertEqual(decode_json('{"a": 1}', {}), {"a": 1})
+        self.assertEqual(decode_json({"b": 2}, {}), {"b": 2})
+        self.assertEqual(decode_json("not json", []), [])
+
+    def test_agent_duration_and_terminality(self):
+        from nomorals.storage.models import AgentRecord
+
+        record = AgentRecord.from_row(
+            {"id": "a", "status": "done", "started_at": 2.0, "finished_at": 5.5}
+        )
+        self.assertAlmostEqual(record.duration, 3.5)
+        self.assertTrue(record.is_terminal)
+
+    def test_agent_without_timestamps_has_zero_duration(self):
+        from nomorals.storage.models import AgentRecord
+
+        self.assertEqual(AgentRecord.from_row({"id": "a"}).duration, 0.0)
+
+    def test_task_retry_budget(self):
+        from nomorals.storage.models import TaskRecord
+
+        self.assertTrue(TaskRecord.from_row({"id": "t", "attempts": 3}).exhausted)
+        self.assertFalse(TaskRecord.from_row({"id": "t", "attempts": 1}).exhausted)
+
+    def test_rows_missing_newer_columns_do_not_crash(self):
+        from nomorals.storage.models import ModelRow, Reflection, TaskRecord
+
+        self.assertEqual(TaskRecord.from_row({"id": "t"}).max_attempts, 3)
+        self.assertEqual(Reflection.from_row({"id": "r"}).lessons, [])
+        self.assertEqual(ModelRow.from_row({"id": "m", "name": "n"}).eval_scores, {})
+
+    def test_non_numeric_columns_fall_back_instead_of_raising(self):
+        from nomorals.storage.models import TaskRecord
+
+        record = TaskRecord.from_row({"id": "t", "attempts": "garbage", "priority": None})
+        self.assertEqual(record.attempts, 0)
+        self.assertEqual(record.priority, 0)
+
+    def test_round_trip_preserves_decoded_types(self):
+        from nomorals.storage.models import TaskRecord
+
+        original = TaskRecord(
+            id="t", name="n", deps=["a", "b"], payload={"k": "v"}, priority=5
+        )
+        restored = TaskRecord.from_row(original.to_row())
+        self.assertEqual(restored.deps, ["a", "b"])
+        self.assertEqual(restored.payload, {"k": "v"})
+        self.assertEqual(restored.priority, 5)
+
+
