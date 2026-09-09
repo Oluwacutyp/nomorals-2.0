@@ -672,10 +672,45 @@ class TestBackupManager(unittest.TestCase):
         self.assertEqual(len(fresh.list()), 1)
 
 
-    # KNOWN GAP: a real-database round-trip for ModelRow/TaskRecord is not covered.
-    # to_row() omits columns the schema declares NOT NULL without a default, so
-    # inserting a bare dataclass fails. Writing through Repository (which supplies
-    # timestamps) works; the direct db.insert() path does not.
+    def test_all_four_records_round_trip_through_the_real_database(self):
+        """to_row() must be valid for a raw db.insert(), not only via Repository."""
+        from nomorals.storage.models import AgentRecord, ModelRow, Reflection, TaskRecord
+
+        cases = [
+            ("models", ModelRow(id="rt-m", name="m", eval_scores={"score": 0.5})),
+            ("tasks", TaskRecord(id="rt-t", name="t", deps=["a"], payload={"k": "v"})),
+            ("agents", AgentRecord(id="rt-a", role="research", capabilities=["fs.read"])),
+            ("reflections", Reflection(id="rt-r", score=0.7, lessons=["learned"])),
+        ]
+        for table, record in cases:
+            with self.subTest(table=table):
+                self.db.insert(table, record.to_row())
+                row = self.db.query_one(f"SELECT * FROM {table} WHERE id = ?", (record.id,))
+                self.assertIsNotNone(row)
+                restored = type(record).from_row(row)
+                self.assertEqual(restored.id, record.id)
+
+    def test_json_columns_survive_the_database_round_trip_as_objects(self):
+        from nomorals.storage.models import ModelRow, TaskRecord
+
+        self.db.insert("tasks", TaskRecord(id="rt-j", name="j", deps=["x", "y"],
+                                           payload={"nested": [1, 2]}).to_row())
+        task = TaskRecord.from_row(self.db.query_one("SELECT * FROM tasks WHERE id = 'rt-j'"))
+        self.assertEqual(task.deps, ["x", "y"])
+        self.assertEqual(task.payload["nested"], [1, 2])
+
+        self.db.insert("models", ModelRow(id="rt-jm", name="jm",
+                                          eval_scores={"score": 0.25}).to_row())
+        model = ModelRow.from_row(self.db.query_one("SELECT * FROM models WHERE id = 'rt-jm'"))
+        self.assertEqual(model.eval_scores["score"], 0.25)
+
+    def test_encode_json_leaves_scalars_alone(self):
+        from nomorals.storage.models import encode_json
+
+        self.assertEqual(encode_json({"a": 1}), '{"a": 1}')
+        self.assertEqual(encode_json([1, 2]), "[1, 2]")
+        self.assertEqual(encode_json("already a string"), "already a string")
+        self.assertIsNone(encode_json(None))
 
 
 if __name__ == "__main__":
@@ -711,7 +746,7 @@ class ModelDataclassTests(unittest.TestCase):
         from nomorals.storage.models import AgentRecord
 
         record = AgentRecord.from_row(
-            {"id": "a", "status": "done", "started_at": 2.0, "finished_at": 5.5}
+            {"id": "a", "status": "done", "spawned_at": 2.0, "finished_at": 5.5}
         )
         self.assertAlmostEqual(record.duration, 3.5)
         self.assertTrue(record.is_terminal)

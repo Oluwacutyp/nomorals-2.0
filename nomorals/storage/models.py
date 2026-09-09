@@ -21,7 +21,26 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["AgentRecord", "TaskRecord", "Reflection", "ModelRow", "decode_json"]
+__all__ = [
+    "AgentRecord",
+    "TaskRecord",
+    "Reflection",
+    "ModelRow",
+    "decode_json",
+    "encode_json",
+]
+
+
+def encode_json(value: Any) -> Any:
+    """Encode a JSON column for storage.
+
+    ``Repository`` encodes on the way in, but a raw ``db.insert()`` does not, and
+    sqlite3 refuses to bind a dict. Encoding here means ``to_row()`` produces
+    something both paths accept, instead of only working through one of them.
+    """
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def decode_json(raw: Any, default: Any) -> Any:
@@ -52,58 +71,61 @@ def _num(row: dict[str, Any], key: str, cast: Any = float, default: Any = 0) -> 
 
 @dataclass
 class AgentRecord:
-    """A row from ``agents``: one agent instance and its outcome."""
+    """A row from ``agents``: one agent instance, its grant, and its lifecycle.
+
+    The columns are ``name``, ``capabilities`` and ``spawned_at`` — not the
+    ``input``/``output``/``tokens`` a first pass assumed. Agents keep their work
+    product in the blackboard and the task rows, not here.
+    """
 
     id: str
     role: str = ""
+    name: str = ""
     status: str = "pending"
     mission_id: str = ""
     parent_id: str = ""
-    input: dict[str, Any] = field(default_factory=dict)
-    output: dict[str, Any] = field(default_factory=dict)
-    error: str = ""
-    tokens: int = 0
-    created_at: float = 0.0
-    started_at: float | None = None
+    capabilities: list[str] = field(default_factory=list)
+    spawned_at: float = 0.0
     finished_at: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
-        if not self.started_at or not self.finished_at:
+        if not self.spawned_at or not self.finished_at:
             return 0.0
-        return max(0.0, self.finished_at - self.started_at)
+        return max(0.0, self.finished_at - self.spawned_at)
 
     @property
     def is_terminal(self) -> bool:
         return self.status in {"done", "failed", "cancelled"}
+
+    @property
+    def depth(self) -> int:
+        """Nesting depth, reconstructed by counting lineage separators."""
+        return self.metadata.get("depth", 0)
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "AgentRecord":
         return cls(
             id=row["id"],
             role=row.get("role") or "",
+            name=row.get("name") or "",
             status=row.get("status") or "pending",
             mission_id=row.get("mission_id") or "",
             parent_id=row.get("parent_id") or "",
-            input=decode_json(row.get("input"), {}),
-            output=decode_json(row.get("output"), {}),
-            error=row.get("error") or "",
-            tokens=_num(row, "tokens", int),
-            created_at=_num(row, "created_at"),
-            started_at=_num(row, "started_at", float, None),
+            capabilities=decode_json(row.get("capabilities"), []),
+            spawned_at=_num(row, "spawned_at"),
             finished_at=_num(row, "finished_at", float, None),
             metadata=decode_json(row.get("metadata"), {}),
         )
 
     def to_row(self) -> dict[str, Any]:
         return {
-            "id": self.id, "role": self.role, "status": self.status,
+            "id": self.id, "role": self.role, "name": self.name, "status": self.status,
             "mission_id": self.mission_id, "parent_id": self.parent_id,
-            "input": self.input, "output": self.output, "error": self.error,
-            "tokens": self.tokens, "created_at": self.created_at,
-            "started_at": self.started_at, "finished_at": self.finished_at,
-            "metadata": self.metadata,
+            "capabilities": encode_json(self.capabilities),
+            "spawned_at": self.spawned_at, "finished_at": self.finished_at,
+            "metadata": encode_json(self.metadata),
         }
 
 
@@ -168,12 +190,13 @@ class TaskRecord:
         return {
             "id": self.id, "name": self.name, "kind": self.kind, "status": self.status,
             "mission_id": self.mission_id, "parent_id": self.parent_id,
-            "agent_role": self.agent_role, "payload": self.payload, "deps": self.deps,
+            "agent_role": self.agent_role, "payload": encode_json(self.payload),
+            "deps": encode_json(self.deps),
             "priority": self.priority, "attempts": self.attempts,
             "max_attempts": self.max_attempts, "result": self.result, "error": self.error,
             "tokens": self.tokens, "created_at": self.created_at,
             "started_at": self.started_at, "finished_at": self.finished_at,
-            "metadata": self.metadata,
+            "metadata": encode_json(self.metadata),
         }
 
 
@@ -204,8 +227,8 @@ class Reflection:
     def to_row(self) -> dict[str, Any]:
         return {
             "id": self.id, "score": self.score, "summary": self.summary,
-            "mission_id": self.mission_id, "lessons": self.lessons,
-            "weights": self.weights, "created_at": self.created_at,
+            "mission_id": self.mission_id, "lessons": encode_json(self.lessons),
+            "weights": encode_json(self.weights), "created_at": self.created_at,
         }
 
 
@@ -233,7 +256,6 @@ class ModelRow:
     revision: str = ""
     eval_scores: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
-    updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -259,7 +281,6 @@ class ModelRow:
             revision=row.get("revision") or "",
             eval_scores=decode_json(row.get("eval_scores"), {}),
             created_at=_num(row, "created_at"),
-            updated_at=_num(row, "updated_at"),
             metadata=decode_json(row.get("metadata"), {}),
         )
 
@@ -270,6 +291,6 @@ class ModelRow:
             "params": self.params, "context_length": self.context_length,
             "quantization": self.quantization, "license": self.license,
             "sha256": self.sha256, "size_bytes": self.size_bytes, "revision": self.revision,
-            "eval_scores": self.eval_scores, "created_at": self.created_at,
-            "updated_at": self.updated_at, "metadata": self.metadata,
+            "eval_scores": encode_json(self.eval_scores), "created_at": self.created_at,
+            "metadata": encode_json(self.metadata),
         }
