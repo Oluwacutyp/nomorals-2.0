@@ -1,0 +1,533 @@
+"""Capability policy.
+
+"You own the model" does not mean "nothing is gated". An autonomous agent tree
+with 64 sub-agents and shell access will eventually do something you did not
+intend — not out of malice, out of a misparsed glob. Gating destructive actions
+costs legitimate workflows nothing and makes the system safe to leave running
+unattended, which is the entire point of an autonomous system.
+
+Model
+-----
+* A **capability** is a dotted string: ``fs.write``, ``exec.shell``, ``net.out``,
+  ``social.post``, ``db.write``, ``train.gpu`` …
+* An **actor** (agent, mission, tool call) holds a :class:`CapabilitySet`.
+* A tool declares the capabilities it needs. The policy intersects the actor's
+  grant with what the tool asks for and returns a :class:`PolicyDecision`.
+* Sub-agents inherit ``parent ∩ role_requirement`` — privilege narrows down the
+  tree, never widens.
+* **Confirmable** capabilities additionally require a one-time confirmation token
+  issued by the operator out of band. This is the gate on ``rm -rf``, ``DROP
+  TABLE``, bulk DM, and bulk follow.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+__all__ = [
+    "AUDIT_DENY",
+    "Capability",
+    "CapabilitySet",
+    "Policy",
+    "PolicyDecision",
+]
+
+
+class Capability:
+    """The capability namespace. Strings, not an enum, so tools can extend it."""
+
+    # Filesystem
+    FS_READ = "fs.read"
+    FS_WRITE = "fs.write"
+    FS_DELETE = "fs.delete"
+    # Shell / code execution
+    EXEC_SHELL = "exec.shell"
+    EXEC_CODE = "exec.code"
+    EXEC_INSTALL = "exec.install"
+    # Network
+    NET_OUT = "net.out"
+    NET_DOWNLOAD = "net.download"
+    NET_BROWSER = "net.browser"
+    # Model plane
+    MODEL_CALL = "model.call"
+    MODEL_DOWNLOAD = "model.download"
+    TRAIN_RUN = "train.run"
+    TRAIN_GPU = "train.gpu"
+    # Memory / data
+    MEM_READ = "mem.read"
+    MEM_WRITE = "mem.write"
+    DB_READ = "db.read"
+    DB_WRITE = "db.write"
+    DB_ADMIN = "db.admin"
+    # Agents
+    AGENT_SPAWN = "agent.spawn"
+    MISSION_START = "mission.start"
+    # Social
+    SOCIAL_POST = "social.post"
+    SOCIAL_READ = "social.read"
+    SOCIAL_DM = "social.dm"
+    SOCIAL_BULK = "social.bulk"
+    # System
+    SYS_CONFIG = "sys.config"
+    SYS_BACKUP = "sys.backup"
+    SYS_SHUTDOWN = "sys.shutdown"
+
+    ALL: tuple[str, ...] = (
+        FS_READ, FS_WRITE, FS_DELETE,
+        EXEC_SHELL, EXEC_CODE, EXEC_INSTALL,
+        NET_OUT, NET_DOWNLOAD, NET_BROWSER,
+        MODEL_CALL, MODEL_DOWNLOAD, TRAIN_RUN, TRAIN_GPU,
+        MEM_READ, MEM_WRITE, DB_READ, DB_WRITE, DB_ADMIN,
+        AGENT_SPAWN, MISSION_START,
+        SOCIAL_POST, SOCIAL_READ, SOCIAL_DM, SOCIAL_BULK,
+        SYS_CONFIG, SYS_BACKUP, SYS_SHUTDOWN,
+    )
+
+    #: Capabilities that require an explicit operator confirmation token.
+    CONFIRMABLE: frozenset[str] = frozenset(
+        {FS_DELETE, EXEC_INSTALL, DB_ADMIN, SOCIAL_DM, SOCIAL_BULK, SYS_SHUTDOWN}
+    )
+
+
+#: Preset grants. Roles pick one; operators can widen or narrow it.
+ROLE_PRESETS: dict[str, tuple[str, ...]] = {
+    "research": (
+        Capability.NET_OUT,
+        Capability.NET_BROWSER,
+        Capability.NET_DOWNLOAD,
+        Capability.FS_READ,
+        Capability.FS_WRITE,
+        Capability.MEM_READ,
+        Capability.MEM_WRITE,
+        Capability.MODEL_CALL,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "coding": (
+        Capability.FS_READ,
+        Capability.FS_WRITE,
+        Capability.EXEC_CODE,
+        Capability.EXEC_SHELL,
+        Capability.MEM_READ,
+        Capability.MEM_WRITE,
+        Capability.MODEL_CALL,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "vision": (
+        Capability.FS_READ,
+        Capability.NET_DOWNLOAD,
+        Capability.MODEL_CALL,
+        Capability.MEM_WRITE,
+    ),
+    "data_collection": (
+        Capability.NET_OUT,
+        Capability.NET_DOWNLOAD,
+        Capability.FS_READ,
+        Capability.FS_WRITE,
+        Capability.MODEL_CALL,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "training": (
+        Capability.FS_READ,
+        Capability.FS_WRITE,
+        Capability.EXEC_SHELL,
+        Capability.TRAIN_RUN,
+        Capability.TRAIN_GPU,
+        Capability.MODEL_DOWNLOAD,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "social": (
+        Capability.SOCIAL_POST,
+        Capability.SOCIAL_READ,
+        Capability.NET_OUT,
+        Capability.FS_READ,
+        Capability.MEM_READ,
+        Capability.MEM_WRITE,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "memory": (
+        Capability.MEM_READ,
+        Capability.MEM_WRITE,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+        Capability.MODEL_CALL,
+    ),
+    "execution": (
+        Capability.FS_READ,
+        Capability.FS_WRITE,
+        Capability.EXEC_CODE,
+        Capability.EXEC_SHELL,
+        Capability.NET_OUT,
+        Capability.DB_READ,
+        Capability.DB_WRITE,
+    ),
+    "orchestrator": tuple(Capability.ALL),
+    "critic": (Capability.MEM_READ, Capability.DB_READ, Capability.MODEL_CALL),
+    "readonly": (Capability.FS_READ, Capability.MEM_READ, Capability.DB_READ),
+}
+
+
+@dataclass(frozen=True)
+class CapabilitySet:
+    """An immutable set of capability patterns (``fs.*`` and ``*`` supported)."""
+
+    patterns: frozenset[str] = frozenset()
+
+    @classmethod
+    def all(cls) -> "CapabilitySet":
+        return cls(frozenset({"*"}))
+
+    @classmethod
+    def none(cls) -> "CapabilitySet":
+        return cls(frozenset())
+
+    @classmethod
+    def of(cls, *caps: str) -> "CapabilitySet":
+        return cls(frozenset(caps))
+
+    @classmethod
+    def role(cls, role: str) -> "CapabilitySet":
+        if role not in ROLE_PRESETS:
+            raise KeyError(f"unknown role preset {role!r}; known: {sorted(ROLE_PRESETS)}")
+        return cls(frozenset(ROLE_PRESETS[role]))
+
+    def grants(self, capability: str) -> bool:
+        if "*" in self.patterns or capability in self.patterns:
+            return True
+        return any(fnmatch.fnmatchcase(capability, p) for p in self.patterns)
+
+    def union(self, other: "CapabilitySet") -> "CapabilitySet":
+        return CapabilitySet(self.patterns | other.patterns)
+
+    def intersect(self, other: "CapabilitySet") -> "CapabilitySet":
+        """Narrow to capabilities both sides allow.
+
+        Wildcards are handled conservatively: if either side is unrestricted the
+        result is the other side; otherwise the literal intersection.
+        """
+        if "*" in self.patterns:
+            return other
+        if "*" in other.patterns:
+            return self
+        expanded_self = _expand(self.patterns)
+        expanded_other = _expand(other.patterns)
+        return CapabilitySet(frozenset(expanded_self & expanded_other))
+
+    def minus(self, *caps: str) -> "CapabilitySet":
+        expanded = _expand(self.patterns)
+        for cap in caps:
+            expanded = {c for c in expanded if not fnmatch.fnmatchcase(c, cap)}
+        return CapabilitySet(frozenset(expanded))
+
+    def as_list(self) -> list[str]:
+        if "*" in self.patterns:
+            return ["*"]
+        return sorted(_expand(self.patterns))
+
+    def __len__(self) -> int:
+        return len(self.patterns)
+
+    def __contains__(self, capability: str) -> bool:
+        return self.grants(capability)
+
+
+def _expand(patterns: Iterable[str]) -> set[str]:
+    """Resolve wildcard patterns against the known capability namespace."""
+    out: set[str] = set()
+    for pattern in patterns:
+        if pattern == "*":
+            out.update(Capability.ALL)
+        elif "*" in pattern or "?" in pattern:
+            out.update(c for c in Capability.ALL if fnmatch.fnmatchcase(c, pattern))
+        else:
+            out.add(pattern)
+    return out
+
+
+AUDIT_ALLOW = "allow"
+AUDIT_DENY = "deny"
+AUDIT_CONFIRM = "confirm"
+
+
+@dataclass
+class PolicyDecision:
+    """Result of a policy check."""
+
+    allowed: bool
+    reason: str = ""
+    capability: str = ""
+    actor: str = ""
+    needs_confirmation: bool = False
+    audit_id: str = ""
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+    def raise_if_denied(self) -> None:
+        if not self.allowed:
+            from .errors import CapabilityDenied
+
+            raise CapabilityDenied(
+                self.reason or "capability denied",
+                capability=self.capability,
+                actor=self.actor,
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "reason": self.reason,
+            "capability": self.capability,
+            "actor": self.actor,
+            "needs_confirmation": self.needs_confirmation,
+            "audit_id": self.audit_id,
+        }
+
+
+@dataclass
+class _Rule:
+    capability: str
+    effect: str  # allow | deny | confirm
+    note: str = ""
+    priority: int = 0
+
+
+class Policy:
+    """Evaluates capability requests against rules, grants, and confirmations.
+
+    Evaluation order:
+      1. explicit ``deny`` rules
+      2. ``confirm`` rules → require a valid confirmation token
+      3. explicit ``allow`` rules
+      4. the actor's :class:`CapabilitySet`
+      5. default deny
+    """
+
+    def __init__(
+        self,
+        *,
+        default_grant: CapabilitySet | None = None,
+        enforce: bool = True,
+        confirmation_ttl: float = 300.0,
+        clock: Any = None,
+    ) -> None:
+        self.default_grant = default_grant if default_grant is not None else CapabilitySet.none()
+        self.enforce = enforce
+        self.confirmation_ttl = confirmation_ttl
+        self._rules: list[_Rule] = []
+        # token -> (expiry_ts, capability it was minted for)
+        self._confirmations: dict[str, tuple[float, str]] = {}
+        self._audit: list[dict[str, Any]] = []
+        self._audit_limit = 2000
+        self._lock = threading.RLock()
+        self._clock = clock or _DefaultClock()
+        self._counts = {"allow": 0, "deny": 0, "confirm": 0}
+
+    # -- rule management -----------------------------------------------------
+    def allow(self, capability: str, *, note: str = "", priority: int = 10) -> "Policy":
+        return self._add(_Rule(capability, "allow", note, priority))
+
+    def deny(self, capability: str, *, note: str = "", priority: int = 100) -> "Policy":
+        return self._add(_Rule(capability, "deny", note, priority))
+
+    def confirm(self, capability: str, *, note: str = "", priority: int = 50) -> "Policy":
+        return self._add(_Rule(capability, "confirm", note, priority))
+
+    def _add(self, rule: _Rule) -> "Policy":
+        with self._lock:
+            self._rules.append(rule)
+            self._rules.sort(key=lambda r: -r.priority)
+        return self
+
+    def clear_rules(self) -> None:
+        with self._lock:
+            self._rules.clear()
+
+    # -- confirmations -------------------------------------------------------
+    def issue_confirmation(self, capability: str, *, ttl: float | None = None) -> str:
+        """Mint a single-use token authorising exactly one confirmable action.
+
+        The token is bound to the capability it was minted for, so a token issued
+        for ``fs.delete`` cannot be replayed to authorise ``social.bulk``.
+        """
+        from .ids import new_short_id
+
+        token = new_short_id("cfm_") + hashlib.sha256(
+            f"{capability}:{self._clock.now()}".encode()
+        ).hexdigest()[:16]
+        with self._lock:
+            self._confirmations[token] = (
+                self._clock.now() + (ttl or self.confirmation_ttl),
+                capability,
+            )
+        return token
+
+    def _consume_confirmation(self, token: str, capability: str) -> bool:
+        """Validate and consume a token. Single-use and capability-bound."""
+        with self._lock:
+            entry = self._confirmations.pop(token, None)
+            if entry is None:
+                return False
+            expiry, bound_capability = entry
+            if expiry < self._clock.now():
+                return False
+            return bound_capability == capability
+
+    def pending_confirmations(self) -> int:
+        with self._lock:
+            now = self._clock.now()
+            self._confirmations = {
+                t: e for t, e in self._confirmations.items() if e[0] >= now
+            }
+            return len(self._confirmations)
+
+    # -- evaluation ----------------------------------------------------------
+    def check(
+        self,
+        capability: str,
+        *,
+        actor: str = "",
+        grant: CapabilitySet | None = None,
+        confirmation: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> PolicyDecision:
+        """Evaluate whether ``actor`` may exercise ``capability``."""
+        effective = grant if grant is not None else self.default_grant
+        reason = ""
+        needs_confirm = False
+
+        with self._lock:
+            for rule in self._rules:
+                if not fnmatch.fnmatchcase(capability, rule.capability):
+                    continue
+                if rule.effect == "deny":
+                    decision = PolicyDecision(
+                        allowed=False,
+                        reason=rule.note or f"denied by policy rule: {rule.capability}",
+                        capability=capability,
+                        actor=actor,
+                    )
+                    self._record(AUDIT_DENY, decision, context)
+                    return decision
+                if rule.effect == "confirm":
+                    needs_confirm = True
+                    reason = rule.note or f"requires confirmation: {rule.capability}"
+                    break
+                if rule.effect == "allow":
+                    break
+
+        granted = effective.grants(capability)
+        confirmable = needs_confirm or capability in Capability.CONFIRMABLE
+
+        if not self.enforce:
+            decision = PolicyDecision(
+                allowed=True,
+                reason="policy enforcement disabled",
+                capability=capability,
+                actor=actor,
+            )
+            self._record(AUDIT_ALLOW, decision, context)
+            return decision
+
+        if not granted:
+            decision = PolicyDecision(
+                allowed=False,
+                reason=f"actor {actor or 'anonymous'!r} lacks capability {capability!r}",
+                capability=capability,
+                actor=actor,
+            )
+            self._record(AUDIT_DENY, decision, context)
+            return decision
+
+        if confirmable:
+            if not confirmation or not self._consume_confirmation(confirmation, capability):
+                decision = PolicyDecision(
+                    allowed=False,
+                    reason=reason
+                    or f"capability {capability!r} requires an operator confirmation token",
+                    capability=capability,
+                    actor=actor,
+                    needs_confirmation=True,
+                )
+                self._record(AUDIT_CONFIRM, decision, context)
+                return decision
+
+        decision = PolicyDecision(
+            allowed=True,
+            reason="granted",
+            capability=capability,
+            actor=actor,
+        )
+        self._record(AUDIT_ALLOW, decision, context)
+        return decision
+
+    def require(
+        self,
+        capability: str,
+        *,
+        actor: str = "",
+        grant: CapabilitySet | None = None,
+        confirmation: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> PolicyDecision:
+        """Like :meth:`check` but raises :class:`CapabilityDenied` on denial."""
+        decision = self.check(
+            capability, actor=actor, grant=grant, confirmation=confirmation, context=context
+        )
+        decision.raise_if_denied()
+        return decision
+
+    # -- audit ---------------------------------------------------------------
+    def _record(self, kind: str, decision: PolicyDecision, context: dict[str, Any] | None) -> None:
+        from .ids import new_short_id
+
+        entry = {
+            "audit_id": new_short_id("aud_"),
+            "ts": self._clock.now(),
+            "kind": kind,
+            "capability": decision.capability,
+            "actor": decision.actor,
+            "reason": decision.reason,
+            "context": dict(context or {}),
+        }
+        decision.audit_id = entry["audit_id"]
+        with self._lock:
+            self._counts[kind] = self._counts.get(kind, 0) + 1
+            self._audit.append(entry)
+            if len(self._audit) > self._audit_limit:
+                del self._audit[: len(self._audit) - self._audit_limit]
+
+    def audit_log(self, limit: int = 100, kind: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            items = list(self._audit)
+        if kind:
+            items = [i for i in items if i["kind"] == kind]
+        return items[-limit:]
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "rules": len(self._rules),
+                "counts": dict(self._counts),
+                "enforce": self.enforce,
+                "audit_entries": len(self._audit),
+            }
+
+    # -- helpers -------------------------------------------------------------
+    def grant_for_role(self, role: str) -> CapabilitySet:
+        return CapabilitySet.role(role).intersect(self.default_grant.union(CapabilitySet.all()))
+
+
+class _DefaultClock:
+    @staticmethod
+    def now() -> float:
+        return time.time()

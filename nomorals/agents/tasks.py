@@ -1,0 +1,384 @@
+"""Task graph: the unit of parallel work.
+
+A task declares *what kind of work* it is, and the runtime uses that to choose a
+substrate:
+
+* ``io``    → thread pool (HTTP, disk, subprocess)
+* ``cpu``   → process pool (tokenizing, embedding, dataset dedup, training)
+* ``async`` → event loop (high fan-out concurrent I/O)
+
+Dependencies form a DAG. The scheduler runs everything whose dependencies have
+completed, in parallel, and propagates cancellation downward — so a mission that
+is cancelled does not leave 40 orphaned subtasks burning tokens.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Iterable, Sequence
+
+from ..core.errors import TaskCancelled, TaskFailed, ValidationError
+from ..core.ids import new_id
+
+__all__ = [
+    "Task",
+    "TaskGraph",
+    "TaskKind",
+    "TaskState",
+    "cycle_in",
+]
+
+
+class TaskState(str, Enum):
+    PENDING = "pending"
+    READY = "ready"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+
+
+class TaskKind(str, Enum):
+    IO = "io"
+    CPU = "cpu"
+    ASYNC = "async"
+
+
+#: Terminal states: no further transitions out of these.
+TERMINAL = frozenset(
+    {TaskState.DONE, TaskState.FAILED, TaskState.CANCELLED, TaskState.SKIPPED}
+)
+
+
+@dataclass
+class Task:
+    """One node in the task graph."""
+
+    name: str
+    fn: Callable[..., Any] | None = None
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    kind: TaskKind = TaskKind.IO
+    id: str = field(default_factory=new_id)
+    deps: list[str] = field(default_factory=list)
+    priority: int = 0
+    timeout: float | None = None
+    retries: int = 0
+    role: str = ""
+    mission_id: str = ""
+    parent_id: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    state: TaskState = TaskState.PENDING
+    result: Any = None
+    error: str = ""
+    attempts: int = 0
+    created_at: float = field(default_factory=time.time)
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def duration(self) -> float:
+        if not self.started_at:
+            return 0.0
+        return (self.finished_at or time.time()) - self.started_at
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in TERMINAL
+
+    @property
+    def ok(self) -> bool:
+        return self.state is TaskState.DONE
+
+    def mark_running(self) -> None:
+        self.state = TaskState.RUNNING
+        self.started_at = time.time()
+        self.attempts += 1
+
+    def mark_done(self, result: Any) -> None:
+        self.state = TaskState.DONE
+        self.result = result
+        self.finished_at = time.time()
+
+    def mark_failed(self, error: str) -> None:
+        self.state = TaskState.FAILED
+        self.error = error
+        self.finished_at = time.time()
+
+    def mark_cancelled(self, reason: str = "cancelled") -> None:
+        self.state = TaskState.CANCELLED
+        self.error = reason
+        self.finished_at = time.time()
+
+    def to_dict(self, *, include_result: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind.value,
+            "state": self.state.value,
+            "deps": list(self.deps),
+            "priority": self.priority,
+            "attempts": self.attempts,
+            "duration": round(self.duration, 4),
+            "error": self.error,
+            "role": self.role,
+        }
+        if include_result:
+            payload["result"] = self.result
+        return payload
+
+
+def cycle_in(deps: dict[str, Sequence[str]]) -> list[str]:
+    """Return one dependency cycle as a list of task names, or ``[]`` if acyclic.
+
+    Kahn's algorithm: whatever is left after peeling every zero-in-degree node is
+    part of a cycle.
+    """
+    remaining = {name: set(d) for name, d in deps.items()}
+    resolved: set[str] = set()
+    progress = True
+    while progress:
+        progress = False
+        for name in list(remaining):
+            if remaining[name] <= resolved:
+                resolved.add(name)
+                del remaining[name]
+                progress = True
+    if not remaining:
+        return []
+    # Walk the leftover subgraph to produce a readable cycle path.
+    start = next(iter(remaining))
+    path = [start]
+    current = start
+    for _ in range(len(remaining)):
+        nxt = next((d for d in remaining[current] if d in remaining), None)
+        if nxt is None:
+            break
+        path.append(nxt)
+        if nxt == start:
+            break
+        current = nxt
+    return path
+
+
+class TaskGraph:
+    """A DAG of tasks with a readiness query the scheduler polls.
+
+    Thread-safe: producers may add tasks while the scheduler is draining.
+    """
+
+    def __init__(self, *, name: str = "graph", mission_id: str = "") -> None:
+        self.name = name
+        self.mission_id = mission_id
+        self.tasks: dict[str, Task] = {}
+        self._by_name: dict[str, str] = {}
+        self._dependents: dict[str, set[str]] = {}
+        self._lock = threading.RLock()
+        self._cancel = threading.Event()
+        self.created_at = time.time()
+
+    # ── construction ─────────────────────────────────────────────────────────
+    def add(self, task: Task, *, depends_on: Sequence[str | Task] = ()) -> Task:
+        """Register a task. ``depends_on`` accepts ids, names, or Task objects."""
+        with self._lock:
+            if task.name in self._by_name:
+                raise ValidationError(f"duplicate task name {task.name!r}")
+            if task.id in self.tasks:
+                raise ValidationError(f"duplicate task id {task.id!r}")
+            for dep in depends_on:
+                key = dep.id if isinstance(dep, Task) else str(dep)
+                resolved = self.tasks.get(key) or self.tasks.get(self._by_name.get(str(dep), ""))
+                if resolved is None:
+                    raise ValidationError(
+                        f"task {task.name!r} depends on unknown task {dep!r}"
+                    )
+                if resolved.id not in task.deps:
+                    task.deps.append(resolved.id)
+            self.tasks[task.id] = task
+            self._by_name[task.name] = task.id
+            self._dependents.setdefault(task.id, set())
+            for dep_id in task.deps:
+                self._dependents.setdefault(dep_id, set()).add(task.id)
+            self._assert_acyclic()
+            return task
+
+    def add_task(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        depends_on: Sequence[str | Task] = (),
+        **kwargs: Any,
+    ) -> Task:
+        """Convenience: build a Task inline."""
+        task_kwargs = {
+            k: kwargs.pop(k)
+            for k in ("kind", "priority", "timeout", "retries", "role", "payload", "mission_id")
+            if k in kwargs
+        }
+        task = Task(name=name, fn=fn, args=args, kwargs=kwargs, **task_kwargs)
+        return self.add(task, depends_on=depends_on)
+
+    def _assert_acyclic(self) -> None:
+        deps = {t.id: list(t.deps) for t in self.tasks.values()}
+        cycle = cycle_in(deps)
+        if cycle:
+            names = [self.tasks[c].name if c in self.tasks else c for c in cycle]
+            raise ValidationError(f"dependency cycle: {' -> '.join(names)}")
+
+    # ── queries ──────────────────────────────────────────────────────────────
+    def get(self, key: str) -> Task | None:
+        with self._lock:
+            return self.tasks.get(key) or self.tasks.get(self._by_name.get(key, ""))
+
+    def require(self, key: str) -> Task:
+        task = self.get(key)
+        if task is None:
+            raise ValidationError(f"unknown task {key!r}")
+        return task
+
+    def ready(self) -> list[Task]:
+        """Tasks whose dependencies are all satisfied, in priority order."""
+        with self._lock:
+            out: list[Task] = []
+            for task in self.tasks.values():
+                if task.state is not TaskState.PENDING:
+                    continue
+                if all(
+                    self.tasks[d].state is TaskState.DONE
+                    for d in task.deps
+                    if d in self.tasks
+                ):
+                    out.append(task)
+            out.sort(key=lambda t: (-t.priority, t.created_at))
+            return out
+
+    def blocked_by_failure(self) -> list[Task]:
+        """Tasks that can never run because an ancestor failed or was cancelled."""
+        with self._lock:
+            doomed: set[str] = set()
+            for task in self.tasks.values():
+                if task.state in {TaskState.FAILED, TaskState.CANCELLED, TaskState.SKIPPED}:
+                    doomed.add(task.id)
+            changed = True
+            while changed:
+                changed = False
+                for task in self.tasks.values():
+                    if task.id in doomed or task.state in TERMINAL:
+                        continue
+                    if any(d in doomed for d in task.deps):
+                        doomed.add(task.id)
+                        changed = True
+            return [self.tasks[i] for i in doomed if self.tasks[i].state is TaskState.PENDING]
+
+    def is_complete(self) -> bool:
+        with self._lock:
+            return all(t.is_terminal for t in self.tasks.values())
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if not t.is_terminal)
+
+    def counts(self) -> dict[str, int]:
+        with self._lock:
+            out: dict[str, int] = {}
+            for task in self.tasks.values():
+                out[task.state.value] = out.get(task.state.value, 0) + 1
+            return out
+
+    def topological_order(self) -> list[Task]:
+        """A valid serial execution order (for debugging and for dry runs)."""
+        with self._lock:
+            remaining = dict(self.tasks)
+            done: set[str] = set()
+            order: list[Task] = []
+            while remaining:
+                batch = [
+                    t for t in remaining.values() if set(t.deps) <= done
+                ]
+                if not batch:  # pragma: no cover - acyclicity is enforced on add
+                    raise ValidationError("graph became cyclic")
+                batch.sort(key=lambda t: (-t.priority, t.created_at))
+                for task in batch:
+                    order.append(task)
+                    done.add(task.id)
+                    del remaining[task.id]
+            return order
+
+    def depth(self) -> int:
+        """Length of the critical path — the minimum possible wall-clock steps."""
+        memo: dict[str, int] = {}
+
+        def walk(task_id: str, seen: set[str]) -> int:
+            if task_id in memo:
+                return memo[task_id]
+            if task_id in seen:  # pragma: no cover - acyclicity enforced
+                return 0
+            seen.add(task_id)
+            task = self.tasks[task_id]
+            value = 1 + max((walk(d, seen) for d in task.deps if d in self.tasks), default=0)
+            seen.discard(task_id)
+            memo[task_id] = value
+            return value
+
+        with self._lock:
+            return max((walk(t, set()) for t in self.tasks), default=0)
+
+    # ── control ──────────────────────────────────────────────────────────────
+    def cancel(self, reason: str = "cancelled") -> int:
+        """Cancel every non-terminal task. Returns how many were cancelled."""
+        self._cancel.set()
+        with self._lock:
+            count = 0
+            for task in self.tasks.values():
+                if not task.is_terminal:
+                    task.mark_cancelled(reason)
+                    count += 1
+            return count
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def reset(self) -> None:
+        """Return every task to PENDING (for re-running a graph)."""
+        self._cancel.clear()
+        with self._lock:
+            for task in self.tasks.values():
+                task.state = TaskState.PENDING
+                task.result = None
+                task.error = ""
+                task.attempts = 0
+                task.started_at = 0.0
+                task.finished_at = 0.0
+
+    # ── reporting ────────────────────────────────────────────────────────────
+    def results(self) -> dict[str, Any]:
+        with self._lock:
+            return {t.name: t.result for t in self.tasks.values() if t.state is TaskState.DONE}
+
+    def failures(self) -> dict[str, str]:
+        with self._lock:
+            return {t.name: t.error for t in self.tasks.values() if t.state is TaskState.FAILED}
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "name": self.name,
+                "mission_id": self.mission_id,
+                "counts": self.counts(),
+                "depth": self.depth(),
+                "tasks": [t.to_dict() for t in self.topological_order()],
+            }
+
+    def __len__(self) -> int:
+        return len(self.tasks)
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(key) is not None

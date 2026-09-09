@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nomorals"
+version = "0.1.0"
+description = "NoMorals Core: a self-hosted, self-improving multi-agent personal AI substrate."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "NoMorals Core" }]
+keywords = ["ai", "agents", "multi-agent", "llm", "autonomous", "self-improving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The core package has ZERO mandatory third-party dependencies.
+# Everything below is optional acceleration. The system degrades gracefully
+# without any of it (see nomorals/core/compat.py).
+dependencies = []
+
+[project.optional-dependencies]
+# Numerical acceleration for the vector store and native trainer.
+fast = ["numpy>=1.24"]
+# Media download and processing.
+media = ["yt-dlp>=2024.4.9"]
+# Local model training on GPU.
+train = ["torch>=2.1", "transformers>=4.38", "datasets>=2.17", "peft>=0.9"]
+# Fine-tuning backends.
+finetune = ["unsloth", "trl>=0.8"]
+# Hugging Face model management.
+hub = ["huggingface-hub>=0.22"]
+# Development / test tooling.
+dev = ["pytest>=7.4", "ruff>=0.3"]
+# Everything.
+all = ["nomorals[fast,media,train,hub,dev]"]
+
+[project.scripts]
+nm = "nomorals.cli:main"
+nmctl = "nomorals.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nomorals*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008"]

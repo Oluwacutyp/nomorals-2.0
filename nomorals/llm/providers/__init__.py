@@ -1,0 +1,38 @@
+"""Provider backends."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..base import LLMProvider
+
+
+def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
+    """Instantiate a provider by name.
+
+    Imports are deferred so an unused backend never costs an import, and a missing
+    optional dependency in one backend cannot break the others.
+    """
+    kind = kind.lower()
+    if kind in {"mock", "offline", "test"}:
+        from .mock import MockProvider
+
+        return MockProvider(**kwargs)
+    if kind in {"openai", "openai_compat", "vllm", "ollama", "lmstudio", "openrouter"}:
+        from .openai_compat import OpenAICompatProvider
+
+        return OpenAICompatProvider(**kwargs)
+    if kind in {"hf", "hf_serverless", "huggingface", "hf_endpoint"}:
+        from .hf_serverless import HFServerlessProvider
+
+        return HFServerlessProvider(**kwargs)
+    if kind in {"llama_cpp", "llamacpp", "gguf"}:
+        from .llama_cpp import LlamaCppProvider
+
+        return LlamaCppProvider(**kwargs)
+    raise ValueError(
+        f"unknown provider {kind!r}; expected mock | openai_compat | hf_serverless | llama_cpp"
+    )
+
+
+__all__ = ["LLMProvider", "build_provider"]
