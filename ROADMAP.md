@@ -82,9 +82,17 @@ Bulk posting requires a confirmation token. `social.bulk` is a confirmable
 capability, so a prompt-injected agent cannot blast every connected account on its
 own authority; `publish()` now takes the token and a test asserts the refusal.
 
-### L7 Surface — partial
-CLI (`nm` / `python3 -m nomorals`) and a threaded stdlib HTTP API with bearer
-auth. Both executed end to end. `nm missions` starts, resumes, and inspects.
+### L7 Surface — `cli.py`, `api/server.py`, `tui/` (46 TUI tests)
+CLI, a threaded stdlib HTTP API with bearer auth, and a curses TUI. All three
+executed end to end.
+
+The TUI splits logic from drawing: `tui/model.py` holds state, wrapping, key
+meaning, and layout as pure functions, and `tui/app.py` is a thin curses driver.
+That split is why the TUI is testable at all — written directly against curses,
+none of its layout or key handling could be verified without a terminal.
+
+`nm tui` dispatches slash-commands (`/mem`, `/recall`, `/tools`, `/models`,
+`/missions`, `/doctor`, `/clear`) and sends anything else to the active model.
 
 ## Not done
 

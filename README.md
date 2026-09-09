@@ -14,6 +14,7 @@ python3 -m nomorals ask "hi"   # chat with the active model
 python3 -m nomorals run "research X and write a report"
 python3 -m nomorals missions --start "long goal" --budget-wall 3600
 python3 -m nomorals missions --resume-all   # after a crash or reboot
+python3 -m nomorals tui        # interactive terminal UI
 ```
 
 ## Why this exists
@@ -39,9 +40,9 @@ operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
 | L4 Capability | filesystem, sandboxed shell, web, parsers, vision, media, **social** | ✅ tested |
 | L5 Agents | task DAG, thread/process/async runtime, budgets, supervisor, orchestrator | ✅ tested |
 | L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
-| L7 Surface | CLI ✅ · HTTP API ✅ · TUI ⬜ | ◐ partial |
+| L7 Surface | CLI · HTTP API · TUI | ✅ tested |
 
-**482 tests, all passing, fully offline.** `python3 -m unittest discover -s tests -t .`
+**531 tests, all passing, fully offline.** `python3 -m unittest discover -s tests -t .`
 
 ## Architecture
 
@@ -157,12 +158,12 @@ backups.
 
 ## Honest status
 
-This is a working, tested core — not a finished product. Roughly 20,400 lines of
-Python across 90 files. The stated 100,000-line target is not achievable as
+This is a working, tested core — not a finished product. Roughly 21,700 lines of
+Python across 95 files. The stated 100,000-line target is not achievable as
 quality code in a single pass; padding the tree with filler to hit a number would
 make the system worse, so the count is reported as measured.
 
-Not yet built: the TUI. Hugging Face integration is written but **unverified
+Everything in ARCHITECTURE.md is now implemented. Hugging Face integration is written but **unverified
 against the live API** — this sandbox has no network access to huggingface.co.
 
 See [`ROADMAP.md`](ROADMAP.md).
