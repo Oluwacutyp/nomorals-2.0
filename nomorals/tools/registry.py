@@ -103,7 +103,7 @@ class ToolRegistry:
         from . import (
             agents, archive, attacker, audio, book, browser, build_app, cards, cipher, compress, connectors, database,
             deals, decoder, decoder_agent, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
-            macros, media, media_hub, metadata, network, osint, osint_people, parsers,
+            macros, media, media_hub, metadata, network, osint, osint_graph, osint_people, parsers,
             proxy, proxylab, run_code, sandbox_code, scriptgen, shell, ssh_socks,
             traindata, vision, web, workspace
         )
@@ -112,7 +112,7 @@ class ToolRegistry:
         for module in [
             agents, archive, attacker, audio, book, browser, build_app, cards, cipher, compress, connectors, database,
             deals, decoder, decoder_agent, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
-            macros, media, media_hub, metadata, network, osint, osint_people, parsers,
+            macros, media, media_hub, metadata, network, osint, osint_graph, osint_people, parsers,
             proxy, proxylab, run_code, sandbox_code, scriptgen, shell, ssh_socks,
             traindata, vision, web, workspace
         ]:
