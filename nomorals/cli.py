@@ -97,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     
     goal = sub.add_parser("goal", help="Create and manage goals")
     goal.add_argument("action", nargs="?", default="list",
-                     choices=["list", "create", "get", "update", "delete"],
+                     choices=["list", "create", "get", "update", "delete", "replan", "depends"],
                      help="Action to perform")
     goal.add_argument("--id", help="Goal ID")
     goal.add_argument("--title", help="Goal title")
@@ -117,7 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     
     project = sub.add_parser("project", help="Manage projects")
     project.add_argument("action", nargs="?", default="list",
-                        choices=["list", "create", "get", "update", "delete"],
+                        choices=["list", "create", "get", "update", "delete", "heal", "replan"],
                         help="Action to perform")
     project.add_argument("title", nargs="?", default="", help="Project title")
     project.add_argument("description", nargs="?", default="", help="Project description")
