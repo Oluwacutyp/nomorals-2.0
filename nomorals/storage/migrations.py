@@ -1198,6 +1198,18 @@ ALTER TABLE media_queue ADD COLUMN duration REAL NOT NULL DEFAULT 0;
 ALTER TABLE failures ADD COLUMN family TEXT NOT NULL DEFAULT '';
 ALTER TABLE failures ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
 """
+_V26_MISSING_COLUMNS = """
+-- Add missing columns to media_queue
+ALTER TABLE media_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+
+-- Add missing columns to failures
+ALTER TABLE failures ADD COLUMN lesson TEXT NOT NULL DEFAULT '';
+
+-- Add missing status columns to various tables
+ALTER TABLE agent_goals ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1224,21 +1236,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(23, "lessons_columns", sql=_V23_LESSONS_COLUMNS),
     Migration(24, "acceptance_runs_columns", sql=_V24_ACCEPTANCE_RUNS_COLUMNS),
     Migration(25, "missing_tables_and_columns", sql=_V25_MISSING_TABLES_AND_COLUMNS),
+    Migration(26, "missing_columns_v26", sql=_V26_MISSING_COLUMNS),
 )
 
 
 def latest_version() -> int:
     return max(m.version for m in MIGRATIONS)
-_V26_MISSING_COLUMNS = """
--- Add missing columns to media_queue
-ALTER TABLE media_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '';
-
--- Add missing columns to failures
-ALTER TABLE failures ADD COLUMN lesson TEXT NOT NULL DEFAULT '';
-
--- Add missing status columns to various tables
-ALTER TABLE agent_goals ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-"""
-
-MIGRATIONS.append(Migration(26, "missing_columns_v26", sql=_V26_MISSING_COLUMNS))
