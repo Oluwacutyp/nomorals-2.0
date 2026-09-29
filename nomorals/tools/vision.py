@@ -148,3 +148,32 @@ def register(registry: Any) -> None:
         data = _load(path, url)
         encoded = base64.b64encode(data).decode("ascii")
         return {"mime": mime, "bytes": len(data), "data_url": f"data:{mime};base64,{encoded}"}
+
+    @registry.register(
+        "vision_screen",
+        description="Analyze a screenshot with structured prompt for UI elements, text, and state.",
+        capability=Capability.MODEL_CALL,
+    )
+    def vision_screen(path: str = "", url: str = "", focus: str = "") -> dict[str, Any]:
+        """Analyze a screenshot with structured prompt.
+        
+        Returns structured analysis of screen content including text, elements, state, and focus area.
+        """
+        data = _load(path, url)
+        # Build structured prompt for screen analysis
+        prompt_parts = [
+            "TEXT: Extract all visible text from this screenshot.",
+            "ELEMENTS: List all UI elements (buttons, inputs, links, etc.).",
+            "STATE: Describe the current state of the interface.",
+            "NOTE: Any important observations or warnings.",
+        ]
+        if focus:
+            prompt_parts.append(f"FOCUS: {focus}")
+        prompt = "\n".join(prompt_parts)
+        
+        result = describe(context, data, prompt, cache=cache)
+        # Add screen-specific metadata
+        result["analysis"] = "screen"
+        if focus:
+            result["focus"] = focus
+        return result
