@@ -385,3 +385,11 @@ class VectorStore:
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
+
+
+def topk_native(query: Sequence[float], candidates: list[Sequence[float]], k: int = 10) -> list[int]:
+    """Stub: native top-k search (removed, use VectorStore.search instead)."""
+    # Pure Python fallback
+    scores = [(i, _dot(query, c)) for i, c in enumerate(candidates)]
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return [i for i, _ in scores[:k]]

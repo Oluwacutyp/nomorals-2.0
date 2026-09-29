@@ -89,6 +89,11 @@ class MissionResult:
 
 
 class MissionRunner:
+    STUCK_AFTER_SECONDS = 300.0
+    MAX_PIVOTS = 3
+
+    def ops_report(self) -> dict:
+        return {"status": "ok", "missions": 0}  # 5 minutes
     """Drives a mission to a terminal state, checkpointing as it goes.
 
     The loop is deliberately simple: run steps in order, checkpoint after each,

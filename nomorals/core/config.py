@@ -144,6 +144,7 @@ class MemorySettings:
 
 @dataclass
 class TrainingSettings:
+    base_model: str = ""
     backend: str = "native"  # native | unsloth | llama_factory
     data_dir: str = "data/training"
     output_dir: str = "artifacts"
@@ -199,6 +200,80 @@ class SocialSettings:
 
 
 @dataclass
+class ChatSettings:
+    local_enabled: bool = False
+    max_history: int = 100
+    media_in_groups: bool = False
+    media_max_mb: float = 20.0
+    telegram_enabled: bool = False
+    telegram_session: str = ""
+    max_per_hour: int = 60
+
+
+@dataclass
+class AutonomySettings:
+    enabled: bool = False
+    interval_hours: float = 6.0
+    adaptive_cadence: bool = True
+    daily_model_calls: int = 100
+    max_project_heals: int = 3
+    tick_goals: bool = True
+    replan_after_heals: int = 2
+    tick_improvement: bool = True
+    tick_projects: bool = True
+    reasoning_mode: str = "off"
+
+
+@dataclass
+class EvolutionSettings:
+    benchmark: str = ""
+    enabled: bool = False
+
+
+@dataclass
+class VisionSettings:
+    model: str = ""
+    ocr_binary: str = ""
+    ocr_language: str = "eng"
+    enabled: bool = False
+
+
+@dataclass
+class ArenaSettings:
+    enabled: bool = False
+    build: bool = False
+    research_pages: int = 3
+    interval_hours: int = 24
+
+
+@dataclass
+class PartnerSettings:
+    enabled: bool = True
+    autonomy_mode: str = "suggest"
+    typing_cap_seconds: float = 0.0
+    platforms: str = "whatsapp,telegram"
+    owner_chats: str = ""
+    us_chats: str = ""
+    personality: str = "helpful"
+    memory_enabled: bool = True
+    proactive: bool = True
+    persona_name: str = ""
+    disclosure: str = ""
+    background_gate: str = "us_or_romantic"
+    train_collect: bool = False
+    gate_restricted_chats: bool = True
+    history_window: int = 50
+    reasoning: str = "auto"
+    max_parallel_chats: int = 5
+    max_proactive_dm_per_day: int = 10
+    max_group_posts_per_day: int = 5
+    typing_while_thinking: bool = True
+    typing_in_groups: bool = False
+    typing_seconds: float = 1.0
+    part_delay_seconds: float = 0.5
+
+
+@dataclass
 class MissionSettings:
     checkpoint_dir: str = "data/missions"
     auto_reflect: bool = True
@@ -209,6 +284,7 @@ class MissionSettings:
 
 @dataclass
 class APISettings:
+    github_token: str = ""
     host: str = "0.0.0.0"
     port: int = 8731
     token: str = ""
@@ -216,6 +292,63 @@ class APISettings:
     max_body_mb: int = 64
     workers: int = 8
 
+
+
+@dataclass
+class ImprovementSettings:
+    enabled: bool = False
+    benchmark: str = ""
+    auto_tick: bool = False
+
+@dataclass
+class OsintSettings:
+    enabled: bool = False
+    sources: list = field(default_factory=list)
+    hibp_key: str = ""
+    abuseipdb_key: str = ""
+    shodan_key: str = ""
+    request_timeout: float = 10.0
+    crtsh_days: int = 90
+
+@dataclass
+class AudioSettings:
+    enabled: bool = False
+    model: str = ""
+    tts_engine: str = ""
+    stt_base_url: str = ""
+
+@dataclass
+class SchedulerSettings:
+    enabled: bool = False
+    interval_hours: float = 6.0
+    tick_seconds: float = 60.0
+
+@dataclass
+class NewsSettings:
+    enabled: bool = False
+    sources: list = field(default_factory=list)
+
+@dataclass
+class NetSettings:
+    enabled: bool = False
+    proxy: str = ""
+    probe_timeout: float = 10.0
+    allowed_targets: str = ""
+    default_ports: str = ""
+    max_probe_ports: int = 100
+    banner: bool = False
+
+@dataclass
+class ProxySettings:
+    active: str = ""
+    known: str = ""
+    url: str = ""
+
+@dataclass
+class RuntimeSettings:
+    enabled: bool = False
+    profile: str = ""
+    threads: int = 4
 
 @dataclass
 class Settings:
@@ -240,6 +373,23 @@ class Settings:
     social: SocialSettings = field(default_factory=SocialSettings)
     mission: MissionSettings = field(default_factory=MissionSettings)
     api: APISettings = field(default_factory=APISettings)
+    partner: PartnerSettings = field(default_factory=PartnerSettings)
+    chat: ChatSettings = field(default_factory=ChatSettings)
+    arena: ArenaSettings = field(default_factory=ArenaSettings)
+    reasoning_mode: str = "off"
+    reasoning_knowledge: str = ""
+    autonomy: AutonomySettings = field(default_factory=AutonomySettings)
+    evolution: EvolutionSettings = field(default_factory=EvolutionSettings)
+    vision: VisionSettings = field(default_factory=VisionSettings)
+    router_intelligent: bool = False
+    runtime: "RuntimeSettings" = field(default_factory=lambda: RuntimeSettings())
+    net: "NetSettings" = field(default_factory=lambda: NetSettings())
+    proxy: "ProxySettings" = field(default_factory=lambda: ProxySettings())
+    news: "NewsSettings" = field(default_factory=lambda: NewsSettings())
+    scheduler: "SchedulerSettings" = field(default_factory=lambda: SchedulerSettings())
+    audio: "AudioSettings" = field(default_factory=lambda: AudioSettings())
+    osint: "OsintSettings" = field(default_factory=lambda: OsintSettings())
+    improvement: "ImprovementSettings" = field(default_factory=lambda: ImprovementSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -376,6 +526,33 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
+    "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
+    "NM_ARENA_ENABLED": "arena.enabled",
+    "NM_ARENA_BUILD": "arena.build",
+    "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",
+    "NM_ARENA_RESEARCH_PAGES": "arena.research_pages",
+    "NM_PARTNER_PLATFORMS": "partner.platforms",
+    "NM_PARTNER_OWNER_CHATS": "partner.owner_chats",
+    "NM_PARTNER_PERSONALITY": "partner.personality",
+    "NM_PARTNER_MEMORY_ENABLED": "partner.memory_enabled",
+    "NM_PARTNER_PROACTIVE": "partner.proactive",
+    "NM_NET_ENABLED": "net.enabled",
+    "NM_NET_PROXY": "net.proxy",
+    "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",
+    "NM_NET_ALLOWED_TARGETS": "net.allowed_targets",
+    "NM_NET_DEFAULT_PORTS": "net.default_ports",
+    "NM_NET_MAX_PROBE_PORTS": "net.max_probe_ports",
+    "NM_NET_BANNER": "net.banner",
+    "NM_PROXY_ACTIVE": "proxy.active",
+    "NM_PROXY_KNOWN": "proxy.known",
+    "NM_PROXY_URL": "proxy.url",
+    "NM_OSINT_ENABLED": "osint.enabled",
+    "NM_OSINT_HIBP_KEY": "osint.hibp_key",
+    "NM_OSINT_ABUSEIPDB_KEY": "osint.abuseipdb_key",
+    "NM_OSINT_SHODAN_KEY": "osint.shodan_key",
+    "NM_OSINT_REQUEST_TIMEOUT": "osint.request_timeout",
+    "NM_OSINT_CRTSH_DAYS": "osint.crtsh_days",
 }
 
 
@@ -655,3 +832,36 @@ def reset_settings() -> None:
     """Forget the cached settings (used by tests)."""
     global _settings
     _settings = None
+
+
+def env_var_path(env_var: str) -> str:
+    """Convert an environment variable name to its dotted config path.
+    
+    Examples:
+        env_var_path("NM_HOME") -> "home"
+        env_var_path("NM_CHAT_MEDIA_IN_GROUPS") -> "chat.media_in_groups"
+        env_var_path("HF_TOKEN") -> "llm.hf_token"
+    """
+    # Check explicit map first
+    if env_var in _ENV_MAP:
+        return _ENV_MAP[env_var]
+    
+    # Strip NM_ prefix if present
+    if env_var.startswith("NM_"):
+        remainder = env_var[3:]  # Strip "NM_"
+    else:
+        remainder = env_var
+    
+    # Convert UPPER_SNAKE to lower.snake
+    parts = remainder.lower().split("_")
+    
+    # Try to find a matching section.field path
+    # Common patterns: SECTION_FIELD -> section.field
+    if len(parts) >= 2:
+        # Try first part as section, rest as field
+        section = parts[0]
+        field = "_".join(parts[1:])
+        return f"{section}.{field}"
+    
+    # Single word - return as-is
+    return remainder.lower()

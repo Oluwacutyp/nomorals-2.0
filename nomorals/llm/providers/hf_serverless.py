@@ -29,6 +29,16 @@ from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
 from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, messages_to_text
 
+
+# Curated fallback models for the intelligent router
+# These are verified to be available on HF Inference API
+ROUTER_FALLBACK_MODELS = [
+    "Sao10K/L3-8B-Stheno-v3.2",
+    "Qwen/Qwen3-8B",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "microsoft/Phi-3.5-mini-instruct",
+]
+
 SERVERLESS_URL = "https://api-inference.huggingface.co"
 ROUTER_URL = "https://router.huggingface.co/v1"
 

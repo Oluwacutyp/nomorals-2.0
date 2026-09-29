@@ -99,12 +99,14 @@ class HttpClient:
         headers: Mapping[str, str] | None = None,
         max_redirects: int = 5,
         verify_tls: bool = True,
+        proxy_url: str = "",
     ) -> None:
         self.timeout = timeout
         self.user_agent = user_agent
         self.headers = dict(headers or {})
         self.max_redirects = max_redirects
         self.verify_tls = verify_tls
+        self.proxy_url = proxy_url
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
 
     # ── core ─────────────────────────────────────────────────────────────────
@@ -228,6 +230,13 @@ class HttpClient:
         headers = {"Content-Type": "application/json", **(kw.pop("headers", None) or {})}
         return self.request("POST", url, data=body, headers=headers, **kw)
 
+    def put_json(
+        self, url: str, payload: Mapping[str, Any], **kw: Any
+    ) -> HttpResponse:
+        body = json.dumps(payload, default=str).encode("utf-8")
+        headers = {"Content-Type": "application/json", **(kw.pop("headers", None) or {})}
+        return self.request("PUT", url, data=body, headers=headers, **kw)
+
     def post_form(self, url: str, form: Mapping[str, Any], **kw: Any) -> HttpResponse:
         body = urllib.parse.urlencode(form).encode("utf-8")
         headers = {
@@ -297,3 +306,64 @@ def url_filename(url: str, default: str = "download.bin") -> str:
     path = urllib.parse.urlparse(url).path
     name = Path(path).name
     return name or default
+
+
+def default_proxy_handler() -> dict[str, Any] | None:
+    """Stub: default proxy handler (removed). Returns None (no proxy)."""
+    return None
+
+
+def apply_socks_proxy(proxy_url: str) -> None:
+    """Stub: apply SOCKS proxy (removed)."""
+    pass
+
+
+def get_default_proxy() -> str | None:
+    """Stub: get default proxy URL (removed)."""
+    return None
+
+
+def reset_socks_proxy() -> None:
+    """Stub: reset SOCKS proxy settings."""
+    pass
+
+
+def set_default_proxy(proxy_url: str) -> None:
+    """Stub: set default proxy URL."""
+    pass
+
+
+_proxy_resolver = None
+
+
+def set_proxy_resolver(resolver):
+    """Register a callable that returns a proxy URL for a given target.
+
+    Used by proxylab to route HTTP requests through rotating proxies.
+    Pass None to clear.
+    """
+    global _proxy_resolver
+    _proxy_resolver = resolver
+
+
+def get_proxy_resolver():
+    """Return the currently registered proxy resolver, or None."""
+    return _proxy_resolver
+
+
+_proxy_error_reporter = None
+
+
+def set_proxy_error_reporter(reporter):
+    """Register a callable that reports proxy errors for rotation/cooldown.
+
+    Used by proxylab to track proxy failures and remove bad proxies from rotation.
+    Pass None to clear.
+    """
+    global _proxy_error_reporter
+    _proxy_error_reporter = reporter
+
+
+def get_proxy_error_reporter():
+    """Return the currently registered proxy error reporter, or None."""
+    return _proxy_error_reporter

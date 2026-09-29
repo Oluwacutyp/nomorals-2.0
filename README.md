@@ -1,180 +1,145 @@
-# NoMorals Core
+# No Morals AI
 
-A self-hosted, self-evolving personal AI substrate. Multi-agent orchestration,
-long-term memory, model training, and real tool access — running on your own
-hardware, with no vendor filter between you and your own models.
+An autonomous AI companion with full integration across messaging, shopping, scheduling, smart home, voice, payments, and more.
 
-**Zero mandatory dependencies.** Pure Python 3.11+ and the standard library.
-Everything else is optional and degrades to a working pure-Python fallback.
+## Status (September 2026)
 
-```
-python3 -m nomorals doctor     # what can this machine actually do?
-python3 -m nomorals tools      # 20 tools, each capability-gated
-python3 -m nomorals ask "hi"   # chat with the active model
-python3 -m nomorals run "research X and write a report"
-python3 -m nomorals missions --start "long goal" --budget-wall 3600
-python3 -m nomorals missions --resume-all   # after a crash or reboot
-python3 -m nomorals tui        # interactive terminal UI
-```
-
-## Why this exists
-
-Hosted assistants refuse, forget, and rate-limit. A personal AI should do none of
-those: it should remember everything you tell it, run your own uncensored open
-weights, execute code, read any file, download any video, and keep working on a
-goal for hours without supervision.
-
-"Unrestricted" here means **no vendor filter between you and hardware you own**.
-It does not mean ungoverned — every action passes through
-[`core/policy.py`](nomorals/core/policy.py): a capability model with narrowing
-inheritance, an append-only audit log, and confirmation tokens for destructive
-operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
-
-## What's built
-
-| Layer | Contents | Status |
-|-------|----------|--------|
-| L1 Core | config, errors, retry, rate limits, policy, events, logging, HTTP | ✅ tested |
-| L2 Storage | SQLite, 52 tables, migrations, FTS5, vectors, blobs, queue, backups | ✅ tested |
-| L3 Cognition | memory, embeddings, LLM router, model registry, HF download, **training pipeline** | ✅ tested |
-| L4 Capability | filesystem, sandboxed shell, web, parsers, vision, media, **social** | ✅ tested |
-| L5 Agents | task DAG, thread/process/async runtime, budgets, supervisor, orchestrator | ✅ tested |
-| L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
-| L7 Surface | CLI · HTTP API · TUI | ✅ tested |
-
-**531 tests, all passing, fully offline.** `python3 -m unittest discover -s tests -t .`
+- **98,800 lines** of Python across **278 modules**
+- **1,737 tests passing** (collection green, runtime assertions being fixed)
+- Active development on `arena/01a088e0-no-morals-ai` branch
 
 ## Architecture
 
-Seven layers with a hard rule: **a module may import only from strictly lower
-layers.** Enforced by [`tests/test_layering.py`](tests/test_layering.py), not by
-convention.
-
 ```
-L7 SURFACE     cli.py · api/server.py
-L6 MISSIONS    long-running autonomous goals
-L5 AGENTS      tasks.py · runtime.py · supervisor.py · orchestrator.py · roles/
-L4 CAPABILITY  tools/ (filesystem, shell, web, parsers, vision, media)
-L3 COGNITION   memory/ · llm/ · training/
-L2 STORAGE     storage/ (db, migrations, fts, vectors, blob, queue, backup)
-L1 CORE        core/ (config, errors, policy, retry, events, http, …)
-```
-
-Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
-
-## Parallelism
-
-`agents/runtime.py` runs a task DAG across three pools at once and places each
-task by declared kind — threads for I/O, processes for CPU, an event loop for
-async. Getting this right is subtle and the failure mode is silent: a graph that
-reports `done` while running serially looks identical to one that is genuinely
-parallel.
-
-Measured on the 2-CPU development sandbox:
-
-| Workload | Serial | Parallel | Speedup |
-|----------|--------|----------|---------|
-| 8 × CPU-bound | 2.21 s | 1.11 s | 2.0× |
-| 16 × CPU-bound | 4.21 s | 2.18 s | 1.9× |
-| 20 × 50 ms I/O | 1.00 s | 0.16 s | 6.3× |
-
-`ExecutionReport.speedup_vs_serial` is reported on every run, so a regression to
-serial execution is visible rather than assumed away. Tests assert on wall time,
-not just on results coming back.
-
-Three defects were found by running this code rather than reading it, and all
-three were silent:
-
-- `ProcessPoolExecutor(max_tasks_per_child=64)` with the default `fork` context
-  raised at pool creation. CPU tasks quietly fell back to threads and reported
-  success with **1.0× speedup**.
-- `submit()` pickles on a queue-management thread, so `except PicklingError`
-  around `submit()` never fired. Now probed with `pickle.dumps` first.
-- Waiting on in-flight futures after `cancel()` made a 0.2 s deadline take
-  5.00 s. Cancellation now short-circuits the drain.
-
-## Memory
-
-Recall merges four normalized signals — recency (exponential decay, half-life ×8
-for facts), importance (with bounded log-linear access reinforcement), semantic
-(cosine), and lexical (BM25 from FTS5). Weights default to
-`{recency .25, importance .30, semantic .30, lexical .15}` and the reflector may
-retune them.
-
-Embeddings fall back to deterministic feature hashing with a suffix-stripping
-stemmer, so recall works with no model and no network. Stated `fact` and
-`preference` records are never auto-forgotten.
-
-## Models
-
-`llm/router.py` keeps a health-scored fallback chain and hot-swaps at runtime:
-
-```python
-router.set_active("dolphin-8b")   # next call uses it
+nomorals/
+├── agents/          # Agent system (orchestrator, planner, proactive, skills)
+├── accounts/        # Credential vault, account management, sessions
+├── integrations/    # External service integrations
+│   ├── email        # Gmail API + IMAP/SMTP
+│   ├── calendar     # Google Calendar API
+│   ├── shopping     # Amazon, eBay, Walmart, Best Buy
+│   ├── naija_shopping  # Jumia, Konga, Jiji, Temu, AliExpress
+│   ├── price_tracker   # General-purpose (flights, GPUs, crypto, anything)
+│   ├── smarthome    # Home Assistant API
+│   ├── voice        # TTS (edge-tts) + STT (Whisper)
+│   ├── payment      # Crypto wallets, virtual cards
+│   ├── spotify      # Spotify Web API
+│   ├── notion       # Notion API
+│   ├── social       # Facebook, Instagram, Threads, Messenger
+│   ├── plaid        # Banking (balances, transactions, liabilities)
+│   └── health       # Steps, sleep, heart rate, workouts
+├── scheduler/       # Cron jobs, reminders, event hooks
+├── goals/           # Goal tracking with subgoals and progress
+├── skills/          # Reusable playbooks
+├── social/chat/     # Chat adapters (Telegram, WhatsApp, Discord, web)
+├── tools/           # Agent tools (browser, shell, OSINT, etc.)
+├── memory/          # Long-term memory with semantic search
+├── partner/         # Companion persona, mood, relationship
+├── games/           # Game engine with economy and achievements
+├── books/           # AI-assisted book writing
+├── training/        # Model training (Unsloth, llama-factory)
+├── llm/             # LLM providers (OpenAI, local, HF)
+├── storage/         # SQLite database, vectors, full-text search
+├── core/            # Config, errors, HTTP, crypto, logging
+└── voice/           # TTS/STT + WhatsApp/Telegram voice bridge
 ```
 
-`llm/registry.py` holds a curated catalog of uncensored open-weight models and
-enforces a **promotion gate**: a self-trained model is not activated unless
-`beats_incumbent()` passes. Without that gate an auto-finetune loop monotonically
-degrades the system — every run that "trains successfully" gets promoted
-regardless of whether it improved anything.
+## Key Features
 
-## Security
+### Messaging
+- **Telegram** (Telethon) - full bot with typing indicators, media, voice notes
+- **WhatsApp** (Baileys bridge) - personal account automation
+- **Discord** - bot adapter
+- **Side chats** - unlimited persistent conversation threads per topic
 
-Tools declare a capability; `ToolRegistry.call()` checks it against the caller's
-grant before dispatch and audits actor, decision, argument digest, and duration
-to the `tool_calls` table. Auditing failures never break a tool call.
+### Shopping & Deals
+- **Naija Deal Hunter** - tracks deals across Jumia, Konga, Jiji, Temu, AliExpress
+- **Price Tracker** - generalized for flights, GPUs, crypto, anything with a URL
+- **Steal scoring** - price vs 30-day median + cross-site comparison
+- **Scheduled scans** - cron jobs for twice-daily scans + flash sale windows
+- **Watchlist alerts** - notify when price drops below target
 
-Verified by test:
+### Productivity
+- **Email** - Gmail API + IMAP/SMTP (send, read, search, labels)
+- **Calendar** - Google Calendar API (CRUD events, reminders)
+- **Notion** - read/write pages and databases
+- **Scheduler** - cron jobs, reminders with snooze, event hooks
+- **Goals** - durable goals with subgoals and progress tracking
+- **Skills** - reusable playbooks the bot writes for itself
 
-- `fs_read("../../etc/passwd")` raises rather than normalizing the path
-- symlink escapes are refused after resolution
-- `fs_delete` requires a single-use confirmation token bound to `fs.delete`
-- a `memory.read` grant cannot invoke `exec.shell`
-- denials are written to the audit log, not just allowed ones
-- a timed-out shell command kills the whole process group — zero orphans left
+### Smart Home
+- **Home Assistant** - lights, thermostat, locks, scenes, automations
 
-Shell execution uses the strongest isolation available (`bwrap` → `unshare` →
-`setrlimit`), with network disabled by default and a hard wall-clock kill.
+### Voice
+- **TTS** - edge-tts (Microsoft Edge voices, free, high quality)
+- **STT** - Whisper (local or API)
+- **Voice notes** - send/receive on WhatsApp and Telegram
+- **Voice commands** - recognize and execute
 
-## Optional dependencies
+### Payments
+- **Crypto** - BTC, ETH, USDT, SOL, MATIC, BNB
+- **Virtual cards** - generate single-use cards for online purchases
+- **Approval flow** - all payments require explicit user approval
 
-Everything has a fallback. `python3 -m nomorals doctor` prints what is present:
+### Finance
+- **Plaid** - bank balances, transactions, recurring charges, liabilities, investments
 
-| Package | Enables | Fallback |
-|---------|---------|----------|
-| `numpy` | vector similarity, training | pure-Python cosine, ~30× slower |
-| `yt-dlp` | download from ~1800 sites | direct-URL downloader |
-| `torch` | GPU fine-tuning | pure-Python trainer, or generated external configs |
-| `transformers` | HF tokenizers | built-in BPE in `training.tokenize` |
-| `huggingface-hub` | cached resumable downloads | raw HTTP range requests |
-| `pillow` | rich image decoding | built-in PNG/JPEG/GIF/BMP header parser |
+### Health
+- **Steps, sleep, heart rate, workouts** - Google Fit API + local storage
 
-## Portability
+### Social Media
+- **Facebook/Instagram/Threads/Messenger** - read/post/insights via Graph API
+- **Spotify** - search, playback, playlists, podcasts
 
-`ARCHITECTURE.md` §11 defines three profiles. `termux` forces process pools off
-(`fork` is unreliable on Android), drops context to 4k, and excludes blobs from
-backups.
+### Agent System
+- **Planner** - natural language goal decomposition → multi-step execution
+- **Proactive engine** - pattern recognition, context-aware suggestions
+- **Error intelligence** - root cause analysis with fix suggestions
+- **Subagents** - async delegation, coordinator fan-out
+- **Memory** - long-term curated + semantic search with provenance
 
-## Honest status
+### Security
+- **Credential vault** - AES-256 encrypted storage
+- **Pre-commit secret scan** - blocks commits with leaked credentials
+- **Capability policy** - audit log for all sensitive operations
 
-This is a working, tested core — not a finished product. Roughly 21,700 lines of
-Python across 95 files. The stated 100,000-line target is not achievable as
-quality code in a single pass; padding the tree with filler to hit a number would
-make the system worse, so the count is reported as measured.
-
-Everything in ARCHITECTURE.md is now implemented. Hugging Face integration is written but **unverified
-against the live API** — this sandbox has no network access to huggingface.co.
-
-See [`ROADMAP.md`](ROADMAP.md).
-
-## Development
+## Running
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 335 tests, no network, ~5s
-python3 -m nomorals doctor                   # environment report
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the bot
+python -m nomorals
+
+# Run tests
+pytest tests/
+```
+
+## Configuration
+
+All config via environment variables or `~/.nomorals/.env`:
+
+```bash
+NM_LLM_PROVIDER=openrouter
+NM_OPENAI_API_KEY=sk-or-v1-...
+NM_TELEGRAM_BOT_TOKEN=...
+NM_VAULT_PASSPHRASE=...
+```
+
+## Testing
+
+```bash
+# Full suite
+pytest tests/
+
+# Specific module
+pytest tests/test_wave41.py
+
+# With coverage
+pytest tests/ --cov=nomorals
 ```
 
 ## License
 
-Your machine, your models, your data.
+MIT

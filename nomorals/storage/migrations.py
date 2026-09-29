@@ -475,6 +475,647 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at DESC);
 """
 
+_V8_MISSING_TABLES = """
+-- Migration 8: Add 10 missing tables that various modules query but were never created
+CREATE TABLE IF NOT EXISTS relationship (
+    id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL DEFAULT 'getting_to_know',
+    stage_since REAL NOT NULL DEFAULT 0,
+    trust REAL NOT NULL DEFAULT 0.5,
+    milestones TEXT NOT NULL DEFAULT '[]',
+    fights TEXT NOT NULL DEFAULT '[]',
+    user_profile TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    objective TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    goal_id TEXT NOT NULL DEFAULT '',
+    budget_wall REAL NOT NULL DEFAULT 0,
+    budget_tokens INTEGER NOT NULL DEFAULT 0,
+    progress REAL NOT NULL DEFAULT 0,
+    report TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    finished_at REAL NOT NULL DEFAULT 0,
+    task_kind TEXT NOT NULL DEFAULT '',
+    artifact TEXT NOT NULL DEFAULT '',
+    verify_cmd TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+CREATE INDEX IF NOT EXISTS idx_projects_goal ON projects(goal_id);
+CREATE TABLE IF NOT EXISTS monitors (
+    id TEXT PRIMARY KEY,
+    target TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    watch TEXT NOT NULL DEFAULT '',
+    interval_s REAL NOT NULL DEFAULT 3600,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL DEFAULT 0,
+    last_ts REAL NOT NULL DEFAULT 0,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    webhook_secret TEXT NOT NULL DEFAULT '',
+    min_alert_gap_s REAL NOT NULL DEFAULT 0,
+    auto_decode INTEGER NOT NULL DEFAULT 1,
+    volatile INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_monitors_target ON monitors(target);
+CREATE INDEX IF NOT EXISTS idx_monitors_enabled ON monitors(enabled);
+CREATE TABLE IF NOT EXISTS kg_nodes (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'entity',
+    properties TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0,
+    last_access REAL NOT NULL DEFAULT 0,
+    access_count INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_kg_label ON kg_nodes(label);
+CREATE INDEX IF NOT EXISTS idx_kg_type ON kg_nodes(type);
+CREATE TABLE IF NOT EXISTS kg_edges (
+    id TEXT PRIMARY KEY,
+    src TEXT NOT NULL DEFAULT '',
+    dst TEXT NOT NULL DEFAULT '',
+    relation TEXT NOT NULL DEFAULT '',
+    weight REAL NOT NULL DEFAULT 1.0,
+    properties TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_kg_src ON kg_edges(src);
+CREATE INDEX IF NOT EXISTS idx_kg_dst ON kg_edges(dst);
+CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL DEFAULT '',
+    chat_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    peer TEXT NOT NULL DEFAULT '',
+    is_owner INTEGER NOT NULL DEFAULT 0,
+    in_us INTEGER NOT NULL DEFAULT 0,
+    last_active REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_chats_platform ON chats(platform);
+CREATE INDEX IF NOT EXISTS idx_chats_chat_id ON chats(chat_id);
+CREATE TABLE IF NOT EXISTS research_log (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    digest TEXT NOT NULL DEFAULT '',
+    suggestion TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '[]',
+    delivered INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    score REAL NOT NULL DEFAULT 0,
+    score_detail TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_research_domain ON research_log(domain);
+CREATE INDEX IF NOT EXISTS idx_research_created ON research_log(created_at);
+CREATE TABLE IF NOT EXISTS cognition_log (
+    id TEXT PRIMARY KEY,
+    ts REAL NOT NULL DEFAULT 0,
+    stages TEXT NOT NULL DEFAULT '{}',
+    seconds REAL NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cognition_ts ON cognition_log(ts);
+CREATE TABLE IF NOT EXISTS corpus_words (
+    word TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_corpus_ts ON corpus_words(ts);
+CREATE TABLE IF NOT EXISTS arena_knowledge (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    digest TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_arena_topic ON arena_knowledge(topic);
+CREATE INDEX IF NOT EXISTS idx_arena_category ON arena_knowledge(category);
+CREATE TABLE IF NOT EXISTS schedule_jobs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    spec TEXT NOT NULL DEFAULT '',
+    payload_kind TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_run REAL DEFAULT 0,
+    last_run REAL DEFAULT 0,
+    last_result TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_enabled ON schedule_jobs(enabled);
+CREATE INDEX IF NOT EXISTS idx_schedule_next ON schedule_jobs(next_run);
+"""
+
+
+_V9_AGENT_TABLES = """
+-- Migration 9: Tables for agents/goals.py and agents/skills.py
+-- These use agent_goals/agent_goal_steps and agent_skills to avoid conflicts
+-- with the wired-in goals/ and skills/ modules that use different schemas.
+
+CREATE TABLE IF NOT EXISTS agent_goals (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    progress REAL NOT NULL DEFAULT 0.0,
+    next_action TEXT NOT NULL DEFAULT '',
+    strategy TEXT NOT NULL DEFAULT '',
+    project_id TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    depends_on TEXT NOT NULL DEFAULT '[]',
+    heals INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    finished_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_status ON agent_goals(status);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_priority ON agent_goals(priority);
+
+CREATE TABLE IF NOT EXISTS agent_goal_steps (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    result TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_agent_goal_steps_goal ON agent_goal_steps(goal_id);
+
+CREATE TABLE IF NOT EXISTS agent_skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'strategy',
+    body TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    uses INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    last_used REAL NOT NULL DEFAULT 0,
+    pruned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_agent_skills_name ON agent_skills(name);
+CREATE INDEX IF NOT EXISTS idx_agent_skills_kind ON agent_skills(kind);
+
+CREATE TABLE IF NOT EXISTS mood_state (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    dims TEXT NOT NULL DEFAULT '{}',
+    label TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS mood_history (
+    id TEXT PRIMARY KEY,
+    dims TEXT NOT NULL DEFAULT '{}',
+    label TEXT NOT NULL DEFAULT '',
+    recorded_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mood_history_recorded ON mood_history(recorded_at);
+
+CREATE TABLE IF NOT EXISTS goals (
+    goal_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    progress REAL NOT NULL DEFAULT 0.0,
+    priority INTEGER NOT NULL DEFAULT 0,
+    target_date REAL,
+    heals INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    completed_at REAL DEFAULT 0,
+    tags TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT '',
+    workspace TEXT NOT NULL DEFAULT 'default'
+);
+CREATE INDEX IF NOT EXISTS idx_goals_user ON goals(user_id, status);
+
+CREATE TABLE IF NOT EXISTS subgoals (
+    subgoal_id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    completed_at REAL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (goal_id) REFERENCES goals(goal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_subgoals_goal ON subgoals(goal_id);
+
+CREATE TABLE IF NOT EXISTS skill_uses (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL,
+    task TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    used_at REAL NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 0,
+    context TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_skill_uses_skill ON skill_uses(skill_id);
+CREATE INDEX IF NOT EXISTS idx_skill_uses_used ON skill_uses(used_at);
+
+CREATE TABLE IF NOT EXISTS macros (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    steps TEXT NOT NULL DEFAULT '[]',
+    runs INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_macros_name ON macros(name);
+
+CREATE TABLE IF NOT EXISTS failures (
+    id TEXT PRIMARY KEY,
+    error TEXT NOT NULL DEFAULT '',
+    error_type TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    context TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    resolution TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_failures_type ON failures(error_type);
+CREATE INDEX IF NOT EXISTS idx_failures_created ON failures(created_at);
+
+-- Additional tables
+CREATE TABLE IF NOT EXISTS proactive_log (
+    id TEXT PRIMARY KEY,
+    trigger_type TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_log_created ON proactive_log(created_at);
+
+CREATE TABLE IF NOT EXISTS media_queue (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    completed_at REAL DEFAULT 0,
+    result TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_media_queue_status ON media_queue(status);
+
+CREATE TABLE IF NOT EXISTS coding_log (
+    id TEXT PRIMARY KEY,
+    task TEXT NOT NULL DEFAULT '',
+    filename TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    output TEXT NOT NULL DEFAULT '',
+    success INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_coding_log_created ON coding_log(created_at);
+
+CREATE TABLE IF NOT EXISTS side_chats (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    messages TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_side_chats_status ON side_chats(status);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
+
+-- More missing tables
+CREATE TABLE IF NOT EXISTS lessons (
+    id TEXT PRIMARY KEY,
+    pattern TEXT NOT NULL DEFAULT '',
+    prevention TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_pattern ON lessons(pattern);
+
+CREATE TABLE IF NOT EXISTS achievements (
+    id TEXT PRIMARY KEY,
+    achievement_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    unlocked_at REAL DEFAULT 0,
+    user_id TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_achievements_user ON achievements(user_id);
+
+CREATE TABLE IF NOT EXISTS game_sessions (
+    id TEXT PRIMARY KEY,
+    game_type TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    players TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_game_sessions_status ON game_sessions(status);
+
+CREATE TABLE IF NOT EXISTS search_log (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL DEFAULT '',
+    results_count INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_search_log_created ON search_log(created_at);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    read INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read);
+
+CREATE TABLE IF NOT EXISTS improvement_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    dataset TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    dimension TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    completed_at REAL DEFAULT 0,
+    result TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_runs_status ON improvement_runs(status);
+
+CREATE TABLE IF NOT EXISTS search_leads (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    snippet TEXT NOT NULL DEFAULT '',
+    score REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS goal_steps (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL DEFAULT 0,
+    completed_at REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_goal_steps_goal ON goal_steps(goal_id);
+
+CREATE TABLE IF NOT EXISTS acceptance_runs (
+    id TEXT PRIMARY KEY,
+    build_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL DEFAULT 0,
+    result TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS evolution_outcomes (
+    id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL DEFAULT 0,
+    fitness REAL NOT NULL DEFAULT 0,
+    genome TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS directives (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_directives_active ON directives(active);
+
+CREATE TABLE IF NOT EXISTS game_stats (
+    player_key TEXT NOT NULL,
+    game_name TEXT NOT NULL,
+    games_played INTEGER NOT NULL DEFAULT 0,
+    games_won INTEGER NOT NULL DEFAULT 0,
+    total_score INTEGER NOT NULL DEFAULT 0,
+    best_score INTEGER NOT NULL DEFAULT 0,
+    total_time REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (player_key, game_name)
+);
+CREATE INDEX IF NOT EXISTS idx_game_stats_player ON game_stats(player_key);
+
+"""
+
+_V10_CONNECTORS = """
+-- Proxy pool
+CREATE TABLE IF NOT EXISTS proxies (
+    ip TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    protocol TEXT NOT NULL DEFAULT 'http',
+    country TEXT DEFAULT '',
+    anonymity TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    score REAL DEFAULT 0.0,
+    working INTEGER DEFAULT 0,
+    latency_ms REAL DEFAULT 0.0,
+    last_check REAL DEFAULT 0.0,
+    fail_streak INTEGER DEFAULT 0,
+    uptime_pct REAL DEFAULT 0.0,
+    PRIMARY KEY (ip, port)
+);
+
+CREATE TABLE IF NOT EXISTS proxy_checks (
+    id TEXT PRIMARY KEY,
+    ip TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    working INTEGER NOT NULL,
+    latency_ms REAL DEFAULT 0.0,
+    checked_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_proxies_score ON proxies(score);
+CREATE INDEX IF NOT EXISTS idx_proxies_working ON proxies(working);
+CREATE INDEX IF NOT EXISTS idx_proxy_checks_ip ON proxy_checks(ip, port);
+
+-- Virtual cards
+CREATE TABLE IF NOT EXISTS cards (
+    token TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    type TEXT NOT NULL,
+    last_four TEXT,
+    state TEXT,
+    spend_limit INTEGER DEFAULT 0,
+    memo TEXT,
+    created_at REAL NOT NULL
+);
+
+-- Finance accounts
+CREATE TABLE IF NOT EXISTS finance_accounts (
+    account_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    institution TEXT,
+    mask TEXT,
+    linked_at REAL NOT NULL
+);
+
+-- Price tracking
+CREATE TABLE IF NOT EXISTS price_watches (
+    watch_id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    target_price REAL DEFAULT 0.0,
+    current_price REAL DEFAULT 0.0,
+    last_check REAL DEFAULT 0.0,
+    triggered INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS price_snapshots (
+    id TEXT PRIMARY KEY,
+    listing_id TEXT NOT NULL,
+    marketplace TEXT NOT NULL,
+    url TEXT NOT NULL,
+    price_ngn REAL NOT NULL,
+    title TEXT NOT NULL,
+    snapshot_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_watches_user ON price_watches(user_id);
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_listing ON price_snapshots(listing_id);
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_time ON price_snapshots(snapshot_at);
+
+-- Connector credentials (labels only, secrets in vault)
+CREATE TABLE IF NOT EXISTS connector_credentials (
+    connector TEXT NOT NULL,
+    label TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (connector, label)
+);
+"""
+
+_V11_FIX_ACHIEVEMENTS = """
+-- Fix achievements table schema to match code expectations
+-- Old schema had: id, achievement_id, name, description, unlocked_at, user_id
+-- New schema has: player_key, achievement_id, unlocked_at (composite PK)
+
+DROP TABLE IF EXISTS achievements;
+
+CREATE TABLE achievements (
+    player_key TEXT NOT NULL,
+    achievement_id TEXT NOT NULL,
+    unlocked_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (player_key, achievement_id)
+);
+CREATE INDEX IF NOT EXISTS idx_achievements_player ON achievements(player_key);
+
+-- Add leaderboards table (missing from migration 0008)
+CREATE TABLE IF NOT EXISTS leaderboards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_name TEXT NOT NULL,
+    player_key TEXT NOT NULL,
+    player_name TEXT NOT NULL DEFAULT '',
+    score INTEGER NOT NULL DEFAULT 0,
+    played_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_leaderboards_game ON leaderboards(game_name);
+CREATE INDEX IF NOT EXISTS idx_leaderboards_score ON leaderboards(game_name, score DESC);
+
+-- Fix game_stats table (missing created_at column)
+DROP TABLE IF EXISTS game_stats;
+
+CREATE TABLE game_stats (
+    player_key TEXT NOT NULL,
+    game_name TEXT NOT NULL,
+    games_played INTEGER NOT NULL DEFAULT 0,
+    games_won INTEGER NOT NULL DEFAULT 0,
+    total_score INTEGER NOT NULL DEFAULT 0,
+    best_score INTEGER NOT NULL DEFAULT 0,
+    total_time REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (player_key, game_name)
+);
+CREATE INDEX IF NOT EXISTS idx_game_stats_player ON game_stats(player_key);
+"""
+
+_V12_GOALS_PROJECT_ID = """
+-- Add project_id column to goals table for goal-project cascade
+ALTER TABLE goals ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_id);
+"""
+
+_V13_PLACEHOLDER = "-- Placeholder migration 13"
+_V14_PLACEHOLDER = "-- Placeholder migration 14"
+_V15_PLACEHOLDER = "-- Placeholder migration 15"
+_V16_PLACEHOLDER = "-- Placeholder migration 16"
+_V17_PLACEHOLDER = "-- Placeholder migration 17"
+_V18_PLACEHOLDER = "-- Placeholder migration 18"
+
+_V19_ARENA_BUILDS = """
+-- Add arena_builds table for content arena
+CREATE TABLE IF NOT EXISTS arena_builds (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    files TEXT NOT NULL DEFAULT '[]',
+    dir TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    syntax TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    decided_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_arena_builds_status ON arena_builds(status);
+
+-- Add arena_stream table for arena event streaming
+CREATE TABLE IF NOT EXISTS arena_stream (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_arena_stream_kind ON arena_stream(kind);
+
+-- Add arena_knowledge table for arena research knowledge
+CREATE TABLE IF NOT EXISTS arena_knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    digest TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_arena_knowledge_topic ON arena_knowledge(topic);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -483,6 +1124,18 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "work_queue", sql=_V5),
     Migration(6, "full_text_search", fn=_create_fts, down="DROP TABLE IF EXISTS web_fts;"),
     Migration(7, "secondary_indexes", sql=_V6_INDEXES),
+    Migration(8, "missing_tables", sql=_V8_MISSING_TABLES),
+    Migration(9, "agent_tables", sql=_V9_AGENT_TABLES),
+    Migration(10, "connectors", sql=_V10_CONNECTORS),
+    Migration(11, "fix_achievements", sql=_V11_FIX_ACHIEVEMENTS),
+    Migration(12, "goals_project_id", sql=_V12_GOALS_PROJECT_ID),
+    Migration(13, "placeholder_13", sql=_V13_PLACEHOLDER),
+    Migration(14, "placeholder_14", sql=_V14_PLACEHOLDER),
+    Migration(15, "placeholder_15", sql=_V15_PLACEHOLDER),
+    Migration(16, "placeholder_16", sql=_V16_PLACEHOLDER),
+    Migration(17, "placeholder_17", sql=_V17_PLACEHOLDER),
+    Migration(18, "placeholder_18", sql=_V18_PLACEHOLDER),
+    Migration(19, "arena_builds", sql=_V19_ARENA_BUILDS),
 )
 
 

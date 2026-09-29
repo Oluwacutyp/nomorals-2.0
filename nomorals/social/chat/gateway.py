@@ -1,0 +1,406 @@
+"""The chat gateway: every platform, one brain, at the same time.
+
+The gateway owns:
+
+* **Simultaneity.** One adapter thread per platform (Telegram userbot,
+  Discord bot, WhatsApp bridge, local console). A message from any of them
+  lands on one inbound callback; a reply from the brain goes out on the
+  platform it came from.
+* **Ordering.** Sends to the same chat are serialized with a per-chat lock,
+  so the runtime and the autonomy agent (which may send at the same moment)
+  never interleave badly.
+* **Rate limiting.** A per-platform rolling one-hour window, enforced here
+  and never trusted to the platform — this is what keeps a userbot account
+  from getting flagged in the first week.
+* **Registry.** Every chat the companion ever sees is upserted into the
+  ``chats`` table, tagged as owner (primary partner) or US-based per config.
+* **Dry run.** In dry-run mode sends are logged and acknowledged but never
+  leave the machine — how you test the whole loop without touching an account.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from typing import Any, Callable
+
+from ...core.ids import new_short_id
+from ...core.logging_setup import get_logger
+from ...storage.db import Database
+from .base import (
+    ChatAdapter,
+    ChatKind,
+    ChatMessage,
+    ChatRef,
+    IncomingHandler,
+    MediaRef,
+    SendResult,
+)
+
+__all__ = ["ChatGateway"]
+
+_log = get_logger(__name__)
+
+
+class _HourWindow:
+    """A rolling per-hour counter for one platform.
+
+    A limit of ``0`` (or less) means *unlimited* — no counting at all.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = int(limit)
+        self._events: list[float] = []
+        self._lock = threading.Lock()
+
+    def allow(self, now: float | None = None) -> bool:
+        if self.limit <= 0:
+            return True
+        now = now if now is not None else time.time()
+        with self._lock:
+            cutoff = now - 3600.0
+            while self._events and self._events[0] < cutoff:
+                self._events.pop(0)
+            if len(self._events) >= self.limit:
+                return False
+            self._events.append(now)
+            return True
+
+    def pending(self, now: float | None = None) -> int:
+        if self.limit <= 0:
+            return 0
+        now = now if now is not None else time.time()
+        cutoff = now - 3600.0
+        with self._lock:
+            return sum(1 for t in self._events if t >= cutoff)
+
+
+class ChatGateway:
+    """Runs N chat adapters at once and funnels everything through one callback."""
+
+    def __init__(
+        self,
+        adapters: dict[str, ChatAdapter],
+        *,
+        db: Database | None = None,
+        dry_run: bool = False,
+        max_per_hour: int = 60,
+        owner_chats: set[str] | None = None,
+        us_chats: set[str] | None = None,
+        clock: Callable[[], float] = time.time,
+        adapter_builder: Callable[[str], ChatAdapter | None] | None = None,
+    ) -> None:
+        if not adapters:
+            raise ValueError("ChatGateway needs at least one adapter")
+        self.adapters = dict(adapters)
+        self._known = dict(adapters)
+        #: Lazy factory for hot-starting a platform that was skipped at boot
+        #: (dependency installed since, credentials added, …).
+        self._adapter_builder = adapter_builder
+        self.db = db
+        self.dry_run = dry_run
+        self.clock = clock
+        self.owner_chats = set(owner_chats or ())
+        self.us_chats = set(us_chats or ())
+        self._inbound: IncomingHandler | None = None
+        self._chat_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+        #: Inbound windows are PER-CHAT, not per-platform. A single spam group
+        #: flooding the platform must not starve the owner's DMs (that bug
+        #: dropped the owner's own /help while a group posted 30 times an hour).
+        #: Keyed by chat.key, created lazily on first message.
+        self._windows: dict[str, _HourWindow] = {}
+        self._max_per_hour = int(max_per_hour)
+        self.stats = {"dropped_rate_limited": 0, "dry_run_sends": 0, "inbound": 0}
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+    def start(self, handler: IncomingHandler) -> list[str]:
+        # Adapters always deliver into the gateway's funnel (registry, rate
+        # limit, error isolation); the brain's handler sits at the far end of it.
+        self._inbound = handler
+        # One-time interactive setup (e.g. Telegram first-run login) must run
+        # on the main thread while the keyboard is still free — the console
+        # starts below and reads stdin from then on.
+        for name in list(self.adapters):
+            try:
+                self.adapters[name].preflight()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - login failed: keep the rest
+                _log.warning("chat preflight failed for %s: %s", name, exc)
+                del self.adapters[name]
+        started: list[str] = []
+        for name, adapter in self.adapters.items():
+            if adapter.start(self._on_inbound):
+                started.append(name)
+        _log.info("chat gateway up: %s (dry_run=%s)", ",".join(started) or "none", self.dry_run)
+        return started
+
+    def stop(self) -> None:
+        for adapter in self.adapters.values():
+            try:
+                adapter.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ── hot start/stop (control commands) ───────────────────────────────────
+    def known_platforms(self) -> list[str]:
+        return sorted(self._known)
+
+    def set_rate_limit(self, limit: int) -> None:
+        """Change the per-chat hourly inbound cap live.
+
+        Power mode calls this with 0 (= unlimited); locking power restores the
+        configured base. Existing windows pick the new limit up immediately.
+        """
+        self._max_per_hour = int(limit)
+        with self._locks_guard:
+            for window in self._windows.values():
+                window.limit = self._max_per_hour
+
+    def start_one(self, name: str, handler: IncomingHandler) -> dict[str, Any]:
+        name = name.strip().lower()
+        adapter = self._known.get(name)
+        if adapter is None and self._adapter_builder is not None:
+            try:
+                adapter = self._adapter_builder(name)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash the session
+                return {"ok": False, "error": str(exc)}
+        if adapter is None:
+            return {"ok": False, "error": f"platform {name!r} is unknown or disabled in settings"}
+        if name in self.adapters and adapter._thread is not None and adapter._thread.is_alive():
+            return {"ok": False, "error": f"{name} is already running"}
+        self._known[name] = adapter
+        self.adapters[name] = adapter
+        if adapter.start(handler):
+            _log.info("chat platform started on demand: %s", name)
+            return {"ok": True, "platform": name}
+        return {"ok": False, "error": f"{name} was already running"}
+
+    def stop_one(self, name: str) -> dict[str, Any]:
+        name = name.strip().lower()
+        adapter = self.adapters.get(name)
+        if adapter is None:
+            return {"ok": False, "error": f"{name} is not running"}
+        try:
+            adapter.stop()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        self.adapters.pop(name, None)
+        _log.info("chat platform stopped on demand: %s", name)
+        return {"ok": True, "platform": name}
+
+    def status(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for name in sorted(set(list(self.adapters) + list(self._known))):
+            adapter = self._known.get(name)
+            if adapter is None:
+                continue
+            out[name] = {
+                **adapter.health(),
+                "running_in_session": name in self.adapters,
+                "hour_pending": self._pending_total(),
+            }
+        out["_stats"] = dict(self.stats)
+        return out
+
+    def _pending_total(self) -> int:
+        """Sum of in-window inbound events across all chats (diagnostics)."""
+        total = 0
+        with self._locks_guard:
+            for window in self._windows.values():
+                total += window.pending()
+        return total
+
+    # ── registry ─────────────────────────────────────────────────────────────
+    def register_chat(self, chat: ChatRef) -> dict[str, Any]:
+        """Upsert a chat into the registry; returns the row (or a local one)."""
+        key = chat.key
+        is_owner = 1 if key in self.owner_chats else 0
+        in_us = 1 if key in self.us_chats else 0
+        if self.db is None:
+            return {"key": key, "is_owner": is_owner, "in_us": in_us}
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    """INSERT INTO chats (id, platform, chat_id, kind, title, peer, is_owner, in_us, last_active)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         kind=excluded.kind,
+                         title=CASE WHEN excluded.title != '' THEN excluded.title ELSE chats.title END,
+                         peer=CASE WHEN excluded.peer != '' THEN excluded.peer ELSE chats.peer END,
+                         last_active=excluded.last_active""",
+                    (key, chat.platform, chat.chat_id, chat.kind, chat.title, chat.peer,
+                     is_owner, in_us, self.clock()),
+                )
+            row = self.db.query_one("SELECT * FROM chats WHERE id = ?", (key,))
+            return row or {"key": key, "is_owner": is_owner, "in_us": in_us}
+        except Exception as exc:  # noqa: BLE001 - registry must never block a message
+            _log.debug("chat registry upsert failed: %s", exc)
+            return {"key": key, "is_owner": is_owner, "in_us": in_us}
+
+    def touch(self, chat: ChatRef) -> None:
+        if self.db is None:
+            return
+        try:
+            self.db.execute(
+                "UPDATE chats SET last_active = ? WHERE id = ?", (self.clock(), chat.key)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── inbound ──────────────────────────────────────────────────────────────
+    def _on_inbound(self, message: ChatMessage) -> None:
+        self.stats["inbound"] += 1
+        row = self.register_chat(message.chat)
+        self.touch(message.chat)
+        # Owner messages are NEVER rate-limited: the cap exists to protect
+        # the bot from group floods, not to drop the owner's own commands.
+        is_owner = bool(row.get("is_owner")) or message.chat.key in self.owner_chats
+        if not is_owner:
+            with self._locks_guard:
+                window = self._windows.get(message.chat.key)
+                if window is None:
+                    window = _HourWindow(self._max_per_hour)
+                    self._windows[message.chat.key] = window
+            if not window.allow(self.clock()):
+                self.stats["dropped_rate_limited"] += 1
+                _log.warning("rate limit: dropping inbound from %s (>%s/h in this chat)",
+                             message.chat.key, window.limit)
+                return
+        handler = self._inbound
+        if handler is not None:
+            _log.info("gateway: dispatching inbound %s to the brain", message.chat.key)
+            try:
+                handler(message)
+            except Exception as exc:  # noqa: BLE001 - brain errors must not kill the feed
+                _log.exception("inbound brain failed for %s: %s", message.chat.key, exc)
+
+    # ── outbound ────────────────────────────────────────────────────────────
+    def _lock_for(self, chat: ChatRef) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._chat_locks.get(chat.key)
+            if lock is None:
+                lock = threading.Lock()
+                self._chat_locks[chat.key] = lock
+            return lock
+
+    def send(
+        self,
+        platform: str,
+        chat: ChatRef | str,
+        text: str,
+        *,
+        reply_to: str = "",
+        ordered: bool = True,
+    ) -> SendResult:
+        """Send one message on one platform. Ordered per chat by default."""
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self.adapters.get(chat.platform)
+        if adapter is None:
+            return SendResult(ok=False, platform=platform, error=f"no adapter for {platform!r}")
+        if not text.strip():
+            return SendResult(ok=True, platform=platform, message_id=new_short_id("skip"))
+        if self.dry_run:
+            self.stats["dry_run_sends"] += 1
+            _log.info("DRY-RUN send %s: %s", chat.key, text[:120])
+            return SendResult(ok=True, platform=platform, message_id=new_short_id("dry"))
+
+        def _do() -> SendResult:
+            result = adapter.send(chat, text, reply_to=reply_to)
+            if result.ok:
+                self.touch(chat)
+            return result
+
+        if ordered:
+            with self._lock_for(chat):
+                return _do()
+        return _do()
+
+    def send_file(
+        self,
+        platform: str,
+        chat: ChatRef | str,
+        path: str,
+        *,
+        caption: str = "",
+        max_send_mb: float = 0.0,
+    ) -> SendResult:
+        """Send a file, auto-compressing when it would exceed ``max_send_mb``.
+
+        Compression is best-effort: if it doesn't help (already-compressed
+        formats, no ffmpeg for video), the original goes out — the caller
+        can pre-check with the compress tool.
+        """
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self.adapters.get(chat.platform)
+        if adapter is None:
+            return SendResult(ok=False, platform=platform, error=f"no adapter for {platform!r}")
+        target = path
+        if max_send_mb > 0:
+            try:
+                from ...tools.compress import compress_file
+
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                if size_mb > max_send_mb:
+                    report = compress_file(path)
+                    if report.get("ok") and report.get("new_bytes", 0) < report.get("original_bytes", 0):
+                        target = str(report["path"])
+                        _log.info("send_file: compressed %s -> %s (ratio %s)",
+                                  path, target, report.get("ratio"))
+            except Exception as exc:  # noqa: BLE001 - never block the send on compression
+                _log.debug("send_file compression failed: %s", exc)
+        media = MediaRef(path=target, mime="", kind="file",
+                         name=os.path.basename(target))
+
+        def _do() -> SendResult:
+            result = adapter.send_media(chat, media, caption=caption)
+            if result.ok:
+                self.touch(chat)
+            return result
+
+        with self._lock_for(chat):
+            return _do()
+
+    def typing(self, platform: str, chat: ChatRef | str, seconds: float = 3.0) -> bool:
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self.adapters.get(chat.platform)
+        if adapter is None or self.dry_run:
+            return False
+        try:
+            return adapter.typing(chat, seconds)
+        except Exception as exc:  # noqa: BLE001 - typing is cosmetic
+            _log.debug("typing failed on %s: %s", platform, exc)
+            return False
+
+    def history(self, platform: str, chat: ChatRef | str, limit: int = 20) -> list[ChatMessage]:
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self.adapters.get(chat.platform)
+        if adapter is None:
+            return []
+        try:
+            return adapter.history(chat, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("history failed on %s: %s", platform, exc)
+            return []
+
+    def media_for(self, message: ChatMessage) -> list[str]:
+        """Local paths of this message's media, ready for the tool layer."""
+        return [m.path for m in message.media if m.path]
+
+
+def parse_chat_keys(raw: str, *, platform: str = "") -> set[str]:
+    """Parse a config string like 'telegram:123, discord:456' or '123,456'."""
+    keys: set[str] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            p, _, cid = part.partition(":")
+            keys.add(f"{p.strip()}:{cid.strip()}")
+        elif platform:
+            keys.add(f"{platform}:{part}")
+    return keys

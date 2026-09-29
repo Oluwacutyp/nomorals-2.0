@@ -148,6 +148,11 @@ class LLMRouter:
         with self._lock:
             return self._active
 
+    @property
+    def active_model(self) -> str:
+        """Alias for ``active`` — used by the CLI."""
+        return self.active
+
     # ── hot-swap ─────────────────────────────────────────────────────────────
     def set_active(self, name: str) -> str:
         """Switch the model used by *new* calls. In-flight calls are unaffected."""

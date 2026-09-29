@@ -98,14 +98,29 @@ class ToolRegistry:
         """Wire up the standard tool set. Imports are deferred per tool."""
         if self._builtin_registered:
             return self
-        from . import filesystem, media, parsers, shell, vision, web
-
-        filesystem.register(self)
-        shell.register(self)
-        web.register(self)
-        vision.register(self)
-        media.register(self)
-        parsers.register(self)
+        
+        # Import all tool modules
+        from . import (
+            agents, attacker, audio, browser, cards, compress, connectors, database,
+            deals, decoder, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
+            macros, media, metadata, network, osint, osint_people, parsers,
+            proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
+            traindata, vision, web, workspace
+        )
+        
+        # Register all tool modules
+        for module in [
+            agents, attacker, audio, browser, cards, compress, connectors, database,
+            deals, decoder, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
+            macros, media, metadata, network, osint, osint_people, parsers,
+            proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
+            traindata, vision, web, workspace
+        ]:
+            try:
+                module.register(self)
+            except Exception:
+                pass  # Some modules may fail to register in certain contexts
+        
         self._builtin_registered = True
         return self
 
@@ -139,13 +154,21 @@ class ToolRegistry:
     def call(
         self,
         name: str,
-        *,
+        /,
+        *args: Any,
         actor: str = "system",
         capabilities: CapabilitySet | None = None,
         confirmation: str | None = None,
         **kwargs: Any,
     ) -> Outcome[Any]:
         """Check the capability, run the tool, and audit the call."""
+        # Reject extra positional arguments with a proper error outcome
+        if args:
+            return Err(ToolError(
+                f"call() takes 1 positional argument but {1 + len(args)} were given; "
+                f"pass tool parameters as keywords"
+            ))
+        
         spec = self._tools.get(name)
         if spec is None:
             return Err(ToolNotFound(f"unknown tool {name!r}; available: {self.names()[:20]}"))

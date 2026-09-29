@@ -50,7 +50,25 @@ class KeyAction(str, Enum):
     END = "end"
     DELETE_CHAR = "delete_char"
     BACKSPACE = "backspace"
+    
+    # Tab completion
     TAB_COMPLETE = "tab_complete"
+    
+    # Multi-line input
+    TOGGLE_MULTILINE = "toggle_multiline"
+    SUBMIT_MULTILINE = "submit_multiline"
+    CANCEL_MULTILINE = "cancel_multiline"
+    
+    # Clipboard
+    COPY_LINE = "copy_line"
+    PASTE = "paste"
+    
+    # Command palette
+    OPEN_PALETTE = "open_palette"
+    CLOSE_PALETTE = "close_palette"
+    PALETTE_UP = "palette_up"
+    PALETTE_DOWN = "palette_down"
+    PALETTE_SELECT = "palette_select"
 
 
 @dataclass
@@ -93,6 +111,24 @@ class TuiState:
     prompt: str = "> "
     max_history: int = 200
     max_lines: int = 2000
+    
+    # Tab completion
+    completions: list[str] = field(default_factory=list)
+    completion_index: int = -1
+    completion_prefix: str = ""
+    
+    # Multi-line input
+    multiline: bool = False
+    multiline_buffer: list[str] = field(default_factory=list)
+    
+    # Clipboard
+    clipboard: str = ""
+    
+    # Command palette
+    show_palette: bool = False
+    palette_items: list[tuple[str, str, Callable[[], None]]] = field(default_factory=list)
+    palette_filter: str = ""
+    palette_index: int = 0
 
     # ── output ───────────────────────────────────────────────────────────────
 
@@ -196,6 +232,139 @@ class TuiState:
         order = [Panel.INPUT, Panel.SCROLLBACK]
         index = order.index(self.focus) if self.focus in order else 0
         self.focus = order[(index + 1) % len(order)]
+    
+    # ── tab completion ───────────────────────────────────────────────────────
+    
+    def tab_complete(self, available_commands: list[str] | None = None) -> None:
+        """Cycle through completions for current word."""
+        if not available_commands:
+            return
+        
+        # Extract current word
+        before_cursor = self.buffer[:self.cursor]
+        words = before_cursor.split()
+        current_word = words[-1] if words else ""
+        
+        if not current_word:
+            return
+        
+        # First tab: find matches
+        if self.completion_index < 0:
+            self.completion_prefix = current_word
+            self.completions = [cmd for cmd in available_commands if cmd.startswith(current_word)]
+            if not self.completions:
+                return
+            self.completion_index = 0
+        else:
+            # Cycle to next completion
+            self.completion_index = (self.completion_index + 1) % len(self.completions)
+        
+        # Replace current word with completion
+        completion = self.completions[self.completion_index]
+        word_start = self.cursor - len(current_word)
+        self.buffer = self.buffer[:word_start] + completion + self.buffer[self.cursor:]
+        self.cursor = word_start + len(completion)
+    
+    def reset_completion(self) -> None:
+        """Reset completion state."""
+        self.completions = []
+        self.completion_index = -1
+        self.completion_prefix = ""
+    
+    # ── multi-line input ─────────────────────────────────────────────────────
+    
+    def toggle_multiline(self) -> None:
+        """Toggle multi-line input mode."""
+        self.multiline = not self.multiline
+        if self.multiline:
+            self.status = "multi-line mode (Ctrl-J to submit, Ctrl-G to cancel)"
+        else:
+            self.multiline_buffer.clear()
+            self.status = "ready"
+    
+    def submit_multiline(self) -> str:
+        """Submit multi-line input."""
+        text = "\n".join(self.multiline_buffer).strip()
+        self.multiline_buffer.clear()
+        self.multiline = False
+        self.status = "ready"
+        return text
+    
+    def add_multiline(self, line: str) -> None:
+        """Add a line to multi-line buffer."""
+        self.multiline_buffer.append(line)
+        self.buffer = ""
+        self.cursor = 0
+    
+    # ── clipboard ────────────────────────────────────────────────────────────
+    
+    def copy_line(self) -> None:
+        """Copy current line to clipboard."""
+        if self.lines:
+            # Copy the last non-empty line
+            for line in reversed(self.lines):
+                if line.text.strip():
+                    self.clipboard = line.text
+                    self.status = f"copied: {line.text[:50]}..."
+                    return
+    
+    def paste(self) -> None:
+        """Paste from clipboard."""
+        if self.clipboard:
+            self.insert(self.clipboard)
+    
+    # ── command palette ──────────────────────────────────────────────────────
+    
+    def open_palette(self, items: list[tuple[str, str, Callable[[], None]]]) -> None:
+        """Open command palette.
+        
+        Args:
+            items: List of (name, description, callback) tuples
+        """
+        self.show_palette = True
+        self.palette_items = items
+        self.palette_filter = ""
+        self.palette_index = 0
+    
+    def close_palette(self) -> None:
+        """Close command palette."""
+        self.show_palette = False
+        self.palette_items = []
+        self.palette_filter = ""
+        self.palette_index = 0
+    
+    def filter_palette(self, query: str) -> list[tuple[str, str, Callable[[], None]]]:
+        """Filter palette items by query."""
+        self.palette_filter = query
+        if not query:
+            return self.palette_items
+        
+        query_lower = query.lower()
+        filtered = [
+            item for item in self.palette_items
+            if query_lower in item[0].lower() or query_lower in item[1].lower()
+        ]
+        return filtered
+    
+    def select_palette_item(self) -> Callable[[], None] | None:
+        """Execute selected palette item."""
+        filtered = self.filter_palette(self.palette_filter)
+        if filtered and 0 <= self.palette_index < len(filtered):
+            _, _, callback = filtered[self.palette_index]
+            self.close_palette()
+            return callback
+        return None
+    
+    def palette_up(self) -> None:
+        """Move palette selection up."""
+        if self.palette_index > 0:
+            self.palette_index -= 1
+    
+    def palette_down(self) -> None:
+        """Move palette selection down."""
+        filtered = self.filter_palette(self.palette_filter)
+        if self.palette_index < len(filtered) - 1:
+            self.palette_index += 1
 
 
 DEFAULT_BINDINGS: dict[str, KeyAction] = {
@@ -204,7 +373,7 @@ DEFAULT_BINDINGS: dict[str, KeyAction] = {
     "\x03": KeyAction.CANCEL,
     "\x04": KeyAction.QUIT,
     "\x0c": KeyAction.CLEAR,
-    "\t": KeyAction.FOCUS_NEXT,
+    "\t": KeyAction.TAB_COMPLETE,
     "\x1b[A": KeyAction.HISTORY_PREV,
     "\x1b[B": KeyAction.HISTORY_NEXT,
     "\x1b[D": KeyAction.CURSOR_LEFT,
@@ -214,6 +383,19 @@ DEFAULT_BINDINGS: dict[str, KeyAction] = {
     "\x08": KeyAction.BACKSPACE,
     "\x7f": KeyAction.BACKSPACE,
     "\x1b[3~": KeyAction.DELETE_CHAR,
+    
+    # Multi-line
+    "\x0a": KeyAction.SUBMIT_MULTILINE,  # Ctrl-J
+    "\x07": KeyAction.CANCEL_MULTILINE,  # Ctrl-G
+    "\x0d": KeyAction.TOGGLE_MULTILINE,  # Ctrl-M
+    
+    # Clipboard
+    "\x19": KeyAction.COPY_LINE,  # Ctrl-Y
+    "\x16": KeyAction.PASTE,      # Ctrl-V
+    
+    # Command palette
+    "\x10": KeyAction.OPEN_PALETTE,  # Ctrl-P
+    "\x1b": KeyAction.CLOSE_PALETTE,  # Escape
 }
 
 
@@ -256,6 +438,10 @@ def render(state: TuiState, *, width: int, height: int) -> Rendered:
     """
     if width < 20 or height < 5:
         return Rendered(rows=[("terminal too small", "error")], status="resize the window")
+    
+    # Command palette overlay
+    if state.show_palette:
+        return _render_palette(state, width=width, height=height)
 
     body_height = height - 2
     prompt_line = state.prompt + state.buffer
@@ -274,10 +460,18 @@ def render(state: TuiState, *, width: int, height: int) -> Rendered:
         visible.insert(0, ("", "blank"))
 
     rows.extend(visible)
+    
+    # Multi-line indicator
+    if state.multiline:
+        rows.append(("─── multi-line mode (Ctrl-J submit, Ctrl-G cancel) ───", "status"))
+        for i, line in enumerate(state.multiline_buffer[-3:], 1):
+            rows.append((f"  {line[:width-4]}", "info"))
+    
     rows.append((prompt_line[:width], "input"))
 
     indicator = "…" if state.busy else ""
-    status = f" {state.status} {indicator}".strip()
+    mode = "[multi]" if state.multiline else ""
+    status = f" {state.status} {mode} {indicator}".strip()
     right = f"[{state.focus.value}] "
     padding = max(1, width - len(status) - len(right))
     rows.insert(0, ((status + " " * padding + right)[:width], "status"))
@@ -288,4 +482,57 @@ def render(state: TuiState, *, width: int, height: int) -> Rendered:
         cursor_col=min(width - 1, len(state.prompt) + state.cursor),
         status=status,
         input_line=prompt_line,
+    )
+
+
+def _render_palette(state: TuiState, *, width: int, height: int) -> Rendered:
+    """Render command palette overlay."""
+    rows: list[tuple[str, str]] = []
+    
+    # Filter items
+    filtered = state.filter_palette(state.palette_filter)
+    
+    # Header
+    header = f" Command Palette ({len(filtered)} items) "
+    rows.append((header.center(width)[:width], "status"))
+    
+    # Search box
+    search = f" > {state.palette_filter}"
+    rows.append((search[:width], "input"))
+    rows.append(("─" * width, "status"))
+    
+    # Items (show up to height-5 items)
+    max_items = height - 5
+    start = max(0, state.palette_index - max_items + 1)
+    visible_items = filtered[start:start + max_items]
+    
+    for i, (name, desc, _) in enumerate(visible_items):
+        actual_index = start + i
+        if actual_index == state.palette_index:
+            prefix = "▸ "
+            kind = "status"
+        else:
+            prefix = "  "
+            kind = "info"
+        
+        line = f"{prefix}{name:20s} {desc}"
+        rows.append((line[:width], kind))
+    
+    # Pad to fill screen
+    while len(rows) < height - 1:
+        rows.append(("", "blank"))
+    
+    # Footer
+    footer = " ↑↓ navigate  ⏎ select  esc close "
+    rows.append((footer.center(width)[:width], "status"))
+    
+    # Cursor in search box
+    cursor_col = 3 + len(state.palette_filter)
+    
+    return Rendered(
+        rows=rows,
+        cursor_row=1,
+        cursor_col=min(width - 1, cursor_col),
+        status="palette",
+        input_line=state.palette_filter,
     )

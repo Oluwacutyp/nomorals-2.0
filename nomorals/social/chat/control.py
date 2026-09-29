@@ -1,0 +1,1126 @@
+"""Control commands: the owner's hands on the machine, from inside a chat.
+
+While `nm chat` is running, the owner types slash-commands — from the local
+console, or from the primary partner chat on any platform (a message that
+starts with ``/`` and comes from the owner is a command, not conversation).
+
+Commands:
+
+    /help                        what you can do
+    /status                      mood, relationship, platforms, autonomy
+    /platforms                   per-platform health
+    /start <platform>            hot-start a platform in this session
+    /stop  <platform>            stop a platform in this session
+    /mood                        show the ten dimensions + label
+    /mood tired                  force the label (sets its profile's values)
+    /mood energy=20 frustration=70   force dimensions directly
+    /mood reset                  back to the persona's baselines
+    /mode  off|suggest|auto      switch the autonomy mode, live
+    /model [provider [fallback]] switch the model live (no restart, persists)
+    /say <platform:chat> text    send a message as her, through the gateway
+    /proposals                   pending autonomous messages
+    /approve <id>                release a proposal
+    /deny    <id>                kill a proposal
+    /stage                       show relationship stage + trust
+    /stage <stage>               advance/regress explicitly
+    /power on <key>              unlock power mode (owner key)
+    /power off|status            lock / report
+    /search <query>              quick web research + cited summary
+    /searchdeep <query>          deep research (power mode)
+    /searchleads                 legit paid-task platform report
+    /searchhist [n]              recent research runs
+    /book <topic> [chapters]     writes a real book → PDF, sends it when done
+    /book status [slug]          book progress · /book list · /book build <slug>
+    /features [name on|off]      feature toggles (arena, vision, search, …)
+    /arena [status|run|topics|stream|export|approve|deny]
+                                 self-improvement arena control
+    /trial [start|save|send|list|rm]
+                                 single-account trial credentials
+    /devon [free text]           the autonomous dev agent: plans tools, runs
+                                 them, and digests a plain-English answer
+    /quit                        stop the runtime
+
+Parsing is pure (no I/O, no dependencies on the runtime) so it is fully
+testable; dispatch happens in :mod:`nomorals.agents.partner_runtime`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+__all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
+           "parse_control", "PLATFORMS", "help_text", "detailed_help",
+           "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS"]
+
+PLATFORMS = ("telegram", "discord", "whatsapp", "local")
+
+#: wave 87: the commands that start a game directly.  The Social Operator
+#: lets these through in EVERY chat (games are social); the Core Mind only
+#: adds the natural-language triggers on top, and only in the owner's DMs.
+GAME_COMMANDS = (
+    # easy
+    "wordchain", "hangman", "numberguess", "two_truths", "wyrr", "spy",
+    "auction", "trivia",
+    # medium
+    "mafia", "king", "story", "rpg", "shop", "duel", "case",
+    # ambitious
+    "world", "escape", "political", "arena",
+    # wild (wave 95)
+    "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
+    # arcade (wave 97)
+    "2048", "snake", "connect4", "battleship",
+    # casino (wave 98)
+    "blackjack", "roulette", "slots",
+)
+
+#: kind -> (min_args, max_args) — used by /help and by validation.
+CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
+    "help": (0, 1),
+    "status": (0, 0),
+    "platforms": (0, 0),
+    "start": (1, 1),
+    "stop": (1, 1),
+    "mood": (0, 10),  # label, or several dim=NN pairs
+    "mode": (1, 1),
+    "model": (0, 6),  # provider + up to 5 fallback providers
+    "say": (2, None),
+    "proposals": (0, 0),
+    "approve": (1, 1),
+    "deny": (1, 1),
+    "stage": (0, 1),
+    "power": (1, 2),
+    "quit": (0, 0),
+    "profile": (0, 0),      # /profile — the profile-aware runtime (env + tuned knobs)
+    # search engine (Telegram / WhatsApp / console — same commands everywhere)
+    "search": (1, None),     # /search <query> — free text, no length cap
+    "searchdeep": (1, None), # /searchdeep <query>  (power mode)
+    "searchleads": (0, 0),   # legit paid-task platform report
+    "searchhist": (0, 1),    # /searchhist [n]
+    # BookForge: write a real book → PDF → send when done
+    "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
+    # Universal Decoder: identify + decode anything, send binary results
+    "decode": (0, None),     # /decode <data> | /decode file:<path> | /decode hash <digest>
+    # Cookie analysis & handling (the CookieLab)
+    "cookies": (1, None),    # /cookies <header> | /cookies file:<path> | /cookies ingest <header>
+    # Prompt/mission structuring sub-agent
+    "structure": (1, None),  # /structure <objective> — the structured brief
+    "monitor": (0, None),    # /monitor [add <target> [every Ns] | list | tick | rm <ref>]
+    # real crypto: AES-256 sealed blobs + classic ciphers
+    "cipher": (0, None),     # /cipher enc|dec … with <pass> · /cipher vault put|get|list|rm
+    # feature flags + arena + trial accounts
+    "features": (0, 2),      # /features | /features <name> on|off
+    "arena": (0, None),      # /arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]
+    "trial": (0, 5),         # /trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]
+    # expansion wave
+    "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
+    # wave 87: direct game-start commands — games are social, so they work in
+    # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
+    # natural language never launches a game there. ("arena" stays the
+    # self-improvement arena — that game is /game arena.)
+    # easy
+    "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
+    "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
+    "trivia": (0, 0),
+    # medium
+    "mafia": (0, 0), "king": (0, 0), "story": (0, 0),
+    "rpg": (0, 0), "shop": (0, 0), "duel": (0, 0), "case": (0, 0),
+    # ambitious
+    "world": (0, 0), "escape": (0, 0), "political": (0, 0),
+    # wild (wave 95)
+    "poker": (0, 0), "ttt": (0, 0), "bulls": (0, 0), "craps": (0, 0),
+    "memory": (0, 0), "mines": (0, 0), "wordle": (0, 0),
+    # arcade (wave 97)
+    "2048": (0, 0), "snake": (0, 0), "connect4": (0, 0), "battleship": (0, 0),
+    # casino (wave 98)
+    "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 0),
+    # wave 87: the Core Mind — manual override over natural-language routing
+    "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
+    "news": (0, 2),          # /news [run|status]
+    "research": (0, 2),      # /research [run [domain]|status]
+    "code": (1, None),       # /code <what to build> — the coding bot
+    "py": (1, None),         # /py <python code> — run in the sandbox (-s/-r sessions)
+    "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
+    "recall": (0, None),     # /recall [query] — what she has stored
+    "forget": (1, None),     # /forget <id or description>
+    # new layer: voice, scheduler, db, api, vision, swarm
+    "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
+    "stt": (1, 5),           # /stt <path> — transcribe an audio file
+    "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
+    "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
+    "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
+    "api": (0, None),        # /api list | <connector> [json params]
+    "swarm": (1, None),      # /swarm <goal> [workers] — parallel devon agents
+    # power layer: network, proxies, scripts, osint, macros
+    "dns": (1, 5),           # /dns <domain> [record type]
+    "scan": (1, 6),          # /scan <target> [ports] [banner]
+    "whois": (1, 3),         # /whois <domain>
+    "ports": (0, 1),         # /ports — what is listening here
+    "proxy": (0, 8),         # /proxy status|scrape|test|pool [scheme]|rotate on|set <url>|ssh <…>
+    "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
+    "gen": (2, None),        # /gen <kind> <name> [json config]
+    "osint": (1, None),      # /osint <target> | campaign <seeds> | graph <verb>…
+    "record": (0, None),     # /record start <name>|stop|step <tool> [json]|status
+    "macro": (0, None),      # /macro [list] | /macro <name> [json overrides]
+    "file": (1, None),       # /file <platform> <chat> <path> [caption]
+    "publish": (1, None),    # /publish <platform> <chat> <md path> [format]
+    "data": (0, None),       # /data mine [name] | /data list | /data fetch <ref> [rows]
+    "evolve": (1, None),     # /evolve <instruction> | /evolve apply <id> | /evolve list
+    "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
+    "task": (1, None),       # /task add <instruction>|run [id]|list
+    "notify": (0, 1),        # /notify [n] — recent alerts
+    "image": (1, 3),         # /image <path-or-url> — lookup
+    "lens": (1, 3),          # /lens <path-or-url> — reverse image search
+    # devon: the autonomous dev & investigation agent
+    "devon": (0, None),      # /devon [free text] — plan tools, run, digest, reply
+    # reasoning: explicit, auditable multi-step thought
+    "think": (1, None),      # /think <question> [strategy] — show the work
+    "benchmark": (0, 2),     # /benchmark [dimension] — how sharp is the system right now
+    # wave 68: command discovery
+    "list": (0, 1),          # /list [group] — every executable command, categorized
+    "commands": (0, 1),      # alias of /list
+    "menu": (0, 1),          # alias of /list
+    # wave 72 systems: media, execution, archives, builders
+    "music": (0, None),      # /music <topic> [style] | styles | song [slug]
+    "play": (0, None),       # /play <paths…> | status | queue | pause | …
+    "video": (0, None),      # /video <query> | download <url> | platforms
+    "exec": (0, None),       # /exec <code> | languages — multi-language sandbox
+    "zip": (0, None),        # /zip <paths…> --dest x.zip | list | info | extract | digest
+    "apps": (0, None),       # /apps [list|build|serve|stop|served|stacks|info]
+    # wave 73: media orchestrator + CI loop
+    "hub": (0, None),        # /hub [song <topic…> [style]|video <q…>|podcast <q…>|status]
+    "podcast": (1, None),    # /podcast <query…> — find→download→transcribe→chapters
+    "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
+}
+
+_HELP_TEXT = "\n".join(
+    [
+        "control commands (you, the owner — start a message with /):",
+        "  /status /platforms /help",
+        "  /start telegram | /stop telegram        hot start/stop a platform",
+        "  /mood [label | dim=0..100 …] | /mood reset",
+        "  /mode off|suggest|auto                  autonomy, live",
+        "  /profile [save|reload]                 this machine's runtime tune (wave 86)",
+        "  /mind [status|<goal>]                  the core mind — route a goal, inspect the routing",
+        "  /model [provider [fallback …]]          switch model live (persists)",
+        "  /say telegram:123 text…                 send as her",
+        "  /proposals /approve <id> /deny <id>",
+        "  /stage [committed|dating|…]",
+        "  /power on <key> | /power off | /power status",
+        "  — search —",
+        "  /search <query>                         quick research + cited summary",
+        "  /searchdeep <query>                     deep research (power mode)",
+        "  /searchleads                            legit paid-task platforms report",
+        "  /searchhist [n]                         recent research runs",
+        "  — bookforge (writes a real book → pdf, sends it) —",
+        "  /book <topic> [chapters]                start a book (auto-sends the pdf)",
+        "  /book status [slug] | /book list        progress",
+        "  /book build <slug> | /book send <slug> <p> <chat>",
+        "  — decode & crypto —",
+        "  /decode <data> | /decode file:<path>     Universal Decoder (sends binary back)",
+        "  /decode hash <digest> | /decode decoders identify hashes / list engine",
+        "  /cookies <header> | /cookies ingest <h>  CookieLab: classify, fingerprint, decode",
+        "  /structure <objective>                   structured brief (subgoals, acceptance…)",
+        "  /cipher enc <data> with <pass>           AES-256 sealed blob (integrity-tagged)",
+        "  /cipher vault put <name> <secret> with <pass>   named secrets vault",
+        "  /cipher vault get <name> with <pass> | list | rm <name>",
+        "  /cipher dec <blob> with <pass>           open it (rejects wrong pass / tamper)",
+        "  /monitor add <url|file> [every Ns]       alert on change (with diff)",
+        "       [--webhook URL] [--min-gap 60]     POST alerts as JSON; throttle",
+        "  /monitor alert <ref> [--webhook … --min-gap N]  change a watch's delivery",
+        "  /monitor list | tick | rm <ref>          manage watches",
+        "  — features & arena —",
+        "  /features                               list all feature toggles",
+        "  /features <name> on|off                 arena|group_posts|proactive_dm|vision|search",
+        "  /arena [status|run [topic]|topics|stream [n]|export [n]]",
+        "  /arena approve <id> | /arena deny <id>  review its builds",
+        "  — trial accounts (one account, delivered to you) —",
+        "  /trial start <platform>                 plan one real trial signup",
+        "  /trial save <platform> <login> <pass>   store it encrypted",
+        "  /trial send <platform>                  send it via WhatsApp/Telegram",
+        "  /trial list | /trial rm <platform>",
+        "  — expansion —",
+        "  /game [list|<name>|quit]                19 games (DM + group): /game list",
+        "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
+        "   /king /story /case /world /escape /political /auction\n"
+        "   /shop /wyrr /two_truths /numberguess   start any of the 19 (every chat)",
+        "  /game leaderboard|stats|shop|balance    the shared table: rankings, record, coins",
+        "  /news [run|status]                      fetch + summarize the feeds",
+        "  /research [run [domain]|status]         lifestyle | tech | cyber",
+        "  /code <what to build>                   the coding bot (draft→run→fix)",
+        "  /py <python code>                       run it sandboxed; -s name keeps a session, -r resets",
+        "  /remember <text> [kind] [tags:a,b]      store it in her long-term memory",
+        "  /recall [query]                         what she remembers (top 5)",
+        "  /forget <id or description>             delete a memory",
+        "  — voice / screen / tools —",
+        "  /tts <text>                             speak it aloud (audio sent back)",
+        "  /stt <path>                             transcribe an audio file",
+        "  /look <path|url> [focus]                screen-reader analysis of a screenshot",
+        "  /schedule add <name> <when> <action>    at 2026-01-01 09:00 | every 30m | 22:00",
+        "  /schedule list | rm <name> | enable <name> | disable <name> | run <name>",
+        "  /db tables | schema <table> | query <sql> | counts",
+        "  /api list | <connector> [json]          external APIs (weather, fx, github, …)",
+        "  /swarm <goal> [workers]                 parallel devon agents + fusion",
+        "  — network / proxy / osint / automation —",
+        "  /dns <domain> [record]                  A/AAAA/MX/NS/TXT/SPF/CAA (no deps)",
+        "  /scan <target> [ports] [banner]         port scan — own infra only",
+        "  /whois <domain>                         registration data (RDAP)",
+        "  /ports                                  what is listening on this machine",
+        "  /proxy status|list|test|set <url>|clear route outbound traffic (your proxies)",
+        "  /proxy scrape|refresh|pool [scheme] free-proxy lab  /proxy rotate on [strategy]",
+        "  /proxy discover [seed urls] learn new list sources from the internet",
+        "  /proxy sources — health of every source (retired ones auto-retry)",
+        "  /proxy ssh start <name> <host> <user> [key] [port] — SSH → SOCKS5 tunnel",
+        "  /workspace [status|scale <n>|up|down|pause|resume|add|remove] the virtual CPU farm",
+        "  /gen <kind> <name> [json]               generate a validated script",
+        "  /osint <domain|ip|url|email>            read-only public-intel report",
+        "  /osint campaign <seeds…>                automated investigation walk",
+        "  /osint graph clusters|node|merge|stats  identity correlation graph",
+        "  /osint graph decoder <report.json>     feed decoder findings into graph",
+        "  /record start <name>|stop|step <t> [json]  capture actions into a macro",
+        "  /macro <name> [json]                    replay a recorded macro",
+        "  /file <platform> <chat> <path> [caption] send a file to any live chat",
+        "  /publish <platform> <chat> <md> [fmt]   make md→pdf/html/… and send it",
+        "  /data mine [name] | list | fetch <name>  train data (mine/free HF sets)",
+        "  /evolve <instruction> | apply <id> | list   self-improvement (tests-gated)",
+        "  /evolve audit | research <t> | revert <id> | auto [n] | queue add <goal>",
+        "  /evolve git | publish [branch] [--push]   where commits land + make permanent",
+        "  /speak <text>                            I say it as a voice note",
+        "  /task add <instruction> | /task run [id] | /task list",
+        "  /notify [n]                             recent alerts",
+        "  /image <path-or-url>                    look it up (hash, dims, seen?)",
+        "  /lens <path-or-url>                     reverse image search",
+        "  — devon (autonomous dev agent) —",
+        "  /devon <free text>                      e.g. 'check if the brain replied to the last messages'",
+        "  /devon                                  what he's on / recent digests",
+        "  — reasoning (shows its work) —",
+        "  /think <question>                       step-by-step answer with the full trace",
+        "  /think <question> <strategy>            strategy: cot|decompose|hypothesize|critique|tree|auto",
+        "  /benchmark [dimension]                  how sharp the system is right now (0-1)",
+        "  — media system (music · playback · video) —",
+        "  /music <topic> [style]                  compose a real song (lyrics + MIDI)",
+        "  /music styles | /music song [slug]      browse styles / re-fetch a saved song",
+        "  /play <paths…>                          queue + play audio (mpv when installed)",
+        "  /play status | queue | pause | resume | stop | next | prev",
+        "  /play seek <s> | volume <n> | remove <n> | clear",
+        "  /video <query> [platform]               find videos across the web (ranked)",
+        "  /video download <url> [audio]           download it (yt-dlp)",
+        "  — execution · archives · builders —",
+        "  /exec <code> [lang]                     run code sandboxed (py/js/bash/c/…)",
+        "  /exec languages                         what's installed here",
+        "  /fix <code> [lang] [--rounds 4]         run it; the model rewrites failures until green",
+        "  /zip <paths…> --dest x.zip              create an archive (zip|tar.gz|…)",
+        "  /zip list|info|extract <archive>        inspect / crack it open (safe)",
+        "  /zip digest <archive>                   extract it and curate every doc into memory",
+        "  /apps build <name> --stack flask        scaffold a real runnable app",
+        "  /apps [list|stacks|info <name>]         what she has built",
+        "  /apps serve <name> [--port N]           run it as a live server (health-checked)",
+        "  /apps stop <name> | /apps served        kill it / list live servers",
+        "  — media hub (one-call orchestrator) —",
+        "  /hub song <topic…> [style]              compose → queue → play a real song",
+        "  /hub video <query…> [platform]          find → download → queue → play",
+        "  /hub podcast <query…>                   find → download → transcribe → chapters",
+        "  /podcast <query…>                       the podcast pipeline (shortcut)",
+        "  /hub status                             the player right now",
+        "  — discovery —",
+        "  /list [group]                           every executable command, categorized",
+        "  /commands [group] | /menu [group]       aliases of /list",
+        "  /quit",
+    ]
+)
+
+
+@dataclass(frozen=True)
+class ControlCommand:
+    kind: str
+    arg: str = ""    #: first argument ("" when there are none)
+    tail: str = ""   #: everything after the command word (for multi-word commands)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "arg": self.arg, "tail": self.tail}
+
+
+def parse_control(text: str) -> ControlCommand | None:
+    """Parse a control message; None when it's ordinary conversation."""
+    stripped = (text or "").strip()
+    if not stripped.startswith("/"):
+        return None
+    rest = stripped[1:].strip()
+    if not rest:
+        return ControlCommand(kind="help")
+    words = rest.split(None, 1)
+    kind = words[0].lower()
+    if kind not in CONTROL_COMMANDS:
+        return None  # unknown slash: treat as a normal message, let her answer
+    tail = words[1].strip() if len(words) > 1 else ""
+    arg = tail.split()[0] if tail else ""
+    n = len(tail.split()) if tail else 0
+    min_args, max_args = CONTROL_COMMANDS[kind]
+    if n < min_args:
+        return ControlCommand(kind="error", arg=f"/{kind} needs {min_args} argument(s)")
+    if max_args is not None and n > max_args:
+        return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s)")
+    return ControlCommand(kind=kind, arg=arg, tail=tail)
+
+
+def help_text() -> str:
+    return _HELP_TEXT
+
+
+# ── detailed help (wave 67) ─────────────────────────────────────────────────
+#: Per-command detail: what it does, exact usage, a real example, and
+#: related commands.  ``/help <command>`` in chat (and ``nm help <topic>``)
+#: renders one of these; ``/help`` alone renders the catalog.
+COMMAND_DETAILS: dict[str, dict[str, str]] = {
+    "status": {"what": "her live state — platforms, model budget, active goals, loop cadence.",
+               "usage": "/status", "example": "/status",
+               "related": "/platforms /benchmark"},
+    "platforms": {"what": "which chat platforms are running in this session.",
+                  "usage": "/platforms", "example": "/platforms",
+                  "related": "/start /stop"},
+    "start": {"what": "hot-start a chat platform without restarting the system.",
+              "usage": "/start <platform>", "example": "/start telegram",
+              "related": "/stop /platforms"},
+    "stop": {"what": "hot-stop a chat platform (it keeps running data on disk).",
+             "usage": "/stop <platform>", "example": "/stop whatsapp",
+             "related": "/start /platforms"},
+    "mood": {"what": "set her mood by label or dimensions (0-100); 'reset' restores baseline.",
+             "usage": "/mood [label | dim=NN …] | reset", "example": "/mood happy",
+             "related": "/stage"},
+    "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
+             "usage": "/mode off|suggest|auto", "example": "/mode auto",
+             "related": "/proposals /power"},
+    "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
+              "usage": "/model [provider [fallback …]]", "example": "/model local",
+              "related": "/status"},
+    "say": {"what": "send a message to a chat as her, from your hands.",
+            "usage": "/say <platform:chat> <text>", "example": "/say telegram:123 hi",
+            "related": "/file /publish"},
+    "proposals": {"what": "list the actions she is waiting for you to approve (suggest mode).",
+                  "usage": "/proposals", "example": "/proposals",
+                  "related": "/approve /deny"},
+    "approve": {"what": "approve one pending proposal so she executes it.",
+                "usage": "/approve <id>", "example": "/approve p3",
+                "related": "/proposals /deny"},
+    "deny": {"what": "deny one pending proposal.",
+             "usage": "/deny <id>", "example": "/deny p3",
+             "related": "/proposals /approve"},
+    "stage": {"what": "set the relationship stage (committed|dating|…), which tunes her behavior.",
+              "usage": "/stage [stage]", "example": "/stage dating",
+              "related": "/mood"},
+    "power": {"what": "power mode: no human-like pacing, maximum capability — needs the key you set in config.",
+              "usage": "/power on <key> | off | status", "example": "/power on mykey",
+              "related": "/mode /features"},
+    "quit": {"what": "shut the whole system down (everything is already on disk).",
+             "usage": "/quit", "example": "/quit"},
+    "search": {"what": "quick research: searches and replies with a cited summary.",
+               "usage": "/search <query>", "example": "/search llama 3.1 8b quant",
+               "related": "/searchdeep /searchhist"},
+    "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
+                   "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
+                   "related": "/search /searchhist"},
+    "searchleads": {"what": "report on legit paid-task platforms — what is real, what pays.",
+                    "usage": "/searchleads", "example": "/searchleads",
+                    "related": "/search"},
+    "searchhist": {"what": "your recent research runs.",
+                   "usage": "/searchhist [n]", "example": "/searchhist 5",
+                   "related": "/search"},
+    "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
+                     "chapters → PDF with table of contents) and sends the finished "
+                     "PDF to you when it's done. Resumable if the run is interrupted.",
+             "usage": "/book <topic> [chapters]   |   /book status [slug]  |  /book list",
+             "example": "/book eBPF for system security 8",
+             "related": "/searchdeep (it researches the topic first)"},
+    "decode": {"what": "Universal Decoder: identifies and decodes almost anything — "
+                       "base64/hex/base32/base58/binary, ROT13, leetspeak, URL, "
+                       "hashes (with known-secret match), cookies, JWTs, tokens, and "
+                       "raw file forensics. Binary results are sent to you as files.",
+              "usage": "/decode <data>   |   /decode file:<path>   |   /decode hash <digest>   |   /decode decoders",
+              "example": "/decode cGFzc3dvcmQ=",
+              "related": "/monitor, nm decode"},
+    "cookies": {"what": "Cookie analysis & handling (the CookieLab): parses a "
+                        "Cookie / Set-Cookie header, classifies each cookie "
+                        "(session/auth/csrf/tracking/jwt/encoded), fingerprints "
+                        "the platforms it implies, decodes opaque values "
+                        "(URL, base64, JSON, JWT, hex, gzip), and flags "
+                        "cookies missing HttpOnly/Secure. 'ingest' also feeds "
+                        "the entities into the knowledge graph.",
+             "usage": "/cookies <cookie-header>   |   /cookies file:<path>   |   /cookies ingest <header>",
+             "example": "/cookies PHPSESSID=abc; path=/; HttpOnly; Secure\nJSESSIONID=xyz",
+             "related": "/decode, nm cookies"},
+    "structure": {"what": "The prompt/mission structuring sub-agent: turns a "
+                          "raw objective into a structured brief — intent, "
+                          "ordered subgoals, inputs, constraints, acceptance "
+                          "criteria, matching tools, and side effects. The "
+                          "same brief the mission runner plans from.",
+             "usage": "/structure <objective>",
+             "example": "/structure Build the decoder and verify it against the test corpus",
+             "related": "/code, nm structure"},
+    "monitor": {"what": "Watches a URL or file and alerts you (with a short diff) "
+                        "when its content actually changes. Auto-ticked while the bot runs.",
+              "usage": "/monitor add <target> [every 300s] [--webhook URL] [--min-gap 60]   |   /monitor alert <ref> [--webhook …] [--min-gap N]   |   /monitor list   |   /monitor tick   |   /monitor rm <ref>",
+              "example": "/monitor add https://example.com/status every 300s --webhook https://hooks.example.com/nm --min-gap 300",
+              "related": "/schedule, nm monitor"},
+    "cipher": {"what": "Real cryptography: AES-256 (PBKDF2) sealed blobs with an "
+                       "integrity tag — wrong passphrases and tampered blobs are "
+                       "rejected, not returned as garbage.",
+              "usage": "/cipher enc <data> with <passphrase>   |   /cipher dec <blob> with <passphrase>   |   /cipher vault put <name> <secret> with <pass>   |   /cipher vault get <name> with <pass>   |   /cipher vault list   |   /cipher vault rm <name> with <pass>",
+              "example": "/cipher vault put my-db-secret hunter2 with vaultkey",
+              "related": "nm cipher, /decode"},
+    "features": {"what": "list or toggle system features: arena, group_posts, proactive_dm, vision, search.",
+                 "usage": "/features [name on|off]", "example": "/features arena on",
+                 "related": "/arena /power"},
+    "arena": {"what": "the content arena: research a topic, stream drafts, review, export, approve builds.",
+              "usage": "/arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]",
+              "example": "/arena run llama fine-tuning",
+              "related": "/features /research"},
+    "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
+              "usage": "/trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]",
+              "example": "/trial list", "related": "/say"},
+    "game": {"what": "the social game engine — 19 games across DM, group and "
+                     "channel, with a shared economy, items and leaderboards. "
+                     "Works for every participant in every chat; in a group a "
+                     "new player is seated the moment they speak.",
+             "usage": "/game [list|<name>|quit|join|leaderboard [game]|stats "
+                      "[name]|balance|shop [buy <item>]]",
+             "example": "/game trivia  ·  /game mafia (group)  ·  "
+                        "/game leaderboard",
+             "related": ""},
+    "mind": {"what": "the Core Mind — the always-on layer that turns a "
+                    "natural-language goal into routed work: research swarm, "
+                    "builder, browser, downloader, missions, games, "
+                    "orchestrator. /mind <goal> forces the routing and shows "
+                    "its reasoning; /mind status shows live jobs, pending "
+                    "clarifications and the last objective.",
+            "usage": "/mind [status|clear|<goal>]",
+            "example": "/mind research the history of jazz  ·  /mind status",
+            "related": "/profile · /task · /swarm · /game"},
+    "wordchain": {"what": "word chain — each word must start with the last letter of the previous one; the house breaks dead ends. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/wordchain", "example": "/wordchain",
+             "related": "/game list · /game leaderboard wordchain · /game quit"},
+    "hangman": {"what": "hangman — the house picks a word, you send letters one at a time; the board draws as you miss. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns. Add 'daily' for the Word of the Day — same word for everyone, all day.",
+             "usage": "/hangman [daily]", "example": "/hangman daily",
+             "related": "/game list · /game leaderboard hangman · /game quit"},
+    "numberguess": {"what": "number guess — the house thinks of a number, you narrow the range. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/numberguess", "example": "/numberguess",
+             "related": "/game list · /game leaderboard numberguess · /game quit"},
+    "two_truths": {"what": "two truths and a lie — everyone posts three claims, the table votes for the lie. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/two_truths", "example": "/two_truths",
+             "related": "/game list · /game leaderboard two_truths · /game quit"},
+    "wyrr": {"what": "wyrr — the house poses, the table picks, everyone sees who's who. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/wyrr", "example": "/wyrr",
+             "related": "/game list · /game leaderboard wyrr · /game quit"},
+    "spy": {"what": "spy — everyone gets a word but one of you gets a fake; find the spy. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/spy", "example": "/spy",
+             "related": "/game list · /game leaderboard spy · /game quit"},
+    "auction": {"what": "auction — the table bids its points up for what the house puts on the block. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/auction", "example": "/auction",
+             "related": "/game list · /game leaderboard auction · /game quit"},
+    "trivia": {"what": "trivia royale — timed trivia rounds, the table races the clock and each other. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/trivia", "example": "/trivia",
+             "related": "/game list · /game leaderboard trivia · /game quit"},
+    "mafia": {"what": "mafia — town vs mafia with a night phase; the house runs the lynch and the kills. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/mafia", "example": "/mafia",
+             "related": "/game list · /game leaderboard mafia · /game quit"},
+    "king": {"what": "king of the hill — climb the hill and defend your spot from challengers. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/king", "example": "/king",
+             "related": "/game list · /game leaderboard king · /game quit"},
+    "story": {"what": "story chain — one sentence each, the story grows, the house judges the arc. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/story", "example": "/story",
+             "related": "/game list · /game leaderboard story · /game quit"},
+    "rpg": {"what": "rpg adventure — a shared dungeon crawl: the house sets the scene, the table decides. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/rpg", "example": "/rpg",
+             "related": "/game list · /game leaderboard rpg · /game quit"},
+    "shop": {"what": "shop game — the in-chat market turns into a game of spending and sniping. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/shop", "example": "/shop",
+             "related": "/game list · /game leaderboard shop · /game quit"},
+    "duel": {"what": "quiz duel — one-on-one rapid-fire questions, best of the round wins. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/duel", "example": "/duel",
+             "related": "/game list · /game leaderboard duel · /game quit"},
+    "case": {"what": "the case — a cooperative investigation: clues drop, the table reasons together. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/case", "example": "/case",
+             "related": "/game list · /game leaderboard case · /game quit"},
+    "world": {"what": "world — a continuing town that never ends, it just grows. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/world", "example": "/world",
+             "related": "/game list · /game leaderboard world · /game quit"},
+    "escape": {"what": "escape room — 4 locks, 3 strikes each, the table breaks out together. Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/escape", "example": "/escape",
+             "related": "/game list · /game leaderboard escape · /game quit"},
+    "political": {"what": "political — 3 elections: pledge, campaign, vote, be mayor (groups). Start it from any chat; while it's live, "
+                   "plain messages are moves and the engine owns the turns.",
+             "usage": "/political", "example": "/political",
+             "related": "/game list · /game leaderboard political · /game quit"},
+    "news": {"what": "fetch and summarize the news feeds.",
+             "usage": "/news [run|status]", "example": "/news run",
+             "related": "/research"},
+    "research": {"what": "scheduled research runs: lifestyle | tech | cyber.",
+                 "usage": "/research [run [domain]|status]", "example": "/research run tech",
+                 "related": "/news /arena"},
+    "code": {"what": "the coding bot: drafts code, runs it in the sandbox, fixes until the acceptance command passes; the real file lands in her workspace.",
+             "usage": "/code <what to build>", "example": "/code a todo cli in python",
+             "related": "/py /devon /task"},
+    "py": {"what": "run python in the sandbox; -s name keeps a session, -r resets it.",
+           "usage": "/py <code> [-s name] [-r]", "example": "/py print(6*7)",
+           "related": "/code"},
+    "remember": {"what": "store something in her long-term memory.",
+                 "usage": "/remember <text> [kind] [tags:a,b]",
+                 "example": "/remember mom's birthday is May 4 tags:people",
+                 "related": "/recall /forget"},
+    "recall": {"what": "what she remembers, ranked; a query narrows it.",
+               "usage": "/recall [query]", "example": "/recall python",
+               "related": "/remember /forget"},
+    "forget": {"what": "delete a memory by id or description.",
+               "usage": "/forget <id or description>", "example": "/forget mom's birthday",
+               "related": "/recall"},
+    "tts": {"what": "speak text aloud and send the audio file back.",
+            "usage": "/tts <text>", "example": "/tts morning",
+            "related": "/speak /stt"},
+    "stt": {"what": "transcribe an audio file to text.",
+            "usage": "/stt <path>", "example": "/stt /sdcard/audio/voice.ogg",
+            "related": "/tts"},
+    "look": {"what": "screen-reader analysis of a screenshot or image URL (she actually sees the pixels).",
+             "usage": "/look <path|url> [focus]", "example": "/look /sdcard/pic.jpg what app is this",
+             "related": "/image /lens"},
+    "schedule": {"what": "cron-style jobs that run in-process: at / every / daily.",
+                 "usage": "/schedule add <name> <when> <action> | list | rm | enable | disable | run | status",
+                 "example": "/schedule add backup daily 02:00 backup",
+                 "related": "/task"},
+    "db": {"what": "inspect the database: tables, schema, counts, or a query.",
+           "usage": "/db tables | schema <t> | query <sql> | counts",
+           "example": "/db counts", "related": ""},
+    "api": {"what": "external API connectors: weather, fx, github, …",
+            "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
+            "related": ""},
+    "swarm": {"what": "parallel swarm on one goal — devon builder agents with a fusion of their results, or the research swarm: parallel researchers, trusted sources first, conflicting claims flagged, structured report filed in memory.",
+              "usage": "/swarm <goal> [workers]  |  /swarm research <topic>",
+              "example": "/swarm audit this repo 4 · /swarm research is termux fast enough for llm inference",
+              "related": "/devon /research"},
+    "profile": {"what": "the profile-aware runtime: detected environment (termux/mobile/pc/vps/workstation) and every tuned knob — threads, VCPUs, download caps, memory pressure, parallel chats, mission aggressiveness, model preference — with the source of each value.",
+                "usage": "/profile", "example": "/profile",
+                "related": "/status /workspace"},
+    "dns": {"what": "DNS records with zero dependencies: A/AAAA/MX/NS/TXT/SPF/CAA.",
+            "usage": "/dns <domain> [record]", "example": "/dns example.com MX",
+            "related": "/whois /osint"},
+    "scan": {"what": "port scan your own infrastructure.",
+             "usage": "/scan <target> [ports] [banner]",
+             "example": "/scan 192.168.1.10 22,80,443",
+             "related": "/ports"},
+    "whois": {"what": "domain registration data via RDAP.",
+              "usage": "/whois <domain>", "example": "/whois example.com",
+              "related": "/dns /osint"},
+    "ports": {"what": "what is listening on this machine.",
+              "usage": "/ports", "example": "/ports",
+              "related": "/scan"},
+    "workspace": {"what": "the virtual CPU farm: environment profile, every core's status/load, autoscaling. /workspace [status|scale <n>|up|down|pause|resume <vcpu>|add <kind>|remove <vcpu>].",
+              "usage": "/workspace [status|scale <n>|up|down|pause|resume|add|remove]",
+              "example": "/workspace",
+              "related": "/status /arena"},
+    "proxy": {"what": "route outbound traffic through your proxies; free-proxy lab (health-tracked sources + internet-wide discovery); SSH→SOCKS5 tunnels.",
+              "usage": "/proxy status|list|test|set <url>|clear | scrape|pool [scheme] | discover [seeds] | sources | rotate on | ssh start <n> <host> <user>",
+              "example": "/proxy status",
+              "related": "/scan /osint"},
+    "gen": {"what": "generate a validated script of a kind.",
+            "usage": "/gen <kind> <name> [json config]", "example": "/gen scraper site name=x",
+            "related": "/code /record"},
+    "osint": {"what": "read-only public-intel: target reports, automated campaigns, identity-correlation graph.",
+              "usage": "/osint <target> | campaign <seeds…> | graph <verb>…",
+              "example": "/osint 8.8.8.8",
+              "related": "/dns /whois /proxy"},
+    "record": {"what": "capture actions into a reusable macro.",
+               "usage": "/record start <name>|stop|step <tool> [json]|status",
+               "example": "/record start daily", "related": "/macro /gen"},
+    "macro": {"what": "replay a recorded macro (with JSON overrides).",
+              "usage": "/macro [list] | <name> [json]", "example": "/macro daily",
+              "related": "/record"},
+    "file": {"what": "send a file to any live chat.",
+             "usage": "/file <platform> <chat> <path> [caption]",
+             "example": "/file telegram 123 /sdcard/a.txt",
+             "related": "/publish"},
+    "publish": {"what": "convert markdown to pdf/html and send it to a chat.",
+                "usage": "/publish <platform> <chat> <md> [fmt]",
+                "example": "/publish telegram 123 notes.md pdf",
+                "related": "/file"},
+    "data": {"what": "training data: mine conversations, list datasets, fetch rows from free HuggingFace sets.",
+             "usage": "/data mine [name] | list | fetch <ref> [rows]",
+             "example": "/data fetch openai/gsm8k 100",
+             "related": "/evolve"},
+    "evolve": {"what": "self-improvement, test-gated: propose changes, apply, revert, publish to git.",
+               "usage": "/evolve <instruction> | apply <id> | list | audit | revert <id> | git",
+               "example": "/evolve make search summaries shorter",
+               "related": "/benchmark"},
+    "speak": {"what": "she says it back to you as a neural voice note.",
+              "usage": "/speak <text>", "example": "/speak all done",
+              "related": "/tts"},
+    "task": {"what": "queued instructions she runs and reports back on.",
+             "usage": "/task add <instruction> | run [id] | list",
+             "example": "/task add check the backups",
+             "related": "/schedule /devon"},
+    "notify": {"what": "recent alerts.", "usage": "/notify [n]",
+               "example": "/notify 10", "related": ""},
+    "image": {"what": "look up an image: hash, dimensions, seen-before.",
+              "usage": "/image <path-or-url>", "example": "/image /sdcard/pic.jpg",
+              "related": "/lens /look"},
+    "lens": {"what": "reverse image search.",
+             "usage": "/lens <path-or-url>", "example": "/lens /sdcard/pic.jpg",
+             "related": "/image"},
+    "devon": {"what": "the autonomous dev & investigation agent: he plans the tools himself, runs them, digests, replies — for anything you say.",
+              "usage": "/devon [free text]",
+              "example": "/devon check if the brain replied to the last messages",
+              "related": "/swarm /code /task"},
+    "think": {"what": "explicit multi-step reasoning with the full trace shown.",
+              "usage": "/think <question> [strategy]",
+              "example": "/think why is the loop idle auto",
+              "related": "/benchmark"},
+    "benchmark": {"what": "how sharp the system is right now, 0-1 per dimension.",
+                  "usage": "/benchmark [dimension]", "example": "/benchmark",
+                  "related": "/evolve"},
+    "help": {"what": "this help — the full catalog, or the detail page for one command.",
+             "usage": "/help [command]", "example": "/help devon",
+             "related": "topic pages: /help budget /help goals /help builds /help skills /help missions /help modes"},
+    "list": {"what": "every command you can run from chat, cleanly categorized — this catalog. An optional group name filters it (status, search, building, memory, voice, tools, platform).",
+             "usage": "/list [group]", "example": "/list building",
+             "related": "/help /commands /menu — nm commands on the console"},
+    "commands": {"what": "alias of /list — every executable command, categorized.",
+                 "usage": "/commands [group]", "example": "/commands building",
+                 "related": "/list /menu"},
+    "menu": {"what": "alias of /list — every executable command, categorized.",
+             "usage": "/menu [group]", "example": "/menu tools",
+             "related": "/list /commands"},
+    # wave 72 systems
+    "music": {"what": "MusicCreator: composes a REAL song from a topic — "
+                      "style-aware lyrics, section structure, chord "
+                      "progression, melody description, and a playable .mid "
+                      "file (real MIDI, opens in any player).",
+              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]",
+              "example": "/music the first rain in lagos lofi",
+              "related": "/play (queue the midi or audio) · nm music on the console"},
+    "play": {"what": "media player: durable queue + transport for audio. "
+                     "Uses mpv when installed (full transport, auto-advance, "
+                     "survives restarts); otherwise the queue is kept and it "
+                     "tells you what to install.",
+              "usage": "/play <paths…> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
+              "example": "/play workspace/song.mid workspace/track2.mp3",
+              "related": "/music (make the thing to play) · nm play on the console"},
+    "video": {"what": "VideoFinder: finds videos across the open web — "
+                      "multi-engine search, ranked by video-URL confidence + "
+                      "relevance, enriched with oEmbed (author/thumbnail) and "
+                      "yt-dlp metadata (duration). Downloads real files.",
+              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms",
+              "example": "/video lofi beats for studying youtube",
+              "related": "/searchdeep · nm video on the console"},
+    "exec": {"what": "Execution system: runs code in the sandbox with "
+                     "structured results (stdout, stderr, exit code, wall "
+                     "time, timeout flag, files written). Languages: python, "
+                     "javascript, bash, ruby, perl, php, lua, tcl, awk, "
+                     "julia, deno, bun, c, cpp, rust, go — whichever is "
+                     "installed. Network off by default.",
+              "usage": "/exec <code> [lang] | /exec languages",
+              "example": "/exec print(sum(range(10))) python",
+              "related": "/code (draft→run→fix agent) · nm exec on the console"},
+    "zip": {"what": "Archive system: identifies archives by magic bytes "
+                    "(a renamed file still works), lists/creates/extracts "
+                    "zip, tar, tar.gz, tar.bz2, tar.xz, gz, bz2, xz (7z/rar "
+                    "when the tools are installed). Extraction is "
+                    "traversal-safe — .. escapes are skipped and reported.",
+              "usage": "/zip <paths…> --dest x.zip | /zip list|info|extract <archive> | /zip digest <archive> | /zip compress <file> [fmt]",
+              "example": "/zip workspace/a.txt workspace/b.txt --dest bundle.zip",
+              "related": "nm zip on the console · /zip digest curates the docs into memory"},
+    "apps": {"what": "Builder system: scaffolds complete RUNNABLE apps "
+                     "(static site, Flask, FastAPI, Express, React+Vite, "
+                     "Python CLI) in workspace/apps/ — real routes, state, "
+                     "CSS, manifest, and post-build validation "
+                     "(py_compile / node --check / JSON).",
+              "usage": "/apps build <name> --stack <stack> | /apps serve <name> [--port N] | /apps stop <name> | /apps served | /apps [list|stacks|info <name>]",
+              "example": "/apps build mytodo --stack fastapi  then  /apps serve mytodo",
+              "related": "/code · nm apps on the console"},
+    "hub": {"what": "MediaHub: the one-call media orchestrator. song = compose a "
+                    "real song then queue+play its MIDI; video = find → download → "
+                    "queue → play; podcast = find → download audio → transcribe (STT "
+                    "when a backend is configured) → extractive/model summary → "
+                    "titled chapters, transcript saved under podcasts/.",
+            "usage": "/hub song <topic…> [style] | /hub video <query…> [platform] | /hub podcast <query…> | /hub status",
+            "example": "/hub song the first rain in lagos lofi",
+            "related": "/podcast (shortcut) · /music · /play · /video · nm hub on the console"},
+    "podcast": {"what": "The podcast pipeline, one call: find a video/podcast for "
+                        "the query, download the audio, transcribe it (OpenAI-"
+                        "compatible STT or whisper.cpp when available), summarize, "
+                        "split into titled chapters, and save the transcript. "
+                        "Sends the transcript file back to this chat when a send "
+                        "target is configured.",
+            "usage": "/podcast <query…> [platform]",
+            "example": "/podcast developer keynote 2026",
+            "related": "/hub podcast (same pipeline) · /stt · nm hub on the console"},
+    "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
+                    "model rewrites it and it runs again, until exit 0 (or the "
+                    "expected text appears in stdout). Reports every round — exit "
+                    "code, timing, what the model did. Without an LLM backend it "
+                    "honestly reports the last failure instead of pretending.",
+            "usage": "/fix <code> [lang] [--rounds N]",
+            "example": "/fix print(total) python",
+            "related": "/exec (single run) · nm exec until_green on the console"},
+}
+
+#: The catalog's groups — every registered command must appear in one.
+_HELP_GROUPS: list[tuple[str, list[str]]] = [
+    ("her day", ["status", "platforms", "proposals", "approve", "deny",
+                 "mood", "stage", "model", "say", "power", "quit",
+                 "mode", "mind"]),
+    ("search & research", ["search", "searchdeep", "searchleads",
+                           "searchhist", "research", "news", "osint",
+                           "dns", "scan", "whois", "ports"]),
+    ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
+                           "data", "evolve", "arena", "trial", "book", "features"]),
+    ("memory & thinking", ["remember", "recall", "forget", "think",
+                           "benchmark"]),
+    ("games — 19, DM + group, start them directly",
+     ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
+      "duel", "case", "world", "escape", "political"]),
+    ("voice & vision", ["tts", "speak", "stt", "look", "image", "lens"]),
+    ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
+                           "monitor"]),
+    ("media system", ["music", "play", "video", "hub", "podcast"]),
+    ("execution · archives · builders", ["exec", "zip", "apps", "fix"]),
+    ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
+                            "macro", "file", "publish", "notify"]),
+    ("platform control", ["start", "stop", "profile"]),
+    ("discovery", ["list", "commands", "menu", "help"]),
+]
+
+_TOPIC_PAGES: dict[str, str] = {
+    "budget": (
+        "model budget — how she spends your model calls\n"
+        "  default: UNLIMITED (0).  If you set a daily cap, everything "
+        "plans around it:\n"
+        "  * builds RESERVE their calls before drafting — if today can't "
+        "afford them the project SUSPENDS (honest report, nothing burned)\n"
+        "  * the next heartbeat RESUMES it automatically after the day "
+        "rolls over\n"
+        "  * 'nm autonomy budget' shows used / reserved / remaining\n"
+        "  * remove the cap:  nm autonomy budget --unlimited\n"
+        "  * set a cap:       nm autonomy budget --cap 100\n"
+        "  * the loop self-throttles its heartbeat near the limit\n"
+        "nothing is throttled unless you put a cap there."),
+    "goals": (
+        "goals & projects — long-term work that survives restarts\n"
+        "  /think and /devon start GOALS; goals get PROJECTS; projects "
+        "EXECUTE.\n"
+        "  * a goal is a multi-step plan with priority + dependencies\n"
+        "  * the heartbeat advances the highest-value goal each tick\n"
+        "  * CLI:  nm goal list|create|advance|status   ·   nm project "
+        "list|run|report\n"
+        "  * she self-heals failed projects (rewrites the step with the "
+        "lessons she learned), up to a cap, then hands it to you\n"
+        "  * finished goals distill their lessons into memory (skills + "
+        "knowledge graph)"),
+    "builds": (
+        "building for real — /code, /devon builds, project steps\n"
+        "  she drafts code, RUNS it in the sandbox, reads the real error, "
+        "fixes — until the ACCEPTANCE command exits 0.\n"
+        "  * acceptance is a real shell command (e.g. 'python3 app.py "
+        "--check'), compiled from what you asked for\n"
+        "  * every passing acceptance is FROZEN; any later step re-runs "
+        "all earlier acceptances — regressions are caught (nm project "
+        "regress <id>)\n"
+        "  * self-corrected sessions become SKILLS named after the error "
+        "— the next similar build recalls the proven fix\n"
+        "  * files land in her workspace; /file sends them to you"),
+    "skills": (
+        "skills — her memory of how to do things\n"
+        "  every success and every fixed failure is captured: tool "
+        "sequences, working strategies, code fixes, lessons.\n"
+        "  * she recalls relevant skills BEFORE starting (prior art in "
+        "the prompt)\n"
+        "  * repeat errors become SYSTEMIC TRAPS — new builds are warned "
+        "up front\n"
+        "  * usage is tracked: what worked gets recalled more\n"
+        "  * CLI:  nm skill list|save|recall|use|stats\n"
+        "  * /recall <query> — ask her what she remembers"),
+    "missions": (
+        "missions — the whole portfolio, cost-aware\n"
+        "  the heartbeat picks work by EXPECTED VALUE: priority tempered "
+        "by dependency depth, heal history, remaining size and MODEL "
+        "COST.\n"
+        "  * a 3-step build (9 model calls) ranks below a 3-step "
+        "research (3 calls) at the same priority\n"
+        "  * with a budget cap: 'nm mission plan' shows per goal what "
+        "fits today (steps affordable) and the ETA in days\n"
+        "  * 'nm mission next' — what she will do at the next heartbeat"),
+    "modes": (
+        "modes — how autonomous she is\n"
+        "  /mode off      asleep — only answers when you message\n"
+        "  /mode suggest  works, but sensitive actions wait for /approve\n"
+        "  /mode auto     acts on her own within the rules\n"
+        "  /power on <key>  power mode: no human-like pacing, maximum "
+        "capability (key from your config)\n"
+        "  /stage …     relationship stage tunes tone & initiative\n"
+        "  normal mode keeps protective pacing (DMs/groups/hourly); "
+        "power mode removes it — that's the only switch."),
+}
+
+
+def _detailed_overview() -> str:
+    lines = [
+        "the full catalog — detail for any command: /help <command>",
+        "topic pages: /help budget|goals|builds|skills|missions|modes",
+        "",
+    ]
+    for group, kinds in _HELP_GROUPS:
+        lines.append(f"  — {group} —")
+        lines.append("  " + "  ".join(f"/{k}" for k in kinds))
+        lines.append("")
+    lines += [
+        "how she works:  goals → projects → real execution.  Builds run "
+        "in a sandbox until the real acceptance command passes; every "
+        "fixed failure becomes a skill; the portfolio is ranked by "
+        "cost-aware expected value; the budget is unlimited unless you "
+        "cap it (nm autonomy budget).",
+        "console:  the whole system is also `nm <command>` — "
+        "`nm help <topic>` shows these same pages.",
+    ]
+    return "\n".join(lines)
+
+
+#: One-line summaries for /list — what each command actually DOES.
+#: (COMMAND_DETAILS already carries richer pages; /list stays scannable.)
+LIST_GROUPS: list[tuple[str, list[str]]] = [
+    ("her day — state & control",
+     ["status", "platforms", "mood", "stage", "model", "say", "power",
+      "proposals", "approve", "deny", "start", "stop", "quit",
+      "mode", "profile", "mind"]),
+    ("search & research",
+     ["search", "searchdeep", "searchleads", "searchhist", "research",
+      "news", "osint", "dns", "scan", "whois", "ports"]),
+    ("building for real — code & missions",
+     ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
+      "arena", "trial", "book", "exec", "apps", "fix", "structure"]),
+    ("media system — music · playback · video · podcast",
+     ["music", "play", "video", "hub", "podcast", "zip"]),
+    ("memory & thinking",
+     ["remember", "recall", "forget", "think", "benchmark"]),
+    ("games — 19, DM + group, start them directly",
+     ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
+      "duel", "case", "world", "escape", "political"]),
+    ("voice & vision",
+     ["tts", "speak", "stt", "look", "image", "lens"]),
+    ("tools & automation",
+     ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
+      "publish", "notify", "features", "decode", "cookies", "cipher",
+      "monitor"]),
+    ("discovery",
+     ["list", "commands", "menu", "help"]),
+]
+
+#: quick aliases → the group they filter to
+_LIST_GROUP_ALIASES = {
+    "status": "her day — state & control",
+    "day": "her day — state & control",
+    "control": "her day — state & control",
+    "search": "search & research",
+    "research": "search & research",
+    "net": "search & research",
+    "building": "building for real — code & missions",
+    "build": "building for real — code & missions",
+    "code": "building for real — code & missions",
+    "memory": "memory & thinking",
+    "think": "memory & thinking",
+    "voice": "voice & vision",
+    "vision": "voice & vision",
+    "tools": "tools & automation",
+    "automation": "tools & automation",
+    "media": "media system — music · playback · video",
+    "music": "media system — music · playback · video",
+    "audio": "media system — music · playback · video",
+    "games": "games — 19, DM + group, start them directly",
+    "discovery": "discovery",
+}
+
+#: one-line "what it does" per command (kept in sync with COMMAND_DETAILS)
+LIST_ONELINERS: dict[str, str] = {
+    "status": "her live state — platforms, budget, goals, loop",
+    "platforms": "which chat platforms are running",
+    "mood": "set or read her mood (label or dim=NN)",
+    "stage": "relationship stage (committed|dating|…)",
+    "model": "switch the brain live: /model [provider [fallbacks]]",
+    "say": "send a message as her: /say platform:chat text",
+    "power": "power mode on/off/status (key-gated)",
+    "proposals": "actions waiting for your approval",
+    "approve": "approve a pending proposal",
+    "deny": "deny a pending proposal",
+    "start": "hot-start a platform this session",
+    "stop": "hot-stop a platform this session",
+    "quit": "shut the system down",
+    "mode": "autonomy mode: off | suggest | auto",
+    "profile": "profile-aware runtime: detected environment + every tuned knob",
+    "search": "quick research + cited summary",
+    "structure": "turn an objective into a structured mission brief",
+    "book": "BookForge: write a real book → PDF → send",
+    "decode": "identify + decode anything: /decode <data|file|hash>",
+    "cookies": "CookieLab: analyze & handle cookie headers",
+    "cipher": "real crypto: AES-256 sealed blobs + classic ciphers + vault",
+    "monitor": "watch a target on a cadence, alert on change",
+    "workspace": "the VCPU farm: status/scale/up/down/pause/resume",
+    "searchdeep": "deep multi-query research (power mode)",
+    "searchleads": "legit paid-task platforms report",
+    "searchhist": "your recent research runs",
+    "research": "scheduled research runs (lifestyle|tech|cyber)",
+    "news": "fetch + summarize the feeds",
+    "osint": "read-only public-intel: reports, campaigns, graph",
+    "dns": "DNS records, zero dependencies",
+    "scan": "port scan (own infra)",
+    "whois": "domain registration data (RDAP)",
+    "ports": "what is listening on this machine",
+    "code": "the coding bot — draft→run→fix to a real acceptance",
+    "py": "run python sandboxed (sessions: -s name)",
+    "devon": "the autonomous dev agent — plans tools, runs, digests, replies",
+    "swarm": "parallel devon agents + fusion",
+    "task": "queued instructions she runs and reports on",
+    "gen": "generate a validated script of a kind",
+    "data": "training data: mine / list / fetch HF sets",
+    "evolve": "self-improvement, test-gated (propose|apply|revert|publish)",
+    "arena": "content arena: research, stream, review, approve builds",
+    "trial": "ONE trial-account plan, stored encrypted",
+    "remember": "store something in long-term memory",
+    "recall": "what she remembers (top 5)",
+    "forget": "delete a memory",
+    "think": "explicit multi-step reasoning with the full trace",
+    "benchmark": "how sharp the system is right now (0-1)",
+    "game": "the social game engine — 19 games, DM + group + channel, with economy and leaderboards",
+    "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
+    "wordchain": "word chain — last letter becomes first",
+    "hangman": "hangman — guess the word before the board is full",
+    "numberguess": "number guess — narrow the range until you hit it",
+    "two_truths": "two truths and a lie — vote for the lie",
+    "wyrr": "wyrr — the house poses, the table picks",
+    "spy": "spy — everyone gets a word but one of you lies",
+    "auction": "auction — bid points for the block",
+    "trivia": "trivia royale — timed trivia showdown",
+    "mafia": "mafia — town vs mafia with a night phase",
+    "king": "king of the hill — climb and defend",
+    "story": "story chain — one sentence each, the story grows",
+    "rpg": "rpg adventure — a shared dungeon crawl",
+    "shop": "shop game — the market turns into a game",
+    "duel": "quiz duel — one-on-one rapid fire",
+    "case": "the case — a cooperative investigation",
+    "world": "world — a continuing town that just grows",
+    "escape": "escape room — 4 locks, break out together",
+    "political": "political — 3 elections, be mayor (groups)",
+    "tts": "speak text, send the audio back",
+    "speak": "neural voice note of your text",
+    "stt": "transcribe an audio file",
+    "look": "screen-reader analysis of a screenshot (sees pixels)",
+    "image": "image lookup: hash, dims, seen-before",
+    "lens": "reverse image search",
+    "schedule": "cron-style in-process jobs",
+    "db": "inspect the database (tables|schema|query|counts)",
+    "api": "external API connectors (weather, fx, github, …)",
+    "proxy": "proxy lab: status|test|set|scrape|refresh|pool|file|rotate|ssh",
+    "record": "capture actions into a macro",
+    "macro": "replay a recorded macro",
+    "file": "send a file to any live chat",
+    "publish": "md→pdf/html and send",
+    "notify": "recent alerts",
+    "features": "feature toggles (arena, vision, search, …)",
+    "list": "this catalog — every executable command, categorized",
+    "help": "the full help: catalog, per-command pages, topics",
+    "music": "compose a real song: lyrics + chords + playable MIDI",
+    "play": "media player: queue + transport (mpv when installed)",
+    "video": "find videos across the web (ranked, enriched) + download",
+    "exec": "run code sandboxed: py/js/bash/c/… with real output",
+    "zip": "archives: create/list/info/extract (safe against zip-slip)",
+    "apps": "scaffold + serve runnable apps: static|flask|fastapi|express|react|cli",
+    "hub": "one-call media: song / video / podcast pipelines, end to end",
+    "podcast": "find → download → transcribe → chapters, transcript saved",
+    "fix": "run code, model rewrites failures until it's green (CI loop)",
+}
+
+
+def list_catalog(topic: str = "") -> str:
+    """/list — every executable chat command, cleanly categorized (wave 68).
+
+    No topic: the full categorized catalog.  A topic (group name or
+    alias): just that group.  Every line is ``/cmd — what it does``.
+    """
+    t = (topic or "").strip().lstrip("/").lower()
+    groups = LIST_GROUPS
+    if t:
+        want = _LIST_GROUP_ALIASES.get(t, t)
+        groups = [(g, ks) for g, ks in LIST_GROUPS
+                  if t in g.lower().replace(" — ", " ") or g.lower() == want
+                  or any(t == k for k in ks)]
+    lines = ["executable commands from chat (start a message with /):"]
+    shown = 0
+    for group, kinds in groups:
+        lines.append("")
+        lines.append(f"  — {group} —")
+        for k in kinds:
+            if k not in CONTROL_COMMANDS:
+                continue
+            lines.append(f"  /{k:<13} {LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))}")
+            shown += 1
+    if not shown:
+        groups_now = [g for g, _ in groups]
+        all_groups = " | ".join(dict.fromkeys(_LIST_GROUP_ALIASES.values()))
+        return (f"no group '{t}' — available: {all_groups}")
+    lines += [
+        "",
+        f"  ({shown} commands)  ·  /help <command> for the full page on any of them",
+        "  ·  /help budget|goals|builds|skills|missions|modes for topic pages",
+        "  ·  console mirror:  nm commands",
+    ]
+    return "\n".join(lines)
+
+
+def detailed_help(topic: str = "") -> str:
+    """The detailed help for chat (and ``nm help``).
+
+    * no topic — the catalog: every command grouped, topic pages listed.
+    * ``/help <command>`` — what it does, exact usage, a real example,
+      related commands.
+    * ``/help budget|goals|builds|skills|missions|modes`` — topic pages.
+    * unknown — fuzzy match or a pointer, never a dead end.
+    """
+    t = (topic or "").strip().lstrip("/").lower()
+    if not t:
+        return _detailed_overview()
+    if t in COMMAND_DETAILS:
+        d = COMMAND_DETAILS[t]
+        lines = [f"/{t} — {d['what']}",
+                 f"  usage:   {d['usage']}",
+                 f"  example: {d['example']}"]
+        if d.get("related"):
+            lines.append(f"  related: {d['related']}")
+        lines.append("")
+        lines.append("catalog: /help   ·   topics: "
+                     "/help budget|goals|builds|skills|missions|modes")
+        return "\n".join(lines)
+    if t in _TOPIC_PAGES:
+        return _TOPIC_PAGES[t]
+    cands = sorted(k for k in COMMAND_DETAILS
+                   if t in k or k in t or t in k.replace("_", " "))
+    if len(cands) == 1:
+        return detailed_help(cands[0])
+    if cands:
+        return ("did you mean: "
+                + ", ".join(f"/help {c}" for c in cands[:8])
+                + "\ncatalog: /help")
+    return (f"no help page for '{t}' — /help <command> for any command "
+            "(e.g. /help devon), or /help budget|goals|builds|skills|"
+            "missions|modes for topics.")

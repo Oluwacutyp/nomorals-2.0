@@ -365,3 +365,15 @@ class MissionStore:
             data["weights"] = _json(data.get("weights"), {})
             out.append(data)
         return out
+
+    def set_status(self, mission_id: str, status: str, note: str = "") -> bool:
+        """Update mission status."""
+        try:
+            self.db.execute(
+                "UPDATE missions SET status = ?, updated_at = ? WHERE id = ?",
+                (status, __import__('time').time(), mission_id)
+            )
+            return True
+        except Exception:
+            return False
+

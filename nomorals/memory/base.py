@@ -35,6 +35,20 @@ class MemoryKind:
     PREFERENCE = "preference"  # how the user wants things done
     SKILL = "skill"          # a procedure that worked
     LESSON = "lesson"        # what a failure taught
+    DECISION = "decision"    # a choice that was made
+    RELATIONSHIP = "relationship"  # a connection between entities
+
+
+#: All memory kinds for iteration/validation
+ALL_KINDS = frozenset({
+    MemoryKind.EPISODE,
+    MemoryKind.FACT,
+    MemoryKind.PREFERENCE,
+    MemoryKind.SKILL,
+    MemoryKind.LESSON,
+    MemoryKind.DECISION,
+    MemoryKind.RELATIONSHIP,
+})
 
 
 #: Kinds that decay slowly because they stay relevant.

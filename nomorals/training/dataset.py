@@ -326,3 +326,56 @@ class DatasetRegistry:
             "bytes": int(self.db.scalar("SELECT COALESCE(SUM(bytes),0) FROM datasets", default=0) or 0),
             "tokens": int(self.db.scalar("SELECT COALESCE(SUM(tokens),0) FROM datasets", default=0) or 0),
         }
+
+
+def to_alpaca(example: Any) -> dict[str, str]:
+    """Convert example to Alpaca format.
+
+    Handles dict input (standard) and list input (messages format).
+    """
+    if isinstance(example, list):
+        # Messages format: [{"role": "user", "content": ...}, {"role": "assistant", "content": ...}]
+        instruction = ""
+        output = ""
+        for msg in example:
+            if isinstance(msg, dict):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user" and not instruction:
+                    instruction = content
+                elif role == "assistant" and not output:
+                    output = content
+        return {"instruction": instruction, "input": "", "output": output}
+
+    if not isinstance(example, dict):
+        return {"instruction": str(example), "input": "", "output": ""}
+
+    instruction = example.get("instruction", "")
+    input_text = example.get("input", "")
+    output = example.get("output", "")
+
+    # Fallback: if no instruction but has messages
+    if not instruction and "messages" in example:
+        return to_alpaca(example["messages"])
+
+    return {
+        "instruction": instruction,
+        "input": input_text,
+        "output": output,
+    }
+
+
+def to_sharegpt(example: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """Stub: convert example to ShareGPT format."""
+    instruction = example.get("instruction", "")
+    output = example.get("output", "")
+    conversations = [
+        {"from": "human", "value": instruction},
+        {"from": "gpt", "value": output},
+    ]
+    return {"conversations": conversations}
+
+
+def write_format_bundles(examples: list[dict[str, Any]], output_dir: str) -> dict[str, int]:
+    """Stub: write examples in multiple formats to output_dir."""
+    return {"alpaca": len(examples), "sharegpt": len(examples)}

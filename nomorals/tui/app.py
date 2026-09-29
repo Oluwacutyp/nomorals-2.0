@@ -45,6 +45,34 @@ class TuiApp:
         """Apply one key. Returns False when the app should exit."""
         action = action_for(key, self.state, self.bindings)
         state = self.state
+        
+        # Handle command palette mode
+        if state.show_palette:
+            return self._handle_palette_key(key, action)
+        
+        # Handle multi-line mode
+        if state.multiline and action == KeyAction.SUBMIT:
+            state.add_multiline(state.buffer)
+            return True
+        if action == KeyAction.SUBMIT_MULTILINE and state.multiline:
+            text = state.submit_multiline()
+            if text:
+                state.say(f"{state.prompt}{text}", kind="user")
+                state.busy = True
+                try:
+                    self.on_submit(text)
+                except Exception as exc:
+                    state.error(f"{type(exc).__name__}: {exc}")
+                finally:
+                    state.busy = False
+            return True
+        if action == KeyAction.CANCEL_MULTILINE:
+            state.multiline = False
+            state.multiline_buffer.clear()
+            state.buffer = ""
+            state.cursor = 0
+            state.status = "ready"
+            return True
 
         if action is KeyAction.QUIT:
             return False
@@ -94,9 +122,73 @@ class TuiApp:
             state.scroll_top(viewport=self._viewport_height())
         elif action is KeyAction.SCROLL_BOTTOM:
             state.scroll_bottom()
+        elif action is KeyAction.TAB_COMPLETE:
+            # Tab complete commands
+            commands = self._get_available_commands()
+            state.tab_complete(commands)
+        elif action is KeyAction.TOGGLE_MULTILINE:
+            state.toggle_multiline()
+        elif action is KeyAction.COPY_LINE:
+            state.copy_line()
+        elif action is KeyAction.PASTE:
+            state.paste()
+        elif action is KeyAction.OPEN_PALETTE:
+            self._open_command_palette()
         elif len(key) == 1 and key.isprintable() and self.state.focus is Panel.INPUT:
             state.insert(key)
+            state.reset_completion()  # Reset completion on new input
         return True
+    
+    def _handle_palette_key(self, key: str, action: KeyAction) -> bool:
+        """Handle keys when command palette is open."""
+        state = self.state
+        
+        if action == KeyAction.CLOSE_PALETTE or key == "\x1b":
+            state.close_palette()
+            return True
+        elif action == KeyAction.PALETTE_UP or key == "\x1b[A":
+            state.palette_up()
+            return True
+        elif action == KeyAction.PALETTE_DOWN or key == "\x1b[B":
+            state.palette_down()
+            return True
+        elif action == KeyAction.PALETTE_SELECT or key in ("\n", "\r"):
+            callback = state.select_palette_item()
+            if callback:
+                try:
+                    callback()
+                except Exception as exc:
+                    state.error(f"{type(exc).__name__}: {exc}")
+            return True
+        elif action == KeyAction.BACKSPACE:
+            if state.palette_filter:
+                state.palette_filter = state.palette_filter[:-1]
+            return True
+        elif len(key) == 1 and key.isprintable():
+            state.palette_filter += key
+            state.palette_index = 0  # Reset selection on filter change
+            return True
+        
+        return True
+    
+    def _get_available_commands(self) -> list[str]:
+        """Get list of available commands for tab completion."""
+        # This would be populated from the actual command registry
+        return [
+            "help", "clear", "quit", "exit", "history", "status",
+            "model", "temperature", "tools", "memory", "reset",
+        ]
+    
+    def _open_command_palette(self) -> None:
+        """Open the command palette with available commands."""
+        commands = [
+            ("clear", "Clear the screen", lambda: self.state.clear()),
+            ("help", "Show help", lambda: self.state.say("Type a message or command. Ctrl-P for palette.")),
+            ("quit", "Exit the TUI", lambda: self.stop()),
+            ("history", "Show command history", lambda: self.state.say(f"History: {len(self.state.history)} commands")),
+            ("multiline", "Toggle multi-line input", lambda: self.state.toggle_multiline()),
+        ]
+        self.state.open_palette(commands)
 
     def _viewport_height(self) -> int:
         if self._screen is None:

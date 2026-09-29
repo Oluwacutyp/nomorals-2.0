@@ -1,0 +1,16 @@
+{
+  "name": "nomorals-whatsapp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node/Baileys bridge: holds the WhatsApp Web session and speaks JSON-lines to the Python core over localhost.",
+  "scripts": {
+    "start": "node whatsapp-bridge.mjs"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.1",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.3",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

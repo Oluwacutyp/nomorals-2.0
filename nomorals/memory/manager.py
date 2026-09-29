@@ -473,3 +473,8 @@ class MemoryManager:
             "weights": dict(self.weights),
             "embedder": self.embedder.stats_snapshot(),
         }
+
+
+def join_tags(tags: list[str]) -> str:
+    """Stub: join tags into a comma-separated string."""
+    return ",".join(tags)
