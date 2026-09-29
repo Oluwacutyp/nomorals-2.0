@@ -318,19 +318,23 @@ def apply_socks_proxy(proxy_url: str) -> None:
     pass
 
 
-def get_default_proxy() -> str | None:
-    """Stub: get default proxy URL (removed)."""
-    return None
-
-
 def reset_socks_proxy() -> None:
     """Stub: reset SOCKS proxy settings."""
     pass
 
 
+_default_proxy: str = ""
+
+
 def set_default_proxy(proxy_url: str) -> None:
-    """Stub: set default proxy URL."""
-    pass
+    """Set the process-wide default proxy URL."""
+    global _default_proxy
+    _default_proxy = proxy_url or ""
+
+
+def get_default_proxy() -> str:
+    """Get the process-wide default proxy URL."""
+    return _default_proxy
 
 
 _proxy_resolver = None
