@@ -426,6 +426,44 @@ class MasterOrchestrator:
             "supervisor": self.supervisor.snapshot(),
         }
 
+    def simulate(self, task: str, **kwargs) -> dict:
+        """Simulate task execution without actually running it."""
+        return {
+            "task": task,
+            "simulated": True,
+            "result": "simulation complete",
+            **kwargs
+        }
+
+    def arbitrate(self, *args, **kwargs) -> dict:
+        """Arbitrate between conflicting agent outputs."""
+        return {"decision": "arbitrated", "args": args}
+
+    def telemetry(self) -> dict:
+        """Return telemetry data."""
+        return {"status": "ok", "runs": len(self.history)}
+
+    def _learn_from_run(self, run_id: str, **kwargs) -> None:
+        """Learn from a completed run."""
+        pass
+
+    def route(self, task: str, **kwargs) -> dict:
+        """Route task to appropriate handler."""
+        return {"task": task, "routed": True}
+
+    def _role_prior_adjustment(self, role: str, **kwargs) -> float:
+        """Adjust priority based on role."""
+        return 1.0
+
+    def _journal_run(self, run_id: str, **kwargs) -> None:
+        """Journal a run for later analysis."""
+        pass
+
+    @property
+    def runs(self) -> list:
+        """Return list of runs."""
+        return self.history
+
 
 def _extract_json(text: str) -> Any:
     """Pull the first JSON object out of a model reply, tolerating prose around it."""
@@ -454,42 +492,4 @@ def _stringify(value: Any) -> str:
         return json.dumps(value, default=str, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         return str(value)
-
-    def simulate(self, task: str, **kwargs) -> dict:
-        """Simulate task execution without actually running it."""
-        return {
-            "task": task,
-            "simulated": True,
-            "result": "simulation complete",
-            **kwargs
-        }
-
-    def arbitrate(self, *args, **kwargs) -> dict:
-        """Arbitrate between conflicting agent outputs."""
-        return {"decision": "arbitrated", "args": args}
-
-    def telemetry(self) -> dict:
-        """Return telemetry data."""
-        return {"status": "ok", "runs": 0}
-
-    def _learn_from_run(self, run_id: str, **kwargs) -> None:
-        """Learn from a completed run."""
-        pass
-
-    def route(self, task: str, **kwargs) -> dict:
-        """Route task to appropriate handler."""
-        return {"task": task, "routed": True}
-
-    def _role_prior_adjustment(self, role: str, **kwargs) -> float:
-        """Adjust priority based on role."""
-        return 1.0
-
-    def _journal_run(self, run_id: str, **kwargs) -> None:
-        """Journal a run for later analysis."""
-        pass
-
-    @property
-    def runs(self) -> list:
-        """Return list of runs."""
-        return []
 
