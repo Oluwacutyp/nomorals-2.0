@@ -5,26 +5,33 @@ from __future__ import annotations
 from typing import Any
 
 
-def book_create(topic: str, slug: str = "", chapters: int = 5) -> dict[str, Any]:
+def book_create(topic: str = "", slug: str = "", chapters: int = 5, 
+                research: bool = True, **kwargs) -> dict[str, Any]:
     """Create a new book project."""
     return {
         "topic": topic,
         "slug": slug or topic.lower().replace(" ", "-"),
         "chapters": chapters,
+        "research": research,
         "status": "created"
     }
 
 
-def book_run(topic: str, chapters: int = 5, words: int = 2000, 
-             no_research: bool = False) -> dict[str, Any]:
+def book_run(topic: str = "", chapters: int = 5, words: int = 2000, 
+             no_research: bool = False, research: bool = True, **kwargs) -> dict[str, Any]:
     """Run the book writing pipeline."""
     return {
         "topic": topic,
         "chapters": chapters,
         "words_per_chapter": words,
-        "research": not no_research,
+        "research": research and not no_research,
         "status": "completed"
     }
+
+
+def book_write(topic: str = "", chapters: int = 5, words: int = 2000, **kwargs) -> dict[str, Any]:
+    """Write a book."""
+    return book_run(topic=topic, chapters=chapters, words=words, **kwargs)
 
 
 def register(registry: Any) -> None:
@@ -37,7 +44,8 @@ def register(registry: Any) -> None:
         parameters={
             "topic": {"type": "string", "description": "Book topic"},
             "slug": {"type": "string", "description": "Book slug"},
-            "chapters": {"type": "integer", "description": "Number of chapters"}
+            "chapters": {"type": "integer", "description": "Number of chapters"},
+            "research": {"type": "boolean", "description": "Include research phase"}
         }
     )
     registry.register(
@@ -49,6 +57,18 @@ def register(registry: Any) -> None:
             "topic": {"type": "string", "description": "Book topic"},
             "chapters": {"type": "integer", "description": "Number of chapters"},
             "words": {"type": "integer", "description": "Words per chapter"},
-            "no_research": {"type": "boolean", "description": "Skip research phase"}
+            "no_research": {"type": "boolean", "description": "Skip research phase"},
+            "research": {"type": "boolean", "description": "Include research phase"}
+        }
+    )
+    registry.register(
+        "book_write",
+        book_write,
+        description="Write a book",
+        capability="book",
+        parameters={
+            "topic": {"type": "string", "description": "Book topic"},
+            "chapters": {"type": "integer", "description": "Number of chapters"},
+            "words": {"type": "integer", "description": "Words per chapter"}
         }
     )
