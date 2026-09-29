@@ -1204,10 +1204,6 @@ ALTER TABLE media_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '';
 
 -- Add missing columns to failures
 ALTER TABLE failures ADD COLUMN lesson TEXT NOT NULL DEFAULT '';
-
--- Add missing status columns to various tables
-ALTER TABLE agent_goals ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
 """
 
 MIGRATIONS: tuple[Migration, ...] = (
