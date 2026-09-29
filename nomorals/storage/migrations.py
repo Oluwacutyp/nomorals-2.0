@@ -1146,6 +1146,12 @@ ALTER TABLE improvement_runs ADD COLUMN category TEXT NOT NULL DEFAULT '';
 ALTER TABLE goals ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';
 """
 
+
+_V22_FAILURES_COLUMNS = """
+-- Add missing columns to failures table
+ALTER TABLE failures ADD COLUMN times_seen INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE failures ADD COLUMN root_cause TEXT NOT NULL DEFAULT '';
+"""
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1168,6 +1174,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(19, "arena_builds", sql=_V19_ARENA_BUILDS),
     Migration(20, "coding_log_columns", sql=_V20_CODING_LOG_COLUMNS),
     Migration(21, "missing_columns", sql=_V21_MISSING_COLUMNS),
+    Migration(22, "failures_columns", sql=_V22_FAILURES_COLUMNS),
 )
 
 
