@@ -176,7 +176,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
     setup_logging(args.log_level, force=True)
     try:
         return _dispatch(args)
