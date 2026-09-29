@@ -513,6 +513,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_BUDGET_TOKENS": "budget.tokens",
     "NM_BUDGET_CHILDREN": "budget.children",
     "NM_LLM_PROVIDER": "llm.provider",
+    "NM_LLM_FALLBACK_CHAIN": "llm.fallback_chain",
+    "NM_LLM_ACTIVE_MODEL": "llm.active_model",
+    "NM_LLM_TIMEOUT": "llm.timeout",
+    "NM_LLM_CACHE_DIR": "llm.cache_dir",
+    "NM_LLM_SYSTEM_PROMPT": "llm.system_prompt",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",
     "NM_HF_BASE_URL": "llm.hf_base_url",
@@ -751,7 +756,12 @@ def load_settings(
     # 5. environment variables
     for key, value in environ.items():
         if key in _ENV_MAP:
-            _apply_dotted(merged, _ENV_MAP[key], value)
+            dotted = _ENV_MAP[key]
+            # Coerce value to proper type based on field definition
+            field_type = _find_field_type(Settings, dotted)
+            if field_type is not None:
+                value = _coerce(value, field_type)
+            _apply_dotted(merged, dotted, value)
             continue
         if not key.startswith(_ENV_PREFIX):
             continue
@@ -762,6 +772,10 @@ def load_settings(
             if target is None:
                 continue
             dotted = target
+        # Coerce value to proper type based on field definition
+        field_type = _find_field_type(Settings, dotted)
+        if field_type is not None:
+            value = _coerce(value, field_type)
         _apply_dotted(merged, dotted, value)
 
     # 6. explicit overrides
@@ -786,6 +800,40 @@ def _find_field_path(root: type, name: str) -> str | None:
             sub = _find_field_path(ftype, name)
             if sub:
                 return f"{f.name}.{sub}"
+    return None
+
+
+def _find_field_type(root: type, dotted: str) -> type | None:
+    """Find the type of a field given its dotted path."""
+    parts = dotted.split(".")
+    current = root
+    hints = _resolved_types(current)
+    
+    for i, part in enumerate(parts):
+        # Find the field in current dataclass
+        found = False
+        for f in fields(current):  # type: ignore[arg-type]
+            if f.name == part:
+                ftype = hints.get(part)
+                if ftype is None:
+                    return None
+                
+                # If this is the last part, return the type
+                if i == len(parts) - 1:
+                    return ftype
+                
+                # Otherwise, descend into the nested dataclass
+                if isinstance(ftype, type) and is_dataclass(ftype):
+                    current = ftype
+                    hints = _resolved_types(current)
+                    found = True
+                    break
+                else:
+                    return None  # Not a dataclass, can't descend
+        
+        if not found:
+            return None
+    
     return None
 
 
