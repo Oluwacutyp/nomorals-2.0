@@ -1206,6 +1206,14 @@ ALTER TABLE media_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '';
 ALTER TABLE failures ADD COLUMN lesson TEXT NOT NULL DEFAULT '';
 """
 
+
+_V27_MEDIA_QUEUE_COLUMNS = """
+-- Add missing columns to media_queue
+ALTER TABLE media_queue ADD COLUMN added_at REAL NOT NULL DEFAULT 0;
+ALTER TABLE media_queue ADD COLUMN played_at REAL NOT NULL DEFAULT 0;
+ALTER TABLE media_queue ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1233,6 +1241,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(24, "acceptance_runs_columns", sql=_V24_ACCEPTANCE_RUNS_COLUMNS),
     Migration(25, "missing_tables_and_columns", sql=_V25_MISSING_TABLES_AND_COLUMNS),
     Migration(26, "missing_columns_v26", sql=_V26_MISSING_COLUMNS),
+    Migration(27, "media_queue_columns", sql=_V27_MEDIA_QUEUE_COLUMNS),
 )
 
 

@@ -104,7 +104,7 @@ class ToolRegistry:
             agents, attacker, audio, book, browser, cards, cipher, compress, connectors, database,
             deals, decoder, decoder_agent, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
             macros, media, metadata, network, osint, osint_people, parsers,
-            proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
+            proxy, proxylab, run_code, sandbox_code, scriptgen, shell, ssh_socks,
             traindata, vision, web, workspace
         )
         
@@ -113,7 +113,7 @@ class ToolRegistry:
             agents, attacker, audio, book, browser, cards, cipher, compress, connectors, database,
             deals, decoder, decoder_agent, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
             macros, media, metadata, network, osint, osint_people, parsers,
-            proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
+            proxy, proxylab, run_code, sandbox_code, scriptgen, shell, ssh_socks,
             traindata, vision, web, workspace
         ]:
             try:
