@@ -92,7 +92,7 @@ class MissionControl:
         ranked_goals: list[Goal] = []
 
         rows = self.context.db.query(
-            "SELECT * FROM goals ORDER BY priority DESC, created_at ASC "
+            "SELECT * FROM agent_goals ORDER BY priority DESC, created_at ASC "
             "LIMIT ?", (limit,))
         for r in rows:
             g = Goal.from_row(r)
@@ -338,7 +338,7 @@ class MissionControl:
     def ranking(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """The whole portfolio (active + paused) ranked by expected value."""
         rows = self.context.db.query(
-            "SELECT * FROM goals WHERE status IN ('active','paused') "
+            "SELECT * FROM agent_goals WHERE status IN ('active','paused') "
             "ORDER BY priority DESC, created_at ASC LIMIT ?", (limit,))
         goals: list[Goal] = []
         for r in rows:

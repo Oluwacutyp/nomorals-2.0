@@ -762,7 +762,7 @@ class CognitiveLoop:
         resumed: list[str] = []
         try:
             rows = self.context.db.query(
-                "SELECT id, project_id FROM goals "
+                "SELECT id, project_id FROM agent_goals "
                 "WHERE status = 'paused' AND project_id != '' "
                 "ORDER BY priority DESC, created_at ASC LIMIT 10")
             if not rows:
@@ -812,7 +812,7 @@ class CognitiveLoop:
         healed: list[str] = []
         try:
             rows = self.context.db.query(
-                "SELECT * FROM goals WHERE status='paused' AND project_id != '' "
+                "SELECT * FROM agent_goals WHERE status='paused' AND project_id != '' "
                 "ORDER BY priority DESC, created_at ASC LIMIT 10")
             mgr = ProjectManager(self.context)
             for r in rows:

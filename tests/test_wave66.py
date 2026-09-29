@@ -206,7 +206,7 @@ class CostAwareEVTest(_Base):
             f"proj-{title}", objective=objective,
             steps=[f"s{i}" for i in range(n_steps)], goal_id=g.id)
         self.context.db.execute(
-            "UPDATE goals SET project_id=? WHERE id=?", (proj.id, g.id))
+            "UPDATE agent_goals SET project_id=? WHERE id=?", (proj.id, g.id))
         return g.id
 
     def test_build_costs_three_per_step(self) -> None:
@@ -487,7 +487,7 @@ class Wave66CliTest(_CliHome, _Base):
         pid = out.strip().splitlines()[0].split()[1]
         ctx = self._cli_context()
         try:
-            ctx.db.execute("UPDATE goals SET project_id=? WHERE id=?",
+            ctx.db.execute("UPDATE agent_goals SET project_id=? WHERE id=?",
                            (pid, gid))
             ctx.db.execute("UPDATE projects SET goal_id=? WHERE id=?",
                            (gid, pid))

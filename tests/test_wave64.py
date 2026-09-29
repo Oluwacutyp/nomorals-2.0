@@ -142,7 +142,7 @@ class ReflectionTest(_Base):
         self.context.router = None
         g = self.gs.create("Flaky thing", plan=["bind the port", "verify it"])
         self.context.db.execute(
-            "UPDATE goals SET heals=1 WHERE id=?", (g.id,))
+            "UPDATE agent_goals SET heals=1 WHERE id=?", (g.id,))
         self.gs.advance(g.id, executor=_ok)  # 1/2 — still active
         self.gs.complete(g.id)  # completes the goal WITH the heal on record
         rec = json.loads(self.context.db.query_one(
@@ -547,7 +547,7 @@ class EvRankingTest(_Base):
         a = self.gs.create("Steady", plan=["x"], priority=5)
         b = self.gs.create("Wounded", plan=["x"], priority=5)
         self.context.db.execute(
-            "UPDATE goals SET heals=2 WHERE id=?", (b.id,))
+            "UPDATE agent_goals SET heals=2 WHERE id=?", (b.id,))
         scores = self._mc().ev_scores([a.id, b.id])
         self.assertGreater(scores[a.id]["expected_value"],
                            scores[b.id]["expected_value"])

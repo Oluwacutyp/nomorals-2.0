@@ -93,7 +93,7 @@ class _Base(unittest.TestCase):
             project_title, objective=objective, steps=list(steps),
             goal_id=g.id)
         self.context.db.execute(
-            "UPDATE goals SET project_id=? WHERE id=?", (proj.id, g.id))
+            "UPDATE agent_goals SET project_id=? WHERE id=?", (proj.id, g.id))
         return g.id
 
 
@@ -255,7 +255,7 @@ class BudgetFitTest(_Capped):
             proj = ProjectManager(ctx).create(
                 "pf", objective="build a free pipeline", steps=["a", "b"],
                 goal_id=g.id)
-            ctx.db.execute("UPDATE goals SET project_id=? WHERE id=?",
+            ctx.db.execute("UPDATE agent_goals SET project_id=? WHERE id=?",
                            (proj.id, g.id))
             row = MissionControl(ctx).ev_scores([g.id])[g.id]
             self.assertTrue(row["fits_today"])
@@ -606,7 +606,7 @@ class MissionPlanFitDisplayTest(_CliBase):
             proj = ProjectManager(ctx).create(
                 "pb", objective="build a demo pipeline",
                 steps=["a", "b", "c"], goal_id=g.id)
-            ctx.db.execute("UPDATE goals SET project_id=? WHERE id=?",
+            ctx.db.execute("UPDATE agent_goals SET project_id=? WHERE id=?",
                            (proj.id, g.id))
         finally:
             ctx.__exit__(None, None, None)

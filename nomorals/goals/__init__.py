@@ -199,7 +199,7 @@ class GoalTracker:
         
         with self.db.transaction():
             self.db.execute("""
-                INSERT INTO goals (goal_id, user_id, title, description, status, progress, priority,
+                INSERT INTO agent_goals (goal_id, user_id, title, description, status, progress, priority,
                     target_date, created_at, updated_at, tags, workspace)
                 VALUES (?, ?, ?, ?, 'active', 0.0, ?, ?, ?, ?, ?, ?)
             """, (goal_id, user_id, title, description, priority, target_date, now, now,
@@ -271,7 +271,7 @@ class GoalTracker:
         """Manually update goal progress."""
         with self.db.transaction():
             self.db.execute("""
-                UPDATE goals SET progress = ?, updated_at = ? WHERE goal_id = ?
+                UPDATE agent_goals SET progress = ?, updated_at = ? WHERE goal_id = ?
             """, (max(0.0, min(100.0, progress)), time.time(), goal_id))
     
     async def complete(self, goal_id: str) -> None:
@@ -279,7 +279,7 @@ class GoalTracker:
         now = time.time()
         with self.db.transaction():
             self.db.execute("""
-                UPDATE goals SET status = 'completed', progress = 100.0, completed_at = ?, updated_at = ?
+                UPDATE agent_goals SET status = 'completed', progress = 100.0, completed_at = ?, updated_at = ?
                 WHERE goal_id = ?
             """, (now, now, goal_id))
     
@@ -291,7 +291,7 @@ class GoalTracker:
         workspace: str | None = None,
     ) -> list[Goal]:
         """List goals for a user."""
-        query = "SELECT * FROM goals WHERE user_id = ?"
+        query = "SELECT * FROM agent_goals WHERE user_id = ?"
         params: list[Any] = [user_id]
         
         if status:
@@ -388,7 +388,7 @@ class GoalTracker:
         
         with self.db.transaction():
             self.db.execute("""
-                UPDATE goals SET progress = ?, updated_at = ? WHERE goal_id = ?
+                UPDATE agent_goals SET progress = ?, updated_at = ? WHERE goal_id = ?
             """, (progress, time.time(), goal_id))
 
 

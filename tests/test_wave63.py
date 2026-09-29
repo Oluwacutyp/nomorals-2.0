@@ -250,7 +250,7 @@ class ReplanningTest(_CliHome, _Base):
         self.assertEqual(h1["mode"], "retry")
         # burn the retry budget: the goal has been healed twice already
         self.context.db.execute(
-            "UPDATE goals SET heals=? WHERE id=?", (2, g.id))
+            "UPDATE agent_goals SET heals=? WHERE id=?", (2, g.id))
         self.pm.run(pid, executor=_port_fail, max_attempts=2, max_steps=5)
         h2 = self.pm.heal(pid)
         self.assertEqual(h2["mode"], "replan")
@@ -266,7 +266,7 @@ class ReplanningTest(_CliHome, _Base):
         g = self.gs.create("no replan", plan=["bind to the port"])
         pid = self.gs.spawn_project(g.id)["project_id"]
         self.context.db.execute(
-            "UPDATE goals SET heals=? WHERE id=?", (9, g.id))
+            "UPDATE agent_goals SET heals=? WHERE id=?", (9, g.id))
         self.pm.run(pid, executor=_port_fail, max_attempts=2, max_steps=5)
         h = self.pm.heal(pid)
         self.assertEqual(h["mode"], "retry")

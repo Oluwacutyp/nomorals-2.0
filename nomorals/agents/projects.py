@@ -526,14 +526,14 @@ class ProjectManager:
         if not p.goal_id:
             return
         try:
-            row = self.db.query_one("SELECT id FROM goals WHERE id=?",
+            row = self.db.query_one("SELECT id FROM agent_goals WHERE id=?",
                                     (p.goal_id,))
             if not row:
                 return
             now = time.time()
             if p.status == "done":
                 self.db.execute(
-                    "UPDATE goals SET status='done', progress=1.0, "
+                    "UPDATE agent_goals SET status='done', progress=1.0, "
                     "finished_at=?, updated_at=? WHERE id=?",
                     (now, now, p.goal_id))
                 self.db.execute(
@@ -549,7 +549,7 @@ class ProjectManager:
                     pass
             elif p.status == "failed":
                 self.db.execute(
-                    "UPDATE goals SET status='paused', progress=?, "
+                    "UPDATE agent_goals SET status='paused', progress=?, "
                     "updated_at=? WHERE id=?",
                     (p.progress, now, p.goal_id))
             elif p.status == "paused":
@@ -557,7 +557,7 @@ class ProjectManager:
                 # project pauses its goal with it — the goal must not
                 # look active while its project is waiting.
                 self.db.execute(
-                    "UPDATE goals SET status='paused', progress=?, "
+                    "UPDATE agent_goals SET status='paused', progress=?, "
                     "updated_at=? WHERE id=?",
                     (p.progress, now, p.goal_id))
         except Exception as exc:  # noqa: BLE001 — goal sync is best-effort
@@ -1121,7 +1121,7 @@ class ProjectManager:
             return False
         try:
             row = self.db.query_one(
-                "SELECT heals FROM goals WHERE id=?", (p.goal_id,))
+                "SELECT heals FROM agent_goals WHERE id=?", (p.goal_id,))
             return bool(row) and int(row.get("heals", 0) or 0) >= threshold
         except Exception:  # noqa: BLE001
             return False
@@ -1132,11 +1132,11 @@ class ProjectManager:
         if not p.goal_id or p.status != "running":
             return
         try:
-            row = self.db.query_one("SELECT id, status FROM goals WHERE id=?",
+            row = self.db.query_one("SELECT id, status FROM agent_goals WHERE id=?",
                                     (p.goal_id,))
             if row and row.get("status") == "paused":
                 self.db.execute(
-                    "UPDATE goals SET status='active', updated_at=? WHERE id=?",
+                    "UPDATE agent_goals SET status='active', updated_at=? WHERE id=?",
                     (time.time(), p.goal_id))
         except Exception as exc:  # noqa: BLE001 — goal sync is best-effort
             _log.debug("goal re-activation failed: %s", exc)

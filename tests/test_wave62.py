@@ -404,7 +404,7 @@ class SelfHealingTest(unittest.TestCase):
         self.assertEqual(self.gs.get(g.id).status, "active")
         # exhaust the heal budget and fail again
         self.context.db.execute(
-            "UPDATE goals SET heals=? WHERE id=?",
+            "UPDATE agent_goals SET heals=? WHERE id=?",
             (self.context.settings.autonomy.max_project_heals, g.id))
         self.pm.run(pid, executor=_always_fail, max_attempts=2, max_steps=5)
         tick2 = loop.tick(executor=_ok)
