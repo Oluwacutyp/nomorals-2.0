@@ -89,10 +89,29 @@ def _parser() -> argparse.ArgumentParser:
     
 
     # Agent-tool subcommands
-    sub.add_parser("autonomy", help="Manage autonomous agent operations")
-    sub.add_parser("goal", help="Create and manage goals")
-    sub.add_parser("skill", help="Manage reusable skills")
-    sub.add_parser("project", help="Manage projects")
+    autonomy = sub.add_parser("autonomy", help="Manage autonomous agent operations")
+    autonomy.add_argument("action", nargs="?", default="status",
+                         choices=["status", "tick", "report", "enable", "disable"],
+                         help="Action to perform")
+    autonomy.add_argument("--json", action="store_true", help="Output as JSON")
+    
+    goal = sub.add_parser("goal", help="Create and manage goals")
+    goal.add_argument("action", nargs="?", default="list",
+                     choices=["list", "create", "get", "update", "delete"],
+                     help="Action to perform")
+    goal.add_argument("--id", help="Goal ID")
+    goal.add_argument("--title", help="Goal title")
+    
+    skill = sub.add_parser("skill", help="Manage reusable skills")
+    skill.add_argument("action", nargs="?", default="list",
+                      choices=["list", "create", "run", "delete"],
+                      help="Action to perform")
+    
+    project = sub.add_parser("project", help="Manage projects")
+    project.add_argument("action", nargs="?", default="list",
+                        choices=["list", "create", "get", "update", "delete"],
+                        help="Action to perform")
+    
     sub.add_parser("kg", help="Knowledge graph operations")
     sub.add_parser("improve", help="Self-improvement operations")
     sub.add_parser("simulate", help="Sandbox code execution")
@@ -1311,6 +1330,12 @@ def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
         _emit(args, {"error": f"unknown action: {action}"}, f"Unknown action: {action}")
         return 1
     
+    return 0
+
+
+def _cmd_stub(args: argparse.Namespace, context: Any, command: str) -> int:
+    """Stub handler for commands not yet fully implemented."""
+    _emit(args, {"command": command, "status": "stub"}, f"{command}: stub implementation")
     return 0
 
 
