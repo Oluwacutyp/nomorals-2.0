@@ -128,7 +128,15 @@ def _parser() -> argparse.ArgumentParser:
     
 
     # Additional subcommands
-    sub.add_parser("book", help="AI-assisted book writing")
+    book = sub.add_parser("book", help="AI-assisted book writing")
+    book.add_argument("action", nargs="?", default="list",
+                     choices=["list", "create", "run", "status", "build"],
+                     help="Action to perform")
+    book.add_argument("topic", nargs="?", default="", help="Book topic")
+    book.add_argument("--chapters", type=int, default=5, help="Number of chapters")
+    book.add_argument("--words", type=int, default=2000, help="Words per chapter")
+    book.add_argument("--no-research", action="store_true", help="Skip research phase")
+    book.add_argument("--slug", default="", help="Book slug")
     sub.add_parser("hub", help="Model hub operations")
     sub.add_parser("cipher", help="Encryption/decryption tools")
     sub.add_parser("osint", help="Open source intelligence")
