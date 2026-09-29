@@ -377,3 +377,28 @@ class MissionStore:
         except Exception:
             return False
 
+
+    def detail(self, mission_id: str) -> dict[str, Any]:
+        """Return detailed information about a mission."""
+        mission = self.get(mission_id)
+        checkpoints = self.checkpoint_history(mission_id, limit=10)
+        return {
+            "mission": mission.to_dict(),
+            "checkpoints": [cp.to_dict() for cp in checkpoints],
+            "progress": self.progress(mission_id),
+        }
+
+    def progress(self, mission_id: str) -> dict[str, Any]:
+        """Return progress information for a mission."""
+        mission = self.get(mission_id)
+        latest = self.latest_checkpoint(mission_id)
+        return {
+            "status": mission.state.get("status", "active"),
+            "progress": mission.state.get("progress", 0.0),
+            "latest_checkpoint": latest.to_dict() if latest else None,
+            "wall_remaining": mission.wall_remaining(),
+        }
+
+    def latest_checkpoints(self, mission_id: str, *, limit: int = 10) -> list[Checkpoint]:
+        """Return the latest checkpoints for a mission."""
+        return self.checkpoint_history(mission_id, limit=limit)
