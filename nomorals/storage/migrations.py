@@ -1220,6 +1220,14 @@ _V28_MISSING_COLUMNS_V2 = """
 ALTER TABLE failures ADD COLUMN ts REAL NOT NULL DEFAULT 0;
 """
 
+
+_V29_MONITOR_COLUMNS = """
+-- Add missing columns to monitors table
+ALTER TABLE monitors ADD COLUMN last_size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE monitors ADD COLUMN last_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE monitors ADD COLUMN error_streak INTEGER NOT NULL DEFAULT 0;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1249,6 +1257,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(26, "missing_columns_v26", sql=_V26_MISSING_COLUMNS),
     Migration(27, "media_queue_columns", sql=_V27_MEDIA_QUEUE_COLUMNS),
     Migration(28, "missing_columns_v2", sql=_V28_MISSING_COLUMNS_V2),
+    Migration(29, "monitor_columns", sql=_V29_MONITOR_COLUMNS),
 )
 
 
