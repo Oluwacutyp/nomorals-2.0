@@ -117,10 +117,10 @@ def _parser() -> argparse.ArgumentParser:
     
     project = sub.add_parser("project", help="Manage projects")
     project.add_argument("action", nargs="?", default="list",
-    project.add_argument("title", nargs="?", default="", help="Project title")
-    project.add_argument("description", nargs="?", default="", help="Project description")
                         choices=["list", "create", "get", "update", "delete"],
                         help="Action to perform")
+    project.add_argument("title", nargs="?", default="", help="Project title")
+    project.add_argument("description", nargs="?", default="", help="Project description")
     
     sub.add_parser("kg", help="Knowledge graph operations")
     sub.add_parser("improve", help="Self-improvement operations")
