@@ -101,7 +101,7 @@ class ToolRegistry:
         
         # Import all tool modules
         from . import (
-            agents, attacker, audio, browser, cards, compress, connectors, database,
+            agents, attacker, audio, browser, cards, cipher, compress, connectors, database,
             deals, decoder, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
             macros, media, metadata, network, osint, osint_people, parsers,
             proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
@@ -110,7 +110,7 @@ class ToolRegistry:
         
         # Register all tool modules
         for module in [
-            agents, attacker, audio, browser, cards, compress, connectors, database,
+            agents, attacker, audio, browser, cards, cipher, compress, connectors, database,
             deals, decoder, filesend, filesystem, finance, giftcard, hashcrack, imagedb,
             macros, media, metadata, network, osint, osint_people, parsers,
             proxy, proxylab, sandbox_code, scriptgen, shell, ssh_socks,
