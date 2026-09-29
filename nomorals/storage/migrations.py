@@ -1133,6 +1133,8 @@ ALTER TABLE macros ADD COLUMN last_result TEXT NOT NULL DEFAULT '';
 -- Add missing columns to notifications table
 ALTER TABLE notifications ADD COLUMN kind TEXT NOT NULL DEFAULT '';
 ALTER TABLE notifications ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications ADD COLUMN body TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE notifications ADD COLUMN pruned_at REAL NOT NULL DEFAULT 0;
 
 -- Add missing columns to improvement_runs table
