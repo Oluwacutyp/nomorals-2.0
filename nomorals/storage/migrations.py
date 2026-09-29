@@ -1125,6 +1125,22 @@ ALTER TABLE coding_log ADD COLUMN stdout TEXT NOT NULL DEFAULT '';
 ALTER TABLE coding_log ADD COLUMN stderr TEXT NOT NULL DEFAULT '';
 """
 
+_V21_MISSING_COLUMNS = """
+-- Add missing columns to various tables
+ALTER TABLE macros ADD COLUMN last_run REAL NOT NULL DEFAULT 0;
+ALTER TABLE macros ADD COLUMN last_result TEXT NOT NULL DEFAULT '';
+
+-- Add missing columns to notifications table
+ALTER TABLE notifications ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications ADD COLUMN pruned_at REAL NOT NULL DEFAULT 0;
+
+-- Add missing columns to improvement_runs table
+ALTER TABLE improvement_runs ADD COLUMN before_score REAL NOT NULL DEFAULT 0;
+ALTER TABLE improvement_runs ADD COLUMN after_score REAL NOT NULL DEFAULT 0;
+ALTER TABLE improvement_runs ADD COLUMN category TEXT NOT NULL DEFAULT '';
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1146,6 +1162,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(18, "placeholder_18", sql=_V18_PLACEHOLDER),
     Migration(19, "arena_builds", sql=_V19_ARENA_BUILDS),
     Migration(20, "coding_log_columns", sql=_V20_CODING_LOG_COLUMNS),
+    Migration(21, "missing_columns", sql=_V21_MISSING_COLUMNS),
 )
 
 
