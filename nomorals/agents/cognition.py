@@ -786,7 +786,7 @@ class CognitiveLoop:
                         continue  # still waiting on the rollover
                     # the goal un-pauses with its project
                     self.context.db.execute(
-                        "UPDATE goals SET status='active', updated_at=? "
+                        "UPDATE agent_goals SET status='active', updated_at=? "
                         "WHERE id=?", (time.time(), goal_id))
                     # advance() self-resumes the project and runs the step
                     gs.advance(goal_id, executor=executor)
@@ -824,7 +824,7 @@ class CognitiveLoop:
                 result = mgr.heal(project.id)
                 if result.get("ok"):
                     self.context.db.execute(
-                        "UPDATE goals SET heals = heals + 1, updated_at=? "
+                        "UPDATE agent_goals SET heals = heals + 1, updated_at=? "
                         "WHERE id=?", (time.time(), r["id"]))
                     healed.append(r["id"])
         except Exception as exc:  # noqa: BLE001 — healing never kills a tick
