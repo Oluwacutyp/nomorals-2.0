@@ -1116,6 +1116,15 @@ CREATE TABLE IF NOT EXISTS arena_knowledge (
 CREATE INDEX IF NOT EXISTS idx_arena_knowledge_topic ON arena_knowledge(topic);
 """
 
+_V20_CODING_LOG_COLUMNS = """
+-- Add missing columns to coding_log table
+ALTER TABLE coding_log ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE coding_log ADD COLUMN exit_code INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE coding_log ADD COLUMN timed_out INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE coding_log ADD COLUMN stdout TEXT NOT NULL DEFAULT '';
+ALTER TABLE coding_log ADD COLUMN stderr TEXT NOT NULL DEFAULT '';
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1136,6 +1145,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(17, "placeholder_17", sql=_V17_PLACEHOLDER),
     Migration(18, "placeholder_18", sql=_V18_PLACEHOLDER),
     Migration(19, "arena_builds", sql=_V19_ARENA_BUILDS),
+    Migration(20, "coding_log_columns", sql=_V20_CODING_LOG_COLUMNS),
 )
 
 
