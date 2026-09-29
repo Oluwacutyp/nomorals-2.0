@@ -102,6 +102,12 @@ def _parser() -> argparse.ArgumentParser:
     goal.add_argument("--id", help="Goal ID")
     goal.add_argument("--title", help="Goal title")
     
+    mission = sub.add_parser("mission", help="Mission control and planning")
+    mission.add_argument("action", nargs="?", default="plan",
+                        choices=["plan", "next", "status"],
+                        help="Action to perform")
+    mission.add_argument("--json", action="store_true", help="Output as JSON")
+    
     skill = sub.add_parser("skill", help="Manage reusable skills")
     skill.add_argument("action", nargs="?", default="list",
                       choices=["list", "create", "run", "delete"],
