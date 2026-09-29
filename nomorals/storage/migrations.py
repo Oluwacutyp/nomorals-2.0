@@ -1218,10 +1218,6 @@ ALTER TABLE media_queue ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0;
 _V28_MISSING_COLUMNS_V2 = """
 -- Add missing columns to failures table
 ALTER TABLE failures ADD COLUMN ts REAL NOT NULL DEFAULT 0;
-
--- Add missing status columns
-ALTER TABLE missions ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE agent_tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
 """
 
 MIGRATIONS: tuple[Migration, ...] = (
