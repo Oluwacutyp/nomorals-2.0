@@ -1168,6 +1168,36 @@ ALTER TABLE acceptance_runs ADD COLUMN output_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE acceptance_runs ADD COLUMN ok INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE acceptance_runs ADD COLUMN ts REAL NOT NULL DEFAULT 0;
 """
+
+_V25_MISSING_TABLES_AND_COLUMNS = """
+-- Create missing skills table
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
+-- Create missing devon_memory table
+CREATE TABLE IF NOT EXISTS devon_memory (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    key TEXT NOT NULL DEFAULT '',
+    value TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+-- Add missing columns to media_queue table
+ALTER TABLE media_queue ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE media_queue ADD COLUMN artist TEXT NOT NULL DEFAULT '';
+ALTER TABLE media_queue ADD COLUMN duration REAL NOT NULL DEFAULT 0;
+
+-- Add missing columns to failures table
+ALTER TABLE failures ADD COLUMN family TEXT NOT NULL DEFAULT '';
+ALTER TABLE failures ADD COLUMN fingerprint TEXT NOT NULL DEFAULT '';
+"""
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1193,6 +1223,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(22, "failures_columns", sql=_V22_FAILURES_COLUMNS),
     Migration(23, "lessons_columns", sql=_V23_LESSONS_COLUMNS),
     Migration(24, "acceptance_runs_columns", sql=_V24_ACCEPTANCE_RUNS_COLUMNS),
+    Migration(25, "missing_tables_and_columns", sql=_V25_MISSING_TABLES_AND_COLUMNS),
 )
 
 
