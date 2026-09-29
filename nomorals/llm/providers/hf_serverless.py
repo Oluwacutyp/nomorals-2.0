@@ -311,3 +311,52 @@ class HFServerlessProvider(LLMProvider):
 def prompt_from_messages(messages: Sequence[Message], template: str = "chatml") -> str:
     """Convenience wrapper around :func:`messages_to_text`."""
     return messages_to_text(messages, template=template)
+
+
+def hf_doctor(provider: HFServerlessProvider) -> list[str]:
+    """Diagnose HuggingFace provider issues."""
+    report = []
+    
+    # Check token
+    token = getattr(provider, "token", "") or ""
+    if not token:
+        report.append("1. token: MISSING (set NM_HF_TOKEN environment variable)")
+    else:
+        report.append(f"1. token: present ({len(token)} chars)")
+    
+    # Check URL
+    url = getattr(provider, "url", "") or SERVERLESS_URL
+    report.append(f"2. URL: {url}")
+    
+    # Check model
+    model = getattr(provider, "model", "")
+    report.append(f"3. model: {model or 'not set'}")
+    
+    # Try to fetch catalog
+    try:
+        catalog = provider.fetch_catalog()
+        report.append(f"4. catalog: {len(catalog)} models available")
+    except Exception as e:
+        report.append(f"4. catalog: FAILED ({type(e).__name__}: {e})")
+    
+    # Try a simple request
+    try:
+        http = getattr(provider, "http", None)
+        if http:
+            response = http.post_json(f"{url}/models/{model or 'test'}", {})
+            if response:
+                report.append("5. API: responding")
+            else:
+                report.append("5. API: no response")
+        else:
+            report.append("5. API: no HTTP client")
+    except Exception as e:
+        report.append(f"5. API: FAILED ({type(e).__name__}: {e})")
+    
+    # Verdict
+    if not token:
+        report.append("\nVERDICT: NOT working (missing token)")
+    else:
+        report.append("\nVERDICT: appears functional")
+    
+    return report
