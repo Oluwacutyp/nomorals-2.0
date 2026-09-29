@@ -1141,6 +1141,9 @@ ALTER TABLE notifications ADD COLUMN pruned_at REAL NOT NULL DEFAULT 0;
 ALTER TABLE improvement_runs ADD COLUMN before_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE improvement_runs ADD COLUMN after_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE improvement_runs ADD COLUMN category TEXT NOT NULL DEFAULT '';
+
+-- Add missing columns to goals table
+ALTER TABLE goals ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]';
 """
 
 MIGRATIONS: tuple[Migration, ...] = (
