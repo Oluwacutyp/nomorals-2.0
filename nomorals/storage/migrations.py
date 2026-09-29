@@ -1158,6 +1158,16 @@ _V23_LESSONS_COLUMNS = """
 ALTER TABLE lessons ADD COLUMN times_seen INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE lessons ADD COLUMN updated_at REAL NOT NULL DEFAULT 0;
 """
+
+_V24_ACCEPTANCE_RUNS_COLUMNS = """
+-- Add missing columns to acceptance_runs table
+ALTER TABLE acceptance_runs ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE acceptance_runs ADD COLUMN step_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE acceptance_runs ADD COLUMN cmd TEXT NOT NULL DEFAULT '';
+ALTER TABLE acceptance_runs ADD COLUMN output_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE acceptance_runs ADD COLUMN ok INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE acceptance_runs ADD COLUMN ts REAL NOT NULL DEFAULT 0;
+"""
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1182,6 +1192,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(21, "missing_columns", sql=_V21_MISSING_COLUMNS),
     Migration(22, "failures_columns", sql=_V22_FAILURES_COLUMNS),
     Migration(23, "lessons_columns", sql=_V23_LESSONS_COLUMNS),
+    Migration(24, "acceptance_runs_columns", sql=_V24_ACCEPTANCE_RUNS_COLUMNS),
 )
 
 

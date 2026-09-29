@@ -91,7 +91,7 @@ def _parser() -> argparse.ArgumentParser:
     # Agent-tool subcommands
     autonomy = sub.add_parser("autonomy", help="Manage autonomous agent operations")
     autonomy.add_argument("action", nargs="?", default="status",
-                         choices=["status", "tick", "report", "enable", "disable"],
+                         choices=["status", "tick", "report", "enable", "disable", "budget"],
                          help="Action to perform")
     autonomy.add_argument("--json", action="store_true", help="Output as JSON")
     
