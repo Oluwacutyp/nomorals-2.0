@@ -98,16 +98,73 @@ class ToolRegistry:
         """Wire up the standard tool set. Imports are deferred per tool."""
         if self._builtin_registered:
             return self
-        from . import filesystem, media, parsers, shell, vision, web
+        
+        # Import and register each tool module SEPARATELY.  A single batched
+        # `from . import (…)` made every builtin sink whenever ANY one tool's
+        # optional dependency was missing; per-module import + register keeps
+        # the rest of the registry alive (the honest degradation is "this
+        # tool is unavailable", never "no tools at all").
+        import importlib as _importlib
 
-        filesystem.register(self)
-        shell.register(self)
-        web.register(self)
-        vision.register(self)
-        media.register(self)
-        parsers.register(self)
+        for _name in (
+            "agents", "archive", "attacker", "audio", "book", "browser",
+            "build_app", "cards", "cipher", "compress", "connectors",
+            "database", "deals", "decoder", "decoder_agent", "filesend",
+            "filesystem", "finance", "giftcard", "hashcrack", "imagedb",
+            "macros", "media", "media_hub", "metadata", "monitor",
+            "network", "osint", "osint_graph", "osint_people", "parsers",
+            "proxy", "proxylab", "run_code", "sandbox_code", "scriptgen",
+            "shell", "ssh_socks", "traindata", "vision", "web", "workspace",
+        ):
+            try:
+                _module = _importlib.import_module(f".{_name}", __package__)
+                _module.register(self)
+            except Exception:  # noqa: BLE001 — one broken tool is not all of them
+                continue
+        
+        # Custom tools authored by the tool creator (toolmaker.install drops
+        # them into nomorals/tools/custom/). A fresh registry must pick them
+        # up without any extra wiring — auto-registration is the contract.
+        # The media system (music writer / player / video finder) lives in
+        # its own package and registers through the same decorator surface.
+        try:
+            from ..media import music as _music, playback as _playback
+            from ..media import video as _video
+
+            for _mod in (_music, _playback, _video):
+                try:
+                    _mod.register(self)
+                except Exception:  # noqa: BLE001 — module-level opt-out
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            self._load_custom_tools()
+        except Exception:  # noqa: BLE001 — a bad custom tool never sinks builtins
+            pass
+
         self._builtin_registered = True
         return self
+
+    def _load_custom_tools(self) -> None:
+        """Import every module in ``nomorals/tools/custom/`` and call its
+        ``register(registry)`` hook."""
+        import importlib
+        import pkgutil
+
+        from . import custom as custom_pkg
+
+        for info in pkgutil.iter_modules(custom_pkg.__path__):
+            if info.name.startswith("_"):
+                continue
+            try:
+                module = importlib.import_module(f"{custom_pkg.__name__}.{info.name}")
+                hook = getattr(module, "register", None)
+                if hook is not None:
+                    hook(self)
+            except Exception:  # noqa: BLE001 — skip a broken custom tool
+                pass
 
     def unregister(self, name: str) -> bool:
         return self._tools.pop(name, None) is not None
@@ -139,13 +196,21 @@ class ToolRegistry:
     def call(
         self,
         name: str,
-        *,
+        /,
+        *args: Any,
         actor: str = "system",
         capabilities: CapabilitySet | None = None,
         confirmation: str | None = None,
         **kwargs: Any,
     ) -> Outcome[Any]:
         """Check the capability, run the tool, and audit the call."""
+        # Reject extra positional arguments with a proper error outcome
+        if args:
+            return Err(ToolError(
+                f"call() takes 1 positional argument but {1 + len(args)} were given; "
+                f"pass tool parameters as keywords"
+            ))
+        
         spec = self._tools.get(name)
         if spec is None:
             return Err(ToolNotFound(f"unknown tool {name!r}; available: {self.names()[:20]}"))
@@ -183,6 +248,7 @@ class ToolRegistry:
             self.stats["calls"] += 1
             self.stats["seconds"] += elapsed
             _log.debug("tool %s failed: %s", name, error.message)
+            self._record_failure_ledger(name, error.message, str(exc))
             return Err(error)
 
         elapsed = time.perf_counter() - started
@@ -190,6 +256,37 @@ class ToolRegistry:
         self.stats["calls"] += 1
         self.stats["seconds"] += elapsed
         return Ok(result)
+
+    def _record_failure_ledger(self, tool: str, message: str,
+                                detail: str) -> None:
+        """Wave 76: real tool errors land in the failure ledger so the
+        failure analyzer can learn from them (and routing can demote what
+        keeps breaking). Best-effort, never raises, no recursion into the
+        failure tooling itself."""
+        db = getattr(self.context, "db", None) if self.context else None
+        if db is None or getattr(self, "_recording", False):
+            return
+        self._recording = True
+        try:
+            db.execute(
+                "INSERT INTO failures (id, source, summary, error, family, "
+                "lesson, ts) VALUES (?,?,?,?,?,?,?)",
+                (f"tool-{int(time.time_ns())}", "tool",
+                 f"{tool} failed {message}"[:500], detail[:500],
+                 self._failure_family(detail or message), "", time.time()))
+        except Exception:  # noqa: BLE001 — the ledger never sinks the result
+            pass
+        finally:
+            self._recording = False
+
+    @staticmethod
+    def _failure_family(text: str) -> str:
+        try:
+            from ..agents.failure import categorize
+
+            return categorize(text)
+        except Exception:  # noqa: BLE001
+            return "tool"
 
     def call_many(self, calls: list[tuple[str, dict[str, Any]]], **common: Any) -> list[Outcome[Any]]:
         return [self.call(name, **{**common, **kwargs}) for name, kwargs in calls]
