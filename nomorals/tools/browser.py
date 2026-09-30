@@ -1,0 +1,1117 @@
+"""Browser tool: a stateful web session built on the standard library.
+
+A :class:`BrowserSession` keeps its own cookie jar and current page, so the
+agent can do what a human browser does without one — open a page, read it,
+follow links, fill and submit forms — with a persistent identity across
+steps. Parsing uses ``html.parser`` (stdlib) into a small DOM; no
+BeautifulSoup, no Chromium.
+
+If ``playwright`` is installed **and** ``NM_BROWSER_PLAYWRIGHT=1``, sessions
+transparently use headless Chromium instead (for JS-heavy sites). Off by
+default: zero extra dependencies.
+
+One tool: ``browser(action, ...)`` behind ``NET_BROWSER``.
+"""
+
+from __future__ import annotations
+
+import html
+import http.cookiejar
+import json
+import os
+import re
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from typing import Any
+
+from ..core.errors import ToolError, classify
+from ..core.logging_setup import get_logger
+from ..core.policy import Capability
+from ..core.trust import domain_tier
+
+__all__ = ["BrowserSession", "Node", "register"]
+
+_log = get_logger(__name__)
+
+_VOID = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "source", "track", "wbr",
+})
+_SKIP = frozenset({"script", "style", "noscript", "template", "svg", "iframe"})
+_BLOCK = frozenset({
+    "p", "div", "section", "article", "header", "footer", "main", "aside",
+    "ul", "ol", "li", "table", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "pre", "form", "fieldset", "nav", "figure", "details",
+})
+_MAX_BODY = 5_000_000  # 5 MB per page is plenty; bigger is a PDF or a bug
+
+
+# ── tiny DOM ─────────────────────────────────────────────────────────────────
+
+
+class Node:
+    """One node of the parsed page. Text nodes have ``tag == ""`` and carry
+    their string in ``text``; element nodes have ``tag`` and ``attrs``."""
+
+    __slots__ = ("tag", "text", "attrs", "children", "parent")
+
+    def __init__(self, tag: str = "", attrs: dict[str, str] | None = None,
+                 text: str = "", parent: "Node | None" = None) -> None:
+        self.tag = tag
+        self.text = text          # non-empty only on text nodes
+        self.attrs = attrs or {}
+        self.children: list[Node] = []
+        self.parent = parent
+
+    @property
+    def is_text(self) -> bool:
+        return self.tag == ""
+
+    # -- structure ----------------------------------------------------------
+    def append(self, child: "Node") -> None:
+        child.parent = self
+        self.children.append(child)
+
+    def walk(self):
+        """Depth-first over all nodes (including text)."""
+        for child in self.children:
+            yield child
+            if not child.is_text:
+                yield from child.walk()
+
+    def find_all(self, tag: "str | tuple[str, ...]" = "", **attr: str) -> list["Node"]:
+        """Elements matching ``tag`` (empty = any; a tuple = any of them)
+        and all ``attr`` key=value."""
+        tags = tag if isinstance(tag, (tuple, list, set, frozenset)) else (tag,)
+        out: list[Node] = []
+        for node in self.walk():
+            if node.is_text:
+                continue
+            if tags and node.tag not in tags:
+                continue
+            if attr and not all(node.attrs.get(k) == v for k, v in attr.items()):
+                continue
+            out.append(node)
+        return out
+
+    # -- content ------------------------------------------------------------
+    def inner_text(self) -> str:
+        """Readable text of this subtree (skips _SKIP tags)."""
+        out: list[str] = []
+
+        def _collect(node: "Node") -> None:
+            if node.is_text:
+                out.append(node.text)
+                return
+            if node.tag in _SKIP:
+                return
+            if node.tag in _BLOCK and out and out[-1] != "\n":
+                out.append("\n")
+            for child in node.children:
+                _collect(child)
+
+        _collect(self)
+        text = re.sub(r"[ \t]+", " ", "".join(out))
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        return text.strip()
+
+
+class _DOMBuilder(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = Node(tag="#root")
+        self._stack: list[Node] = [self.root]
+
+    def handle_starttag(self, tag, attrs) -> None:
+        node = Node(tag=tag.lower(), attrs=dict(attrs), parent=self._stack[-1])
+        self._stack[-1].append(node)
+        if tag.lower() not in _VOID:
+            self._stack.append(node)
+
+    def handle_startendtag(self, tag, attrs) -> None:
+        self._stack[-1].append(Node(tag=tag.lower(), attrs=dict(attrs), parent=self._stack[-1]))
+
+    def handle_endtag(self, tag) -> None:
+        tag = tag.lower()
+        for i in range(len(self._stack) - 1, 0, -1):
+            if self._stack[i].tag == tag:
+                del self._stack[i:]
+                break
+
+    def handle_data(self, data) -> None:
+        if data:
+            self._stack[-1].append(Node(text=data, parent=self._stack[-1]))
+
+
+def parse_html(markup: str) -> Node:
+    builder = _DOMBuilder()
+    try:
+        builder.feed(markup)
+        builder.close()
+    except Exception:  # noqa: BLE001 - malformed HTML should degrade, not raise
+        _log.debug("html parser choked mid-stream; using partial DOM")
+    return builder.root
+
+
+# ── markdown rendering ───────────────────────────────────────────────────────
+
+
+def node_to_markdown(node: Node, *, depth: int = 0) -> str:
+    """Render a DOM subtree as markdown (headings, links, lists, code)."""
+    out: list[str] = []
+    for child in node.children:
+        if child.is_text:
+            out.append(child.text)
+            continue
+        tag = child.tag
+        if tag in _SKIP:
+            continue
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            level = int(tag[1])
+            out.append("\n" + "#" * level + " " + child.inner_text().strip() + "\n")
+        elif tag == "a":
+            inner = child.inner_text().strip()
+            href = child.attrs.get("href", "")
+            out.append(f"[{inner}]({href})" if href else inner)
+        elif tag in {"strong", "b"}:
+            inner = child.inner_text().strip()
+            out.append(f"**{inner}**" if inner else "")
+        elif tag in {"em", "i"}:
+            inner = child.inner_text().strip()
+            out.append(f"*{inner}*" if inner else "")
+        elif tag == "code":
+            out.append("`" + child.inner_text().strip() + "`")
+        elif tag == "pre":
+            out.append("\n```\n" + child.inner_text().strip() + "\n```\n")
+        elif tag == "li":
+            indent = "  " * max(0, depth)
+            out.append(f"\n{indent}- " + child.inner_text().strip())
+        elif tag == "br":
+            out.append("\n")
+        elif tag == "img":
+            alt = child.attrs.get("alt", "")
+            src = child.attrs.get("src", "")
+            out.append(f"![{alt}]({src})" if src else "")
+        elif tag in _BLOCK:
+            out.append("\n" + node_to_markdown(child, depth=depth + (1 if tag in {"ul", "ol"} else 0)) + "\n")
+        else:
+            out.append(node_to_markdown(child, depth=depth))
+    text = re.sub(r"[ \t]+", " ", "".join(out))
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+# ── the session ──────────────────────────────────────────────────────────────
+
+
+class BrowserSession:
+    """One cookie-kept web session with a current page and parsed DOM."""
+
+    def __init__(
+        self,
+        *,
+        user_agent: str = "NoMoralsCore/0.1 (browser tool)",
+        timeout: float = 30.0,
+        proxy_url: str = "",
+        respect_robots: bool = True,
+        name: str = "default",
+        session_dir: str = "",
+        retries: int = 2,
+        max_task_steps: int = 12,
+    ) -> None:
+        self.name = name
+        self.user_agent = user_agent
+        self.timeout = timeout
+        self.respect_robots = respect_robots
+        #: wave 86: transient failures (timeout, 5xx, reset) are retried
+        #: with backoff before they become errors.
+        self.retries = max(0, int(retries))
+        #: wave 86: cap for the multi-step ``task`` action (profile-tuned).
+        self.max_task_steps = max(1, int(max_task_steps))
+        #: wave 86: when set, cookies are persisted here across runs
+        #: (data/browser/sessions/<name>.json) — a task that logs in once
+        #: keeps the login next time.
+        self.session_dir = str(session_dir or "").strip()
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self._load_cookies()
+        handlers: list[Any] = [
+            urllib.request.HTTPCookieProcessor(self.cookie_jar),
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+        ]
+        if proxy_url:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        else:
+            handlers.append(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(*handlers)
+
+        self.url: str = ""
+        self.title: str = ""
+        self.dom: Node | None = None
+        self._raw: str = ""
+        #: agent-supplied field overrides (fill); form fields keep their own
+        #: value attribute unless overridden here
+        self._form_values: dict[str, str] = {}
+        self._history: list[str] = []
+        self.created_at = time.time()
+        self.request_count = 0
+
+    # -- low-level fetch ------------------------------------------------------
+    def _fetch(self, url: str, *, method: str = "GET",
+               form: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None
+               ) -> dict[str, Any]:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ToolError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
+        if self.respect_robots and not _robots_allowed(url, self.user_agent):
+            raise ToolError(f"robots.txt disallows {url}")
+
+        data = None
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if form is not None:
+            data = urllib.parse.urlencode(form).encode("utf-8")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if extra_headers:
+            headers.update(extra_headers)
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        # wave 86: transient failures (timeout, reset, 5xx) are retried with
+        # backoff — a flaky first fetch should not cost the whole task.
+        last_exc: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                with self._opener.open(request, timeout=self.timeout) as response:
+                    body = response.read(_MAX_BODY)
+                    final_url = response.geturl()
+                    status = getattr(response, "status", 200)
+                    content_type = response.headers.get("Content-Type", "")
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read(_MAX_BODY) if hasattr(exc, "read") else b""
+                final_url = url
+                status = exc.code
+                content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
+                if status < 500 or attempt >= self.retries:
+                    break
+                last_exc = exc  # 5xx: retry — the server is having a moment
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if attempt >= self.retries:
+                    raise ToolError(f"request failed: {classify(exc).message}") from exc
+                last_exc = exc
+            time.sleep(0.5 * (2 ** attempt))
+        else:  # pragma: no cover - the loop always breaks or raises
+            raise ToolError(f"request failed: {classify(last_exc).message if last_exc else 'unknown'}")
+
+        try:
+            charset = (content_type.split("charset=")[-1].split(";")[0].strip()
+                       or "utf-8").lower()
+        except Exception:  # noqa: BLE001
+            charset = "utf-8"
+        if charset == "utf-8":
+            text = body.decode("utf-8", errors="replace")
+        else:
+            try:
+                text = body.decode(charset, errors="replace")
+            except (LookupError, ValueError):
+                text = body.decode("utf-8", errors="replace")
+        self.request_count += 1
+        return {
+            "url": final_url, "status": status,
+            "content_type": content_type, "text": text,
+        }
+
+    # -- public actions --------------------------------------------------------
+    def do(self, action: str, **kw: Any) -> dict[str, Any]:
+        """Dispatch one action. Returns a JSON-able dict; raises ToolError."""
+        action = (action or "state").lower().strip()
+        handler = _ACTIONS.get(action)
+        if handler is None:
+            raise ToolError(f"unknown browser action {action!r}; "
+                            f"one of: {', '.join(sorted(_ACTIONS))}")
+        return handler(self, **kw)
+
+    def open(self, url: str = "", **_: Any) -> dict[str, Any]:
+        if not (url or "").strip():
+            raise ToolError("browser open needs a url")
+        result = self._fetch(url.strip())
+        self.url = result["url"]
+        self._raw = result["text"]
+        if self.url not in self._history[-20:]:
+            self._history.append(self.url)
+        self.dom = parse_html(self._raw)
+        title_nodes = self.dom.find_all("title")
+        self.title = title_nodes[0].inner_text() if title_nodes else ""
+        # agent fills do not survive a navigation
+        self._form_values = {}
+        self._save_cookies()
+        return {
+            "ok": result["status"] < 400,
+            "url": self.url,
+            "status": result["status"],
+            "title": self.title[:200],
+            "chars": len(self._raw),
+            "links": len(self.dom.find_all("a")),
+            "forms": len(self.dom.find_all("form")),
+            "cookies": len(self.cookie_jar),
+        }
+
+    def text(self, max_chars: int = 40000, **_: Any) -> dict[str, Any]:
+        self._require_page()
+        content = self.dom.inner_text()
+        return {"url": self.url, "title": self.title, "chars": len(content),
+                "text": content[:max_chars], "truncated": len(content) > max_chars}
+
+    def markdown(self, max_chars: int = 40000, **_: Any) -> dict[str, Any]:
+        self._require_page()
+        content = node_to_markdown(self.dom)
+        return {"url": self.url, "title": self.title, "chars": len(content),
+                "markdown": content[:max_chars], "truncated": len(content) > max_chars}
+
+    def links(self, max_links: int = 100, **_: Any) -> dict[str, Any]:
+        self._require_page()
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for node in self.dom.find_all("a"):
+            href = node.attrs.get("href", "")
+            if not href:
+                continue
+            absolute = urllib.parse.urljoin(self.url, href)
+            parsed = urllib.parse.urlparse(absolute)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            key = absolute.split("#", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"text": node.inner_text().strip(), "url": absolute})
+            if len(out) >= max_links:
+                break
+        return {"url": self.url, "count": len(out), "links": out}
+
+    def click(self, target: str = "", **_: Any) -> dict[str, Any]:
+        """Follow a link by text, href, or index. Returns the new page."""
+        self._require_page()
+        if not (target or "").strip():
+            raise ToolError("browser click needs a target (link text, href, or index)")
+        links = self.dom.find_all("a")
+        wanted = target.strip()
+        chosen_href = ""
+        if wanted.isdigit():
+            idx = int(wanted)
+            if 0 <= idx < len(links) and links[idx].attrs.get("href"):
+                chosen_href = links[idx].attrs["href"]
+        else:
+            for node in links:
+                href = node.attrs.get("href", "")
+                if not href:
+                    continue
+                if href == wanted or node.inner_text().strip() == wanted:
+                    chosen_href = href
+                    break
+        if not chosen_href:
+            raise ToolError(f"no link matching {wanted!r} on this page")
+        return self.open(urllib.parse.urljoin(self.url, chosen_href))
+
+    def fill(self, name: str = "", value: str = "", **_: Any) -> dict[str, Any]:
+        """Store a value for a form field (submitted on the next submit)."""
+        self._require_page()
+        if not (name or "").strip():
+            raise ToolError("browser fill needs a name (the input's name attribute)")
+        if name not in _form_field_names(self.dom):
+            # still allow it — dynamic forms exist — but flag it
+            _log.debug("fill for unknown field %r (proceeding anyway)", name)
+        self._form_values[name] = value
+        return {"ok": True, "field": name,
+                "pending": sorted(self._form_values)}
+
+    def submit(self, target: str = "", **_: Any) -> dict[str, Any]:
+        """Submit a form: by index, id, or action-text match. Uses fills."""
+        self._require_page()
+        forms = self.dom.find_all("form")
+        if not forms:
+            raise ToolError("no form on this page to submit")
+        form = None
+        wanted = (target or "").strip()
+        if wanted.isdigit():
+            idx = int(wanted)
+            if 0 <= idx < len(forms):
+                form = forms[idx]
+        else:
+            for node in forms:
+                if wanted in ("", "0"):
+                    form = node
+                    break
+                if node.attrs.get("id") == wanted or node.attrs.get("name") == wanted \
+                        or node.attrs.get("action", "") == wanted:
+                    form = node
+                    break
+        if form is None:
+            raise ToolError(f"no form matching {wanted!r} (have {len(forms)}: use an index)")
+
+        fields = _form_fields(form)
+        values: dict[str, str] = {}
+        for field in fields:
+            name = field.attrs.get("name")
+            if not name:
+                continue
+            if name in self._form_values:
+                values[name] = self._form_values[name]
+            else:
+                values[name] = field.attrs.get("value", "")
+        method = (form.attrs.get("method") or "get").upper()
+        if method not in {"GET", "POST"}:
+            method = "POST"
+        action = form.attrs.get("action", "") or self.url
+        url = urllib.parse.urljoin(self.url, action)
+        if method == "GET" and values:
+            url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(values)
+        result = self._fetch(url, method=method, form=values if method == "POST" else None)
+        self.url = result["url"]
+        self._raw = result["text"]
+        if self.url not in self._history[-20:]:
+            self._history.append(self.url)
+        self.dom = parse_html(self._raw)
+        title_nodes = self.dom.find_all("title")
+        self.title = title_nodes[0].inner_text() if title_nodes else ""
+        self._form_values = {}
+        self._save_cookies()
+        return {
+            "ok": result["status"] < 400,
+            "url": self.url, "status": result["status"],
+            "title": self.title[:200], "chars": len(self._raw),
+        }
+
+    def extract(self, target: str = "", kind: str = "", **_: Any) -> dict[str, Any]:
+        """Structured extraction from the current page.
+
+        Two modes:
+
+        * ``kind`` empty — text of matching elements: a tag name, #id,
+          .class, or css-lite 'tag.class' (the classic behaviour).
+        * ``kind`` set — a STRUCTURED view of the page, no selector needed:
+
+          - ``headings`` — the h1-h6 outline (level + text)
+          - ``tables``   — every table as {caption, headers, rows}
+          - ``forms``    — every form as {id, action, method, fields}
+          - ``meta``     — title, description, og:*, canonical, favicon
+          - ``nav``      — link groups: {url, text, tag}
+        """
+        self._require_page()
+        kind = (kind or "").strip().lower()
+        if kind in {"headings", "h"}:
+            return self._extract_headings()
+        if kind in {"tables", "table"}:
+            return self._extract_tables()
+        if kind in {"forms", "form"}:
+            return self._extract_forms()
+        if kind in {"meta", "head"}:
+            return self._extract_meta()
+        if kind in {"nav", "links-structured", "sitemap"}:
+            return self._extract_nav()
+        if kind:
+            raise ToolError(f"unknown extract kind {kind!r}; "
+                            f"use headings|tables|forms|meta|nav, or leave it empty for selector mode")
+
+        wanted = (target or "body").strip()
+        parsed_kind, value = _parse_selector(wanted)
+        if parsed_kind == "id":
+            nodes = [n for n in self.dom.walk() if not n.is_text and n.attrs.get("id") == value]
+        elif parsed_kind == "class":
+            nodes = [n for n in self.dom.walk()
+                     if not n.is_text and value in (n.attrs.get("class") or "").split()]
+        else:
+            nodes = self.dom.find_all(value or "body")
+        if not nodes:
+            return {"url": self.url, "count": 0, "matches": [],
+                    "note": f"nothing matched {wanted!r}"}
+        matches = []
+        for node in nodes[:50]:
+            text = node.inner_text().strip()
+            if text:
+                matches.append(text[:2000])
+        return {"url": self.url, "count": len(matches), "matches": matches}
+
+    # -- structured extractors (wave 86 browser v2) ---------------------------
+    def _extract_headings(self) -> dict[str, Any]:
+        out: list[dict[str, Any]] = []
+        for node in self.dom.walk():
+            if node.is_text:
+                continue
+            tag = (node.tag or "").lower()
+            if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                text = " ".join(node.inner_text().split())
+                if text:
+                    out.append({"level": int(tag[1]), "text": text[:300]})
+        return {"url": self.url, "kind": "headings", "count": len(out), "items": out[:120]}
+
+    def _extract_tables(self) -> dict[str, Any]:
+        out: list[dict[str, Any]] = []
+        for table in self.dom.find_all("table")[:20]:
+            trs = table.find_all("tr")
+            rows: list[list[str]] = []
+            for tr in trs:
+                cells = [
+                    " ".join(td.inner_text().split())
+                    for td in tr.find_all(("td", "th"))
+                ]
+                if any(cells):
+                    rows.append([c[:200] for c in cells])
+            if not rows:
+                continue
+            first_cells = trs[0].find_all(("td", "th")) if trs else []
+            header_row = (
+                first_cells
+                and any((n.tag or "") == "th" for n in first_cells)
+                and all((n.tag or "") == "th" for n in first_cells)
+            )
+            headers = rows[0] if header_row else []
+            data_rows = rows[1:] if header_row else rows
+            out.append({
+                "headers": headers,
+                "rows": data_rows[:100],
+                "row_count": len(rows),
+            })
+        return {"url": self.url, "kind": "tables", "count": len(out), "tables": out}
+
+    def _extract_forms(self) -> dict[str, Any]:
+        out: list[dict[str, Any]] = []
+        for form in self.dom.find_all("form")[:20]:
+            fields = []
+            for field in _form_fields(form):
+                tag = (field.tag or "").lower()
+                if tag not in {"input", "select", "textarea"}:
+                    continue
+                ftype = field.attrs.get("type", "" if tag != "input" else "text")
+                fields.append({
+                    "tag": tag,
+                    "type": ftype if tag == "input" else "",
+                    "name": field.attrs.get("name", ""),
+                    "id": field.attrs.get("id", ""),
+                    "placeholder": field.attrs.get("placeholder", ""),
+                    "value": field.attrs.get("value", "")[:80],
+                    "required": field.attrs.get("required") is not None
+                                or "aria-required" in field.attrs,
+                })
+            out.append({
+                "id": form.attrs.get("id", ""),
+                "name": form.attrs.get("name", ""),
+                "action": form.attrs.get("action", ""),
+                "method": (form.attrs.get("method") or "get").upper(),
+                "fields": fields[:40],
+            })
+        return {"url": self.url, "kind": "forms", "count": len(out), "forms": out}
+
+    def _extract_meta(self) -> dict[str, Any]:
+        meta: dict[str, str] = {}
+        for node in self.dom.walk():
+            if node.is_text or (node.tag or "").lower() != "meta":
+                continue
+            key = (node.attrs.get("property") or node.attrs.get("name") or "").strip().lower()
+            content = (node.attrs.get("content") or "").strip()
+            if key and content and key not in meta:
+                meta[key] = content[:300]
+        canonical = ""
+        for node in self.dom.walk():
+            if not node.is_text and (node.tag or "").lower() == "link" \
+                    and node.attrs.get("rel") == "canonical":
+                canonical = node.attrs.get("href", "")
+                break
+        return {
+            "url": self.url, "kind": "meta",
+            "title": self.title,
+            "description": meta.get("description", "") or meta.get("og:description", ""),
+            "canonical": canonical,
+            "og": {k: v for k, v in meta.items() if k.startswith("og:")},
+            "other": {k: v for k, v in meta.items()
+                      if not k.startswith("og:") and k not in {"description", "viewport"}},
+        }
+
+    def _extract_nav(self, limit: int = 200) -> dict[str, Any]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for a in self.dom.find_all("a"):
+            href = (a.attrs.get("href") or "").strip()
+            if not href or href.startswith(("#", "javascript:")):
+                continue
+            absolute = urllib.parse.urljoin(self.url, href)
+            text = " ".join(a.inner_text().split())[:120]
+            key = (absolute, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"url": absolute, "text": text, "tag": (a.attrs.get("class") or "")[:60]})
+            if len(out) >= limit:
+                break
+        return {"url": self.url, "kind": "nav", "count": len(out), "links": out}
+
+    # -- advanced multi-page research walk (wave 85) --------------------------
+    def walk(self, url: str = "", *, max_pages: int = 4,
+             in_domain: bool = True, focus: str = "",
+             max_chars: int = 12000, **_: Any) -> dict[str, Any]:
+        """A breadth-first research walk — advanced browsing.
+
+        From the current page (or ``url`` when given), repeatedly follows the
+        best-scoring link and collects up to ``max_pages`` pages.  Links are
+        scored by relevance (keyword overlap with ``focus`` when given) and
+        by the domain's trust tier, so the walk drifts toward credible,
+        on-topic pages instead of random corners of the site.
+
+        * ``in_domain`` (default) — stay on the seed page's domain;
+        * otherwise off-domain links are followed, but only from
+          high-trust sources (tier ≥ 0.5);
+        * dead links are recorded and skipped, never fatal.
+
+        Returns ``{"pages": [{url, title, trust, excerpt}], "digest"}`` —
+        the digest is one structured line per page, ready for the report.
+        """
+        if url:
+            self.open(url)
+        self._require_page()
+        root_host = (urllib.parse.urlparse(self.url).hostname or "").lower()
+        if not root_host:
+            raise ToolError("cannot walk: the seed page has no host")
+        max_pages = max(1, min(int(max_pages), 12))
+        focus_words = {w for w in re.split(r"[^a-z0-9]+", (focus or "").lower())
+                       if len(w) > 3}
+        visited = {self.url.split("#", 1)[0]}
+        pages: list[dict[str, Any]] = []
+
+        def _collect_current() -> None:
+            tier = domain_tier(self.url)[0]
+            body = self.text(max_chars=max_chars).get("text", "")
+            excerpt = " ".join(body.split())[:400]
+            pages.append({"url": self.url, "title": self.title[:160],
+                          "trust": tier, "chars": len(body),
+                          "excerpt": excerpt})
+
+        _collect_current()
+        for _ in range(1, max_pages):
+            links = self.links(max_links=80).get("links", [])
+            best: tuple[float, float, str] | None = None
+            for link in links:
+                target = link["url"].split("#", 1)[0]
+                if target in visited:
+                    continue
+                parsed = urllib.parse.urlparse(target)
+                host = (parsed.hostname or "").lower()
+                if not host or parsed.scheme not in {"http", "https"}:
+                    continue
+                same = host == root_host or host.endswith("." + root_host)
+                if in_domain and not same:
+                    continue
+                tier = domain_tier(target)[0]
+                if not in_domain and not same and tier < 0.5:
+                    continue  # off-domain only from credible sources
+                anchor = {w for w in re.split(r"[^a-z0-9]+",
+                                              link.get("text", "").lower())
+                          if len(w) > 2}
+                relevance = len(anchor & focus_words) if focus_words else 0
+                score = (relevance * 2.0, tier)
+                if best is None or score > (best[0], best[1]):
+                    best = (score[0], score[1], target)
+            if best is None:
+                break
+            target = best[2]
+            visited.add(target)
+            try:
+                self.open(target)
+                _collect_current()
+            except Exception as exc:  # noqa: BLE001 — a dead link ends the hop,
+                pages.append({"url": target, "title": "", "trust": best[1],
+                              "chars": 0, "excerpt": f"(unreadable: {exc})"})
+                _log.debug("walk hop failed at %s: %s", target, exc)
+                continue
+        digest = "\n".join(
+            f"{i}. [{p['trust']:.2f}] {p['title'] or p['url']}\n"
+            f"   {p['url']}\n   {p['excerpt'][:300]}"
+            for i, p in enumerate(pages, 1))
+        return {"ok": True, "seed": self.url if not url else url,
+                "pages": pages, "count": len(pages), "digest": digest}
+
+    # -- multi-step tasks (wave 86 browser v2) --------------------------------
+    _TASK_ACTS = {
+        "open", "goto", "wait", "click", "fill", "submit", "extract",
+        "text", "markdown", "links", "back", "stop",
+    }
+
+    def task(self, steps: Any = None, stop_on_error: bool = True,
+             max_steps: int = 0, **_: Any) -> dict[str, Any]:
+        """Multi-step web task: a small program of browsing actions.
+
+        ``steps`` is a list of action dicts (or a JSON string of one),
+        executed in order on ONE session — cookies and form fills carry
+        across steps, so a login performed in step 2 is alive in step 10:
+
+          [{"act": "open",    "url": "https://example.com"},
+           {"act": "extract", "kind": "meta"},
+           {"act": "fill",    "name": "q", "value": "no morals"},
+           {"act": "submit",  "target": "0"},
+           {"act": "extract", "kind": "headings"},
+           {"act": "click",   "target": "next page"},
+           {"act": "wait",    "seconds": 2},
+           {"act": "back"},
+           {"act": "stop",    "note": "done"}]
+
+        Supported acts: open/goto | wait | click | fill | submit |
+        extract | text | markdown | links | back | stop. Each step is
+        retried once on failure; a second failure halts the task (or
+        continues, with ``stop_on_error=False``) and the report says
+        exactly where. Capped at ``max_steps`` (or the session's
+        profile-tuned cap) so a bad plan cannot loop the network.
+        """
+        if isinstance(steps, str):
+            try:
+                steps = json.loads(steps)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"task steps must be a JSON list: {exc}") from exc
+        if not isinstance(steps, list) or not steps:
+            raise ToolError("task needs a non-empty list of step dicts")
+        cap = max_steps or self.max_task_steps
+        if len(steps) > cap:
+            raise ToolError(f"task has {len(steps)} steps — cap is {cap} "
+                            f"(profile limit; split the task or raise runtime limits)")
+        report: list[dict[str, Any]] = []
+        halted = False
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise ToolError(f"step {i} must be a dict, got {type(step).__name__}")
+            act = str(step.get("act") or step.get("action") or "").strip().lower()
+            if act == "goto":
+                act = "open"
+            if act not in self._TASK_ACTS:
+                raise ToolError(f"step {i}: unknown act {act!r}; "
+                                f"one of: {', '.join(sorted(self._TASK_ACTS))}")
+            if act == "stop":
+                report.append({"i": i, "act": "stop", "ok": True,
+                               "note": str(step.get("note", "stopped by task"))[:200]})
+                break
+            data: Any = None
+            error = ""
+            for attempt in (1, 2):  # one retry per step
+                try:
+                    data = self._run_task_step(act, step)
+                    error = ""
+                    break
+                except ToolError as exc:
+                    error = str(exc)
+                    if attempt == 2:
+                        break
+                except Exception as exc:  # noqa: BLE001 - report, don't crash
+                    error = f"{type(exc).__name__}: {exc}"
+                    if attempt == 2:
+                        break
+            ok = not error
+            entry = {"i": i, "act": act, "ok": ok}
+            if error:
+                entry["error"] = error[:300]
+            else:
+                entry["data"] = self._compact_task_data(data)
+            report.append(entry)
+            if not ok and stop_on_error:
+                halted = True
+                break
+        return {
+            "ok": not halted,
+            "session": self.name,
+            "url": self.url,
+            "title": self.title,
+            "steps_total": len(steps),
+            "steps_done": len(report),
+            "steps": report,
+        }
+
+    def _run_task_step(self, act: str, step: dict[str, Any]) -> Any:
+        if act == "open":
+            return self.open(url=str(step.get("url", "")))
+        if act == "wait":
+            seconds = min(10.0, max(0.0, float(step.get("seconds", 1.0))))
+            time.sleep(seconds)
+            return {"waited": seconds}
+        if act == "click":
+            return self.click(target=str(step.get("target", "")))
+        if act == "fill":
+            return self.fill(name=str(step.get("name", "")),
+                             value=str(step.get("value", "")))
+        if act == "submit":
+            return self.submit(target=str(step.get("target", "")))
+        if act == "extract":
+            return self.extract(target=str(step.get("target", "")),
+                                kind=str(step.get("kind", "")))
+        if act == "text":
+            return self.text(max_chars=int(step.get("max_chars", 40000)))
+        if act == "markdown":
+            return self.markdown(max_chars=int(step.get("max_chars", 40000)))
+        if act == "links":
+            return self.links(max_links=int(step.get("max_links", 100)))
+        if act == "back":
+            if len(self._history) <= 1:
+                raise ToolError("nowhere to go back to")
+            self._history.pop()
+            target_url = self._history[-1]
+            return self.open(url=target_url)
+        raise ToolError(f"unhandled task act {act!r}")
+
+    @staticmethod
+    def _compact_task_data(data: Any) -> Any:
+        """Keep step data JSON-able and small enough for a tool result."""
+        if isinstance(data, dict):
+            out: dict[str, Any] = {}
+            for k, v in data.items():
+                if isinstance(v, list) and len(v) > 25:
+                    out[k] = [BrowserSession._compact_task_data(x) for x in v[:25]]
+                    out[k + "_truncated"] = len(v) - 25
+                else:
+                    out[k] = BrowserSession._compact_task_data(v)
+            return out
+        if isinstance(data, list):
+            return [BrowserSession._compact_task_data(x) for x in data[:25]]
+        if isinstance(data, str) and len(data) > 4000:
+            return data[:4000] + f"… ({len(data)} chars total)"
+        return data
+
+    def state(self, **_: Any) -> dict[str, Any]:
+        return {
+            "session": self.name,
+            "url": self.url,
+            "title": self.title,
+            "cookies": len(self.cookie_jar),
+            "requests": self.request_count,
+            "seconds_alive": round(time.time() - self.created_at, 1),
+            "pending_form_values": sorted(self._form_values),
+            "cookies_persisted_to": self._session_file(),
+        }
+
+    def close(self, **_: Any) -> dict[str, Any]:
+        # Persist cookies BEFORE clearing: a task that logged in keeps the
+        # login for the next session with this name.
+        self._save_cookies()
+        self.dom = None
+        self._raw = ""
+        self.url = ""
+        self.title = ""
+        self.cookie_jar.clear()
+        self._form_values = {}
+        self._history = []
+        return {"ok": True, "closed": self.name, "cookies_persisted": bool(self.session_dir)}
+
+    # -- cookie persistence (wave 86) ------------------------------------------
+    def _session_file(self) -> str:
+        if not self.session_dir:
+            return ""
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", self.name or "default")
+        return os.path.join(self.session_dir, f"{safe}.json")
+
+    def _save_cookies(self) -> None:
+        path = self._session_file()
+        if not path:
+            return
+        try:
+            os.makedirs(self.session_dir, exist_ok=True)
+            # __getstate__ is the canonical cookie field dump — immune to
+            # constructor signature drift between Python versions.
+            payload = [c.__getstate__() for c in self.cookie_jar]
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, default=str)
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            _log.debug("cookie save failed for session %r: %s", self.name, exc)
+
+    def _load_cookies(self) -> None:
+        path = self._session_file()
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            fields = {"version", "name", "value", "port", "port_specified",
+                      "domain", "domain_specified", "domain_initial_dot",
+                      "path", "path_specified", "secure", "expires", "discard",
+                      "comment", "comment_url", "rest", "rfc2109"}
+            count = 0
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                cookie = http.cookiejar.Cookie.__new__(http.cookiejar.Cookie)
+                for key, value in entry.items():
+                    if key in fields:
+                        setattr(cookie, key, value)
+                if not getattr(cookie, "name", "") or \
+                        not getattr(cookie, "domain", ""):
+                    continue  # half-formed entry: skip, keep the rest
+                self.cookie_jar.set_cookie(cookie)
+                count += 1
+            if count:
+                _log.info("browser session %r: restored %d persisted cookie(s)",
+                          self.name, count)
+        except Exception as exc:  # noqa: BLE001 - a corrupt file just means no cookies
+            _log.debug("cookie load failed for session %r: %s", self.name, exc)
+
+    # -- helpers ---------------------------------------------------------------
+    def _require_page(self) -> None:
+        if self.dom is None:
+            raise ToolError("no page open — use browser open <url> first")
+
+
+_ACTIONS = {
+    "open": BrowserSession.open,
+    "text": BrowserSession.text,
+    "markdown": BrowserSession.markdown,
+    "links": BrowserSession.links,
+    "click": BrowserSession.click,
+    "fill": BrowserSession.fill,
+    "submit": BrowserSession.submit,
+    "extract": BrowserSession.extract,
+    "walk": BrowserSession.walk,
+    "task": BrowserSession.task,
+    "state": BrowserSession.state,
+    "close": BrowserSession.close,
+}
+
+
+def _parse_selector(selector: str) -> tuple[str, str]:
+    """'tag', '#id', or '.class' → (kind, value) with kind in tag|id|class."""
+    s = selector.strip()
+    if s.startswith("#"):
+        return "id", s[1:]
+    if s.startswith("."):
+        return "class", s[1:]
+    return "tag", s
+
+
+# ── form helpers ─────────────────────────────────────────────────────────────
+
+
+def _form_fields(form: Node) -> list[Node]:
+    fields: list[Node] = []
+    for node in form.walk():
+        if node.tag in {"input", "textarea", "select"}:
+            fields.append(node)
+    return fields
+
+
+def _form_field_names(dom: Node) -> set[str]:
+    names: set[str] = set()
+    for form in dom.find_all("form"):
+        for field in _form_fields(form):
+            name = field.attrs.get("name")
+            if name:
+                names.add(name)
+    return names
+
+
+
+
+
+# ── robots (shared with web tools) ───────────────────────────────────────────
+
+
+def _robots_allowed(url: str, user_agent: str) -> bool:
+    try:
+        from .web import _robots
+
+        return _robots.allowed(url, user_agent)
+    except Exception:  # noqa: BLE001 - robots should never hard-block the browser
+        return True
+
+
+# ── ssl (one context, shared) ────────────────────────────────────────────────
+
+
+def _ssl_context():
+    import ssl
+
+    return ssl.create_default_context()
+
+
+# ── session registry ─────────────────────────────────────────────────────────
+
+_sessions: dict[str, BrowserSession] = {}
+_sessions_lock = threading.Lock()
+
+
+def get_session(name: str = "default", **settings: Any) -> BrowserSession:
+    with _sessions_lock:
+        session = _sessions.get(name or "default")
+        if session is None:
+            session = BrowserSession(name=name or "default", **settings)
+            _sessions[name or "default"] = session
+        return session
+
+
+def drop_session(name: str = "default") -> bool:
+    with _sessions_lock:
+        return _sessions.pop(name or "default", None) is not None
+
+
+# ── tool registration ────────────────────────────────────────────────────────
+
+
+def register(registry: Any) -> None:
+    context = registry.context
+    settings = getattr(context, "settings", None) if context is not None else None
+    tools_settings = getattr(settings, "tools", None) if settings else None
+    user_agent = getattr(tools_settings, "user_agent", "NoMoralsCore/0.1") if tools_settings else "NoMoralsCore/0.1"
+    timeout = getattr(tools_settings, "http_timeout", 30.0) if tools_settings else 30.0
+    respect_robots = getattr(tools_settings, "robots_txt", True) if tools_settings else True
+    proxy_url = getattr(tools_settings, "proxy_url", "") if tools_settings else ""
+    # wave 86: cookie persistence on disk + profile-tuned task cap
+    tune = (getattr(context, "extras", None) or {}).get("tune") if context is not None else None
+    session_dir = str(getattr(settings, "resolve", lambda p: p)
+                      ("data/browser/sessions")) if settings is not None else ""
+    tune_profile = getattr(tune, "profile", None) if tune is not None else None
+    tune_kind = str(getattr(tune_profile, "kind", ""))
+    max_task_steps = 6 if tune_kind in ("termux", "mobile", "embedded") else 12
+
+    @registry.register(
+        "browser",
+        description=(
+            "stateful web browsing (v2): open a page and read it (text/markdown), "
+            "list links, click, fill and submit forms, extract elements or "
+            "STRUCTURED views (headings/tables/forms/meta/nav), walk a "
+            "trust-ranked multi-page research path, or run a multi-step task "
+            "(a small program of open/fill/submit/extract/click/back steps); "
+            "cookies persist per session AND across restarts; flaky fetches "
+            "are retried with backoff"
+        ),
+        capability=Capability.NET_BROWSER,
+        parameters={
+            "action": "str — open|text|markdown|links|click|fill|submit|extract|walk|task|state|close",
+            "url": "str — for open/walk",
+            "target": "str — for click (link text/href/index), submit (form index/id), extract (tag, #id, .class)",
+            "kind": "str — for extract: headings|tables|forms|meta|nav (structured views, no selector needed)",
+            "name": "str — for fill: the input name",
+            "value": "str — for fill: the value",
+            "session": "str (optional, default 'default') — named cookie session (persisted to disk)",
+            "steps": "list|json — for task: [{act, ...}] multi-step program (open/fill/submit/extract/click/back/wait/stop)",
+            "max_chars": "int (optional) — cap for text/markdown output",
+        },
+    )
+    def browser(
+        action: str,
+        url: str = "",
+        target: str = "",
+        name: str = "",
+        value: str = "",
+        kind: str = "",
+        steps: Any = None,
+        session: str = "default",
+        max_chars: int = 40000,
+        **_: Any,
+    ) -> dict[str, Any]:
+        sess = get_session(session, user_agent=user_agent, timeout=timeout,
+                           respect_robots=respect_robots, proxy_url=proxy_url,
+                           session_dir=session_dir, max_task_steps=max_task_steps)
+        try:
+            return sess.do(action, url=url, target=target, name=name,
+                           value=value, kind=kind, steps=steps, max_chars=max_chars)
+        except ToolError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a browser error is a result
+            raise ToolError(f"browser {action} failed: {classify(exc).message}") from exc
