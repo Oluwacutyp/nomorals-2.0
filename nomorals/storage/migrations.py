@@ -1522,6 +1522,62 @@ def _apply_search_engine_schema(db: object) -> None:
                 f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+def _apply_skills_table_unify(db: object) -> None:
+    """Wave 77: ONE skills table.
+
+    Two stores had grown up: the plain ``skills`` table (id, name,
+    description, code, timestamps) and the SkillLibrary's ``agent_skills``
+    twin with the usage/pruning columns.  The library now lives directly on
+    ``skills`` (external tooling and schedulers update its rows by name),
+    so extend ``skills`` to the full schema, copy any twin rows over, and
+    index what the library queries.
+    """
+    wanted = {
+        "kind": "TEXT NOT NULL DEFAULT 'strategy'",
+        "body": "TEXT NOT NULL DEFAULT ''",
+        "tags": "TEXT NOT NULL DEFAULT ''",
+        "source": "TEXT NOT NULL DEFAULT ''",
+        "uses": "INTEGER NOT NULL DEFAULT 0",
+        "success_count": "INTEGER NOT NULL DEFAULT 0",
+        "failure_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_used": "REAL NOT NULL DEFAULT 0",
+        "version": "INTEGER NOT NULL DEFAULT 1",
+        "pruned": "INTEGER NOT NULL DEFAULT 0",
+        "pruned_at": "REAL NOT NULL DEFAULT 0",
+        "pruned_reason": "TEXT NOT NULL DEFAULT ''",
+    }
+    try:  # the plain table always exists from migration 25; be paranoid
+        have = {r["name"] for r in db.query("PRAGMA table_info(skills)")}  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - no table at all: create it first
+        db.execute(  # type: ignore[attr-defined]
+            "CREATE TABLE IF NOT EXISTS skills ("
+            "id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', "
+            "description TEXT NOT NULL DEFAULT '', code TEXT NOT NULL DEFAULT '', "
+            "created_at REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL DEFAULT 0)"
+        )
+        have = set()
+    for col, ddl in wanted.items():
+        if col not in have:
+            db.execute(f"ALTER TABLE skills ADD COLUMN {col} {ddl}")  # type: ignore[attr-defined]
+    try:  # carry the twin's rows forward (idempotent by PRIMARY KEY)
+        keys = sorted(set(wanted) | {
+            "id", "name", "description", "created_at", "updated_at"})
+        cols = ", ".join(keys)
+        marks = ", ".join("?" for _ in keys)
+        for r in db.query("SELECT * FROM agent_skills"):  # type: ignore[attr-defined]
+            vals = tuple(r[k] if k in r.keys() else None for k in keys)
+            db.execute(  # type: ignore[attr-defined]
+                f"INSERT OR IGNORE INTO skills ({cols}) VALUES ({marks})", vals)
+    except Exception:  # noqa: BLE001 - no twin table: nothing to carry
+        pass
+    db.execute("CREATE INDEX IF NOT EXISTS idx_skills_name "  # type: ignore[attr-defined]
+               "ON skills(name)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_skills_kind "  # type: ignore[attr-defined]
+               "ON skills(kind)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_skills_pruned "  # type: ignore[attr-defined]
+               "ON skills(pruned, updated_at DESC)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1575,6 +1631,7 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_memory_tags_origin),
     Migration(48, "search_engine_schema",
               fn=_apply_search_engine_schema),
+    Migration(49, "skills_table_unify", fn=_apply_skills_table_unify),
 )
 
 
