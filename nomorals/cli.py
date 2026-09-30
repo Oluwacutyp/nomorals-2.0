@@ -974,19 +974,15 @@ def _cmd_code_review(args: argparse.Namespace, context: Any, ref: str | None) ->
 
 
 def _cmd_code_test(args: argparse.Namespace, context: Any) -> int:
-    """Run the test suite. Phase B makes this pytest-aware; for now it shells
-    out to the unittest discover command."""
-    import subprocess
+    """Run the test suite through the pytest-aware runner (Phase B)."""
+    from .tools.pytest_runner import format_test_result, run_tests
 
     root = str(Path(args.root).expanduser().resolve())
-    if args.changed:
-        # Phase B will select tests by changed files; Phase A is honest
-        # about running the whole suite.
-        print("(note: --changed selection lands in Phase B; running full suite)")
-    cmd = [sys.executable, "-u", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
-    print(f"$ {' '.join(cmd)}  (in {root})")
-    proc = subprocess.run(cmd, cwd=root)
-    return proc.returncode
+    result = run_tests(changed_only=bool(args.changed), repo=root)
+    print(format_test_result(result))
+    if result.get("failed"):
+        return 1
+    return 0 if result.get("ok") else 1
 
 
 def _cmd_run(args: argparse.Namespace, context: Any) -> int:

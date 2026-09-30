@@ -19,6 +19,8 @@ loud ("model returned no code") rather than pretending to work.
 
 from __future__ import annotations
 
+import difflib
+import json
 import re
 import sys
 import time
@@ -81,6 +83,64 @@ def extract_code_block(text: str) -> str:
     return ""
 
 
+_JSON_BLOCK = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def _parse_json_block(text: str) -> Any:
+    """Pull the first fenced (```json) block out of a model reply and parse
+    it. Returns None when there is no block or it is not valid JSON."""
+    if not text:
+        return None
+    match = _JSON_BLOCK.search(text)
+    raw = match.group(1) if match else text
+    try:
+        return json.loads(raw.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_edits_block(text: str) -> list[dict[str, str]] | None:
+    """Parse the surgical-edit protocol: ``{"edits": [{old_text, new_text}]}``.
+
+    Returns the edit list (possibly empty), or None when the model gave
+    nothing usable.
+    """
+    data = _parse_json_block(text)
+    if not isinstance(data, dict):
+        return None
+    edits = data.get("edits")
+    if not isinstance(edits, list):
+        return None
+    out: list[dict[str, str]] = []
+    for edit in edits:
+        if (isinstance(edit, dict)
+                and isinstance(edit.get("old_text"), str)
+                and isinstance(edit.get("new_text"), str)):
+            out.append({"old_text": edit["old_text"],
+                        "new_text": edit["new_text"]})
+        else:
+            return None
+    return out
+
+
+def _unified_diff(before: str, after: str, rel: str) -> str:
+    """Unified diff of two file texts ("" when identical)."""
+    if before == after:
+        return ""
+    return "\n".join(difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm=""))
+
+
+def _format_lint_result(lint_res: dict[str, Any]) -> str:
+    """Lint violations as fix-loop feedback."""
+    lines = ["ruff lint failed:"]
+    for viol in lint_res.get("violations", [])[:10]:
+        lines.append(f"{viol.get('file')}:{viol.get('line')}:{viol.get('col')}: "
+                     f"{viol.get('code')} {viol.get('message')}")
+    return "\n".join(lines)
+
+
 @dataclass
 class CodingResult:
     ok: bool
@@ -139,86 +199,310 @@ class CodingAgent:
         timeout: float = 60.0,
         seed_code: str = "",
     ) -> CodingResult:
-        """Run the write->run->fix loop until the acceptance command is green.
+        """Run the surgical multi-file edit loop (audit Phase B).
 
-        ``seed_code`` (wave 65) pre-loads the file with code from a PREVIOUS
-        build step, so multi-step build projects extend the artifact instead
-        of rewriting it from scratch each step.
+        Plan which files change, edit them with exact-text replacement via
+        the ``edit_file`` tool surface (never whole-file rewrites of
+        existing files), verify with the pytest-aware runner, and gate on
+        lint.  An explicitly passed ``accept`` command overrides the test
+        runner (the ``--accept`` escape hatch for non-Python / exotic
+        cases).  ``seed_code`` pre-loads the default file on round 1.
         """
+        from ..tools import lint as _lint_mod
+        from ..tools import pytest_runner as _pytest_mod
+        from ..tools.edit_loop import EditLoop
+
         started = time.perf_counter()
+        use_runner = not accept
         accept = accept or f'python3 "{filename}"'
         # wave 68: a long/multi-clause build ask is structured into a
-        # spec first (objective + steps + criteria) — the draft loop then
-        # works from a spec, not from raw prose.  One bounded model call,
-        # skipped for short asks, best-effort throughout.
+        # spec first — unchanged from Phase A.
         draft_task = task
         try:
             from .brief import BriefAgent, should_brief
 
-            # gate on the CORE request: an execution prompt that already
-            # carries injected prior-art is not a raw ask worth re-wrapping
+            # gate on the CORE request (see core_request above)
             if should_brief(core_request(task)):
                 brief = BriefAgent(self.context).refine(task, kind="code")
                 if brief.by == "model":
                     draft_task = brief.as_goal()
         except Exception:  # noqa: BLE001 — structuring is best-effort
             pass
-        current = seed_code or ""
-        last_error = ""
+
         workdir = self._resolve(".")
+        editor = EditLoop(agent=None, project_root=str(workdir))
 
-        for attempt in range(1, max(max_iterations, 1) + 1):
-            seeded = bool(seed_code) and attempt == 1 and not last_error
-            code = self._draft(draft_task, filename, current, last_error,
-                               attempt, seeded=seeded)
-            if not code:
-                return CodingResult(
-                    ok=False,
-                    iterations=attempt - 1,
-                    error="model returned no code block (check the active provider in /status)",
-                    seconds=time.perf_counter() - started,
-                )
-
-            # The reasoning pre-flight: a harsh reviewer reads the draft
-            # BEFORE it spends a sandbox run; if it finds real flaws the
-            # code is revised once. A revision that yields no code block
-            # keeps the original draft.
-            if attempt == 1:
-                code = self._reason_review_code(draft_task, code)
-
-            path = self._resolve(filename)
-            path.write_text(code, encoding="utf-8")
-            result = self._run(accept, workdir, timeout)
-            self._journal(task, filename, attempt, code, result)
-            _log.info(
-                "coding agent attempt %d: exit=%s (%.2fs)%s",
-                attempt,
-                result["exit_code"],
-                result["seconds"],
-                "" if result["exit_code"] == 0 else " — fixing",
+        # ── plan step: which files change and why ──
+        plan = self._plan_files(draft_task, filename, workdir)
+        per_file = max(1, max_iterations // max(1, len(plan)))
+        budgets = {spec["path"]: per_file for spec in plan}
+        texts: dict[str, str | None] = {}
+        for spec in plan:
+            p = self._resolve(spec["path"])
+            texts[spec["path"]] = (
+                p.read_text(encoding="utf-8") if p.is_file() else None
             )
+        file_errors = {spec["path"]: "" for spec in plan}
+        changed: list[str] = []
+        last_error = ""
+        rounds = max(1, max_iterations)
 
-            if result["exit_code"] == 0 and not result["timed_out"]:
-                # closed loop (wave 66): a session that had to fix
-                # itself is prior art — distill the error -> fix trail
-                # into a reusable code skill.
-                self._distill_session(task, filename, attempt)
+        for attempt in range(1, rounds + 1):
+            if not any(v > 0 for v in budgets.values()):
+                break  # every file spent its budget — stop, don't re-verify
+            diffs: dict[str, str] = {}
+            touched: list[str] = []
+            for spec in plan:
+                rel = spec["path"]
+                if budgets[rel] <= 0:
+                    continue
+                path = self._resolve(rel)
+                before = path.read_text(encoding="utf-8") if path.is_file() else ""
+                is_new = texts[rel] is None or spec.get("new_file")
+                if is_new:
+                    # New files may still be drafted whole.
+                    seeded = bool(seed_code) and rel == filename and attempt == 1
+                    code = self._draft(
+                        draft_task, rel,
+                        (seed_code if seeded else texts[rel] or ""),
+                        file_errors[rel] or last_error, attempt, seeded=seeded)
+                    if not code:
+                        return CodingResult(
+                            ok=False,
+                            iterations=attempt - 1,
+                            error="model returned no code block (check the active provider in /status)",
+                            seconds=time.perf_counter() - started,
+                        )
+                    if attempt == 1:
+                        code = self._reason_review_code(draft_task, code)
+                    path.write_text(code, encoding="utf-8")
+                    texts[rel] = code
+                else:
+                    edits = self._draft_edits(
+                        draft_task, rel, texts[rel] or "",
+                        file_errors[rel] or last_error, attempt)
+                    if edits is None:
+                        file_errors[rel] = "model returned no usable edits"
+                        budgets[rel] -= 1
+                        continue
+                    if not edits:
+                        continue  # model judges no change needed
+                    apply_errors: list[str] = []
+                    for edit in edits:
+                        try:
+                            editor.surgical_replace(
+                                rel, edit["old_text"], edit["new_text"])
+                        except (ValueError, FileNotFoundError) as exc:
+                            apply_errors.append(str(exc))
+                    texts[rel] = (path.read_text(encoding="utf-8")
+                                  if path.is_file() else "")
+                    if apply_errors:
+                        file_errors[rel] = ("edit application failed: "
+                                           + "; ".join(apply_errors))
+                        budgets[rel] -= 1
+                        continue
+                    file_errors[rel] = ""
+                budgets[rel] -= 1
+                after = path.read_text(encoding="utf-8") if path.is_file() else ""
+                diff_text = _unified_diff(before, after, rel)
+                if not diff_text.strip():
+                    continue
+                diffs[rel] = diff_text
+                touched.append(rel)
+                if rel not in changed:
+                    changed.append(rel)
+                # Phase B: the harsh reviewer runs over EVERY applied diff,
+                # not just attempt-1 new-file drafts. Flaws become next
+                # round's fix prompt for that file.
+                flaws = self._review_flaws(draft_task, diff_text)
+                if flaws:
+                    file_errors[rel] = (
+                        "reviewer found flaws in the applied diff: "
+                        + "; ".join(flaws))
+
+            # ── verify ──
+            if use_runner:
+                tres = _pytest_mod.run_tests(
+                    repo=str(workdir),
+                    timeout=min(max(timeout * 5.0, 60.0), 600.0))
+                green = (tres["ok"] and not tres["failed"]
+                         and not tres["errors"])
+                verify_out = _pytest_mod.format_test_result(tres)
+                verify_err = "" if green else verify_out
+            else:
+                raw = self._run(accept, workdir, timeout)
+                green = raw["exit_code"] == 0 and not raw["timed_out"]
+                verify_out = (raw.get("stdout") or "")[-4000:]
+                verify_err = ((raw.get("stderr") or raw.get("stdout")
+                               or "non-zero exit"))[-4000:]
+                if not green:
+                    verify_out = (f"accept command failed "
+                                  f"(exit {raw.get('exit_code')}):\n{verify_err}")
+            vresult = {"exit_code": 0 if green else 1, "timed_out": False,
+                       "stdout": verify_out, "stderr": verify_err}
+            for rel in touched:
+                self._journal(task, rel, attempt,
+                              diffs.get(rel, "")[:60000], vresult)
+            _log.info("coding agent round %d: %s%s", attempt,
+                      "green" if green else "failing",
+                      "" if green else " — fixing")
+
+            if green:
+                # ── lint gate: runs AFTER tests go green; lint failures
+                # become fix-iterations exactly like test failures. ──
+                lint_res = _lint_mod.lint(changed or [filename],
+                                          repo=str(workdir))
+                if not lint_res["ruff_installed"]:
+                    _log.info("ruff not installed — lint gate skipped "
+                              "(honest skip, never a silent pass)")
+                elif not lint_res["ok"]:
+                    last_error = _format_lint_result(lint_res)
+                    for rel in changed:
+                        file_errors[rel] = last_error
+                    for rel in touched:
+                        self._journal(task, rel, attempt,
+                                      diffs.get(rel, "")[:60000],
+                                      {"exit_code": 1, "timed_out": False,
+                                       "stdout": "", "stderr": last_error})
+                    continue
+                # closed loop (wave 66): distill per changed file.
+                for rel in changed:
+                    self._distill_session(task, rel, attempt)
                 return CodingResult(
                     ok=True,
                     iterations=attempt,
-                    files=[filename],
-                    output=result["stdout"],
+                    files=changed or [filename],
+                    output=verify_out[-2000:],
                     seconds=time.perf_counter() - started,
                 )
-            current = code
-            last_error = (result["stderr"] or result["stdout"] or "non-zero exit")[-4000:]
+            last_error = verify_err
+            for rel in touched:
+                if not file_errors[rel]:
+                    file_errors[rel] = verify_err[-2000:]
 
+        stuck = [s["path"] for s in plan
+                 if budgets[s["path"]] <= 0 and file_errors[s["path"]]]
+        error = f"still failing after {rounds} attempts: {last_error[-500:]}"
+        if stuck:
+            error += f" | files that did not converge: {', '.join(stuck)}"
         return CodingResult(
             ok=False,
-            iterations=max_iterations,
-            error=f"still failing after {max_iterations} attempts: {last_error[-500:]}",
+            iterations=rounds,
+            error=error,
             seconds=time.perf_counter() - started,
         )
+
+    def _plan_files(self, task: str, default: str,
+                    workdir: Path) -> list[dict[str, Any]]:
+        """Ask the model which files the task touches (Phase B plan step).
+
+        Returns ``[{path, why, new_file}]``. Falls back to the single
+        default file when the model gives nothing usable — the loop stays
+        single-file then, exactly like Phase A.
+        """
+        system = (
+            "You are a build planner. Decide which files must be created or "
+            "modified to complete the task. Respond with EXACTLY ONE fenced "
+            "```json block shaped like "
+            '{"files": [{"path": "relative/path.py", "why": "one line", '
+            '"new_file": false}]} — paths are relative to the project root. '
+            "No prose outside the block."
+        )
+        response = self.router.chat(
+            [Message.system(system), Message.user(f"Task: {task}")],
+            SamplingParams(temperature=0.2),
+        )
+        specs = self._default_plan(default, workdir)
+        if not getattr(response, "ok", False):
+            return specs
+        data = _parse_json_block(response.text)
+        items = data.get("files") if isinstance(data, dict) else None
+        if not items:
+            return specs
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for item in items[:12]:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("path", "")).strip()
+            if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+                continue
+            try:
+                self._resolve(rel)
+            except ValueError:
+                continue  # escapes the project root
+            if rel in seen:
+                continue
+            seen.add(rel)
+            out.append({"path": rel, "why": str(item.get("why", ""))[:200],
+                        "new_file": bool(item.get("new_file"))
+                        and not (workdir / rel).is_file()})
+        return out or specs
+
+    def _default_plan(self, default: str,
+                      workdir: Path) -> list[dict[str, Any]]:
+        return [{"path": default, "why": "default target (plan step fallback)",
+                 "new_file": not (workdir / default).is_file()}]
+
+    def _draft_edits(self, task: str, rel: str, current: str,
+                     last_error: str, attempt: int) -> list[dict[str, str]] | None:
+        """Ask the model for surgical edits to an existing file.
+
+        Returns a list of ``{old_text, new_text}`` (possibly empty when the
+        model judges no change is needed), or None when the model gave
+        nothing usable.
+        """
+        system = (
+            "You are a surgical code editor. Fix the file below with minimal "
+            "exact-text replacements. Respond with EXACTLY ONE fenced ```json "
+            "block shaped like "
+            '{"edits": [{"old_text": "<exact text copied verbatim from the file>", '
+            '"new_text": "<replacement>"}]}. old_text must appear EXACTLY as '
+            "written in the file (copy it verbatim, including whitespace) and "
+            "should be unique — include surrounding context lines. Change "
+            "only what the task needs. If no change is needed, return "
+            '{"edits": []}. No prose outside the block.'
+        )
+        user = (f"Task: {task}\n\nFile: {rel}\n\nCurrent content:\n```\n"
+                f"{current}\n```\n\nAttempt {attempt}.")
+        if last_error:
+            user += (f"\n\nThe last round FAILED with this exact output:\n```\n"
+                     f"{last_error}\n```\nFix it with minimal edits.")
+            # hard mid-loop recall (wave 67), same as _draft
+            fixes = self._recall_error_fixes(last_error)
+            if fixes:
+                user += "\n" + fixes
+        elif attempt == 1:
+            traps = self._trap_warning()
+            if traps:
+                user += "\n\n" + traps
+        response = self.router.chat(
+            [Message.system(system), Message.user(user)],
+            SamplingParams(temperature=0.2),
+        )
+        if not getattr(response, "ok", False):
+            _log.warning("coding agent: edit-model call failed: %s",
+                         getattr(response, "error", "?"))
+            return None
+        return _parse_edits_block(response.text)
+
+    def _review_flaws(self, task: str, text: str,
+                      focus: str | None = None) -> list[str]:
+        """The harsh reviewer, factored out so Phase B can run it over
+        every applied diff — not just attempt-1 new-file drafts."""
+        from .reasoning import looks_complex, reasoning_enabled, review_text
+
+        # gate on the CORE request (see core_request above)
+        core = core_request(task)
+        if not reasoning_enabled(self.context,
+                                 complex_ok=looks_complex(core)
+                                 or len(core) >= 80):
+            return []
+        return review_text(
+            self.context, text,
+            focus=focus or "the applied diff below: undefined names, wrong "
+                           "indices, unhandled edge cases, or changes that "
+                           "break the task's acceptance criteria") or []
 
     def sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Recent iterations, newest first (for inspection after the fact)."""
@@ -375,18 +659,10 @@ class CodingAgent:
         bugs (wrong indices, undefined names, missing edge cases); if it
         finds any, the code is revised once. Gated by NM_REASONING_MODE;
         power mode reviews every draft with a relaxed budget."""
-        from .reasoning import (looks_complex, reasoning_enabled,
-                                revise_text, review_text)
+        from .reasoning import revise_text
 
-        # gate on the CORE request — injected prior-art blocks are not
-        # complexity (judging them would double every build's calls)
-        core = core_request(task)
-        if not reasoning_enabled(self.context,
-                                 complex_ok=looks_complex(core)
-                                 or len(core) >= 80):
-            return code
-        flaws = review_text(
-            self.context, code,
+        flaws = self._review_flaws(
+            task, code,
             focus="python code that must run without error: undefined "
                   "names, wrong indices, unhandled edge cases the task "
                   "implies")

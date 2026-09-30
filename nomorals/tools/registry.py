@@ -112,10 +112,11 @@ class ToolRegistry:
             "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "filesend",
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
+            "lint",
             "edit_loop",
             "macros", "media", "metadata", "monitor",
             "network", "osint", "osint_graph", "osint_people", "parsers",
-            "proxy", "proxylab", "run_code", "sandbox_code", "scriptgen",
+            "proxy", "proxylab", "pytest_runner", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "workspace",
             # the agent bridge registers last: agent modules own the real
             # implementations, and thin tools/ wrappers of the same name
