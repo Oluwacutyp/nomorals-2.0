@@ -127,6 +127,11 @@ DEFAULT_COLAB_BASE = "huihui-ai/Qwen2.5-7B-Instruct-abliterated-v2"
 #: days).  The pool caps below allow ~523k unique rows.
 DEFAULT_TARGET_ROWS = 500_000
 
+#: Smallest row count worth a Colab session: below this the QLoRA run is
+#: noise. 'nm data mix' lifts a smaller --rows to this floor for fetched,
+#: manifest-complete sources (clamped to what the sources actually hold).
+NOTEBOOK_MIN_TARGET_ROWS = 100
+
 #: The default data recipe — the 500K class (wave 69e).  Every id and
 #: row count verified live against HuggingFace on 2026-09-12:
 #:   * teknium/OpenHermes-2.5   → 1,001,551 rows, ShareGPT `conversations`

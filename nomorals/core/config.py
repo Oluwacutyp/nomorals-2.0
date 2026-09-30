@@ -119,6 +119,11 @@ class LLMSettings:
     #: 2026-08-16) — the default must be a live ID, and NM_GROQ_MODEL exists
     #: so a drift event is a .env edit, not a re-release.
     groq_model: str = "openai/gpt-oss-120b"
+    local_lora: str = ""
+
+    #: comma-separated GGUF LoRA adapter(s) the llama.cpp server stacks on
+    #: the promoted base model (NM_LLM_LOCAL_LORA; written by
+    #: nm models --promote-local <base> --lora <file>)
     #: opt-in ONLY: when no real provider configures, boot with the scripted
     #: mock instead of booting model-less. Default off — a silent mock pretending
     #: to answer is worse than an honest "no model configured".

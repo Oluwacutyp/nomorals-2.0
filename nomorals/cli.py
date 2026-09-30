@@ -36,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--activate", default="", help="activate a registered model by name")
     models.add_argument("--promote-local", default="",
                         help="point the whole system at a local GGUF (writes the .env contract)")
+    models.add_argument("--lora", default="",
+                        help="with --promote-local: GGUF LoRA adapter(s) to run "
+                             "on top of the base model (comma-separated)")
 
     data = sub.add_parser("data", help="fine-tune data: catalog, base models, persona mix")
     data.add_argument("action", nargs="?", default="catalog",
@@ -380,15 +383,52 @@ def _cmd_data(args: argparse.Namespace, context: Any) -> int:
             persona = ft.load_persona(getattr(args, "persona_file", "") or "")
         out_base = _P(args.out) if getattr(args, "out", "") else data_dir / "persona-mix"
         sources = [ft.MixSource(name=_P(fpath).stem, path=fpath) for fpath in found]
+        # A fetched source carries <name>.manifest.json (rows, HF id,
+        # config): recipe-complete.  For those, a tiny --rows is treated as
+        # "at least the Colab floor" — 100 rows is the smallest sample that
+        # moves a QLoRA — clamped down to what the sources actually hold.
+        # Hand-made files with no manifest take the number literally.
+        requested = int(getattr(args, "rows", 0) or 0)
+        metas: list[dict] = []
+        for fpath in found:
+            mf = _P(fpath).with_suffix(".manifest.json")
+            try:
+                metas.append(json.loads(mf.read_text(encoding="utf-8"))
+                             if mf.is_file() else {})
+            except Exception:  # noqa: BLE001 — a corrupt manifest = no manifest
+                metas.append({})
+        recipe = bool(metas) and all(m and m.get("rows") for m in metas)
         kwargs: dict = {}
-        if getattr(args, "rows", 0):
-            kwargs["target_rows"] = int(args.rows)
+        notebook_target = 0
+        if recipe:
+            available = sum(int(m.get("rows") or 0) for m in metas)
+            floor = min(ft.NOTEBOOK_MIN_TARGET_ROWS, available)
+            eff = max(requested or floor, floor)
+            kwargs["target_rows"] = eff
+            notebook_target = max(requested, ft.NOTEBOOK_MIN_TARGET_ROWS)
+        elif requested:
+            kwargs["target_rows"] = requested
+            notebook_target = requested
         manifest = ft.build_persona_mix(sources, persona, out_base, **kwargs)
         colab = ft.write_colab_script(
             out_base,
             base_model=getattr(args, 'base', '') or ft.DEFAULT_COLAB_BASE,
             train_file=str(manifest["outputs"]["messages_jsonl"]))
         manifest["colab_script"] = colab
+        nb_sources = [
+            {"name": _P(fpath).stem,
+             "id": str((m or {}).get("source") or ""),
+             "config": str((m or {}).get("config") or ""),
+             "rows": int((m or {}).get("rows") or 0)}
+            for fpath, m in zip(found, metas)
+        ]
+        notebook = ft.write_colab_notebook(
+            out_base,
+            base_model=getattr(args, "base", "") or ft.DEFAULT_COLAB_BASE,
+            persona=persona,
+            sources=nb_sources,
+            target_rows=notebook_target or ft.DEFAULT_TARGET_ROWS)
+        manifest["colab_notebook"] = notebook
         per_src = ", ".join(f"{k}={v['rows']}" for k, v in manifest["per_source"].items())
         payload = manifest
         if getattr(args, 'json', False):
@@ -400,6 +440,7 @@ def _cmd_data(args: argparse.Namespace, context: Any) -> int:
         print(f"  filtered: {manifest['filtered']}  dupes dropped: "
               f"{manifest['deduped']}  per source: {per_src}")
         print(f"  colab script: {colab}")
+        print(f"  colab nb:   {notebook}")
         return 0
 
     print(f"unknown data action: {action}")
@@ -603,18 +644,27 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
     registry = ModelRegistry(context.db)
     if getattr(args, "promote_local", ""):
         path = str(args.promote_local).strip()
-        _env_update_home(context, {
+        lora = str(getattr(args, "lora", "") or "").strip()
+        update = {
             "NM_LLM_PROVIDER": "llama_cpp",
             "NM_LLM_LOCAL_MODEL": path,
             "NM_LLM_LOCAL_AUTO_START": "1",
-        })
+        }
+        if lora:
+            update["NM_LLM_LOCAL_LORA"] = lora
+        _env_update_home(context, update)
         try:
             context.settings.llm.provider = "llama_cpp"
             context.settings.llm.local_model = path
+            if lora:
+                context.settings.llm.local_lora = lora
         except Exception:  # noqa: BLE001 — the file is the durable truth
             pass
-        _emit(args, {"ok": True, "local_model": path, "provider": "llama_cpp"},
-              f"local model promoted: {path}\n"
+        payload = {"ok": True, "local_model": path, "lora": lora,
+                   "provider": "llama_cpp"}
+        lora_line = f"  lora on top: {lora}\n" if lora else ""
+        _emit(args, payload,
+              f"local model promoted: {path}\n" + lora_line +
               "  provider -> llama_cpp, auto-start on — written to the home "
               ".env; the next boot runs entirely on it")
         return 0
