@@ -363,7 +363,17 @@ def parse_control(text: str) -> ControlCommand | None:
 
 
 def help_text() -> str:
-    return _HELP_TEXT
+    """The catalog — plus any command registered after the text was written.
+
+    The games registry grows (poker was a late addition) and the static help
+    drifted from CONTROL_COMMANDS; rather than chase every line, coverage is
+    closed here — every registered command is guaranteed to appear.
+    """
+    text = _HELP_TEXT
+    missing = sorted(kind for kind in CONTROL_COMMANDS if f"/{kind}" not in text)
+    if missing:
+        text += "\n  /" + " /".join(missing) + "   (newer games — /list has the full detail)"
+    return text
 
 
 # ── detailed help (wave 67) ─────────────────────────────────────────────────

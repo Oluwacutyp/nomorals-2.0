@@ -211,7 +211,7 @@ def build_context(
         )
 
     if with_router:
-        context.router = _build_router(settings, event_bus)
+        context.router = _build_router(settings, event_bus, db=context.db)
 
     if with_memory:
         from ..memory.manager import MemoryManager
@@ -234,7 +234,62 @@ def build_context(
     return context
 
 
-def _build_router(settings: Settings, bus: EventBus) -> Any:
+PROVIDER_OVERRIDE_KEY = "llm.provider_override"
+FALLBACK_CHAIN_KEY = "llm.fallback_chain"
+
+
+def persist_provider_override(db: Any, provider: str,
+                              chain: list[str] | None = None) -> None:
+    """Durably store the live provider switch (the /model control command).
+
+    Lives in kv_store, not the .env file: the .env is the user's hand —
+    rewriting it from chat would surprise them. The store is applied again
+    at every boot (:func:`_apply_provider_override`), so a switch made mid-
+    conversation survives a restart.
+    """
+    import json as _json
+
+    provider = (provider or "").strip().lower()
+    if not provider:
+        raise ValueError("provider name required")
+    import time as _time
+
+    for key, payload in (
+        (PROVIDER_OVERRIDE_KEY, {"provider": provider}),
+        (FALLBACK_CHAIN_KEY, {"chain": [c.strip().lower() for c in (chain or []) if c.strip()]}),
+    ):
+        db.execute(
+            "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (key, _json.dumps(payload), _time.time()),
+        )
+
+
+def _apply_provider_override(db: Any, settings: Settings) -> None:
+    """kv_store wins over the .env defaults for provider + fallback chain."""
+    import json as _json
+
+    try:
+        row = db.query_one(
+            "SELECT value FROM kv_store WHERE key = ?", (PROVIDER_OVERRIDE_KEY,))
+        if row and row["value"]:
+            provider = str(_json.loads(row["value"]).get("provider") or "").strip().lower()
+            if provider:
+                settings.llm.provider = provider
+        crow = db.query_one(
+            "SELECT value FROM kv_store WHERE key = ?", (FALLBACK_CHAIN_KEY,))
+        if crow and crow["value"]:
+            chain = [str(c).strip().lower() for c in
+                     (_json.loads(crow["value"]).get("chain") or []) if str(c).strip()]
+            if chain:
+                settings.llm.fallback_chain = chain
+    except Exception:  # noqa: BLE001 — a broken override must not stop the boot
+        pass
+
+
+def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
+                  context: Any | None = None) -> Any:
     """Build the provider chain, wiring each backend's own credentials.
 
     Each provider kind needs different arguments; passing one flat kwargs dict
@@ -244,6 +299,9 @@ def _build_router(settings: Settings, bus: EventBus) -> Any:
     from ..llm.providers import build_provider
     from ..llm.router import LLMRouter
 
+    if db is not None:
+        # a live /model switch (or `nm models --set-provider`) beats .env
+        _apply_provider_override(db, settings)
     llm = settings.llm
 
     def kwargs_for(kind: str) -> dict[str, Any]:

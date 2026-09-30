@@ -47,3 +47,4 @@ Thumbs.db
 
 # packaged game lexicon ships in the wheel — never ignore it
 !nomorals/games/data/
+.testdeps/

@@ -757,7 +757,10 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        elif "#" in value:
+        elif value.startswith("#"):
+            # `KEY=   # note` — the value IS the comment: empty, not "#" text
+            value = ""
+        elif " #" in value:
             value = value.split(" #", 1)[0].strip()
         if key:
             values[key] = value
