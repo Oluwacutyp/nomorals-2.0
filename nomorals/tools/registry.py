@@ -108,10 +108,12 @@ class ToolRegistry:
 
         for _name in (
             "archive", "attacker", "audio", "book", "browser",
-            "build_app", "cards", "cipher", "compress", "connectors",
+            "build_app", "cards", "cipher", "code_executor", "compress",
+            "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "filesend",
-            "filesystem", "finance", "giftcard", "hashcrack", "imagedb",
-            "macros", "media", "media_hub", "metadata", "monitor",
+            "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
+            "edit_loop",
+            "macros", "media", "metadata", "monitor",
             "network", "osint", "osint_graph", "osint_people", "parsers",
             "proxy", "proxylab", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "workspace",
