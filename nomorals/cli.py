@@ -211,7 +211,16 @@ def _parser() -> argparse.ArgumentParser:
     trial_sub = trial_parser.add_subparsers(dest="trial_command")
     trial_sub.add_parser("save", help="Save trial data")
     trial_sub.add_parser("list", help="List trial data")
-    sub.add_parser("train", help="Model training")
+    train = sub.add_parser("train", help="model training: backends, runs")
+    train.add_argument("--backends", action="store_true",
+                       help="list training backends with honest machine availability")
+    train.add_argument("--run", action="store_true",
+                       help="kick off one pipeline run (collect→train→evaluate→promote)")
+    train.add_argument("--backend", default="",
+                       help="override the training backend for this run")
+    train.add_argument("--base-model", default="",
+                       help="HF base model id (required for external backends)")
+    train.add_argument("--json", action="store_true", help="Output as JSON")
     help_p = sub.add_parser("help", help="Show help")
     help_p.add_argument("topic", nargs="?", default="",
                         help="command or topic page (e.g. code, budget)")
@@ -1440,9 +1449,46 @@ def _cmd_partner_ask(args, context) -> int:
     return 0
 
 def _cmd_train(args, context):
-    """Stub: train command."""
-    _emit(args, {"status": "ok"}, "Training ready")
-    return 0
+    """Training control: honest backend listing, or one real pipeline run."""
+    import dataclasses
+
+    from .training.backends import available_backends
+
+    if getattr(args, "backends", False):
+        rows = available_backends()
+        configured = (context.settings.training.backend or "native").strip().lower()
+        lines = [f"configured backend: {configured}"]
+        for row in rows:
+            mark = "ok   " if row["available"] else "miss "
+            reason = "" if row["available"] else f" — {row['reason']}"
+            lines.append(f"  {mark}{row['name']}{reason}")
+        _emit(args, {"configured": configured, "backends": rows}, "\n".join(lines))
+        return 0
+
+    if not getattr(args, "run", False):
+        _emit(args, {"started": False},
+              "nothing to do — pass --backends to see engines or --run to train")
+        return 0
+
+    from .self_improvement import SelfImprovementJob
+
+    job = SelfImprovementJob(context)
+    result = job.run(
+        force=True,
+        backend=getattr(args, "backend", "") or "",
+        base_model=getattr(args, "base_model", "") or "",
+    )
+    payload = dataclasses.asdict(result)
+    if result.status in ("skipped",):
+        _emit(args, payload, f"training skipped — {result.reason or 'policy'}")
+        return 0
+    if result.status in ("done", "completed", "succeeded"):
+        _emit(args, payload,
+              f"training {result.status} — run {result.run_id}"
+              + (" PROMOTED" if result.promoted else " (gate did not promote)"))
+        return 0
+    _emit(args, payload, f"training {result.status} — {result.error or result.reason}")
+    return 1
 
 def _cmd_crack(args, context):
     """Stub: crack command."""
