@@ -289,7 +289,9 @@ def _parser() -> argparse.ArgumentParser:
     finance.add_argument("--days", type=int, default=30, help="Transaction history days")
     
     # Native extensions command
-    sub.add_parser("native", help="Native extensions and benchmarks")
+    native = sub.add_parser("native", help="native kernels: status and build")
+    native.add_argument("--build", action="store_true",
+                        help="compile the C++ kernels when a compiler is present")
     
         # Virtual cards commands
     cards = sub.add_parser("cards", help="Virtual card management")
@@ -447,6 +449,24 @@ def _cmd_data(args: argparse.Namespace, context: Any) -> int:
     return 2
 
 
+def _cmd_native(args, context) -> int:
+    """Native hot-path status: which kernels run on C++, which fell back."""
+    from . import native as native_mod
+
+    if getattr(args, "build", False):
+        ok, msg = native_mod.build(force=True)
+        print(f"native build: {'ok' if ok else 'FAILED'} \u2014 {msg}")
+    info = native_mod.info()
+    mlp = info.get("mlp") or {}
+    search_backend = info.get("backend", "pure-python")
+    train_backend = mlp.get("backend", "pure-python")
+    _emit(args, info,
+          f"native vector search: {search_backend}\n"
+          f"native mlp training: {train_backend}\n"
+          f"compiler: {info.get('compiler') or 'not found (pure-python fallback is fine)'}")
+    return 0
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     from .core.config import load_settings
 
@@ -543,7 +563,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "finance":
             return _cmd_finance(args, context)
         if args.command == "native":
-            return _cmd_stub(args, context, "native")
+            return _cmd_native(args, context)
         if args.command == "cards":
             return _cmd_cards(args, context)
         if args.command == "autonomy":

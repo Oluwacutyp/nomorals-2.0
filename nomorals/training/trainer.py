@@ -183,6 +183,38 @@ class NativeTrainer:
         """Cooperative stop, checked between batches."""
         self._cancelled = True
 
+    def _cpp_kernel(self) -> bool:
+        """Whether the C++ mlptrain kernel carries this run's batch math.
+
+        The kernel (nomorals/native/mlptrain.cpp) runs the SAME operation
+        order and clamps as :meth:`_batch_gradients` — parity is enforced by
+        test_wave92 element-wise — and additionally applies the SGD step so
+        one ctypes call covers a whole batch.  Availability is a property of
+        the machine; a missing/broken .so silently degrades to pure Python.
+        """
+        try:
+            from .. import native as _native
+            return bool(_native.mlp_available())
+        except Exception:  # noqa: BLE001 — a broken extension is not a crash
+            return False
+
+    @staticmethod
+    def _cpp_batch(seq_batch, buf: dict, *, context: int, lr: float, l2: float):
+        """One C++ batch (gradients + SGD step when lr > 0)."""
+        from array import array
+
+        from .. import native as _native
+        flat_ids: array = array("i")
+        lens: array = array("i")
+        for ids in seq_batch:
+            flat_ids.extend(ids)
+            lens.append(len(ids))
+        return _native.mlp_batch(
+            flat_ids, lens,
+            buf["embedding"], buf["hidden_w"], buf["hidden_b"],
+            buf["out_w"], buf["out_b"],
+            context=context, lr=lr, l2=l2)
+
     def fit(
         self,
         train: Sequence[Example],
@@ -209,6 +241,14 @@ class NativeTrainer:
         output_weights = [[0.0] * vocab for _ in range(hidden)]
         output_bias = [0.0] * vocab
 
+        buffers = None
+        if self._cpp_kernel():
+            try:
+                buffers = _pack_weights(embedding, hidden_weights, hidden_bias,
+                                        output_weights, output_bias)
+            except Exception:  # noqa: BLE001 — fall back rather than fail the run
+                buffers = None
+
         metrics = TrainMetrics(examples=len(samples), backend="native")
         started = time.perf_counter()
         batches = max(1, len(samples) // max(1, config.batch_size))
@@ -224,23 +264,30 @@ class NativeTrainer:
                 if self._cancelled:
                     break
                 batch = samples[batch_start : batch_start + config.batch_size]
-                loss, grad_embed, grad_hidden_w, grad_hidden_b, grad_out_w, grad_out_b, count = (
-                    self._batch_gradients(
-                        batch, embedding, hidden_weights, hidden_bias, output_weights, output_bias
+                lr = config.learning_rate / (1.0 + 0.01 * step)
+                if buffers is not None:
+                    loss, count, _ = self._cpp_batch(
+                        batch, buffers, context=context, lr=lr, l2=config.l2 * lr)
+                else:
+                    loss, grad_embed, grad_hidden_w, grad_hidden_b, grad_out_w, grad_out_b, count = (
+                        self._batch_gradients(
+                            batch, embedding, hidden_weights, hidden_bias, output_weights, output_bias
+                        )
                     )
-                )
+                    _axpy(embedding, grad_embed, -lr, config.l2 * lr)
+                    _axpy(hidden_weights, grad_hidden_w, -lr, config.l2 * lr)
+                    _axpy(output_weights, grad_out_w, -lr, config.l2 * lr)
+                    _add(hidden_bias, grad_hidden_b, -lr)
+                    _add(output_bias, grad_out_b, -lr)
                 running += loss
                 tokens += count
-                lr = config.learning_rate / (1.0 + 0.01 * step)
-                _axpy(embedding, grad_embed, -lr, config.l2 * lr)
-                _axpy(hidden_weights, grad_hidden_w, -lr, config.l2 * lr)
-                _axpy(output_weights, grad_out_w, -lr, config.l2 * lr)
-                _add(hidden_bias, grad_hidden_b, -lr)
-                _add(output_bias, grad_out_b, -lr)
                 step += 1
                 if self.on_step and step % config.log_every == 0:
                     self.on_step(step, loss)
 
+            if buffers is not None:
+                _unpack_weights(buffers, embedding, hidden_weights, hidden_bias,
+                                output_weights, output_bias)
             average = running / max(1, batches)
             metrics.train_loss_history.append(average)
             metrics.final_loss = average
@@ -438,6 +485,41 @@ class NativeTrainer:
 
 def _scale(matrix: list[list[float]], divisor: float) -> list[list[float]]:
     return [[v / divisor for v in row] for row in matrix]
+
+
+def _pack_weights(embedding, hidden_weights, hidden_bias, output_weights,
+                  output_bias) -> dict:
+    """Flatten the nested weight lists into the float64 buffers the C kernel
+    updates in place.  Kept as plain arrays — zero marshalling per batch."""
+    from array import array
+
+    def flat(rows) -> array:
+        buf: array = array("d")
+        for row in rows:
+            buf.extend(row)
+        return buf
+
+    return {
+        "embedding": flat(embedding),
+        "hidden_w": flat(hidden_weights),
+        "hidden_b": array("d", hidden_bias),
+        "out_w": flat(output_weights),
+        "out_b": array("d", output_bias),
+    }
+
+
+def _unpack_weights(buf: dict, embedding, hidden_weights, hidden_bias,
+                    output_weights, output_bias) -> None:
+    """Write the kernel-updated buffers back into the live weight lists."""
+    for target, source in ((embedding, buf["embedding"]),
+                           (hidden_weights, buf["hidden_w"]),
+                           (output_weights, buf["out_w"])):
+        width = len(target[0])
+        for i, row in enumerate(target):
+            base = i * width
+            row[:] = [source[base + j] for j in range(width)]
+    hidden_bias[:] = list(buf["hidden_b"])
+    output_bias[:] = list(buf["out_b"])
 
 
 def _add(vector: list[float], gradient: Sequence[float], rate: float) -> None:
