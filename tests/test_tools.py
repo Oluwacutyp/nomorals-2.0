@@ -14,10 +14,11 @@ import zipfile
 from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
+from unittest import mock
 
 from nomorals.agents.context import build_context
 from nomorals.core.config import Settings
-from nomorals.core.errors import CapabilityDenied, NotFound, ToolError, ValidationError
+from nomorals.core.errors import CapabilityDenied, NotFound, SandboxError, ToolError, ValidationError
 from nomorals.core.policy import CapabilitySet
 from nomorals.tools.filesystem import safe_path
 from nomorals.tools.parsers import detect_kind, parse, parse_pdf
@@ -153,9 +154,88 @@ class ShellSandboxTests(unittest.TestCase):
         self.assertTrue(result["timed_out"])
         self.assertLess(result["seconds"], 10.0)
 
-    def test_backend_detection_never_returns_unavailable(self):
-        for preferred in ("auto", "bwrap", "unshare", "rlimit", "none"):
-            self.assertIn(detect_backend(preferred), {"bwrap", "unshare", "rlimit", "none"})
+    def test_backend_detection_auto_never_returns_unavailable(self):
+        # "auto" degrades silently through bwrap -> unshare -> rlimit.
+        self.assertIn(detect_backend("auto"), {"bwrap", "unshare", "rlimit"})
+        self.assertEqual(detect_backend("rlimit"), "rlimit")
+        self.assertEqual(detect_backend("none"), "none")
+
+    def test_explicit_installed_but_broken_backend_raises(self):
+        # An explicitly requested backend whose binary exists but fails its
+        # runtime probe is an explicit failure, not a silent downgrade.
+        for name in ("bwrap", "unshare"):
+            if shutil.which(name) is None:
+                continue
+            from nomorals.tools import shell as shell_mod
+            shell_mod._PROBE_CACHE.pop(name, None)
+            try:
+                detect_backend(name)
+            except SandboxError:
+                continue  # installed but unusable at runtime: correct
+            # Probe passed here, so the backend was honestly returned.
+            self.assertIn(name, {"bwrap", "unshare"})
+
+
+class BackendProbeTests(unittest.TestCase):
+    """detect_backend must probe runtime capability, not just binary presence.
+
+    A shipped binary is not a working backend: containers often carry
+    ``unshare``/``bwrap`` while refusing the mounts the sandbox needs. These
+    tests simulate present-but-broken backends and pin the caching contract.
+    """
+
+    def setUp(self):
+        from nomorals.tools import shell as shell_mod
+
+        self.shell = shell_mod
+        self._saved_cache = dict(shell_mod._PROBE_CACHE)
+        shell_mod._PROBE_CACHE.clear()
+
+    def tearDown(self):
+        self.shell._PROBE_CACHE.clear()
+        self.shell._PROBE_CACHE.update(self._saved_cache)
+
+    @staticmethod
+    def _pretend_installed(*args, **kwargs):
+        real_which = shutil.which
+
+        def fake_which(cmd, *a, **k):
+            if cmd in {"bwrap", "unshare"}:
+                return f"/usr/bin/{cmd}"  # present, even where they are not
+            return real_which(cmd, *a, **k)
+
+        return fake_which
+
+    @staticmethod
+    def _broken_probe(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stderr="unshare: mount /proc failed: Operation not permitted",
+        )
+
+    def test_present_but_broken_backend_is_skipped_not_chosen(self):
+        with mock.patch.object(
+            self.shell.shutil, "which", side_effect=self._pretend_installed()
+        ), mock.patch.object(self.shell.subprocess, "run", side_effect=self._broken_probe):
+            chosen = detect_backend("auto")
+        self.assertEqual(chosen, "rlimit")
+        self.assertNotIn(chosen, {"bwrap", "unshare"})
+
+    def test_explicit_broken_backend_raises_instead_of_downgrading(self):
+        with mock.patch.object(
+            self.shell.shutil, "which", side_effect=self._pretend_installed()
+        ), mock.patch.object(self.shell.subprocess, "run", side_effect=self._broken_probe):
+            with self.assertRaises(SandboxError):
+                detect_backend("unshare")
+
+    def test_probe_result_is_cached_across_calls(self):
+        real_run = self.shell.subprocess.run
+        with mock.patch.object(self.shell.subprocess, "run", wraps=real_run) as probe_run:
+            first = detect_backend("auto")
+            calls_after_first = probe_run.call_count
+            second = detect_backend("auto")
+        self.assertEqual(first, second)
+        self.assertEqual(probe_run.call_count, calls_after_first)
 
 
 class ParserTests(unittest.TestCase):

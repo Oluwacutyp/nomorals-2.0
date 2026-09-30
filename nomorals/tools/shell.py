@@ -2,8 +2,10 @@
 
 Layered isolation, strongest available first:
 
-1. ``bwrap`` (bubblewrap) — real namespace isolation, if installed.
-2. ``unshare`` — namespaces without the bwrap dependency.
+1. ``bwrap`` (bubblewrap) — real namespace isolation, if installed *and* working.
+   ``detect_backend`` probes each candidate at runtime: a shipped binary is not
+   a working backend (containers often lack the mounts the sandbox needs).
+2. ``unshare`` — namespaces without the bwrap dependency, probed the same way.
 3. ``resource.setrlimit`` — CPU seconds, address space, file size, process count.
    Always applied, even under bwrap, because limits are the backstop.
 4. cwd jail — the process starts in the workspace and is never given a path out.
@@ -79,18 +81,80 @@ def _set(which: int, soft: int, hard: int) -> None:
         _log.debug("setrlimit(%s) failed: %s", which, exc)
 
 
+# Probe commands: trivial, no network, run once per process per backend.
+# They use the same isolation flags run_sandboxed applies, so a passing probe
+# means the backend works under the exact invocation we will use.
+_PROBE_ARGV: dict[str, list[str]] = {
+    "bwrap": ["bwrap", "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "/bin/true"],
+    "unshare": ["unshare", "--map-root-user", "--fork", "--pid", "--mount-proc", "/bin/true"],
+}
+_PROBE_TIMEOUT = 5.0
+_PROBE_CACHE: dict[str, bool] = {}
+
+
+def _probe_backend(name: str) -> bool:
+    """Return True if *name* works at runtime, not merely that it is installed.
+
+    ``shutil.which`` only proves the binary exists — a container can ship
+    ``unshare`` while refusing the ``/proc`` mount it needs, failing at runtime
+    with ``mount /proc failed: Operation not permitted``. The probe result is
+    cached at module level, so each backend is probed at most once per process.
+    """
+    if name in _PROBE_CACHE:
+        return _PROBE_CACHE[name]
+    usable = False
+    if shutil.which(name) is None:
+        _log.debug("sandbox backend %s is not installed", name)
+    else:
+        try:
+            probe = subprocess.run(
+                _PROBE_ARGV[name],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=_PROBE_TIMEOUT,
+            )
+            usable = probe.returncode == 0
+            if not usable:
+                _log.debug(
+                    "sandbox backend %s probe exited %s: %s",
+                    name,
+                    probe.returncode,
+                    (probe.stderr or "").strip(),
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.debug("sandbox backend %s probe failed: %s", name, exc)
+    _PROBE_CACHE[name] = usable
+    return usable
+
+
 def detect_backend(preferred: str = "auto") -> str:
-    """Pick the strongest isolation available on this platform."""
-    if preferred in {"bwrap", "unshare", "none", "rlimit"}:
-        if preferred == "bwrap" and not shutil.which("bwrap"):
-            return "rlimit"
-        if preferred == "unshare" and not shutil.which("unshare"):
-            return "rlimit"
+    """Pick the strongest isolation that actually works at runtime.
+
+    Each candidate is probe-executed under the flags ``run_sandboxed`` uses
+    (cached once per process). ``"auto"`` degrades silently through
+    bwrap → unshare → rlimit. An explicit ``"bwrap"``/``"unshare"`` whose
+    binary exists but fails its probe raises ``SandboxError`` — an explicit
+    choice is an explicit failure, never a silent downgrade. An explicit
+    choice that is not installed falls back to ``rlimit``.
+    """
+    if preferred in {"rlimit", "none"}:
         return preferred
-    if shutil.which("bwrap"):
-        return "bwrap"
-    if shutil.which("unshare") and sys.platform.startswith("linux"):
-        return "unshare"
+    if preferred in {"bwrap", "unshare"}:
+        if _probe_backend(preferred):
+            return preferred
+        if shutil.which(preferred) is not None:
+            raise SandboxError(
+                f"sandbox backend {preferred!r} is installed but unavailable at runtime "
+                "(probe failed); refusing to silently downgrade"
+            )
+        _log.debug("sandbox backend %r is not installed; using rlimit", preferred)
+        return "rlimit"
+    for candidate in ("bwrap", "unshare"):
+        if candidate == "unshare" and not sys.platform.startswith("linux"):
+            continue
+        if _probe_backend(candidate):
+            return candidate
     return "rlimit"
 
 
