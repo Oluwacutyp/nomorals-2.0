@@ -1578,6 +1578,71 @@ def _apply_skills_table_unify(db: object) -> None:
                "ON skills(pruned, updated_at DESC)")
 
 
+def _apply_companion_schema(db: object) -> None:
+    """Expansion-era writes the base schema only half-covers (wave 42+).
+
+    The games relay, directives engine, news feed runner, image ledger and
+    Devon's memory box all INSERT columns their tables were never given.
+    Guarded per column: databases that already carry them skip the ALTER.
+    """
+    wanted = {
+        "directives": {
+            "status": "TEXT NOT NULL DEFAULT 'pending'",
+            "result": "TEXT NOT NULL DEFAULT ''",
+            "error": "TEXT NOT NULL DEFAULT ''",
+            "finished_at": "REAL NOT NULL DEFAULT 0",
+            "updated_at": "REAL NOT NULL DEFAULT 0",
+        },
+        "game_sessions": {
+            "game": "TEXT NOT NULL DEFAULT ''",
+            "chat_key": "TEXT NOT NULL DEFAULT ''",
+        },
+        "devon_memory": {
+            "ts": "REAL NOT NULL DEFAULT 0",
+            "chat_key": "TEXT NOT NULL DEFAULT ''",
+            "run_id": "TEXT NOT NULL DEFAULT ''",
+            "task": "TEXT NOT NULL DEFAULT ''",
+            "step": "INTEGER NOT NULL DEFAULT 0",
+            "tool": "TEXT NOT NULL DEFAULT ''",
+            "args": "TEXT NOT NULL DEFAULT ''",
+            "observation": "TEXT NOT NULL DEFAULT ''",
+            "digest": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'step'",
+        },
+    }
+    for table, cols in wanted.items():
+        try:
+            have = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}  # noqa: UP031
+        except Exception:  # noqa: BLE001 - table absent: nothing to alter
+            continue
+        for col, ddl in cols.items():
+            if col not in have:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+    # full-text feeds + the face of every photo she has ever seen
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS news_items ("
+        "id TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT '', "
+        "title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', "
+        "summary TEXT NOT NULL DEFAULT '', published TEXT NOT NULL DEFAULT '', "
+        "created_at REAL NOT NULL DEFAULT 0, UNIQUE(url))"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_news_items_created ON news_items(created_at)")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS image_index ("
+        "hash TEXT PRIMARY KEY, path TEXT NOT NULL DEFAULT '', "
+        "size INTEGER NOT NULL DEFAULT 0, mime TEXT NOT NULL DEFAULT '', "
+        "first_seen REAL NOT NULL DEFAULT 0, last_seen REAL NOT NULL DEFAULT 0, "
+        "seen_in TEXT NOT NULL DEFAULT '[]')"
+    )
+    try:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_game_sessions_chat "
+                   "ON game_sessions(chat_key, status)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1632,6 +1697,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(48, "search_engine_schema",
               fn=_apply_search_engine_schema),
     Migration(49, "skills_table_unify", fn=_apply_skills_table_unify),
+    Migration(50, "companion_schema", fn=_apply_companion_schema),
 )
 
 
