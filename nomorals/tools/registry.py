@@ -107,7 +107,7 @@ class ToolRegistry:
         import importlib as _importlib
 
         for _name in (
-            "agents", "archive", "attacker", "audio", "book", "browser",
+            "archive", "attacker", "audio", "book", "browser",
             "build_app", "cards", "cipher", "compress", "connectors",
             "database", "deals", "decoder", "decoder_agent", "filesend",
             "filesystem", "finance", "giftcard", "hashcrack", "imagedb",
@@ -115,6 +115,10 @@ class ToolRegistry:
             "network", "osint", "osint_graph", "osint_people", "parsers",
             "proxy", "proxylab", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "workspace",
+            # the agent bridge registers last: agent modules own the real
+            # implementations, and thin tools/ wrappers of the same name
+            # must never shadow them (last registration wins).
+            "agents",
         ):
             try:
                 _module = _importlib.import_module(f".{_name}", __package__)
@@ -127,6 +131,11 @@ class ToolRegistry:
         # up without any extra wiring — auto-registration is the contract.
         # The media system (music writer / player / video finder) lives in
         # its own package and registers through the same decorator surface.
+        try:
+            from ..books import tools as _books
+            _books.register(self)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video

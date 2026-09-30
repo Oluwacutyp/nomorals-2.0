@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from .compat import feature_report, report_as_text
@@ -199,9 +200,14 @@ def _parser() -> argparse.ArgumentParser:
     cipher = sub.add_parser("cipher",
                             help="nmc1 encryption: encrypt, decrypt, classic ciphers, hmac")
     cipher.add_argument("action", nargs="?", default="",
-                        choices=["", "encrypt", "decrypt", "classic", "hmac", "formats"])
+                        choices=["", "encrypt", "decrypt", "classic", "hmac",
+                                 "formats", "vault_put", "vault_get",
+                                 "vault_list", "vault_rm",
+                                 "vault_export", "vault_import"])
     cipher.add_argument("data", nargs="?", default="",
                         help="text to encrypt / classic-cipher input")
+    cipher.add_argument("secret", nargs="?", default="",
+                        help="vault: secret value to store under <data> as name")
     cipher.add_argument("--blob", default="", help="nmc1:v1 blob to decrypt")
     cipher.add_argument("--passphrase", default="", help="KDF passphrase")
     cipher.add_argument("--key", default="", help="raw key (hex or text) instead of a passphrase")
@@ -214,8 +220,30 @@ def _parser() -> argparse.ArgumentParser:
     cipher.add_argument("--keyword", default="", help="classic: vigenere keyword")
     cipher.add_argument("--decrypt", action="store_true",
                         help="classic: decrypt instead of encrypt")
+    cipher.add_argument("--entry-pass", default="",
+                        help="vault_export: passphrase of 'pass'-scheme entries")
     cipher.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("osint", help="Open source intelligence")
+    osint_p = sub.add_parser("osint",
+                             help="OSINT reports + the identity graph")
+    osub = osint_p.add_subparsers(dest="subcommand")
+    for _name, _help in (("report", "full read-only OSINT report for a target"),
+                         ("domain", "domain intel"), ("ip", "IP intel"),
+                         ("url", "URL intel"), ("email", "email intel")):
+        _op = osub.add_parser(_name, help=_help)
+        _op.add_argument("target")
+    _op = osub.add_parser("campaign", help="run an automated investigation walk")
+    _op.add_argument("seeds", nargs="*")
+    _op = osub.add_parser("decoder", help="ingest a decoder report into the graph")
+    _op.add_argument("report")
+    _op.add_argument("--source", default="cli")
+    for _name in ("stats", "clusters", "timeline", "clear"):
+        osub.add_parser(_name, help=f"identity graph: {_name}")
+    _op = osub.add_parser("node", help="identity graph: one entity's neighborhood")
+    _op.add_argument("ref")
+    _op = osub.add_parser("graph", help="identity graph: subcommand")
+    _op.add_argument("action", nargs="?", default="stats")
+    _op.add_argument("args", nargs="*")
+    _op.add_argument("--source", default="cli")
     structure_p = sub.add_parser("structure", help="Structure an objective into a brief")
     structure_p.add_argument("objective", nargs="?", default="",
                              help="task text to structure into a brief")
@@ -257,7 +285,8 @@ def _parser() -> argparse.ArgumentParser:
     monitor = sub.add_parser("monitor", help="watch files/URLs for changes")
     monitor.add_argument("action", nargs="?", default="status",
                          choices=["add", "list", "tick", "status", "remove",
-                                  "enable", "disable"])
+                                  "enable", "disable", "alert", "webhook_test",
+                                  "webhook-test"])
     monitor.add_argument("ref", nargs="?", default="",
                          help="target or ref (add/remove/enable/disable)")
     monitor.add_argument("--interval", type=float, default=300.0,
@@ -265,9 +294,23 @@ def _parser() -> argparse.ArgumentParser:
     monitor.add_argument("--webhook", default="", help="URL to POST alerts to")
     monitor.add_argument("--secret", default="",
                          help="HMAC secret for webhook signatures")
+    monitor.add_argument("--min-gap", type=int, default=None,
+                         help="minimum seconds between alerts for this watch")
     monitor.add_argument("--watch", default="content", choices=["content", "size"])
     monitor.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("crack", help="Hash cracking")
+    crack = sub.add_parser("crack", help="Offline hash cracking (md5/sha1/sha256/…)")
+    crack.add_argument("hashes", nargs="*", help="digest(s) to attack")
+    crack.add_argument("--hash", default="", metavar="DIGEST",
+                       help="one more digest (script-friendly)")
+    crack.add_argument("--algo", default="",
+                       choices=["", "md5", "sha1", "sha256", "sha512", "ntlm"],
+                       help="force one algorithm (default: detect)")
+    crack.add_argument("--mode", default="",
+                       choices=["", "hybrid", "dictionary", "brute", "known"],
+                       help="attack mode (default hybrid)")
+    crack.add_argument("--words", default="", metavar="FILE",
+                       help="extra wordlist file")
+    crack.add_argument("--json", action="store_true", help="Output as JSON")
     decode = sub.add_parser("decode",
                             help="decode/identify encodings, chains, hashes")
     decode.add_argument("text", nargs="?", default="",
@@ -276,6 +319,10 @@ def _parser() -> argparse.ArgumentParser:
                         help="known-plaintext hash lookup")
     decode.add_argument("--mode", default="", choices=["", "decoders"],
                         help="'decoders' lists the decoder registry")
+    decode.add_argument("--history", action="store_true",
+                        help="list the most recent decode reports")
+    decode.add_argument("--show", default="", metavar="ID",
+                        help="print one stored decode report (JSON)")
     decode.add_argument("--json", action="store_true", help="Output as JSON")
     music = sub.add_parser("music", help="Music generation")
     music.add_argument("action", nargs="?", default="styles",
@@ -571,7 +618,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "cipher":
             return _cmd_cipher(args, context)
         if args.command == "osint":
-            return _cmd_stub(args, context, "osint")
+            return _cmd_osint(args, context)
         if args.command == "structure":
             return _cmd_structure(args, context)
         if args.command == "arena":
@@ -1613,14 +1660,51 @@ def _cmd_train(args, context):
     return 1
 
 def _cmd_crack(args, context):
-    """Stub: crack command."""
-    _emit(args, {"status": "ok"}, "Crack ready")
+    """Offline hash cracking at the shell — one digest or a batch."""
+    digests = [d for d in (list(getattr(args, "hashes", None) or [])
+                           + [getattr(args, "hash", "") or ""]) if d]
+    if not digests:
+        print("usage: nm crack <digest> [digest…] [--algo md5|sha1|…] "
+              "[--mode hybrid|dictionary|brute] [--words FILE]")
+        return 0
+    kw: dict = {}
+    if getattr(args, "algo", ""):
+        kw["algo"] = args.algo
+    if getattr(args, "mode", ""):
+        kw["mode"] = args.mode
+    if getattr(args, "words", ""):
+        kw["wordlist"] = args.words
+    outcome = context.tools.call("hash_crack", target=",".join(digests), **kw)
+    if not outcome.ok:
+        print(f"crack failed: {getattr(outcome.error, 'message', outcome.error)}")
+        return 1
+    value = outcome.value or {}
+    found = value.get("found") or {}
+    _emit(args, value, "\n".join(f"{k} = {v}" for k, v in found.items())
+          or f"no plaintext found for {len(digests)} digest(s)")
     return 0
 
 def _cmd_decode(args, context):
     """Decode/identify: encodings, nested chains, known hashes (wave 71)."""
     from .core import decoder as D
 
+    if getattr(args, "history", False):
+        rows = D.decode_history(context.db, limit=15)
+        if not rows:
+            print("no decode history yet")
+            return 0
+        for row in rows:
+            print(f"{row['id']}  {row.get('created_at', '')}  "
+                  f"{row.get('source', '')}/{row.get('kind', '')}  "
+                  f"{str(row.get('input_preview', row.get('input_text', '')))[:60]}")
+        return 0
+    if getattr(args, "show", ""):
+        row = D.get_report(context.db, args.show)
+        if not row:
+            print(f"no report {args.show!r}")
+            return 1
+        print(row.get("report_json", ""))
+        return 0
     if getattr(args, "mode", "") == "decoders":
         names = [d.name for d in D.DECODERS]
         _emit(args, {"count": len(names), "names": names},
@@ -1671,6 +1755,49 @@ def _cmd_decode(args, context):
     _emit(args, out, "\n".join(lines))
     return 0
 
+def _cmd_osint(args, context):
+    """OSINT reports and the persistent identity graph, from the shell."""
+    sub = getattr(args, "subcommand", "") or ""
+    if sub in ("report", "domain", "ip", "url", "email"):
+        tool = {"report": "osint_report", "domain": "osint_domain",
+                "ip": "osint_ip", "url": "osint_url",
+                "email": "osint_email"}[sub]
+        outcome = context.tools.call(tool, target=args.target)
+    elif sub == "campaign":
+        outcome = context.tools.call("osint_campaign",
+                                      seeds=",".join(args.seeds or []))
+    elif sub == "decoder":
+        from pathlib import Path as _P
+
+        raw = _P(args.report).read_text()
+        outcome = context.tools.call("osint_graph", action="ingest_decoder",
+                                     report=raw, source=args.source)
+    elif sub in ("stats", "clusters", "timeline", "clear", "node", "graph"):
+        action = "stats" if sub == "graph" else sub
+        extra: dict = {}
+        if sub == "graph" and args.action:
+            action = args.action
+            if action == "node" and args.args:
+                extra["node"] = args.args[0]
+            if action == "merge" and len(args.args) >= 2:
+                extra["a"], extra["b"] = args.args[0], args.args[1]
+        if sub == "node":
+            extra["node"] = args.ref
+        outcome = context.tools.call("osint_graph", action=action, **extra)
+    else:
+        print("usage: nm osint report <target> | stats | clusters | node <ref>"
+              " | decoder <report.json> [--source s] | campaign <seeds…>")
+        return 0
+    if not outcome.ok:
+        print(f"error: {getattr(outcome.error, 'message', outcome.error)}")
+        return 1
+    import json as _json
+
+    print(_json.dumps(outcome.value, indent=2, default=str)
+          if getattr(args, "json", False) else str(outcome.value)[:3500])
+    return 0
+
+
 def _cmd_cipher(args, context):
     """nmc1 encryption at the shell: authenticated AES, classic ciphers, HMAC."""
     import base64 as _b64
@@ -1682,6 +1809,43 @@ def _cmd_cipher(args, context):
     data = getattr(args, "data", "") or ""
     passphrase = getattr(args, "passphrase", "") or ""
     key_bytes = _key_bytes(getattr(args, "key", "") or "")
+
+    if action in ("vault_export", "vault_import"):
+        outcome = context.tools.call(
+            "cipher", action=action, path=data, passphrase=passphrase,
+            entry_pass=getattr(args, "entry_pass", "") or "")
+        if not outcome.ok:
+            print(f"error: {getattr(outcome.error, 'message', outcome.error)}")
+            return 1
+        result = outcome.value or {}
+        if action == "vault_export":
+            print(f"exported {result.get('count', '?')} entries to {data}")
+        else:
+            print(f"imported {result.get('count', 0)} entries from {data}")
+        return 0
+
+    if action in ("vault_put", "vault_get", "vault_list", "vault_rm"):
+        # the sealed named-secrets vault lives in the cipher tool (agent
+        # side); the CLI is a thin window onto it
+        vault = getattr(args, "secret", "") or ""
+        outcome = context.tools.call(
+            "cipher", action=action, name=data, data=vault,
+            passphrase=passphrase)
+        if not outcome.ok:
+            print(f"error: {getattr(outcome.error, 'message', outcome.error)}")
+            return 1
+        result = outcome.value or {}
+        if action == "vault_put":
+            print(f"stored {data} in the vault")
+        elif action == "vault_get":
+            print(result.get("data", ""))
+        elif action == "vault_list":
+            names = result.get("names", [])
+            print("vault entries: " + (", ".join(names) if names else "none"))
+        else:
+            print(f"removed {data}" if result.get("removed", True)
+                  else f"no vault entry {data}")
+        return 0
     try:
         if action == "encrypt":
             if not data:
@@ -1754,11 +1918,14 @@ def _cmd_monitor(args, context):
                   "[--webhook URL --secret S] [--watch content|size]")
             return 2
         try:
-            row = agent.add(ref,
-                            interval=float(getattr(args, "interval", 300.0) or 300.0),
-                            webhook=getattr(args, "webhook", "") or "",
-                            secret=getattr(args, "secret", "") or "",
-                            watch=getattr(args, "watch", "") or "content")
+            _kw: dict = dict(
+                interval=float(getattr(args, "interval", 300.0) or 300.0),
+                webhook=getattr(args, "webhook", "") or "",
+                secret=getattr(args, "secret", "") or "",
+                watch=getattr(args, "watch", "") or "content")
+            if getattr(args, "min_gap", None) is not None:
+                _kw["min_gap"] = float(args.min_gap)
+            row = agent.add(ref, **_kw)
         except ValueError as exc:
             print(f"monitor add failed: {exc}")
             return 1
@@ -1766,6 +1933,29 @@ def _cmd_monitor(args, context):
               f"watching {ref} ({row.get('kind', 'file')}, "
               f"every {int(row.get('interval', 300) or 300)}s)")
         return 0
+    if action == "alert":
+        row = agent.set_alerting(
+            ref,
+            webhook=getattr(args, "webhook", None) or None,
+            secret=getattr(args, "secret", None) or None,
+            min_gap=(float(args.min_gap)
+                     if getattr(args, "min_gap", None) is not None else None))
+        if row is None:
+            print(f"no such monitor: {ref}")
+            return 1
+        gap = int(row.get("min_alert_gap_s", 0) or 0)
+        wh = row.get("webhook_url", "") or "off"
+        _emit(args, {"monitor": row}, f"alerting updated: webhook={wh} gap={gap}s")
+        return 0
+    if action in ("webhook_test", "webhook-test"):
+        res = agent.webhook_test(ref)
+        if res is None:
+            print(f"no such monitor (or no webhook set): {ref}")
+            return 1
+        ok = res.get("ok")
+        _emit(args, res, f"webhook test: {'sent' if ok else 'failed'} "
+                        f"({res.get('status', res.get('error', ''))})")
+        return 0 if ok else 1
     if action == "tick":
         result = agent.tick()
         if isinstance(result, dict):
@@ -2000,6 +2190,8 @@ def _cmd_zip(args: argparse.Namespace, context: Any) -> int:
             return 0
         elif action == "compress":
             out = a.compress(path)
+        elif action == "digest" and path and Path(path).is_dir():
+            out = a.digest_directory(path)
         else:
             out = a.digest(path)
     except Exception as exc:  # noqa: BLE001

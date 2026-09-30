@@ -1643,6 +1643,16 @@ def _apply_companion_schema(db: object) -> None:
 
 
 
+def _apply_cipher_vault(db: object) -> None:
+    """The named-secrets vault table (mirrors CipherAgent._VAULT_DDL)."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS cipher_vault ("
+        "name TEXT PRIMARY KEY, blob TEXT NOT NULL, "
+        "key_scheme TEXT NOT NULL DEFAULT 'pass', "
+        "created_at REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL DEFAULT 0)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1698,6 +1708,7 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_search_engine_schema),
     Migration(49, "skills_table_unify", fn=_apply_skills_table_unify),
     Migration(50, "companion_schema", fn=_apply_companion_schema),
+    Migration(51, "cipher_vault", fn=_apply_cipher_vault),
 )
 
 
