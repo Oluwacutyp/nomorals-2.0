@@ -142,11 +142,40 @@ MODEL_CATALOG: tuple[CatalogEntry, ...] = (
         "Multilingual, long-context embeddings.",
         ("embedding", "multilingual"),
     ),
+    # ── curated GGUF mirrors for llama.cpp (nm models / local_server) ──
+    # TheBloke's GGUF repos were DELETED upstream (anonymous 401) — every
+    # entry below is a live bartowski mirror, kind="gguf" so
+    # resolve_gguf_repo(kind="gguf") finds exactly these.  Order matters:
+    # the first kind=gguf hit for a family is what fetches.
     CatalogEntry(
-        "TheBloke/dolphin-2.9.1-llama-3-8b-GGUF",
-        "llama3", 8_000_000_000, 8192, "instruct", "llama3",
-        "GGUF quants of Dolphin 8B for llama.cpp.",
-        ("dolphin", "gguf", "quantized"),
+        "bartowski/Meta-Llama-3-8B-Instruct-GGUF",
+        "llama3", 8_000_000_000, 8192, "gguf", "llama3",
+        "GGUF quants of Meta Llama-3 8B Instruct (Q4_K_M and friends).",
+        ("gguf", "llama", "llama-3-8b", "8b", "quantized"),
+    ),
+    CatalogEntry(
+        "bartowski/dolphin-2.9.1-llama-3-8b-GGUF",
+        "llama3", 8_000_000_000, 8192, "gguf", "llama3",
+        "Live GGUF mirror of the deleted TheBloke dolphin-2.9.1-llama-3-8b.",
+        ("gguf", "dolphin", "dolphin-8b", "8b", "quantized"),
+    ),
+    CatalogEntry(
+        "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "qwen2.5", 7_600_000_000, 32768, "gguf", "apache-2.0",
+        "GGUF mirror of Qwen2.5-7B-Instruct — the persona finetune base.",
+        ("gguf", "qwen", "7b", "quantized"),
+    ),
+    CatalogEntry(
+        "bartowski/Phi-3.5-mini-instruct-GGUF",
+        "phi-3.5", 3_800_000_000, 131072, "gguf", "mit",
+        "GGUF quants of Phi-3.5-mini — strong for the phone's RAM.",
+        ("gguf", "phi", "phi-3.5", "mini", "quantized"),
+    ),
+    CatalogEntry(
+        "bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+        "mistral", 12_200_000_000, 32768, "gguf", "apache-2.0",
+        "GGUF quants of Mistral Nemo 12B.",
+        ("gguf", "mistral", "nemo", "quantized"),
     ),
 )
 
