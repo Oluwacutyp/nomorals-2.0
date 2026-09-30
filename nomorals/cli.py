@@ -292,6 +292,8 @@ def _parser() -> argparse.ArgumentParser:
     native = sub.add_parser("native", help="native kernels: status and build")
     native.add_argument("--build", action="store_true",
                         help="compile the C++ kernels when a compiler is present")
+    native.add_argument("--benchmark", action="store_true",
+                        help="time the vector-search kernel native vs pure Python and check agreement")
     
         # Virtual cards commands
     cards = sub.add_parser("cards", help="Virtual card management")
@@ -455,7 +457,19 @@ def _cmd_native(args, context) -> int:
 
     if getattr(args, "build", False):
         ok, msg = native_mod.build(force=True)
-        print(f"native build: {'ok' if ok else 'FAILED'} \u2014 {msg}")
+        print(f"native build: {'OK' if ok else 'FAILED'} \u2014 {msg}")
+    if getattr(args, "benchmark", False):
+        bench = native_mod.benchmark()
+        agreement = "agreement: True" if bench.get("match") else "agreement: False (top-10 index lists differ)"
+        _emit(args, {"benchmark": bench},
+              "\n".join([
+                  f"benchmark: {bench['vectors']} vectors x {bench['dim']} dim, "
+                  f"top-10, backend {bench.get('backend')}",
+                  f"  python: {bench['python_ms']} ms | native: {bench['native_ms']} ms"
+                  + (f" | speedup: {bench['speedup']}x" if bench.get('speedup') else ""),
+                  agreement,
+              ]))
+        return 0
     info = native_mod.info()
     mlp = info.get("mlp") or {}
     search_backend = info.get("backend", "pure-python")

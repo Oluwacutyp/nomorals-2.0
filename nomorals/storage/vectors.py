@@ -119,11 +119,23 @@ class VectorStore:
         table: str = TABLE,
         model: str = "default",
         use_numpy: bool = True,
+        use_native: bool = False,
     ) -> None:
         self.db = db
         self.table = table
         self.model = model
         self._numpy = np if (use_numpy and available("numpy")) else None
+        #: C++ vecsim kernel: the phone's hot path.  Explicit opt-in because
+        #: it scores in float32 (agreement with the float64 paths is to ~5
+        #: decimal places — every parity test this ships with checks that).
+        self._native = False
+        self._native_flat: Any = None
+        if use_native:
+            try:
+                from .. import native as _native
+                self._native = bool(_native.available())
+            except Exception:  # noqa: BLE001 — no extension is not an error
+                self._native = False
         self._matrix: Any = None
         self._meta: list[dict[str, Any]] = []
         self._centroids: list[_Centroid] = []
@@ -230,6 +242,7 @@ class VectorStore:
     def _load(self) -> None:
         if not self._index_dirty and self._matrix is not None:
             return
+        self._native_flat = None  # matrix changed — repack lazily
         rows = self.db.query(f'SELECT * FROM "{self.table}"')
         self._meta = [
             {
@@ -320,7 +333,25 @@ class VectorStore:
             candidates = range(total)
 
         scored: list[tuple[float, int]] = []
-        if self._numpy is not None and not isinstance(self._matrix, list):
+        if self._native:
+            idx = list(candidates)
+            if idx:
+                from .. import native as _native
+                if len(idx) == total and idx[0] == 0:
+                    if self._native_flat is None:
+                        from array import array as _array
+                        packed = _array("f")
+                        for row in self._as_lists():
+                            packed.extend(row)
+                        self._native_flat = packed
+                    pairs = _native.topk(self._native_flat, query, total)
+                    scored = [(float(s), int(r)) for s, r in pairs]
+                else:
+                    lists = self._as_lists()
+                    matrix = [lists[i] for i in idx]
+                    pairs = _native.topk(matrix, query, len(matrix))
+                    scored = [(float(s), idx[int(r)]) for s, r in pairs]
+        elif self._numpy is not None and not isinstance(self._matrix, list):
             idx = list(candidates)
             if not idx:
                 return []
@@ -379,7 +410,8 @@ class VectorStore:
             **self.stats,
             "vectors": self.count(),
             "clusters": len(self._centroids),
-            "backend": "numpy" if self._numpy is not None else "pure-python",
+            "backend": ("native-cpp" if self._native
+                        else "numpy" if self._numpy is not None else "pure-python"),
         }
 
 
