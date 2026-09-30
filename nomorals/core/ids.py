@@ -87,8 +87,16 @@ def ulid_now(now_ms: int | None = None) -> str:
     return _factory.next(now_ms)
 
 
-# Alias that reads better at call sites.
-new_id = ulid_now
+def new_id(prefix: str = "") -> str:
+    """Generate a ULID, optionally with a human-readable prefix.
+
+    Examples:
+        new_id()        → "01JFX..."  (plain 26-char ULID)
+        new_id("task")  → "task_01JFX..."
+        new_id("cron")  → "cron_01JFX..."
+    """
+    raw = _factory.next()
+    return f"{prefix}_{raw}" if prefix else raw
 
 
 def new_short_id(prefix: str = "", length: int = 12) -> str:

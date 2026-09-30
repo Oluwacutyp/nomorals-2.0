@@ -35,6 +35,20 @@ class MemoryKind:
     PREFERENCE = "preference"  # how the user wants things done
     SKILL = "skill"          # a procedure that worked
     LESSON = "lesson"        # what a failure taught
+    DECISION = "decision"    # a choice that was made
+    RELATIONSHIP = "relationship"  # a connection between entities
+
+
+#: All memory kinds for iteration/validation
+ALL_KINDS = frozenset({
+    MemoryKind.EPISODE,
+    MemoryKind.FACT,
+    MemoryKind.PREFERENCE,
+    MemoryKind.SKILL,
+    MemoryKind.LESSON,
+    MemoryKind.DECISION,
+    MemoryKind.RELATIONSHIP,
+})
 
 
 #: Kinds that decay slowly because they stay relevant.
@@ -64,6 +78,10 @@ class MemoryRecord:
     last_access: float = 0.0
     source: str = ""
     agent: str = ""
+    #: comma-joined normalized tags (see manager.join_tags) and the pointer
+    #: to the chat this memory was distilled from ("chat:tg:123")
+    tags: str = ""
+    origin: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     expires_at: float | None = None
@@ -139,6 +157,8 @@ class MemoryRecord:
             expires_at=row.get("expires_at"),
             metadata=metadata or {},
             embedding_id=row.get("embedding_id") or "",
+            tags=row.get("tags") or "",
+            origin=row.get("origin") or "",
         )
 
 

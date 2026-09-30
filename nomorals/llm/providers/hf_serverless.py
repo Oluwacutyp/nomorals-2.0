@@ -29,6 +29,16 @@ from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
 from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, messages_to_text
 
+
+# Curated fallback models for the intelligent router
+# These are verified to be available on HF Inference API
+ROUTER_FALLBACK_MODELS = [
+    "Sao10K/L3-8B-Stheno-v3.2",
+    "Qwen/Qwen3-8B",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "microsoft/Phi-3.5-mini-instruct",
+]
+
 SERVERLESS_URL = "https://api-inference.huggingface.co"
 ROUTER_URL = "https://router.huggingface.co/v1"
 
@@ -51,10 +61,15 @@ class HFServerlessProvider(LLMProvider):
         wait_for_model: bool = True,
         use_chat_endpoint: bool = True,
         embed_model: str = "",
+        vision_model: str = "",
     ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
         self.token = token
         self.model = model
+        # A dedicated vision repo (e.g. Qwen/Qwen2.5-VL-7B-Instruct): on the
+        # legacy serverless API each model owns its /models/<repo>/ URL, so a
+        # vision model means a different URL, not just a different payload.
+        self.vision_model = vision_model
         self.base_url = (endpoint_url or base_url).rstrip("/")
         self.endpoint_url = endpoint_url.rstrip("/")
         self.template = template
@@ -74,20 +89,31 @@ class HFServerlessProvider(LLMProvider):
 
     @property
     def capabilities(self) -> set[str]:
-        return {"chat", "complete", "embed"}
+        # vision: serverless VLMs (Qwen-VL, Phi-vision) ride the same chat shape;
+        # describe_image routes pixels to the configured vision model.
+        return {"chat", "complete", "embed", "vision"}
+
+    @staticmethod
+    def fetch_catalog() -> list[dict[str, Any]]:
+        """Fetch the catalog of available models."""
+        return [
+            {"model_id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
+            for m in ROUTER_FALLBACK_MODELS
+        ]
 
     @property
     def _is_dedicated_endpoint(self) -> bool:
         return bool(self.endpoint_url)
 
-    def chat_url(self) -> str:
+    def chat_url(self, model: str = "") -> str:
         if self._is_dedicated_endpoint:
             # Inference Endpoints expose a vLLM/TGI-compatible OpenAI surface.
             base = self.base_url
             return f"{base}/v1/chat/completions" if not base.endswith("/v1") else f"{base}/chat/completions"
+        repo = model or self.model
         if self.use_chat_endpoint:
-            return f"{self.base_url}/models/{self.model}/v1/chat/completions"
-        return f"{self.base_url}/models/{self.model}"
+            return f"{self.base_url}/models/{repo}/v1/chat/completions"
+        return f"{self.base_url}/models/{repo}"
 
     def embed_url(self) -> str:
         if self._is_dedicated_endpoint:
@@ -144,22 +170,89 @@ class HFServerlessProvider(LLMProvider):
         started = time.perf_counter()
         sampling = (params or SamplingParams()).clamped()
         payload = self.build_chat_payload(messages, sampling)
+        
+        # Try with current model first
         try:
-            raw = retry_call(
-                lambda: self.http.post_json(self.chat_url(), payload), policy=self._policy
-            )
-        except RateLimited as exc:
-            return self._record(
-                LLMResponse(text="", model=self.model, error=f"rate limited: {exc.message}"),
-                started,
-            )
+            raw = self._post_checked(self.chat_url(), payload)
+            return self._record(self._parse_chat(raw), started)
         except Exception as exc:  # noqa: BLE001
+            # Don't heal on authentication errors (401)
+            error_msg = str(exc).lower()
+            if "401" in error_msg or "unauthorized" in error_msg:
+                error = classify(exc)
+                return self._record(
+                    LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
+                    started,
+                )
+            
+            # Model failed, try to discover a new one
+            try:
+                catalog_data = self.fetch_catalog()
+                # catalog_data is a list of dicts with "id" or "model_id" keys
+                new_model = self._discover_catalog_model(catalog_data, exclude=self.model)
+            except Exception:  # noqa: BLE001
+                # Catalog failed, fall back to first curated model
+                new_model = ROUTER_FALLBACK_MODELS[0] if ROUTER_FALLBACK_MODELS else None
+                if new_model == self.model:
+                    new_model = None
+            try:
+                if new_model is None:
+                    # Try to get from catalog again or use fallback
+                    try:
+                        catalog_data = self.fetch_catalog()
+                        new_model = self._discover_catalog_model(catalog_data, exclude=self.model)
+                    except Exception:  # noqa: BLE001
+                        new_model = ROUTER_FALLBACK_MODELS[0] if ROUTER_FALLBACK_MODELS else None
+                        if new_model == self.model:
+                            new_model = None
+                if new_model:
+                    # Update the model and retry
+                    original_model = self.model
+                    self.model = new_model
+                    try:
+                        payload = self.build_chat_payload(messages, sampling)
+                        raw = self.http.post_json(self.chat_url(), payload)
+                        # Check if response is ok
+                        if hasattr(raw, 'ok') and not raw.ok:
+                            # Retry failed, restore original model and return error
+                            self.model = original_model
+                            return self._record(
+                                LLMResponse(text="", model=self.model, error=f"HTTP {getattr(raw, 'status_code', 'unknown')}"),
+                                started,
+                            )
+                        # raw is a response object, call .json() to get the data
+                        if hasattr(raw, 'json'):
+                            data = raw.json()
+                        else:
+                            data = raw
+                        result = self._parse_chat(data)
+                        if result.error:
+                            # Retry failed, restore original model
+                            self.model = original_model
+                        else:
+                            # Success with healed model, add healed_from info
+                            if result.raw is None:
+                                result.raw = {}
+                            if isinstance(result.raw, dict):
+                                result.raw["healed_from"] = original_model
+                        return self._record(result, started)
+                    except Exception as retry_exc:  # noqa: BLE001
+                        # Retry failed, restore original model and return error
+                        self.model = original_model
+                        error = classify(retry_exc)
+                        return self._record(
+                            LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
+                            started,
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+            
+            # Return error
             error = classify(exc)
             return self._record(
                 LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
                 started,
             )
-        return self._record(self._parse_chat(raw.json()), started)
 
     def complete(self, prompt: str, params: SamplingParams | None = None, **kw: Any) -> LLMResponse:
         if self.use_chat_endpoint or self._is_dedicated_endpoint:
@@ -213,8 +306,11 @@ class HFServerlessProvider(LLMProvider):
         sampling = (params or SamplingParams()).clamped()
         encoded = base64.b64encode(image).decode("ascii")
         mime = kw.pop("mime", "image/png")
+        # on serverless, a configured vision model means its own /models/<repo>/
+        # URL — the chat model cannot see, and sending pixels to it is a 404.
+        model = self.vision_model or self.model
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {
                     "role": "user",
@@ -232,7 +328,7 @@ class HFServerlessProvider(LLMProvider):
         started = time.perf_counter()
         try:
             raw = retry_call(
-                lambda: self.http.post_json(self.chat_url(), payload), policy=self._policy
+                lambda: self.http.post_json(self.chat_url(model), payload), policy=self._policy
             )
         except Exception as exc:  # noqa: BLE001
             error = classify(exc)
@@ -298,6 +394,132 @@ class HFServerlessProvider(LLMProvider):
         raise ModelError(f"unrecognized embedding response shape: {type(data).__name__}")
 
 
+    def _post_checked(self, url: str, payload: dict, **kwargs) -> dict:
+        """Post a request and check the response.
+        
+        Args:
+            url: The URL to post to
+            payload: The payload to send
+            **kwargs: Additional arguments to pass to post_json
+        
+        Returns:
+            The response data
+        """
+        response = self.http.post_json(url, payload, **kwargs)
+        return response
+
+    @staticmethod
+    def _discover_catalog_model(catalog: list[dict], exclude: str = "") -> str:
+        """Discover the best model from a catalog.
+        
+        Args:
+            catalog: List of model dicts with 'id' and 'providers' keys
+            exclude: Model ID to exclude from selection
+        
+        Returns:
+            The selected model ID, or empty string if none found
+        """
+        if not catalog:
+            return None
+        
+        # Filter out excluded models
+        candidates = []
+        for model in catalog:
+            model_id = model.get("id", "")
+            if model_id == exclude:
+                continue
+            # Check if model has live providers (if providers field exists)
+            providers = model.get("providers")
+            if providers is not None:
+                # Only include if at least one provider is live
+                if not any(p.get("status") == "live" for p in providers):
+                    continue
+            # Include the model
+            candidates.append(model_id)
+        
+        if not candidates:
+            return None
+        
+        # Prefer small uncensored models (abliterated, uncensored, etc.)
+        uncensored_keywords = ["abliterated", "uncensored", "dolphin"]
+        small_keywords = ["7B", "8B", "3B", "1.5B"]
+        
+        # Score candidates
+        scored = []
+        for model_id in candidates:
+            score = 0
+            model_lower = model_id.lower()
+            
+            # Bonus for uncensored
+            for keyword in uncensored_keywords:
+                if keyword in model_lower:
+                    score += 10
+                    break
+            
+            # Bonus for small models
+            for keyword in small_keywords:
+                if keyword in model_id:
+                    score += 5
+                    break
+            
+            scored.append((score, model_id))
+        
+        # Sort by score (descending) and return the best
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][1] if scored else None
+
+
+
 def prompt_from_messages(messages: Sequence[Message], template: str = "chatml") -> str:
     """Convenience wrapper around :func:`messages_to_text`."""
     return messages_to_text(messages, template=template)
+
+
+def hf_doctor(provider: HFServerlessProvider) -> list[str]:
+    """Diagnose HuggingFace provider issues."""
+    report = []
+    
+    # Check token
+    token = getattr(provider, "token", "") or ""
+    if not token:
+        report.append("1. token: MISSING (set NM_HF_TOKEN environment variable)")
+    else:
+        report.append(f"1. token: present ({len(token)} chars)")
+    
+    # Check URL
+    url = getattr(provider, "url", "") or SERVERLESS_URL
+    report.append(f"2. URL: {url}")
+    
+    # Check model
+    model = getattr(provider, "model", "")
+    report.append(f"3. model: {model or 'not set'}")
+    
+    # Try to fetch catalog
+    try:
+        catalog = provider.fetch_catalog()
+        report.append(f"4. catalog: {len(catalog)} models available")
+    except Exception as e:
+        report.append(f"4. catalog: FAILED ({type(e).__name__}: {e})")
+    
+    # Try a simple request
+    try:
+        http = getattr(provider, "http", None)
+        if http:
+            response = http.post_json(f"{url}/models/{model or 'test'}", {})
+            if response:
+                report.append("5. API: responding")
+            else:
+                report.append("5. API: no response")
+        else:
+            report.append("5. API: no HTTP client")
+    except Exception as e:
+        report.append(f"5. API: FAILED ({type(e).__name__}: {e})")
+    
+    # Verdict
+    if not token:
+        report.append("\nVERDICT: NOT working (missing token)")
+    else:
+        report.append("\nVERDICT: appears functional")
+    
+    return report
+

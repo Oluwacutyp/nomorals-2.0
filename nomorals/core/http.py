@@ -71,6 +71,30 @@ class HttpResponse:
         raise http_error(self.status, self.text, self.url)
 
 
+def _error_snippet(body: str) -> str:
+    """The server's own reason, if it gave one.
+
+    OpenAI-shaped error JSON ({"error": {"message": ...}}) is unwrapped;
+    otherwise the raw body trimmed. Empty/HTML bodies stay empty so the
+    message never ends in a dangling dash."""
+    body = (body or "").strip()
+    if not body or body[0] == "<":
+        return ""
+    if body[0] == "{":
+        try:
+            import json
+
+            data = json.loads(body)
+            message = ((data.get("error") or {}).get("message")
+                       if isinstance(data.get("error"), dict)
+                       else data.get("error")) or ""
+            if message:
+                return str(message)[:200]
+        except (ValueError, TypeError):
+            pass
+    return body[:200]
+
+
 def http_error(status: int, body: str, url: str = "") -> NoMoralsError:
     """Map an HTTP status onto the framework error hierarchy."""
     detail = body[:500]
@@ -80,7 +104,12 @@ def http_error(status: int, body: str, url: str = "") -> NoMoralsError:
     if status in {401, 403}:
         return ProviderError(f"{status} unauthorized for {url}: {detail}", retryable=False)
     if status == 404:
-        return ProviderError(f"404 not found: {url}", retryable=False)
+        # a 404 without the server's reason is unactionable — "model not
+        # found: <retired-id>" is exactly what tells the owner to fix config
+        why = _error_snippet(body)
+        return ProviderError(
+            f"404 not found: {url}" + (f" — {why}" if why else ""),
+            retryable=False)
     if status in {408, 425} or status >= 500:
         return ProviderError(f"{status} from {url}: {detail}", retryable=True)
     if status == 503:
@@ -99,12 +128,14 @@ class HttpClient:
         headers: Mapping[str, str] | None = None,
         max_redirects: int = 5,
         verify_tls: bool = True,
+        proxy_url: str = "",
     ) -> None:
         self.timeout = timeout
         self.user_agent = user_agent
         self.headers = dict(headers or {})
         self.max_redirects = max_redirects
         self.verify_tls = verify_tls
+        self.proxy_url = proxy_url
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
 
     # ── core ─────────────────────────────────────────────────────────────────
@@ -228,6 +259,13 @@ class HttpClient:
         headers = {"Content-Type": "application/json", **(kw.pop("headers", None) or {})}
         return self.request("POST", url, data=body, headers=headers, **kw)
 
+    def put_json(
+        self, url: str, payload: Mapping[str, Any], **kw: Any
+    ) -> HttpResponse:
+        body = json.dumps(payload, default=str).encode("utf-8")
+        headers = {"Content-Type": "application/json", **(kw.pop("headers", None) or {})}
+        return self.request("PUT", url, data=body, headers=headers, **kw)
+
     def post_form(self, url: str, form: Mapping[str, Any], **kw: Any) -> HttpResponse:
         body = urllib.parse.urlencode(form).encode("utf-8")
         headers = {
@@ -297,3 +335,68 @@ def url_filename(url: str, default: str = "download.bin") -> str:
     path = urllib.parse.urlparse(url).path
     name = Path(path).name
     return name or default
+
+
+def default_proxy_handler() -> dict[str, Any] | None:
+    """Stub: default proxy handler (removed). Returns None (no proxy)."""
+    return None
+
+
+def apply_socks_proxy(proxy_url: str) -> None:
+    """Stub: apply SOCKS proxy (removed)."""
+    pass
+
+
+def reset_socks_proxy() -> None:
+    """Stub: reset SOCKS proxy settings."""
+    pass
+
+
+_default_proxy: str = ""
+
+
+def set_default_proxy(proxy_url: str) -> None:
+    """Set the process-wide default proxy URL."""
+    global _default_proxy
+    _default_proxy = proxy_url or ""
+
+
+def get_default_proxy() -> str:
+    """Get the process-wide default proxy URL."""
+    return _default_proxy
+
+
+_proxy_resolver = None
+
+
+def set_proxy_resolver(resolver):
+    """Register a callable that returns a proxy URL for a given target.
+
+    Used by proxylab to route HTTP requests through rotating proxies.
+    Pass None to clear.
+    """
+    global _proxy_resolver
+    _proxy_resolver = resolver
+
+
+def get_proxy_resolver():
+    """Return the currently registered proxy resolver, or None."""
+    return _proxy_resolver
+
+
+_proxy_error_reporter = None
+
+
+def set_proxy_error_reporter(reporter):
+    """Register a callable that reports proxy errors for rotation/cooldown.
+
+    Used by proxylab to track proxy failures and remove bad proxies from rotation.
+    Pass None to clear.
+    """
+    global _proxy_error_reporter
+    _proxy_error_reporter = reporter
+
+
+def get_proxy_error_reporter():
+    """Return the currently registered proxy error reporter, or None."""
+    return _proxy_error_reporter

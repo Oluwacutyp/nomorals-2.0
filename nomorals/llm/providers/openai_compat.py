@@ -34,6 +34,9 @@ class OpenAICompatProvider(LLMProvider):
         organization: str = "",
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
+        vision_model: str = "",
+        vision_base_url: str = "",
+        vision_api_key: str = "",
     ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
         self.base_url = base_url.rstrip("/")
@@ -41,6 +44,11 @@ class OpenAICompatProvider(LLMProvider):
         self.model = model
         self.template = template
         self.extra_body = dict(extra_body or {})
+        # A dedicated vision model/endpoint: text chat and image understanding
+        # are often served by different models (a 7B chat model cannot see).
+        self.vision_model = vision_model
+        self.vision_base_url = (vision_base_url or "").rstrip("/")
+        self.vision_api_key = vision_api_key
         headers = dict(extra_headers or {})
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -55,7 +63,7 @@ class OpenAICompatProvider(LLMProvider):
 
     @property
     def capabilities(self) -> set[str]:
-        return {"chat", "complete", "embed"}
+        return {"chat", "complete", "embed", "vision"}
 
     def health(self) -> bool:
         try:
@@ -158,10 +166,21 @@ class OpenAICompatProvider(LLMProvider):
         ]
         started = time.perf_counter()
         sampling = (params or SamplingParams()).clamped()
-        payload = {"model": self.model, "messages": payload_messages, **sampling.to_openai()}
+        # Resolve the vision target at call time: a dedicated vision endpoint
+        # gets its own client (and its own key), never the text chat one.
+        if self.vision_base_url:
+            base = self.vision_base_url
+            vheaders: dict[str, str] = {}
+            if self.vision_api_key:
+                vheaders["Authorization"] = f"Bearer {self.vision_api_key}"
+            http = HttpClient(timeout=self.timeout, headers=vheaders)
+        else:
+            base, http = self.base_url, self.http
+        model = self.vision_model or self.model
+        payload = {"model": model, "messages": payload_messages, **sampling.to_openai()}
         try:
             raw = retry_call(
-                lambda: self.http.post_json(f"{self.base_url}/chat/completions", payload),
+                lambda: http.post_json(f"{base}/chat/completions", payload),
                 policy=self._policy,
             )
         except Exception as exc:  # noqa: BLE001
@@ -170,5 +189,5 @@ class OpenAICompatProvider(LLMProvider):
         data = raw.json()
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         return self._record(
-            LLMResponse(text=text, model=data.get("model", self.model), raw=data), started
+            LLMResponse(text=text, model=data.get("model", model), raw=data), started
         )

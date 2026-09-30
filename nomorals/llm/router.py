@@ -94,6 +94,7 @@ class LLMRouter:
         failure_threshold: int = 3,
         bus: EventBus | None = None,
         clock: Callable[[], float] = time.monotonic,
+        repair_hooks: dict[str, Callable] | list[Callable] | None = None,
     ) -> None:
         self._providers: list[LLMProvider] = []
         self._by_name: dict[str, LLMProvider] = {}
@@ -104,7 +105,10 @@ class LLMRouter:
         self.failure_threshold = failure_threshold
         self.bus = bus
         self._clock = clock
-        self.stats = {"calls": 0, "failovers": 0, "failures": 0}
+        self.repair_hooks = repair_hooks if repair_hooks is not None else {}
+        self.repair_cooldown_seconds = cooldown_seconds
+        self._last_repair_time: dict[str, float] = {}
+        self.stats = {"calls": 0, "failovers": 0, "failures": 0, "repairs": 0}
 
     # ── registration ─────────────────────────────────────────────────────────
     def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> "LLMRouter":
@@ -147,6 +151,11 @@ class LLMRouter:
     def active(self) -> str:
         with self._lock:
             return self._active
+
+    @property
+    def active_model(self) -> str:
+        """Alias for ``active`` — used by the CLI."""
+        return self.active
 
     # ── hot-swap ─────────────────────────────────────────────────────────────
     def set_active(self, name: str) -> str:
@@ -280,6 +289,26 @@ class LLMRouter:
             return
         cooldown = self.cooldown_seconds if health.consecutive_failures + 1 >= self.failure_threshold else 0.0
         health.record_failure(error, cooldown)
+        
+        # Call repair hooks with cooldown
+        now = self._clock()
+        if isinstance(self.repair_hooks, dict):
+            for hook_name, hook in self.repair_hooks.items():
+                last_time = self._last_repair_time.get(hook_name, 0.0)
+                if now - last_time >= self.repair_cooldown_seconds:
+                    try:
+                        hook()
+                        self._last_repair_time[hook_name] = now
+                        self.stats["repairs"] += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+        else:
+            for hook in self.repair_hooks:
+                try:
+                    hook(name, error)
+                    self.stats["repairs"] += 1
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ── introspection ────────────────────────────────────────────────────────
     def probe(self, timeout: float = 10.0) -> dict[str, bool]:

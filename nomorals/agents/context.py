@@ -284,6 +284,103 @@ def _build_router(settings: Settings, bus: EventBus) -> Any:
     for fallback in llm.fallback_chain:
         add(fallback)
     if not router.providers():
-        # Never leave the system without a model: the offline mock always works.
-        add("mock", primary=True)
+        if llm.allow_mock_fallback:
+            add("mock", primary=True)
+        else:
+            # No silent fake: a misconfigured chain boots model-less, and the
+            # error surfaces where it belongs (loudly, at call time) instead
+            # of a scripted mock answering "how are you?" with fake warmth.
+            _log.warning(
+                "no usable model provider configured — running model-less. "
+                "Fix NM_LLM_PROVIDER/NM_LLM_FALLBACK_CHAIN, or opt into the "
+                "scripted test mock with NM_LLM_ALLOW_MOCK_FALLBACK=1.")
+    # The OCR floor is always in the chain: free, offline, and the only
+    # "vision" that works without a VLM. It is a fallback, never primary —
+    # real models describe first, tesseract reads the pixels when they can't.
+    if "ocr" not in registered:
+        try:
+            router.add(
+                build_provider(
+                    "ocr",
+                    binary=settings.vision.ocr_binary,
+                    language=settings.vision.ocr_language,
+                ),
+                name="ocr",
+            )
+            registered.add("ocr")
+        except Exception as exc:  # noqa: BLE001 — the floor itself may be absent
+            _log.warning("could not register ocr fallback: %s", exc)
     return router
+
+
+def ensure_local_gguf(model_path_or_settings, **kwargs):
+    """Ensure a local GGUF model is running and return the server manager.
+    
+    Args:
+        model_path_or_settings: Path to the GGUF model file or Settings object
+        **kwargs: Additional parameters (ignored)
+    
+    Returns:
+        GGUFServerManager if auto-start is enabled and server is running/healed,
+        None otherwise, or the model path string if it's just a path
+    """
+    import os
+    
+    # Handle Settings object
+    model_path = model_path_or_settings
+    settings = None
+    if hasattr(model_path_or_settings, 'llm'):
+        settings = model_path_or_settings
+        model_path = getattr(model_path_or_settings.llm, 'local_model', '')
+        if not model_path:
+            return None
+        
+        # Check if auto-start is enabled
+        auto_start = getattr(model_path_or_settings.llm, 'local_auto_start', False)
+        if auto_start:
+            # Try to start or heal the server
+            try:
+                from nomorals.llm import local_server as ls
+                port = getattr(model_path_or_settings.llm, 'local_port', 8080)
+                host = getattr(model_path_or_settings.llm, 'local_host', '127.0.0.1')
+                
+                # Check if port is in use
+                if ls.port_in_use(host, port):
+                    # Port is in use, check if healthy
+                    mgr = ls.GGUFServerManager(
+                        model_path=model_path,
+                        port=port,
+                        host=host,
+                    )
+                    if mgr._healthy():
+                        # Already healthy, don't interfere
+                        return None
+                    # Not healthy, try to heal
+                    diagnosis = mgr.heal()
+                    if diagnosis and hasattr(diagnosis, 'model_path'):
+                        mgr.model_path = diagnosis.model_path
+                    return mgr
+                else:
+                    # Port is free, start a new server
+                    mgr = ls.GGUFServerManager(
+                        model_path=model_path,
+                        port=port,
+                        host=host,
+                    )
+                    diagnosis = mgr.heal()
+                    if diagnosis and diagnosis.ok:
+                        if hasattr(diagnosis, 'model_path'):
+                            mgr.model_path = diagnosis.model_path
+                        return mgr
+            except Exception:
+                pass
+        
+        return model_path if os.path.exists(model_path) else None
+    
+    # Just a path string
+    if not model_path:
+        return None
+    
+    if os.path.exists(model_path):
+        return model_path
+    return None

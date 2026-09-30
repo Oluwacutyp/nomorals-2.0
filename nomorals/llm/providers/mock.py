@@ -58,7 +58,10 @@ class MockProvider(LLMProvider):
 
     @property
     def capabilities(self) -> set[str]:
-        return {"chat", "complete", "embed", "vision"}
+        # "vision" is deliberately absent: the mock's "[mock vision]" blurb is a
+        # test fixture, not a real VLM description. Router vision failover must
+        # never settle for it (tests/test_vision2.py).
+        return {"chat", "complete", "embed"}
 
     def health(self) -> bool:
         return True

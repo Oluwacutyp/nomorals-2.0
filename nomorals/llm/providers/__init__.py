@@ -30,8 +30,13 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         from .llama_cpp import LlamaCppProvider
 
         return LlamaCppProvider(**kwargs)
+    if kind in {"ocr", "tesseract"}:
+        from .ocr import OCRProvider
+
+        return OCRProvider(**kwargs)
     raise ValueError(
-        f"unknown provider {kind!r}; expected mock | openai_compat | hf_serverless | llama_cpp"
+        "unknown provider "
+        f"{kind!r}; expected mock | openai_compat | hf_serverless | llama_cpp | ocr"
     )
 
 

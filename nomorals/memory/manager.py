@@ -118,6 +118,8 @@ class MemoryManager:
         metadata: dict[str, Any] | None = None,
         ttl_seconds: float = 0.0,
         index: bool = True,
+        tags: Any = "",
+        origin: str = "",
     ) -> str:
         """Store a memory and index it for both vector and lexical recall."""
         content = (content or "").strip()
@@ -136,6 +138,8 @@ class MemoryManager:
             "last_access": 0.0,
             "source": source,
             "agent": agent,
+            "tags": join_tags(tags),
+            "origin": (origin or "").strip(),
             "created_at": now,
             "updated_at": now,
             "expires_at": now + ttl_seconds if ttl_seconds else None,
@@ -210,8 +214,14 @@ class MemoryManager:
         min_score: float = 0.0,
         source: str = "",
         include_expired: bool = False,
+        tags: str = "",
     ) -> RecallResult:
-        """Merged semantic + lexical + recency recall."""
+        """Merged semantic + lexical + recency recall.
+
+        ``tags`` (comma-separated) keeps only records carrying ALL of the
+        requested tags — the tag lane the /remember command populates.
+        """
+        wanted_tags = {t.strip() for t in (tags or "").split(",") if t.strip()}
         started = time.perf_counter()
         limit = limit or self.limit
         if not query.strip():
@@ -252,6 +262,10 @@ class MemoryManager:
                 continue
             if source and record.source != source:
                 continue
+            if wanted_tags:
+                have = {t.strip() for t in (record.tags or "").split(",")}
+                if not wanted_tags <= have:
+                    continue
             record.semantic = semantic_scores.get(record.id, 0.0)
             record.lexical = lexical_scores.get(record.id, 0.0)
             record.score = score_memory(
@@ -288,6 +302,37 @@ class MemoryManager:
             f"decay = MIN(1.0, decay + 0.02) WHERE id IN ({placeholders})",
             [time.time(), *ids],
         )
+
+    def find_one(self, query: str, *, kind: str = "") -> MemoryRecord | None:
+        """Resolve free text ("the server password") to the best record.
+
+        Recall first (semantic+lexical ranking), then a LIKE fallback; a
+        hit must share at least one word with the query, so a miss is a
+        clean ``None`` rather than whatever happened to rank top.
+        """
+        query = (query or "").strip()
+        if not query:
+            return None
+        result = self.recall(query, limit=4, kind=kind)
+        import re as _re
+        qwords = set(_re.findall(r"[a-z0-9']+", query.lower()))
+        for record in result.records:
+            if qwords & set(_re.findall(r"[a-z0-9']+", record.content.lower())):
+                return record
+        if kind:
+            row = self.db.query_one(
+                "SELECT * FROM memories WHERE kind = ? AND content LIKE ? "
+                "ORDER BY updated_at DESC LIMIT 1", (kind, f"%{query}%"))
+        else:
+            row = self.db.query_one(
+                "SELECT * FROM memories WHERE content LIKE ? "
+                "ORDER BY updated_at DESC LIMIT 1", (f"%{query}%",))
+        if row is None:
+            return None
+        record = MemoryRecord.from_row(row)
+        if qwords and not (qwords & set(record.content.lower().split())):
+            return None
+        return record
 
     def get(self, record_id: str) -> MemoryRecord | None:
         row = self.repo.get(record_id)
@@ -473,3 +518,29 @@ class MemoryManager:
             "weights": dict(self.weights),
             "embedder": self.embedder.stats_snapshot(),
         }
+
+
+def join_tags(tags: Any) -> str:
+    """Normalize tags into a comma-joined canonical string.
+
+    Accepts a list or an already-joined string; lowercases, trims, drops
+    empties and duplicates, preserves first-seen order, caps at 8 tags so
+    one sloppy input can't bloat the row.
+    """
+    if not tags:
+        return ""
+    if isinstance(tags, str):
+        parts: list[str] = tags.split(",")
+    else:
+        try:
+            parts = [str(t) for t in tags]
+        except TypeError:
+            return ""
+    seen: list[str] = []
+    for part in parts:
+        tag = part.strip().lower()
+        if tag and tag not in seen:
+            seen.append(tag)
+        if len(seen) >= 8:
+            break
+    return ",".join(seen)

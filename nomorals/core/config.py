@@ -103,9 +103,9 @@ class LLMSettings:
     fallback_chain: list[str] = field(default_factory=lambda: ["mock"])
     active_model: str = ""
     hf_token: str = ""
-    hf_base_url: str = "https://api-inference.huggingface.co"
+    hf_base_url: str = "https://router.huggingface.co/hf-inference"
     hf_endpoint_url: str = ""
-    hf_model: str = "cognitivecomputations/dolphin-2.9.1-llama-3-8b"
+    hf_model: str = "huihui-ai/Qwen2.5-7B-Instruct-abliterated-v2"
     openai_base_url: str = "http://localhost:11434/v1"
     openai_api_key: str = ""
     openai_model: str = "dolphin-2.9-llama3-8b"
@@ -113,6 +113,16 @@ class LLMSettings:
     timeout: float = 120.0
     cache_dir: str = "models"
     system_prompt: str = ""
+    local_model: str = ""  # path or name of a downloaded GGUF; drives the
+                          # power-mode router cascade when present
+    #: Groq's model IDs churn (they retired llama-3.3-70b-versatile & co. on
+    #: 2026-08-16) — the default must be a live ID, and NM_GROQ_MODEL exists
+    #: so a drift event is a .env edit, not a re-release.
+    groq_model: str = "openai/gpt-oss-120b"
+    #: opt-in ONLY: when no real provider configures, boot with the scripted
+    #: mock instead of booting model-less. Default off — a silent mock pretending
+    #: to answer is worse than an honest "no model configured".
+    allow_mock_fallback: bool = False
 
 
 @dataclass
@@ -140,10 +150,18 @@ class MemorySettings:
             "lexical": 0.15,
         }
     )
+    #: automatic mining of durable facts from every turn (never the reply path)
+    extract_enabled: bool = True
+    #: opt-in LLM pass on top of the heuristics — one cheap completion,
+    #: fails closed to the heuristic result on garbage
+    extract_llm: bool = False
+    #: fuzzy similarity above which a candidate counts as a duplicate
+    extract_dedupe_ratio: float = 0.8
 
 
 @dataclass
 class TrainingSettings:
+    base_model: str = ""
     backend: str = "native"  # native | unsloth | llama_factory
     data_dir: str = "data/training"
     output_dir: str = "artifacts"
@@ -199,6 +217,126 @@ class SocialSettings:
 
 
 @dataclass
+class ChatSettings:
+    local_enabled: bool = False
+    max_history: int = 100
+    media_in_groups: bool = False
+    media_max_mb: float = 20.0
+    telegram_enabled: bool = False
+    telegram_session: str = ""
+    telegram_api_id: str = ""
+    telegram_api_hash: str = ""
+    discord_enabled: bool = False
+    discord_token: str = ""
+    whatsapp_enabled: bool = False
+    whatsapp_port: int = 0
+    max_per_hour: int = 60
+
+
+@dataclass
+class AutonomySettings:
+    enabled: bool = False
+    interval_hours: float = 6.0
+    adaptive_cadence: bool = True
+    daily_model_calls: int = 0  # 0 = unlimited; the loop meters regardless
+    max_project_heals: int = 3
+    tick_goals: bool = True
+    replan_after_heals: int = 2
+    tick_improvement: bool = True
+    tick_projects: bool = True
+    tick_train: bool = True
+    reasoning_mode: str = "off"
+    reflect_on_completion: bool = True
+    
+    def __post_init__(self):
+        """Validate the autonomy dial before anything consumes it."""
+        from nomorals.core.errors import ConfigError
+
+        if self.interval_hours < 1.0:
+            raise ConfigError(
+                f"autonomy.interval_hours must be >= 1.0, got {self.interval_hours}")
+        if self.max_project_heals < 0:
+            raise ConfigError(
+                f"autonomy.max_project_heals must be >= 0, got {self.max_project_heals}")
+        if self.replan_after_heals < 0:
+            raise ConfigError(
+                f"autonomy.replan_after_heals must be >= 0, got {self.replan_after_heals}")
+        if self.daily_model_calls < 0:
+            raise ConfigError(
+                "autonomy.daily_model_calls must be >= 0 "
+                f"(0 = unlimited), got {self.daily_model_calls}")
+
+
+@dataclass
+class EvolutionSettings:
+    benchmark: str = ""
+    enabled: bool = False
+
+
+@dataclass
+class VisionSettings:
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    ocr_binary: str = ""
+    ocr_language: str = "eng"
+    enabled: bool = False
+
+
+@dataclass
+class ArenaSettings:
+    enabled: bool = False
+    build: bool = False
+    research_pages: int = 3
+    interval_hours: int = 24
+
+
+@dataclass
+class PartnerSettings:
+    enabled: bool = True
+    autonomy_mode: str = "suggest"
+    typing_cap_seconds: float = 0.0
+    platforms: str = "local"
+    owner_chats: str = ""
+    us_chats: str = ""
+    personality: str = "helpful"
+    memory_enabled: bool = True
+    proactive: bool = True
+    persona_name: str = ""
+    disclosure: str = ""
+    background_gate: str = "us_or_romantic"
+    #: Every owner conversation is a fine-tune pair waiting to happen; the
+    #: runtime appends them to data/training/conversations.jsonl by default
+    #: (NM_PARTNER_TRAIN_COLLECT=0 turns the recorder off).
+    train_collect: bool = True
+    gate_restricted_chats: bool = True
+    history_window: int = 50
+    reasoning: str = "auto"
+    max_parallel_chats: int = 5
+    max_proactive_dm_per_day: int = 10
+    max_group_posts_per_day: int = 5
+    #: comma-separated group chat keys the autonomy agent may post in
+    group_chats: str = ""
+    #: quiet hours for proactive sends (hour of day, 24h clock)
+    quiet_start: int = 22
+    quiet_end: int = 8
+    typing_while_thinking: bool = True
+    #: typing indicators are on for every chat kind — in groups they make
+    #: the reply feel human-paced instead of telegraphed; the per-part
+    #: typing run scales with chunk length
+    typing_in_groups: bool = True
+    typing_seconds: float = 1.0
+    #: "typing…" refresh cadence — platforms expire the indicator (~5s on
+    #: Telegram), so the keepalive tick must stay under that
+    typing_keepalive_seconds: float = 4.0
+    #: how long to keep holding "typing…" before giving up on the reply
+    typing_keepalive_budget: float = 120.0
+    #: after this much silence mid-reply, send one "still thinking" line
+    slow_reply_notice_seconds: float = 45.0
+    part_delay_seconds: float = 0.5
+
+
+@dataclass
 class MissionSettings:
     checkpoint_dir: str = "data/missions"
     auto_reflect: bool = True
@@ -209,6 +347,10 @@ class MissionSettings:
 
 @dataclass
 class APISettings:
+    github_token: str = ""
+    weather_latitude: float = 6.5244  # Enugu, the owner's coordinates
+    weather_longitude: float = 7.5186
+    request_timeout: float = 10.0
     host: str = "0.0.0.0"
     port: int = 8731
     token: str = ""
@@ -216,6 +358,72 @@ class APISettings:
     max_body_mb: int = 64
     workers: int = 8
 
+
+
+@dataclass
+class ImprovementSettings:
+    enabled: bool = False
+    mode: str = "off"
+    target: float = 0.8
+    benchmark: str = ""
+    auto_tick: bool = False
+
+@dataclass
+class OsintSettings:
+    enabled: bool = False
+    sources: list = field(default_factory=list)
+    hibp_key: str = ""
+    abuseipdb_key: str = ""
+    shodan_key: str = ""
+    request_timeout: float = 10.0
+    crtsh_days: int = 90
+
+@dataclass
+class AudioSettings:
+    enabled: bool = False
+    model: str = ""
+    tts_engine: str = "auto"
+    tts_voice: str = ""
+    stt_provider: str = "auto"
+    stt_base_url: str = ""
+    stt_model: str = ""
+    stt_api_key: str = ""
+    audio_dir: str = "audio"
+
+@dataclass
+class SchedulerSettings:
+    enabled: bool = True
+    interval_hours: float = 6.0
+    tick_seconds: float = 60.0
+    max_concurrent: int = 2
+    wall_seconds: float = 300.0
+
+@dataclass
+class NewsSettings:
+    enabled: bool = False
+    sources: list = field(default_factory=list)
+
+@dataclass
+class NetSettings:
+    enabled: bool = False
+    proxy: str = ""
+    probe_timeout: float = 10.0
+    allowed_targets: str = ""
+    default_ports: str = ""
+    max_probe_ports: int = 100
+    banner: bool = False
+
+@dataclass
+class ProxySettings:
+    active: str = ""
+    known: str = ""
+    url: str = ""
+
+@dataclass
+class RuntimeSettings:
+    enabled: bool = False
+    profile: str = ""
+    threads: int = 4
 
 @dataclass
 class Settings:
@@ -240,6 +448,33 @@ class Settings:
     social: SocialSettings = field(default_factory=SocialSettings)
     mission: MissionSettings = field(default_factory=MissionSettings)
     api: APISettings = field(default_factory=APISettings)
+    partner: PartnerSettings = field(default_factory=PartnerSettings)
+    chat: ChatSettings = field(default_factory=ChatSettings)
+    arena: ArenaSettings = field(default_factory=ArenaSettings)
+    reasoning_mode: str = "always"  # pre-flight permanently on (wave 85);
+    # every hook is budget-capped, and "auto"|"off" still opt down/out
+    reasoning_knowledge: str = "on"
+    autonomy: AutonomySettings = field(default_factory=AutonomySettings)
+    evolution: EvolutionSettings = field(default_factory=EvolutionSettings)
+    vision: VisionSettings = field(default_factory=VisionSettings)
+    router_intelligent: str = "off"
+    
+    def __post_init__(self):
+        """Validate router_intelligent and reasoning_knowledge values."""
+        if self.router_intelligent not in ("on", "off"):
+            from nomorals.core.errors import ConfigError
+            raise ConfigError(f"router_intelligent must be 'on' or 'off', got '{self.router_intelligent}'")
+        if self.reasoning_knowledge not in ("on", "off"):
+            from nomorals.core.errors import ConfigError
+            raise ConfigError(f"reasoning_knowledge must be 'on' or 'off', got '{self.reasoning_knowledge}'")
+    runtime: "RuntimeSettings" = field(default_factory=lambda: RuntimeSettings())
+    net: "NetSettings" = field(default_factory=lambda: NetSettings())
+    proxy: "ProxySettings" = field(default_factory=lambda: ProxySettings())
+    news: "NewsSettings" = field(default_factory=lambda: NewsSettings())
+    scheduler: "SchedulerSettings" = field(default_factory=lambda: SchedulerSettings())
+    audio: "AudioSettings" = field(default_factory=lambda: AudioSettings())
+    osint: "OsintSettings" = field(default_factory=lambda: OsintSettings())
+    improvement: "ImprovementSettings" = field(default_factory=lambda: ImprovementSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -363,6 +598,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_BUDGET_TOKENS": "budget.tokens",
     "NM_BUDGET_CHILDREN": "budget.children",
     "NM_LLM_PROVIDER": "llm.provider",
+    "NM_LLM_FALLBACK_CHAIN": "llm.fallback_chain",
+    "NM_LLM_ACTIVE_MODEL": "llm.active_model",
+    "NM_LLM_TIMEOUT": "llm.timeout",
+    "NM_LLM_CACHE_DIR": "llm.cache_dir",
+    "NM_LLM_SYSTEM_PROMPT": "llm.system_prompt",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",
     "NM_HF_BASE_URL": "llm.hf_base_url",
@@ -376,6 +616,33 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
+    "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
+    "NM_ARENA_ENABLED": "arena.enabled",
+    "NM_ARENA_BUILD": "arena.build",
+    "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",
+    "NM_ARENA_RESEARCH_PAGES": "arena.research_pages",
+    "NM_PARTNER_PLATFORMS": "partner.platforms",
+    "NM_PARTNER_OWNER_CHATS": "partner.owner_chats",
+    "NM_PARTNER_PERSONALITY": "partner.personality",
+    "NM_PARTNER_MEMORY_ENABLED": "partner.memory_enabled",
+    "NM_PARTNER_PROACTIVE": "partner.proactive",
+    "NM_NET_ENABLED": "net.enabled",
+    "NM_NET_PROXY": "net.proxy",
+    "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",
+    "NM_NET_ALLOWED_TARGETS": "net.allowed_targets",
+    "NM_NET_DEFAULT_PORTS": "net.default_ports",
+    "NM_NET_MAX_PROBE_PORTS": "net.max_probe_ports",
+    "NM_NET_BANNER": "net.banner",
+    "NM_PROXY_ACTIVE": "proxy.active",
+    "NM_PROXY_KNOWN": "proxy.known",
+    "NM_PROXY_URL": "proxy.url",
+    "NM_OSINT_ENABLED": "osint.enabled",
+    "NM_OSINT_HIBP_KEY": "osint.hibp_key",
+    "NM_OSINT_ABUSEIPDB_KEY": "osint.abuseipdb_key",
+    "NM_OSINT_SHODAN_KEY": "osint.shodan_key",
+    "NM_OSINT_REQUEST_TIMEOUT": "osint.request_timeout",
+    "NM_OSINT_CRTSH_DAYS": "osint.crtsh_days",
 }
 
 
@@ -565,7 +832,9 @@ def load_settings(
 
     # 4. .env file
     if use_env_file:
-        for env_path in (Path.cwd() / ".env", Path(os.path.expanduser(merged["home"])) / ".env"):
+        env_home = environ.get("NM_HOME") or merged["home"]
+        for env_path in (Path.cwd() / ".env",
+                         Path(os.path.expanduser(env_home)) / ".env"):
             for key, value in _parse_env_file(env_path).items():
                 environ.setdefault(key, value)
             if env_path.is_file():
@@ -574,7 +843,12 @@ def load_settings(
     # 5. environment variables
     for key, value in environ.items():
         if key in _ENV_MAP:
-            _apply_dotted(merged, _ENV_MAP[key], value)
+            dotted = _ENV_MAP[key]
+            # Coerce value to proper type based on field definition
+            field_type = _find_field_type(Settings, dotted)
+            if field_type is not None:
+                value = _coerce(value, field_type)
+            _apply_dotted(merged, dotted, value)
             continue
         if not key.startswith(_ENV_PREFIX):
             continue
@@ -585,6 +859,10 @@ def load_settings(
             if target is None:
                 continue
             dotted = target
+        # Coerce value to proper type based on field definition
+        field_type = _find_field_type(Settings, dotted)
+        if field_type is not None:
+            value = _coerce(value, field_type)
         _apply_dotted(merged, dotted, value)
 
     # 6. explicit overrides
@@ -593,12 +871,45 @@ def load_settings(
             _apply_dotted(merged, key, value)
 
     settings = _build(Settings, merged)
+    _heal_retired_urls(settings)
     _validate(settings)
     return settings
 
 
+# Retired endpoints map onto their live successors so an old .env keeps
+# working instead of failing at runtime with 410s.
+_RETIRED_URLS = {
+    "https://api-inference.huggingface.co": "https://router.huggingface.co/hf-inference",
+    "http://api-inference.huggingface.co": "https://router.huggingface.co/hf-inference",
+    "https://api-inference.huggingface.co/": "https://router.huggingface.co/hf-inference",
+}
+
+
+def _heal_retired_urls(settings: "Settings") -> None:
+    """Rewrite decommissioned endpoints in place (config-hygiene pass)."""
+    llm = settings.llm
+    raw = (llm.hf_base_url or "").strip().rstrip("/")
+    if not raw:
+        llm.hf_base_url = _RETIRED_URLS["https://api-inference.huggingface.co"]
+        return
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(raw).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        host = ""
+    if host == "api-inference.huggingface.co":
+        llm.hf_base_url = _RETIRED_URLS["https://api-inference.huggingface.co"]
+
+
 def _find_field_path(root: type, name: str) -> str | None:
-    """Locate a bare field name inside the settings tree; returns a dotted path."""
+    """Locate a bare field name inside the settings tree; returns a dotted path.
+
+    Accepts both the bare name (``daily_model_calls``) and a section-prefixed
+    spelling (``autonomy_daily_model_calls`` — how flattened env vars arrive,
+    e.g. ``NM_AUTONOMY_DAILY_MODEL_CALLS``), since section and field names use
+    underscores too.
+    """
     for f in fields(root):  # type: ignore[arg-type]
         if f.name == name:
             return name
@@ -609,6 +920,45 @@ def _find_field_path(root: type, name: str) -> str | None:
             sub = _find_field_path(ftype, name)
             if sub:
                 return f"{f.name}.{sub}"
+            # section-prefix form: "<section>_<rest>"
+            if name.startswith(f.name + "_"):
+                rest = _find_field_path(ftype, name[len(f.name) + 1:])
+                if rest:
+                    return f"{f.name}.{rest}"
+    return None
+
+
+def _find_field_type(root: type, dotted: str) -> type | None:
+    """Find the type of a field given its dotted path."""
+    parts = dotted.split(".")
+    current = root
+    hints = _resolved_types(current)
+    
+    for i, part in enumerate(parts):
+        # Find the field in current dataclass
+        found = False
+        for f in fields(current):  # type: ignore[arg-type]
+            if f.name == part:
+                ftype = hints.get(part)
+                if ftype is None:
+                    return None
+                
+                # If this is the last part, return the type
+                if i == len(parts) - 1:
+                    return ftype
+                
+                # Otherwise, descend into the nested dataclass
+                if isinstance(ftype, type) and is_dataclass(ftype):
+                    current = ftype
+                    hints = _resolved_types(current)
+                    found = True
+                    break
+                else:
+                    return None  # Not a dataclass, can't descend
+        
+        if not found:
+            return None
+    
     return None
 
 
@@ -655,3 +1005,29 @@ def reset_settings() -> None:
     """Forget the cached settings (used by tests)."""
     global _settings
     _settings = None
+
+
+def env_var_path(env_var: str) -> str | None:
+    """Convert an environment variable name to its dotted config path.
+
+    Returns None when the variable maps to no real config field.
+    
+    Examples:
+        env_var_path("NM_HOME") -> "home"
+        env_var_path("NM_CHAT_MEDIA_IN_GROUPS") -> "chat.media_in_groups"
+        env_var_path("HF_TOKEN") -> "llm.hf_token"
+    """
+    # Check explicit map first
+    if env_var in _ENV_MAP:
+        return _ENV_MAP[env_var]
+    
+    # Strip NM_ prefix if present
+    if env_var.startswith("NM_"):
+        remainder = env_var[3:]  # Strip "NM_"
+    else:
+        remainder = env_var
+    
+    # Validate against the real settings tree: an NM_FOO_BAR that matches no
+    # field must resolve to None (silently-ignored env vars were the bug
+    # this guard exists to catch).
+    return _find_field_path(Settings, remainder.lower())
