@@ -196,7 +196,25 @@ def _parser() -> argparse.ArgumentParser:
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
     sub.add_parser("hub", help="Model hub operations")
-    sub.add_parser("cipher", help="Encryption/decryption tools")
+    cipher = sub.add_parser("cipher",
+                            help="nmc1 encryption: encrypt, decrypt, classic ciphers, hmac")
+    cipher.add_argument("action", nargs="?", default="",
+                        choices=["", "encrypt", "decrypt", "classic", "hmac", "formats"])
+    cipher.add_argument("data", nargs="?", default="",
+                        help="text to encrypt / classic-cipher input")
+    cipher.add_argument("--blob", default="", help="nmc1:v1 blob to decrypt")
+    cipher.add_argument("--passphrase", default="", help="KDF passphrase")
+    cipher.add_argument("--key", default="", help="raw key (hex or text) instead of a passphrase")
+    cipher.add_argument("--mode", default="", choices=["", "ctr", "cbc"],
+                        help="aes mode (default ctr)")
+    cipher.add_argument("--algorithm", default="caesar",
+                        choices=["caesar", "vigenere", "atbash", "b64"],
+                        help="classic: which cipher")
+    cipher.add_argument("--shift", type=int, default=1, help="classic: caesar shift")
+    cipher.add_argument("--keyword", default="", help="classic: vigenere keyword")
+    cipher.add_argument("--decrypt", action="store_true",
+                        help="classic: decrypt instead of encrypt")
+    cipher.add_argument("--json", action="store_true", help="Output as JSON")
     sub.add_parser("osint", help="Open source intelligence")
     structure_p = sub.add_parser("structure", help="Structure an objective into a brief")
     structure_p.add_argument("objective", nargs="?", default="",
@@ -236,9 +254,29 @@ def _parser() -> argparse.ArgumentParser:
     cookies_p.add_argument("--json", action="store_true", help="Output as JSON")
     sub.add_parser("reason", help="Reasoning engine")
     sub.add_parser("workspace", help="Workspace management")
-    sub.add_parser("monitor", help="System monitoring")
+    monitor = sub.add_parser("monitor", help="watch files/URLs for changes")
+    monitor.add_argument("action", nargs="?", default="status",
+                         choices=["add", "list", "tick", "status", "remove",
+                                  "enable", "disable"])
+    monitor.add_argument("ref", nargs="?", default="",
+                         help="target or ref (add/remove/enable/disable)")
+    monitor.add_argument("--interval", type=float, default=300.0,
+                         help="seconds between checks (floor 30)")
+    monitor.add_argument("--webhook", default="", help="URL to POST alerts to")
+    monitor.add_argument("--secret", default="",
+                         help="HMAC secret for webhook signatures")
+    monitor.add_argument("--watch", default="content", choices=["content", "size"])
+    monitor.add_argument("--json", action="store_true", help="Output as JSON")
     sub.add_parser("crack", help="Hash cracking")
-    sub.add_parser("decode", help="Decoding tools")
+    decode = sub.add_parser("decode",
+                            help="decode/identify encodings, chains, hashes")
+    decode.add_argument("text", nargs="?", default="",
+                        help="data (or file:path) to decode")
+    decode.add_argument("--hash", default="", metavar="DIGEST",
+                        help="known-plaintext hash lookup")
+    decode.add_argument("--mode", default="", choices=["", "decoders"],
+                        help="'decoders' lists the decoder registry")
+    decode.add_argument("--json", action="store_true", help="Output as JSON")
     music = sub.add_parser("music", help="Music generation")
     music.add_argument("action", nargs="?", default="styles",
                        choices=["styles", "compose", "songs"],
@@ -1580,19 +1618,197 @@ def _cmd_crack(args, context):
     return 0
 
 def _cmd_decode(args, context):
-    """Stub: decode command."""
-    _emit(args, {"status": "ok"}, "Decode ready")
+    """Decode/identify: encodings, nested chains, known hashes (wave 71)."""
+    from .core import decoder as D
+
+    if getattr(args, "mode", "") == "decoders":
+        names = [d.name for d in D.DECODERS]
+        _emit(args, {"count": len(names), "names": names},
+              f"decoders ({len(names)}): " + ", ".join(names))
+        return 0
+
+    digest = getattr(args, "hash", "") or ""
+    if digest:
+        info = D.analyze(digest).hash or {}
+        known = info.get("known")
+        if known:
+            _emit(args, info, f"known plaintext: {known.get('plaintext')}"
+                  f"  (algorithm {known.get('algorithm')})")
+        else:
+            cands = ", ".join(info.get("algorithms") or []) or "no hash candidates"
+            _emit(args, info, f"no known plaintext; candidates: {cands}")
+        return 0
+
+    text = getattr(args, "text", "") or ""
+    if not text:
+        print("usage: nm decode <text|file:path>  |  nm decode --hash <digest>  |  "
+              "nm decode --mode decoders")
+        return 2
+
+    from .agents.decoder import DecoderAgent
+
+    agent = DecoderAgent(context=context, name="cli")
+    result = agent.run({"data": text, "explain": True})
+    if not getattr(result, "ok", False):
+        print(f"decode failed: {getattr(result, 'error', 'unknown')}")
+        return 1
+    out = dict(result.output)
+    report = out.get("report") or {}
+    best = report.get("best") or {}
+    chain = "+".join(str(x) for x in (best.get("chain") or [])) \
+        or str(best.get("decoder") or "?")
+    best_out = str(best.get("output", ""))
+    if len(best_out) > 300:
+        best_out = best_out[:300] + " …"
+    lines = [f"best: {chain} -> {best_out}"]
+    for h in (report.get("hits") or [])[:6]:
+        note = f"  {str(h.get('note'))[:70]}" if h.get("note") else ""
+        lines.append(f"  {h.get('decoder')}: conf {h.get('confidence')}{note}")
+    if out.get("explanation"):
+        lines.append(f"explanation: {out['explanation']}")
+    if out.get("saved_to"):
+        lines.append(f"saved: {out['saved_to']}")
+    _emit(args, out, "\n".join(lines))
     return 0
 
 def _cmd_cipher(args, context):
-    """Stub: cipher command."""
-    _emit(args, {"status": "ok"}, "Cipher ready")
-    return 0
+    """nmc1 encryption at the shell: authenticated AES, classic ciphers, HMAC."""
+    import base64 as _b64
+
+    from .core import cipher as core
+    from .tools.cipher import _key_bytes
+
+    action = getattr(args, "action", "") or ""
+    data = getattr(args, "data", "") or ""
+    passphrase = getattr(args, "passphrase", "") or ""
+    key_bytes = _key_bytes(getattr(args, "key", "") or "")
+    try:
+        if action == "encrypt":
+            if not data:
+                print("usage: nm cipher encrypt <text> --passphrase <pw>")
+                return 2
+            if not passphrase and not key_bytes:
+                print("error: encrypt needs --passphrase (or --key)")
+                return 2
+            print(core.aes_encrypt(
+                data, passphrase=passphrase, key=key_bytes,
+                mode=getattr(args, "mode", "") or "ctr"))
+            return 0
+        if action == "decrypt":
+            blob = getattr(args, "blob", "") or data
+            if not blob:
+                print("usage: nm cipher decrypt --blob <nmc1:...> --passphrase <pw>")
+                return 2
+            plain = core.aes_decrypt(blob, passphrase=passphrase, key=key_bytes)
+            try:
+                print(plain.decode("utf-8"))
+            except UnicodeDecodeError:
+                print(f"<binary: {_b64.b64encode(plain).decode()}>")
+            return 0
+        if action == "classic":
+            alg = (getattr(args, "algorithm", "") or "caesar").lower()
+            do_dec = bool(getattr(args, "decrypt", False))
+            if alg == "caesar":
+                print(core.caesar(data, int(getattr(args, "shift", 1) or 1),
+                                   decrypt=do_dec))
+            elif alg == "vigenere":
+                print(core.vigenere(data, getattr(args, "keyword", "") or "",
+                                    decrypt=do_dec))
+            elif alg == "atbash":
+                print(core.atbash(data))
+            elif alg == "b64":
+                if do_dec:
+                    print(core.b64_decode(data).decode("utf-8", "replace"))
+                else:
+                    print(core.b64_encode(data))
+            else:
+                print(f"unknown algorithm {alg!r} (caesar|vigenere|atbash|b64)")
+                return 2
+            return 0
+        if action == "hmac":
+            print(core.hmac_hex(getattr(args, "key", "") or "", data))
+            return 0
+        if action == "formats":
+            _emit(args, {"algorithms": ["aes-ctr", "aes-cbc", "caesar",
+                                        "vigenere", "atbash", "b64", "hmac-sha256"]},
+                  "nmc1:v1 blobs - aes-ctr (default), aes-cbc; classic: caesar, "
+                  "vigenere, atbash, b64; hmac-sha256")
+            return 0
+    except core.CipherError as exc:
+        print(f"cipher error: {exc}")
+        return 1
+    print(f"unknown action: {action!r} (encrypt|decrypt|classic|hmac|formats)")
+    return 2
 
 def _cmd_monitor(args, context):
-    """Stub: monitor command."""
-    _emit(args, {"status": "ok"}, "Monitor ready")
-    return 0
+    """Watch files/URLs for changes — thin shell over agents.monitor."""
+    from .agents.monitor import MonitorAgent
+
+    agent = MonitorAgent(context)
+    action = getattr(args, "action", "") or "status"
+    ref = getattr(args, "ref", "") or ""
+
+    if action == "add":
+        if not ref:
+            print("usage: nm monitor add <file-or-url> [--interval SECONDS] "
+                  "[--webhook URL --secret S] [--watch content|size]")
+            return 2
+        try:
+            row = agent.add(ref,
+                            interval=float(getattr(args, "interval", 300.0) or 300.0),
+                            webhook=getattr(args, "webhook", "") or "",
+                            secret=getattr(args, "secret", "") or "",
+                            watch=getattr(args, "watch", "") or "content")
+        except ValueError as exc:
+            print(f"monitor add failed: {exc}")
+            return 1
+        _emit(args, row,
+              f"watching {ref} ({row.get('kind', 'file')}, "
+              f"every {int(row.get('interval', 300) or 300)}s)")
+        return 0
+    if action == "tick":
+        result = agent.tick()
+        if isinstance(result, dict):
+            text = "tick: " + (", ".join(f"{k}={v}" for k, v in result.items())
+                               or "nothing due")
+        else:
+            text = f"tick: {result}"
+        _emit(args, result if isinstance(result, dict) else {"result": result}, text)
+        return 0
+    if action == "list":
+        rows = agent.list()
+        if not rows:
+            _emit(args, [], "no monitors - add one with `nm monitor add <file|url>`")
+            return 0
+        lines = []
+        for r in rows:
+            label = r.get("ref") or r.get("target") or ""
+            lines.append(f" {label}  kind={r.get('kind', '')}  "
+                         f"{'enabled' if r.get('enabled', True) else 'paused'}  "
+                         f"every {int(r.get('interval', 300) or 300)}s")
+        _emit(args, rows, "\n".join(lines))
+        return 0
+    if action == "status":
+        st = agent.status()
+        _emit(args, st,
+              f"monitors: {st.get('enabled', 0)}/{st.get('total', 0)} enabled")
+        return 0
+    if action == "remove":
+        if not ref:
+            print("usage: nm monitor remove <ref>")
+            return 2
+        ok = bool(agent.remove(ref))
+        print(f"removed {ref}" if ok else f"no monitor matching {ref}")
+        return 0 if ok else 1
+    if action in ("enable", "disable"):
+        row = agent.set_enabled(ref, action == "enable")
+        if row is None:
+            print(f"no monitor matching {ref}")
+            return 1
+        _emit(args, row, f"{ref} {action}d")
+        return 0
+    print(f"unknown action: {action}")
+    return 2
 
 def _reply_path_report(settings_or_args, path: str = ""):
     """Return a reply path report for the given settings or args.
