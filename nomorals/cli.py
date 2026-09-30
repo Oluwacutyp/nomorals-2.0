@@ -184,6 +184,27 @@ def _parser() -> argparse.ArgumentParser:
     kg.add_argument("--json", action="store_true", help="Output as JSON")
     sub.add_parser("improve", help="Self-improvement operations")
     sub.add_parser("simulate", help="Sandbox code execution")
+    code = sub.add_parser(
+        "code",
+        help="Coding agent: run a task, review diffs, run tests",
+        description=("nm code \"<task>\" [--file F] [--accept CMD] [--max-iters N] [--root DIR]\n"
+                     "nm code review [ref] [--root DIR]\n"
+                     "nm code test [--changed] [--root DIR]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # `task` takes the remaining words so `nm code review` / `nm code test`
+    # work as subcommands without argparse subparser conflicts.
+    code.add_argument("task", nargs="*", default=[],
+                      help='task to run, or "review [ref]" / "test"')
+    code.add_argument("--file", default="main.py", help="target file for the task")
+    code.add_argument("--accept", default="",
+                      help="acceptance command (default: python3 <file>)")
+    code.add_argument("--max-iters", type=int, default=5, help="max draft iterations")
+    code.add_argument("--root", default=".", help="project root the agent works in")
+    code.add_argument("--changed", action="store_true",
+                      help="with test: only run tests for changed files")
+    code.add_argument("--json", action="store_true", help="Output as JSON")
+
     
 
     # Additional subcommands
@@ -681,6 +702,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_stub(args, context, "improve")
         if args.command == "simulate":
             return _cmd_stub(args, context, "simulate")
+        if args.command == "code":
+            return _cmd_code(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -864,6 +887,106 @@ def _cmd_memory(args: argparse.Namespace, context: Any) -> int:
     for record in result.records:
         print(f"{record.score:.3f} [{record.kind}] {record.content[:160]}")
     return 0
+
+
+def _cmd_code(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm code` to run / review / test."""
+    words = list(args.task or [])
+    if words and words[0] == "review":
+        ref = words[1] if len(words) > 1 else None
+        return _cmd_code_review(args, context, ref)
+    if words and words[0] == "test":
+        return _cmd_code_test(args, context)
+    task = " ".join(words).strip()
+    if not task:
+        print('usage: nm code "<task>" [--file F] [--accept CMD] [--max-iters N] [--root DIR]',
+              file=sys.stderr)
+        print('       nm code review [ref] [--root DIR]', file=sys.stderr)
+        print('       nm code test [--changed] [--root DIR]', file=sys.stderr)
+        return 2
+    return _cmd_code_run(args, context, task)
+
+
+def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
+    """Run a coding task directly through the CodingAgent (no orchestrator)."""
+    from .agents.coding import CodingAgent
+
+    root = str(Path(args.root).expanduser().resolve())
+    agent = CodingAgent(context, root=root)
+    result = agent.run(
+        task,
+        filename=args.file,
+        accept=args.accept,
+        max_iterations=args.max_iters,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, default=str))
+        return 0 if result.ok else 1
+    print(f"task: {task}")
+    print(f"file: {args.file}  iterations: {result.iterations}  "
+          f"seconds: {result.seconds:.1f}")
+    if result.ok:
+        print("OK — acceptance command passed")
+    else:
+        print(f"FAILED: {result.error}")
+    # Always end the session with the diff on screen; committing is a
+    # separate, explicit `nm` step — never automatic.
+    from .tools.git import git_diff
+    try:
+        diff = git_diff(None, [args.file], root)
+        if diff["diff"].strip():
+            print("\n--- diff ---")
+            print(diff["diff"] if not diff["truncated"]
+                  else diff["diff"] + "\n... [truncated]")
+        else:
+            print("\n(no changes)")
+    except Exception as exc:  # noqa: BLE001 — diff is best-effort
+        print(f"\n(could not render diff: {exc})")
+    return 0 if result.ok else 1
+
+
+def _cmd_code_review(args: argparse.Namespace, context: Any, ref: str | None) -> int:
+    """Render a readable diff of the working tree (or ref) for review."""
+    from .tools.git import git_diff, git_status
+
+    root = str(Path(args.root).expanduser().resolve())
+    try:
+        status = git_status(root)
+        diff = git_diff(ref, None, root)
+    except Exception as exc:
+        print(f"review failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"status": status, "diff": diff}, indent=2, default=str))
+        return 0
+    print(f"repo: {root}  branch: {status['branch']}")
+    dirty = status["staged"] + status["unstaged"] + status["untracked"]
+    print(f"dirty files ({len(dirty)}): "
+          + (", ".join(dirty[:20]) if dirty else "none"))
+    body = diff["diff"]
+    if not body.strip():
+        print("\n(no diff)")
+        return 0
+    print(f"\n--- diff{f' vs {ref}' if ref else ''} "
+          f"({diff['bytes']} bytes{', truncated' if diff['truncated'] else ''}) ---")
+    print(body if not diff["truncated"] else body + "\n... [truncated at 50KB]")
+    return 0
+
+
+def _cmd_code_test(args: argparse.Namespace, context: Any) -> int:
+    """Run the test suite. Phase B makes this pytest-aware; for now it shells
+    out to the unittest discover command."""
+    import subprocess
+
+    root = str(Path(args.root).expanduser().resolve())
+    if args.changed:
+        # Phase B will select tests by changed files; Phase A is honest
+        # about running the whole suite.
+        print("(note: --changed selection lands in Phase B; running full suite)")
+    cmd = [sys.executable, "-u", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
+    print(f"$ {' '.join(cmd)}  (in {root})")
+    proc = subprocess.run(cmd, cwd=root)
+    return proc.returncode
 
 
 def _cmd_run(args: argparse.Namespace, context: Any) -> int:
