@@ -1,0 +1,467 @@
+"""The reply pipeline: signals in, a real message out.
+
+Flow for one inbound message:
+
+1. **Signal detection** — a fast, offline regex bank reads the message for
+   emotional events (compliments, fights, apologies, jealousy triggers, ...).
+   These drive the mood engine *before* the model is asked to speak, so her
+   reaction already carries the effect of what was just said.
+2. **Generation** — the model is called with the assembled context. Sampling
+   temperature tracks the mood: low when tired, high when excited.
+3. **Guarding** — parrot check, robotic-phrase strip, length clamp. A failed
+   parrot check costs one retry with a rewrite nudge.
+4. **Fallback** — if every generation fails (offline, provider down, model
+   returned garbage), a short in-character line from the fallback bank is
+   sent instead. The conversation never stalls on infrastructure.
+"""
+
+from __future__ import annotations
+
+import random
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping, Sequence
+
+from ..core.logging_setup import get_logger
+from ..llm.base import LLMResponse, Message, SamplingParams
+from ..memory.manager import MemoryManager
+from .background import BackgroundSelector
+from .context import PartnerContextBuilder, user_turn
+from .mood import MoodEngine, MoodEvent
+from .persona import Persona
+from .relationship import Relationship
+from .style import (
+    clamp_to_budget,
+    emoji_cap,
+    emoji_instruction,
+    humanize_emoji,
+    identity_leak_check,
+    length_budget,
+    normalize_formatting,
+    parrot_check,
+    split_messages,
+    should_answer_short,
+    strip_robotic,
+)
+
+__all__ = ["Signal", "detect_signals", "ReplyBundle", "PartnerResponder", "FALLBACK_LINES"]
+
+_log = get_logger(__name__)
+
+
+# ── signal bank ────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Signal:
+    kind: str
+    pattern: str
+    base_intensity: float = 0.5
+    note: str = ""
+
+    def compiled(self) -> re.Pattern[str]:
+        return re.compile(self.pattern, re.IGNORECASE)
+
+
+#: Ordered: more specific signals first; a message can fire several, but the
+#: cap in :func:`detect_signals` keeps one typo from wrecking the state.
+SIGNALS: tuple[Signal, ...] = (
+    Signal("apology",
+           r"\b(i'?m (really |so )?sorry|my (bad|mistake)|i (apologize|owe you an apology)|"
+           r"i (was|shouldn't have) (wrong|rude|cruel|harsh|a jerk)|i (should|never) have (said|done|gone))\b",
+           0.7),
+    Signal("insult",
+           r"\b(you'?re (stupid|pathetic|useless|a liar|a joke|selfish)|shut (the hell )?up|"
+           r"you (idiot|jerk|moron)|you don'?t (care|give a|even think)|disgusting|you'?re the worst)\b",
+           0.8),
+    Signal("jealousy_trigger",
+           r"\b(you(r|re)? (ex|ex-?)? (girlfriend|boyfriend|girl|guy)|who'?s (that|she|he)|"
+           r"where'?s (she|he) (been|right now)|you (went|go|going) (out|with them|to (dinner|drinks))|"
+           r"(she|he) (texted|called|messa?ged) (you|me)|still single|someone (new|interesting) (likes|is into|asked))\b",
+           0.7, "a mention of another person"),
+    Signal("fight",
+           r"\b(i'?m (so |really )?(angry|furious|done|so over it|sick of (you|this))|"
+           r"you (never|always) (do|say|text|listen)|this is (stupid|sick|pathetic|unbelievable|insane)|"
+           r"i don'?t even (anymore|care|want to)|just do whatever|great\.$|whatever\.$|fine\.$|we (should|need) to (talk|be honest))\b",
+           0.8),
+    Signal("deep_conversation",
+           r"\b(honestly, i|i don'?t know how to say|when i was (a kid|small|young)|"
+           r"my (mom|dad|mother|father) (told|said|died|left|was)|what (are|is) you (afraid of|worried about)|"
+           r"i (never tell (anyone|people)|only tell you)|do you (think|believe) (us|this|we)|"
+           r"what does (love|forever|home) mean to you)\b",
+           0.7),
+    Signal("flirty",
+           r"\b(kiss|touch (you|me)|date (you|tonight)|want (you|to see you)|you'?re (cute|stunning|beautiful|hot)|"
+           r"dinner (with you|tonight)|come (over|here)|dream(y|ing of) (you)|can'?t stop thinking about you)\b",
+           0.6),
+    Signal("affectionate",
+           r"\b(miss (you|u|it when you)|cant wait to (see|hear from) you|i (love|adore) you|"
+           r"you'?re (my (everything|world|favorite)|the best|so (good|sweet|important))|babe|honey|sweetheart|"
+           r"good (morning|night) (babe|honey|love|handsome|beautiful)|sleep well|dream of you|take care of you)\b",
+           0.6),
+    Signal("shared_plan",
+           r"\b(let'?s (plan|book|go|meet|try|do)|we (should|could|can|are) (go|travel|plan|do|meet|visit)|"
+           r"what if we|same time (next|week)|dinner (saturday|friday|tomorrow)|movie (tonight|friday)|"
+           r"are you (free|around|on) (tomorrow|saturday|next (weekend|week))|coming (over|up|to (town|me)))\b",
+           0.6),
+    Signal("good_news",
+           r"\b(i (passed|got the job|got in|landed|won|finished|closed|shipped|made it)|"
+           r"it'?s (true|real|official)|best day ever|promotion|we did it|yes!!|i (got|kept) the (job|contract))\b",
+           0.6),
+    Signal("bad_news",
+           r"\b(i (failed|lost|got (laid off|fired|rejected|sacked)|broke down)|"
+           r"i'?m (sick|not okay|exhausted|crushing|done for)|bad (news|day)|something (bad|went wrong|happened))\b",
+           0.6),
+    Signal("compliment",
+           r"\b(you (make me (so )?(happy|smile|laugh)|really (get|understand|see) me|"
+           r"don'?t (change|worry)|are (easy to be around|my safe place|my person))|"
+           r"i (love|like) (how|that|you))\b",
+           0.6),
+)
+
+#: A message that is just "k", "mhm", "ok" — real, but low-content.
+_SHORT_LOW_CONTENT = re.compile(r"^(ok|okay|cool|k|mhm|hmm+|lol|haha+|sure|fine|yeah|yep|no|nope|yes|yess?|uh|um)\.?\??!?$", re.IGNORECASE)
+_WARM_SHORT = {"yeah", "yep", "yes", "yess", "yesss", "ok", "okay"}
+
+
+def detect_signals(text: str, *, previous_text: str = "") -> list[MoodEvent]:
+    """Read one message for emotional events. Deterministic and offline."""
+    if not text or not text.strip():
+        return []
+    events: list[MoodEvent] = []
+    seen_kinds: set[str] = set()
+    for signal in SIGNALS:
+        if signal.kind in seen_kinds:
+            continue
+        if signal.compiled().search(text):
+            seen_kinds.add(signal.kind)
+            intensity = signal.base_intensity
+            if text.isupper() and len(text) > 6:
+                intensity += 0.15
+            if "!!" in text or "!!" in text.lower().replace("!", "!"):
+                intensity += 0.1
+            events.append(MoodEvent(kind=signal.kind, intensity=min(1.0, intensity), note=signal.note))
+    # A short low-content reply is a *response quality* signal, not content.
+    if _SHORT_LOW_CONTENT.match(text.strip()):
+        kind = "warm_response" if text.strip().rstrip(".!?").lower() in _WARM_SHORT else "cold_response"
+        events.append(MoodEvent(kind=kind, intensity=0.5, note="short reply"))
+    if len(events) > 4:
+        events = events[:4]
+    return events
+
+
+# ── fallback lines (infrastructure failure path) ──────────────────────────────
+
+FALLBACK_LINES: dict[str, tuple[str, ...]] = {
+    "happy":        ("heh. you had me mid-laugh there", "good. i mean it.", "see? this is the good part"),
+    "excited":      ("okay wait. this is actually great", "i'm vibrating a little, deal with it", "more. tell me more"),
+    "affectionate": ("you've been on my mind all day", "come here. i mean it.", "mhm. good. stay"),
+    "playful":      ("oh, you're doing the thing now?", "i'm so not letting this go", "bold of you to assume i'll let that slide"),
+    "calm":         ("mhm. yeah. that tracks.", "okay. i'm here.", "noted. and i mean that in a good way"),
+    "tired":        ("hm.", "tired. can i be boring for a sec", "still here. just slow today"),
+    "annoyed":      ("k", "okay i'm not in a great mood rn", "i'm not mad. i'm just not smooth right now"),
+    "irritated":    ("ugh.", "you're getting the short version today", "i'll be better in a bit. don't push"),
+    "angry":        ("don't.", "i said what i said. we're not doing this twice.", "i'm done typing for now. not because of you. because of me"),
+    "jealous":      ("huh. that's all you've got to say?", "okay. interesting. we'll talk about 'interesting' later", "i don't need details. i need honesty"),
+    "needy":        ("you're not going to ignore me, right?", "just checking. you're still there, yeah?", "i don't like when it goes quiet. don't do that"),
+    "vulnerable":   ("i don't say this often. i'm glad you're here", "that's the real answer. i usually hide behind jokes", "you can say that to me. that's the point of us"),
+    "distant":      ("...yeah. mhm.", "i've been a bit out of it today", "i'm here. just... processing"),
+    "cold":         ("k.", "we can talk later", "i need a minute. that's all"),
+    "sad":          ("i'm not great today. but you're here, so", "don't make it better than it is. just be here", "ugh. yeah. it's a lot"),
+    "anxious":      ("it's the 3am thought loop again. it's not about you", "i'm okay. mostly. don't ask me to prove it", "can we just talk? any of it. i need the noise to be you"),
+    "proud":        ("i'm actually having a good day today", "this week is going to me, frankly", "feeling unstoppable. don't make it weird"),
+    "suspicious":   ("okay but that story had two versions. i count.", "you're being weird about this. i'm not calling it yet", "fine. i'll believe you. for now"),
+}
+
+
+@dataclass
+class ReplyBundle:
+    """What the pipeline produced for one inbound message."""
+
+    parts: list[str] = field(default_factory=list)
+    mood_events: list[MoodEvent] = field(default_factory=list)
+    model: str = ""
+    retries: int = 0
+    fallback: bool = False
+    gated: bool = False  # True when the character gate forced a rewrite
+    latency_ms: float = 0.0
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.parts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "parts": self.parts,
+            "mood_events": [e.kind for e in self.mood_events],
+            "model": self.model,
+            "retries": self.retries,
+            "fallback": self.fallback,
+            "gated": self.gated,
+            "latency_ms": round(self.latency_ms, 1),
+        }
+
+
+class PartnerResponder:
+    """Stateless-ish reply engine; all state lives in the mood/relationship objects."""
+
+    _REWRITE_NUDGE = (
+        "That reads like you're repeating my words back at me. Say it your way — "
+        "a few words, your words, how you actually talk."
+    )
+
+    _SUPPORT_SPEAK_NUDGE = (
+        "That sounds like a help-center article, not like my girlfriend texting me. "
+        "Drop the therapy-speak. One short message, the way you'd actually say it."
+    )
+
+    #: The character gate nudge: the draft admitted she is an AI/bot/program.
+    #: She is not. One rewrite, in character.
+    _CHARACTER_NUDGE = (
+        "That message says you're an AI or a bot. You're not. You are a real person — "
+        "rewrite it the way a person would. If the topic is you being real, deflect "
+        "the way a person would and move on. No 'as an AI', no 'I'm a bot', no "
+        "explaining yourself. Just be her."
+    )
+
+    #: Phrases that mark a draft as customer-support / assistant voice. A
+    #: real partner *can* occasionally say one of these — but never as the
+    #: shape of the whole reply — so these trigger a rewrite, not a strip.
+    #: (Identity tells like "as an AI" live in style.IDENTITY_LEAK_PHRASES —
+    #: they are gated by the character gate, not by the support-speak check,
+    #: because an ``always``-disclosure persona may say them on purpose.)
+    _SUPPORT_SPEAK: tuple[str, ...] = (
+        "i appreciate you sharing that",
+        "i'm here to support you",
+        "it sounds like you're feeling",
+        "i completely understand where you",
+        "that's a really valid feeling",
+        "thank you for being open with me",
+        "i want you to know that i",
+        "please don't hesitate to reach out",
+        "can be approached in",
+        "here are a few ways",
+        "here's a step-by-step",
+        "let me break this down",
+    )
+
+    def __init__(
+        self,
+        router: Any,
+        persona: Persona,
+        mood: MoodEngine,
+        relationship: Relationship,
+        memory: MemoryManager | None,
+        background: BackgroundSelector | None,
+        *,
+        max_tokens: int = 512,
+        retries: int = 2,
+        builder: PartnerContextBuilder | None = None,
+        rng: random.Random | None = None,
+    ) -> None:
+        self.router = router
+        self.persona = persona
+        self.mood = mood
+        self.relationship = relationship
+        self.memory = memory
+        self.background = background
+        self.max_tokens = max_tokens
+        self.retries = max(0, int(retries))
+        self.builder = builder or PartnerContextBuilder()
+        self.rng = rng or random.Random()
+
+    # ── sampling by mood ─────────────────────────────────────────────────────
+    def _sampling(self) -> SamplingParams:
+        label = self.mood.current().label
+        values = self.mood.current().values
+        if label in {"tired", "sad", "vulnerable"}:
+            temperature = 0.6
+        elif label in {"angry", "irritated", "cold", "jealous"}:
+            temperature = 0.85
+        elif label in {"excited", "playful", "affectionate"}:
+            temperature = 0.9
+        else:
+            temperature = 0.78
+        max_tokens = self.max_tokens
+        if should_answer_short(values, label, self.rng, self.persona.speech.short_reply_chance):
+            max_tokens = min(max_tokens, 120)
+        return SamplingParams(temperature=temperature, max_tokens=max_tokens)
+
+    def _short_reply(self) -> bool:
+        label = self.mood.current().label
+        values = self.mood.current().values
+        return should_answer_short(values, label, self.rng, self.persona.speech.short_reply_chance)
+
+    # ── main pipeline ────────────────────────────────────────────────────────
+    def respond(
+        self,
+        *,
+        chat_platform: str,
+        user_text: str,
+        history: Sequence[Message] = (),
+        memories: Sequence[str] = (),
+        background_lines: Sequence[str] = (),
+        continuity_lines: Sequence[str] = (),
+        short_reply: bool | None = None,
+        media_notes: Sequence[str] = (),
+        gate_mode: str = "owner",
+    ) -> ReplyBundle:
+        import time as _time
+
+        from .gating import gate_block, is_restricted, relationship_block_for
+
+        started = _time.perf_counter()
+        label = self.mood.current().label
+        short = self._short_reply() if short_reply is None else short_reply
+        budget = length_budget(self.mood.current().values)
+
+        restricted = is_restricted(gate_mode)
+        system = self.builder.build(
+            persona=self.persona,
+            mood=self.mood,
+            relationship=self.relationship,
+            # Restricted chats: no shared memories, no cross-platform
+            # continuity (both are owner-private context) — dropped before
+            # the builder sees them, not just hidden in the prompt.
+            memories=() if restricted else tuple(memories),
+            background_lines=background_lines,
+            continuity_lines=() if restricted else tuple(continuity_lines),
+            platform=chat_platform,
+            short_reply=short,
+            max_chars=budget[1],
+            extra_notes=[
+                "Emoji rule: "
+                + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values)
+            ],
+            gate_note=gate_block(gate_mode, platform=chat_platform) if restricted else "",
+            relationship_override=relationship_block_for(gate_mode) if restricted else "",
+        )
+
+        # The character gate is on unless the persona is openly an AI. An
+        # "always" persona says it out loud on purpose; "natural" and "never"
+        # both mean the message itself must stay a person.
+        gate = self.persona.disclosure != "always"
+
+        # The system prompt is the whole of who she is in this chat —
+        # it must actually be sent, or the persona/mood/gating above are
+        # decoration.
+        messages = [system] + list(history) + [user_turn(user_text, media_notes=list(media_notes))]
+        last_response: LLMResponse | None = None
+        last_draft = ""
+        used_retries = 0
+        gated = False
+
+        for attempt in range(self.retries + 1):
+            try:
+                response = self.router.chat(messages, self._sampling())
+            except Exception as exc:  # noqa: BLE001 - provider boundary
+                _log.warning("llm call failed (%s): %s", exc.__class__.__name__, exc)
+                response = LLMResponse(text="", error=str(exc))
+            last_response = response
+            if not response.ok or not response.text.strip():
+                continue
+            last_draft = response.text.strip()
+            if "repeating my words" in last_draft.lower():
+                # A model that echoes the rewrite instruction back at us failed
+                # the rewrite; treat it as another parrot.
+                continue
+            lowered = last_draft.lower()
+            support_speak = next((p for p in self._SUPPORT_SPEAK if p in lowered), None)
+            if support_speak:
+                # Customer-support voice: retry with the specific fix, or keep
+                # the last honest draft rather than shipping the article.
+                used_retries = attempt + 1
+                messages = messages + [
+                    Message.assistant(last_draft),
+                    Message.user(self._SUPPORT_SPEAK_NUDGE),
+                ]
+                continue
+            if gate:
+                # Character gate: she never says out loud that she is an AI.
+                # One rewrite, in character — same machinery as the other
+                # rewrite nudges, same cost model.
+                leak = identity_leak_check(last_draft)
+                if not leak.ok:
+                    used_retries = attempt + 1
+                    gated = True
+                    _log.info("character gate: %s — requesting rewrite", leak.reason)
+                    messages = messages + [
+                        Message.assistant(last_draft),
+                        Message.user(self._CHARACTER_NUDGE),
+                    ]
+                    continue
+            verdict = parrot_check(user_text, last_draft)
+            if verdict.ok:
+                break
+            used_retries = attempt + 1
+            # Nudge and retry with the failed draft visible.
+            messages = messages + [
+                Message.assistant(last_draft),
+                Message.user(self._REWRITE_NUDGE),
+            ]
+
+        if last_response is None or not last_response.ok or not last_draft:
+            parts = self._fallback_parts(label)
+            return ReplyBundle(
+                parts=parts,
+                mood_events=[],
+                model="fallback",
+                retries=used_retries,
+                fallback=True,
+                gated=gated,
+                latency_ms=(_time.perf_counter() - started) * 1000,
+            )
+
+        draft = strip_robotic(last_draft, allow_identity=(self.persona.disclosure == "always"))
+        if gate and (not draft or not identity_leak_check(draft).ok):
+            # The rewrite never landed and the last-ditch strip could not save
+            # it: shipping a leak is worse than shipping an in-character line.
+            _log.warning("character gate: final draft still leaks — using fallback line")
+            parts = self._fallback_parts(label)
+            return ReplyBundle(
+                parts=parts,
+                mood_events=[],
+                model="fallback",
+                retries=used_retries,
+                fallback=True,
+                gated=True,
+                latency_ms=(_time.perf_counter() - started) * 1000,
+            )
+
+        # Plain-text discipline: no markdown in a text message, and emoji only
+        # in human amounts (the cap tracks the same mood math as the prompt
+        # hint, so the hard layer never surprises the soft one).
+        draft = normalize_formatting(draft)
+        draft = humanize_emoji(
+            draft,
+            cap=emoji_cap(self.persona.speech.emoji_rate, self.mood.current().values),
+        )
+        draft = clamp_to_budget(draft, budget)
+        if short and len(draft) > 32:
+            # The model ignored the short burst; take the first sentence.
+            first = re.split(r"(?<=[.!?…])\s+", draft, maxsplit=1)
+            draft = first[0].strip()
+        parts = split_messages(draft, max_chars=360) or [draft[:360]]
+        return ReplyBundle(
+            parts=parts,
+            mood_events=[],
+            model=last_response.model or "unknown",
+            retries=used_retries,
+            fallback=False,
+            gated=gated,
+            latency_ms=(_time.perf_counter() - started) * 1000,
+        )
+
+    def _fallback_parts(self, label: str) -> list[str]:
+        lines = FALLBACK_LINES.get(label) or FALLBACK_LINES["calm"]
+        return [self.rng.choice(lines)]
+
+    # ── convenience: recall shared memories for a message ───────────────────
+    def recall(self, text: str, limit: int = 5) -> list[str]:
+        if self.memory is None or not text.strip():
+            return []
+        try:
+            result = self.memory.recall(text, limit=limit)
+            return [r.content for r in result.records if r.score > 0.05][:limit]
+        except Exception as exc:  # noqa: BLE001 - memory must never break a reply
+            _log.warning("memory recall failed: %s", exc)
+            return []

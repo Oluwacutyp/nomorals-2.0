@@ -1,0 +1,744 @@
+"""The game engine: rooms, turns, timers, persistence, rewards.
+
+One :class:`GameEngine` serves every platform at once — Telegram,
+WhatsApp, Discord, the local console — because it never touches a
+platform: it takes a normalized chat key, a sender key, and a send
+callback, and produces messages.  The chat gateway feeds it inbound
+text; the engine's output goes back out the same chat it came from.
+
+Concurrency model: rooms are mutable state guarded by one engine lock —
+a move is a handful of dict ops, the lock is held for microseconds, and
+the scheduler thread never does rule work under the lock (it only
+*selects* rooms whose clocks ran out, then moves them like any other
+move).  The scheduler thread is weakref-bound to its engine so a
+disposed engine can never leak a ticker (the same discipline as the
+virtual CPU farm).
+"""
+from __future__ import annotations
+
+import inspect
+import threading
+import time
+import weakref
+from typing import Any, Callable
+
+from ..core.ids import new_id
+from ..core.logging_setup import get_logger
+from .ai import GameMind
+from .economy import GameEconomy, ShopItem
+from .games.base import GAME_COMMANDS, MultiGame, Room, parse_command
+from .players import AI_PLAYER, Leaderboard, Player, PlayerStore
+
+__all__ = ["GameEngine", "SendFn"]
+
+_log = get_logger(__name__)
+
+SendFn = Callable[[str, str], None]  # (chat_key, text) -> None
+
+
+def _new_state_accepts_kwargs(game: MultiGame) -> bool:
+    """True when the game's new_state takes **kw (hangman: the daily flag)."""
+    try:
+        params = inspect.signature(game.new_state).parameters
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _scheduler_worker(engine_ref: "weakref.ref") -> None:
+    """Ticker thread target. Holds only a weakref + the wake event
+    (neither references the engine), so a dead engine's thread dies at
+    the next wake instead of outliving its owner."""
+    while True:
+        engine = engine_ref()
+        if engine is None:
+            return
+        event = engine._wake
+        interval = 1.0
+        engine = None  # release before the wait
+        if event.wait(timeout=interval):
+            event.clear()
+        engine = engine_ref()
+        if engine is None or engine._stopping:
+            return
+        try:
+            engine._sweep_timeouts()
+        except Exception:  # noqa: BLE001 - the ticker must never die
+            _log.debug("game sweep failed", exc_info=True)
+
+
+class GameEngine:
+    """The table host for every game in every chat, on every platform."""
+
+    def __init__(self, context: Any, *, send: SendFn | None = None,
+                 suggest: Callable[[str], str] | None = None) -> None:
+        self.context = context
+        self.db = getattr(context, "db", None)
+        self._send = send
+        self._suggest = suggest
+        self._lock = threading.RLock()
+        self._rooms: dict[str, Room] = {}        # chat_key -> live room
+        self._by_id: dict[str, Room] = {}
+        self._mind = GameMind(suggest=suggest)
+        self.store = PlayerStore(self.db)
+        self.economy = GameEconomy(self.store)
+        self.board = Leaderboard(self.store)
+        self.games: dict[str, MultiGame] = {}
+        self._wake = threading.Event()
+        self._stopping = False
+        self._thread: threading.Thread | None = None
+        self._register_builtins()
+        self._start_scheduler()
+
+    # ── game registry ──────────────────────────────────────────────────────
+    def _register_builtins(self) -> None:
+        from .games.easy import EASY_GAMES
+        from .games.medium import MEDIUM_GAMES
+        from .games.ambitious import AMBITIOUS_GAMES
+        from .games.wild import WILD_GAMES
+        from .games.arcade import ARCADE_GAMES
+        from .games.casino import CASINO_GAMES
+        for game in (*EASY_GAMES, *MEDIUM_GAMES, *AMBITIOUS_GAMES,
+                    *WILD_GAMES, *ARCADE_GAMES, *CASINO_GAMES):
+            self.games[game.name] = game
+
+    def register(self, game: MultiGame) -> None:
+        self.games[game.name] = game
+
+    # ── scheduler ──────────────────────────────────────────────────────────
+    def _start_scheduler(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=_scheduler_worker, args=(weakref.ref(self),),
+            name="nm-game-turns", daemon=True)
+        self._stopping = False
+        self._thread.start()
+
+    def shutdown(self) -> None:
+        self._stopping = True
+        self._wake.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def __del__(self):
+        try:
+            self.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sweep_timeouts(self) -> None:
+        now = time.time()
+        due: list[Room] = []
+        with self._lock:
+            for room in self._rooms.values():
+                game = self.games.get(room.game)
+                if (game is None or room.status != "active"
+                        or game.move_timeout <= 0):
+                    continue
+                cur = room.current
+                if (cur is not None and not cur.is_ai
+                        and now - room.turn_started > game.move_timeout):
+                    due.append(room)
+        for room in due:
+            try:
+                self._handle_timeout(room)
+            except Exception:  # noqa: BLE001
+                _log.exception("game timeout failed: %s", room.game)
+
+    # ── sending ────────────────────────────────────────────────────────────
+    def _emit(self, room: Room, *texts: str) -> None:
+        for text in texts:
+            if not text:
+                continue
+            room.messages.append(text[:400])
+            room.messages = room.messages[-40:]
+            if self._send is not None:
+                try:
+                    self._send(room.chat_key, text)
+                except Exception:  # noqa: BLE001 - a send failure never
+                    _log.debug("game send failed", exc_info=True)
+            else:
+                print(text)  # CLI/standalone: visible output
+
+    # ── persistence ───────────────────────────────────────────────────────
+    def _persist(self, room: Room) -> None:
+        if self.db is None:
+            return
+        try:
+            import json as _json
+            with self.db.transaction():
+                self.db.execute(
+                    "INSERT INTO game_rooms (id, game, chat_key, platform, kind, "
+                    "players, turn, state, status, started_at, seed, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET turn = excluded.turn, "
+                    "state = excluded.state, status = excluded.status, "
+                    "players = excluded.players, updated_at = excluded.updated_at",
+                    (room.id, room.game, room.chat_key, room.platform,
+                     room.kind, _json.dumps([p.key for p in room.players]),
+                     room.turn, _json.dumps(room.state), room.status,
+                     room.started_at, room.seed, time.time()),
+                )
+        except Exception:  # noqa: BLE001
+            _log.debug("game room persist failed", exc_info=True)
+
+    def _load_live(self, chat_key: str) -> Room | None:
+        """Restore a room that survived a restart (mid-game reboot)."""
+        if self.db is None:
+            return None
+        try:
+            row = self.db.query_one(
+                "SELECT * FROM game_rooms WHERE chat_key = ? AND status = 'active' "
+                "ORDER BY updated_at DESC LIMIT 1", (chat_key,)
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if row is None:
+            return None
+        room = Room.from_row(row, {})
+        self._rooms[room.chat_key] = room
+        self._by_id[room.id] = room
+        return room
+
+    # ── room lifecycle ─────────────────────────────────────────────────────
+    def live(self, chat_key: str) -> Room | None:
+        with self._lock:
+            room = self._rooms.get(chat_key)
+            if room is not None and room.status == "active":
+                return room
+        return self._load_live(chat_key)
+
+    def start(self, chat_key: str, game_name: str,
+              host: Player, *, kind: str = "dm",
+              platform: str = "", daily: bool = False) -> tuple[Room, list[str]]:
+        """Open a room and seat the host (plus AI seats).
+
+        Returns (room, messages_to_send). Raises ValueError when the
+        game is unknown or the chat kind doesn't fit (group-only game in
+        a DM, …).
+        """
+        name = (game_name or "").strip().lower()
+        game = self.games.get(name)
+        if game is None:
+            raise ValueError(
+                f"unknown game {name!r}. try: {', '.join(sorted(self.games))}")
+        platform = platform or chat_key.split(":", 1)[0]
+        if game.needs_group and kind == "dm":
+            raise ValueError(
+                f"{game.name} needs a group — start it in a group chat "
+                f"(/game {game.name} there).")
+        with self._lock:
+            existing = self._rooms.get(chat_key)
+            if existing is not None and existing.status == "active":
+                raise ValueError(
+                    f"a {existing.game} is already live here — /game quit "
+                    "first.")
+            room = Room(
+                id=new_id(), game=game.name, chat_key=chat_key,
+                platform=platform, kind=kind,
+            )
+            room.players = [host]
+            self._fill_ai(room, game)
+            # daily is an opt-in: only handed to games whose new_state
+            # accepts kwargs (hangman).  The rest play as always.
+            if daily and _new_state_accepts_kwargs(game):
+                room.state = game.new_state(game.rng(room), daily=True)
+            else:
+                room.state = game.new_state(game.rng(room))
+            self._mirror_inventory(room)
+            self._rooms[chat_key] = room
+            self._by_id[room.id] = room
+        msgs: list[str] = []
+        try:
+            intro = game.setup(room, self._mind)
+            if intro:
+                msgs.append(intro)
+            room.status = "active"
+            room.turn_started = time.time()
+            self._persist(room)
+            self._pump_ai(room, msgs)
+            self._persist(room)
+        except Exception:  # noqa: BLE001 - a bad setup must not orphan a room
+            with self._lock:
+                self._rooms.pop(chat_key, None)
+                self._by_id.pop(room.id, None)
+            raise
+        return room, msgs
+
+    def _mirror_inventory(self, room: Room) -> None:
+        """Games that spend real gear (arena, escape) read each human's
+        items from ``state['inventory'][player.key]`` — a snapshot taken
+        at setup so game code stays pure (no store access inside a
+        move). The engine reconciles the actual ledger when the room
+        closes, consuming whatever the state says was used."""
+        inv: dict[str, dict[str, int]] = {}
+        for p in room.humans:
+            try:
+                inv[p.key] = dict(self.store.get(p.key).items)
+            except Exception:  # noqa: BLE001
+                inv[p.key] = {}
+        room.state["inventory"] = inv
+
+    def _reconcile_items(self, room: Room) -> None:
+        consumed = room.state.get("consumed", {})
+        for p in room.players:
+            if p.is_ai:
+                continue
+            used = consumed.get(p.key) or consumed.get("you") or {}
+            for item, n in used.items():
+                for _ in range(max(0, int(n))):
+                    self.economy.consume(p, item)
+
+    def _fill_ai(self, room: Room, game: MultiGame) -> None:
+        """Seat enough AI players for the game to work. Channel rooms
+        are house-played: all seats are AI, humans spectate."""
+        humans_wanted = 0
+        if room.kind == "channel" and game.channel_mode == "house":
+            pass  # all AI
+        elif room.kind == "dm":
+            humans_wanted = 1
+        # Calculate total slots needed, accounting for humans already seated
+        humans_present = len(room.humans)
+        ai_needed = max(0, game.min_players - humans_present)
+        # But don't exceed max_players total
+        ai_needed = min(ai_needed, game.max_players - humans_present)
+        # Also ensure we have at least game.ai_seats AI players
+        ai_needed = max(ai_needed, game.ai_seats)
+        
+        have = len(room.ai_seats)
+        for i in range(ai_needed - have):
+            room.players.append(Player(
+                key=f"{AI_PLAYER}:{room.game}:{i}", platform="ai",
+                name=f"House {i + 1}", is_ai=True))
+
+    def join(self, chat_key: str, player: Player) -> list[str]:
+        """A human joins a live room (groups). Returns messages."""
+        with self._lock:
+            room = self._rooms.get(chat_key)
+            if room is None or room.status != "active":
+                return ["no game is live here — start one with /game <name>."]
+            game = self.games.get(room.game)
+            if room.player(player.key) is not None:
+                return [f"{player.name} is already at the table."]
+            
+            replaced_ai = None
+            if len(room.players) >= game.max_players:
+                # Try to replace an AI player
+                ai_players = [p for p in room.players if p.is_ai]
+                if ai_players:
+                    # Remove the first AI player to make room
+                    replaced_ai = ai_players[0]
+                    room.players = [p for p in room.players if p.key != replaced_ai.key]
+                    # Adjust turn if needed
+                    if room.turn >= len(room.players):
+                        room.turn = 0
+                    room.players.append(player)
+                else:
+                    return ["the table is full."]
+            else:
+                room.players.append(player)
+        msgs: list[str] = []
+        note = game.on_join(room, player, self._mind)
+        if note:
+            msgs.append(note)
+        else:
+            if replaced_ai:
+                msgs.append(f"{player.name} sits down (replacing {replaced_ai.name}).")
+            else:
+                msgs.append(f"{player.name} sits down.")
+        self._persist(room)
+        self._emit(room, *msgs)
+        return msgs
+
+    def leave(self, chat_key: str, player: Player) -> list[str]:
+        with self._lock:
+            room = self._rooms.get(chat_key)
+            if room is None or room.status != "active":
+                return []
+            if room.player(player.key) is None:
+                return [f"{player.name} isn't in this game."]
+            if room.player(player.key).is_ai:
+                return []
+        game = self.games.get(room.game)
+        notice = game.on_leave(room, player, self._mind) if game else None
+        room.players = [p for p in room.players if p.key != player.key]
+        if room.turn >= len(room.players):
+            room.turn = 0 % max(1, len(room.players))
+        if not room.humans or len(room.players) <= len(room.ai_seats):
+            return self._finish(room, notice)
+        room.turn_started = time.time()
+        self._persist(room)
+        msgs = []
+        if notice:
+            msgs.append(notice)
+        self._emit(room, *msgs)
+        self._pump_ai(room, [])
+        self._persist(room)
+        return msgs
+
+    def move(self, chat_key: str, text: str, sender: Player,
+             *, kind: str = "dm") -> list[str]:
+        """Route one inbound message at a live room.
+
+        Handles engine commands (/pass /status /shop …), turn
+        enforcement (only the current seat moves; in a DM the single
+        human always may), game moves, and AI pumping afterwards.
+        """
+        with self._lock:
+            room = self._rooms.get(chat_key)
+            if room is None or room.status != "active":
+                return []
+            game = self.games.get(room.game)
+            if game is None:
+                return []
+        # channel spectator mode: humans don't move, they watch
+        if room.kind == "channel" and game.channel_mode == "house" \
+                and not sender.is_ai:
+            return []
+        cmd, rest = parse_command(text)
+        if cmd == "pass" or cmd == "skip":
+            if not self._is_turn(room, sender):
+                return [f"it's not your turn — waiting on "
+                        f"{room.current.name if room.current else '…'}."]
+            room.state["passes"] = int(room.state.get("passes") or 0) + 1
+            self._emit(room, f"{sender.name} passes.")
+            room.advance_turn()
+            out: list[str] = []
+            self._pump_ai(room, out)
+            if self.is_over(room):
+                out.extend(self._finish(room))
+            else:
+                self._persist(room)
+            return out or []
+        if cmd == "status":
+            return [self.describe(room)]
+        if cmd == "help":
+            return [f"📜 {game.name} rules:\n{game.rules or game.description}"]
+        if cmd == "shop":
+            if rest.startswith("buy "):
+                ok, msg = self.economy.purchase(sender, rest[4:].strip())
+                return [msg]
+            return [self.economy.catalog_text(game.name, sender)]
+        if cmd == "balance":
+            prof = self.store.get(sender.key)
+            items = ", ".join(f"{k}×{v}" for k, v in prof.items.items()) or "none"
+            return [f"🪙 {prof.coins} coins · {prof.points} points · items: {items}"]
+        if cmd == "leave":
+            return self.leave(chat_key, sender)
+        if cmd == "game":
+            return []  # control commands are the runtime's, not the game's
+
+        # an actual move — only the current seat (or the solo human in a DM)
+        if not self._is_turn(room, sender):
+            cur = room.current
+            if room.kind == "group" and cur is not None and not cur.is_ai:
+                return [f"waiting on {cur.name} — your move goes in after "
+                        "theirs. (/pass /status /help)"]
+            return []
+        out: list[str] = []
+        try:
+            out.extend(game.on_move(room, sender, text, self._mind))
+        except Exception:  # noqa: BLE001 - a game bug must not eat the chat
+            _log.exception("game move failed: %s", room.game)
+            out.append("…the table hiccuped. try that again.")
+        if self.is_over(room):
+            out.extend(self._finish(room))
+        else:
+            room.advance_turn()
+            self._pump_ai(room, out)
+            if self.is_over(room):
+                out.extend(self._finish(room))
+            else:
+                self._persist(room)
+        return out
+
+    def _is_turn(self, room: Room, sender: Player) -> bool:
+        if room.kind == "dm":
+            return any(not p.is_ai for p in room.players) and \
+                sender in room.humans
+        cur = room.current
+        return cur is not None and not cur.is_ai and cur.key == sender.key
+
+    def quit(self, chat_key: str) -> list[str]:
+        with self._lock:
+            room = self._rooms.get(chat_key)
+            if room is None or room.status != "active":
+                return ["no game is live here."]
+        return self._finish(room, "everyone up? table closed.")
+
+    def _pump_ai(self, room: Room, out: list[str]) -> None:
+        """Play every consecutive AI seat until a human's turn (or the
+        game ends). Bounded so a stuck AI loop can't hang the chat."""
+        game = self.games.get(room.game)
+        if game is None:
+            return
+        for _ in range(64):
+            if self.is_over(room):
+                return
+            cur = room.current
+            if cur is None or not cur.is_ai:
+                return
+            try:
+                out.extend(game.ai_turn(room, self._mind))
+            except Exception:  # noqa: BLE001
+                _log.exception("ai turn failed: %s", room.game)
+                out.append("…the house fumbled that turn.")
+            if self.is_over(room):
+                return
+            # did the game make progress? (removed the AI seat, changed
+            # state, or advanced). If nothing moved at all, bail out.
+            before = (room.turn, room.status)
+            room.advance_turn()
+            after = (room.turn, room.status)
+            if before == after and not room.state:
+                room.status = "finished"
+                out.append("the house got stuck — closing the table.")
+                return
+
+    def _handle_timeout(self, room: Room) -> None:
+        game = self.games.get(room.game)
+        cur = room.current
+        if game is None or cur is None or cur.is_ai:
+            return
+        with self._lock:
+            msgs = game.on_timeout(room, cur, self._mind)
+            if self.is_over(room):
+                msgs.extend(self._finish(room))
+            else:
+                self._pump_ai(room, msgs)
+                if self.is_over(room):
+                    msgs.extend(self._finish(room))
+                else:
+                    self._persist(room)
+            for m in msgs:
+                self._emit(room, m)
+
+    def is_over(self, room: Room) -> bool:
+        """Pure check — never mutates. ``_finish`` owns the close:
+        persisting the finished status and popping the room."""
+        if room.status == "finished":
+            return True
+        game = self.games.get(room.game)
+        if game is None:
+            return False
+        try:
+            return bool(game.is_over(room))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _finish(self, room: Room, extra: str | None = None) -> list[str]:
+        """Close a room: final message + ledger credits + persistence."""
+        game = self.games.get(room.game)
+        if room.status == "finished":
+            return [extra] if extra else []
+        room.status = "finished"
+        msgs: list[str] = []
+        if extra:
+            msgs.append(extra)
+        if game is not None:
+            try:
+                msgs.append(game.final_message(room, self._mind))
+            except Exception:  # noqa: BLE001
+                msgs.append("game over.")
+            try:
+                winner = game.winner(room)
+                for p in list(room.players):
+                    if p.is_ai:
+                        continue
+                    won = None
+                    if winner == "draw":
+                        won = None
+                    elif isinstance(winner, Player):
+                        won = (winner.key == p.key)
+                    elif winner is None:
+                        won = None
+                    points = GameEconomy.reward_points(won, game.score(room, p))
+                    coins = GameEconomy.reward_coins(won)
+                    score = game.score(room, p)
+                    self.store.record_outcome(
+                        p, won=won, game=room.game, points=points,
+                        coins=coins, score=score)
+                    # record to leaderboard if score > 0
+                    if score > 0:
+                        try:
+                            from .achievements import record_score
+                            record_score(self.db, room.game, p.key, p.name, score)
+                        except Exception:  # noqa: BLE001
+                            _log.debug("leaderboard record failed", exc_info=True)
+                    # update game stats
+                    try:
+                        from .achievements import update_game_stats
+                        update_game_stats(self.db, p.key, room.game,
+                                          won=bool(won), score=score)
+                    except Exception:  # noqa: BLE001
+                        _log.debug("game stats update failed", exc_info=True)
+                    # award achievements
+                    try:
+                        from .achievements import unlock_achievement
+                        self._award_achievements(room, game, p, won, score)
+                    except Exception:  # noqa: BLE001
+                        _log.debug("achievement award failed", exc_info=True)
+                msgs.append(
+                    f"📈 points and coins credited — /game leaderboard"
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("game ledger credit failed", exc_info=True)
+        try:
+            self._reconcile_items(room)
+        except Exception:  # noqa: BLE001
+            _log.debug("game item reconcile failed", exc_info=True)
+        self._persist(room)
+        self._emit(room, *msgs)
+        with self._lock:
+            self._rooms.pop(room.chat_key, None)
+            self._by_id.pop(room.id, None)
+        return msgs
+
+    def _award_achievements(self, room: Room, game: Any, player: Player,
+                            won: bool | None, score: int) -> None:
+        """Award achievements based on game outcome and state."""
+        from .achievements import unlock_achievement
+        db = self.db
+        game_name = room.game
+        
+        # 2048 achievements
+        if game_name == "2048":
+            max_tile = max(max(r) for r in room.state.get("grid", [[0]]))
+            if max_tile >= 2048:
+                unlock_achievement(db, player.key, "2048_win")
+            if max_tile >= 4096:
+                unlock_achievement(db, player.key, "2048_4096")
+            if score >= 5000:
+                unlock_achievement(db, player.key, "2048_score_5k")
+        
+        # Snake achievements
+        elif game_name == "snake":
+            if score >= 50:
+                unlock_achievement(db, player.key, "snake_50")
+            if score >= 200:
+                unlock_achievement(db, player.key, "snake_200")
+            moves = room.state.get("moves", 0)
+            if moves >= 20 and not room.state.get("alive", True):
+                unlock_achievement(db, player.key, "snake_no_crash_20")
+        
+        # Connect Four achievements
+        elif game_name == "connect4" and won:
+            unlock_achievement(db, player.key, "connect4_win")
+            moves = room.state.get("moves", 0)
+            if moves < 10:
+                unlock_achievement(db, player.key, "connect4_quick")
+        
+        # Battleship achievements
+        elif game_name == "battleship" and won:
+            unlock_achievement(db, player.key, "battleship_win")
+            shots = room.state.get("ai_shots", [])
+            hits = sum(shots[r][c] == 1 for r in range(10) for c in range(10))
+            total = sum(shots[r][c] > 0 for r in range(10) for c in range(10))
+            if total > 0 and hits / total >= 0.8:
+                unlock_achievement(db, player.key, "battleship_perfect")
+        
+        # Arena achievements
+        elif game_name == "arena" and won:
+            unlock_achievement(db, player.key, "arena_win")
+        
+        # World achievements
+        elif game_name == "world":
+            pop = room.state.get("pop", 0)
+            if pop >= 50:
+                unlock_achievement(db, player.key, "world_50_pop")
+            buildings = room.state.get("buildings", {})
+            if len(buildings) >= 5:  # has all building types
+                unlock_achievement(db, player.key, "world_all_buildings")
+        
+        # RPG achievements
+        elif game_name == "rpg":
+            sheets = room.state.get("sheets", {})
+            player_sheet = sheets.get(player.key, {})
+            if room.state.get("done"):
+                unlock_achievement(db, player.key, "rpg_finish")
+            if player_sheet.get("level", 1) >= 5:
+                unlock_achievement(db, player.key, "rpg_level_5")
+        
+        # Casino achievements
+        elif game_name == "blackjack" and won:
+            unlock_achievement(db, player.key, "blackjack_win")
+            player_hand = room.state.get("player", [])
+            if len(player_hand) >= 2:
+                # Check for exact 21 (not blackjack which is 2 cards)
+                hand_val = sum(min(c, 10) for c in player_hand)
+                aces = sum(1 for c in player_hand if c == 14)
+                while hand_val > 21 and aces > 0:
+                    hand_val -= 10
+                    aces -= 1
+                if hand_val == 21 and len(player_hand) > 2:
+                    unlock_achievement(db, player.key, "blackjack_21")
+        
+        elif game_name == "roulette":
+            bet_type = room.state.get("bet_type", "")
+            payout = room.state.get("payout", 0)
+            if bet_type == "number" and payout > 0:
+                unlock_achievement(db, player.key, "roulette_number")
+        
+        elif game_name == "slots":
+            reels = room.state.get("reels", [])
+            if len(reels) == 3 and reels[0] == reels[1] == reels[2] == "💎":
+                unlock_achievement(db, player.key, "slots_jackpot")
+
+    # ── inspection ─────────────────────────────────────────────────────────
+    def describe(self, room: Room) -> str:
+        game = self.games.get(room.game)
+        lines = [
+            f"🎮 {room.game} — {room.status} ({room.kind})",
+            "players:",
+        ]
+        for i, p in enumerate(room.players):
+            marker = "←" if i == room.turn else "·"
+            tag = " 🤖" if p.is_ai else ""
+            lines.append(f"  {marker} {p.name}{tag}")
+        if game is not None:
+            try:
+                extra = game.describe_state(room)
+                if extra:
+                    lines.append(extra)
+            except Exception:  # noqa: BLE001
+                pass
+        cur = room.current
+        if cur is not None and not cur.is_ai and room.status == "active":
+            lines.append(f"turn: {cur.name}")
+        return "\n".join(lines)
+
+    def list_games(self, *, with_groups: bool = False) -> str:
+        from .games.easy import EASY_GAMES
+        from .games.medium import MEDIUM_GAMES
+        from .games.ambitious import AMBITIOUS_GAMES
+        from .games.wild import WILD_GAMES
+        from .games.arcade import ARCADE_GAMES
+        from .games.casino import CASINO_GAMES
+        lines = ["games — start one with /game <name>:"]
+        for label, group in (("easy", EASY_GAMES),
+                             ("medium", MEDIUM_GAMES),
+                             ("ambitious", AMBITIOUS_GAMES),
+                             ("wild", WILD_GAMES),
+                             ("arcade", ARCADE_GAMES),
+                             ("casino", CASINO_GAMES)):
+            lines.append(f"  — {label} —")
+            for g in group:
+                extra = " (group)" if g.needs_group else ""
+                lines.append(f"  /game {g.name:<18} {g.description}{extra}")
+        lines.append("  /game leaderboard [game]   the rankings")
+        lines.append("  /game stats [name]         a player's record")
+        lines.append("  /game shop                 spend your coins")
+        lines.append("  /game quit                 leave the table")
+        return "\n".join(lines)
+
+    def rooms(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {"id": r.id, "game": r.game, "chat": r.chat_key,
+                 "kind": r.kind, "status": r.status,
+                 "players": len(r.players),
+                 "humans": len(r.humans)}
+                for r in self._rooms.values()
+            ]
