@@ -134,8 +134,15 @@ def decode_example(row: dict[str, Any], *, kind: str = "") -> Example:
             kind = "messages"
 
     if kind == "sharegpt":
+        # the system turn must survive decoding — apply_persona replaces it,
+        # and a source system prompt flattened into "user" would train the
+        # persona twice over
+        _from_roles = {"gpt": "assistant", "assistant": "assistant",
+                      "bot": "assistant", "human": "user", "user": "user",
+                      "system": "system", "tool": "tool",
+                      "function": "tool"}
         turns = [
-            Turn("assistant" if str(m.get("from")) in {"gpt", "assistant", "bot"} else "user",
+            Turn(_from_roles.get(str(m.get("from")).lower(), "user"),
                  str(m.get("value") or ""))
             for m in row.get("conversations") or []
             if isinstance(m, dict)
@@ -326,3 +333,118 @@ class DatasetRegistry:
             "bytes": int(self.db.scalar("SELECT COALESCE(SUM(bytes),0) FROM datasets", default=0) or 0),
             "tokens": int(self.db.scalar("SELECT COALESCE(SUM(tokens),0) FROM datasets", default=0) or 0),
         }
+
+
+def _is_messages_list(value: Any) -> bool:
+    """True when ``value`` is a single conversation: a list of message dicts."""
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(m, dict) and "role" in m and "content" in m
+                    for m in value))
+
+
+def _turns_of(example: Any) -> list[tuple[str, str]] | None:
+    """Best-effort ``(role, content)`` pairs for any accepted example shape.
+
+    Accepts an :class:`Example`, an OpenAI-style dict (``messages`` or
+    ``conversation``), a ShareGPT dict (``conversations`` with from/value),
+    a plain list of message dicts, or an alpaca dict.  Returns ``None``
+    when the shape carries no turns (so callers can try raw fields).
+    """
+    turns = getattr(example, "turns", None)
+    if turns is not None:
+        return [(str(t.role), str(t.content)) for t in turns]
+    if isinstance(example, dict):
+        msgs = example.get("messages") or example.get("conversation") or []
+        if not msgs:
+            msgs = example.get("conversations") or []
+            return [(("assistant" if str(m.get("from", "")).lower() in {"gpt", "assistant", "bot"}
+                     else "system" if str(m.get("from", "")).lower() == "system"
+                     else "user"), str(m.get("value") or ""))
+                    for m in msgs if isinstance(m, dict)] or None
+        pairs = [(str(m.get("role") or "user"), str(m.get("content") or ""))
+                 for m in msgs if isinstance(m, dict)]
+        return pairs or None
+    if isinstance(example, list):
+        pairs = [(str(m.get("role") or "user"), str(m.get("content") or ""))
+                 for m in example if isinstance(m, dict)]
+        return pairs or None
+    return None
+
+
+def to_alpaca(example: Any) -> Any:
+    """Convert example(s) to Alpaca format: ``instruction`` / ``input`` / ``output``.
+
+    Accepts a single example (Example, dict, or messages list) *or a list of
+    them* — a list in means a list out, which is what the persona-mix bundler
+    and every Alpaca-format loader on Colab/Kaggle expect.
+    """
+    if isinstance(example, list) and example and not _is_messages_list(example):
+        # a list of examples: each element is its own training row
+        return [to_alpaca(item) for item in example]
+    turns = _turns_of(example)
+    if turns:
+        instruction = ""
+        for role, content in turns:
+            if role != "system" and content.strip():
+                instruction = content
+                break
+        if not instruction:
+            instruction = turns[0][1]
+        output = "\n\n".join(c for r, c in turns if r == "assistant").strip()
+        if isinstance(example, dict) and example.get("input"):
+            return {"instruction": instruction,
+                    "input": str(example["input"]), "output": output}
+        return {"instruction": instruction, "input": "", "output": output}
+    if isinstance(example, dict):
+        return {
+            "instruction": str(example.get("instruction")
+                               or example.get("question")
+                               or example.get("prompt") or ""),
+            "input": str(example.get("input") or ""),
+            "output": str(example.get("output")
+                          or example.get("response")
+                          or example.get("answer") or ""),
+        }
+    return {"instruction": str(example), "input": "", "output": ""}
+
+
+def to_sharegpt(example: Any) -> Any:
+    """Convert example(s) to ShareGPT format: one ``conversation`` per row.
+
+    ShareGPT has no system role, so a system turn (the persona) is folded
+    into the front of the first human message instead of being dropped —
+    training on the bundle then still conditions on the persona.
+    """
+    if isinstance(example, list) and example and not _is_messages_list(example):
+        return [to_sharegpt(item) for item in example]
+    turns = _turns_of(example)
+    if turns is None and isinstance(example, dict):
+        instruction = str(example.get("instruction") or "")
+        input_text = str(example.get("input") or "")
+        human = instruction if not input_text else f"{instruction}\n\n{input_text}"
+        turns = [("user", human), ("assistant", str(example.get("output") or ""))]
+    if not turns:
+        return {"conversation": []}
+    system = [c for r, c in turns if r == "system" and c.strip()]
+    conversation: list[dict[str, str]] = []
+    for role, content in turns:
+        if role == "system":
+            continue
+        speaker = "gpt" if role == "assistant" else "human"
+        conversation.append({"from": speaker, "value": content})
+    if system and conversation:
+        for i, entry in enumerate(conversation):
+            if entry["from"] == "human":
+                entry["value"] = "\n\n".join(system + [entry["value"]])
+                break
+        else:
+            conversation.insert(0, {"from": "human",
+                                    "value": "\n\n".join(system)})
+    elif system:
+        conversation = [{"from": "human", "value": "\n\n".join(system)}]
+    return {"conversation": conversation}
+
+
+def write_format_bundles(examples: list[dict[str, Any]], output_dir: str) -> dict[str, int]:
+    """Stub: write examples in multiple formats to output_dir."""
+    return {"alpaca": len(examples), "sharegpt": len(examples)}
