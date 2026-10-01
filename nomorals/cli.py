@@ -901,6 +901,16 @@ def _parser() -> argparse.ArgumentParser:
                              help="task text to structure into a brief")
     structure_p.add_argument("--for", dest="for_", default="mission",
                              help="shape the brief for: mission|goal|chat")
+    money_p = sub.add_parser("money", help="money-making opportunities hunter")
+    msub = money_p.add_subparsers(dest="money_action")
+    _m = msub.add_parser("scan", help="run the opportunity finders (web + curated)")
+    _m.add_argument("kind", nargs="?", default="",
+                    help="optional kind: paid_task|referral|course|bounty|gig|arbitrage|content")
+    _m.add_argument("--max", type=int, default=15, help="max results shown")
+    _m = msub.add_parser("list", help="list stored opportunities")
+    _m.add_argument("--new", action="store_true", help="only recent finds")
+    _m.add_argument("--max", type=int, default=30, help="max results shown")
+    _m = msub.add_parser("profile", help="show the earner profile")
     structure_p.add_argument("--polish", action="store_true",
                              help="let the model rewrite the brief")
     structure_p.add_argument("--json", action="store_true", help="Output as JSON")
@@ -1295,6 +1305,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_osint(args, context)
         if args.command == "structure":
             return _cmd_structure(args, context)
+        if args.command == "money":
+            return _cmd_money(args, context)
         if args.command == "arena":
             if getattr(args, "arena_command", None) == "status":
                 return _cmd_stub(args, context, "arena status")
@@ -4429,6 +4441,20 @@ def _cmd_decode(args, context):
         lines.append(f"saved: {out['saved_to']}")
     _emit(args, out, "\n".join(lines))
     return 0
+
+def _cmd_money(args, context):
+    """Money-making opportunities hunter, from the shell."""
+    from .agents.opportunities import handle_money_command
+    action = getattr(args, "money_action", "") or "list"
+    if action == "scan":
+        tail = f"scan {args.kind}".strip()
+    elif action == "list":
+        tail = "new" if args.new else "list"
+    else:
+        tail = "profile"
+    print(handle_money_command(tail, context))
+    return 0
+
 
 def _cmd_osint(args, context):
     """OSINT reports and the persistent identity graph, from the shell."""

@@ -28,6 +28,7 @@ Commands:
     /search <query>              quick web research + cited summary
     /searchdeep <query>          deep research (power mode)
     /searchleads                 legit paid-task platform report
+    /money [scan|list|new]       money-making opportunities hunter
     /searchhist [n]              recent research runs
     /book <topic> [chapters]     writes a real book → PDF, sends it when done
     /book status [slug]          book progress · /book list · /book build <slug>
@@ -95,6 +96,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "search": (1, None),     # /search <query> — free text, no length cap
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
+    "money": (0, None),      # money opportunities hunter: scan|list|new|profile
     "searchhist": (0, 1),    # /searchhist [n]
     # BookForge: write a real book → PDF → send when done
     "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
@@ -211,6 +213,7 @@ _HELP_TEXT = "\n".join(
         "  /search <query>                         quick research + cited summary",
         "  /searchdeep <query>                     deep research (power mode)",
         "  /searchleads                            legit paid-task platforms report",
+        "  /money [scan|list|new]                   money-making opportunities hunter",
         "  /searchhist [n]                         recent research runs",
         "  — bookforge (writes a real book → pdf, sends it) —",
         "  /book <topic> [chapters]                start a book (auto-sends the pdf)",
@@ -432,7 +435,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                    "related": "/search /searchhist"},
     "searchleads": {"what": "report on legit paid-task platforms — what is real, what pays.",
                     "usage": "/searchleads", "example": "/searchleads",
-                    "related": "/search"},
+                    "related": "/search /money"},
+    "money": {"what": "hunts every kind of money-making opportunity — paid tasks, referrals, free courses, bounties, gigs — ranked by value vs effort.",
+              "usage": "/money [scan [kind] | list | new | profile]",
+              "example": "/money scan bounty",
+              "related": "/searchleads"},
     "searchhist": {"what": "your recent research runs.",
                    "usage": "/searchhist [n]", "example": "/searchhist 5",
                    "related": "/search"},
@@ -798,6 +805,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                  "mood", "stage", "model", "say", "power", "quit",
                  "mode", "mind"]),
     ("search & research", ["search", "searchdeep", "searchleads",
+                           "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "whois", "ports"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
@@ -964,7 +972,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "profile", "mind"]),
     ("search & research",
-     ["search", "searchdeep", "searchleads", "searchhist", "research",
+     ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "whois", "ports"]),
     ("building for real — code & missions",
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
@@ -1038,6 +1046,7 @@ LIST_ONELINERS: dict[str, str] = {
     "workspace": "the VCPU farm: status/scale/up/down/pause/resume",
     "searchdeep": "deep multi-query research (power mode)",
     "searchleads": "legit paid-task platforms report",
+    "money": "money-making opportunities hunter",
     "searchhist": "your recent research runs",
     "research": "scheduled research runs (lifestyle|tech|cyber)",
     "news": "fetch + summarize the feeds",
