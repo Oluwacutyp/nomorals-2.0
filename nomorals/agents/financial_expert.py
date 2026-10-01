@@ -18,6 +18,7 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..integrations import sentinel_bridge as bridge
+from ..integrations.market_data import SentinelMarketProvider
 
 __all__ = [
     "FinancialExpert",
@@ -25,6 +26,8 @@ __all__ = [
     "BacktestSummary",
     "Signal",
     "Comparison",
+    "TradeIdea",
+    "SentinelMarketProvider",
     "DISCLAIMER",
 ]
 
@@ -211,6 +214,52 @@ class Comparison:
         return "\n".join(lines)
 
 
+@dataclass
+class TradeIdea:
+    id: str = ""
+    symbol: str = ""
+    market: str = "crypto"
+    profile: str = "default"
+    direction: str = "flat"          # long | short | flat
+    entry: float = 0.0
+    stop: float = 0.0
+    target_1: float = 0.0
+    target_2: float = 0.0
+    size_fraction: float = 0.0
+    risk_reward: float = 0.0
+    confidence: float = 0.0
+    rationale: str = ""
+    created_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "symbol": self.symbol, "market": self.market,
+            "profile": self.profile, "direction": self.direction,
+            "entry": self.entry, "stop": self.stop,
+            "target_1": self.target_1, "target_2": self.target_2,
+            "size_fraction": self.size_fraction,
+            "risk_reward": self.risk_reward, "confidence": self.confidence,
+            "rationale": self.rationale,
+            "created_at": self.created_at, "disclaimer": DISCLAIMER,
+        }
+
+    def summary_text(self) -> str:
+        if self.direction == "flat":
+            return (f"Trade idea {self.symbol} [{self.market}, {self.profile}]: "
+                    f"FLAT — {self.rationale}\n{DISCLAIMER}")
+        lines = [
+            f"Trade idea {self.symbol} [{self.market}, {self.profile}]: "
+            f"{self.direction.upper()} (confidence {self.confidence:.0%})",
+            f"  entry ~{self.entry:,.4g} | stop {self.stop:,.4g} | "
+            f"target1 {self.target_1:,.4g} | target2 {self.target_2:,.4g}",
+            f"  risk:reward ~1:{self.risk_reward:.1f} | "
+            f"size ~{self.size_fraction:.1%} of equity",
+            f"  why: {self.rationale}",
+            DISCLAIMER,
+        ]
+        return "\n".join(lines)
+
+
 class FinancialExpert:
     """The conversational trading brain. Paper-first; live is gated elsewhere."""
 
@@ -363,3 +412,86 @@ class FinancialExpert:
                              "error": str(exc)[:160]})
         return Comparison(symbols=list(symbols), market=market, rows=rows,
                           created_at=time.time())
+
+    def trade_idea(self, symbol: str, market: str = "crypto",
+                   profile: str = "default") -> TradeIdea:
+        """A full trade plan: direction, entry, stop, targets, size.
+
+        Runs the engine scan under the requested risk profile
+        (default|aggressive|conservative) and turns the fused signal +
+        risk-manager stops into plain language. Research only.
+        """
+        profile = (profile or "default").strip().lower()
+        if profile not in ("default", "aggressive", "conservative"):
+            raise bridge.SentinelError(
+                f"unknown profile {profile!r}")
+        engine = bridge.get_engine(market, profile)
+        df = bridge.load_data(symbol, market, "1h", 600)
+        report = engine.scan(df, symbol=symbol)
+        pos = float(getattr(report, "position_now", 0.0) or 0.0)
+        direction = "long" if pos > 0 else "short" if pos < 0 else "flat"
+        try:
+            entry = float(df["close"].iloc[-1])
+        except (TypeError, IndexError, KeyError):
+            entry = 0.0
+        stops = getattr(report, "stops", None) or {}
+        stop = float(stops.get("stop", 0.0) or 0.0)
+        target_1 = float(stops.get("target_1", 0.0) or 0.0)
+        target_2 = float(stops.get("target_2", 0.0) or 0.0)
+        risk = abs(entry - stop)
+        reward = abs(target_2 - entry)
+        rr = round(reward / risk, 2) if risk > 0 and reward > 0 else 0.0
+        bias = float(getattr(report, "bias", 0.0) or 0.0)
+        agreement = float(getattr(report, "agreement", 0.0) or 0.0)
+        confidence = round(min(0.95, abs(bias) * 0.5 + agreement * 0.5), 2)
+        regime = str(getattr(report, "regime_label", "")).strip()
+        if direction == "flat":
+            rationale = (
+                f"engine is flat on {symbol}: "
+                f"{_regime_plain(regime)}, agreement "
+                f"{agreement:.0%} below the entry bar. Waiting is the "
+                f"position.")
+        else:
+            rationale = (
+                f"{regime} regime with {agreement:.0%} strategy agreement; "
+                f"ML gate {'approved' if getattr(report, 'approved', False) else 'did not approve'} "
+                f"the {direction}. Stop = engine ATR stop, targets = "
+                f"1R/2R.")
+        out = TradeIdea(
+            id=new_id("ti"), symbol=symbol, market=market, profile=profile,
+            direction=direction, entry=entry, stop=stop,
+            target_1=target_1, target_2=target_2,
+            size_fraction=float(getattr(report, "size_fraction", 0.0) or 0.0),
+            risk_reward=rr, confidence=confidence, rationale=rationale,
+            created_at=time.time(),
+        )
+        self._room_log(f"trade idea {symbol}: {direction} rr={rr}")
+        return out
+
+    def quote(self, symbol: str,
+              market: str = "crypto") -> dict[str, Any] | None:
+        """Keyless spot quote (no engine needed)."""
+        return SentinelMarketProvider().quote(symbol, market=market)
+
+    def watch_price(self, symbol: str, market: str = "crypto",
+                    condition: dict[str, Any] | None = None,
+                    name: str = "") -> dict[str, Any]:
+        """Register a price alert through the watchers system.
+
+        ``condition`` is a watcher condition dict, e.g.
+        ``{"op": "lt", "field": "value", "value": 60000}`` (fires when the
+        price drops below 60000) or ``{"op": "changed_by_pct",
+        "field": "value", "value": 5}``. Reuses the existing ``price``
+        watcher kind — no duplicate alert machinery.
+        """
+        from .watchers import WatcherAgent
+        agent = WatcherAgent(self.context)
+        target = {"source": "market",
+                  "symbol": (symbol or "").strip().upper(),
+                  "market": (market or "crypto").strip().lower()}
+        text = (f"watch {market} price {symbol} "
+                f"{name or 'price alert'}").strip()
+        return agent.add(
+            text, kind="price", target=target,
+            condition=dict(condition) if condition else None,
+            name=name or f"{target['symbol']} price alert")

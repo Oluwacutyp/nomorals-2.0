@@ -170,6 +170,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
+    "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
     "task": (1, None),       # /task add <instruction>|run [id]|list
@@ -699,6 +700,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/bet analyze <home> vs <away> [home_odds draw_odds away_odds] [--league L] | /bet bankroll [set <amount>] | /bet backtest [n] [--seed S] | /bet record <home> <away> <hg-ag>",
             "example": "/bet analyze Arsenal vs Chelsea 2.10 3.40 3.60",
             "related": "/api"},
+    "finance": {"what": "the finance brain: Sentinel.py engine over free keyless market data (Binance/Stooq/Frankfurter). Quotes, regime analysis, signals, full trade plans with stops/targets, backtests, and price alerts. Research only — never financial advice.",
+            "usage": "/finance quote <sym> [market] | /finance analyze <sym> [market] [tf] | /finance signal <sym> [market] | /finance idea <sym> [market] [--profile P] | /finance backtest <sym> [market] | /finance compare <s1,s2> [market] | /finance watch <sym> <above|below> <price> [market] | /finance doctor",
+            "example": "/finance idea BTC crypto --profile conservative",
+            "related": "/money"},
     "task": {"what": "queued instructions she runs and reports back on.",
              "usage": "/task add <instruction> | run [id] | list",
              "example": "/task add check the backups",
@@ -1007,7 +1012,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "features", "decode", "cookies", "cipher",
-      "monitor", "bet", "weather", "tz"]),
+      "monitor", "bet", "finance", "weather", "tz"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

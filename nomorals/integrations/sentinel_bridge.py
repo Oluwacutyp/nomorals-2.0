@@ -15,6 +15,13 @@ starts fast and works fine when the submodule is absent — callers get
 ``ImportError`` traceback. ``import nomorals.integrations.sentinel_bridge``
 must never import pandas/numpy.
 
+Market data is **keyless-first**: :func:`load_data` defaults to
+``source="auto"``, which pulls OHLCV from the free adapters in
+:mod:`nomorals.integrations.market_data` (Binance/Kraken/Coinbase/CoinGecko
+for crypto, Yahoo/Stooq for stocks, Frankfurter/Yahoo for fiat FX) with no API keys and
+no extra packages. ``source="ccxt"`` / ``source="yfinance"`` keep the legacy
+package-backed paths for callers that want them.
+
 Tested Sentinel commit: see :data:`TESTED_COMMIT`. ``doctor()`` warns when the
 checked-out submodule differs.
 """
@@ -151,36 +158,57 @@ def get_engine(market: str = "crypto", profile: str = "default") -> Any:
 
 
 def load_data(symbol: str, market: str = "crypto", timeframe: str = "1h",
-              bars: int = 2000) -> Any:
+              bars: int = 2000, source: str = "auto") -> Any:
     """Load OHLCV bars for a symbol, routed by market.
 
-    crypto ``BTC/USDT`` -> ``load_ccxt`` (needs the ``ccxt`` package);
-    forex/stocks ``XAUUSD``/``AAPL`` -> ``load_yfinance`` (needs
-    ``yfinance``); a path ending in ``.csv`` -> ``load_csv``.
+    ``source="auto"`` (default) uses the keyless free adapters in
+    :mod:`nomorals.integrations.market_data` — no API keys, no extra
+    packages. ``source="ccxt"`` forces the legacy ccxt path (crypto,
+    needs the ``ccxt`` package); ``source="yfinance"`` forces the legacy
+    yfinance path (forex/stocks, needs ``yfinance``). A symbol ending in
+    ``.csv`` always loads a local CSV.
     """
     _ensure_path()
     market = (market or "crypto").strip().lower()
     symbol = (symbol or "").strip()
+    source = (source or "auto").strip().lower()
     if not symbol:
         raise SentinelError("symbol is required")
+    if symbol.lower().endswith(".csv"):
+        path = Path(symbol).expanduser()
+        if not path.is_file():
+            raise SentinelError(f"CSV not found: {path}")
+        try:
+            from sentinel.data import feed
+        except ImportError as exc:
+            raise SentinelError(
+                f"could not import sentinel.data.feed ({exc}); "
+                f"{_MISSING_DEPS_HINT}") from exc
+        return feed.load_csv(str(path))
+    if source == "auto":
+        try:
+            from . import market_data
+        except ImportError as exc:
+            raise SentinelError(
+                f"could not import market_data ({exc})") from exc
+        try:
+            return market_data.get_ohlcv(symbol, market=market,
+                                         timeframe=timeframe, bars=bars)
+        except market_data.MarketDataError as exc:
+            raise SentinelError(f"free market-data feed failed: {exc}") from exc
     try:
         from sentinel.data import feed
     except ImportError as exc:
         raise SentinelError(
             f"could not import sentinel.data.feed ({exc}); "
             f"{_MISSING_DEPS_HINT}") from exc
-    if symbol.lower().endswith(".csv"):
-        path = Path(symbol).expanduser()
-        if not path.is_file():
-            raise SentinelError(f"CSV not found: {path}")
-        return feed.load_csv(str(path))
-    if market == "crypto":
+    if source == "ccxt" or (source == "auto" and market == "crypto"):
         _require("ccxt", "pip install ccxt   (crypto feeds need it)")
         try:
             return feed.load_ccxt(symbol, timeframe=timeframe, limit=bars)
         except Exception as exc:  # noqa: BLE001 - network/provider errors
             raise SentinelError(f"ccxt feed failed for {symbol}: {exc}") from exc
-    if market in ("forex", "stocks"):
+    if source == "yfinance" or (source == "auto" and market in ("forex", "stocks")):
         _require("yfinance", "pip install yfinance   (forex/stock feeds need it)")
         try:
             return feed.load_yfinance(symbol, interval=timeframe)
@@ -291,6 +319,18 @@ def doctor() -> DoctorReport:
     for market, cfg in CONFIGS.items():
         exists = (VENDOR_ROOT / "configs" / cfg).is_file()
         checks.append(DoctorCheck(f"config:{market}", exists, cfg))
+
+    try:
+        from . import market_data
+        status = market_data.source_status()
+        keyed = [src for src, on in status["keyed"].items() if on]
+        checks.append(DoctorCheck(
+            "market-data", True,
+            f"keyless: {', '.join(status['keyless'])}"
+            + (f" | keyed upgrades active: {', '.join(keyed)}"
+               if keyed else " | no keyed upgrades (optional)")))
+    except Exception as exc:  # noqa: BLE001 - never fail doctor on this
+        checks.append(DoctorCheck("market-data", False, str(exc)[:160]))
 
     try:
         engine = get_engine("crypto", "default")

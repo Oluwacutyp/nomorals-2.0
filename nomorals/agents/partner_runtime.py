@@ -1767,6 +1767,8 @@ class PartnerRuntime:
         if kind == "money":
             from .opportunities import handle_money_command
             return handle_money_command(command.tail or arg, self.context)
+        if kind == "finance":
+            return self._control_finance(command.tail or arg, chat_key=chat_key)
         if kind == "weather":
             return self._control_weather(command.tail or arg)
         if kind == "tz":
@@ -5608,6 +5610,143 @@ class PartnerRuntime:
             return render_analysis(a)
 
         return f"unknown /bet verb {verb!r}\n{_usage()}"
+
+    # ── finance: the Sentinel-backed FinancialExpert ─────────────────────────
+    def _control_finance(self, tail: str, chat_key: str) -> str:
+        """Conversational finance over free market data.
+
+        /finance quote <symbol> [market]
+        /finance analyze <symbol> [market] [timeframe]
+        /finance signal <symbol> [market]
+        /finance idea <symbol> [market] [--profile default|aggressive|conservative]
+        /finance backtest <symbol> [market] [--profile P]
+        /finance compare <sym1,sym2,..> [market]
+        /finance watch <symbol> <above|below> <price> [market]
+        /finance doctor
+        """
+        from .financial_expert import FinancialExpert
+        from ..integrations import sentinel_bridge as bridge
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+
+        def _usage() -> str:
+            return (
+                "/finance quote <symbol> [market] — spot price, no engine\n"
+                "/finance analyze <symbol> [market] [timeframe] — regime + bias\n"
+                "/finance signal <symbol> [market] — directional call\n"
+                "/finance idea <symbol> [market] [--profile P] — full trade plan\n"
+                "/finance backtest <symbol> [market] [--profile P]\n"
+                "/finance compare <s1,s2,..> [market]\n"
+                "/finance watch <symbol> <above|below> <price> [market] — price alert\n"
+                "/finance doctor — integration health\n"
+                "markets: crypto (default) | forex | stocks")
+
+        if verb in ("", "help"):
+            return _usage()
+
+        def _market(args: list[str], default: str = "crypto") -> tuple[str, list[str]]:
+            if args and args[-1].lower() in ("crypto", "forex", "stocks"):
+                return args[-1].lower(), args[:-1]
+            return default, args
+
+        try:
+            if verb == "doctor":
+                return bridge.doctor().summary_text()
+
+            if verb == "quote":
+                toks = rest.split()
+                if not toks:
+                    return "usage: /finance quote <symbol> [market]"
+                market, toks = _market(toks)
+                q = FinancialExpert(self.context).quote(toks[0], market)
+                if not q:
+                    return f"no quote for {toks[0]} [{market}]"
+                chg = q.get("change_pct_24h")
+                chg_s = f" ({chg:+.2f}% 24h)" if isinstance(chg, (int, float)) else ""
+                return (f"{q['symbol']} {q['price']:,.2f} "
+                        f"{q.get('currency', '')}{chg_s} — via {q['source']}")
+
+            if verb in ("analyze", "signal", "backtest"):
+                toks = rest.split()
+                if not toks:
+                    return f"usage: /finance {verb} <symbol> [market] [timeframe]"
+                market, toks = _market(toks)
+                symbol = toks[0]
+                expert = FinancialExpert(self.context)
+                if verb == "analyze":
+                    tf = toks[1] if len(toks) > 1 else "1h"
+                    return expert.analyze(symbol, market, timeframe=tf).summary_text()
+                if verb == "signal":
+                    return expert.signal(symbol, market).summary_text()
+                profile = "default"
+                if "--profile" in toks:
+                    try:
+                        profile = toks[toks.index("--profile") + 1]
+                    except IndexError:
+                        pass
+                return expert.backtest(symbol, market, profile=profile).summary_text()
+
+            if verb == "idea":
+                toks = rest.split()
+                if not toks:
+                    return "usage: /finance idea <symbol> [market] [--profile P]"
+                profile = "default"
+                if "--profile" in toks:
+                    i = toks.index("--profile")
+                    try:
+                        profile = toks[i + 1]
+                    except IndexError:
+                        pass
+                    toks = toks[:i] + toks[i + 2:]
+                market, toks = _market(toks)
+                if not toks:
+                    return "usage: /finance idea <symbol> [market] [--profile P]"
+                return FinancialExpert(self.context).trade_idea(
+                    toks[0], market, profile=profile).summary_text()
+
+            if verb == "compare":
+                toks = rest.split()
+                if not toks:
+                    return "usage: /finance compare <s1,s2,..> [market]"
+                market, toks = _market(toks)
+                symbols = [s.strip() for s in " ".join(toks).split(",") if s.strip()]
+                if not symbols:
+                    return "usage: /finance compare <s1,s2,..> [market]"
+                return FinancialExpert(self.context).compare(symbols, market).summary_text()
+
+            if verb == "watch":
+                toks = rest.split()
+                # /finance watch BTC below 60000 [crypto]
+                if len(toks) < 3:
+                    return "usage: /finance watch <symbol> <above|below> <price> [market]"
+                market, toks = _market(toks)
+                symbol, direction, price_s = toks[0], toks[1].lower(), toks[2]
+                if direction not in ("above", "below"):
+                    return "usage: /finance watch <symbol> <above|below> <price> [market]"
+                try:
+                    price = float(price_s.replace(",", ""))
+                except ValueError:
+                    return f"not a price: {price_s!r}"
+                op = "gt" if direction == "above" else "lt"
+                res = FinancialExpert(self.context).watch_price(
+                    symbol, market,
+                    condition={"op": op, "field": "value", "value": price},
+                    name=f"{symbol.upper()} {direction} {price:,.4g}")
+                if not res.get("ok"):
+                    return f"couldn't create the alert: {res}"
+                w = res["watcher"]
+                return (f"watching {symbol.upper()} [{market}] — alert when "
+                        f"price goes {direction} {price:,.4g} "
+                        f"(watcher {w.get('id')}). {res.get('echo', '')}".strip())
+        except bridge.SentinelUnavailable as exc:
+            return str(exc)
+        except bridge.SentinelError as exc:
+            return f"finance error: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat must never traceback
+            return f"finance error: {exc}"
+        return f"unknown /finance verb {verb!r}\n{_usage()}"
 
     # ── directives (direct instructions to the core) ─────────────────────────
     def _control_task(self, tail: str, chat_key: str) -> str:

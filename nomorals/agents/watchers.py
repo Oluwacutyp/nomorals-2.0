@@ -626,7 +626,9 @@ class PriceKind(_KindChecker):
       watchlist/track actions).
     * ``market`` — a crypto/fiat symbol via CoinGecko's keyless
       ``simple/price`` endpoint through the proxy-aware HttpClient (the same
-      pattern ``payment_integration.get_price`` already uses in-repo).
+      pattern ``payment_integration.get_price`` already uses in-repo);
+      stocks via Yahoo and fiat FX via Frankfurter (both keyless) when the
+      watcher target sets ``market`` to ``stocks``/``forex``.
     """
 
     name = "price"
@@ -692,6 +694,9 @@ class PriceKind(_KindChecker):
         if not symbol:
             return WatchResult(changed=False,
                                error="market price watcher needs a symbol")
+        market = (target.get("market") or "crypto").strip().lower()
+        if market in ("stocks", "forex"):
+            return self._check_market_free(wctx, watcher, market, symbol)
         coin_id = self._SYMBOL_MAP.get(symbol, symbol.lower())
         currency = (target.get("currency") or "usd").strip().lower()
         wctx.check_host_gap("api.coingecko.com")
@@ -728,6 +733,39 @@ class PriceKind(_KindChecker):
         return WatchResult(changed=triggered, old_value=watcher.last_value,
                            new_value=new_value, summary=summary,
                            evidence={"symbol": symbol})
+
+    def _check_market_free(self, wctx: WatcherContext, watcher: Watcher,
+                           market: str, symbol: str) -> WatchResult:
+        """Stocks via Yahoo / fiat FX via Frankfurter — both keyless.
+
+        Same condition semantics as the crypto path; the quote comes from
+        :mod:`nomorals.integrations.market_data` (stdlib-only, no pandas).
+        """
+        from ..integrations import market_data
+
+        host = "stooq.com" if market == "stocks" else "api.frankfurter.dev"
+        wctx.check_host_gap(host)
+        try:
+            q = market_data.quote(symbol, market=market)
+            price = float(q.get("price"))
+        except Exception as exc:  # noqa: BLE001 — bad payload → error streak
+            return WatchResult(changed=False, error=str(exc)[:160])
+        currency = str(q.get("currency") or "USD").upper()
+        new_value = {"price": price, "currency": currency,
+                     "symbol": symbol, "market": market}
+        cond = watcher.condition
+        if cond.field == "value":
+            old_price = (watcher.last_value or {}).get("price") \
+                if isinstance(watcher.last_value, dict) else None
+            triggered, note = evaluate_condition(cond, old=old_price,
+                                                new=price)
+        else:
+            triggered, note = evaluate_condition(cond, old=watcher.last_value,
+                                                new=new_value)
+        summary = f"{symbol} {currency} {price:,.4g} — {note}"
+        return WatchResult(changed=triggered, old_value=watcher.last_value,
+                           new_value=new_value, summary=summary,
+                           evidence={"symbol": symbol, "market": market})
 
     def describe(self, watcher: Watcher) -> str:
         t = watcher.target or {}
