@@ -118,7 +118,7 @@ class ToolRegistry:
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
             "lint",
             "edit_loop",
-            "macros", "media", "metadata", "monitor",
+            "macros", "media", "media_edit", "metadata", "monitor",
             "network", "osint", "osint_graph", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "workspace",

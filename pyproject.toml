@@ -30,6 +30,8 @@ dependencies = []
 fast = ["numpy>=1.24"]
 # Media download and processing.
 media = ["yt-dlp>=2024.4.9"]
+# Media editing engine (Pillow-backed image ops; ffmpeg used from PATH).
+media-edit = ["Pillow>=10.0"]
 # Local model training on GPU.
 train = ["torch>=2.1", "transformers>=4.38", "datasets>=2.17", "peft>=0.9"]
 # Fine-tuning backends.

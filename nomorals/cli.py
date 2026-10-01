@@ -205,7 +205,44 @@ def _parser() -> argparse.ArgumentParser:
                       help="with test: only run tests for changed files")
     code.add_argument("--json", action="store_true", help="Output as JSON")
 
-    
+    media = sub.add_parser(
+        "media",
+        help="Edit images and video from plain language",
+        description=("nm media edit <file> \"<instruction>\" [--dry-run] [--wait]\n"
+                     "nm media probe <file>\n"
+                     "nm media jobs [--limit N]\n"
+                     "nm media convert <file> <fmt>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    media_sub = media.add_subparsers(dest="media_action", required=True)
+    m_edit = media_sub.add_parser("edit", help="edit an image or video")
+    m_edit.add_argument("file", help="image or video file (workspace-relative)")
+    m_edit.add_argument("instruction", help="plain-language edit instruction")
+    m_edit.add_argument("--dry-run", action="store_true",
+                        help="show the planned op chain without executing")
+    m_edit.add_argument("--wait", action="store_true",
+                        help="with video: block until the background job finishes")
+    m_edit.add_argument("--timeout", type=float, default=900.0,
+                        help="seconds to wait with --wait (default 900)")
+    m_edit.add_argument("--video", action="store_true",
+                        help="force video handling regardless of extension")
+    m_edit.add_argument("--image", action="store_true",
+                        help="force image handling regardless of extension")
+    m_edit.add_argument("--json", action="store_true", help="Output as JSON")
+    m_probe = media_sub.add_parser("probe", help="probe an image or video file")
+    m_probe.add_argument("file", help="file to probe (workspace-relative)")
+    m_probe.add_argument("--json", action="store_true", help="Output as JSON")
+    m_jobs = media_sub.add_parser("jobs", help="list recent media jobs")
+    m_jobs.add_argument("--limit", type=int, default=20)
+    m_jobs.add_argument("--json", action="store_true", help="Output as JSON")
+    m_conv = media_sub.add_parser("convert", help="convert to another format")
+    m_conv.add_argument("file", help="file to convert (workspace-relative)")
+    m_conv.add_argument("fmt", help="target format: webp, png, mp4, ...")
+    m_conv.add_argument("--wait", action="store_true",
+                        help="with video: block until the background job finishes")
+    m_conv.add_argument("--json", action="store_true", help="Output as JSON")
+
+
 
     # Additional subcommands
     book = sub.add_parser("book", help="AI-assisted book writing")
@@ -704,6 +741,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_stub(args, context, "simulate")
         if args.command == "code":
             return _cmd_code(args, context)
+        if args.command == "media":
+            return _cmd_media(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -1016,6 +1055,171 @@ def _cmd_code_test(args: argparse.Namespace, context: Any) -> int:
     if result.get("failed"):
         return 1
     return 0 if result.get("ok") else 1
+
+
+_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv"}
+
+
+def _media_tools(context: Any) -> Any:
+    return context.tools.register_builtins()
+
+
+def _media_call(context: Any, name: str, **kwargs: Any) -> Any:
+    """Call a media tool; return the value or raise a clean error."""
+    outcome = _media_tools(context).call(name, actor="cli", **kwargs)
+    if not outcome.ok:
+        err = outcome.error
+        msg = getattr(err, "message", None) or str(err)
+        raise RuntimeError(msg)
+    return outcome.value
+
+
+def _cmd_media(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm media` to edit / probe / jobs / convert."""
+    action = args.media_action
+    if action == "edit":
+        return _cmd_media_edit(args, context)
+    if action == "probe":
+        return _cmd_media_probe(args, context)
+    if action == "jobs":
+        return _cmd_media_jobs(args, context)
+    if action == "convert":
+        return _cmd_media_convert(args, context)
+    print(f"unknown media action: {action}", file=sys.stderr)
+    return 2
+
+
+def _is_video_file(path: str, args: argparse.Namespace) -> bool:
+    if getattr(args, "video", False):
+        return True
+    if getattr(args, "image", False):
+        return False
+    return Path(path).suffix.lower() in _VIDEO_EXTS
+
+
+def _cmd_media_edit(args: argparse.Namespace, context: Any) -> int:
+    as_json = getattr(args, "json", False)
+    try:
+        if _is_video_file(args.file, args):
+            result = _media_call(context, "media_edit_video",
+                                 video_path=args.file,
+                                 instruction=args.instruction,
+                                 dry_run=args.dry_run)
+        else:
+            result = _media_call(context, "media_edit",
+                                 image_path=args.file,
+                                 instruction=args.instruction,
+                                 dry_run=args.dry_run)
+    except RuntimeError as exc:
+        print(f"media edit failed: {exc}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print(result["plan"])
+        return 0
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+    elif result.get("job_id"):
+        print(f"job {result['job_id']} queued: {result.get('summary', '')}")
+        print(f"poll with: nm media jobs / media_job_status({result['job_id']})")
+    else:
+        print(f"wrote {result['output']}  ({result.get('summary', '')})")
+        print(f"original untouched: {result['input']}")
+    if result.get("job_id") and args.wait:
+        return _cmd_media_wait(args, context, result["job_id"], as_json)
+    return 0
+
+
+def _cmd_media_wait(args: argparse.Namespace, context: Any,
+                    job_id: str, as_json: bool) -> int:
+    import time
+    timeout = getattr(args, "timeout", 900.0)
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        try:
+            info = _media_call(context, "media_job_status", job_id=job_id)
+        except RuntimeError as exc:
+            print(f"job poll failed: {exc}", file=sys.stderr)
+            return 1
+        status = info["status"]
+        if status != last:
+            prog = info.get("progress")
+            extra = f" {prog:.0%}" if isinstance(prog, float) else ""
+            print(f"job {job_id}: {status}{extra}")
+            last = status
+        if status in ("done", "failed"):
+            if as_json:
+                print(json.dumps(info, indent=2, default=str))
+            elif status == "done":
+                print(f"done → {info.get('output_ref')}")
+            else:
+                print(f"FAILED: {info.get('error')}", file=sys.stderr)
+            return 0 if status == "done" else 1
+        time.sleep(1.0)
+    print(f"timed out after {timeout:.0f}s waiting for job {job_id}",
+          file=sys.stderr)
+    return 1
+
+
+def _cmd_media_probe(args: argparse.Namespace, context: Any) -> int:
+    try:
+        info = _media_call(context, "media_edit_probe", path=args.file)
+    except RuntimeError as exc:
+        print(f"probe failed: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2, default=str))
+        return 0
+    if info.get("kind") == "video":
+        print(f"{info['path']}: {info.get('width')}x{info.get('height')} "
+              f"{info.get('video_codec')} {info.get('fps') or '?'}fps "
+              f"{(info.get('duration') or 0):.1f}s "
+              f"({info['bytes'] / 1e6:.1f}MB)")
+    else:
+        print(f"{info['path']}: {info.get('width')}x{info.get('height')} "
+              f"{info.get('format')} {info.get('mode')} "
+              f"({info['bytes'] / 1024:.0f}KB)")
+    return 0
+
+
+def _cmd_media_jobs(args: argparse.Namespace, context: Any) -> int:
+    try:
+        jobs = _media_call(context, "media_jobs", limit=args.limit)
+    except RuntimeError as exc:
+        print(f"jobs failed: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(jobs, indent=2, default=str))
+        return 0
+    if not jobs:
+        print("no media jobs yet")
+        return 0
+    for j in jobs:
+        prog = j.get("progress")
+        extra = f" {prog:.0%}" if isinstance(prog, float) else ""
+        print(f"{j['id'][:13]}  {j['status']}{extra}  {j['kind']}  "
+              f"{j.get('label', '')}  → {j.get('output_ref') or '-'}")
+    return 0
+
+
+def _cmd_media_convert(args: argparse.Namespace, context: Any) -> int:
+    as_json = getattr(args, "json", False)
+    try:
+        result = _media_call(context, "media_convert", path=args.file,
+                             format=args.fmt)
+    except RuntimeError as exc:
+        print(f"convert failed: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+    elif result.get("job_id"):
+        print(f"job {result['job_id']} queued: {result.get('summary', '')}")
+    else:
+        print(f"wrote {result['output']}")
+        print(f"original untouched: {result['input']}")
+    if result.get("job_id") and args.wait:
+        return _cmd_media_wait(args, context, result["job_id"], as_json)
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace, context: Any) -> int:
