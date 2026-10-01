@@ -229,7 +229,7 @@ code("""#@title 9) Push the MERGED model to YOUR Hugging Face account (optional)
 # Skips cleanly if the token is missing — your GGUF from cell 8 is still yours.
 import os
 
-HF_REPO = "YOUR_USERNAME/codebeast-3.8b"   # ← set your HF username
+HF_REPO = "Cutyp/codebeast-3.8b"   # the owner's HF account
 
 def _hf_token():
     t = os.environ.get("HF_TOKEN")
