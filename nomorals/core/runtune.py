@@ -3,7 +3,7 @@
 One question, answered once, applied everywhere: *what kind of machine is
 this, and what does that mean for every resource knob?*
 
-``nomorals.workspace.profile`` (wave 84) detects the environment —
+``nomorals.core.profile`` (moved from nomorals.workspace.profile, wave 84) detects the environment —
 termux/mobile, embedded, pc, vps, workstation — and carries a VCPU
 envelope. This module is the *runtime* half of that: it turns the detected
 profile (plus the actual CPU/RAM) into a complete, inspectable set of
@@ -33,7 +33,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..workspace.profile import EnvironmentProfile, resolve_profile
+from .profile import EnvironmentProfile, resolve_profile
 from .config import _settings_to_dict
 
 __all__ = ["RuntimeTune", "build_tune", "KNOWN_KINDS"]

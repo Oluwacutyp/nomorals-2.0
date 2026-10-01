@@ -30,7 +30,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
-from .profile import EnvironmentProfile, resolve_profile
+from ..core.profile import EnvironmentProfile, resolve_profile
 from .vcpu import KINDS, VcpuStatus, VirtualCPU
 
 __all__ = ["Workspace"]

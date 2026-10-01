@@ -8,7 +8,7 @@ from .context import AgentContext
 from .orchestrator import MasterOrchestrator, Plan
 from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
-from .tasks import Task, TaskGraph, TaskKind, TaskState
+from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
 __all__ = [
     "Agent",

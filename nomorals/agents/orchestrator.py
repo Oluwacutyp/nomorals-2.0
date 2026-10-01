@@ -25,7 +25,7 @@ from .blackboard import Blackboard
 from .role_specs import RoleRegistry, SwarmAgent
 from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
-from .tasks import Task, TaskGraph, TaskKind, TaskState
+from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
 __all__ = ["MasterOrchestrator", "Plan", "PlanStep", "OrchestrationResult"]
 

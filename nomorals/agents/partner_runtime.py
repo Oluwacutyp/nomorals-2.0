@@ -1252,7 +1252,7 @@ class PartnerRuntime:
                 # user model fresh and memory hygienic.  Idempotent by name;
                 # no-ops when memory is empty.
                 try:
-                    from ..memory.persona import ensure_persona_jobs
+                    from .scheduler import ensure_persona_jobs
                     ensure_persona_jobs(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
@@ -2276,7 +2276,9 @@ class PartnerRuntime:
                          + " lack HttpOnly+Secure")
         if ingest:
             try:
-                ing = lab.ingest(self.context, raw, source="chat-cookies")
+                from .kg import KnowledgeGraph
+                ing = lab.ingest(self.context, raw, source="chat-cookies",
+                                 graph=KnowledgeGraph(self.context.db))
                 lines.append(f"ingested: {ing.get('nodes', 0)} graph nodes"
                              + (f", report {ing.get('report_id')}"
                                 if ing.get("report_id") else ""))

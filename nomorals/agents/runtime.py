@@ -37,7 +37,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from ..core.errors import DeadlineExceeded, TaskCancelled, TaskFailed, classify
 from ..core.logging_setup import get_logger
-from .tasks import Task, TaskGraph, TaskKind, TaskState
+from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
 __all__ = ["ExecutionReport", "HybridExecutor", "run_pickled"]
 

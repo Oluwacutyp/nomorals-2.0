@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..base import Agent
-from ..tasks import Task
+from ...core.tasks import Task
 from ...core.policy import Capability
 # Prompt 02: the role specs live in ..role_specs (this name is a package, so
 # the spec module could not be called roles.py); re-exported here so the

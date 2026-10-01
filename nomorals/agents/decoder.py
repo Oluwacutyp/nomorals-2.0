@@ -280,6 +280,8 @@ def register(registry: Any) -> None:
             raw = p.read_text(encoding="utf-8", errors="replace")
         lab = CookieLab()
         if (action or "report").strip().lower() == "ingest":
+            from .kg import KnowledgeGraph
             return {"ok": True, "report": lab.report(raw),
-                    "ingested": lab.ingest(context, raw, source=source)}
+                    "ingested": lab.ingest(context, raw, source=source,
+                                           graph=KnowledgeGraph(context.db))}
         return {"ok": True, "report": lab.report(raw)}

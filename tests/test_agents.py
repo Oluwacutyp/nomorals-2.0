@@ -20,7 +20,7 @@ from nomorals.agents.orchestrator import MasterOrchestrator, Plan, PlanStep
 from nomorals.agents.roles import ROLES, build_agent
 from nomorals.agents.runtime import HybridExecutor
 from nomorals.agents.supervisor import RestartPolicy, Supervisor
-from nomorals.agents.tasks import Task, TaskGraph, TaskKind, TaskState, cycle_in
+from nomorals.core.tasks import Task, TaskGraph, TaskKind, TaskState, cycle_in
 from nomorals.core.config import Settings
 from nomorals.core.errors import ValidationError
 

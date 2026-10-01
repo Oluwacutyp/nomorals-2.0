@@ -27,7 +27,7 @@ from ..agents.financial_expert import FinancialExpert
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
-from ..integrations import sentinel_bridge as bridge
+import nomorals.integrations.sentinel_bridge as bridge
 
 __all__ = ["register", "LiveTradingDisabled",
            "set_exchange_client_factory", "trading"]

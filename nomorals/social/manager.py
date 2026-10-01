@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from ..agents.tasks import Task, TaskGraph, TaskKind
+from ..core.tasks import Task, TaskGraph, TaskKind
 from ..core.errors import NotFound, ValidationError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger

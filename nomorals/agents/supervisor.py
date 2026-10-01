@@ -20,7 +20,7 @@ from typing import Any, Callable
 from ..core.errors import BudgetExceeded, DeadlineExceeded, classify
 from ..core.logging_setup import get_logger
 from .base import Agent, AgentResult, AgentState
-from .tasks import Task, TaskGraph, TaskState
+from ..core.tasks import Task, TaskGraph, TaskState
 
 __all__ = ["RestartPolicy", "Supervisor", "SupervisorEvent"]
 

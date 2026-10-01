@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from ..agents.orchestrator import MasterOrchestrator
-from ..agents.tasks import TaskKind
+from ..core.tasks import TaskKind
 from ..core.errors import BudgetExceeded, NoMoralsError, classify
 from ..core.logging_setup import get_logger
 from ..missions.mission import Mission, MissionStatus, MissionStore

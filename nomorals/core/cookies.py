@@ -445,15 +445,22 @@ class CookieLab:
         }
 
     # ── ingest ──────────────────────────────────────────────────────────────
-    def ingest(self, context: Any, text: str, *, source: str = "cookies") -> dict[str, Any]:
+    def ingest(self, context: Any, text: str, *, source: str = "cookies",
+               graph: Any = None) -> dict[str, Any]:
         """Feed the cookie findings into the knowledge graph and archive
-        the report.  Best-effort — returns what it did, never raises."""
+        the report.  Best-effort — returns what it did, never raises.
+
+        ``graph`` is an optional knowledge-graph sink (e.g.
+        ``agents.kg.KnowledgeGraph``).  It is a parameter — not an import —
+        so the kernel never depends on the agents layer; callers that want
+        graph ingestion pass the sink in.
+        """
         rep = self.report(text)
         ingested: dict[str, Any] = {"services": rep["services"],
                                     "nodes": 0, "report_id": ""}
         try:
-            from ..agents.kg import KnowledgeGraph
-            graph = KnowledgeGraph(context.db)
+            if graph is None:
+                raise RuntimeError("no graph sink provided")
             source_node = graph.upsert_node(source, type="entity",
                                             properties={"kind": "cookie-source"})
             for svc in rep["services"]:

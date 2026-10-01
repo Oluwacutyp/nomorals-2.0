@@ -4108,8 +4108,10 @@ def _cmd_cookies(args: argparse.Namespace, context: Any) -> int:
         action = "ingest"
         text = text.split(None, 1)[1].strip()
     if action == "ingest":
+        from nomorals.agents.kg import KnowledgeGraph
         out = lab.ingest(context, text,
-                        source=getattr(args, "source", "") or "cookies")
+                        source=getattr(args, "source", "") or "cookies",
+                        graph=KnowledgeGraph(context.db))
         _emit(args, out, f"cookies: ingested: {out.get('nodes', 0)} "
               f"graph node(s) — services: "
               f"{', '.join(out.get('services') or []) or 'none'}")

@@ -423,3 +423,39 @@ class Scheduler:
             "last_run": row.get("last_run"),
             "last_result": (row.get("last_result") or "")[:300],
         }
+
+
+# ── persona maintenance jobs ───────────────────────────────────────────────
+
+PERSONA_REBUILD_JOB = "persona rebuild"
+PERSONA_CURATE_JOB = "persona curate"
+
+
+def ensure_persona_jobs(context: Any) -> dict[str, Any]:
+    """Register the daily persona rebuild + curation jobs (idempotent).
+
+    Moved here from memory.persona (2026-10-01): job registration belongs
+    with the scheduler.  memory/ must not import agents/ (layering).
+    """
+    out: dict[str, Any] = {}
+    for name, spec, action in (
+            (PERSONA_REBUILD_JOB, "daily 03:30", "rebuild"),
+            (PERSONA_CURATE_JOB, "daily 04:00", "curate")):
+        try:
+            sched = Scheduler(context)
+            have = [j for j in sched.list_jobs() if j.get("name") == name]
+        except Exception:  # noqa: BLE001 — scheduler table may not exist yet
+            have = []
+        if have:
+            out[name] = {"already_scheduled": True}
+            continue
+        try:
+            job = sched.add(name, spec, "tool",
+                            {"tool": "memory",
+                             "args": {"action": action}})
+            out[name] = {"scheduled": True, "job_id": job.get("id")}
+            _log.info("scheduled persona job: %s", name)
+        except Exception as exc:  # noqa: BLE001
+            out[name] = {"error": str(exc)}
+    return out
+

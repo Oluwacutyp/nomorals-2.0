@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from nomorals.agents.coding import CodingAgent, _DIFF_REVIEW_FOCUS
-from nomorals.agents.tasks import Task
+from nomorals.core.tasks import Task
 from nomorals.tools import agents as agents_mod
 from nomorals.tools.agents import CODING_TOOLS
 
