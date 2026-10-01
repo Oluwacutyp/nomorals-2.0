@@ -155,6 +155,38 @@ class CapabilityDenied(NoMoralsError):
             self.details.setdefault("actor", actor)
 
 
+class ToolDenied(ToolError):
+    """A tool call was blocked by a role's allowlist.
+
+    Structured so role agents can adapt (the denial names the role, the
+    tool, and the reason) and so the failure ledger can categorize it
+    distinctly from capability-policy denials.
+    """
+
+    code = "tool.denied"
+    retryable = False
+
+    def __init__(
+        self,
+        message: str = "tool denied by role allowlist",
+        *,
+        role: str | None = None,
+        tool: str | None = None,
+        reason: str = "",
+        **kw: Any,
+    ) -> None:
+        super().__init__(message, **kw)
+        self.role = role
+        self.tool = tool
+        self.reason = reason
+        if role:
+            self.details.setdefault("role", role)
+        if tool:
+            self.details.setdefault("tool", tool)
+        if reason:
+            self.details.setdefault("reason", reason)
+
+
 class SandboxError(ToolError):
     code = "tool.sandbox"
 

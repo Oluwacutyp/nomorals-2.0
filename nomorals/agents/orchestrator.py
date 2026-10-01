@@ -22,6 +22,7 @@ from ..core.logging_setup import get_logger
 from ..core.result import Ok, Err
 from .base import Budget
 from .blackboard import Blackboard
+from .role_specs import RoleRegistry, SwarmAgent
 from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
 from .tasks import Task, TaskGraph, TaskKind, TaskState
@@ -130,14 +131,26 @@ class MasterOrchestrator:
         blackboard: Blackboard | None = None,
         max_steps: int = 12,
         planner_prompt: str = "",
+        roles: RoleRegistry | None = None,
     ) -> None:
         self.context = context
         self.executor = executor or (context.executor if context is not None else None)
         self.supervisor = supervisor or Supervisor()
-        self.blackboard = blackboard or (context.blackboard if context is not None else Blackboard())
+        if blackboard is not None:
+            self.blackboard = blackboard
+        elif context is not None and getattr(context, "blackboard", None) is not None:
+            self.blackboard = context.blackboard
+        else:
+            self.blackboard = Blackboard()
         self.max_steps = max_steps
         self.planner_prompt = planner_prompt
+        # Prompt 02: when a RoleRegistry is wired, plan roles resolve to
+        # locked RoleSpecs (unknown roles get the safe execution spec).
+        # When None, dispatch behaves exactly as before (backward compat).
+        self.roles = roles
         self.history: list[OrchestrationResult] = []
+        # Prompt 02: per-role telemetry — tasks, ok/failed, seconds, denials.
+        self._role_stats: dict[str, dict[str, Any]] = {}
 
     # ── planning ─────────────────────────────────────────────────────────────
     def plan(self, goal: str, *, context_hint: str = "") -> Plan:
@@ -287,8 +300,19 @@ class MasterOrchestrator:
         def dispatch(task: Task) -> Any:
             self.supervisor.check_budget()
             chosen = role_handlers.get(task.role) or role_handlers.get(task.name) or handler
-            self.context.emit("task.started", task=task.name, role=task.role, goal=goal) if self.context else None
-            result = chosen(task)
+            if self.context:
+                self.context.emit("task.started", task=task.name, role=task.role, goal=goal)
+            started = time.perf_counter()
+            try:
+                result = chosen(task)
+                ok = not (isinstance(result, dict) and result.get("error"))
+            except Exception:
+                self._record_role(task.role, time.perf_counter() - started,
+                                  ok=False, denials=0)
+                raise
+            elapsed = time.perf_counter() - started
+            denials = _result_denials(result)
+            self._record_role(task.role, elapsed, ok=ok, denials=denials)
             self.blackboard.post(
                 f"task.{task.name}", result, author=task.role, topic=goal,
                 metadata={"role": task.role},
@@ -342,7 +366,26 @@ class MasterOrchestrator:
         return report
 
     def _default_handler(self, task: Task) -> Any:
-        """Delegate to the agent registered for this task's role."""
+        """Delegate to the agent registered for this task's role.
+
+        Prompt 02: when a RoleRegistry is wired, every role resolves to a
+        locked RoleSpec (unknown roles get the safe ``execution`` spec —
+        never full tool access).  The ``coding`` role keeps the real
+        CodingRoleAgent; other roles get a generic SwarmAgent bound to
+        their allowlist.  With no registry wired, this is exactly the
+        old behavior.
+        """
+        if self.roles is not None and self.context is not None:
+            tools = getattr(self.context, "tools", None)
+            if task.role in ("coding", "coder"):
+                agent_factory = getattr(tools, "agent_for", None)
+                if callable(agent_factory):
+                    agent = agent_factory("coding")
+                    if agent is not None:
+                        return agent.run(task.payload).output
+            spec = self.roles.resolve(task.role)
+            agent = SwarmAgent(self.context, spec, registry=tools)
+            return agent.run(task.payload).output
         if self.context is not None:
             tools = getattr(self.context, "tools", None)
             agent_factory = getattr(tools, "agent_for", None)
@@ -351,6 +394,24 @@ class MasterOrchestrator:
                 if agent is not None:
                     return agent.run(task.payload).output
         return {"task": task.name, "goal": task.payload.get("goal", ""), "status": "no handler"}
+
+    def _record_role(self, role: str, seconds: float, *,
+                     ok: bool, denials: int) -> None:
+        """Prompt 02: per-role telemetry for stats() and the event bus."""
+        entry = self._role_stats.setdefault(
+            role, {"tasks": 0, "ok": 0, "failed": 0,
+                   "seconds": 0.0, "denials": 0})
+        entry["tasks"] += 1
+        entry["ok" if ok else "failed"] += 1
+        entry["seconds"] = round(entry["seconds"] + seconds, 3)
+        entry["denials"] += denials
+        if self.context is not None:
+            try:
+                self.context.emit(
+                    "swarm.task_done", role=role, ok=ok,
+                    seconds=round(seconds, 3), denials=denials)
+            except Exception:  # noqa: BLE001 - telemetry never breaks dispatch
+                pass
 
     # ── aggregation & reflection ─────────────────────────────────────────────
     def _aggregate(self, goal: str, graph: TaskGraph) -> str:
@@ -429,13 +490,37 @@ class MasterOrchestrator:
     # ── reporting ────────────────────────────────────────────────────────────
     def stats(self) -> dict[str, Any]:
         runs = len(self.history)
+        roles = {}
+        for role, entry in self._role_stats.items():
+            tasks = entry["tasks"] or 1
+            roles[role] = {
+                "tasks": entry["tasks"],
+                "success_rate": round(entry["ok"] / tasks, 3),
+                "avg_seconds": round(entry["seconds"] / tasks, 3),
+                "denials": entry["denials"],
+            }
         return {
             "runs": runs,
             "successes": sum(1 for r in self.history if r.ok),
             "avg_score": round(sum(r.score for r in self.history) / runs, 3) if runs else 0.0,
             "avg_seconds": round(sum(r.seconds for r in self.history) / runs, 3) if runs else 0.0,
             "supervisor": self.supervisor.snapshot(),
+            "roles": roles,
+            "tool_denials": sum(e["denials"] for e in self._role_stats.values()),
         }
+
+
+def _result_denials(result: Any) -> int:
+    """Best-effort denial count from a handler's return value."""
+    if result is None:
+        return 0
+    denials = getattr(result, "denials", None)
+    if isinstance(denials, (int, float)):
+        return int(denials)
+    if isinstance(result, dict):
+        value = result.get("denials", 0)
+        return int(value) if isinstance(value, (int, float)) else 0
+    return 0
 
 
 def _extract_json(text: str) -> Any:
