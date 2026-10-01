@@ -3293,13 +3293,6 @@ class PartnerRuntime:
         return "usage: /trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]"
 
     # ── games ────────────────────────────────────────────────────────────────
-    def _games(self):
-        """The legacy solo bridge (20q, rps, memory) — kept for the classics
-        the multi-player engine doesn't cover."""
-        from .games import GamesAgent
-
-        return GamesAgent(self.context)
-
     def _game_engine(self) -> Any:
         """The multi-player GameEngine — ONE instance serves every platform
         at once. It never touches a platform: it sees chat keys, sender
@@ -3317,13 +3310,46 @@ class PartnerRuntime:
         return engine
 
     def _game_relay(self) -> Any:
-        """The game relay system — connects two separate DM chats for multiplayer."""
-        relay = getattr(self, "_game_relay_obj", None)
-        if relay is None:
-            from ..games.relay import GameRelay
-            relay = GameRelay(self._game_engine())
-            self._game_relay_obj = relay
-        return relay
+        """The game relay system — one per engine, so the ticker reaps
+        expired invites and every platform shares the same relay table."""
+        return self._game_engine().relay
+
+    def _relay_send(self, chat_key: str, text: str) -> bool:
+        """Send to a relay chat on its own platform. Chat keys are
+        ``platform:chat_id`` — never assume telegram."""
+        platform = (chat_key or "").partition(":")[0].strip() or "telegram"
+        try:
+            result = self.gateway.send(platform, chat_key, text)
+            return bool(getattr(result, "ok", False))
+        except Exception:  # noqa: BLE001
+            _log.warning("relay send failed for %s", chat_key,
+                         exc_info=True)
+            return False
+
+    @staticmethod
+    def _resolve_invite_target(inviter_chat_key: str,
+                               to_label: str) -> str | None:
+        """Best-effort chat key for a direct invite DM on the inviter's
+        own platform. Returns None when the label can't be resolved
+        (then the invite code is the delivery mechanism)."""
+        label = (to_label or "").strip()
+        if not label:
+            return None
+        platform = (inviter_chat_key or "").partition(":")[0].strip()
+        if platform == "telegram":
+            return f"telegram:{label.lstrip('@')}"
+        if platform == "whatsapp":
+            digits = "".join(c for c in label if c.isdigit())
+            # a phone number → DM chat; the adapter normalizes the JID
+            if len(digits) >= 7:
+                return f"whatsapp:{digits}"
+            return None
+        if platform == "discord":
+            digits = "".join(c for c in label if c.isdigit())
+            if len(digits) >= 5:
+                return f"discord:{digits}"
+            return None
+        return None
 
     def _game_suggest(self) -> Callable[[str], str] | None:
         """Optional LLM brain for the game AI — the same router the legacy
@@ -3427,23 +3453,15 @@ class PartnerRuntime:
             if live is not None:
                 lines.append(
                     f"live game: {live.game} — send your move (or /game quit)")
-            else:
-                # a legacy solo session may still be live in this chat
-                try:
-                    active = self._games().active(chat_key)
-                except Exception:  # noqa: BLE001
-                    active = None
-                if active:
-                    lines.append(
-                        f"live game: {active['game']} — send your move "
-                        "(or /game quit)")
             lines.append(engine.list_games())
-            lines.append("  (legacy solo: 20q, rps, memory)")
+            lines.append("  /game <name> — start · /game rematch — run it back")
+            lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
             return "\n".join(lines)
         if verb == "quit":
-            if live is not None:
-                return "\n".join(engine.quit(chat_key))
-            return self._games().quit(chat_key)
+            return "\n".join(engine.quit(chat_key))
+        if verb == "rematch":
+            room, msgs = engine.rematch(chat_key)
+            return "\n".join(msgs)
         if verb in {"leaderboard", "board", "ranks"}:
             game = parts[1].lower() if len(parts) > 1 else ""
             return engine.board.render(10, game=game)
@@ -3476,22 +3494,33 @@ class PartnerRuntime:
         if verb == "invite":
             if player is None:
                 return "invite needs a chat sender."
-            if len(parts) < 3:
-                return "usage: /game invite <friend_username> <game_name>"
-            to_username = parts[1]
-            game_name = parts[2].lower()
+            if len(parts) < 2:
+                return ("usage: /game invite <game_name> [who]\n"
+                        "the code is the invite — your friend accepts with "
+                        "/game accept <code> from any chat.")
+            game_name = parts[1].lower()
+            to_label = parts[2] if len(parts) > 2 else ""
             try:
                 relay = self._game_relay()
-                invite = relay.create_invite(chat_key, player, to_username, game_name)
-                # Send invite to the friend's DM
-                friend_chat = f"telegram:{to_username}"  # TODO: resolve username to chat_key
-                self.gateway.send("telegram", {"key": friend_chat},
-                    f"🎮 {player.name} invited you to play {game_name}!\n"
-                    f"To accept: /game accept {invite.code}\n"
-                    f"(expires in 1 hour)")
-                return f"invite sent to {to_username} for {game_name}. They'll get a DM with code {invite.code}."
+                invite = relay.create_invite(
+                    chat_key, player, game_name, to_label=to_label)
             except ValueError as exc:
                 return str(exc)
+            share = (f"invite ready for {invite.game_name} — share this:\n"
+                     f"/game accept {invite.code}\n"
+                     f"(expires in 1 hour, works from any chat)")
+            target = self._resolve_invite_target(chat_key, to_label)
+            if target is not None:
+                sent = self._relay_send(
+                    target,
+                    f"🎮 {player.name} invited you to play "
+                    f"{invite.game_name}!\n"
+                    f"to accept: /game accept {invite.code}\n"
+                    f"(expires in 1 hour)")
+                if sent:
+                    return (f"invite sent to {to_label} for "
+                            f"{invite.game_name}.\n{share}")
+            return share
         if verb == "accept":
             if player is None:
                 return "accept needs a chat sender."
@@ -3501,10 +3530,15 @@ class PartnerRuntime:
             try:
                 relay = self._game_relay()
                 relay_room = relay.accept_invite(code, chat_key, player)
-                # Notify both players
-                self.gateway.send("telegram", {"key": relay_room.chat_a},
-                    f"🎮 {player.name} accepted! Game started in this chat.")
-                return f"game started! Play here in this chat. Your moves will be relayed to your opponent."
+                # tell the inviter their friend joined (the accepter is
+                # already looking at this chat)
+                self._relay_send(
+                    relay_room.chat_a,
+                    f"🎮 {player.name} accepted your "
+                    f"{relay_room.game_name} invite — game on! play in "
+                    f"your DM, moves are relayed.")
+                return ("game started! play here in this chat — your moves "
+                        "are relayed to your opponent.")
             except ValueError as exc:
                 return str(exc)
         if verb in engine.games:
@@ -3520,16 +3554,14 @@ class PartnerRuntime:
             if msgs and not msgs[0].startswith("🎮"):
                 msgs[0] = f"🎮 {msgs[0]}"  # the table-opening banner
             return "\n".join(msgs) or engine.describe(room)
-        # legacy solo bridge for the classics the engine doesn't cover
-        return self._games().begin(chat_key, verb)
+        return (f"unknown game {verb!r} — /game list to see the table.")
 
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.
 
-        The multi-player engine gets first dibs (19 games, every platform);
-        the legacy solo bridge answers only for the classics it still owns.
-        Relay rooms (DM-to-DM multiplayer) are checked first.
+        The multi-player engine owns every game (36 and counting, every
+        platform). Relay rooms (DM-to-DM multiplayer) are checked first.
         """
         try:
             from .features import feature_enabled
@@ -3543,14 +3575,15 @@ class PartnerRuntime:
             relay = self._game_relay()
             relay_room = relay.get_relay_for_chat(chat_key)
             if relay_room is not None and player is not None:
-                # Route through relay
+                # route through the virtual room; the reply goes back to
+                # this chat via the normal path, the opponent gets theirs
+                # on their own platform
                 msgs = relay.relay_move(chat_key, text, player)
-                # Send to both players
-                if msgs:
-                    reply = "\n".join(msgs)
-                    self.gateway.send("telegram", {"key": relay_room.chat_a}, reply)
-                    self.gateway.send("telegram", {"key": relay_room.chat_b}, reply)
-                return "\n".join(msgs) or None
+                if not msgs:
+                    return None
+                reply = "\n".join(msgs)
+                self._relay_send(relay_room.other_chat(chat_key), reply)
+                return reply
             
             engine = self._game_engine()
             room = engine.live(chat_key)
@@ -3578,9 +3611,7 @@ class PartnerRuntime:
                     msgs.extend(engine.join(chat_key, player))
                 msgs.extend(engine.move(chat_key, text, player, kind=kind))
                 return "\n".join(msgs) or None
-            if text.startswith("/"):
-                return None
-            return self._games().play(chat_key, text)
+            return None
         except Exception:  # noqa: BLE001 - a game bug must never eat the chat
             _log.exception("game move failed")
             return None

@@ -87,8 +87,22 @@ class GameEngine:
         self._wake = threading.Event()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._relay_obj: Any = None  # lazy GameRelay (see relay property)
+        self._last_game: dict[str, tuple[str, list[Player], str]] = {}
         self._register_builtins()
         self._start_scheduler()
+
+    @property
+    def relay(self) -> Any:
+        """The DM-to-DM game relay, created on first use. Lives on the
+        engine so the ticker can reap expired invites/relays and so every
+        platform shares one relay table."""
+        relay = self._relay_obj
+        if relay is None:
+            from .relay import GameRelay  # lazy: relay imports engine
+            relay = GameRelay(self)
+            self._relay_obj = relay
+        return relay
 
     # ── game registry ──────────────────────────────────────────────────────
     def _register_builtins(self) -> None:
@@ -146,6 +160,13 @@ class GameEngine:
                 self._handle_timeout(room)
             except Exception:  # noqa: BLE001
                 _log.exception("game timeout failed: %s", room.game)
+        # reap expired invites / long-idle relay rooms (throttled inside)
+        try:
+            relay = self._relay_obj
+            if relay is not None:
+                relay.maybe_cleanup()
+        except Exception:  # noqa: BLE001
+            _log.debug("relay cleanup failed", exc_info=True)
 
     # ── sending ────────────────────────────────────────────────────────────
     def _emit(self, room: Room, *texts: str) -> None:
@@ -576,8 +597,11 @@ class GameEngine:
                         _log.debug("game stats update failed", exc_info=True)
                     # award achievements
                     try:
-                        from .achievements import unlock_achievement
-                        self._award_achievements(room, game, p, won, score)
+                        new_ach = self._award_achievements(
+                            room, game, p, won, score)
+                        for ach_name in new_ach:
+                            msgs.append(
+                                f"🏆 {p.name} unlocked “{ach_name}”!")
                     except Exception:  # noqa: BLE001
                         _log.debug("achievement award failed", exc_info=True)
                 msgs.append(
@@ -591,79 +615,169 @@ class GameEngine:
             _log.debug("game item reconcile failed", exc_info=True)
         self._persist(room)
         self._emit(room, *msgs)
+        # remember the table for /game rematch (relay virtual rooms are
+        # excluded — a rematch there needs a fresh invite)
+        if not room.chat_key.startswith("relay:"):
+            humans = [p for p in room.players if not p.is_ai]
+            if humans:
+                with self._lock:
+                    self._last_game[room.chat_key] = (
+                        room.game, humans, room.kind)
         with self._lock:
             self._rooms.pop(room.chat_key, None)
             self._by_id.pop(room.id, None)
         return msgs
 
+    def rematch(self, chat_key: str) -> tuple[Room | None, list[str]]:
+        """Start the last finished game again with the same humans.
+
+        Returns (room, messages) or (None, [why-not])."""
+        with self._lock:
+            last = self._last_game.get(chat_key)
+            live = self._rooms.get(chat_key)
+        if last is None:
+            return None, ["no finished game here yet — /game list to start one."]
+        if live is not None and live.status == "active":
+            return None, [f"a {live.game} is already live — /game quit first."]
+        game_name, humans, kind = last
+        host, rest = humans[0], humans[1:]
+        try:
+            room, msgs = self.start(chat_key, game_name, host, kind=kind)
+        except ValueError as exc:
+            return None, [str(exc)]
+        joined: list[str] = []
+        for p in rest:
+            try:
+                joined.extend(self.join(chat_key, p))
+            except Exception:  # noqa: BLE001
+                _log.debug("rematch reseat failed for %s", p.key,
+                           exc_info=True)
+        return room, ["🔁 rematch — same game, same table."] + joined + msgs
+
     def _award_achievements(self, room: Room, game: Any, player: Player,
-                            won: bool | None, score: int) -> None:
-        """Award achievements based on game outcome and state."""
-        from .achievements import unlock_achievement
+                            won: bool | None, score: int) -> list[str]:
+        """Award achievements based on game outcome and state.
+
+        Returns the display names of newly unlocked achievements so the
+        caller can announce them.
+        """
+        from .achievements import _achievement_map, unlock_achievement
         db = self.db
         game_name = room.game
-        
+        names = _achievement_map()
+        newly: list[str] = []
+
+        def grant(achievement_id: str) -> None:
+            try:
+                if unlock_achievement(db, player.key, achievement_id):
+                    ach = names.get(achievement_id)
+                    if ach is not None:
+                        newly.append(ach.name)
+            except Exception:  # noqa: BLE001
+                _log.debug("achievement grant failed", exc_info=True)
+
+        # milestones come from the ledger (already includes this game —
+        # record_outcome runs before this)
+        try:
+            prof = self.store.get(player.key)
+        except Exception:  # noqa: BLE001
+            prof = None
+
+        if prof is not None:
+            if prof.games_played >= 10:
+                grant("games_10")
+            if prof.games_played >= 100:
+                grant("games_100")
+            if prof.wins >= 25:
+                grant("wins_25")
+            if prof.wins >= 100:
+                grant("wins_100")
+
+        # Poker achievements
+        if game_name == "poker":
+            if won:
+                grant("poker_win")
+                if room.state.get("human_allin"):
+                    grant("poker_allin_win")
+            # straight or better at any showdown this match (rank>=4)
+            if room.state.get("human_best_rank", 0) >= 4:
+                grant("poker_straight")
+
+        # Hangman achievements
+        elif game_name == "hangman":
+            if won:
+                if room.state.get("wrong", 0) == 0:
+                    grant("hangman_perfect")
+                if prof is not None:
+                    hang_wins = (prof.per_game.get("hangman", {})
+                                 .get("wins", 0))
+                    if hang_wins >= 5:
+                        grant("hangman_5_wins")
+
+        # Arena achievements
+        elif game_name == "arena":
+            if won:
+                grant("arena_win")
+                if room.state.get("crit_kill_by") == "you":
+                    grant("arena_crit_kill")
+
         # 2048 achievements
-        if game_name == "2048":
+        elif game_name == "2048":
             max_tile = max(max(r) for r in room.state.get("grid", [[0]]))
             if max_tile >= 2048:
-                unlock_achievement(db, player.key, "2048_win")
+                grant("2048_win")
             if max_tile >= 4096:
-                unlock_achievement(db, player.key, "2048_4096")
+                grant("2048_4096")
             if score >= 5000:
-                unlock_achievement(db, player.key, "2048_score_5k")
-        
+                grant("2048_score_5k")
+
         # Snake achievements
         elif game_name == "snake":
             if score >= 50:
-                unlock_achievement(db, player.key, "snake_50")
+                grant("snake_50")
             if score >= 200:
-                unlock_achievement(db, player.key, "snake_200")
+                grant("snake_200")
             moves = room.state.get("moves", 0)
             if moves >= 20 and not room.state.get("alive", True):
-                unlock_achievement(db, player.key, "snake_no_crash_20")
-        
+                grant("snake_no_crash_20")
+
         # Connect Four achievements
         elif game_name == "connect4" and won:
-            unlock_achievement(db, player.key, "connect4_win")
+            grant("connect4_win")
             moves = room.state.get("moves", 0)
             if moves < 10:
-                unlock_achievement(db, player.key, "connect4_quick")
-        
+                grant("connect4_quick")
+
         # Battleship achievements
         elif game_name == "battleship" and won:
-            unlock_achievement(db, player.key, "battleship_win")
+            grant("battleship_win")
             shots = room.state.get("ai_shots", [])
             hits = sum(shots[r][c] == 1 for r in range(10) for c in range(10))
             total = sum(shots[r][c] > 0 for r in range(10) for c in range(10))
             if total > 0 and hits / total >= 0.8:
-                unlock_achievement(db, player.key, "battleship_perfect")
-        
-        # Arena achievements
-        elif game_name == "arena" and won:
-            unlock_achievement(db, player.key, "arena_win")
-        
+                grant("battleship_perfect")
+
         # World achievements
         elif game_name == "world":
             pop = room.state.get("pop", 0)
             if pop >= 50:
-                unlock_achievement(db, player.key, "world_50_pop")
+                grant("world_50_pop")
             buildings = room.state.get("buildings", {})
             if len(buildings) >= 5:  # has all building types
-                unlock_achievement(db, player.key, "world_all_buildings")
-        
+                grant("world_all_buildings")
+
         # RPG achievements
         elif game_name == "rpg":
             sheets = room.state.get("sheets", {})
             player_sheet = sheets.get(player.key, {})
             if room.state.get("done"):
-                unlock_achievement(db, player.key, "rpg_finish")
+                grant("rpg_finish")
             if player_sheet.get("level", 1) >= 5:
-                unlock_achievement(db, player.key, "rpg_level_5")
-        
+                grant("rpg_level_5")
+
         # Casino achievements
         elif game_name == "blackjack" and won:
-            unlock_achievement(db, player.key, "blackjack_win")
+            grant("blackjack_win")
             player_hand = room.state.get("player", [])
             if len(player_hand) >= 2:
                 # Check for exact 21 (not blackjack which is 2 cards)
@@ -673,18 +787,20 @@ class GameEngine:
                     hand_val -= 10
                     aces -= 1
                 if hand_val == 21 and len(player_hand) > 2:
-                    unlock_achievement(db, player.key, "blackjack_21")
-        
+                    grant("blackjack_21")
+
         elif game_name == "roulette":
             bet_type = room.state.get("bet_type", "")
             payout = room.state.get("payout", 0)
             if bet_type == "number" and payout > 0:
-                unlock_achievement(db, player.key, "roulette_number")
-        
+                grant("roulette_number")
+
         elif game_name == "slots":
             reels = room.state.get("reels", [])
             if len(reels) == 3 and reels[0] == reels[1] == reels[2] == "💎":
-                unlock_achievement(db, player.key, "slots_jackpot")
+                grant("slots_jackpot")
+
+        return newly
 
     # ── inspection ─────────────────────────────────────────────────────────
     def describe(self, room: Room) -> str:

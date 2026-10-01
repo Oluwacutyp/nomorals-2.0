@@ -300,14 +300,14 @@ class EasyGamesTests(unittest.TestCase):
         prof = self.engine.store.get(ADA.key)
         self.assertGreaterEqual(prof.points, 50)
 
-    def test_game_registry_has_all_nineteen(self):
+    def test_game_registry_has_all_twenty_two(self):
         from nomorals.games.games.easy import EASY_GAMES
         from nomorals.games.games.medium import MEDIUM_GAMES
         from nomorals.games.games.ambitious import AMBITIOUS_GAMES
         names = {g.name for g in (*EASY_GAMES, *MEDIUM_GAMES, *AMBITIOUS_GAMES)}
         expected = {
             "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
-            "spy", "auction", "trivia",
+            "spy", "auction", "trivia", "20q", "rps", "digits",
             "mafia", "king", "story", "rpg", "shop", "duel", "case",
             "world", "arena", "escape", "political",
         }

@@ -92,7 +92,7 @@ GAME_ALIASES: dict[str, str] = {
     "escape room": "escape",
     "escape": "escape",
     "political": "political",
-    # legacy solo bridge (nomorals.agents.games) — still routed to it
+    # classics now live in the multiplayer engine (20q, rps, digits)
     "20 questions": "20q",
     "20q": "20q",
     "rock paper scissors": "rps",

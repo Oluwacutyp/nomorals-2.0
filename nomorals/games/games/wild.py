@@ -247,6 +247,12 @@ class PokerGame(MultiGame):
                        f"→ {_hand_name(scores[p.key])}")
         top = max(scores.values())
         winners = [k for k, v in scores.items() if v == top]
+        # achievement tracking: the human's best made hand this game
+        # (rank 8 = straight flush … 4 = straight, 0 = high card)
+        for p in room.players:
+            if not p.is_ai and p.key in scores:
+                best = max(s.get("human_best_rank", 0), scores[p.key][0])
+                s["human_best_rank"] = best
         # side pots: each player only wins up to what they committed,
         # surplus returns to its owner
         pays: dict[str, int] = {}
@@ -365,7 +371,9 @@ class PokerGame(MultiGame):
             s["bets"][hk_human] += pay
             s["pot"] += pay
             s["committed"][hk_human] += pay
-            out.append(f"you bet {pay}.")
+            if s["stacks"][hk_human] <= 0:
+                s["human_allin"] = True
+            out.append(f"you bet {pay}." + (" all-in!" if s.get("human_allin") else ""))
         # house answers
         house = [p for p in room.players if p.is_ai][0]
         if house.key in s["hole"] and s["stacks"].get(house.key, 0) > 0:

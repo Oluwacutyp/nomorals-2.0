@@ -1653,6 +1653,49 @@ def _apply_cipher_vault(db: object) -> None:
     )
 
 
+def _apply_game_relay_tables(db: object) -> None:
+    """Game relay persistence: invites and DM-to-DM relay rooms.
+
+    The relay previously kept everything in memory (lost on restart) and
+    never reaped expired invites. These tables let a relay survive a
+    reboot; the relay module also creates them IF NOT EXISTS defensively,
+    so this migration is belt-and-braces for fresh installs.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS game_invites (
+            code                TEXT PRIMARY KEY,
+            game_name           TEXT NOT NULL,
+            from_chat           TEXT NOT NULL,
+            from_player_key     TEXT NOT NULL,
+            from_player_name    TEXT NOT NULL DEFAULT '',
+            from_player_platform TEXT NOT NULL DEFAULT '',
+            to_label            TEXT NOT NULL DEFAULT '',
+            created_at          REAL NOT NULL DEFAULT 0,
+            expires_at          REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS game_relays (
+            room_id             TEXT PRIMARY KEY,
+            game_name           TEXT NOT NULL,
+            chat_a              TEXT NOT NULL,
+            chat_b              TEXT NOT NULL,
+            player_a_key        TEXT NOT NULL,
+            player_a_name       TEXT NOT NULL DEFAULT '',
+            player_a_platform   TEXT NOT NULL DEFAULT '',
+            player_b_key        TEXT NOT NULL,
+            player_b_name       TEXT NOT NULL DEFAULT '',
+            player_b_platform   TEXT NOT NULL DEFAULT '',
+            active              INTEGER NOT NULL DEFAULT 1,
+            last_activity       REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_game_invites_expires
+            ON game_invites(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_game_relays_chats
+            ON game_relays(chat_a, chat_b);
+        """
+    )
+
+
 def _apply_watchers_tables(db: object) -> None:
     """Prompt 03 (watchers): the general watcher model, check history, and
     the alert audit log.
@@ -1923,6 +1966,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(52, "self_improvement_v2", fn=_apply_self_improvement_v2),
     Migration(53, "trading_tables", fn=_apply_trading_tables),
     Migration(54, "watchers_tables", fn=_apply_watchers_tables),
+    Migration(55, "game_relay_tables", fn=_apply_game_relay_tables),
 )
 
 

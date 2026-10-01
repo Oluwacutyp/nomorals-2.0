@@ -1272,7 +1272,197 @@ class TriviaRoyaleGame(MultiGame):
                            for k, v in s["lives"].items()))
 
 
+class TwentyQuestionsGame(MultiGame):
+    """Ported from the legacy solo GamesAgent: the house thinks of
+    something, the table asks yes/no questions (20 max)."""
+    name = "20q"
+    description = "i think of something, you ask yes/no questions (20)"
+    min_players = 1
+    max_players = 4
+    ai_seats = 0
+    move_timeout = 120
+    rules = ("I'm thinking of something. Ask yes/no questions — 20 max. "
+             "Guess with “guess: <thing>”. The table wins together.")
+
+    BANK: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("a houseplant", ("plant", "leaf", "pot", "water", "green")),
+        ("a mechanical keyboard", ("key", "click", "desk", "switch", "clack")),
+        ("a thunderstorm", ("rain", "lightning", "loud", "sky", "weather")),
+        ("a cat", ("fur", "meow", "pet", "paw", "milk")),
+        ("a submarine", ("water", "deep", "metal", "ocean", "silent")),
+        ("a library", ("book", "quiet", "shelf", "read", "card")),
+        ("a lighthouse", ("light", "beam", "tower", "coast", "ship")),
+        ("a vending machine", ("coin", "snack", "button", "drink", "slot")),
+    )
+
+    def new_state(self, rng: random.Random) -> dict[str, Any]:
+        return {"target": None, "hints": [], "asked": 0, "max": 20}
+
+    def setup(self, room, mind):
+        target, hints = room.rng().choice(self.BANK)
+        room.state["target"] = target
+        room.state["hints"] = list(hints)
+        return (f"20 questions — i'm thinking of something. the table gets "
+                f"{room.state['max']} yes/no questions. start anywhere "
+                f"(“guess: …” to guess).")
+
+    def on_move(self, room, player, text, mind):
+        s = room.state
+        word = text.strip().lower().rstrip("?")
+        if "guess:" in word or word.startswith(("it's ", "its ")):
+            guess = word.split(":", 1)[-1] if ":" in word else word[4:]
+            s["asked"] += 1
+            if s["target"] in guess:
+                s["done"] = "table"
+                return [f"guessed it in {s['asked']} questions — "
+                        f"{s['target']}. well played."]
+            left = s["max"] - s["asked"]
+            if left <= 0:
+                s["done"] = "house"
+                return [f"out of questions. it was {s['target']}."]
+            return [f"not that one. {left} questions left."]
+        s["asked"] += 1
+        truth = any(h in word for h in s["hints"]) or any(
+            word in h for h in s["hints"])
+        answer = mind.yes_no(truth, word)
+        left = s["max"] - s["asked"]
+        if left <= 0:
+            s["done"] = "house"
+            return [f"{answer}. out of questions — it was {s['target']}."]
+        return [f"{answer}  ({left} left)"]
+
+    def is_over(self, room):
+        return room.status == "finished" or bool(room.state.get("done"))
+
+    def winner(self, room):
+        done = room.state.get("done")
+        if done == "table":
+            return room.humans[0] if room.humans else "draw"
+        if done == "house":
+            return "house"
+        return None
+
+    def score(self, room, player):
+        return max(0, room.state.get("max", 20) - room.state.get("asked", 0))
+
+
+class RpsGame(MultiGame):
+    """Ported from the legacy solo GamesAgent: rock-paper-scissors,
+    first to 3 against the house."""
+    name = "rps"
+    description = "rock paper scissors — first to 3"
+    min_players = 1
+    max_players = 1
+    ai_seats = 0
+    move_timeout = 60
+    rules = "Type rock, paper, or scissors. First to 3 takes it."
+
+    MOVES = ("rock", "paper", "scissors")
+    BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+
+    def new_state(self, rng: random.Random) -> dict[str, Any]:
+        return {"me": 0, "you": 0}
+
+    def setup(self, room, mind):
+        return "rock paper scissors, first to 3. type rock, paper or scissors."
+
+    def on_move(self, room, player, text, mind):
+        s = room.state
+        guess = text.strip().lower()
+        if guess not in self.MOVES:
+            return ["rock, paper, or scissors — that's the whole menu."]
+        mine = room.rng().choice(self.MOVES)
+        if mine == guess:
+            reply = f"both {mine}. again."
+        elif self.BEATS[mine] == guess:
+            s["me"] += 1
+            reply = (f"i throw {mine}. mine! ({s['me']}-{s['you']})"
+                     if s["me"] < 3 else
+                     f"i throw {mine}. three — i take it.")
+        else:
+            s["you"] += 1
+            reply = f"i throw {mine}. yours. ({s['you']}-{s['me']})"
+        if s["me"] >= 3:
+            s["done"] = "house"
+            return [reply]
+        if s["you"] >= 3:
+            s["done"] = "table"
+            return [f"{reply} you won 3-{s['me']} — respect."]
+        return [reply]
+
+    def is_over(self, room):
+        return room.status == "finished" or bool(room.state.get("done"))
+
+    def winner(self, room):
+        done = room.state.get("done")
+        if done == "table":
+            return room.humans[0] if room.humans else "draw"
+        if done == "house":
+            return "house"
+        return None
+
+    def score(self, room, player):
+        return int(room.state.get("you", 0))
+
+
+class DigitMemoryGame(MultiGame):
+    """Ported from the legacy solo GamesAgent's number-memory (named
+    “digits” here — the engine already has a concentration game called
+    “memory”)."""
+    name = "digits"
+    description = "i show digits, you repeat them — grows each round"
+    min_players = 1
+    max_players = 1
+    ai_seats = 0
+    move_timeout = 120
+    rules = ("I show you digits, you type them back. Each round adds a "
+             "digit. Survive 8 rounds.")
+
+    def new_state(self, rng: random.Random) -> dict[str, Any]:
+        return {"round": 0, "number": "", "best": 0}
+
+    def setup(self, room, mind):
+        room.state["round"] = 1
+        room.state["number"] = "".join(
+            room.rng().choice("0123456789") for _ in range(3))
+        return (f"digits — repeat back: {room.state['number']} "
+                f"(3 digits to start, grows each round)")
+
+    def on_move(self, room, player, text, mind):
+        s = room.state
+        guess = "".join(ch for ch in text if ch.isdigit())
+        target = str(s.get("number") or "")
+        if guess == target and guess:
+            s["round"] += 1
+            s["best"] = max(s["best"], s["round"] - 1)
+            s["number"] = "".join(room.rng().choice("0123456789")
+                                  for _ in range(2 + s["round"]))
+            if s["round"] > 8:
+                s["done"] = "table"
+                return [f"eight rounds?! best was {s['best']} — that's a "
+                        f"brain, not a phone."]
+            return [f"correct. now: {s['number']} "
+                    f"({len(s['number'])} digits)"]
+        s["done"] = "house"
+        return [f"that's not it — it was {target}. "
+                f"best round: {s['best']}."]
+
+    def is_over(self, room):
+        return room.status == "finished" or bool(room.state.get("done"))
+
+    def winner(self, room):
+        if room.state.get("done") == "table":
+            return room.humans[0] if room.humans else "draw"
+        if room.state.get("done") == "house":
+            return "house"
+        return None
+
+    def score(self, room, player):
+        return int(room.state.get("best", 0))
+
+
 EASY_GAMES: tuple[MultiGame, ...] = (
     WordChainGame(), HangmanGame(), NumberGuessGame(), TwoTruthsGame(),
     WyrrGame(), SpyGame(), AuctionGame(), TriviaRoyaleGame(),
+    TwentyQuestionsGame(), RpsGame(), DigitMemoryGame(),
 )

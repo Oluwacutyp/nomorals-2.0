@@ -366,6 +366,9 @@ class BattleArenaGame(MultiGame):
             d["hp"] = 1
             return (f"the shield SHATTERS — {dst} is burned to 1 HP. "
                     f"one more hit and it's over.")
+        if crit and d["hp"] <= 0:
+            # a killing crit — "you" is the human seat, "house" the AI
+            s["crit_kill_by"] = src
         kind = "CRIT — " if crit else ""
         tag = " (focused)" if focused else ""
         return (f"{kind}{src} lands {raw}{tag} — "
