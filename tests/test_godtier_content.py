@@ -78,7 +78,39 @@ class NewsFeedTests(unittest.TestCase):
         total = sum(len(v) for v in FEED_CATEGORIES.values())
         self.assertGreaterEqual(total, 24)
         self.assertIn("nigeria", FEED_CATEGORIES)
+        for region in ("usa", "europe", "asia", "wires"):
+            self.assertIn(region, FEED_CATEGORIES)
+            self.assertTrue(FEED_CATEGORIES[region],
+                            f"category {region!r} is empty")
         self.assertGreaterEqual(len(DEFAULT_FEEDS), 10)
+        # default digest is a global mix, not Nigeria-limited
+        default_urls = [u for _, u in DEFAULT_FEEDS]
+        self.assertTrue(any("vanguardngr" in u or "punchng" in u
+                            for u in default_urls))
+        self.assertTrue(any("nytimes" in u or "cnn.com" in u
+                            for u in default_urls))
+
+    def test_feed_urls_syntactically_valid(self):
+        from urllib.parse import urlparse
+
+        from nomorals.agents.news import FEED_CATEGORIES, feeds_for
+        for cat, feeds in FEED_CATEGORIES.items():
+            self.assertTrue(feeds, f"category {cat!r} is empty")
+            for name, url in feeds:
+                self.assertTrue(name and name.strip(), f"blank name in {cat}")
+                parts = urlparse(url)
+                self.assertIn(parts.scheme, ("http", "https"),
+                              f"bad scheme: {url}")
+                self.assertTrue(parts.netloc, f"no host: {url}")
+                self.assertNotIn(" ", url, f"space in URL: {url}")
+        # no URL may appear twice anywhere in the table
+        urls = [u for _, u in feeds_for()]
+        self.assertEqual(len(urls), len(set(urls)))
+        # DEFAULT_FEEDS is the world+tech+business+regional flattening
+        from nomorals.agents.news import DEFAULT_FEEDS
+        self.assertEqual(list(DEFAULT_FEEDS),
+                         feeds_for("world", "tech", "business", "usa",
+                                   "europe", "asia", "nigeria"))
 
     def test_feeds_for(self):
         from nomorals.agents.news import feeds_for

@@ -1,12 +1,16 @@
 """News system: a news sub-agent + a summarizer sub-agent.
 
-* **Fetcher** — keyless RSS feeds (29 across world / tech / nigeria /
-  business / science / sports — see ``FEED_CATEGORIES``) over the
-  proxy-aware search client, robots-aware, deduped by URL in
-  ``news_items``.
+* **Fetcher** — keyless RSS feeds (43 across world / tech / nigeria /
+  business / science / sports / usa / europe / asia / wires — see
+  ``FEED_CATEGORIES``) over the proxy-aware search client, robots-aware,
+  deduped by URL in ``news_items``.
 * **Summarizer** — model-sourced when a live model is answering, extractive
   one-liners otherwise. Never invents a headline it didn't read.
 * **Digest** — top N items per source, delivered through the notifier.
+
+Every URL in ``FEED_CATEGORIES`` was live-fetched and verified 2026-10-01.
+The legacy wire services (Reuters/AP/AFP/…) no longer publish public RSS,
+so ``wires`` carries the working global aggregators instead.
 """
 
 from __future__ import annotations
@@ -44,30 +48,57 @@ FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
         ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
     ),
     "nigeria": (
-        ("Punch", "https://punchng.com/feed/"),
+        ("Punch", "https://rss.punchng.com/v1/category/latest_news"),
         ("Vanguard", "https://www.vanguardngr.com/feed/"),
         ("Premium Times", "https://www.premiumtimesng.com/feed"),
         ("Channels TV", "https://www.channelstv.com/feed/"),
-        ("TheCable", "https://www.thecable.ng/feed"),
+        ("Sahara Reporters", "https://saharareporters.com/rss.xml"),
         ("TechCabal", "https://techcabal.com/feed/"),
     ),
     "business": (
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
-        ("Business Insider", "https://www.businessinsider.com/rss"),
+        ("Business Insider", "https://feeds.businessinsider.com/custom/all"),
         ("Nairametrics", "https://nairametrics.com/feed/"),
         ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
     ),
     "science": (
         ("BBC Science", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
         ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
-        ("New Scientist", "https://www.newscientist.com/feed/home"),
-        ("NASA", "https://www.nasa.gov/rss/dyn/breaking_news.rss"),
+        ("New Scientist", "https://www.newscientist.com/feed/"),
+        ("NASA", "https://www.nasa.gov/news-release/feed/"),
     ),
     "sports": (
         ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
-        ("ESPN", "https://www.espn.com/espn/rss/news"),
+        ("CBS Sports", "https://www.cbssports.com/rss/headlines/"),
         ("Sky Sports", "https://www.skysports.com/rss/12040"),
         ("Complete Sports", "https://www.completesports.com/feed/"),
+    ),
+    "usa": (
+        ("CNN", "http://rss.cnn.com/rss/edition.rss"),
+        ("NYT", "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"),
+        ("PBS NewsHour", "https://www.pbs.org/newshour/feeds/rss/headlines"),
+        ("Washington Post", "https://feeds.washingtonpost.com/rss/national"),
+    ),
+    "europe": (
+        ("The Guardian", "https://www.theguardian.com/world/rss"),
+        ("Sky News", "https://feeds.skynews.com/feeds/rss/home.xml"),
+        ("Euronews", "https://www.euronews.com/rss"),
+    ),
+    "asia": (
+        ("Straits Times", "https://www.straitstimes.com/news/world/rss.xml"),
+        ("The Hindu", "https://www.thehindu.com/news/national/feeder/default.rss"),
+        ("Hong Kong FP", "https://hongkongfp.com/feed/"),
+        ("The Diplomat", "https://thediplomat.com/feed/"),
+        ("Channel News Asia",
+         "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"),
+    ),
+    # The legacy wires (Reuters/AP/AFP/…) publish no public RSS any more;
+    # verified dead/walled 2026-10-01. These are the working global
+    # wire-style aggregators.
+    "wires": (
+        ("Google News", "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"),
+        ("Google News World",
+         "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US%3Aen"),
     ),
 }
 
@@ -87,9 +118,11 @@ def feeds_for(*categories: str) -> list[tuple[str, str]]:
     return out
 
 
-#: world + tech + nigeria — the general default digest.
+#: world + tech + business + regional spread (usa/europe/asia/nigeria) —
+#: the general default digest.
 DEFAULT_FEEDS: tuple[tuple[str, str], ...] = tuple(
-    feeds_for("world", "tech", "nigeria"))
+    feeds_for("world", "tech", "business", "usa", "europe", "asia",
+              "nigeria"))
 
 _TAG = re.compile(r"<[^>]+>")
 
