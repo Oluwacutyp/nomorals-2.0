@@ -17,12 +17,16 @@ Protocol (one JSON object per line):
 
   python -> bridge
     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":""}
+    {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3}
     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
+    {"id":"<req>","cmd":"read","chat":"<jid>"}            # best-effort receipts
+    {"id":"<req>","cmd":"chats","limit":30}               # best-effort listing
     {"id":"<req>","cmd":"status"}
 
 The bridge owns the credential state (``.creds/`` directory); this client
-stores nothing.
+stores nothing. Commands the bridge doesn't implement answer ok:false and
+the adapter degrades gracefully (``mark_read``/``chats`` return False/[]).
 """
 
 from __future__ import annotations
@@ -40,6 +44,33 @@ from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, 
 __all__ = ["WhatsAppAdapter"]
 
 _log = get_logger(__name__)
+
+
+def _split_text(text: str, *, limit: int = 4000) -> list[str]:
+    """Split long text on paragraph/line boundaries so no chunk exceeds
+    *limit* characters. Short text returns unchanged as a single chunk."""
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for para in text.split("\n\n"):
+        # a single huge paragraph: hard-split it
+        while len(para) > limit:
+            cut = para.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            chunks.append(para[:cut])
+            para = para[cut:].lstrip()
+        piece_len = len(para) + 2
+        if current and current_len + piece_len > limit:
+            chunks.append("\n\n".join(current))
+            current, current_len = [], 0
+        current.append(para)
+        current_len += piece_len
+    if current:
+        chunks.append("\n\n".join(current))
+    return [c for c in chunks if c] or [text[:limit]]
 
 
 class WhatsAppAdapter(ChatAdapter):
@@ -66,6 +97,23 @@ class WhatsAppAdapter(ChatAdapter):
         self._responses_lock = threading.Lock()
         self.connected = threading.Event()
         self.user_jid: str = ""
+        # last QR login code, so the owner/app can surface it without
+        # watching stdout (the bridge re-emits a QR whenever the session
+        # needs re-linking)
+        self.last_qr: str = ""
+        self.last_qr_at: float = 0.0
+        self.bridge_state: str = "unknown"
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _jid(self, chat: ChatRef) -> str:
+        """Normalize a chat to a WhatsApp JID."""
+        jid = (chat.chat_id or "").strip()
+        if chat.kind == ChatKind.DM and jid and not jid.endswith(
+                ("@s.whatsapp.net", "@whatsapp.net", "@c.us", "@g.us")):
+            # plain phone number → personal chat JID
+            digits = "".join(c for c in jid if c.isdigit() or c == "+")
+            jid = f"{digits}@c.us" if digits else jid
+        return jid
 
     # ── low-level protocol ───────────────────────────────────────────────────
     def _write_line(self, obj: dict[str, Any]) -> None:
@@ -88,9 +136,13 @@ class WhatsAppAdapter(ChatAdapter):
             with self._responses_lock:
                 return self._responses.pop(req_id, (event, {}))[1]
         except ConnectionError as exc:
+            return {"id": req_id, "ok": False, "error": str(exc)}
+        finally:
+            # never leak the pending entry — a late response must not
+            # wake a future command reusing nothing (ids are unique, but
+            # the dict would grow without bound)
             with self._responses_lock:
                 self._responses.pop(req_id, None)
-            return {"id": req_id, "ok": False, "error": str(exc)}
 
     def _reader_loop(self, handler: IncomingHandler) -> None:
         sock = self._sock
@@ -120,8 +172,10 @@ class WhatsAppAdapter(ChatAdapter):
 
     def _dispatch(self, obj: dict[str, Any], handler: IncomingHandler) -> None:
         kind = obj.get("type")
-        if kind == "response" or "id" in obj and "cmd" not in obj and kind is None:
-            req_id = obj.get("id", "")
+        if kind in (None, "response") and "id" in obj:
+            # response to one of our commands — the bridge sends these
+            # both untyped and as {"type": "response", ...}; accept both
+            req_id = str(obj.get("id") or "")
             if req_id:
                 with self._responses_lock:
                     pending = self._responses.get(req_id)
@@ -131,14 +185,22 @@ class WhatsAppAdapter(ChatAdapter):
             return
         if kind == "status":
             self.user_jid = str(obj.get("user") or "")
-            if obj.get("state") == "open":
+            state = str(obj.get("state") or "")
+            self.bridge_state = state
+            if state == "open":
                 self.connected.set()
                 _log.info("whatsapp bridge connected as %s", self.user_jid)
             else:
                 self.connected.clear()
+                if state:
+                    _log.warning("whatsapp bridge state: %s", state)
         elif kind == "qr":
-            _log.info("whatsapp QR received — scan it with WhatsApp (Linked Devices)")
-            print("WHATSAPP QR:\n" + str(obj.get("data", "")))
+            self.last_qr = str(obj.get("data") or "")
+            self.last_qr_at = time.time()
+            self.connected.clear()
+            _log.warning("whatsapp QR received — scan it with WhatsApp "
+                         "(Linked Devices); also available via health()")
+            print("WHATSAPP QR:\n" + self.last_qr)
         elif kind == "message":
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
@@ -185,10 +247,15 @@ class WhatsAppAdapter(ChatAdapter):
                 reader = threading.Thread(target=self._reader_loop, args=(handler,),
                                           name=f"wa-{self.name}-reader", daemon=True)
                 reader.start()
-                # The reader loop sets/clears `connected` from status events;
-                # just wait until we're told to stop.
-                while not self.stopped:
+                delay = self.reconnect_delay
+                # The reader clears `connected` on exit. If it dies the
+                # socket dropped and we must reconnect — watch its
+                # liveness, don't just sleep until stopped.
+                while not self.stopped and reader.is_alive():
                     time.sleep(0.25)
+                if not self.stopped:
+                    _log.warning("whatsapp bridge connection lost; "
+                                 "reconnecting in %.0fs", delay)
             except OSError as exc:
                 self.connected.clear()
                 self._sock = None
@@ -196,10 +263,6 @@ class WhatsAppAdapter(ChatAdapter):
                     return
                 _log.warning("whatsapp bridge unreachable at %s:%s (%s); retrying in %.0fs",
                              self.host, self.port, exc, delay)
-                time.sleep(delay)
-                delay = min(delay * 2, 60.0)
-            else:
-                delay = self.reconnect_delay
             finally:
                 if self._sock is not None:
                     try:
@@ -207,6 +270,10 @@ class WhatsAppAdapter(ChatAdapter):
                     except OSError:
                         pass
                     self._sock = None
+            if self.stopped:
+                return
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
 
     def wait_for_bridge(self, timeout: float = 60.0) -> bool:
         started = time.time()
@@ -218,16 +285,89 @@ class WhatsAppAdapter(ChatAdapter):
             time.sleep(0.2)
         return False
 
+    def preflight(self) -> None:
+        """One-time setup check: is the bridge reachable at all?
+
+        Unlike Telethon's interactive login this never prompts — it just
+        fails fast with a clear message when the Node bridge isn't running,
+        instead of letting ``run()`` spin on reconnect backoff silently.
+        """
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=5)
+            sock.close()
+        except OSError as exc:
+            raise RuntimeError(
+                f"whatsapp bridge not reachable at {self.host}:{self.port} "
+                f"({exc}); start bridge/whatsapp-bridge.mjs first") from exc
+
     # ── outbound ─────────────────────────────────────────────────────────────
+    def _send_with_retry(self, chat: ChatRef, text: str,
+                         *, reply_to: str = "") -> SendResult:
+        """One text send with a single retry on transient bridge failure."""
+        started = time.perf_counter()
+        jid = self._jid(chat)
+        last_error = "bridge rejected send"
+        for attempt in (1, 2):
+            response = self._send_cmd(
+                {"cmd": "send", "chat": jid, "text": text,
+                 "reply_to": reply_to})
+            if response.get("ok"):
+                self.stats["sent"] += 1
+                return SendResult(ok=True, platform=self.name,
+                                  message_id=str(response.get("id") or ""),
+                                  seconds=time.perf_counter() - started)
+            last_error = str(response.get("error") or last_error)
+            # only retry transient failures, not rejections
+            if "timeout" not in last_error.lower() and \
+               "not connected" not in last_error.lower():
+                break
+            if attempt == 1:
+                time.sleep(1.0)
+        self.stats["send_errors"] += 1
+        return SendResult(ok=False, platform=self.name, error=last_error,
+                          seconds=time.perf_counter() - started)
+
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
             return SendResult(ok=False, platform=self.name, error="bridge not connected",
                               seconds=time.perf_counter() - started)
-        jid = chat.chat_id
-        if chat.kind == ChatKind.DM and not jid.endswith(("@s.whatsapp.net", "@whatsapp.net", "@c.us")):
-            jid = f"{jid}@c.us"
-        response = self._send_cmd({"cmd": "send", "chat": jid, "text": text, "reply_to": reply_to})
+        # WhatsApp caps a text message well above this; split long sends so
+        # one giant alert doesn't get silently truncated by the bridge.
+        chunks = _split_text(text, limit=4000)
+        result: SendResult | None = None
+        for i, chunk in enumerate(chunks):
+            result = self._send_with_retry(
+                chat, chunk,
+                reply_to=reply_to if i == 0 else "")
+            if not result.ok:
+                return result
+        assert result is not None
+        return result
+
+    def send_media(self, chat: ChatRef, media: MediaRef, *,
+                   caption: str = "") -> SendResult:
+        """Send a photo/video/audio/document via the bridge's send_media."""
+        started = time.perf_counter()
+        if not self.connected.is_set():
+            return SendResult(ok=False, platform=self.name,
+                              error="bridge not connected",
+                              seconds=time.perf_counter() - started)
+        path = (media.path or "").strip()
+        if not path:
+            return SendResult(ok=False, platform=self.name,
+                              error="media has no path",
+                              seconds=time.perf_counter() - started)
+        cmd: dict[str, Any] = {
+            "cmd": "send_media",
+            "chat": self._jid(chat),
+            "path": path,
+            "caption": caption,
+        }
+        kind = (media.kind or "").lower()
+        if kind in ("voice", "ptt"):
+            cmd["ptt"] = True  # voice-note bubble instead of an audio file
+        response = self._send_cmd(cmd, timeout=60)
         if response.get("ok"):
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
@@ -235,75 +375,89 @@ class WhatsAppAdapter(ChatAdapter):
                               seconds=time.perf_counter() - started)
         self.stats["send_errors"] += 1
         return SendResult(ok=False, platform=self.name,
-                          error=str(response.get("error") or "bridge rejected send"),
+                          error=str(response.get("error") or "bridge rejected media"),
                           seconds=time.perf_counter() - started)
+
+    def send_voice(self, chat: ChatRef, audio_path: str, *,
+                   caption: str = "") -> SendResult:
+        """Send a voice note. Convenience wrapper over :meth:`send_media`."""
+        return self.send_media(
+            chat, MediaRef(path=audio_path, kind="voice"), caption=caption)
+
+    def mark_read(self, chat: ChatRef) -> bool:
+        """Send read receipts for a chat. Best-effort: older bridges that
+        don't implement the ``read`` command answer ok:false and we return
+        False instead of raising."""
+        if not self.connected.is_set():
+            return False
+        response = self._send_cmd(
+            {"cmd": "read", "chat": self._jid(chat)}, timeout=10)
+        return bool(response.get("ok"))
+
+    def chats(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Recent chats (id, title, kind, last_ts). Best-effort: returns []
+        when the bridge doesn't implement the ``chats`` command."""
+        if not self.connected.is_set():
+            return []
+        response = self._send_cmd(
+            {"cmd": "chats", "limit": max(1, int(limit))}, timeout=15)
+        if not response.get("ok"):
+            return []
+        out = []
+        for entry in response.get("chats") or []:
+            out.append({
+                "id": str(entry.get("id") or ""),
+                "title": str(entry.get("title") or ""),
+                "kind": str(entry.get("kind") or ChatKind.DM),
+                "last_ts": float(entry.get("ts") or 0) / 1000.0,
+            })
+        return [c for c in out if c["id"]]
 
     def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
         if not self.connected.is_set() or seconds <= 0:
             return False
-        jid = chat.chat_id
-        if chat.kind == ChatKind.DM and not jid.endswith(("@s.whatsapp.net", "@whatsapp.net", "@c.us")):
-            jid = f"{jid}@c.us"
-        response = self._send_cmd({"cmd": "typing", "chat": jid, "seconds": max(1, int(seconds))},
-                                  timeout=5)
+        response = self._send_cmd(
+            {"cmd": "typing", "chat": self._jid(chat),
+             "seconds": max(1, int(seconds))}, timeout=5)
         return bool(response.get("ok"))
 
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
         if not self.connected.is_set():
             return []
-        jid = chat.chat_id
-        if chat.kind == ChatKind.DM and not jid.endswith(("@s.whatsapp.net", "@whatsapp.net", "@c.us")):
-            jid = f"{jid}@c.us"
-        response = self._send_cmd({"cmd": "history", "chat": jid, "limit": int(limit)}, timeout=15)
+        response = self._send_cmd(
+            {"cmd": "history", "chat": self._jid(chat),
+             "limit": int(limit)}, timeout=15)
         if not response.get("ok"):
             return []
         out: list[ChatMessage] = []
         for entry in response.get("messages") or []:
+            try:
+                ts = float(entry.get("ts") or time.time()) / 1000.0
+            except (TypeError, ValueError):
+                ts = time.time()
             out.append(
                 ChatMessage(
                     chat=chat,
-                    incoming=True,
+                    incoming=bool(entry.get("incoming", True)),
                     text=str(entry.get("text") or ""),
                     sender=str(entry.get("sender") or ""),
-                    ts=float(entry.get("ts") or time.time()) / 1000.0,
+                    media=[
+                        MediaRef(path=str(m.get("path") or ""),
+                                 mime=str(m.get("mime") or ""),
+                                 kind=str(m.get("kind") or "file"))
+                        for m in (entry.get("media") or [])
+                        if m.get("path")
+                    ],
+                    reply_to=str(entry.get("reply_to") or ""),
+                    ts=ts,
                 )
             )
         return out
 
-    def send_voice(self, chat: ChatRef, audio_path: str, *, caption: str = "") -> SendResult:
-        """Send a voice note via WhatsApp.
-        
-        Args:
-            chat: Target chat
-            audio_path: Path to audio file (OGG/MP3)
-            caption: Optional caption
-            
-        Returns:
-            SendResult
-        """
-        if not self.connected.is_set():
-            return SendResult(ok=False, platform=self.name, error="not connected", seconds=0)
-        
-        jid = chat.chat_id
-        if chat.kind == ChatKind.DM and not jid.endswith(("@s.whatsapp.net", "@whatsapp.net", "@c.us")):
-            jid = f"{jid}@c.us"
-        
-        # Send as media with ptt=true (push-to-talk = voice note)
-        cmd = {
-            "cmd": "send_media",
-            "chat": jid,
-            "path": audio_path,
-            "caption": caption,
-            "ptt": True,  # Voice note flag
-        }
-        
-        response = self._send_cmd(cmd, timeout=30)
-        
-        if response.get("ok"):
-            return SendResult(ok=True, platform=self.name, seconds=0)
-        
-        return SendResult(ok=False, platform=self.name, error=str(response.get("error", "failed")), seconds=0)
-    
     def health(self) -> dict[str, Any]:
         return {**super().health(), "connected": self.connected.is_set(),
-                "user": self.user_jid, "bridge": f"{self.host}:{self.port}"}
+                "user": self.user_jid, "bridge": f"{self.host}:{self.port}",
+                "bridge_state": self.bridge_state,
+                "qr_pending": bool(self.last_qr),
+                "qr_age_s": round(time.time() - self.last_qr_at, 1)
+                if self.last_qr else None}
