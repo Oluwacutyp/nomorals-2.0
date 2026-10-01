@@ -55,6 +55,66 @@ class ParseTests(unittest.TestCase):
         self.assertIn("socks5", schemes)
         self.assertIn("http", schemes)
 
+    def test_parse_list_rejects_unspecified_ip(self):
+        text = "0.0.0.0:80\n1.2.3.4:8080\n999.999.999.999:3128\n"
+        out = PL.ProxyScraper.parse_list(text, "http")
+        self.assertEqual([p.host for p in out], ["1.2.3.4"])
+
+    def test_parse_json_geonode_shape(self):
+        # geonode: {"data": [{ip, port (string), protocols: [...],
+        # country: "DE"}]}
+        import json
+        text = json.dumps({"data": [
+            {"ip": "84.21.173.170", "port": "1080",
+             "protocols": ["socks4"], "country": "DE"},
+            {"ip": "1.2.3.4", "port": 8080,
+             "protocols": ["http", "https"], "country": "United States"},
+        ]})
+        out = PL.ProxyScraper.parse_json(text)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0].scheme, "socks4")
+        self.assertEqual(out[0].port, 1080)
+        self.assertEqual(out[0].country, "DE")
+        # first valid protocol wins; a long country name is not trusted
+        self.assertEqual(out[1].scheme, "http")
+        self.assertEqual(out[1].country, "")
+
+    def test_parse_json_proxy_free_shape(self):
+        # proxy-free proxies.json: {"proxies": [{ip, port, protocol,
+        # country_code}]}
+        import json
+        text = json.dumps({"count": 2, "proxies": [
+            {"ip": "43.203.114.231", "port": 3128, "protocol": "HTTPS",
+             "country": "South Korea", "country_code": "KR"},
+        ]})
+        out = PL.ProxyScraper.parse_json(text)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].scheme, "https")
+        self.assertEqual(out[0].country, "KR")
+
+    def test_parse_html_base64_attrs(self):
+        # advanced.name: <td data-ip="base64(ip)" data-port="base64(port)">
+        import base64
+        ip = base64.b64encode(b"116.90.234.106").decode()
+        port = base64.b64encode(b"1080").decode()
+        text = (
+            "<table><tr><td>1</td>"
+            f'<td data-ip="{ip}"></td><td data-port="{port}"></td>'
+            '<td><a class="label">SOCKS4</a></td><td>DE</td>'
+            "</tr></table>"
+        )
+        out = PL.ProxyScraper.parse_html(text, "http")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].host, "116.90.234.106")
+        self.assertEqual(out[0].port, 1080)
+        self.assertEqual(out[0].scheme, "socks4")
+        self.assertEqual(out[0].country, "DE")
+
+    def test_parse_html_base64_attrs_bad_data_skipped(self):
+        text = ('<table><tr><td data-ip="!!!" data-port="@@@"></td>'
+                "<td>x</td></tr></table>")
+        self.assertEqual(PL.ProxyScraper.parse_html(text), [])
+
 
 class ScraperTests(unittest.TestCase):
     def test_scrape_dedupe_and_counts(self):
@@ -150,6 +210,59 @@ class SourceRegistryTests(unittest.TestCase):
         self.assertEqual(e["fails"], 0)
         self.assertEqual(e["last_found"], 1500)
         self.assertFalse(e["disabled"])
+
+    def test_retirement_for_new_source(self):
+        # a source added in the 2026-10-01 expansion retires exactly
+        # like a built-in: 3 straight failures -> disabled, a success
+        # reinstates it
+        reg = self._reg()
+        reg.sources()
+        for _ in range(3):
+            reg.record("geonode-http", ok=False, error="timeout")
+        dis = reg.disabled()
+        self.assertEqual([d["name"] for d in dis], ["geonode-http"])
+        names = [n for n, _, _ in reg.sources()]
+        self.assertNotIn("geonode-http", names)
+        reg.record("geonode-http", ok=True, found=500)
+        self.assertEqual(reg.disabled(), [])
+        self.assertIn("geonode-http",
+                      [n for n, _, _ in reg.sources()])
+
+
+class CatalogTests(unittest.TestCase):
+    def test_catalog_has_90_plus_sources(self):
+        self.assertGreaterEqual(len(PS.BUILT_IN_SOURCES), 90)
+
+    def test_catalog_names_unique_and_kinds_valid(self):
+        names = [n for n, _, _ in PS.BUILT_IN_SOURCES]
+        self.assertEqual(len(names), len(set(names)))
+        for _, _, kind in PS.BUILT_IN_SOURCES:
+            self.assertIn(kind, {"list", "protocol", "html", "json"})
+
+    def test_new_sources_present_with_right_kinds(self):
+        by_name = {n: (u, k) for n, u, k in PS.BUILT_IN_SOURCES}
+        for name, kind in [
+                ("geonode-http", "json"),
+                ("proxyfree-json", "json"),
+                ("psgh-socks5", "protocol"),
+                ("iplocate-all", "protocol"),
+                ("dpangestuw-socks5", "protocol"),
+                ("advancedname-http", "html"),
+                ("sslproxies-http", "html"),
+                ("openproxylist-http", "list"),
+                ("proxyscrape-v3-http", "protocol"),
+                ("hookzof-socks5", "list"),
+                ("jetkai-https", "list"),
+                ("ercin-socks5", "list")]:
+            self.assertIn(name, by_name, name)
+            self.assertEqual(by_name[name][1], kind, name)
+        # the scraper's scheme filter keys off the name suffix for
+        # "list"/"json" kinds — new per-protocol sources carry one
+        for name in ["mmpx12-socks4", "jetkai-https", "hookzof-socks5",
+                     "geonode-http", "claude89757-https", "vmheaven-http"]:
+            scheme = PL.ProxyScraper._source_scheme(name, "list")
+            self.assertIn(scheme, ("http", "https", "socks4", "socks5"))
+            self.assertTrue(name.endswith(scheme), name)
 
 
 class ProxyLabTests(unittest.TestCase):

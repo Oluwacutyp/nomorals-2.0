@@ -31,6 +31,7 @@ SOCKS4 server — in-process).
 """
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import ipaddress
 import json
@@ -270,9 +271,11 @@ def _recv_exact(sock: socket.socket, n: int, timeout: float) -> bytes:
 def _valid_ip(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
-        return True
     except ValueError:
         return False
+    # the unspecified address is never a real proxy (some lists pad
+    # with 0.0.0.0 rows) — drop it at parse time, not test time
+    return value not in ("0.0.0.0", "::")
 
 
 # ── scraper ──────────────────────────────────────────────────────────────────
@@ -329,7 +332,7 @@ class ProxyScraper:
             if match:
                 host = match.group(1)
                 port = int(match.group(2))
-                if 0 < port < 65536:
+                if 0 < port < 65536 and _valid_ip(host):
                     out.append(Proxy(host=host, port=port, scheme=scheme))
                 continue
             # not an ip:port line — try a bare "host port" pair
@@ -373,7 +376,12 @@ class ProxyScraper:
         """A JSON array of proxy records (monosans proxies.json and
         friends): {protocol, host, port, exit_ip, geolocation.country
         .iso_code, ...}.  The per-record protocol + country beat any
-        source-level defaults."""
+        source-level defaults.
+
+        Also handles the geonode shape ({ip, port, protocols: [...],
+        country: "DE"}) and proxy-free's shape ({ip, port, protocol,
+        country_code: "KR"} inside {"proxies": [...]}).
+        """
         out: list[Proxy] = []
         try:
             data = json.loads(text)
@@ -396,7 +404,15 @@ class ProxyScraper:
             if not _valid_ip(host) and not _valid_hostname(host):
                 continue
             scheme = str(rec.get("protocol") or rec.get("scheme")
-                         or "http").strip().lower()
+                         or "").strip().lower()
+            if not scheme:
+                # geonode-style: "protocols": ["socks4", "http"]
+                protos = rec.get("protocols")
+                if isinstance(protos, list):
+                    for p in protos:
+                        if str(p).strip().lower() in SCHEMES:
+                            scheme = str(p).strip().lower()
+                            break
             if scheme not in SCHEMES:
                 scheme = "http"
             country = ""
@@ -405,6 +421,15 @@ class ProxyScraper:
                 c = geo.get("country")
                 if isinstance(c, dict):
                     country = str(c.get("iso_code") or "").upper()
+            if not country:
+                # "country_code": "KR" (proxy-free) or "country": "DE"
+                # (geonode) — only trust bare 2-letter codes
+                for key in ("country_code", "country"):
+                    cc = rec.get(key)
+                    if isinstance(cc, str) and re.fullmatch(
+                            r"[A-Za-z]{2}", cc.strip()):
+                        country = cc.strip().upper()
+                        break
             out.append(Proxy(host=host, port=port, scheme=scheme,
                              country=country))
         return out
@@ -418,26 +443,43 @@ class ProxyScraper:
         2. separate IP cell + numeric Port cell (free-proxy-list.net)
         3. a per-row type cell (HTTP / HTTPS / SOCKS4 / SOCKS5) that
            overrides the source-level scheme (spys mixed pages)
+        4. base64 ``data-ip`` / ``data-port`` attributes on the cells
+           (advanced.name)
 
         A 2-3 letter cell is treated as the country code.
         """
         out: list[Proxy] = []
         for row in re.findall(r"<tr[^>]*>(.*?)</tr>", text,
                               re.IGNORECASE | re.DOTALL):
+            host, port = "", 0
+            # layout 4: base64-encoded ip/port cell attributes — check
+            # the raw row HTML before the tags are stripped
+            m_ip = re.search(r'data-ip="([^"]+)"', row)
+            m_port = re.search(r'data-port="([^"]+)"', row)
+            if m_ip and m_port:
+                try:
+                    host = base64.b64decode(m_ip.group(1)).decode(
+                        "utf-8", "replace").strip()
+                    port = int(base64.b64decode(m_port.group(1)).decode(
+                        "utf-8", "replace").strip())
+                except (ValueError, base64.binascii.Error):
+                    host, port = "", 0
+                if not _valid_ip(host) or not 0 < port < 65536:
+                    host, port = "", 0
             cells = [c.strip()
                      for c in re.findall(r"<td[^>]*>(.*?)</td>", row,
                                          re.IGNORECASE | re.DOTALL)]
             cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
             cells = [c for c in cells if c]
-            if len(cells) < 2:
-                continue
-            host, port = "", 0
-            # layout 1: an ip:port token inside one cell
-            for c in cells:
-                m = _IPPORT_RE.search(c)
-                if m and 0 < int(m.group(2)) < 65536:
-                    host, port = m.group(1), int(m.group(2))
-                    break
+            if not host:
+                if len(cells) < 2:
+                    continue
+                # layout 1: an ip:port token inside one cell
+                for c in cells:
+                    m = _IPPORT_RE.search(c)
+                    if m and 0 < int(m.group(2)) < 65536:
+                        host, port = m.group(1), int(m.group(2))
+                        break
             if not host:
                 # layout 2: separate IP cell, then a numeric port cell
                 ip_idx = next((i for i, c in enumerate(cells)
