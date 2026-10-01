@@ -1571,8 +1571,14 @@ class PartnerRuntime:
             verb = parts[0].lower() if parts else ""
             if verb == "on":
                 if len(parts) < 2:
-                    return "usage: /power on <owner-key>"
-                result = power.unlock(parts[1], actor=chat_key)
+                    return ("usage: /power on <owner-key> — or: "
+                            "/power on <identity> <passphrase>  (owner seal; "
+                            "safer via `nm power unlock`, which hides input)")
+                if len(parts) >= 3:
+                    result = power.unlock(parts[2], actor=chat_key,
+                                          identity=parts[1])
+                else:
+                    result = power.unlock(parts[1], actor=chat_key)
                 if result.get("ok"):
                     # Power mode = unlimited: the inbound rate cap lifts too.
                     self.gateway.set_rate_limit(0)

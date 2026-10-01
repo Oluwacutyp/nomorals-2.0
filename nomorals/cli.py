@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hmac
 import json
 import sys
 from pathlib import Path
@@ -95,6 +97,24 @@ def _parser() -> argparse.ArgumentParser:
     mem_sub.add_parser("export", help="JSON dump of the user model + records")
     mem_sub.add_parser("rebuild", help="rebuild the user model now")
     mem_sub.add_parser("curate", help="run one memory-curation pass")
+
+    owner = sub.add_parser("owner", help="owner identity seal (ingrained in code)")
+    owner_sub = owner.add_subparsers(dest="owner_action")
+    owner_sub.add_parser("seal",
+                         help="bake your passphrase seal into the code "
+                              "(prompts securely, min 20 chars)")
+    owner_sub.add_parser("verify",
+                         help="check an identity + passphrase against the seal")
+    owner_sub.add_parser("whoami",
+                         help="show the ingrained owner identities")
+
+    power = sub.add_parser("power", help="power mode")
+    power_sub = power.add_subparsers(dest="power_action")
+    power_sub.add_parser("unlock",
+                         help="unlock power mode via owner seal "
+                              "(prompts securely)")
+    power_sub.add_parser("lock", help="lock power mode")
+    power_sub.add_parser("status", help="power mode status")
 
     agent = sub.add_parser("run", help="run a goal through the orchestrator")
     agent.add_argument("goal", nargs="+")
@@ -976,6 +996,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_tools(args, context)
         if args.command == "memory":
             return _cmd_memory(args, context)
+        if args.command == "owner":
+            return _cmd_owner(args, context)
+        if args.command == "power":
+            return _cmd_power(args, context)
         if args.command == "run":
             return _cmd_run(args, context)
         if args.command == "ask":
@@ -1240,6 +1264,70 @@ def _cmd_tools(args: argparse.Namespace, context: Any) -> int:
         if params:
             print(f"{'':<20} ({params})")
     return 0
+
+
+def _cmd_owner(args: argparse.Namespace, context: Any) -> int:
+    """Owner identity seal: bake / verify the passphrase proof in code."""
+    from .core.owner import (OWNER_IDENTITIES, bake_seal, make_seal,
+                             seal_configured, verify_owner)
+
+    action = args.owner_action or "whoami"
+    if action == "whoami":
+        print("ingrained owner identities: " + ", ".join(OWNER_IDENTITIES))
+        print("passphrase seal: " + ("baked in code" if seal_configured()
+                                     else "not set — run `nm owner seal`"))
+        return 0
+    identity = input("identity: ").strip()
+    secret = getpass.getpass("passphrase: ")
+    if action == "seal":
+        if not secret:
+            print("empty passphrase — nothing sealed.", file=sys.stderr)
+            return 1
+        confirm = getpass.getpass("passphrase (again): ")
+        if not hmac.compare_digest(secret, confirm):
+            print("passphrases do not match.", file=sys.stderr)
+            return 1
+        try:
+            seal = make_seal(secret)
+        except ValueError as exc:
+            print(f"too weak: {exc}", file=sys.stderr)
+            return 1
+        path = bake_seal(seal)
+        print(f"seal baked into {path}")
+        print("the passphrase itself was never written anywhere.")
+        return 0
+    if action == "verify":
+        ok = verify_owner(identity, secret)
+        print("owner verified." if ok else "not verified.")
+        return 0 if ok else 1
+    print(f"unknown owner action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_power(args: argparse.Namespace, context: Any) -> int:
+    """Power mode via the owner seal (secure prompts, nothing echoed)."""
+    from .agents.power import power_mode_for
+
+    power = power_mode_for(context)
+    action = args.power_action or "status"
+    if action == "status":
+        s = power.status()
+        print("power mode: " + ("ACTIVE" if s["active"] else "locked"))
+        if s["active"]:
+            print(f"unlocked by {s['unlocked_by']}")
+        return 0
+    if action == "lock":
+        result = power.lock(actor="cli")
+        print(result.get("message", ""))
+        return 0
+    if action == "unlock":
+        identity = input("identity: ").strip()
+        secret = getpass.getpass("passphrase: ")
+        result = power.unlock(secret, actor="cli", identity=identity)
+        print(result.get("message", ""))
+        return 0 if result.get("ok") else 1
+    print(f"unknown power action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_memory(args: argparse.Namespace, context: Any) -> int:

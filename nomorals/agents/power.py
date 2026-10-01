@@ -1,10 +1,12 @@
 """Power mode: the owner's documented, audited expansion of capability.
 
 This is the "Ultimate" tier, done the honest way: nothing hidden, nothing
-cruel, everything reversible. When the owner unlocks power mode with the key
-they set in ``partner.owner_key`` (env ``NM_PARTNER_OWNER_KEY``), the runtime
-wakes her up wider — more autonomy, more parallel chats, longer context
-budgets, bolder group posting, shorter typing delays.
+cruel, everything reversible. The owner unlocks power mode either with the key
+they set in ``partner.owner_key`` (env ``NM_PARTNER_OWNER_KEY``) or with the
+owner seal — one of their ingrained identities plus the passphrase baked via
+``nm owner seal`` (``nomorals.core.owner``). Either way the runtime wakes her
+up wider — more autonomy, more parallel chats, longer context budgets, bolder
+group posting, shorter typing delays.
 
 Deliberate invariants:
 
@@ -28,6 +30,7 @@ from typing import Any
 
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
+from ..core.owner import seal_configured, verify_owner
 
 
 # Shim classes for settings that were removed from core.config
@@ -105,22 +108,38 @@ class PowerMode:
             _log.warning("power-mode audit failed: %s", exc)
 
     # ── unlock / lock ────────────────────────────────────────────────────────
-    def unlock(self, key: str, *, actor: str = "console") -> dict[str, Any]:
+    def unlock(self, key: str, *, actor: str = "console",
+               identity: str = "") -> dict[str, Any]:
         """Try to unlock with ``key``. Returns a report dict; the key itself
-        never appears in it."""
+        never appears in it.
+
+        Two ways in, tried in order:
+
+        1. the env/config owner key (``partner.owner_key``) — existing path;
+        2. the owner seal — ``identity`` names one of the ingrained owner
+           identities and ``key`` is the passphrase baked via ``nm owner
+           seal`` (``nomorals.core.owner``).
+        """
         expected = str(getattr(self.context.settings.partner, "owner_key", "") or "")
-        if not expected:
-            self._audit("power.unlock_denied", {"actor": actor, "why": "no owner key configured"})
+        if expected and hmac.compare_digest(key, expected):
+            return self._activate(actor, via="owner-key")
+        if identity and seal_configured() and verify_owner(identity, key):
+            return self._activate(actor, via="owner-seal")
+        if not expected and not seal_configured():
+            self._audit("power.unlock_denied", {"actor": actor, "why": "no unlock configured"})
             return {
                 "ok": False,
                 "message": (
-                    "no owner key is configured (partner.owner_key / NM_PARTNER_OWNER_KEY), "
-                    "so power mode can't be unlocked. Set a key first — it stays on your machine."
+                    "no unlock is configured — set partner.owner_key "
+                    "(NM_PARTNER_OWNER_KEY) or bake an owner seal with "
+                    "`nm owner seal`. Either stays on your machine."
                 ),
             }
-        if not hmac.compare_digest(key, expected):
-            self._audit("power.unlock_denied", {"actor": actor, "why": "bad key"})
-            return {"ok": False, "message": "wrong key. power mode stays locked."}
+        self._audit("power.unlock_denied", {"actor": actor, "why": "bad key"})
+        return {"ok": False, "message": "wrong key. power mode stays locked."}
+
+    def _activate(self, actor: str, *, via: str) -> dict[str, Any]:
+        """Widen the dials after a successful unlock (either path)."""
         if self._active:
             return {"ok": True, "message": "power mode is already active.", "changes": []}
         changes = self._widen()
@@ -131,9 +150,11 @@ class PowerMode:
         self._persist(True, actor)
         self._audit(
             "power.unlock",
-            {"actor": actor, "fields": [c.field for c in changes]},
+            {"actor": actor, "via": via,
+             "fields": [c.field for c in changes]},
         )
-        _log.info("power mode UNLOCKED by %s: %s", actor, [c.field for c in changes])
+        _log.info("power mode UNLOCKED by %s via %s: %s",
+                  actor, via, [c.field for c in changes])
         return {
             "ok": True,
             "message": f"power mode active. widened: {', '.join(c.field for c in changes)}.",
@@ -215,7 +236,8 @@ class PowerMode:
                 "applied_in_process": True,
                 "unlocked_by": self.unlocked_by,
                 "unlocked_at": self.unlocked_at,
-                "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or "")),
+                "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
+                or seal_configured(),
                 "changes": [c.to_dict() for c in self._restored],
             }
         persisted = self._read_persisted()
@@ -225,7 +247,8 @@ class PowerMode:
                 "applied_in_process": False,
                 "unlocked_by": str(persisted.get("by") or "owner"),
                 "unlocked_at": float(persisted.get("ts", 0.0)),
-                "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or "")),
+                "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
+                or seal_configured(),
                 "changes": [],
             }
         return {
@@ -233,7 +256,8 @@ class PowerMode:
             "applied_in_process": False,
             "unlocked_by": "",
             "unlocked_at": 0.0,
-            "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or "")),
+            "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
+                or seal_configured(),
             "changes": [],
         }
 
