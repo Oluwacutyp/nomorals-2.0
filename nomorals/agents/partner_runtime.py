@@ -2917,7 +2917,8 @@ class PartnerRuntime:
                     return default
                 if not name or name.startswith("--"):
                     return ("usage: /apps build <name> --stack "
-                            "static|flask|fastapi|express|react-vite|cli-python "
+                            "static|flask|fastapi|express|react-vite|cli-python|"
+                            "django|nextjs|bot-telegram|go-cli "
                             "[--title T] [--features a,b,c]")
                 stack = _flag("--stack", "static")
                 feats = [f.strip() for f in _flag("--features", "").split(",")

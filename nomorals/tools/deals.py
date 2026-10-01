@@ -43,7 +43,7 @@ async def deals(action: str, **kwargs: Any) -> dict[str, Any]:
     """Deals tool - search, track, and find steals across Nigerian marketplaces.
     
     Args:
-        action: One of: scan, steals, track, watchlist, check_watchlists
+        action: One of: scan, compare, steals, track, watchlist, check_watchlists
         **kwargs: Action-specific parameters
         
     Returns:
@@ -68,6 +68,19 @@ async def deals(action: str, **kwargs: Any) -> dict[str, Any]:
             "results_count": len(snapshots),
             "results": [s.to_dict() for s in snapshots[:20]],
         }
+    
+    elif action == "compare":
+        query = kwargs.get("query", "")
+        sites = kwargs.get("sites", None)
+        max_price = kwargs.get("max_price", float("inf"))
+        
+        report = await engine.compare_prices(
+            query,
+            sites=sites,
+            max_price=max_price,
+        )
+        
+        return {"action": "compare", **report}
     
     elif action == "steals":
         threshold = kwargs.get("threshold", 70)
@@ -133,14 +146,15 @@ def register(registry: Any) -> None:
     registry.register(
         name="deals",
         fn=deals,
-        description="Search, track, and find steals across Nigerian marketplaces (Jumia, Konga, Jiji, Temu, AliExpress)",
+        description="Search, track, compare, and find steals across Nigerian marketplaces (Jumia, Konga, Jiji, Kara, SLOT, Temu, AliExpress, eBay, Banggood, Amazon)",
         parameters={
             "action": {
                 "type": "string",
-                "enum": ["scan", "steals", "track", "watchlist", "check_watchlists"],
-                "description": "Action to perform",
+                "enum": ["scan", "compare", "steals", "track", "watchlist", "check_watchlists"],
+                "description": "Action to perform (compare = cross-site cheapest-price comparison)",
             },
-            "query": {"type": "string", "description": "Search query (for scan)"},
+            "query": {"type": "string", "description": "Search query (for scan/compare)"},
+            "sites": {"type": "array", "description": "Sites to scan (for scan/compare)"},
             "max_price": {"type": "number", "description": "Maximum price in Naira"},
             "threshold": {"type": "number", "description": "Steal score threshold (0-100)"},
             "url": {"type": "string", "description": "Product URL to track"},

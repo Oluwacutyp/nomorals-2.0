@@ -8,19 +8,29 @@ Sites:
 - Jumia Nigeria (jumia.com.ng) - JS-heavy, needs human pacing
 - Jiji Nigeria (jiji.ng) - marketplace, variable quality
 - Konga (konga.com) - easiest target, start here
+- Kara Nigeria (kara.com.ng) - electronics/gadgets, Lagos-based
+- SLOT Systems (slot.ng) - phones & electronics, nationwide
 - Temu (temu.com) - JS-heavy, Playwright path
 - AliExpress (aliexpress.com) - ships to Nigeria
+- eBay (ebay.com) - price anchor for used/refurbished
+- Banggood (banggood.com) - ships to Nigeria
 - Amazon (amazon.com) - price anchor for comparison
+
+FX: USD/EUR/GBP -> NGN conversion uses a live rate (cached 1h) with a
+documented fallback when the network is unavailable.
 
 Usage:
     engine = NaijaShoppingEngine(db, browser_session, proxy_manager)
-    
+
     # Scan for deals
     deals = await engine.scan_category("phones", max_price=200000)
-    
+
+    # Cross-site price comparison
+    report = await engine.compare_prices("iphone 13")
+
     # Track a specific product
     await engine.track_url("https://www.jumia.com.ng/...", user_id="user123")
-    
+
     # Get steals (high steal score)
     steals = await engine.get_steals(threshold=80)
 """
@@ -28,10 +38,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import random
 import re
+import statistics
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -46,6 +59,9 @@ __all__ = [
     "PriceSnapshot",
     "Steal",
     "Watchlist",
+    "SITES",
+    "get_fx_rate",
+    "extract_titles",
 ]
 
 _log = get_logger(__name__)
@@ -60,6 +76,7 @@ SITES = {
         "bot_protection": "high",
         "min_delay": 3.0,
         "max_delay": 8.0,
+        "currency": "NGN",
     },
     "konga": {
         "name": "Konga",
@@ -69,6 +86,7 @@ SITES = {
         "bot_protection": "low",
         "min_delay": 1.5,
         "max_delay": 3.0,
+        "currency": "NGN",
     },
     "jiji": {
         "name": "Jiji Nigeria",
@@ -78,6 +96,27 @@ SITES = {
         "bot_protection": "medium",
         "min_delay": 2.0,
         "max_delay": 5.0,
+        "currency": "NGN",
+    },
+    "kara": {
+        "name": "Kara Nigeria",
+        "base_url": "https://kara.com.ng",
+        "search_path": "/catalogsearch/result/?q={query}",
+        "trust_score": 0.78,
+        "bot_protection": "medium",
+        "min_delay": 2.0,
+        "max_delay": 5.0,
+        "currency": "NGN",
+    },
+    "slot": {
+        "name": "SLOT Systems",
+        "base_url": "https://www.slot.ng",
+        "search_path": "/catalogsearch/result/?q={query}",
+        "trust_score": 0.80,
+        "bot_protection": "medium",
+        "min_delay": 2.0,
+        "max_delay": 5.0,
+        "currency": "NGN",
     },
     "temu": {
         "name": "Temu",
@@ -88,6 +127,7 @@ SITES = {
         "min_delay": 4.0,
         "max_delay": 10.0,
         "requires_playwright": True,
+        "currency": "NGN",
     },
     "aliexpress": {
         "name": "AliExpress",
@@ -97,6 +137,27 @@ SITES = {
         "bot_protection": "medium",
         "min_delay": 2.5,
         "max_delay": 6.0,
+        "currency": "USD",
+    },
+    "ebay": {
+        "name": "eBay",
+        "base_url": "https://www.ebay.com",
+        "search_path": "/sch/i.html?_nkw={query}",
+        "trust_score": 0.88,
+        "bot_protection": "high",
+        "min_delay": 3.0,
+        "max_delay": 7.0,
+        "currency": "USD",
+    },
+    "banggood": {
+        "name": "Banggood",
+        "base_url": "https://www.banggood.com",
+        "search_path": "/search/{query}.html",
+        "trust_score": 0.72,
+        "bot_protection": "medium",
+        "min_delay": 2.5,
+        "max_delay": 6.0,
+        "currency": "USD",
     },
     "amazon": {
         "name": "Amazon (price anchor)",
@@ -106,8 +167,180 @@ SITES = {
         "bot_protection": "high",
         "min_delay": 3.0,
         "max_delay": 7.0,
+        "currency": "USD",
     },
 }
+
+
+# ── Foreign exchange (USD/EUR/GBP -> NGN) ────────────────────────────────────
+#
+# Live rates are fetched from https://open.er-api.com/v6/latest/{BASE}
+# (no API key required) and cached in-memory for FX_CACHE_TTL (1 hour), so a
+# full multi-site scan does not hammer the endpoint.
+#
+# FALLBACK: when the network is unreachable or the API response changes shape,
+# get_fx_rate() falls back to FALLBACK_RATES below. These are *approximate*
+# hard-coded values (deliberately conservative) and must be treated as
+# estimates, not market rates. Converted prices are still stored as plain NGN,
+# so downstream code needs no special-casing of fallback-converted values.
+
+FX_API_URL = "https://open.er-api.com/v6/latest/{base}"
+FX_CACHE_TTL = 3600.0  # 1 hour
+
+FALLBACK_RATES: dict[str, float] = {
+    "USD": 1550.0,
+    "EUR": 1680.0,
+    "GBP": 1980.0,
+}
+
+_FX_CACHE: dict[str, tuple[float, float]] = {}  # "SRC:DST" -> (rate, fetched_at)
+
+
+def clear_fx_cache() -> None:
+    """Clear the in-memory FX cache (useful for tests and forced refreshes)."""
+    _FX_CACHE.clear()
+
+
+def _fetch_fx_rate(base: str, quote: str, timeout: float = 5.0) -> float:
+    """Fetch a live rate from the open FX API; raises on any failure."""
+    url = FX_API_URL.format(base=base)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    rate = float(payload["rates"][quote])
+    if rate <= 0:
+        raise ValueError(f"bad rate from FX API: {rate!r}")
+    return rate
+
+
+def get_fx_rate(base: str = "USD", quote: str = "NGN", timeout: float = 5.0) -> float:
+    """Get the base -> quote exchange rate.
+
+    Tries the live FX API first (5s timeout), caches the result for 1 hour,
+    and falls back to FALLBACK_RATES (approximate) when the network fails.
+
+    Args:
+        base: Source currency, one of USD/EUR/GBP.
+        quote: Target currency (NGN for the shopping engine).
+        timeout: HTTP timeout in seconds for the live fetch.
+
+    Returns:
+        The exchange rate (multiply a base-currency price by this to get quote).
+    """
+    base = base.upper()
+    quote = quote.upper()
+    if base == quote:
+        return 1.0
+
+    key = f"{base}:{quote}"
+    now = time.time()
+    cached = _FX_CACHE.get(key)
+    if cached and (now - cached[1]) < FX_CACHE_TTL:
+        return cached[0]
+
+    try:
+        rate = _fetch_fx_rate(base, quote, timeout)
+        _log.debug(f"FX live rate {key} = {rate}")
+    except Exception as e:
+        fallback = FALLBACK_RATES.get(base)
+        if fallback is None:
+            raise ValueError(f"No FX rate available for {base}->{quote}") from e
+        _log.warning(
+            f"FX fetch failed for {base}->{quote} ({e}); "
+            f"using fallback rate {fallback} (approximate, not a market rate)"
+        )
+        rate = fallback
+
+    _FX_CACHE[key] = (rate, now)
+    return rate
+
+
+# ── Title extraction & dedupe ────────────────────────────────────────────────
+
+_META_TITLE_RE = re.compile(
+    r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_TITLE_TAG_RE = re.compile(r"<title[^>]*>\s*(.+?)\s*</title>", re.IGNORECASE | re.DOTALL)
+_HEADING_RE = re.compile(r"<h[123][^>]*>(.*?)</h[123]>", re.IGNORECASE | re.DOTALL)
+
+
+def _norm_title(title: str) -> str:
+    """Normalize a title for comparison: lowercase, alnum+spaces only."""
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
+
+def _clean_title(raw: str, *, from_page_title: bool = False) -> str:
+    """Strip tags/entities/noise from a raw title candidate."""
+    text = re.sub(r"<[^>]+>", " ", raw)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if from_page_title:
+        # "<title>" tags carry site suffixes: "Search results for x | Jumia Nigeria"
+        text = re.split(r"\s*[|｜]\s*", text)[0].strip()
+    if len(text) < 4 or len(text) > 160:
+        return ""
+    low = text.lower()
+    if low.startswith(
+        ("search results", "search for", "products for", "category:", "shop ", "home")
+    ):
+        return ""
+    return text
+
+
+def extract_titles(page_html: str, limit: int = 20) -> list[str]:
+    """Best-effort product-title extraction from raw HTML.
+
+    Tries og:title, then <title>, then h1/h2/h3 headings (product cards are
+    usually headings on listing pages). Returns de-duplicated candidates.
+    """
+    titles: list[str] = []
+
+    def _push(raw: str, *, page: bool = False) -> None:
+        title = _clean_title(raw, from_page_title=page)
+        if title and all(_norm_title(title) != _norm_title(t) for t in titles):
+            titles.append(title)
+
+    for m in _META_TITLE_RE.finditer(page_html):
+        _push(m.group(1))
+        if len(titles) >= limit:
+            return titles
+
+    m = _TITLE_TAG_RE.search(page_html)
+    if m:
+        _push(m.group(1), page=True)
+
+    for m in _HEADING_RE.finditer(page_html):
+        _push(m.group(1))
+        if len(titles) >= limit:
+            break
+
+    return titles[:limit]
+
+
+def _dedupe_snapshots(snapshots: list["PriceSnapshot"]) -> list["PriceSnapshot"]:
+    """Drop near-identical snapshots.
+
+    Two snapshots are duplicates when they are from the same site, their
+    prices are within 1% of each other, and their normalized titles match
+    (or either title is generic/empty).
+    """
+    unique: list[PriceSnapshot] = []
+    for snap in snapshots:
+        is_dup = False
+        for kept in unique:
+            if kept.site != snap.site:
+                continue
+            base = max(kept.price_ngn, snap.price_ngn)
+            if base <= 0 or abs(kept.price_ngn - snap.price_ngn) / base > 0.01:
+                continue
+            t1, t2 = _norm_title(kept.title), _norm_title(snap.title)
+            if (t1 and t2 and (t1 == t2 or t1 in t2 or t2 in t1)) or not t1 or not t2:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(snap)
+    return unique
 
 
 @dataclass
@@ -305,7 +538,78 @@ class NaijaShoppingEngine:
             except Exception as e:
                 _log.warning(f"Failed to scan {site_id}: {e}")
         
-        return all_snapshots
+        return _dedupe_snapshots(all_snapshots)
+    
+    async def compare_prices(
+        self,
+        query: str,
+        *,
+        sites: list[str] | None = None,
+        max_price: float = float("inf"),
+        max_pages: int = 1,
+    ) -> dict[str, Any]:
+        """Cross-site price comparison for a query.
+
+        Scans each site (fail-soft: one dead site never kills the scan),
+        stores + dedupes snapshots, and returns the cheapest snapshot per
+        site, the overall best deal, and savings vs the median price.
+
+        Args:
+            query: Search query or category
+            sites: Sites to compare (default: all)
+            max_price: Maximum price filter in NGN
+            max_pages: Pages per site (1 keeps comparison fast)
+
+        Returns:
+            Dict with query, per_site cheapest snapshots, best_deal,
+            median_price, savings_vs_median_pct, sites_scanned/failed.
+        """
+        sites = sites or list(SITES.keys())
+        per_site: dict[str, Optional[dict[str, Any]]] = {}
+        sites_failed: list[str] = []
+        all_snaps: list[PriceSnapshot] = []
+
+        for site_id in sites:
+            if site_id not in SITES:
+                continue
+
+            try:
+                snaps = await self._scan_site(site_id, query, max_price, max_pages)
+                snaps = _dedupe_snapshots(snaps)
+
+                for snap in snaps:
+                    self._store_snapshot(snap)
+
+                per_site[site_id] = (
+                    min(snaps, key=lambda s: s.price_ngn).to_dict() if snaps else None
+                )
+                all_snaps.extend(snaps)
+            except Exception as e:
+                sites_failed.append(site_id)
+                _log.warning(f"compare_prices: {site_id} failed: {e}")
+
+            # Human pacing delay between sites (kept for comparisons too)
+            await self._human_delay(site_id)
+
+        all_snaps = _dedupe_snapshots(all_snaps)
+        prices = sorted(s.price_ngn for s in all_snaps if s.price_ngn > 0)
+        best = min(all_snaps, key=lambda s: s.price_ngn) if all_snaps else None
+        median_price = statistics.median(prices) if prices else 0.0
+        savings_pct = 0.0
+        if best and median_price > 0:
+            savings_pct = max(0.0, (median_price - best.price_ngn) / median_price * 100)
+
+        return {
+            "query": query,
+            "sites_scanned": [s for s in sites if s in SITES and s not in sites_failed],
+            "sites_failed": sites_failed,
+            "per_site": per_site,
+            "best_deal": best.to_dict() if best else None,
+            "best_site": best.site if best else None,
+            "median_price": median_price,
+            "savings_vs_median_pct": round(savings_pct, 1),
+            "result_count": len(all_snaps),
+        }
     
     async def _scan_site(
         self,
@@ -350,45 +654,66 @@ class NaijaShoppingEngine:
         site_id: str,
         max_price: float,
     ) -> list[PriceSnapshot]:
-        """Parse search results from HTML."""
+        """Parse search results from HTML.
+
+        Extracts prices with per-site regex patterns, converts foreign
+        currencies to NGN via the FX helper, pairs prices with extracted
+        product titles by position, and dedupes near-identical hits.
+        """
         snapshots = []
-        
+        site_cfg = SITES[site_id]
+
         # Site-specific price patterns
         price_patterns = {
             "jumia": [r'data-price="(\d[\d,]*)"', r'₦\s*([\d,]+)'],
             "konga": [r'class="[^"]*price[^"]*"[^>]*>₦\s*([\d,]+)', r'"price":\s*"?([\d,]+)"?'],
             "jiji": [r'class="[^"]*price[^"]*"[^>]*>₦\s*([\d,]+)'],
+            "kara": [r'class="[^"]*price[^"]*"[^>]*>₦\s*([\d,]+)', r'"price":\s*"?([\d,]+)"?'],
+            "slot": [r'class="[^"]*price[^"]*"[^>]*>₦\s*([\d,]+)', r'"price":\s*"?([\d,]+)"?'],
             "temu": [r'"price":\s*(\d+)', r'₦\s*([\d,]+)'],
             "aliexpress": [r'"minPrice":\s*([\d.]+)', r'US \$\s*([\d.]+)'],
+            "ebay": [r's-item__price[^>]*>\s*(?:US\s*)?\$([\d,.]+)', r'"price":"([\d.]+)"'],
+            "banggood": [r'"salePrice":"([\d.]+)"', r'\$\s*([\d.]+)'],
             "amazon": [r'"price":"([\d.]+)"', r'\$([\d.]+)'],
         }
-        
+
         patterns = price_patterns.get(site_id, [r'₦\s*([\d,]+)'])
-        
-        # Extract prices
+        titles = extract_titles(html)
+
+        # Collect raw prices across all patterns first, then pair with titles.
+        raw_prices: list[float] = []
         for pattern in patterns:
             matches = re.findall(pattern, html)
-            for price_str in matches[:20]:
+            for price_str in matches:
                 try:
                     price = float(price_str.replace(",", ""))
-                    
-                    # Convert USD to NGN if needed (approximate rate)
-                    if site_id in ("amazon", "aliexpress") and "$" in pattern:
-                        price *= 1500  # Rough USD to NGN conversion
-                    
-                    if price > max_price or price < 100:  # Filter noise
-                        continue
-                    
-                    snapshots.append(PriceSnapshot(
-                        product_url=SITES[site_id]["base_url"],
-                        site=site_id,
-                        price_ngn=price,
-                        title=f"Product from {site_id}",
-                    ))
-                except (ValueError, IndexError):
+                except ValueError:
                     continue
-        
-        return snapshots
+                if price <= 0:
+                    continue
+
+                # Convert foreign currencies to NGN via the FX helper
+                # (live rate, cached 1h, documented fallback when offline).
+                currency = site_cfg.get("currency", "NGN")
+                if currency != "NGN":
+                    price *= get_fx_rate(currency, "NGN")
+
+                raw_prices.append(price)
+
+        for i, price in enumerate(raw_prices[:20]):
+            if price > max_price or price < 100:  # Filter noise
+                continue
+
+            title = titles[i] if i < len(titles) else f"Product from {site_id}"
+
+            snapshots.append(PriceSnapshot(
+                product_url=site_cfg["base_url"],
+                site=site_id,
+                price_ngn=price,
+                title=title,
+            ))
+
+        return _dedupe_snapshots(snapshots)
     
     def _extract_next_page(self, html: str) -> Optional[str]:
         """Extract next page URL from pagination."""
