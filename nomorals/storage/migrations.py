@@ -1761,6 +1761,31 @@ def _apply_briefing_tables(db: object) -> None:
     )
 
 
+def _apply_memory_archive(db: object) -> None:
+    """Prompt 11 (persona depth): 30-day undo archive for memory curation.
+
+    ``forget()`` / ``forget_below()`` / dedup merges copy the record here
+    BEFORE deletion — nothing vanishes surprisingly.  ``MemoryCurator.restore()``
+    can bring a record back within 30 days.  IF NOT EXISTS: re-runs are safe.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS memory_archive (
+            id            TEXT PRIMARY KEY,
+            kind          TEXT NOT NULL DEFAULT '',
+            content       TEXT NOT NULL DEFAULT '',
+            importance    REAL NOT NULL DEFAULT 0.5,
+            metadata      TEXT NOT NULL DEFAULT '{}',
+            archived_at   REAL NOT NULL DEFAULT 0,
+            reason        TEXT NOT NULL DEFAULT '',
+            superseded_by TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_archive_at
+            ON memory_archive (archived_at DESC);
+        """
+    )
+
+
 def _apply_watchers_tables(db: object) -> None:
     """Prompt 03 (watchers): the general watcher model, check history, and
     the alert audit log.
@@ -2034,6 +2059,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(55, "game_relay_tables", fn=_apply_game_relay_tables),
     Migration(56, "room_tables", fn=_apply_room_tables),
     Migration(57, "briefing_tables", fn=_apply_briefing_tables),
+    Migration(58, "memory_archive", fn=_apply_memory_archive),
 )
 
 

@@ -26,6 +26,10 @@ __all__ = ["register", "AGENT_TOOL_MODULES", "agent_for",
 _log = logging.getLogger(__name__)
 
 # Modules under ``nomorals.agents`` that expose ``register(registry)``.
+# Dotted names stay under nomorals.agents too ("search.engine" →
+# ``nomorals.agents.search.engine``); a module living elsewhere in the
+# package (like "memory.persona") is found via the nomorals.* fallback in
+# register() below.
 AGENT_TOOL_MODULES = (
     "benchmark",
     "cipher",
@@ -55,6 +59,7 @@ AGENT_TOOL_MODULES = (
     "structuring",
     "toolmaker",
     "watchers",
+    "memory.persona",
 )
 
 
@@ -68,7 +73,13 @@ def register(registry: Any) -> None:
     """
     for name in AGENT_TOOL_MODULES:
         try:
-            module = importlib.import_module(f"nomorals.agents.{name}")
+            # most modules live under nomorals.agents (dotted names like
+            # "search.engine" too); a few live elsewhere in the package
+            # (e.g. "memory.persona" → nomorals.memory.persona)
+            try:
+                module = importlib.import_module(f"nomorals.agents.{name}")
+            except ModuleNotFoundError:
+                module = importlib.import_module(f"nomorals.{name}")
             hook = getattr(module, "register", None)
             if hook is None:
                 continue

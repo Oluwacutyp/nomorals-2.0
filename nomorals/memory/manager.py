@@ -34,6 +34,27 @@ from .embeddings import Embedder
 
 __all__ = ["MemoryManager"]
 
+
+def _is_private(record: MemoryRecord) -> bool:
+    """Prompt 11: the owner-marked privacy flag lives in metadata."""
+    try:
+        return bool((record.metadata or {}).get("private"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_sensitive(content: str, kind: str) -> str:
+    """Prompt 11: refuse to persist sensitive attributes as FACT/PREFERENCE/
+    RELATIONSHIP.  Lazy import keeps manager ↔ persona dependency one-way."""
+    if kind not in (MemoryKind.FACT, MemoryKind.PREFERENCE,
+                    MemoryKind.RELATIONSHIP):
+        return ""
+    try:
+        from .persona import is_sensitive_text
+        return is_sensitive_text(content)
+    except Exception:  # noqa: BLE001
+        return ""
+
 _log = get_logger(__name__)
 
 
@@ -121,9 +142,17 @@ class MemoryManager:
         tags: Any = "",
         origin: str = "",
     ) -> str:
-        """Store a memory and index it for both vector and lexical recall."""
+        """Store a memory and index it for both vector and lexical recall.
+
+        Prompt 11: FACT/PREFERENCE/RELATIONSHIP records touching sensitive
+        attributes (health, politics, religion, race, sexuality) are refused
+        — the owner never gets a shadow profile.  Returns "" on refusal.
+        """
         content = (content or "").strip()
         if not content:
+            return ""
+        if _is_sensitive(content, kind):
+            _log.info("remember refused: sensitive attribute (%s)", kind)
             return ""
         now = time.time()
         record_id = new_id()
@@ -214,18 +243,25 @@ class MemoryManager:
         min_score: float = 0.0,
         source: str = "",
         include_expired: bool = False,
+        include_private: bool = False,
         tags: str = "",
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
         ``tags`` (comma-separated) keeps only records carrying ALL of the
         requested tags — the tag lane the /remember command populates.
+
+        Private-marked records are excluded unless ``include_private`` is
+        set — proactive recall and training pipelines never see them.
         """
         wanted_tags = {t.strip() for t in (tags or "").split(",") if t.strip()}
         started = time.perf_counter()
         limit = limit or self.limit
         if not query.strip():
-            return RecallResult(records=self._recent(limit, kind=kind), query=query)
+            recents = self._recent(limit, kind=kind)
+            if not include_private:
+                recents = [r for r in recents if not _is_private(r)]
+            return RecallResult(records=recents, query=query)
         self.stats["recalls"] += 1
 
         candidates: dict[str, MemoryRecord] = {}
@@ -247,7 +283,10 @@ class MemoryManager:
 
         ids = list(candidates)
         if not ids:
-            return RecallResult(records=self._recent(limit, kind=kind), query=query,
+            recents = self._recent(limit, kind=kind)
+            if not include_private:
+                recents = [r for r in recents if not _is_private(r)]
+            return RecallResult(records=recents, query=query,
                                 elapsed_ms=(time.perf_counter() - started) * 1000)
 
         placeholders = ", ".join("?" for _ in ids)
@@ -257,6 +296,8 @@ class MemoryManager:
         for row in rows:
             record = MemoryRecord.from_row(row)
             if record.expired and not include_expired:
+                continue
+            if not include_private and _is_private(record):
                 continue
             if kind and record.kind != kind:
                 continue
@@ -374,6 +415,43 @@ class MemoryManager:
             self.forget(record_id)
         return len(doomed)
 
+    # ── Prompt 11: privacy controls ──────────────────────────────────────
+    def mark_private(self, record_id: str) -> int:
+        """Mark a record private: excluded from proactive recall, context
+        blocks, and training pipelines.  Returns rows updated."""
+        record = self.get(record_id)
+        if record is None:
+            return 0
+        metadata = dict(record.metadata or {})
+        metadata["private"] = True
+        return self.update(record_id, metadata=metadata)
+
+    def mark_public(self, record_id: str) -> int:
+        """Clear the private flag."""
+        record = self.get(record_id)
+        if record is None:
+            return 0
+        metadata = dict(record.metadata or {})
+        metadata.pop("private", None)
+        return self.update(record_id, metadata=metadata)
+
+    def for_training(self, *, kind: str = "",
+                     limit: int = 5000) -> list[MemoryRecord]:
+        """Records safe for model-training pipelines (Prompt 01's
+        self-improvement and any future training loops).
+
+        Contract: NEVER yields private-marked records.  Any pipeline that
+        ingests memory records must go through this method.
+        """
+        try:
+            result = self.recall("", limit=limit, kind=kind or "",
+                                 include_private=False)
+        except Exception:  # noqa: BLE001
+            return []
+        # belt and braces: recall already filters, but the contract is
+        # explicit here so a future recall change can't leak
+        return [r for r in result.records if not _is_private(r)]
+
     # ── working memory ───────────────────────────────────────────────────────
     def build_context(
         self,
@@ -383,22 +461,27 @@ class MemoryManager:
         limit: int | None = None,
         kinds: Sequence[str] = (),
         include_recent: int = 3,
+        include_private: bool = False,
     ) -> str:
         """Assemble a token-budgeted context block for a model call.
 
         Ranking is by relevance, but assembly walks the ranked list and stops when
         the budget is spent — so a huge memory never crowds out the actual task.
+
+        Private-marked records are excluded unless ``include_private`` is set.
         """
         budget = budget_tokens or self.context_budget
         parts: list[str] = []
         used = 0
 
-        recalled = self.recall(goal, limit=limit or self.limit)
+        recalled = self.recall(goal, limit=limit or self.limit,
+                               include_private=include_private)
         pool = [r for r in recalled.records if not kinds or r.kind in kinds]
         if include_recent:
             recent_ids = {r.id for r in pool}
             for record in self._recent(include_recent):
-                if record.id not in recent_ids:
+                if record.id not in recent_ids and (
+                        include_private or not _is_private(record)):
                     pool.append(record)
 
         for record in pool:

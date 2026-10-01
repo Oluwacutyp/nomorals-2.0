@@ -145,8 +145,12 @@ class MemoryRecord:
             id=row["id"],
             kind=row.get("kind") or MemoryKind.EPISODE,
             content=row.get("content") or "",
-            importance=float(row.get("importance") or 0.5),
-            salience=float(row.get("salience") or 0.5),
+            # NB: explicit None checks — 0.0 is a valid importance/salience
+            # (a barely-stated preference), not a missing value
+            importance=float(0.5 if row.get("importance") is None
+                             else row["importance"]),
+            salience=float(0.5 if row.get("salience") is None
+                           else row["salience"]),
             decay=float(row.get("decay") or 1.0),
             access_count=int(row.get("access_count") or 0),
             last_access=float(row.get("last_access") or 0.0),

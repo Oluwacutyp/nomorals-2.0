@@ -1194,6 +1194,16 @@ class PartnerRuntime:
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "rooms tick job not registered: %s", exc)
+                # Prompt 11: persona rebuild + curation — two durable daily
+                # jobs (rebuild at 03:30, curate at 04:00) that keep the
+                # user model fresh and memory hygienic.  Idempotent by name;
+                # no-ops when memory is empty.
+                try:
+                    from ..memory.persona import ensure_persona_jobs
+                    ensure_persona_jobs(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "persona jobs not registered: %s", exc)
                 # Prompt 04: morning briefing — one durable "briefing" job
                 # (daily at settings.briefing.time, default 07:00, owner
                 # tz) that composes + delivers the overnight digest.
