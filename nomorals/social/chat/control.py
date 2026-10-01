@@ -166,6 +166,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "data": (0, None),       # /data mine [name] | /data list | /data fetch <ref> [rows]
     "evolve": (1, None),     # /evolve <instruction> | /evolve apply <id> | /evolve list
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
+    "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "image": (1, 3),         # /image <path-or-url> — lookup
@@ -285,6 +286,7 @@ _HELP_TEXT = "\n".join(
         "  /evolve audit | research <t> | revert <id> | auto [n] | queue add <goal>",
         "  /evolve git | publish [branch] [--push]   where commits land + make permanent",
         "  /speak <text>                            I say it as a voice note",
+        "  /voice list|use|say|clone…                the voice catalogue (switch voices live)",
         "  /task add <instruction> | /task run [id] | /task list",
         "  /notify [n]                             recent alerts",
         "  /image <path-or-url>                    look it up (hash, dims, seen?)",
@@ -674,6 +676,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                "usage": "/evolve <instruction> | apply <id> | list | audit | revert <id> | git",
                "example": "/evolve make search summaries shorter",
                "related": "/benchmark"},
+    "voice": {"what": "the voice catalogue: list voices, switch the active voice live (per chat), speak as it, or clone a new voice from a voice note.",
+            "usage": "/voice list | /voice use <name> | /voice say <text> | /voice clone <name> [path] | /voice transcript <name> <text> | /voice describe <name> <text> | /voice rm <name>",
+            "example": "/voice use narrator",
+            "related": "/speak /stt"},
     "speak": {"what": "she says it back to you as a neural voice note.",
               "usage": "/speak <text>", "example": "/speak all done",
               "related": "/tts"},
@@ -802,7 +808,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
      ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political"]),
-    ("voice & vision", ["tts", "speak", "stt", "look", "image", "lens"]),
+    ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor"]),
     ("media system", ["music", "play", "video", "hub", "podcast"]),

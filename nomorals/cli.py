@@ -293,7 +293,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
-                     "nm voice fetch --backend cosyvoice\n"
+                     "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini\n"
+                     "nm voice clone <name> <audio> --consent [--transcript T]\n"
+                     "nm voice list | nm voice use <name> | nm voice current\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
                      "nm voice stats [--json]\n"
@@ -320,6 +322,9 @@ def _parser() -> argparse.ArgumentParser:
     v_say = voice_sub.add_parser("say", help="speak one line via TTS")
     v_say.add_argument("text", help="text to speak")
     v_say.add_argument("--profile", default="", help="TTS voice profile name")
+    v_say.add_argument("--voice", default="",
+                       help="catalogue voice name (resolves backend + "
+                            "profile; alias of --profile for raw profiles)")
     v_say.add_argument("--out", default="", help="wav output path")
     v_say.add_argument("--backend", default="",
                        help="TTS backend (default: settings or auto)")
@@ -328,6 +333,9 @@ def _parser() -> argparse.ArgumentParser:
                             "breath, stutters, fillers, pauses, emphasis")
     v_say.add_argument("--mood", default="neutral",
                        help="performance mood (happy, sad, nervous, tired, …)")
+    v_say.add_argument("--effect", default="",
+                       help="named director house style "
+                            "(dramatic_whisper, hype, bedtime_story, …)")
     v_say.add_argument("--intensity", type=int, default=3,
                        help="director intensity 0-5 (default: 3)")
     v_say.add_argument("--seed", type=int, default=None,
@@ -366,12 +374,50 @@ def _parser() -> argparse.ArgumentParser:
     v_fetch = voice_sub.add_parser(
         "fetch", help="download open TTS weights from HuggingFace")
     v_fetch.add_argument("--backend", default="cosyvoice",
-                         help="model to fetch (default: cosyvoice)")
+                         help="model to fetch: cosyvoice (default), "
+                              "fish-s2-pro, fish-s1-mini")
     v_fetch.add_argument("--dest", default="",
                          help="destination dir (default: ~/.cache/nomorals/voice_models/<backend>)")
     v_fetch.add_argument("--repo", default="",
                          help="override the HuggingFace repo id")
     v_fetch.add_argument("--json", action="store_true", help="Output as JSON")
+    # -- voice catalogue: named voices, switchable at runtime ---------------
+    v_clone = voice_sub.add_parser(
+        "clone", help="clone a voice from a reference clip into the catalogue")
+    v_clone.add_argument("name", help="catalogue voice name")
+    v_clone.add_argument("audio", help="reference audio file path")
+    v_clone.add_argument("--transcript", default="",
+                         help="words spoken in the reference clip "
+                              "(improves zero-shot cloning)")
+    v_clone.add_argument("--consent", action="store_true",
+                         help="confirm this is your voice or you have "
+                              "permission to clone it (required)")
+    v_clone.add_argument("--backend", default="auto",
+                         help="preferred backend for this voice")
+    v_clone.add_argument("--describe", default="",
+                         help="human description of the voice")
+    v_clone.add_argument("--json", action="store_true", help="Output as JSON")
+    v_vlist = voice_sub.add_parser("list", help="list catalogue voices")
+    v_vlist.add_argument("--json", action="store_true", help="Output as JSON")
+    v_use = voice_sub.add_parser("use",
+                                 help="set the catalogue's active voice")
+    v_use.add_argument("name", help="catalogue voice name")
+    v_use.add_argument("--json", action="store_true", help="Output as JSON")
+    v_cur = voice_sub.add_parser("current", help="show the active voice")
+    v_cur.add_argument("--json", action="store_true", help="Output as JSON")
+    v_rm = voice_sub.add_parser("rm", help="drop a catalogue voice")
+    v_rm.add_argument("name", help="catalogue voice name")
+    v_rm.add_argument("--json", action="store_true", help="Output as JSON")
+    v_desc = voice_sub.add_parser("describe",
+                                  help="describe a catalogue voice")
+    v_desc.add_argument("name", help="catalogue voice name")
+    v_desc.add_argument("text", help="description text")
+    v_desc.add_argument("--json", action="store_true", help="Output as JSON")
+    v_vtr = voice_sub.add_parser(
+        "transcript", help="set a cloned voice's prompt transcript")
+    v_vtr.add_argument("name", help="catalogue voice name")
+    v_vtr.add_argument("text", help="words spoken in the reference clip")
+    v_vtr.add_argument("--json", action="store_true", help="Output as JSON")
 
     inbox = sub.add_parser(
         "inbox",
@@ -2013,6 +2059,20 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_decrypt(args, context)
     if action == "fetch":
         return _cmd_voice_fetch(args, context)
+    if action == "clone":
+        return _cmd_voice_clone(args, context)
+    if action == "list":
+        return _cmd_voice_catalogue_list(args, context)
+    if action == "use":
+        return _cmd_voice_use(args, context)
+    if action == "current":
+        return _cmd_voice_current(args, context)
+    if action == "rm":
+        return _cmd_voice_rm(args, context)
+    if action == "describe":
+        return _cmd_voice_describe(args, context)
+    if action == "transcript":
+        return _cmd_voice_transcript(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
     return 2
 
@@ -2087,17 +2147,32 @@ def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
 
 
 def _cmd_voice_say(args: argparse.Namespace, context: Any) -> int:
+    from .voice.catalogue import default_catalogue
     from .voice.tts import UniversalTTS
 
-    backend = args.backend or context.settings.audio.tts_engine or "auto"
-    engine = UniversalTTS(backend=backend)
-    if args.perform:
-        out = engine.perform(args.text, voice_name=args.profile or None,
-                             out_path=args.out or "", mood=args.mood,
-                             intensity=args.intensity, seed=args.seed)
+    # --voice names a catalogue voice (resolves backend + profile);
+    # --profile is the raw profile path for direct engine use.
+    cat = default_catalogue()
+    entry = cat.get(args.voice) if args.voice else None
+    if entry is not None:
+        out = cat.speak(args.text, out_path=args.out or "", mood=args.mood,
+                        intensity=args.intensity, seed=args.seed,
+                        effect=args.effect or None, perform=args.perform)
     else:
-        out = engine.speak(args.text, voice_name=args.profile or None,
-                           out_path=args.out or "")
+        backend = args.backend or context.settings.audio.tts_engine or "auto"
+        engine = UniversalTTS(backend=backend)
+        if args.perform:
+            out = engine.perform(args.text,
+                                 voice_name=(args.voice or args.profile
+                                             or None),
+                                 out_path=args.out or "", mood=args.mood,
+                                 intensity=args.intensity, seed=args.seed,
+                                 effect=args.effect or None)
+        else:
+            out = engine.speak(args.text,
+                               voice_name=(args.voice or args.profile
+                                           or None),
+                               out_path=args.out or "")
     if args.json:
         print(json.dumps({"path": out.get("path"),
                           "backend": out.get("backend"),
@@ -2130,6 +2205,145 @@ def _cmd_voice_fetch(args: argparse.Namespace, context: Any) -> int:
         print(f"weights ready at {path}")
         print("speak with them: "
               f"nm voice say \"hello there\" --backend {name} --perform")
+    return 0
+
+
+def _cmd_voice_clone(args: argparse.Namespace, context: Any) -> int:  # noqa: ARG001
+    from .voice.catalogue import default_catalogue
+
+    if not args.consent:
+        print("refusing: pass --consent to confirm this is your voice or "
+              "you have permission to clone it", file=sys.stderr)
+        return 2
+    cat = default_catalogue()
+    try:
+        voice = cat.clone(args.name, args.audio,
+                          transcript=args.transcript or "",
+                          backend=args.backend or "auto",
+                          description=args.describe or "",
+                          consent_confirmed=True)
+    except Exception as exc:
+        print(f"clone failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"name": voice.name, "backend": voice.backend,
+                          "profile": voice.profile}, indent=2))
+    else:
+        print(f"cloned '{voice.name}' → catalogue "
+              f"(backend: {voice.backend})")
+        print(f"speak with it: nm voice say \"hello there\" "
+              f"--voice {voice.name} --perform")
+    return 0
+
+
+def _cmd_voice_catalogue_list(args: argparse.Namespace,  # noqa: ARG001
+                              context: Any) -> int:
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    voices = cat.list()
+    if args.json:
+        print(json.dumps(voices, indent=2))
+    elif not voices:
+        print("no voices yet — clone one: "
+              "nm voice clone <name> <audio> --consent")
+    else:
+        for v in voices:
+            mark = "●" if v["active"] else "○"
+            desc = f" — {v['description']}" if v["description"] else ""
+            prof = f" (profile: {v['profile']})" if v["profile"] else ""
+            print(f"{mark} {v['name']} [{v['backend']}]"
+                  f"{prof}{desc}")
+    return 0
+
+
+def _cmd_voice_use(args: argparse.Namespace, context: Any) -> int:  # noqa: ARG001
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    try:
+        voice = cat.set_active(args.name)
+    except KeyError:
+        print(f"unknown voice {args.name!r} — nm voice list",
+              file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"active": voice.name}, indent=2))
+    else:
+        print(f"active voice → '{voice.name}' "
+              f"(per-chat switches still win in chat)")
+    return 0
+
+
+def _cmd_voice_current(args: argparse.Namespace,  # noqa: ARG001
+                       context: Any) -> int:
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    voice = cat.active_for_chat()
+    if args.json:
+        print(json.dumps({"active": voice.name if voice else None,
+                          "backend": voice.backend if voice else None},
+                         indent=2))
+    elif voice is None:
+        print("no active voice — nm voice list")
+    else:
+        print(f"active voice: '{voice.name}' [{voice.backend}]")
+    return 0
+
+
+def _cmd_voice_rm(args: argparse.Namespace, context: Any) -> int:  # noqa: ARG001
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    if not cat.remove(args.name):
+        print(f"unknown voice {args.name!r} — nm voice list",
+              file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"removed": args.name}, indent=2))
+    else:
+        print(f"removed '{args.name}' from the catalogue")
+    return 0
+
+
+def _cmd_voice_describe(args: argparse.Namespace,  # noqa: ARG001
+                        context: Any) -> int:
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    voice = cat.get(args.name)
+    if voice is None:
+        print(f"unknown voice {args.name!r} — nm voice list",
+              file=sys.stderr)
+        return 1
+    voice.description = args.text.strip()
+    cat._save()
+    if args.json:
+        print(json.dumps({"name": voice.name,
+                          "description": voice.description}, indent=2))
+    else:
+        print(f"description set for '{voice.name}'")
+    return 0
+
+
+def _cmd_voice_transcript(args: argparse.Namespace,  # noqa: ARG001
+                          context: Any) -> int:
+    from .voice.catalogue import default_catalogue
+
+    cat = default_catalogue()
+    profile = cat.library.get(args.name)
+    if profile is None:
+        print(f"unknown voice {args.name!r} — nm voice list",
+              file=sys.stderr)
+        return 1
+    profile.prompt_text = args.text.strip()
+    cat.library._save_index()
+    if args.json:
+        print(json.dumps({"name": args.name,
+                          "prompt_chars": len(args.text)}, indent=2))
+    else:
+        print(f"transcript set for '{args.name}' ({len(args.text)} chars)")
     return 0
 
 

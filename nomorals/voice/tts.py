@@ -318,6 +318,8 @@ def available_backends() -> list[str]:
         out.append("kokoro")
     if _spec("cosyvoice"):
         out.append("cosyvoice")
+    if _spec("huggingface_hub"):
+        out.append("hf-endpoint")
     return out
 
 
@@ -501,8 +503,123 @@ class CosyVoiceBackend:
         return self._collect(gen)
 
 
+class HFEndpointBackend:
+    """Hugging Face Inference Endpoints / serverless Inference API.
+
+    Reach a TTS model *without* local weights — the no-GPU path:
+
+    1. **Serverless** (default): ``huggingface_hub.InferenceClient`` with a
+       model id, e.g. ``fishaudio/s2-pro`` — HF routes to shared GPUs.
+       Needs ``pip install huggingface_hub``; ``HF_TOKEN`` env only for
+       gated/private models.
+    2. **Dedicated endpoint**: set ``HF_TTS_ENDPOINT_URL`` to an
+       Inference Endpoint you deployed (CosyVoice / Fish / whatever
+       container you run). The backend POSTs ``{"inputs": text,
+       "parameters": {...}}`` and expects audio bytes back.
+
+    The director's script is rendered fish-native (``render_fish``) when
+    the model id mentions fish — S2 speaks canonical tags natively —
+    otherwise plain speakable text (``render_plain``), since endpoint
+    APIs speak plain text. Auth is env-only; never paste tokens in chat.
+    """
+
+    name = "hf-endpoint"
+    sample_rate = 24000
+
+    @property
+    def supports_native_tags(self) -> bool:
+        # Fish models speak the director's free-form [tags] natively
+        # (render_fish keeps them inline); anything else gets plain text.
+        return self._is_fish()
+
+    supports_cloning = True        # via endpoint voice/reference params
+
+    def __init__(self, model: str = "", endpoint_url: str = "") -> None:
+        try:
+            from huggingface_hub import InferenceClient  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "hf-endpoint backend needs huggingface_hub: "
+                "pip install huggingface_hub") from exc
+        self.model = (model or os.environ.get("HF_TTS_MODEL", "")
+                      or "fishaudio/s2-pro")
+        self.endpoint_url = (endpoint_url
+                             or os.environ.get("HF_TTS_ENDPOINT_URL", ""))
+
+    def _is_fish(self) -> bool:
+        return "fish" in self.model.lower()
+
+    def _client(self) -> Any:
+        from huggingface_hub import InferenceClient
+
+        token = os.environ.get("HF_TOKEN", "") or None
+        if self.endpoint_url:
+            return InferenceClient(base_url=self.endpoint_url, token=token)
+        return InferenceClient(model=self.model, token=token)
+
+    @staticmethod
+    def _decode_wav(blob: bytes) -> tuple[list, int]:
+        """WAV bytes → (float samples, sample_rate). Stdlib only.
+
+        Handles 8/16/32-bit PCM, mono or multi-channel (mixed to mono).
+        """
+        import io
+        import struct as _struct
+
+        with wave.open(io.BytesIO(blob), "rb") as wav:
+            n = wav.getnframes()
+            raw = wav.readframes(n)
+            width = wav.getsampwidth()
+            rate = wav.getframerate()
+            channels = wav.getnchannels()
+        if width == 1:
+            # 8-bit WAV PCM is unsigned — offset to signed
+            vals = [b - 128 for b in raw]
+            scale = 128.0
+        elif width == 2:
+            vals = list(_struct.unpack("<%dh" % (len(raw) // 2), raw))
+            scale = 32768.0
+        elif width == 4:
+            vals = list(_struct.unpack("<%di" % (len(raw) // 4), raw))
+            scale = float(1 << 31)
+        else:
+            raise ValueError(f"unsupported WAV sample width: {width}")
+        mono = [sum(vals[i:i + channels]) / (channels * scale)
+                for i in range(0, len(vals), channels)]
+        return mono, rate
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        client = self._client()
+        params: dict = {}
+        if instruct:
+            params["instruct"] = instruct
+        if voice is not None:
+            voice.validate_for_cloning()
+            if voice.preset_id:
+                params["speaker"] = voice.preset_id
+            if voice.language:
+                params["language"] = voice.language
+        if self.endpoint_url:
+            blob = client.post(json={"inputs": text, "parameters": params})
+        else:
+            blob = client.text_to_speech(text)
+        if not isinstance(blob, (bytes, bytearray)) or not blob:
+            raise ValueError("hf-endpoint returned no audio bytes")
+        try:
+            samples, rate = self._decode_wav(bytes(blob))
+        except Exception as exc:
+            head = bytes(blob)[:100]
+            raise ValueError(
+                "hf-endpoint did not return WAV audio "
+                f"(first bytes: {head!r})") from exc
+        self.sample_rate = rate
+        return samples
+
+
 _BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
-             "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend}
+             "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend,
+             "hf-endpoint": HFEndpointBackend}
 
 
 # ----------------------------------------------------
@@ -629,25 +746,31 @@ class UniversalTTS:
 
     def perform(self, text: str, voice_name: Optional[str] = None,
                 out_path: str = "", *, mood: str = "neutral",
-                intensity: int = 3, seed: Optional[int] = None) -> dict:
+                intensity: int = 3, seed: Optional[int] = None,
+                effect: Optional[str] = None) -> dict:
         """Text in, human-sounding wav out.
 
         Runs the director (``nomorals/voice/director.py``) over ``text``
-        — laughs, sighs, coughs, breaths, stutters, fillers, pauses,
-        emphasis — then renders the performance script in whatever the
-        active backend natively understands:
+        — the PerformanceTuner normalizes it, detects each sentence's
+        intent, and routes a natural effect chain (laughs, sighs,
+        coughs, breaths, stutters, fillers, pauses, emphasis) — then
+        renders the performance script in whatever the active backend
+        natively understands:
 
+        - fish: near pass-through (S2 speaks free-form [tags] natively)
         - cosyvoice: instruct tokens + emotion/rate instruction
         - bark: native paralinguistic tags
-        - xtts/kokoro: speakable words + spliced silence pauses
+        - xtts/kokoro/hf-endpoint: speakable words + spliced silence
 
-        Returns the usual speak() dict plus ``script`` (the marked-up
-        performance text) and ``cues`` (what the director inserted).
+        ``effect`` picks a named director house style (see
+        ``director.EFFECT_PRESETS``). Returns the usual speak() dict plus
+        ``script`` (the marked-up performance text) and ``cues``.
         """
         from .director import (direct, render_bark, render_cosyvoice,
-                               render_plain)
+                               render_fish, render_plain)
 
-        script = direct(text, mood=mood, intensity=intensity, seed=seed)
+        script = direct(text, mood=mood, intensity=intensity, seed=seed,
+                        effect=effect)
         voice = self.voices.get(voice_name) if voice_name else None
         backend = self._load_backend()
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
@@ -658,6 +781,10 @@ class UniversalTTS:
             final_text, instruct = render_cosyvoice(script)
         elif backend.name == "bark":
             final_text = render_bark(script)
+        elif backend.name == "fish" or (
+                backend.name == "hf-endpoint"
+                and getattr(backend, "_is_fish", lambda: False)()):
+            final_text = render_fish(script)
         else:
             final_text, pause_points = render_plain(script)
 

@@ -33,6 +33,35 @@ MODEL_REGISTRY = {
             "gpustack/CosyVoice-300M",
         ],
     },
+    "fish-s2-pro": {
+        "hf_repo": "fishaudio/s2-pro",
+        "license": "Fish Audio Research License (non-commercial research; "
+                   "read the repo LICENSE before production use)",
+        "approx_size": "~8 GB (4B params)",
+        "notes": (
+            "SOTA open TTS: 10M+ hours, 80+ languages, 91.6% "
+            "paralinguistics win rate on EmergentTTS-Eval. 15,000+ "
+            "free-form [tag] directions (the director's canonical "
+            "markup is near-native here), native multi-speaker "
+            "<|speaker:i|> tags, 10–30s reference cloning, SGLang "
+            "streaming at 0.195 RTF on H200. Local inference via the "
+            "fish-speech repo's SGLang server; or reach it with no GPU "
+            "through the 'hf-endpoint' backend."
+        ),
+        "alt_repos": [],
+    },
+    "fish-s1-mini": {
+        "hf_repo": "fishaudio/openaudio-s1-mini",
+        "license": "check the repo LICENSE (open weights)",
+        "approx_size": "~1 GB (0.5B params)",
+        "notes": (
+            "Lightweight 0.5B Fish TTS for CPU/small-GPU boxes. Emotion "
+            "and tone markers ((angry), (laughing), (sighing), …), EN/ZH/"
+            "JA + more. Good first download to smoke-test the pipeline "
+            "before pulling s2-pro."
+        ),
+        "alt_repos": [],
+    },
 }
 
 
