@@ -7,6 +7,7 @@ import getpass
 import hmac
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -698,6 +699,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm briefing today           print the last stored briefing\n"
                      "nm briefing retry           regenerate + deliver\n"
                      "nm briefing config          show time/timezone/topics/sections\n"
+                     "nm briefing status          proactive switches + recent delivery states\n"
                      "nm briefing topics add|rm X  manage news topic filter\n"
                      "nm briefing symbols add|rm X  manage market symbols\n"
                      "nm briefing sections pin|unpin <name>\n"
@@ -706,7 +708,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     briefing_sub = briefing.add_subparsers(dest="briefing_action",
                                            required=True)
-    for _name in ("now", "today", "retry", "config"):
+    for _name in ("now", "today", "retry", "config", "status"):
         _p = briefing_sub.add_parser(_name, help=f"briefing {_name}")
         _p.add_argument("--json", action="store_true", help="Output as JSON")
     b_topics = briefing_sub.add_parser("topics", help="manage news topics")
@@ -3520,13 +3522,47 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
 
 
 def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
-    """Route `nm briefing` to now / today / retry / config / topics /
-    symbols / sections / followup."""
+    """Route `nm briefing` to now / today / retry / config / status /
+    topics / symbols / sections / followup."""
     from .agents import morning_briefing as mb
 
     as_json = getattr(args, "json", False)
     action = args.briefing_action
     try:
+        if action == "status":
+            payload = mb.proactive_status(context)
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                s = payload["settings"]
+                print("proactive delivery:")
+                print(f"  master:   {'ON' if s['proactive_enabled'] else 'OFF'}"
+                      "  (NM_PARTNER_PROACTIVE_ENABLED=0 to silence)")
+                print(f"  briefing: {'ON' if s['proactive_briefing'] else 'OFF'}"
+                      "  (NM_PARTNER_PROACTIVE_BRIEFING)")
+                print(f"  watchers: {'ON' if s['proactive_watchers'] else 'OFF'}"
+                      "  (NM_PARTNER_PROACTIVE_WATCHERS)")
+                print(f"  quiet hours: {s['quiet_hours']} ({s['timezone']})")
+                print(f"  briefing time: {s['briefing_time']}")
+                recent = payload["recent"]
+                if not recent:
+                    print("no proactive sends recorded yet")
+                else:
+                    print("recent sends:")
+                    for r in recent:
+                        when = time.strftime(
+                            "%m-%d %H:%M",
+                            time.localtime(r.get("created_at", 0)))
+                        mark = {"sent": "✓", "failed": "✗",
+                                "pending": "…",
+                                "held-quiet-hours": "⏸",
+                                "disabled": "⊘",
+                                "muted": "⊘"}.get(
+                                    r.get("delivery_state"), "?")
+                        print(f"  {when} [{r.get('kind')}] {mark} "
+                              f"{r.get('delivery_state')} — "
+                              f"{r.get('title', '')[:60]}")
+            return 0
         if action in ("now", "retry"):
             result = mb.run_briefing(context)
             if as_json:

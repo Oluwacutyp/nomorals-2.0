@@ -1209,8 +1209,9 @@ class AlertEngine:
         if self._notifier is None:
             from .notifier import Notifier
 
-            self._notifier = Notifier(
-                self.context, getattr(self.context, "gateway", None))
+            # Notifier resolves the live gateway from the context itself
+            # (context.extras["gateway"] in the runtime).
+            self._notifier = Notifier(self.context)
         return self._notifier
 
     def _send(self, watcher: Watcher, title: str, body: str,
@@ -1220,8 +1221,11 @@ class AlertEngine:
                                     critical=critical,
                                     channels=watcher.channels or None)
         channel = ",".join(watcher.channels) if watcher.channels else "notifier"
+        # audit log stays honest: only "sent" when a channel was reached
+        audit_status = (res.get("delivery_state")
+                        or ("sent" if res.get("delivered") else "failed"))
         self.store.record_alert(watcher.id, severity=watcher.severity,
-                                channel=channel, status="sent",
+                                channel=channel, status=audit_status,
                                 title=title, body=body, now=now)
         watcher.last_alert_ts = now
         watcher.last_alert_severity = watcher.severity
@@ -1913,7 +1917,7 @@ def register(registry: Any) -> None:
 
         agent = WatcherAgent(
             context,
-            notifier=Notifier(context, getattr(context, "gateway", None)),
+            notifier=Notifier(context),
             registry=registry)
         if action == "add":
             return agent.add(text)

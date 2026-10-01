@@ -2060,6 +2060,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(56, "room_tables", fn=_apply_room_tables),
     Migration(57, "briefing_tables", fn=_apply_briefing_tables),
     Migration(58, "memory_archive", fn=_apply_memory_archive),
+    Migration(59, "notifications_delivery_state",
+              sql="ALTER TABLE notifications ADD COLUMN delivery_state "
+                  "TEXT NOT NULL DEFAULT '';"),
 )
 
 

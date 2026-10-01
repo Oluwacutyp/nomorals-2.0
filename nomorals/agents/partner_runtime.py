@@ -1779,6 +1779,8 @@ class PartnerRuntime:
             return self._control_mind(command.tail or arg, chat_key=chat_key)
         if kind == "notify":
             return self._control_notify(arg)
+        if kind == "proactive":
+            return self._control_proactive(arg)
         if kind == "image":
             return self._control_image(command.tail or arg)
         if kind == "lens":
@@ -2338,7 +2340,7 @@ class PartnerRuntime:
         from .notifier import Notifier
 
         agent = MonitorAgent(self.context, notifier=Notifier(
-            self.context, getattr(self.context, "gateway", None)))
+            self.context))
         if not tail or tail == "list":
             rows = agent.list()
             if not rows:
@@ -5859,14 +5861,58 @@ class PartnerRuntime:
         rows = notifier.recent(limit)
         if not rows:
             return "no notifications yet — arena builds, research, news and tasks land here."
+        marks = {"sent": "✓", "failed": "✗", "pending": "…",
+                 "held-quiet-hours": "⏸", "disabled": "⊘",
+                 "muted": "⊘", "deduped": "⤺"}
         lines = [f"notifications ({len(rows)}):"]
         for row in rows:
             when = time.strftime("%m-%d %H:%M", time.localtime(row.get("created_at", 0)))
-            delivered = "✓" if row.get("delivered") else "…"
+            state = row.get("delivery_state") or (
+                "sent" if row.get("delivered") else "pending")
+            mark = marks.get(state, "?")
             body = str(row.get("body", "")).replace("\n", " ")[:80]
-            lines.append(f"  {when} [{row.get('kind')}] {delivered} {row.get('title', '')[:50]}")
+            lines.append(f"  {when} [{row.get('kind')}] {mark} {state} "
+                         f"{row.get('title', '')[:50]}")
             if body:
                 lines.append(f"      {body}")
+        lines.append("states: ✓sent ✗failed …pending ⏸held-quiet-hours "
+                     "⊘disabled/muted ⤺deduped — see `nm briefing status`")
+        return "\n".join(lines)
+
+    def _control_proactive(self, arg: str) -> str:
+        """Owner-only: show the proactive push-send switches and the
+        delivery states of recent proactive sends (briefing + watcher
+        alerts).  Proactive messages go to the owner's DMs only — this
+        command just reports; toggles are env vars (see /help)."""
+        from .morning_briefing import proactive_status
+
+        payload = proactive_status(self.context)
+        s = payload["settings"]
+        marks = {"sent": "✓", "failed": "✗", "pending": "…",
+                 "held-quiet-hours": "⏸", "disabled": "⊘",
+                 "muted": "⊘", "deduped": "⤺"}
+        lines = [
+            "she speaks first — proactive push sends (owner DMs only):",
+            f"  master:   {'ON' if s['proactive_enabled'] else 'OFF'}"
+            "  (NM_PARTNER_PROACTIVE_ENABLED=0 silences everything)",
+            f"  briefing: {'ON' if s['proactive_briefing'] else 'OFF'}"
+            f"  daily {s['briefing_time']} ({s['timezone']})",
+            f"  watchers: {'ON' if s['proactive_watchers'] else 'OFF'}",
+            f"  quiet hours: {s['quiet_hours']} — watcher alerts hold, "
+            "the scheduled briefing still goes out",
+        ]
+        recent = payload["recent"]
+        if not recent:
+            lines.append("no proactive sends recorded yet")
+        else:
+            lines.append("recent sends:")
+            for r in recent:
+                when = time.strftime(
+                    "%m-%d %H:%M", time.localtime(r.get("created_at", 0)))
+                state = r.get("delivery_state", "?")
+                lines.append(f"  {when} [{r.get('kind')}] "
+                             f"{marks.get(state, '?')} {state} — "
+                             f"{r.get('title', '')[:60]}")
         return "\n".join(lines)
 
     # ── image tools ──────────────────────────────────────────────────────────

@@ -331,6 +331,14 @@ class PartnerSettings:
     personality: str = "helpful"
     memory_enabled: bool = True
     proactive: bool = True
+    #: Master switch for proactive *push* sends (morning briefing delivery
+    #: + watcher alerts).  Default ON.  Env: NM_PARTNER_PROACTIVE_ENABLED=0
+    #: to make her speak only when spoken to.
+    proactive_enabled: bool = True
+    #: Per-kind toggles, all default ON.  Envs: NM_PARTNER_PROACTIVE_BRIEFING,
+    #: NM_PARTNER_PROACTIVE_WATCHERS (0/1).
+    proactive_briefing: bool = True
+    proactive_watchers: bool = True
     persona_name: str = ""
     disclosure: str = ""
     background_gate: str = "us_or_romantic"
@@ -689,6 +697,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_PARTNER_PERSONALITY": "partner.personality",
     "NM_PARTNER_MEMORY_ENABLED": "partner.memory_enabled",
     "NM_PARTNER_PROACTIVE": "partner.proactive",
+    "NM_PARTNER_PROACTIVE_ENABLED": "partner.proactive_enabled",
+    "NM_PARTNER_PROACTIVE_BRIEFING": "partner.proactive_briefing",
+    "NM_PARTNER_PROACTIVE_WATCHERS": "partner.proactive_watchers",
+    "NM_PARTNER_QUIET_START": "partner.quiet_start",
+    "NM_PARTNER_QUIET_END": "partner.quiet_end",
     "NM_NET_ENABLED": "net.enabled",
     "NM_NET_PROXY": "net.proxy",
     "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",

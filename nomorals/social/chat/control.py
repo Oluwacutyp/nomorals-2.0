@@ -175,6 +175,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
+    "proactive": (0, 0),     # /proactive — push-send switches + delivery states
     "image": (1, 3),         # /image <path-or-url> — lookup
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
@@ -236,6 +237,12 @@ _HELP_TEXT = "\n".join(
         "       [--webhook URL] [--min-gap 60]     POST alerts as JSON; throttle",
         "  /monitor alert <ref> [--webhook … --min-gap N]  change a watch's delivery",
         "  /monitor list | tick | rm <ref>          manage watches",
+        "  — she speaks first (owner DMs only, never anyone else) —",
+        "  /proactive                            push-send switches + delivery states",
+        "  /notify [n]                           recent alerts with delivery states",
+        "  env: NM_PARTNER_PROACTIVE_ENABLED=0 silences all pushes;",
+        "       NM_PARTNER_PROACTIVE_BRIEFING=0 / _WATCHERS=0 toggle each kind;",
+        "       quiet hours NM_PARTNER_QUIET_START/_END (default 22–8)",
         "  — features & arena —",
         "  /features                               list all feature toggles",
         "  /features <name> on|off                 arena|group_posts|proactive_dm|vision|search",
@@ -716,8 +723,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
            "usage": "/tz | /tz 2026-10-02 14:00 [from-zone] [to-zone]",
            "example": "/tz 2026-10-02 14:00 America/New_York Africa/Lagos",
            "related": "/weather /briefing"},
-    "notify": {"what": "recent alerts.", "usage": "/notify [n]",
-               "example": "/notify 10", "related": ""},
+    "notify": {"what": "recent alerts, with delivery states.",
+               "usage": "/notify [n]",
+               "example": "/notify 10", "related": "/proactive"},
+    "proactive": {"what": ("she speaks first: the morning briefing and watcher "
+                           "alerts are pushed to your DMs. Owner-only, never "
+                           "sent to anyone else."),
+                  "usage": "/proactive",
+                  "example": "/proactive",
+                  "related": "/notify /watch"},
     "image": {"what": "look up an image: hash, dimensions, seen-before.",
               "usage": "/image <path-or-url>", "example": "/image /sdcard/pic.jpg",
               "related": "/lens /look"},
@@ -844,7 +858,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("media system", ["music", "play", "video", "hub", "podcast"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
-                            "macro", "file", "publish", "notify"]),
+                            "macro", "file", "publish", "notify", "proactive"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1011,7 +1025,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "look", "image", "lens"]),
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
-      "publish", "notify", "features", "decode", "cookies", "cipher",
+      "publish", "notify", "proactive", "features", "decode", "cookies", "cipher",
       "monitor", "bet", "finance", "weather", "tz"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
@@ -1130,6 +1144,7 @@ LIST_ONELINERS: dict[str, str] = {
     "file": "send a file to any live chat",
     "publish": "md→pdf/html and send",
     "notify": "recent alerts",
+    "proactive": "proactive push sends: switches + delivery states",
     "features": "feature toggles (arena, vision, search, …)",
     "list": "this catalog — every executable command, categorized",
     "help": "the full help: catalog, per-command pages, topics",

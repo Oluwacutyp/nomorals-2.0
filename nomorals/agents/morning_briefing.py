@@ -928,19 +928,24 @@ def _deliver(context: Any, briefing: Briefing,
     title = (f"☀️ morning briefing — {briefing.date}"
              + (" (late)" if briefing.late else ""))
     try:
-        notifier = Notifier(context,
-                            gateway=getattr(context, "gateway", None))
+        # Notifier resolves the live gateway from the context itself
+        # (context.extras["gateway"] in the runtime) — the briefing is
+        # pushed to the owner's DMs, never just stored.
+        notifier = Notifier(context)
         res = notifier.publish("briefing", title, text,
                                force=briefing.late)
         delivered = bool(res.get("delivered"))
+        delivery_state = res.get("delivery_state") or (
+            "sent" if delivered else "pending")
     except Exception as exc:  # noqa: BLE001 — notifier must not raise
         _log.warning("briefing delivery failed: %s", exc)
         delivered = False
+        delivery_state = "failed"
     return {"ok": True, "briefing_id": briefing.id, "date": briefing.date,
             "sections": len(briefing.sections),
             "word_count": briefing.word_count(),
-            "delivered": delivered, "late": briefing.late,
-            "text": text}
+            "delivered": delivered, "delivery_state": delivery_state,
+            "late": briefing.late, "text": text}
 
 
 def _deliver_fallback(context: Any, date: str, reason: str,
@@ -950,14 +955,46 @@ def _deliver_fallback(context: Any, date: str, reason: str,
     body = (f"Briefing failed: {reason[:160]}. "
             f"Run `nm briefing retry`.")
     try:
-        notifier = Notifier(context,
-                            gateway=getattr(context, "gateway", None))
+        notifier = Notifier(context)
         notifier.publish("briefing", title, body, force=True)
     except Exception:  # noqa: BLE001
         pass
     _log.error("briefing total failure: %s", reason[:300])
     return {"ok": False, "date": date, "fallback": True, "reason": reason[:160],
             "delivered": True, "late": late}
+
+def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
+    """Proactive delivery status: current switches + recent proactive
+    sends (briefing + watcher alerts) with their delivery states.
+
+    Powers ``nm briefing status`` and the chat ``/notify`` view.
+    Delivery states: sent / failed / pending (no live channel yet) /
+    held-quiet-hours / disabled (proactive switch off) / muted /
+    deduped.
+    """
+    from .notifier import Notifier
+    partner = getattr(getattr(context, "settings", None), "partner", None)
+
+    def _b(name: str, default: bool = True) -> bool:
+        return bool(getattr(partner, name, default)) if partner else default
+
+    settings = {
+        "proactive_enabled": _b("proactive_enabled"),
+        "proactive_briefing": _b("proactive_briefing"),
+        "proactive_watchers": _b("proactive_watchers"),
+        "quiet_hours": (f"{getattr(partner, 'quiet_start', 22):02d}:00-"
+                        f"{getattr(partner, 'quiet_end', 8):02d}:00"
+                        if partner else "22:00-08:00"),
+        "timezone": _owner_tz(context),
+        "briefing_time": briefing_time(context),
+    }
+    try:
+        recent = Notifier(context).delivery_summary(
+            limit, kinds=("briefing", "watcher"))
+    except Exception:  # noqa: BLE001 — status must not raise
+        recent = []
+    return {"settings": settings, "recent": recent}
+
 
 # ── tool registration ──────────────────────────────────────────────────────
 
@@ -973,12 +1010,13 @@ def register(registry: Any) -> None:
             "Morning briefing: the overnight digest. action=run (compose, "
             "store, deliver now) | today (print the last stored briefing, "
             "no regeneration) | retry (regenerate + deliver) | config "
-            "(show time/timezone/topics/sections) | followup <n> (expand "
-            "item n from the stored briefing)."
+            "(show time/timezone/topics/sections) | status (proactive "
+            "delivery switches + recent sends with delivery states) | "
+            "followup <n> (expand item n from the stored briefing)."
         ),
         capability=Capability.DB_READ,
         parameters={
-            "action": "str — run|today|retry|config|followup",
+            "action": "str — run|today|retry|config|status|followup",
             "n": "int (optional) — item number for followup",
         },
     )
@@ -988,6 +1026,8 @@ def register(registry: Any) -> None:
             return run_briefing(context)
         if act == "retry":
             return run_briefing(context)
+        if act == "status":
+            return proactive_status(context)
         if act == "today":
             b = latest_briefing(context)
             if not b:
