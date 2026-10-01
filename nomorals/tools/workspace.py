@@ -105,3 +105,75 @@ def register(registry: Any) -> None:
             ok = ws.remove_vcpu(value)
             return {"removed": ok, "summary": ws.summary_line()}
         return {"error": f"unsupported action {action!r}"}
+
+    @registry.register(
+        "room",
+        description=(
+            "Project rooms (Prompt 05): persistent per-goal/per-project "
+            "workspaces. action=new <title> [--kind goal|project|ad_hoc] "
+            "[--linked ID] | list [--status active|paused|archived] | "
+            "enter <slug> (mark current, returns ROOM.md) | status <slug> | "
+            "archive|pause|resume <slug> | link <a> <b> (cross reference) | "
+            "search <query> [--deep] | tick (advance active rooms now) | "
+            "stale (idle rooms to review). Work inside a room is sandboxed "
+            "to its directory; nothing outside it is touched."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": ("str — new|list|enter|status|archive|pause|resume|"
+                       "link|search|tick|stale"),
+            "value": "str (optional) — title for new, slug otherwise",
+            "kind": "str (optional) — goal|project|ad_hoc for new",
+            "linked": "str (optional) — linked goal/project id for new",
+            "status": "str (optional) — status filter for list",
+            "deep": "bool (optional) — search files/ contents too",
+        },
+    )
+    def room(*, action: str = "", value: str = "",
+             kind: str = "ad_hoc", linked: str = "",
+             status: str = "", deep: str = "") -> dict[str, Any]:
+        from pathlib import Path as _Path
+
+        from ..workspace.rooms import RoomManager
+        root = _Path(context.settings.workspace_dir)
+        mgr = RoomManager(root, db=context.db)
+        act = (action or "").strip().lower()
+        val = (value or "").strip()
+        is_deep = str(deep or "").lower() in {"1", "true", "yes", "on"}
+        if act == "new" and val:
+            r = mgr.create(val, kind=kind or "ad_hoc",
+                           linked_id=linked or "")
+            return {"room": r.to_dict()}
+        if act == "list":
+            return {"rooms": [r.to_dict()
+                              for r in mgr.list(status=status or "")]}
+        if act == "enter" and val:
+            with mgr.enter(val):
+                pass
+            md = (mgr.rooms_dir / val / "ROOM.md").read_text(
+                encoding="utf-8")
+            return {"slug": val, "room_md": md}
+        if act == "status" and val:
+            r = mgr.get(val)
+            if r is None:
+                return {"error": f"no room {val!r}"}
+            return {"room": r.to_dict()}
+        if act in {"archive", "pause", "resume"} and val:
+            r = {"archive": mgr.archive, "pause": mgr.pause,
+                 "resume": mgr.resume}[act](val)
+            return {"room": r.to_dict()}
+        if act == "link" and val:
+            parts = val.split()
+            if len(parts) != 2:
+                return {"error": "link needs two slugs: link <a> <b>"}
+            return {"linked": mgr.link(parts[0], parts[1])}
+        if act == "search" and val:
+            return {"hits": mgr.search(val, deep=is_deep)}
+        if act == "tick":
+            from ..agents.goals import GoalSystem
+            from ..agents.projects import ProjectManager
+            return mgr.tick(goal_system=GoalSystem(context),
+                            project_manager=ProjectManager(context))
+        if act == "stale":
+            return {"stale": [r.to_dict() for r in mgr.stale_rooms()]}
+        return {"error": f"unsupported room action {act!r}"}

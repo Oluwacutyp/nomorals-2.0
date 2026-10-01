@@ -1696,6 +1696,42 @@ def _apply_game_relay_tables(db: object) -> None:
     )
 
 
+def _apply_room_tables(db: object) -> None:
+    """Prompt 05 (project rooms): per-goal workspace index.
+
+    The room's directory (rooms/<slug>/) is the source of truth for
+    human state (ROOM.md carries the rehydration contract); these tables
+    are the queryable index — listing, linked-goal/project lookups, and
+    cross-room links.  RoomManager also creates them IF NOT EXISTS
+    defensively, so this migration is belt-and-braces for fresh installs.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS rooms (
+            id              TEXT PRIMARY KEY,
+            slug            TEXT NOT NULL UNIQUE,
+            kind            TEXT NOT NULL DEFAULT 'ad_hoc',
+            linked_id       TEXT NOT NULL DEFAULT '',
+            title           TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'active',
+            created_at      REAL NOT NULL DEFAULT 0,
+            last_entered_at REAL NOT NULL DEFAULT 0,
+            updated_at      REAL NOT NULL DEFAULT 0,
+            state_json      TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_rooms_linked
+            ON rooms(kind, linked_id);
+        CREATE INDEX IF NOT EXISTS idx_rooms_status ON rooms(status);
+        CREATE TABLE IF NOT EXISTS room_links (
+            slug_a     TEXT NOT NULL,
+            slug_b     TEXT NOT NULL,
+            created_at REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (slug_a, slug_b)
+        );
+        """
+    )
+
+
 def _apply_watchers_tables(db: object) -> None:
     """Prompt 03 (watchers): the general watcher model, check history, and
     the alert audit log.
@@ -1967,6 +2003,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(53, "trading_tables", fn=_apply_trading_tables),
     Migration(54, "watchers_tables", fn=_apply_watchers_tables),
     Migration(55, "game_relay_tables", fn=_apply_game_relay_tables),
+    Migration(56, "room_tables", fn=_apply_room_tables),
 )
 
 

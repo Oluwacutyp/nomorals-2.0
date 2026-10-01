@@ -1184,6 +1184,16 @@ class PartnerRuntime:
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "watchers sweeper job not registered: %s", exc)
+                # Prompt 05: rooms tick — one durable "rooms tick" job
+                # (every 5m) that runs the room tool's tick action, advancing
+                # each active room's linked goal/project.  Idempotent by
+                # name; a no-op when no rooms exist.
+                try:
+                    from ..workspace.rooms import ensure_rooms_tick_job
+                    ensure_rooms_tick_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "rooms tick job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on

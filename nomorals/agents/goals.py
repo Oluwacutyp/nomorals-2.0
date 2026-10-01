@@ -165,7 +165,11 @@ class GoalSystem:
              int(priority)))
         for i, step in enumerate(plan[:24]):
             self._add_step(goal_id, i, str(step)[:400])
-        return self.get(goal_id) or Goal(id=goal_id, title=title)
+        goal = self.get(goal_id) or Goal(id=goal_id, title=title)
+        # Prompt 05: every goal gets a room (configurable, default ON);
+        # room creation never blocks goal creation
+        self._maybe_auto_room("goal", goal_id, title, plan)
+        return goal
 
     # ── goal -> project cascade (wave 51) ─────────────────────────────────
     def spawn_project(self, goal_id: str, *, objective: str = "",
@@ -542,6 +546,58 @@ class GoalSystem:
                 "updated_at=? WHERE id=?",
                 (status, result[:2000], attempts, now, step_id))
 
+    def _room_manager(self) -> Any | None:
+        """Lazily build the RoomManager (None when rooms unavailable).
+
+        Cached per instance; a False sentinel avoids retrying a failed
+        build.  Goals without rooms take the exact original code path.
+        """
+        if not hasattr(self, "_rooms_cache"):
+            self._rooms_cache: Any = None
+        if self._rooms_cache is False:
+            return None
+        if self._rooms_cache is None:
+            try:
+                from ..workspace.rooms import RoomManager
+                from pathlib import Path
+                root = Path(self.context.settings.workspace_dir)
+                self._rooms_cache = RoomManager(root=root, db=self.db)
+            except Exception:  # noqa: BLE001 — rooms are optional
+                self._rooms_cache = False
+                return None
+        return self._rooms_cache
+
+    def _linked_room(self, goal_id: str) -> Any | None:
+        mgr = self._room_manager()
+        if mgr is None:
+            return None
+        try:
+            return mgr.get_by_linked("goal", goal_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _rooms_auto_create(self) -> bool:
+        try:
+            return bool(getattr(self.context.settings,
+                                "rooms_auto_create", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _maybe_auto_room(self, kind: str, linked_id: str, title: str,
+                         plan: list[str] | None = None) -> None:
+        """Create+link a room for a new goal/project (configurable, ON)."""
+        if not self._rooms_auto_create():
+            return
+        mgr = self._room_manager()
+        if mgr is None:
+            return
+        try:
+            if mgr.get_by_linked(kind, linked_id) is None:
+                mgr.create(title, kind=kind, linked_id=linked_id, plan=plan)
+        except Exception as exc:  # noqa: BLE001 — room failure never
+            _log.warning("auto-room create failed for %s %s: %s",  # blocks creation
+                         kind, linked_id, exc)
+
     def advance(self, goal_id: str, *, executor: Any = None) -> Goal:
         """Execute the next ready step of a goal and record its result.
 
@@ -565,6 +621,34 @@ class GoalSystem:
             return self.get(goal_id) or goal
         step = ready[0]
         self._set_step(step.id, status="in_progress")
+        room = self._linked_room(goal_id)
+        if room is None or executor is None:
+            self._run_step_executor(step, executor)
+        else:
+            # room-linked step: run inside the RoomContext so outputs land
+            # in files/, activity is logged, and state checkpoints after
+            mgr = self._room_manager()
+            assert mgr is not None
+            with mgr.enter(room.slug) as ctx:
+                ctx.set_step(step.description[:200])
+                ctx.log(step.id, "start",
+                        {"description": step.description[:500]})
+                try:
+                    self._run_step_executor(step, executor)
+                except Exception:
+                    ctx.log(step.id, "error", {"status": "executor raised"})
+                    raise
+                ctx.log(step.id, "end", {"status": "recorded"})
+                ctx.checkpoint(f"goal step done: {step.description[:80]}")
+        self._recompute_progress(self.get(goal_id) or goal)
+        return self.get(goal_id) or goal
+
+    def _run_step_executor(self, step: GoalStep, executor: Any) -> None:
+        """The original step-execution body, unchanged.
+
+        Extracted so the room-linked path wraps it without altering the
+        roomless behavior byte-for-byte.
+        """
         if executor is not None:
             try:
                 result = str(executor(step.description))
@@ -579,8 +663,6 @@ class GoalSystem:
         else:
             self._set_step(step.id, status="done",
                            result=f"step recorded: {step.description[:200]}")
-        self._recompute_progress(self.get(goal_id) or goal)
-        return self.get(goal_id) or goal
 
     # ── adapt (self-correcting) ─────────────────────────────────────────────
     def adapt(self, goal_id: str, *, reason: str = "") -> Goal:

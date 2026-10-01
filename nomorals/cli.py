@@ -277,6 +277,57 @@ def _parser() -> argparse.ArgumentParser:
     i_sweep = inbox_sub.add_parser("sweep", help="run one inbox sweep cycle now")
     i_sweep.add_argument("--json", action="store_true", help="Output as JSON")
 
+    room = sub.add_parser(
+        "room",
+        help="Project rooms: persistent per-goal workspaces",
+        description=("nm room new \"<title>\" [--kind goal|project|ad_hoc] [--linked ID]\n"
+                     "nm room list [--status active]\n"
+                     "nm room enter <slug>\n"
+                     "nm room status <slug>\n"
+                     "nm room archive <slug> | nm room pause <slug> | nm room resume <slug>\n"
+                     "nm room link <slug-a> <slug-b>\n"
+                     "nm room search \"<query>\" [--deep]\n"
+                     "nm room tick\n"
+                     "nm room stale [--days 30]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    room_sub = room.add_subparsers(dest="room_action", required=True)
+    r_new = room_sub.add_parser("new", help="create a room")
+    r_new.add_argument("title", help="room title")
+    r_new.add_argument("--kind", default="ad_hoc",
+                       choices=["goal", "project", "ad_hoc"])
+    r_new.add_argument("--linked", default="",
+                       help="linked goal/project id")
+    r_new.add_argument("--json", action="store_true", help="Output as JSON")
+    r_list = room_sub.add_parser("list", help="list rooms")
+    r_list.add_argument("--status", default="",
+                        help="filter: active|paused|archived")
+    r_list.add_argument("--json", action="store_true", help="Output as JSON")
+    r_enter = room_sub.add_parser("enter", help="enter a room (prints ROOM.md)")
+    r_enter.add_argument("slug", help="room slug")
+    r_enter.add_argument("--json", action="store_true", help="Output as JSON")
+    r_status = room_sub.add_parser("status", help="room progress/blockers/decisions")
+    r_status.add_argument("slug", help="room slug")
+    r_status.add_argument("--json", action="store_true", help="Output as JSON")
+    for _name in ("archive", "pause", "resume"):
+        _p = room_sub.add_parser(_name, help=f"{_name} a room")
+        _p.add_argument("slug", help="room slug")
+        _p.add_argument("--json", action="store_true", help="Output as JSON")
+    r_link = room_sub.add_parser("link", help="read-only cross reference")
+    r_link.add_argument("slug_a", help="first room slug")
+    r_link.add_argument("slug_b", help="second room slug")
+    r_link.add_argument("--json", action="store_true", help="Output as JSON")
+    r_search = room_sub.add_parser("search", help="search rooms")
+    r_search.add_argument("query", help="search query")
+    r_search.add_argument("--deep", action="store_true",
+                          help="also search files/ contents")
+    r_search.add_argument("--json", action="store_true", help="Output as JSON")
+    r_tick = room_sub.add_parser("tick", help="advance active rooms now")
+    r_tick.add_argument("--json", action="store_true", help="Output as JSON")
+    r_stale = room_sub.add_parser("stale", help="rooms idle > N days")
+    r_stale.add_argument("--days", type=float, default=30.0)
+    r_stale.add_argument("--json", action="store_true", help="Output as JSON")
+
 
     improve = sub.add_parser(
         "improve",
@@ -929,6 +980,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_media(args, context)
         if args.command == "inbox":
             return _cmd_inbox(args, context)
+        if args.command == "room":
+            return _cmd_room(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -1773,6 +1826,134 @@ def _critique_from_json(text: str) -> "Critique":
     return Critique(verdict=str(data.get("verdict", "request_changes")),
                     issues=issues,
                     score=float(data.get("score", 50) or 50))
+
+
+def _room_obj(context: Any) -> Any:
+    """Build the RoomManager for the CLI context's workspace."""
+    from .workspace.rooms import RoomManager
+
+    root = Path(context.settings.workspace_dir)
+    return RoomManager(root, db=context.db)
+
+
+def _cmd_room(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm room` to new / list / enter / status / archive / pause /
+    resume / link / search / tick / stale."""
+    as_json = getattr(args, "json", False)
+    try:
+        mgr = _room_obj(context)
+    except Exception as exc:  # noqa: BLE001
+        print(f"rooms unavailable: {exc}", file=sys.stderr)
+        return 1
+    action = args.room_action
+    try:
+        if action == "new":
+            room = mgr.create(args.title, kind=args.kind,
+                              linked_id=args.linked or "")
+            payload = room.to_dict()
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                print(f"room {room.slug} ({room.kind}) — "
+                      f"{mgr.rooms_dir / room.slug}")
+            return 0
+        if action == "list":
+            rooms = mgr.list(status=args.status or "")
+            if as_json:
+                print(json.dumps([r.to_dict() for r in rooms], indent=2,
+                                 default=str))
+            else:
+                for r in rooms:
+                    print(f"{r.slug:28} {r.status:8} {r.kind:8} "
+                          f"{r.current_step[:50] or '(no step)'}")
+            return 0
+        if action == "enter":
+            with mgr.enter(args.slug) as ctx:
+                md = (mgr.rooms_dir / args.slug / "ROOM.md").read_text(
+                    encoding="utf-8")
+            if as_json:
+                print(json.dumps({"slug": args.slug, "room_md": md},
+                                 indent=2))
+            else:
+                print(md)
+                print(f"--- room {args.slug} entered; work in this session "
+                      f"is scoped to {mgr.rooms_dir / args.slug} ---")
+            return 0
+        if action == "status":
+            room = mgr.get(args.slug)
+            if room is None:
+                print(f"no room {args.slug!r}", file=sys.stderr)
+                return 1
+            payload = room.to_dict()
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                print(f"{room.slug} [{room.status}] {room.title}")
+                print(f"kind: {room.kind}  linked: "
+                      f"{room.linked_id or 'none'}")
+                print(f"current step: {room.current_step or '(none)'}")
+                print(f"blockers: {', '.join(room.blockers) or '(none)'}")
+                for d in room.decisions[-5:]:
+                    print(f"  - [{d.get('at', '?')}] {d.get('decision', '')}")
+            return 0
+        if action in ("archive", "pause", "resume"):
+            room = {"archive": mgr.archive, "pause": mgr.pause,
+                    "resume": mgr.resume}[action](args.slug)
+            if as_json:
+                print(json.dumps(room.to_dict(), indent=2, default=str))
+            else:
+                print(f"room {room.slug} → {room.status}")
+            return 0
+        if action == "link":
+            result = mgr.link(args.slug_a, args.slug_b)
+            if as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"linked {args.slug_a} <-> {args.slug_b}")
+            return 0
+        if action == "search":
+            hits = mgr.search(args.query, deep=args.deep)
+            if as_json:
+                print(json.dumps(hits, indent=2, default=str))
+            else:
+                for h in hits:
+                    print(f"{h['slug']:28} [{h['where']}] {h['title'][:60]}")
+                if not hits:
+                    print("(no matches)")
+            return 0
+        if action == "tick":
+            from .agents.goals import GoalSystem
+            from .agents.projects import ProjectManager
+            result = mgr.tick(goal_system=GoalSystem(context),
+                              project_manager=ProjectManager(context))
+            if as_json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                for r in result["advanced"]:
+                    print(f"{r['slug']}: advanced {r['steps']} step(s)")
+                for r in result["skipped"]:
+                    print(f"{r['slug']}: skipped ({r['reason']})")
+                for r in result["reconciled"]:
+                    print(f"{r['slug']}: reconciled dirty state")
+                for r in result["errors"]:
+                    print(f"{r['slug']}: ERROR {r['error']}")
+            return 0
+        if action == "stale":
+            stale = mgr.stale_rooms(days=args.days)
+            if as_json:
+                print(json.dumps([r.to_dict() for r in stale], indent=2,
+                                 default=str))
+            else:
+                for r in stale:
+                    print(f"{r.slug:28} idle — archive?")
+                if not stale:
+                    print("(no stale rooms)")
+            return 0
+    except (KeyError, ValueError) as exc:
+        print(f"room error: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown room action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_inbox(args: argparse.Namespace, context: Any) -> int:

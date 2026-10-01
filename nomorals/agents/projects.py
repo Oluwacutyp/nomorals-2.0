@@ -143,6 +143,55 @@ class ProjectManager:
         self.db = context.db
         self.max_attempts = 3
 
+    # ── rooms (Prompt 05) ────────────────────────────────────────────────
+    def _room_manager(self) -> Any | None:
+        """Lazily build the RoomManager (None when rooms unavailable)."""
+        if not hasattr(self, "_rooms_cache"):
+            self._rooms_cache: Any = None
+        if self._rooms_cache is False:
+            return None
+        if self._rooms_cache is None:
+            try:
+                from ..workspace.rooms import RoomManager
+                from pathlib import Path
+                root = Path(self.context.settings.workspace_dir)
+                self._rooms_cache = RoomManager(root=root, db=self.db)
+            except Exception:  # noqa: BLE001 — rooms are optional
+                self._rooms_cache = False
+                return None
+        return self._rooms_cache
+
+    def _linked_room(self, project_id: str) -> Any | None:
+        mgr = self._room_manager()
+        if mgr is None:
+            return None
+        try:
+            return mgr.get_by_linked("project", project_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _rooms_auto_create(self) -> bool:
+        try:
+            return bool(getattr(self.context.settings,
+                                "rooms_auto_create", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _maybe_auto_room(self, project_id: str, title: str,
+                         steps: list[str] | None = None) -> None:
+        if not self._rooms_auto_create():
+            return
+        mgr = self._room_manager()
+        if mgr is None:
+            return
+        try:
+            if mgr.get_by_linked("project", project_id) is None:
+                mgr.create(title, kind="project", linked_id=project_id,
+                           plan=steps)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("auto-room create failed for project %s: %s",
+                         project_id, exc)
+
     # ── persistence ──────────────────────────────────────────────────────
     def _upsert_row(self, p: Project) -> None:
         self.db.execute(
@@ -234,6 +283,9 @@ class ProjectManager:
             p.steps = [ProjectStep(id=new_short_id(), description=s) for s in steps]
             p.status = "running"
         self._upsert_row(p)
+        # Prompt 05: every project gets a room (configurable, default ON)
+        self._maybe_auto_room(p.id, p.title,
+                              [s.description for s in p.steps] or None)
         return p
 
     def _classify_tt(self, text: str):
@@ -424,6 +476,29 @@ class ProjectManager:
         self._current_project_id = project_id
         self._current_step_id = step.id  # wave 67: acceptance regression
         exec_fn = executor or self._default_executor
+        # Prompt 05: a room-linked project runs its step inside the
+        # RoomContext — activity logged, state checkpointed afterwards.
+        # Without a room, exec_fn is untouched (original behavior).
+        room = self._linked_room(project_id)
+        room_ctx = None
+        if room is not None:
+            mgr = self._room_manager()
+            if mgr is not None:
+                room_ctx = mgr.enter(room.slug)
+                room_ctx.set_step(step.description[:200])
+                _inner, _ctx, _sid = exec_fn, room_ctx, step.id
+
+                def exec_fn(desc: str, _i=_inner, _c=_ctx,
+                            _s=_sid) -> str:  # noqa: F811
+                    _c.log(_s, "start", {"description": desc[:500]})
+                    try:
+                        out = _i(desc)
+                    except Exception as exc:
+                        _c.log(_s, "error",
+                               {"error": type(exc).__name__})
+                        raise
+                    _c.log(_s, "end", {"status": "ok"})
+                    return out
         try:
             result = exec_fn(step.description)
             step.status = "done"
@@ -479,6 +554,15 @@ class ProjectManager:
                 # two-way sync) — the owner can adapt and resume it later.
                 self._sync_goal(p)
             return p
+        finally:
+            # Prompt 05: checkpoint + release the room after the step,
+            # whichever way the step ended (done / paused / failed)
+            if room_ctx is not None:
+                try:
+                    room_ctx.checkpoint(
+                        f"project step {step.id}: {step.status}")
+                finally:
+                    room_ctx.close()
         p.updated_at = time.time()
         p = self._recompute(p)
         self._upsert_row(p)
