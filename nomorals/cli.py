@@ -288,6 +288,70 @@ def _parser() -> argparse.ArgumentParser:
                         help="with video: block until the background job finishes")
     m_conv.add_argument("--json", action="store_true", help="Output as JSON")
 
+    voice = sub.add_parser(
+        "voice",
+        help="Live voice loop: talk to Devon through your mic and speakers",
+        description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
+                     "nm voice say \"text\" [--profile P] [--out PATH]\n"
+                     "nm voice listen [--secs N] [--out PATH]\n"
+                     "nm voice transcribe <file>\n"
+                     "nm voice stats [--json]\n"
+                     "nm voice consent [--grant|--revoke] [--device ID]\n"
+                     "nm voice purge\n"
+                     "nm voice decrypt <file.enc> --key-file PATH"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    voice_sub = voice.add_subparsers(dest="voice_action", required=True)
+    v_call = voice_sub.add_parser("call", help="live listen→think→speak loop")
+    v_call.add_argument("--turns", type=int, default=0,
+                        help="max turns (0 = until you say goodbye)")
+    v_call.add_argument("--profile", default="",
+                        help="TTS voice profile name")
+    v_call.add_argument("--device", default="default",
+                        help="device id (consent + conversation identity)")
+    v_call.add_argument("--keep-audio", action="store_true",
+                        help="retain raw utterances (encrypted with --audio-key-file)")
+    v_call.add_argument("--audio-key-file", default="",
+                        help="file holding the 32-byte audio key or a passphrase")
+    v_call.add_argument("--no-tts", action="store_true",
+                        help="skip speech output (text in terminal only)")
+    v_call.add_argument("--json", action="store_true", help="Output as JSON")
+    v_say = voice_sub.add_parser("say", help="speak one line via TTS")
+    v_say.add_argument("text", help="text to speak")
+    v_say.add_argument("--profile", default="", help="TTS voice profile name")
+    v_say.add_argument("--out", default="", help="wav output path")
+    v_say.add_argument("--json", action="store_true", help="Output as JSON")
+    v_listen = voice_sub.add_parser("listen",
+                                    help="record one utterance to a wav file")
+    v_listen.add_argument("--secs", type=float, default=10.0,
+                          help="max seconds to record")
+    v_listen.add_argument("--out", default="", help="wav output path")
+    v_listen.add_argument("--device", default="default", help="device id")
+    v_listen.add_argument("--json", action="store_true", help="Output as JSON")
+    v_tr = voice_sub.add_parser("transcribe", help="transcribe an audio file")
+    v_tr.add_argument("file", help="audio file path")
+    v_tr.add_argument("--json", action="store_true", help="Output as JSON")
+    v_stats = voice_sub.add_parser("stats", help="voice latency/session stats")
+    v_stats.add_argument("--json", action="store_true", help="Output as JSON")
+    v_consent = voice_sub.add_parser("consent",
+                                     help="manage per-device recording consent")
+    v_consent.add_argument("--device", default="default", help="device id")
+    v_consent.add_argument("--grant", action="store_true",
+                           help="grant consent non-interactively")
+    v_consent.add_argument("--revoke", action="store_true",
+                           help="revoke consent")
+    v_consent.add_argument("--json", action="store_true", help="Output as JSON")
+    v_purge = voice_sub.add_parser("purge",
+                                   help="delete retained raw audio")
+    v_purge.add_argument("--json", action="store_true", help="Output as JSON")
+    v_dec = voice_sub.add_parser("decrypt",
+                                 help="decrypt a retained .wav.enc utterance")
+    v_dec.add_argument("file", help="encrypted utterance path")
+    v_dec.add_argument("--key-file", required=True,
+                       help="file holding the 32-byte audio key or passphrase")
+    v_dec.add_argument("--out", default="",
+                       help="output wav path (default: alongside, .wav)")
+
     inbox = sub.add_parser(
         "inbox",
         help="Drop-in inbox: drop a file, link, or note — Devon acts",
@@ -1099,6 +1163,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_code(args, context)
         if args.command == "media":
             return _cmd_media(args, context)
+        if args.command == "voice":
+            return _cmd_voice(args, context)
         if args.command == "vision":
             return _cmd_vision(args, context)
         if args.command == "inbox":
@@ -1842,6 +1908,297 @@ def _print_vision_result(action: str, result: dict[str, Any]) -> None:
     print(result.get("description", ""))
     model = result.get("model") or result.get("provider") or "?"
     print(f"[via {model}]")
+
+
+def _voice_data_dir(args: argparse.Namespace, settings: Any) -> str:
+    return str(settings.audio.voice_data_dir or "voice_data")
+
+
+def _voice_read_key_file(path: str) -> bytes:
+    """Key file: raw 16/24/32-byte key, or a passphrase (PBKDF2-derived)."""
+    raw = open(path, "rb").read().strip()
+    if len(raw) in (16, 24, 32):
+        return raw
+    from .core.cipher import derive_key
+
+    return derive_key(raw.decode("utf-8", "replace"),
+                      salt=b"nomorals-voice-audio", iterations=200_000)
+
+
+def _voice_stt_from_tools(context: Any) -> Any:
+    """STT callable reusing the exact transcription path as inbound voice
+    notes (the ``transcribe`` tool). One-shot per utterance — see
+    ``stt_supports_partial``."""
+
+    def _stt(wav_path: str) -> str:
+        outcome = context.tools.call("transcribe", path=wav_path,
+                                     provider="auto")
+        if not outcome.ok:
+            return ""
+        value = outcome.value or {}
+        return str(value.get("text", "") or "").strip()
+
+    _stt.supports_partial = False  # type: ignore[attr-defined]
+    return _stt
+
+
+def _voice_think_runtime(context: Any, device: str) -> Any:
+    """A ``think`` callable wired to the real partner pipeline.
+
+    One PartnerRuntime for the whole call, one stable ChatRef
+    (``voice:<device>``) for every turn — the conversation identity
+    persists in memory/DB across sessions, exactly like a chat DM.
+    """
+    from .social.chat.base import ChatMessage, ChatRef
+    from .social.chat.gateway import ChatGateway
+    from .agents.partner_runtime import PartnerRuntime
+
+    chat = ChatRef(platform="voice", chat_id=device, kind="dm",
+                   title="Voice call", peer="owner")
+    gateway = ChatGateway({}, db=context.db, owner_chats={chat.key})
+    gateway.register_chat(chat)  # marks is_owner in the chat registry
+    runtime = PartnerRuntime(context, gateway=gateway)
+    counter = [0]
+
+    def think(transcript: str) -> str:
+        counter[0] += 1
+        msg = ChatMessage(chat=chat, incoming=True, text=transcript,
+                          sender="owner",
+                          message_id=f"voice-{device}-{counter[0]}")
+        outcome = runtime.handle_message(msg)
+        return "\n\n".join(p for p in outcome.parts if p).strip()
+
+    return think
+
+
+def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice` subcommands."""
+    action = args.voice_action
+    if action == "call":
+        return _cmd_voice_call(args, context)
+    if action == "say":
+        return _cmd_voice_say(args, context)
+    if action == "listen":
+        return _cmd_voice_listen(args, context)
+    if action == "transcribe":
+        return _cmd_voice_transcribe(args, context)
+    if action == "stats":
+        return _cmd_voice_stats(args, context)
+    if action == "consent":
+        return _cmd_voice_consent(args, context)
+    if action == "purge":
+        return _cmd_voice_purge(args, context)
+    if action == "decrypt":
+        return _cmd_voice_decrypt(args, context)
+    print(f"unknown voice action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
+    import time
+    from pathlib import Path
+
+    from .voice.session import VoiceSession
+
+    settings = context.settings
+    data_dir = _voice_data_dir(args, settings)
+    audio_key = (_voice_read_key_file(args.audio_key_file)
+                 if args.audio_key_file else None)
+
+    tts = None
+    if not args.no_tts:
+        from .voice.tts import UniversalTTS
+
+        engine = UniversalTTS(backend=settings.audio.tts_engine or "auto")
+
+        def _tts(text: str, profile: str) -> dict:
+            out_path = str(Path(data_dir) / "tmp" /
+                           f"tts-{int(time.time() * 1000)}.wav")
+            return engine.speak(text, voice_name=profile or None,
+                                out_path=out_path)
+
+        tts = _tts
+    else:
+        def _tts(text: str, profile: str) -> dict:  # noqa: ARG001
+            return {"path": ""}
+
+    def _deliver(turn_id: str, text: str) -> None:
+        print(f"\n━━━ {turn_id} ━━━\n{text}\n")
+
+    def _ask() -> bool:
+        try:
+            ans = input("Allow microphone recording on this device? [y/N] ")
+        except EOFError:
+            return False
+        return ans.strip().lower() in ("y", "yes")
+
+    session = VoiceSession(
+        think=_voice_think_runtime(context, args.device),
+        stt=_voice_stt_from_tools(context),
+        tts=tts,
+        deliver_text=_deliver,
+        data_dir=data_dir,
+        device_id=args.device,
+        profile=args.profile,
+        silence_ms=settings.audio.voice_silence_ms,
+        keep_audio=args.keep_audio,
+        audio_key=audio_key,
+        speech_cap_secs=settings.audio.voice_speech_cap_secs,
+    )
+    print("Voice call starting — say \"goodbye\" to hang up.\n")
+    report = session.run(max_turns=args.turns, ask_consent=_ask)
+    if args.json:
+        print(json.dumps({
+            "session_id": report.session_id,
+            "turns": report.turns,
+            "barge_ins": report.barge_ins,
+            "end_reason": report.end_reason,
+            "error": report.error,
+        }, indent=2))
+    else:
+        print(f"\nCall ended ({report.end_reason}): "
+              f"{report.turns} turns, {report.barge_ins} barge-ins.")
+        if report.error:
+            print(f"error: {report.error}")
+    return 0 if report.end_reason != "error" else 1
+
+
+def _cmd_voice_say(args: argparse.Namespace, context: Any) -> int:
+    from .voice.tts import UniversalTTS
+
+    engine = UniversalTTS(backend=context.settings.audio.tts_engine or "auto")
+    out = engine.speak(args.text, voice_name=args.profile or None,
+                       out_path=args.out or "")
+    if args.json:
+        print(json.dumps({"path": out.get("path"),
+                          "backend": out.get("backend")}, indent=2))
+    else:
+        print(f"said it → {out.get('path')} ({out.get('backend')})")
+    return 0
+
+
+def _cmd_voice_listen(args: argparse.Namespace, context: Any) -> int:
+    import time
+    from pathlib import Path
+
+    from .voice.session import (ConsentStore, EnergyVAD, MicCapture,
+                                default_mic, write_wav_bytes)
+
+    data_dir = _voice_data_dir(args, context.settings)
+    consent = ConsentStore(data_dir)
+    if not consent.consented(args.device):
+        try:
+            ans = input("Allow microphone recording on this device? [y/N] ")
+        except EOFError:
+            ans = ""
+        if ans.strip().lower() not in ("y", "yes"):
+            print("no consent — not recording.")
+            return 1
+        consent.grant(args.device)
+    mic = default_mic()
+    if mic is None:
+        print("no microphone available.", file=sys.stderr)
+        return 1
+    capture = MicCapture(mic)
+    capture.start()
+    vad = EnergyVAD(silence_ms=800)
+    chunks: list[bytes] = []
+    deadline = time.time() + max(1.0, args.secs)
+    try:
+        while time.time() < deadline:
+            chunk = capture.poll(timeout=0.1)
+            if chunk is None:
+                continue
+            chunks.append(chunk)
+            if vad.observe(chunk) == "silence" and len(chunks) > 40:
+                break
+    finally:
+        capture.stop()
+        mic.close()
+    out = args.out or str(Path(data_dir) / "tmp" /
+                          f"listen-{int(time.time())}.wav")
+    write_wav_bytes(out, b"".join(chunks))
+    if args.json:
+        print(json.dumps({"path": out, "chunks": len(chunks)}, indent=2))
+    else:
+        print(f"recorded → {out}")
+    return 0
+
+
+def _cmd_voice_transcribe(args: argparse.Namespace, context: Any) -> int:
+    stt = _voice_stt_from_tools(context)
+    text = stt(args.file)
+    if args.json:
+        print(json.dumps({"text": text}, indent=2))
+    else:
+        print(text)
+    return 0
+
+
+def _cmd_voice_stats(args: argparse.Namespace, context: Any) -> int:
+    from .voice.session import StatsStore
+
+    summary = StatsStore(_voice_data_dir(args, context.settings)).summary()
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print(f"sessions: {summary['sessions']}  turns: {summary['turns']}  "
+              f"barge-ins: {summary['barge_ins']}")
+        print(f"ear-to-ear p50: {summary['ear_to_ear_ms_p50']} ms  "
+              f"p95: {summary['ear_to_ear_ms_p95']} ms")
+    return 0
+
+
+def _cmd_voice_consent(args: argparse.Namespace, context: Any) -> int:
+    from .voice.session import ConsentStore
+
+    store = ConsentStore(_voice_data_dir(args, context.settings))
+    if args.revoke:
+        store.revoke(args.device)
+        result = {"device": args.device, "consented": False}
+    elif args.grant:
+        store.grant(args.device)
+        result = {"device": args.device, "consented": True}
+    else:
+        result = {"device": args.device,
+                  "consented": store.consented(args.device)}
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        state = "granted" if result["consented"] else "not granted"
+        print(f"recording consent for {args.device!r}: {state}")
+    return 0
+
+
+def _cmd_voice_purge(args: argparse.Namespace, context: Any) -> int:
+    from .voice.session import VoiceSession
+
+    session = VoiceSession(
+        think=lambda t: "", stt=lambda p: "", tts=lambda t, p: {},
+        data_dir=_voice_data_dir(args, context.settings))
+    removed = session.purge_audio()
+    if args.json:
+        print(json.dumps({"removed": removed}, indent=2))
+    else:
+        print(f"deleted {removed} retained audio file(s).")
+    return 0
+
+
+def _cmd_voice_decrypt(args: argparse.Namespace, context: Any) -> int:
+    from pathlib import Path
+
+    from .voice.session import decrypt_kept_audio, write_wav_bytes
+
+    key = _voice_read_key_file(args.key_file)
+    try:
+        pcm = decrypt_kept_audio(args.file, key)
+    except Exception as exc:
+        print(f"decrypt failed: {exc}", file=sys.stderr)
+        return 1
+    out = args.out or str(Path(args.file).with_suffix("").with_suffix(".wav"))
+    write_wav_bytes(out, pcm)
+    print(f"decrypted → {out}")
+    return 0
 
 
 def _cmd_vision(args: argparse.Namespace, context: Any) -> int:

@@ -152,6 +152,23 @@ class PartnerBrain:
                 notes.append(f"file: {media.name or media.path}")
         return notes
 
+    def _spoken_command(self, message: ChatMessage) -> str:
+        """Raw transcript if an audio attachment transcribes to a /command.
+
+        Returns "" when there is no audio, no transcript, or the transcript
+        isn't a command — the caller leaves the message untouched.
+        """
+        for media in message.media or []:
+            kind = str(getattr(media, "kind", "") or "")
+            mime = str(getattr(media, "mime", "") or "")
+            if kind not in ("audio", "voice") and not mime.startswith("audio"):
+                continue
+            note = self._transcribe_media_note(media)
+            text = note.split("—", 1)[-1].strip() if "—" in note else ""
+            if text.startswith("/"):
+                return text
+        return ""
+
     def _transcribe_media_note(self, media: Any) -> str:
         """Voice input: transcribe an incoming voice note so the model HEARS it.
 
@@ -890,6 +907,19 @@ class PartnerRuntime:
             ]
         else:
             self.context.extras.pop("attachments", None)
+        # Voice notes use the typed-intent path: if the owner's voice note
+        # transcribes to a slash command, it becomes the message text so the
+        # whole downstream pipeline (command parsing, routing, gating) treats
+        # it exactly like typed text. Anything else stays conversation
+        # context via _media_notes as before.
+        if message.incoming and not message.text.strip().startswith("/"):
+            spoken = self.brain._spoken_command(message)
+            if spoken:
+                import dataclasses
+
+                message = dataclasses.replace(message, text=spoken)
+                _log.info("voice note in %s transcribed to command %r",
+                          message.chat.key, spoken[:40])
         # Games: while a game is live in this chat, the room owns the
         # conversation — plain messages are moves and the in-game commands
         # (/status /pass /shop /leave …) work for every participant.
@@ -5054,9 +5084,18 @@ class PartnerRuntime:
         sent = False
         if gateway is not None and ref.platform in getattr(gateway, "adapters", {}):
             try:
+                # Caption ceiling is ~1024 chars on the platforms; the full
+                # transcript rides beside the voice note so it's readable
+                # and searchable in chat.
                 result = gateway.send_file(ref.platform, ref, v["path"],
-                                           caption=text[:80])
+                                           caption=text[:1024])
                 sent = bool(getattr(result, "ok", False))
+                if sent and len(text) > 1024:
+                    try:
+                        gateway.send(ref.platform, ref, text)
+                    except Exception:  # noqa: BLE001 - transcript is a bonus
+                        _log.debug("voice-note transcript send failed",
+                                   exc_info=True)
             except Exception:  # noqa: BLE001 - report the file, don't crash
                 sent = False
         backend = v.get("backend", "?")

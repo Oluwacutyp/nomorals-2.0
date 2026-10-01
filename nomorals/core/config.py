@@ -419,6 +419,13 @@ class AudioSettings:
     stt_model: str = ""
     stt_api_key: str = ""
     audio_dir: str = "audio"
+    # live voice session (Prompt 10): silence that ends an utterance,
+    # per-device data dir, raw-audio retention (off by default), and the
+    # spoken-summary length cap. Env: NM_AUDIO_VOICE_SILENCE_MS etc.
+    voice_silence_ms: int = 800
+    voice_keep_audio: bool = False
+    voice_speech_cap_secs: int = 60
+    voice_data_dir: str = "voice_data"
 
 @dataclass
 class SchedulerSettings:
