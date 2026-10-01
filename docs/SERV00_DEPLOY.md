@@ -105,14 +105,56 @@ Survives Serv00 maintenance reboots on its own.
 
 ## Step 7 — Point it at YOUR model after training
 
-Once `codebeast-3.8b` is on your Hugging Face account:
+Once `Cutyp/codebeast-3.8b` is on your Hugging Face account:
 
 ```bash
 # edit ~/.devon-bot.env:
-NM_HF_MODEL=<your-username>/codebeast-3.8b
+NM_HF_MODEL=Cutyp/codebeast-3.8b
 # then restart:
 pkill -f run_chat_bot.py   # cron brings it back within a minute
 ```
+
+## Optional: also connect your personal Telegram account (userbot)
+
+This gives Devon full access as *you* over MTProto: DMs, groups, channels.
+Handy trick: message your own **Saved Messages** and she replies there.
+
+**Read this first, it's important:**
+- The session file (below) is a *live login* to your Telegram account —
+  anyone holding it **is you** on Telegram. Serv00 is a shared host. Only
+  do this if you're comfortable with that risk.
+- Telegram limits or bans userbot accounts that behave like spam bots.
+  Devon has per-platform rate limits, but keep proactive/auto messaging
+  modest — don't let her DM strangers.
+
+Steps:
+
+1. **API credentials (free):** go to [my.telegram.org](https://my.telegram.org),
+   log in with your phone number → **API development tools** → create an app
+   → copy **api_id** and **api_hash**.
+2. **Install Telethon** in the venv:
+   ```bash
+   ~/bot-venv/bin/pip install telethon
+   ```
+3. **Add to `~/.devon-bot.env`:**
+   ```bash
+   NM_PARTNER_PLATFORMS=telegram,telegram-bot
+   NM_CHAT_TELEGRAM_ENABLED=true
+   NM_CHAT_TELEGRAM_API_ID=12345678
+   NM_CHAT_TELEGRAM_API_HASH=paste_yours_here
+   NM_CHAT_TELEGRAM_SESSION=~/.devon-telegram.session
+   # optional: NM_CHAT_TELEGRAM_CHATS=...  (limit which chats she listens in)
+   ```
+4. **First login is interactive** — run in the foreground over SSH (not via
+   cron). She'll ask for your phone number in international format
+   (e.g. `234803...`), then the code Telegram sends you, then your 2FA
+   password if you have one. After that the session file is the credential
+   and every later boot is silent.
+5. **Lock down the session file:**
+   ```bash
+   chmod 600 ~/.devon-telegram.session
+   ```
+   Never commit it, never upload it anywhere.
 
 ## Limits to respect
 
@@ -131,6 +173,8 @@ pkill -f run_chat_bot.py   # cron brings it back within a minute
 | `adapters started: ['local']` only | `NM_CHAT_TELEGRAM_BOT_TOKEN` missing/wrong in `~/.devon-bot.env` |
 | Bot replies with errors about the model | `HF_TOKEN` wrong, or `NM_HF_MODEL` repo id misspelled / not public |
 | First reply very slow, then fine | Normal — HF cold start on the free tier |
+| `telegram unavailable: No module named 'telethon'` | `~/bot-venv/bin/pip install telethon`, then restart |
+| Login code asked on every boot | delete `~/.devon-telegram.session` and redo the one-time interactive login |
 | `python3 --version` < 3.11 | Check Serv00 docs for a newer python, or ask in their forum |
 | Everything dies hourly | CPU-abuse suspension — lighten what the bot is doing |
 

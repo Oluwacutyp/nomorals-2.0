@@ -8,10 +8,17 @@ a cheap VPS) is:
     NM_LLM_PROVIDER=hf_serverless          # brain = HF Inference API, no local model
     NM_HF_MODEL=<your HF repo>             # e.g. <user>/codebeast-3.8b
     HF_TOKEN=...                           # huggingface.co/settings/tokens
-    NM_PARTNER_PLATFORMS=telegram-bot
+    NM_PARTNER_PLATFORMS=telegram-bot   # or: telegram,telegram-bot for +userbot
     NM_CHAT_TELEGRAM_BOT_ENABLED=true
     NM_CHAT_TELEGRAM_BOT_TOKEN=...         # from @BotFather
     NM_CHAT_TELEGRAM_BOT_CHATS=...         # owner chat id(s)
+
+    # Optional userbot (your personal account via Telethon — needs
+    # `pip install telethon` and a one-time interactive login):
+    # NM_CHAT_TELEGRAM_ENABLED=true
+    # NM_CHAT_TELEGRAM_API_ID=...          # from my.telegram.org
+    # NM_CHAT_TELEGRAM_API_HASH=...
+    # NM_CHAT_TELEGRAM_SESSION=~/.devon-telegram.session
 
 The Telegram *bot* adapter long-polls ``getUpdates`` — no webhook, no inbound
 ports, no public IP needed — so it works behind any NAT/shared host.

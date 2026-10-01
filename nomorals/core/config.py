@@ -231,6 +231,8 @@ class ChatSettings:
     telegram_session: str = ""
     telegram_api_id: str = ""
     telegram_api_hash: str = ""
+    telegram_chats: str = ""
+    threads_enabled: bool = True
     telegram_bot_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_bot_chats: str = ""
