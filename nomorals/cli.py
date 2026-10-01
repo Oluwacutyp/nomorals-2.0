@@ -288,6 +288,141 @@ def _parser() -> argparse.ArgumentParser:
                         help="with video: block until the background job finishes")
     m_conv.add_argument("--json", action="store_true", help="Output as JSON")
 
+    studio = sub.add_parser(
+        "studio",
+        help="Pro edit sessions: filters, grading, layers, AI edits, templates",
+        description=("nm studio presets\n"
+                     "nm studio filter <file> <preset> [--strength F]\n"
+                     "nm studio grade <file> [--temperature N] [--tint N] "
+                     "[--saturation F] [--contrast F] [--vignette F]\n"
+                     "nm studio text <file> \"<text>\" [--position POS] [--size N]\n"
+                     "nm studio ai <file> \"<instruction>\" [--strength F] "
+                     "[--seed N] [--mask l,t,r,b]\n"
+                     "nm studio template <name> [--param k=v ...] [--wait]\n"
+                     "nm studio project save <file> <project> --ops JSON\n"
+                     "nm studio project render <project> [--wait]\n"
+                     "nm studio project describe <project>\n"
+                     "nm studio batch <dir> <project> [--pattern GLOB]\n"
+                     "nm studio compare <file> --ops JSON [--mode MODE]\n"
+                     "nm studio gen-status"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    studio_sub = studio.add_subparsers(dest="studio_action", required=True)
+
+    def _s_json(p):
+        p.add_argument("--json", action="store_true", help="Output as JSON")
+
+    s_presets = studio_sub.add_parser("presets", help="list studio presets")
+    _s_json(s_presets)
+
+    s_filter = studio_sub.add_parser("filter", help="apply a filter preset")
+    s_filter.add_argument("file", help="image file (workspace-relative)")
+    s_filter.add_argument("preset", help="filter preset name")
+    s_filter.add_argument("--strength", type=float, default=1.0)
+    _s_json(s_filter)
+
+    s_grade = studio_sub.add_parser("grade", help="color grade an image")
+    s_grade.add_argument("file", help="image file (workspace-relative)")
+    s_grade.add_argument("--temperature", type=float, default=0.0)
+    s_grade.add_argument("--tint", type=float, default=0.0)
+    s_grade.add_argument("--saturation", type=float, default=1.0)
+    s_grade.add_argument("--contrast", type=float, default=1.0)
+    s_grade.add_argument("--vignette", type=float, default=0.0)
+    _s_json(s_grade)
+
+    s_text = studio_sub.add_parser("text", help="add pro text to an image")
+    s_text.add_argument("file", help="image file (workspace-relative)")
+    s_text.add_argument("text", help="the text to render")
+    s_text.add_argument("--position", default="bottom")
+    s_text.add_argument("--size", type=int, default=64)
+    s_text.add_argument("--color", default="white")
+    _s_json(s_text)
+
+    s_ai = studio_sub.add_parser("ai", help="AI instruction edit "
+                                 "('make it sunset')")
+    s_ai.add_argument("file", help="image file (workspace-relative)")
+    s_ai.add_argument("instruction", help="natural-language edit instruction")
+    s_ai.add_argument("--strength", type=float, default=0.75)
+    s_ai.add_argument("--seed", type=int, default=None)
+    s_ai.add_argument("--mask", default=None,
+                      help="region as l,t,r,b (or omit for full image)")
+    _s_json(s_ai)
+
+    s_tmpl = studio_sub.add_parser("template", help="build a template project")
+    s_tmpl.add_argument("name", help="podcast-clip, quote-card, "
+                                    "product-showcase, meme, slideshow")
+    s_tmpl.add_argument("--param", action="append", default=[],
+                        help="template param as k=v (repeatable)")
+    s_tmpl.add_argument("--wait", action="store_true",
+                        help="with video: block until the job finishes")
+    _s_json(s_tmpl)
+
+    s_proj = studio_sub.add_parser("project", help="save/load/render projects")
+    s_proj.add_argument("action", choices=["save", "render", "describe"])
+    s_proj.add_argument("file", nargs="?", default=None,
+                        help="save: source file; render/describe: project file")
+    s_proj.add_argument("project", nargs="?", default=None,
+                        help="save: project file to write")
+    s_proj.add_argument("--ops", default="[]",
+                        help="save: op chain as JSON list")
+    s_proj.add_argument("--wait", action="store_true")
+    _s_json(s_proj)
+
+    s_batch = studio_sub.add_parser("batch", help="apply a project to a folder")
+    s_batch.add_argument("dir", help="source directory (workspace-relative)")
+    s_batch.add_argument("project", help="saved studio project file")
+    s_batch.add_argument("--pattern", default="*.jpg")
+    s_batch.add_argument("--out-dir", default=None)
+    _s_json(s_batch)
+
+    s_cmp = studio_sub.add_parser("compare", help="before/after comparison")
+    s_cmp.add_argument("file", help="image file (workspace-relative)")
+    s_cmp.add_argument("--ops", default="[]",
+                       help="op chain as JSON list")
+    s_cmp.add_argument("--mode", default="side-by-side",
+                       choices=["side-by-side", "split", "stacked", "html"])
+    _s_json(s_cmp)
+
+    s_gen = studio_sub.add_parser("gen-status",
+                                  help="generative backend status")
+    _s_json(s_gen)
+
+    captcha = sub.add_parser(
+        "captcha",
+        help="captcha detection and solving for browser automation",
+        description=("nm captcha detect --html FILE | --url URL\n"
+                     "nm captcha status\n"
+                     "nm captcha solve --kind KIND --sitekey KEY --url URL\n"
+                     "  [--backend service|takeover|detect] [--image PATH|URL]\n"
+                     "  [--v3-action NAME] [--min-score F]"),
+    )
+    captcha_sub = captcha.add_subparsers(dest="captcha_action", required=True)
+    c_detect = captcha_sub.add_parser("detect", help="detect captchas in HTML")
+    c_detect.add_argument("--html", default="",
+                          help="HTML file to scan (default: fetch --url)")
+    c_detect.add_argument("--url", default="",
+                          help="page URL (fetched, or hints detection)")
+    c_detect.add_argument("--json", action="store_true",
+                          help="output as JSON")
+    captcha_sub.add_parser("status", help="backend availability + audit path")
+    c_solve = captcha_sub.add_parser("solve", help="solve one challenge")
+    c_solve.add_argument("--kind", required=True,
+                         help="recaptcha_v2|recaptcha_v3|recaptcha_enterprise|"
+                              "hcaptcha|turnstile|image_captcha")
+    c_solve.add_argument("--sitekey", default="",
+                         help="the data-sitekey")
+    c_solve.add_argument("--url", default="", help="page URL")
+    c_solve.add_argument("--backend", default="auto",
+                         help="service|takeover|detect|auto (default auto)")
+    c_solve.add_argument("--image", default="",
+                         help="image captcha: file path or URL")
+    c_solve.add_argument("--v3-action", default="",
+                         help="reCAPTCHA v3 action name")
+    c_solve.add_argument("--min-score", type=float, default=0.3,
+                         help="reCAPTCHA v3 score floor")
+    c_solve.add_argument("--json", action="store_true",
+                         help="output as JSON")
+
     voice = sub.add_parser(
         "voice",
         help="Live voice loop: talk to Devon through your mic and speakers",
@@ -1230,8 +1365,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_code(args, context)
         if args.command == "media":
             return _cmd_media(args, context)
+        if args.command == "studio":
+            return _cmd_studio(args, context)
         if args.command == "voice":
             return _cmd_voice(args, context)
+        if args.command == "captcha":
+            return _cmd_captcha(args, context)
         if args.command == "vision":
             return _cmd_vision(args, context)
         if args.command == "inbox":
@@ -1792,6 +1931,137 @@ def _cmd_media(args: argparse.Namespace, context: Any) -> int:
     return 2
 
 
+def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm studio` to the EditStudio tools."""
+    action = args.studio_action
+    as_json = getattr(args, "json", False)
+    try:
+        if action == "presets":
+            result = _media_call(context, "studio_presets")
+            if as_json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print("filter presets:  " + ", ".join(result["filters"]))
+                print("transitions:     " + ", ".join(result["transitions"]))
+                print("export presets:  " + ", ".join(result["export_presets"]))
+                print("templates:       " + ", ".join(result["templates"]))
+                print("blend modes:     " + ", ".join(result["blend_modes"]))
+            return 0
+        if action == "filter":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "filter", "preset": args.preset,
+                      "strength": args.strength}])
+        elif action == "grade":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "grade", "temperature": args.temperature,
+                      "tint": args.tint, "saturation": args.saturation,
+                      "contrast": args.contrast, "vignette": args.vignette}])
+        elif action == "text":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "text_layer", "text": args.text,
+                      "position": args.position, "size": args.size,
+                      "color": args.color}])
+        elif action == "ai":
+            gen_op: dict[str, Any] = {
+                "op": "generative_edit", "instruction": args.instruction,
+                "strength": args.strength}
+            if args.seed is not None:
+                gen_op["seed"] = args.seed
+            if args.mask:
+                gen_op["mask"] = [int(v) for v in args.mask.split(",")]
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[gen_op])
+        elif action == "template":
+            params: dict[str, Any] = {}
+            for kv in args.param or []:
+                if "=" not in kv:
+                    print(f"bad --param {kv!r}; use k=v", file=sys.stderr)
+                    return 2
+                k, v = kv.split("=", 1)
+                params[k.strip()] = v.strip()
+            result = _media_call(context, "studio_template",
+                                 template=args.name, params=params,
+                                 wait=args.wait)
+        elif action == "project":
+            if args.action == "save":
+                if not args.file or not args.project:
+                    print("project save needs <file> <project>",
+                          file=sys.stderr)
+                    return 2
+                result = _media_call(context, "studio_project",
+                                     action="save", source=args.file,
+                                     project_path=args.project,
+                                     ops=json.loads(args.ops))
+            elif args.action == "render":
+                if not args.file:
+                    print("project render needs <project>", file=sys.stderr)
+                    return 2
+                result = _media_call(context, "studio_project",
+                                     action="render", project_path=args.file,
+                                     wait=args.wait)
+            else:
+                if not args.file:
+                    print("project describe needs <project>", file=sys.stderr)
+                    return 2
+                result = _media_call(context, "studio_project",
+                                     action="describe",
+                                     project_path=args.file)
+                print(result["describe"])
+                return 0
+        elif action == "batch":
+            result = _media_call(context, "studio_batch", src_dir=args.dir,
+                                 project=args.project, pattern=args.pattern,
+                                 out_dir=args.out_dir)
+        elif action == "compare":
+            result = _media_call(context, "studio_compare", source=args.file,
+                                 ops=json.loads(args.ops), mode=args.mode)
+        elif action == "gen-status":
+            result = _media_call(context, "studio_gen_status")
+            if as_json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(f"selected backend: {result['selected']}")
+                print(f"huggingface_hub installed: {result['hf_installed']}")
+                print(f"HF_TOKEN set: {result['hf_token_set']} "
+                      f"(model: {result['hf_model']})")
+                print(f"diffusers available: {result['diffusers_available']} "
+                      f"(model: {result['diffusers_model']})")
+                if not result['hf_installed'] and not result[
+                        'diffusers_available']:
+                    print("no generative backend ready: pip install "
+                          "huggingface_hub + set HF_TOKEN, or install "
+                          "diffusers+torch")
+            return 0
+        else:
+            print(f"unknown studio action: {action}", file=sys.stderr)
+            return 2
+    except RuntimeError as exc:
+        print(f"studio failed: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+    elif result.get("job_id"):
+        print(f"job {result['job_id']} queued")
+        if args.wait:
+            return _cmd_media_wait(args, context, result["job_id"], as_json)
+    elif action == "batch":
+        print(f"batch: {result['ok']}/{result['files']} ok")
+    elif action == "compare":
+        print(f"comparison → {result['output']}")
+    elif action == "template":
+        print(f"template {result.get('template')} → "
+              f"{result.get('output') or result.get('job_id')}")
+    elif action == "project":
+        print(result.get("saved", result.get("output", result)))
+    else:
+        print(f"wrote {result['output']}")
+        print(f"original untouched: {result['input']}")
+    return 0
+
+
 def _is_video_file(path: str, args: argparse.Namespace) -> bool:
     if getattr(args, "video", False):
         return True
@@ -2036,6 +2306,87 @@ def _voice_think_runtime(context: Any, device: str) -> Any:
         return "\n\n".join(p for p in outcome.parts if p).strip()
 
     return think
+
+
+def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm captcha` subcommands."""
+    import json as _json
+    from .tools.captcha import (CaptchaKind, CaptchaChallenge, CaptchaError,
+                                ServiceBackend, TakeoverBackend, detect,
+                                solve, _audit_path)
+
+    settings = getattr(context, "settings", None)
+    action = args.captcha_action
+
+    def _out(obj: Any) -> int:
+        if args.json:
+            print(_json.dumps(obj, indent=2))
+        else:
+            print(_json.dumps(obj, indent=2))
+        return 0
+
+    if action == "status":
+        svc = ServiceBackend()
+        return _out({
+            "backends": ["service", "takeover", "detect"],
+            "service_available": svc.available(),
+            "api_key_configured": svc.available(),
+            "audit_log": _audit_path(settings),
+            "kinds": list(CaptchaKind.ALL),
+        })
+
+    if action == "detect":
+        html, url = "", args.url or ""
+        if args.html:
+            with open(args.html, encoding="utf-8", errors="replace") as fh:
+                html = fh.read()
+        elif args.url:
+            import urllib.request
+            req = urllib.request.Request(
+                args.url, headers={"User-Agent": "nomorals-captcha/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                html = resp.read().decode("utf-8", "replace")
+                url = resp.geturl()
+        else:
+            print("nm captcha detect needs --html FILE or --url URL",
+                  file=sys.stderr)
+            return 2
+        found = detect(html, url)
+        return _out({"count": len(found),
+                     "challenges": [c.summary() for c in found]})
+
+    if action == "solve":
+        if args.kind not in CaptchaKind.ALL:
+            print(f"unknown kind {args.kind!r} "
+                  f"(want one of: {list(CaptchaKind.ALL)})", file=sys.stderr)
+            return 2
+        image_bytes, image_url = b"", ""
+        if args.image:
+            if args.image.startswith(("http://", "https://")):
+                from .tools.captcha import fetch_image_bytes
+                image_url = args.image
+                image_bytes = fetch_image_bytes(args.image)
+            else:
+                with open(args.image, "rb") as fh:
+                    image_bytes = fh.read()
+        challenge = CaptchaChallenge(
+            kind=args.kind, sitekey=args.sitekey, page_url=args.url,
+            image_url=image_url, image_bytes=image_bytes,
+            action=args.v3_action, min_score=args.min_score)
+        try:
+            result = solve(challenge, backend=args.backend, settings=settings)
+        except CaptchaError as exc:
+            print(f"captcha solve failed: {exc}", file=sys.stderr)
+            return 1
+        out = result.to_dict()
+        if result.takeover and not args.json:
+            print("Takeover: " + result.detail)
+            print(_json.dumps(out, indent=2))
+            return 3
+        return _out(out)
+
+    print(f"unknown captcha action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_voice(args: argparse.Namespace, context: Any) -> int:

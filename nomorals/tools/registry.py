@@ -112,7 +112,7 @@ class ToolRegistry:
 
         for _name in (
             "archive", "attacker", "audio", "book", "browser",
-            "build_app", "cards", "cipher", "code_executor", "compress",
+            "build_app", "captcha", "cards", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "filesend",
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
