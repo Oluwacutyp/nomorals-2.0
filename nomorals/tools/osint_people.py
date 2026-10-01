@@ -215,8 +215,8 @@ def email_investigate(context: Any, email: str) -> dict[str, Any]:
         domain_info = osint_domain(context, domain)
         out["domain_registration"] = domain_info.get("registration")
         out["domain_nameservers"] = None
-    except ToolError:
-        pass
+    except ToolError as e:
+        _log.debug("domain enrichment failed for %s: %s", domain, e)
     out["breaches"] = breach_check(context, email)
     return out
 

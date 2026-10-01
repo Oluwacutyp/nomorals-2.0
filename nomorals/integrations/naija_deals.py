@@ -589,7 +589,7 @@ class NaijaDealHunter:
                 if i < len(discounts):
                     try:
                         discount = abs(float(discounts[i]))
-                    except ValueError:
+                    except ValueError:  # noqa: E103 - unparseable scraped discount treated as 0
                         pass
                 
                 if discount < min_discount:

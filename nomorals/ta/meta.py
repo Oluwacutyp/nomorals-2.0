@@ -14,10 +14,14 @@ the rule-based fallback in :mod:`nomorals.ta.pipeline`.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
 __all__ = ["labeled_matrix", "MetaGate", "sklearn_available"]
+
+_log = logging.getLogger(__name__)
 
 _REGIME_COLS = ("vol_ratio", "range_pos", "width_q", "vol_q", "trend_r2",
                 "efficiency", "p_trend", "p_range", "p_squeeze", "p_panic")
@@ -113,8 +117,8 @@ class MetaGate:
             joblib.dump({"model": self.model, "thr": self.threshold,
                          "nf": self.n_features, "pos": self.train_pos_rate},
                         path)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("could not save meta model to %s: %s", path, e)
 
     def load(self, path) -> bool:
         try:

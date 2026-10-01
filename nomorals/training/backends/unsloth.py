@@ -315,7 +315,7 @@ def _save_gguf(model: Any, tokenizer: Any, out: Path) -> dict[str, Any]:
                     model, str(gguf_dir), tokenizer, quantization_method="q8_0"
                 ),
             ))
-        except ImportError:
+        except ImportError:  # noqa: E103 - unsloth optional, other export attempts follow
             pass
         attempts.append(("model.save_pretrained_gguf()",
                          lambda: model.save_pretrained_gguf(str(gguf_dir), tokenizer)))

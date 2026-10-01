@@ -84,7 +84,7 @@ class VoiceBridge:
             # Cleanup temp file
             try:
                 Path(audio_path).unlink(missing_ok=True)
-            except Exception:
+            except Exception:  # noqa: E103 - temp file cleanup is best-effort
                 pass
             
             if result.ok:
@@ -143,7 +143,7 @@ class VoiceBridge:
             # Cleanup temp file
             try:
                 Path(audio_path).unlink(missing_ok=True)
-            except Exception:
+            except Exception:  # noqa: E103 - temp file cleanup is best-effort
                 pass
             
             _log.info(f"Sent voice note to Telegram: {chat_id}")

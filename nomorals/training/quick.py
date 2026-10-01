@@ -105,7 +105,7 @@ def collect_quick_dataset(context: Any,
                 if users and assists:
                     add(users[0].get("content", ""),
                         assists[0].get("content", ""), "seed")
-    except OSError:
+    except OSError:  # noqa: E103 - seed file is optional enrichment
         pass
 
     # 2. REAL pairs collected by the running bot (its actual voice)
@@ -123,7 +123,7 @@ def collect_quick_dataset(context: Any,
                     continue
                 add(str(rec.get("user", "")), str(rec.get("assistant", "")),
                     "collected")
-    except (OSError, AttributeError):
+    except (OSError, AttributeError):  # noqa: E103 - collected data is optional
         pass
 
     return examples

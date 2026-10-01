@@ -969,13 +969,13 @@ class TelegramBotAdapter(ChatAdapter):
             if chat.thread_id:
                 try:
                     params_base["message_thread_id"] = int(chat.thread_id)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    _log.debug("dropping bad thread_id %r: %s", chat.thread_id, e)
             if reply_to:
                 try:
                     params_base["reply_parameters"] = {"message_id": int(reply_to)}
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    _log.debug("dropping bad reply_to %r: %s", reply_to, e)
             for chunk in _chunk_text(text, self.MAX_TEXT):
                 result = self._api("sendMessage", text=chunk, **params_base)
                 last_id = str(result.get("message_id", ""))

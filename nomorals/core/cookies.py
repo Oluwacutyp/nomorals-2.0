@@ -399,7 +399,7 @@ class CookieLab:
                         cookie.decode_via = "hex"
                     if cookie.kind == "unknown":
                         cookie.kind = "encoded"
-            except (binascii.Error, ValueError):
+            except (binascii.Error, ValueError):  # noqa: E103 - undecodable value is a normal probe outcome
                 pass
         return cookie
 

@@ -70,7 +70,7 @@ class SandboxLimits:
         _set(resource.RLIMIT_CORE, 0, 0)
         try:
             os.setsid()  # own process group, so the whole tree can be signalled
-        except OSError:  # pragma: no cover - already a leader
+        except OSError:  # pragma: no cover - already a leader  # noqa: E103 - already documented
             pass
 
 
@@ -253,7 +253,7 @@ def _kill_tree(process: subprocess.Popen) -> None:
     except (ProcessLookupError, PermissionError, OSError):  # pragma: no cover
         try:
             process.kill()
-        except OSError:
+        except OSError:  # noqa: E103 - process already gone
             pass
 
 

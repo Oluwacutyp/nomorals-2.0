@@ -28,6 +28,10 @@ from .cases import (  # noqa: F401 - CASES kept for back-compat
 )
 from .easy import TRIVIA
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 __all__ = ["MEDIUM_GAMES"]
 
 # ── shared banks ─────────────────────────────────────────────────────────────
@@ -1536,8 +1540,9 @@ class InvestigationGame(MultiGame):
             hist = (prof.per_game or {}).get("case")
             if isinstance(hist, dict) and hist.get("v") == HISTORY_VERSION:
                 return hist
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("case history for %s unreadable, starting fresh: %s",
+                       player.key, e)
         return blank_history()
 
     def save_history(self, store, player, state):
@@ -1559,8 +1564,9 @@ class InvestigationGame(MultiGame):
             per_game["case"] = history
             prof.per_game = per_game
             store._upsert(prof)  # same package; no public per-game setter
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("could not persist case history for %s: %s",
+                         player.key, e)
         return history
 
     def setup(self, room, mind):

@@ -290,7 +290,7 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
         try:
             import huggingface_hub  # noqa: F401
             return HFInferenceBackend()
-        except ImportError:
+        except ImportError:  # noqa: E103 - optional backend probe, absence is handled below
             pass
         raise GenerativeEditError(_NO_BACKEND_MSG)
     raise GenerativeEditError(

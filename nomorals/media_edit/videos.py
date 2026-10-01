@@ -120,7 +120,7 @@ def run_ffmpeg(args: list[str], *,
                 try:
                     ms = float(line.split("=", 1)[1])
                     progress_cb(min(1.0, max(0.0, (ms / 1_000_000) / duration)))
-                except ValueError:
+                except ValueError:  # noqa: E103 - one malformed progress line; keep reading
                     pass
             elif line == "progress=end" and progress_cb:
                 progress_cb(1.0)
@@ -145,7 +145,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     except (OSError, ProcessLookupError):
         try:
             proc.kill()
-        except OSError:
+        except OSError:  # noqa: E103 - process already gone; teardown is best-effort
             pass
     try:
         proc.wait(timeout=10)

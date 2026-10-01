@@ -20,6 +20,7 @@ or ``scan()`` for machine-readable findings.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -141,11 +142,14 @@ _NOQA_MAP = {"BLE001": ("E101", "E102", "E103", "E104"),  # blind except (whole 
 
 
 def _noqa_suppresses(line: str, rule: str) -> bool:
-    if "# noqa" not in line:
+    # find "noqa" anywhere inside a trailing comment, e.g.
+    # "# noqa: BLE001", "# noqa", "# pragma: no cover, noqa: E103"
+    m = re.search(r"#.*?\bnoqa\b(.*)$", line)
+    if not m:
         return False
-    tail = line.split("# noqa", 1)[1].strip()
+    tail = m.group(1).strip()
     if not tail.startswith(":"):
-        return True  # bare "# noqa" suppresses all
+        return True  # bare "noqa" suppresses all
     codes = [c.strip().split()[0] for c in tail[1:].split(",") if c.strip()]
     for code in codes:
         if code == rule or rule in _NOQA_MAP.get(code, ()):

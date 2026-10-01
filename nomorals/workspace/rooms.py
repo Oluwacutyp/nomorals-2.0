@@ -597,7 +597,7 @@ class RoomManager:
                             f"{e.get('event')}")
                     except (json.JSONDecodeError, ValueError):
                         continue
-        except OSError:
+        except OSError:  # noqa: E103 - dirty-room recovery is best-effort; missing log is expected
             pass
         room.state["dirty_reconciled_at"] = _utcnow()
         room.state["dirty_tail"] = tail

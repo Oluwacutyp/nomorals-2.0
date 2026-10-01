@@ -40,6 +40,9 @@ from pathlib import Path
 from typing import Any, Callable, Generator, List, Optional, Set
 
 from ..core.policy import Capability
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 __all__ = [
     "ALGORITHMS",
@@ -676,8 +679,8 @@ class Engine:
             self._tested = data.get("tested", 0)
             if not self.quiet and self._tested:
                 print(f"  Resumed — {self._tested:,} candidates already tested\n")
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("checkpoint %s is corrupt, starting fresh: %s", p, e)
 
     # ── display ────────────────────────────────────────────────────────────
     def _header(self) -> None:

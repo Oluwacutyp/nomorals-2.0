@@ -165,8 +165,8 @@ class WhatsAppAdapter(ChatAdapter):
                     except json.JSONDecodeError:
                         continue
                     self._dispatch(obj, handler)
-        except OSError:
-            pass
+        except OSError as e:
+            _log.debug("whatsapp bridge read loop ended: %s", e)
         finally:
             self.connected.clear()
 
@@ -267,7 +267,7 @@ class WhatsAppAdapter(ChatAdapter):
                 if self._sock is not None:
                     try:
                         self._sock.close()
-                    except OSError:
+                    except OSError:  # noqa: E103 - socket already dead
                         pass
                     self._sock = None
             if self.stopped:

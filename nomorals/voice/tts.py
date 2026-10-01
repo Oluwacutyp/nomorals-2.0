@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -49,6 +50,8 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from .director import CANONICAL_BURSTS
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "VoiceProfile",
@@ -155,8 +158,8 @@ class VoiceLibrary:
                 json.dump(
                     {k: v.to_dict() for k, v in self.profiles.items()},
                     fh, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning("could not persist voice profile index: %s", e)
 
     def upload_voice(self, name: str, audio_file_path: str,
                      language: str = "en", consent_confirmed: bool = False,
@@ -232,7 +235,7 @@ class VoiceLibrary:
             if profile.reference_audio_path and \
                     os.path.exists(profile.reference_audio_path):
                 os.remove(profile.reference_audio_path)
-        except OSError:
+        except OSError:  # noqa: E103 - reference file already gone; index save below is the source of truth
             pass
         self._save_index()
         return True

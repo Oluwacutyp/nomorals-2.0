@@ -90,7 +90,7 @@ def _error_snippet(body: str) -> str:
                        else data.get("error")) or ""
             if message:
                 return str(message)[:200]
-        except (ValueError, TypeError):
+        except (ValueError, TypeError):  # noqa: E103 - falls through to raw body
             pass
     return body[:200]
 

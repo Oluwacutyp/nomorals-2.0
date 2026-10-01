@@ -187,7 +187,7 @@ def _connect(host: str, port: int, timeout: float) -> socket.socket:
     sock = socket.create_connection((host, port), timeout=timeout)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except OSError:
+    except OSError:  # noqa: E103 - socket tuning is best-effort
         pass
     return sock
 
@@ -694,7 +694,7 @@ class ProxyScraper:
         if head in "{[":
             try:
                 json.loads(text)
-            except ValueError:
+            except ValueError:  # noqa: E103 - falls through to protocol/list parsers
                 pass
             else:
                 proxies = cls.parse_json(text)
@@ -953,7 +953,7 @@ class ProxyStore:
                          self.candidates_json):
                 try:
                     path.unlink()
-                except OSError:
+                except OSError:  # noqa: E103 - cache file may not exist
                     pass
 
     # -- pool queries ---------------------------------------------------------

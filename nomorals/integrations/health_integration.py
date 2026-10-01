@@ -371,8 +371,8 @@ class HealthIntegration:
             cred = self.account_manager.get_credential("google_fit_oauth", account)
             if cred.is_active:
                 return "google_fit"
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("health backend probe failed, using local: %s", e)
         
         return "local"
     

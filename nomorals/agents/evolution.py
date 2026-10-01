@@ -184,8 +184,8 @@ class EvolutionGitController:
             try:
                 out["ahead"] = int(left or 0)
                 out["behind"] = int(right or 0) if sep else 0
-            except ValueError:
-                pass
+            except ValueError as e:
+                _log.debug("unparseable rev-list output: %s", e)
         return out
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -352,8 +352,8 @@ class EvolutionAgent:
                     text = p.read_text(encoding="utf-8", errors="replace")
                     test_lines += sum(1 for l in text.splitlines()
                                       if "def test_" in l)
-                except OSError:
-                    pass
+                except OSError as e:
+                    _log.debug("unreadable test file %s: %s", p, e)
         prod_files = prod_lines = 0
         nomo = self.repo_root / "nomorals"
         if nomo.is_dir():
@@ -364,8 +364,8 @@ class EvolutionAgent:
                 try:
                     prod_lines += len(p.read_text(
                         encoding="utf-8", errors="replace").splitlines())
-                except OSError:
-                    pass
+                except OSError as e:
+                    _log.debug("unreadable source file %s: %s", p, e)
         tools = skills = kg_nodes = kg_edges = 0
         try:
             tools = len(getattr(self.context, "tools", None) or [])
@@ -576,8 +576,8 @@ class EvolutionAgent:
                             if report.get(k)
                         }, indent=2)[:6000]
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e:
+                    _log.debug("skipping malformed research report: %s", e)
         if focus:
             parts = [p.strip() for p in focus.split(",") if p.strip()]
             for rel in parts[:6]:

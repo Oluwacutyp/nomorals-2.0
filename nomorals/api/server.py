@@ -248,7 +248,7 @@ def serve(
         return 0
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:  # pragma: no cover
+    except KeyboardInterrupt:  # pragma: no cover  # noqa: E103, E106 - deliberate shutdown hook
         pass
     finally:
         httpd.shutdown()

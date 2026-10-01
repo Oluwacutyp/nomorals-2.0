@@ -17,7 +17,7 @@ def parse_json_loose(text: str) -> Any:
         cleaned = re.sub(r"\n?```$", "", cleaned).strip()
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError:  # noqa: E103 - probe failed; bracket-matching fallback follows
         pass
     for opener, closer in (("{", "}"), ("[", "]")):
         start, end = cleaned.find(opener), cleaned.rfind(closer)

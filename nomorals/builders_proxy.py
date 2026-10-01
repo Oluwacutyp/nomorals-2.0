@@ -103,7 +103,7 @@ def ensure_self_signed_cert(cert_path: str, key_path: str,
         with open(cert_path, "wb") as fh:
             fh.write(cert.public_bytes(serialization.Encoding.PEM))
         return cert_path, key_path
-    except ImportError:
+    except ImportError:  # noqa: E103 - cryptography optional, openssl fallback follows
         pass
     except Exception as exc:  # noqa: BLE001 — fall through to openssl
         crypto_err = str(exc)
@@ -291,7 +291,7 @@ def run(listen_host: str, listen_port: int, backend_host: str,
           flush=True)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:  # pragma: no cover
+    except KeyboardInterrupt:  # pragma: no cover  # noqa: E103 - deliberate top-level shutdown hook
         pass
     finally:
         httpd.server_close()

@@ -57,7 +57,7 @@ def detect_tts_engines() -> list[str]:
         import edge_tts  # noqa: F401
 
         found.append("edge_tts")
-    except ImportError:
+    except ImportError:  # noqa: E103 - optional TTS backend probe
         pass
     return found
 

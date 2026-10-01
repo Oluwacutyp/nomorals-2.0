@@ -360,8 +360,8 @@ def generate(context: Any, kind: str, name: str, config: dict[str, Any],
     target.write_text(text, encoding="utf-8")
     try:
         target.chmod(0o755 if ext == "sh" else 0o644)
-    except OSError:
-        pass
+    except OSError as e:
+        _log.debug("chmod failed for %s: %s", target, e)
     return {
         "path": str(target), "kind": kind, "name": name, "ext": ext,
         "bytes": len(text), "validated": True,

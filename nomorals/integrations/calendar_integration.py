@@ -237,8 +237,8 @@ class CalendarIntegration:
                 cred = self.account_manager.get_credential("google_calendar_oauth", account)
                 if cred.credential_type == "oauth_token":
                     return "google_api"
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("calendar backend probe failed for %s: %s", account, e)
         
         return "none"
     

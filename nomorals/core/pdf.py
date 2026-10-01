@@ -727,7 +727,7 @@ def _parse_cmap(data: bytes) -> tuple[dict[int, str], int]:
                         break
                     try:
                         cmap[gid] = _cmap_to_text(bytes.fromhex(arr[i].decode()))
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError):  # noqa: E103 - malformed cmap entry skipped
                         pass
             else:
                 try:
@@ -795,14 +795,14 @@ def _draws_in_stream(stream: bytes,
             # Tm: a b c d e f — e, f are the new text origin
             try:
                 x, y = float(m.group(6)), float(m.group(7))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError):  # noqa: E103 - malformed Tm operands keep last position
                 pass
         elif m.group(9) is not None:
             # Td/TD: move the line start
             try:
                 x += float(m.group(8))
                 y += float(m.group(9))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError):  # noqa: E103 - malformed Td operands keep last position
                 pass
         elif m.group(0).strip() == b"T*":
             # T*: next line down (leading unknown; any negative works)
@@ -821,7 +821,7 @@ def _draws_in_stream(stream: bytes,
                     try:
                         if float(part.group(1)) < -80:
                             text += " "
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError):  # noqa: E103 - malformed kerning number ignored
                         pass
             if text:
                 draws.append((x, y, text))

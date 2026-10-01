@@ -162,7 +162,7 @@ class CodeInterpreter:
             for stale in workdir.glob("*"):
                 try:
                     stale.unlink()
-                except OSError:
+                except OSError:  # noqa: E103 - stale file cleanup is best-effort
                     pass
         if not (code or "").strip():
             if reset:

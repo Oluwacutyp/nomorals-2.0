@@ -263,7 +263,7 @@ class ToolMaker:
             try:
                 target.unlink(missing_ok=True)
                 tmp.rmdir()
-            except OSError:
+            except OSError:  # noqa: E103 - temp cleanup is best-effort
                 pass
 
     # ── 4. install ─────────────────────────────────────────────────────────

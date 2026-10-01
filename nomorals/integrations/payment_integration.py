@@ -565,8 +565,8 @@ class PaymentIntegration:
                         name=f"{currency} Wallet ({cred.username[:8]}...)",
                         currency=currency,
                     ))
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("crypto wallet listing failed: %s", e)
         
         # Virtual cards
         cards = await self.get_virtual_cards()

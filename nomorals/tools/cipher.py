@@ -119,7 +119,7 @@ def _key_bytes(key: str) -> bytes:
     if len(probe) in (32, 48, 64):
         try:
             return bytes.fromhex(probe)
-        except ValueError:
+        except ValueError:  # noqa: E103 - not hex; falls through to UTF-8 bytes
             pass
     return probe.encode("utf-8")
 

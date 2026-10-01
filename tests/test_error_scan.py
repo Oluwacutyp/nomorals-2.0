@@ -158,6 +158,15 @@ class TestErrorScan(unittest.TestCase):
         """)
         self.assertEqual(rules(f), [])
 
+    def test_noqa_after_pragma_is_honored(self):
+        f = run_scan("""
+            try:
+                x()
+            except ValueError:  # pragma: no cover, noqa: E103 - deliberate
+                pass
+        """)
+        self.assertEqual(rules(f), [])
+
     def test_unparseable_file_does_not_crash_scan(self):
         import tempfile, os
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:

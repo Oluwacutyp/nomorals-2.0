@@ -99,7 +99,7 @@ class BackupManager:
         # Checkpoint first so the snapshot is self-contained (no -wal sidecar needed).
         try:
             self.db.checkpoint("TRUNCATE")
-        except StorageError:  # pragma: no cover - not in WAL mode
+        except StorageError:  # noqa: E103 - not in WAL mode; nothing to checkpoint (pragma: no cover)
             pass
 
         pages = int(

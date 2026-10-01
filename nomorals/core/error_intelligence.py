@@ -529,7 +529,7 @@ class ErrorIntelligence:
                 if "Retry-After" in headers:
                     try:
                         return float(headers["Retry-After"])
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError):  # noqa: E103 - unparseable header treated as absent
                         pass
         
         return None

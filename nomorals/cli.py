@@ -5019,7 +5019,7 @@ def _reply_path_report(settings_or_args, path: str = ""):
         s.close()
         if result == 0:
             server_state = "running on port " + str(local_port)
-    except Exception:
+    except Exception:  # noqa: E103 - local server probe is best-effort
         pass
     
     # Build providers list

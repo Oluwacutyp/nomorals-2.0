@@ -57,7 +57,7 @@ def memory_mb() -> int:
             for line in fh:
                 if line.startswith("MemTotal:"):
                     return int(int(line.split()[1]) / 1024.0)
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError, IndexError):  # noqa: E103 - memory probe falls through to next method
         pass
     try:  # macOS / anything else
         import subprocess

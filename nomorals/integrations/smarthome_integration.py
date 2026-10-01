@@ -343,8 +343,8 @@ class SmartHomeIntegration:
             cred = self.account_manager.get_credential("homeassistant", "default")
             if cred.is_active:
                 return "homeassistant"
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("smart-home backend probe failed, using none: %s", e)
         
         return "none"
     
@@ -617,8 +617,8 @@ class SmartHomeIntegration:
                 # Partial match
                 if name_or_id.lower() in friendly_name.lower():
                     return entity_id
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("smart-home entity lookup failed, using fallback: %s", e)
         
         # Fallback: assume it's an entity ID with domain
         if domain:

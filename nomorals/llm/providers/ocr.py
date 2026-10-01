@@ -90,7 +90,7 @@ def ocr_bytes(
     finally:
         try:
             os.unlink(tmp.name)
-        except OSError:
+        except OSError:  # noqa: E103 - temp cleanup is best-effort
             pass
 
 

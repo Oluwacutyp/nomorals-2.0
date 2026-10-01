@@ -459,8 +459,9 @@ def ensure_local_gguf(model_path_or_settings, **kwargs):
                         if hasattr(diagnosis, 'model_path'):
                             mgr.model_path = diagnosis.model_path
                         return mgr
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("GGUF server heal/start failed for %s: %s",
+                             model_path, e)
         
         return model_path if os.path.exists(model_path) else None
     

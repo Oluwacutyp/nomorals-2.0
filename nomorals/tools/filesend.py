@@ -237,7 +237,7 @@ def create_file(
     target.write_bytes(data)
     try:
         target.chmod(0o644)
-    except OSError:
+    except OSError:  # noqa: E103 - chmod is best-effort (e.g. non-POSIX fs); file is already written
         pass
     _log.info("file created: %s (%d bytes, %s)", target, len(data), ext)
     return {
@@ -283,8 +283,8 @@ def send_file(
     if not target.startswith("/") and not target.startswith("~"):
         try:
             resolved = str(safe_path(context, target))
-        except ToolError:
-            pass  # fall through to the literal path; the send will fail loudly
+        except ToolError:  # noqa: E103 - fall through to the literal path; the send will fail loudly
+            pass
     adapters = getattr(gateway, "adapters", None) or {}
     if platform not in adapters:
         live = ", ".join(sorted(adapters)) or "none"

@@ -285,7 +285,7 @@ class Repository:
             if column in out and isinstance(out[column], str) and out[column]:
                 try:
                     out[column] = json.loads(out[column])
-                except json.JSONDecodeError:
+                except json.JSONDecodeError:  # noqa: E103 - keep raw value when a column isn't valid JSON
                     pass
         return out
 

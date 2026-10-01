@@ -795,8 +795,8 @@ def make_registry_register(context: Any) -> Callable[[dict[str, Any]], None]:
                     kind = "sharegpt"
                 elif "instruction" in first:
                     kind = "alpaca"
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as e:
+                _log.debug("dataset kind sniff failed for %s: %s", path, e)
             DatasetRegistry(context.db).register(
                 name=f"{out['name']}-fetched",
                 path=path,

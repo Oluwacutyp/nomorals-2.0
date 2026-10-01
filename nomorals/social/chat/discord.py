@@ -260,7 +260,7 @@ class DiscordAdapter(ChatAdapter):
                     try:
                         kwargs["reference"] = discord.MessageReference(message_id=int(reply_to),
                                                                        channel_id=int(chat.chat_id))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError):  # noqa: E103 - invalid reply_to id, send without reference
                         pass
                 return await channel.send(text, **kwargs)
 

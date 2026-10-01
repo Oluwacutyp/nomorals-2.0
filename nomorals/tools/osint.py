@@ -282,7 +282,7 @@ def _classify(target: str) -> str:
     try:
         ipaddress.ip_address(target)
         return "ip"
-    except ValueError:
+    except ValueError:  # noqa: E103 - not an IP, fall through to domain check
         pass
     if re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", target):
         return "domain"

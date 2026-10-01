@@ -119,11 +119,11 @@ class TuiApp:
                 attribute |= curses.A_REVERSE
             try:
                 self._screen.addnstr(index, 0, text, width - 1, attribute)
-            except curses.error:
-                pass  # writing the bottom-right cell always raises; ignore it
+            except curses.error:  # noqa: E103 - writing the bottom-right cell always raises; ignore it
+                pass
         try:
             self._screen.move(frame.cursor_row, frame.cursor_col)
-        except curses.error:
+        except curses.error:  # noqa: E103 - cursor off-screen; refresh still paints the frame
             pass
         self._screen.refresh()
 

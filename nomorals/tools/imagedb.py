@@ -474,8 +474,8 @@ def image_stats(context: Any) -> dict[str, Any]:
         formats[fmt] = formats.get(fmt, 0) + 1
         try:
             total_bytes += int(row.get("size") or 0)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            _log.debug("skipping bad size value %r: %s", row.get("size"), e)
     try:
         dupe_groups = len(find_dupes(context, threshold=6)["groups"])
     except Exception:  # noqa: BLE001 - stats must never fail on clustering

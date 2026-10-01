@@ -288,7 +288,7 @@ def parse_when(text: str, now: float | None = None) -> float | None:
         dt = datetime.fromisoformat(s)
         ts = dt.timestamp()
         return ts if ts > now - 60 else None
-    except ValueError:
+    except ValueError:  # noqa: E103 - not ISO format, try other date formats below
         pass
 
     # optional time-of-day: 9am, 5:30pm, 17:30
@@ -510,7 +510,7 @@ class Inbox:
                     and self._processed not in p.parents:
                 try:
                     total += p.stat().st_size
-                except OSError:
+                except OSError:  # noqa: E103 - file vanished mid-scan
                     pass
         return total
 
@@ -557,7 +557,7 @@ class Inbox:
                                                 kind_hint=kind_hint))
             try:
                 src.rmdir()
-            except OSError:
+            except OSError:  # noqa: E103 - source dir may not be empty, leave it
                 pass
             if not items:
                 raise ValueError(f"nothing to intake in {src}")

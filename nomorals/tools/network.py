@@ -237,8 +237,8 @@ def is_scannable(target: str, allowed_targets: str = "") -> bool:
         if not ip.is_global:  # loopback, private, link-local, CGNAT, test, reserved
             return True
         return target in allowed
-    except ValueError:
-        pass  # hostname — resolved by the caller; literal match on the allowlist
+    except ValueError:  # noqa: E103 - hostname, not an IP; resolved by the caller, literal match on the allowlist
+        pass
     return target.lower() in {a.lower() for a in allowed}
 
 
@@ -291,7 +291,7 @@ def tcp_probe(host: str, port: int, timeout: float = 1.5, banner: bool = False) 
                     ).strip()[:80]
                     if text:
                         return f"open:{text}"
-                except (socket.timeout, OSError):
+                except (socket.timeout, OSError):  # noqa: E103 - banner grab is best-effort; port already known open
                     pass
             return "open"
         if result in (111, 61, 10061):  # ECONNREFUSED family
@@ -341,7 +341,7 @@ def local_listeners() -> list[dict[str, Any]]:
                         if port.isdigit():
                             found.setdefault((addr, int(port)),
                                              {"address": addr, "port": int(port), "family": "?"})
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError):  # noqa: E103 - ss(1) unavailable or unparsable; port list stays partial
                 pass
     return sorted(found.values(), key=lambda d: d["port"])
 

@@ -536,8 +536,8 @@ class SourceRegistry:
             self.path.write_text(
                 json.dumps(self._data, indent=1, sort_keys=True),
                 encoding="utf-8")
-        except OSError:
-            pass  # health is best-effort; scraping must not die on it
+        except OSError:  # noqa: E103 - health is best-effort; scraping must not die on it
+            pass
 
     # -- catalog ---------------------------------------------------------------
     def _entry(self, name: str, url: str, kind: str,

@@ -133,7 +133,7 @@ class EventBus:
         self._stop.set()
         try:
             self._queue.put_nowait(None)
-        except queue.Full:  # pragma: no cover - queue drained below anyway
+        except queue.Full:  # pragma: no cover - queue drained below anyway  # noqa: E103
             pass
         if self._dispatcher is not None:
             self._dispatcher.join(timeout=timeout)

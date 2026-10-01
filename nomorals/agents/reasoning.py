@@ -1402,7 +1402,7 @@ class ReasoningAgent:
                         pivot = raw[:300]
                         rationale = "model red-team of the approach"
                         should_pivot = True
-        except _BudgetExhausted:
+        except _BudgetExhausted:  # noqa: E103 - routine signal; deterministic fallback below
             pass
         except Exception as exc:  # noqa: BLE001
             _log.debug("reasoning course_correct failed: %s", exc)
@@ -1482,7 +1482,7 @@ class ReasoningAgent:
                         attack = "holds under challenge"
                 if raw and not attacks and "holds" not in attack:
                     attacks.append(raw[:300])
-        except _BudgetExhausted:
+        except _BudgetExhausted:  # noqa: E103 - routine signal; deterministic fallback below
             pass
         except Exception as exc:  # noqa: BLE001
             _log.debug("reasoning self_challenge failed: %s", exc)

@@ -345,7 +345,7 @@ class CodeRunner:
                     if (data.get("scripts") or {}).get("test"):
                         npm = shutil.which("npm") or "npm"
                         return [npm, "test", "--silent"], "npm test"
-                except (ValueError, OSError):
+                except (ValueError, OSError):  # noqa: E103 - falls through to unittest detection
                     pass
             py_tests = [
                 p for p in root.rglob("*.py")

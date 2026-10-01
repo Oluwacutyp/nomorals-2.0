@@ -644,7 +644,7 @@ def quote(symbol: str, market: str = "crypto") -> dict[str, Any]:
                 return {"symbol": disp, "price": float(r["Close"]),
                         "change_pct_24h": None, "currency": "USD",
                         "source": "stooq"}
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError):  # noqa: E103 - malformed stooq row; MarketDataError raised below
                 pass
         raise MarketDataError(f"no stock quote for {disp}")
     if market == "forex":

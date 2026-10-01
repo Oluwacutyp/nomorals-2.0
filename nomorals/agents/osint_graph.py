@@ -659,7 +659,7 @@ class IdentityGraph:
         elif isinstance(out, (dict, list)):
             try:
                 blob_parts.append(json.dumps(out))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError):  # noqa: E103 - unserializable output skipped; other blob parts still used
                 pass
         for t in tokens[:25]:
             if isinstance(t, dict):

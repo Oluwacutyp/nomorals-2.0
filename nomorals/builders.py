@@ -1779,7 +1779,7 @@ class AppBuilder:
 
                     os.kill(pid, signal.SIGKILL)
                     killed = True
-                except (ProcessLookupError, PermissionError, OSError):
+                except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone; kill chain is best-effort
                     pass
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid}
@@ -1933,7 +1933,7 @@ class AppBuilder:
                 try:
                     os.kill(pid, signal.SIGKILL)
                     killed = True
-                except (ProcessLookupError, PermissionError, OSError):
+                except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone; kill chain is best-effort
                     pass
         return {"app": slug, "stopped": killed or not _pid_alive(pid),
                 "was_pid": pid, "url": entry.get("url", "")}
@@ -2037,7 +2037,7 @@ def _find_child_pid(app_dir: Path, cmd: list[str]) -> int | None:
             if cwd == str(app_dir):
                 if start_ticks > best[0]:
                     best = (start_ticks, pid, pid)
-    except OSError:
+    except OSError:  # noqa: E103 - /proc entry vanished mid-scan; skip it
         pass
     if best[2] is not None:
         return best[2]

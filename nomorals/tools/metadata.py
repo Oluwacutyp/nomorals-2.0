@@ -153,7 +153,7 @@ def _parse_exif_ifd(tiff: bytes) -> dict[str, Any]:
                     try:
                         found[name] = struct.unpack(prefix + ({3: "H", 4: "I"}[typ]),
                                                     raw)[0]
-                    except (struct.error, IndexError):
+                    except (struct.error, IndexError):  # noqa: E103 - corrupt tag skipped; best-effort parse
                         pass
         except (struct.error, IndexError):
             break
@@ -199,7 +199,7 @@ def _parse_exif_ifd(tiff: bytes) -> dict[str, Any]:
                         _gps_decimal(lat, lat_dir), _gps_decimal(lon, lon_dir)
                     ),
                 }
-    except (struct.error, IndexError, KeyError):
+    except (struct.error, IndexError, KeyError):  # noqa: E103 - corrupt GPS block skipped
         pass
     return found
 
@@ -241,7 +241,7 @@ def _png_meta(data: bytes) -> dict[str, Any]:
                     parts = rest.split(b"\x00")
                     if len(parts) >= 4:
                         out[key.decode("latin-1")] = parts[-1].decode("utf-8", "replace")
-            except (UnicodeDecodeError, IndexError):
+            except (UnicodeDecodeError, IndexError):  # noqa: E103 - undecodable chunk skipped
                 pass
         pos += 12 + length
     return out
@@ -396,7 +396,7 @@ def _flac_meta(data: bytes) -> dict[str, Any]:
                         comments[key] = value
                 if comments:
                     out.update(comments)
-            except (struct.error, IndexError, UnicodeDecodeError):
+            except (struct.error, IndexError, UnicodeDecodeError):  # noqa: E103 - corrupt comment block skipped
                 pass
         pos += 4 + length
         if is_last:
@@ -594,7 +594,7 @@ def extract_metadata(context: Any, source: str) -> dict[str, Any]:
         if temp_path:
             try:
                 Path(temp_path).unlink(missing_ok=True)
-            except OSError:
+            except OSError:  # noqa: E103 - temp file already gone
                 pass
 
 

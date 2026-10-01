@@ -1361,7 +1361,7 @@ class PartnerRuntime:
                 while not self._stopped.is_set():
                     self._tick_beacon()
                     time.sleep(0.5)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt:  # noqa: E103 - interrupt ends the beacon loop; finally stops it
             pass
         finally:
             self.stop()
@@ -5533,14 +5533,14 @@ class PartnerRuntime:
                 if t == "--seed" and i + 1 < len(toks):
                     try:
                         seed = int(toks[i + 1])
-                    except ValueError:
+                    except ValueError:  # noqa: E103 - unparseable --seed keeps default 7
                         pass
                     i += 2
                     continue
                 if t.startswith("--seed="):
                     try:
                         seed = int(t.split("=", 1)[1])
-                    except ValueError:
+                    except ValueError:  # noqa: E103 - unparseable --seed keeps default 7
                         pass
                 elif t.isdigit():
                     n = int(t)
@@ -5563,7 +5563,7 @@ class PartnerRuntime:
             if "--league" in toks:
                 try:
                     league = toks[toks.index("--league") + 1]
-                except IndexError:
+                except IndexError:  # noqa: E103 - missing --league value keeps default GEN
                     pass
             store.record(Fixture(home=home, away=away, league=league,
                                  home_goals=hg, away_goals=ag))
@@ -5578,7 +5578,7 @@ class PartnerRuntime:
                 toks = rest.split()
                 try:
                     league = toks[toks.index("--league") + 1]
-                except IndexError:
+                except IndexError:  # noqa: E103 - missing --league value keeps default GEN
                     pass
                 rest = " ".join(t for i, t in enumerate(toks)
                                 if t != "--league" and
@@ -5724,7 +5724,7 @@ class PartnerRuntime:
                     i = toks.index("--profile")
                     try:
                         profile = toks[i + 1]
-                    except IndexError:
+                    except IndexError:  # noqa: E103 - missing --profile value keeps default
                         pass
                     toks = toks[:i] + toks[i + 2:]
                 market, toks = _market(toks)

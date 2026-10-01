@@ -251,8 +251,8 @@ class EmailIntegration:
                 cred = self.account_manager.get_credential("gmail_oauth", account)
                 if cred.credential_type == "oauth_token":
                     return "gmail_api"
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("gmail oauth probe failed, falling back to imap: %s", e)
         
         # Default to IMAP/SMTP
         return "imap"
@@ -608,8 +608,8 @@ class EmailIntegration:
             try:
                 from email.utils import parsedate_to_datetime
                 date = parsedate_to_datetime(date_str).timestamp()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("unparseable email date %r: %s", date_str, e)
             
             # Extract body
             body = ""

@@ -30,9 +30,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..core.logging_setup import get_logger
 from .tts import UniversalTTS, VoiceLibrary
 
 __all__ = ["CatalogueVoice", "VoiceCatalogue", "default_catalogue"]
+
+_log = get_logger(__name__)
 
 _VALID_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,47}$")
 
@@ -105,8 +108,8 @@ class VoiceCatalogue:
                            "active": self.active,
                            "chat_overrides": self.chat_overrides},
                           fh, indent=2)
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning("voice catalogue save failed (%s): %s", self._path(), e)
 
     # -- catalogue management ----------------------------------------
 

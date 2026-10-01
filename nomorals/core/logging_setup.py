@@ -84,7 +84,7 @@ class RedactionFilter(logging.Filter):
                     }
                 elif isinstance(record.args, tuple):
                     record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
-        except Exception:  # pragma: no cover - logging must never raise
+        except Exception:  # noqa: E103 - logging must never raise (pragma: no cover)
             pass
         return True
 

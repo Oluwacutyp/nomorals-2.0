@@ -464,8 +464,8 @@ class ProactiveEngine:
                         confidence=0.7,
                         priority=2,
                     ))
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("unread-email suggestion failed: %s", e)
         
         return suggestions
     

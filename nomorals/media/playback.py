@@ -270,7 +270,7 @@ class PlaybackEngine:
         sock_path = self._mpv_sock_path()
         try:
             os.unlink(sock_path)
-        except FileNotFoundError:
+        except FileNotFoundError:  # noqa: E103 - stale socket may not exist
             pass
         cmd = [self.backend.binary, "--idle=yes", "--really-quiet",
                "--no-terminal", f"--input-ipc-server={sock_path}",
@@ -298,7 +298,7 @@ class PlaybackEngine:
             try:
                 while s.recv(4096):
                     pass
-            except (socket.timeout, OSError):
+            except (socket.timeout, OSError):  # noqa: E103 - timeout ends the drain loop by design
                 pass
             return True
         except OSError:
@@ -335,7 +335,7 @@ class PlaybackEngine:
                     if not chunk:
                         break
                     buf += chunk
-            except socket.timeout:
+            except socket.timeout:  # noqa: E103 - partial response is still usable
                 pass
             for line in buf.split(b"\n"):
                 try:
@@ -482,7 +482,7 @@ class PlaybackEngine:
         if pid:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
+            except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone
                 pass
             self._state.pop("player_pid", None)
         self._state["playing"] = False

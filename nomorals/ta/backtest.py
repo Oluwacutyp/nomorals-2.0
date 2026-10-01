@@ -30,7 +30,7 @@ def periods_per_year(index: pd.Index) -> int:
             if dt <= 0:
                 return 252
             return max(1, int(round(365.25 * 86400 / dt)))
-    except Exception:
+    except Exception:  # noqa: E103 - documented 252 fallback
         pass
     return 252
 
@@ -60,7 +60,7 @@ class EventBacktester:
                         / max(1, len(idx) - 1) / 3600.0)
                 if dt_h > 0:
                     return (self.funding_8h_bps / 1e4) * (dt_h / 8.0)
-        except Exception:
+        except Exception:  # noqa: E103 - documented 0.0 fallback
             pass
         return 0.0
 

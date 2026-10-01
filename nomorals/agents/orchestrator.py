@@ -531,7 +531,7 @@ def _extract_json(text: str) -> Any:
         text = re.sub(r"\n?```$", "", text).strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError:  # noqa: E103 - falls through to brace-extraction fallback
         pass
     start = text.find("{")
     end = text.rfind("}")

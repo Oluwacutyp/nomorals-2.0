@@ -108,7 +108,7 @@ def find_font(query: str | None, size: int) -> Any:
         if os.path.isfile(q):
             try:
                 return ImageFont.truetype(q, size)
-            except OSError:
+            except OSError:  # noqa: E103 - falls through to font discovery
                 pass
         fonts = discover_fonts()
         ql = q.lower()

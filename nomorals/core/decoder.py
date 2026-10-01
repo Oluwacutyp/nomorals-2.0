@@ -680,13 +680,13 @@ class _Base64Decoder(Decoder):
         if not any(c in core for c in "-_"):
             try:
                 candidates.append(("base64", base64.b64decode(padded)))
-            except (binascii.Error, ValueError):
+            except (binascii.Error, ValueError):  # noqa: E103 - not base64; base64url candidate tried next
                 pass
         if re.fullmatch(r"[A-Za-z0-9_\-=]+", padded):
             try:
                 candidates.append(("base64url",
                                    base64.urlsafe_b64decode(padded)))
-            except (binascii.Error, ValueError):
+            except (binascii.Error, ValueError):  # noqa: E103 - not base64url either; no candidates from this input
                 pass
         for label, raw in candidates:
             if not raw:

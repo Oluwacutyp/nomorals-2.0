@@ -112,7 +112,7 @@ class BackgroundTestRun:
                 text = self._decoder.decode(chunk)
                 if text:
                     self._feed(text)
-        except (OSError, ValueError):
+        except (OSError, ValueError):  # noqa: E103 - best-effort drain of a closing stream
             pass
 
     def _feed(self, text: str) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..core.logging_setup import get_logger
 from .data import clean_ohlcv
 from .math import atr, ensure_ohlcv
 from .meta import MetaGate, labeled_matrix, sklearn_available
@@ -22,6 +23,8 @@ from .regime import RegimeDetector
 from .risk import PROFILES, RiskManager
 from .signals import fuse_all
 from .strategies import list_strategies, rank_strategies, run_zoo
+
+_log = get_logger(__name__)
 
 __all__ = ["analyze", "committee_position", "PROFILES"]
 
@@ -53,8 +56,8 @@ def _meta_approval(vote: pd.Series, agreement: pd.Series,
             if gate.model is not None:
                 ok = bool(gate.approve(X.iloc[[-1]])[0])
                 return ok, "meta-gate"
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("meta-gate failed, falling back to rule-based approval: %s", e)
     # Rule fallback: the committee agrees AND the vote clears the cost gate.
     ok = bool(agreement.iloc[-1] >= min_agreement
               and abs(vote.iloc[-1]) >= enter_threshold)

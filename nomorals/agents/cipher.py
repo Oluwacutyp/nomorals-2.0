@@ -343,7 +343,7 @@ class CipherAgent(Agent):
                 parsed = json.loads(s)
                 if isinstance(parsed, dict):
                     return parsed
-            except (ValueError, TypeError):
+            except (ValueError, TypeError):  # noqa: E103 - non-JSON input falls through to the action/data dict below
                 pass
             return {"action": "decrypt" if s.startswith("nmc1:") else "encrypt",
                     "data": s, "blob": s}

@@ -277,7 +277,7 @@ class SshSocksTunnel:
             except (OSError, ProcessLookupError):
                 try:
                     proc.terminate()
-                except OSError:
+                except OSError:  # noqa: E103 - process already gone; teardown is best-effort
                     pass
             try:
                 proc.wait(timeout=6)
@@ -288,7 +288,7 @@ class SshSocksTunnel:
                     proc.kill()
                 try:
                     proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired:  # noqa: E103 - process survived SIGKILL wait; stop() reports stopped anyway
                     pass
             return {"stopped": True, "pid": proc.pid}
 

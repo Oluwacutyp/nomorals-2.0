@@ -272,7 +272,7 @@ class _SounddeviceMic:
                 status: Any) -> None:
             try:
                 self._queue.put_nowait(bytes(indata))
-            except queue.Full:
+            except queue.Full:  # noqa: E103 - audio callback must never block; drop the chunk
                 pass
 
         self._stream = _sd.InputStream(

@@ -382,7 +382,7 @@ def _run_python(code: str, timeout: float = 15.0) -> dict[str, Any]:
         try:
             target.unlink(missing_ok=True)
             tmp.rmdir()
-        except OSError:
+        except OSError:  # noqa: E103 - temp cleanup is best-effort
             pass
 
 

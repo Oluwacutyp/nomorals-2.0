@@ -146,8 +146,8 @@ class Database:
         for conn in connections:
             try:
                 conn.close()
-            except sqlite3.Error:  # pragma: no cover
-                pass
+            except sqlite3.Error as e:  # pragma: no cover
+                _log.debug("connection close failed during teardown: %s", e)
         self._local.conn = None
 
     def __enter__(self) -> "Database":
