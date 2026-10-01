@@ -24,12 +24,163 @@ from ..core.errors import TaskCancelled, TaskFailed, ValidationError
 from ..core.ids import new_id
 
 __all__ = [
+    "AcceptanceCriterion",
+    "AcceptanceResult",
     "Task",
     "TaskGraph",
     "TaskKind",
+    "TaskResult",
     "TaskState",
     "cycle_in",
 ]
+
+
+@dataclass
+class AcceptanceCriterion:
+    """One check that must hold for a task to count as *correct*, not merely
+    finished.  ``spec`` is serializable; built-in kinds:
+
+    * ``{"metric": name, "gte": x}`` (also ``lte`` / ``eq``)
+    * ``{"artifact": true}`` — the result references at least one artifact
+    * ``{"assertion": name}`` — a named assertion in the result passed
+    * ``{"test_suite": name}`` — ``result.tests[name]`` reports success
+    * ``{"manual": true}`` — passes only with ``evidence["approved_by"]``
+    """
+
+    name: str
+    description: str = ""
+    spec: dict[str, Any] = field(default_factory=dict)
+    required: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "description": self.description,
+                "spec": dict(self.spec), "required": self.required}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AcceptanceCriterion":
+        return cls(name=data["name"], description=data.get("description", ""),
+                   spec=dict(data.get("spec") or {}),
+                   required=bool(data.get("required", True)))
+
+
+@dataclass
+class AcceptanceResult:
+    name: str
+    passed: bool
+    detail: str = ""
+    required: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "passed": self.passed,
+                "detail": self.detail, "required": self.required}
+
+
+@dataclass
+class TaskResult:
+    """What a task produced — evidence, not just a status flag.
+
+    Completion (``Task.state == DONE``) means the work *ran*; ``passed``
+    means the acceptance criteria *held*.  Autonomous agents must check the
+    second before claiming the goal.
+    """
+
+    status: str = "done"
+    artifacts: list[str] = field(default_factory=list)  # artifact:// URIs
+    evidence: dict[str, Any] = field(default_factory=dict)
+    assertions: list[dict[str, Any]] = field(default_factory=list)
+    tests: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    acceptance_results: list[AcceptanceResult] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        required = [r for r in self.acceptance_results if r.required]
+        return bool(required) and all(r.passed for r in required)
+
+    def verify(self, criteria: Sequence[AcceptanceCriterion]) -> list[AcceptanceResult]:
+        """Evaluate ``criteria`` against this result (built-in spec kinds)."""
+        results: list[AcceptanceResult] = []
+        for crit in criteria:
+            passed, detail = _evaluate_criterion(crit, self)
+            results.append(AcceptanceResult(name=crit.name, passed=passed,
+                                           detail=detail, required=crit.required))
+        self.acceptance_results = results
+        return results
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "artifacts": list(self.artifacts),
+            "evidence": dict(self.evidence),
+            "assertions": [dict(a) for a in self.assertions],
+            "tests": dict(self.tests),
+            "metrics": dict(self.metrics),
+            "acceptance_results": [r.to_dict() for r in self.acceptance_results],
+            "passed": self.passed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskResult":
+        return cls(
+            status=data.get("status", "done"),
+            artifacts=list(data.get("artifacts") or []),
+            evidence=dict(data.get("evidence") or {}),
+            assertions=[dict(a) for a in data.get("assertions") or []],
+            tests=dict(data.get("tests") or {}),
+            metrics=dict(data.get("metrics") or {}),
+            acceptance_results=[
+                AcceptanceResult(name=r["name"], passed=bool(r["passed"]),
+                                 detail=r.get("detail", ""),
+                                 required=bool(r.get("required", True)))
+                for r in data.get("acceptance_results") or []
+            ],
+        )
+
+
+def _evaluate_criterion(crit: AcceptanceCriterion,
+                        result: TaskResult) -> tuple[bool, str]:
+    spec = crit.spec or {}
+    try:
+        if "metric" in spec:
+            name = spec["metric"]
+            value = result.metrics.get(name)
+            if value is None:
+                return False, f"metric {name!r} missing"
+            for op, target in (("gte", None), ("lte", None), ("eq", None)):
+                if op in spec:
+                    target = spec[op]
+                    ok = (value >= target if op == "gte"
+                          else value <= target if op == "lte"
+                          else value == target)
+                    return bool(ok), f"metric {name}={value} {op} {target}"
+            return False, f"metric {name!r}: no comparison in spec"
+        if spec.get("artifact"):
+            ok = bool(result.artifacts)
+            return ok, f"{len(result.artifacts)} artifact(s) referenced"
+        if "assertion" in spec:
+            name = spec["assertion"]
+            for a in result.assertions:
+                if a.get("name") == name:
+                    passed = bool(a.get("passed"))
+                    return passed, a.get("detail", "")
+            return False, f"assertion {name!r} not recorded"
+        if "test_suite" in spec:
+            name = spec["test_suite"]
+            suite = result.tests.get(name)
+            if suite is None:
+                return False, f"test suite {name!r} not recorded"
+            if isinstance(suite, dict):
+                passed = bool(suite.get("passed", suite.get("ok", False)))
+                detail = str(suite.get("detail", suite.get("summary", "")))
+            else:
+                passed, detail = bool(suite), ""
+            return passed, detail
+        if spec.get("manual"):
+            approver = result.evidence.get("approved_by", "")
+            return bool(approver), f"approved_by={approver!r}" or "not approved"
+        return False, f"unknown spec kind: {sorted(spec)}"
+    except Exception as exc:  # noqa: BLE001 - a broken check fails closed
+        return False, f"evaluation error: {type(exc).__name__}: {exc}"
 
 
 class TaskState(str, Enum):
@@ -81,6 +232,10 @@ class Task:
     started_at: float = 0.0
     finished_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Acceptance criteria: what must hold for this task to count as
+    #: *correct*.  Empty means "ran to completion" is the only bar — and
+    #: :attr:`verified` says so honestly.
+    acceptance: list[AcceptanceCriterion] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -105,6 +260,35 @@ class Task:
         self.state = TaskState.DONE
         self.result = result
         self.finished_at = time.time()
+        # Completion is not correctness: when the result carries evidence,
+        # evaluate the acceptance criteria immediately so `verified` is
+        # meaningful without a second pass.
+        if isinstance(result, TaskResult) and self.acceptance:
+            result.verify(self.acceptance)
+
+    @property
+    def verified(self) -> bool:
+        """True when the task is both finished AND its required acceptance
+        criteria held.  With no criteria defined, falls back to state —
+        completion is the only bar, and the empty criteria list says so."""
+        if self.state is not TaskState.DONE:
+            return False
+        if not self.acceptance:
+            return True
+        result = self.result
+        if not isinstance(result, TaskResult):
+            return False
+        if not result.acceptance_results:
+            result.verify(self.acceptance)
+        return result.passed
+
+    def verify(self) -> list[AcceptanceResult]:
+        """(Re-)evaluate this task's acceptance criteria against its result."""
+        result = self.result
+        if not isinstance(result, TaskResult):
+            result = TaskResult(status="done" if self.state is TaskState.DONE else "unknown")
+            self.result = result
+        return result.verify(self.acceptance)
 
     def mark_failed(self, error: str) -> None:
         self.state = TaskState.FAILED
@@ -128,9 +312,13 @@ class Task:
             "duration": round(self.duration, 4),
             "error": self.error,
             "role": self.role,
+            "acceptance": [c.to_dict() for c in self.acceptance],
+            "verified": self.verified if self.state is TaskState.DONE else False,
         }
         if include_result:
-            payload["result"] = self.result
+            result = self.result
+            payload["result"] = (result.to_dict() if isinstance(result, TaskResult)
+                                 else result)
         return payload
 
 

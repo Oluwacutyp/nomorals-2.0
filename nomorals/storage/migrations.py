@@ -1997,6 +1997,26 @@ def _apply_self_improvement_v2(db: object) -> None:
     )
 
 
+# ── 0060: artifacts ──────────────────────────────────────────────────────────
+
+_V60_ARTIFACTS = """
+-- Evolve the primitive artifacts table (migration 8: inline content) into
+-- first-class artifacts: content-addressed through the blob store, with
+-- creator/mission/task links and provenance.  The old `name`/`content`
+-- columns stay for history; nothing in prod code wrote them.
+ALTER TABLE artifacts ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifacts ADD COLUMN mime TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts ADD COLUMN creator TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts ADD COLUMN mission_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifacts ADD COLUMN provenance TEXT NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_artifacts_mission ON artifacts(mission_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_hash ON artifacts(content_hash);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -2063,6 +2083,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(59, "notifications_delivery_state",
               sql="ALTER TABLE notifications ADD COLUMN delivery_state "
                   "TEXT NOT NULL DEFAULT '';"),
+    Migration(60, "artifacts", sql=_V60_ARTIFACTS),
 )
 
 
