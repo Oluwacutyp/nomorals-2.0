@@ -292,7 +292,8 @@ def _parser() -> argparse.ArgumentParser:
         "voice",
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
-                     "nm voice say \"text\" [--profile P] [--out PATH]\n"
+                     "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
+                     "nm voice fetch --backend cosyvoice\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
                      "nm voice stats [--json]\n"
@@ -320,6 +321,17 @@ def _parser() -> argparse.ArgumentParser:
     v_say.add_argument("text", help="text to speak")
     v_say.add_argument("--profile", default="", help="TTS voice profile name")
     v_say.add_argument("--out", default="", help="wav output path")
+    v_say.add_argument("--backend", default="",
+                       help="TTS backend (default: settings or auto)")
+    v_say.add_argument("--perform", action="store_true",
+                       help="run the humanizing director: laughs, sighs, "
+                            "breath, stutters, fillers, pauses, emphasis")
+    v_say.add_argument("--mood", default="neutral",
+                       help="performance mood (happy, sad, nervous, tired, …)")
+    v_say.add_argument("--intensity", type=int, default=3,
+                       help="director intensity 0-5 (default: 3)")
+    v_say.add_argument("--seed", type=int, default=None,
+                       help="seed for reproducible performances")
     v_say.add_argument("--json", action="store_true", help="Output as JSON")
     v_listen = voice_sub.add_parser("listen",
                                     help="record one utterance to a wav file")
@@ -351,6 +363,15 @@ def _parser() -> argparse.ArgumentParser:
                        help="file holding the 32-byte audio key or passphrase")
     v_dec.add_argument("--out", default="",
                        help="output wav path (default: alongside, .wav)")
+    v_fetch = voice_sub.add_parser(
+        "fetch", help="download open TTS weights from HuggingFace")
+    v_fetch.add_argument("--backend", default="cosyvoice",
+                         help="model to fetch (default: cosyvoice)")
+    v_fetch.add_argument("--dest", default="",
+                         help="destination dir (default: ~/.cache/nomorals/voice_models/<backend>)")
+    v_fetch.add_argument("--repo", default="",
+                         help="override the HuggingFace repo id")
+    v_fetch.add_argument("--json", action="store_true", help="Output as JSON")
 
     inbox = sub.add_parser(
         "inbox",
@@ -1990,6 +2011,8 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_purge(args, context)
     if action == "decrypt":
         return _cmd_voice_decrypt(args, context)
+    if action == "fetch":
+        return _cmd_voice_fetch(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
     return 2
 
@@ -2066,14 +2089,47 @@ def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
 def _cmd_voice_say(args: argparse.Namespace, context: Any) -> int:
     from .voice.tts import UniversalTTS
 
-    engine = UniversalTTS(backend=context.settings.audio.tts_engine or "auto")
-    out = engine.speak(args.text, voice_name=args.profile or None,
-                       out_path=args.out or "")
+    backend = args.backend or context.settings.audio.tts_engine or "auto"
+    engine = UniversalTTS(backend=backend)
+    if args.perform:
+        out = engine.perform(args.text, voice_name=args.profile or None,
+                             out_path=args.out or "", mood=args.mood,
+                             intensity=args.intensity, seed=args.seed)
+    else:
+        out = engine.speak(args.text, voice_name=args.profile or None,
+                           out_path=args.out or "")
     if args.json:
         print(json.dumps({"path": out.get("path"),
-                          "backend": out.get("backend")}, indent=2))
+                          "backend": out.get("backend"),
+                          "script": out.get("script"),
+                          "cues": out.get("cues")}, indent=2))
     else:
         print(f"said it → {out.get('path')} ({out.get('backend')})")
+        if out.get("script"):
+            print(f"performance: {out['script']}")
+    return 0
+
+
+def _cmd_voice_fetch(args: argparse.Namespace, context: Any) -> int:
+    from .voice.fetch import MODEL_REGISTRY, fetch_model
+
+    name = (args.backend or "cosyvoice").lower()
+    info = MODEL_REGISTRY.get(name, {})
+    print(f"fetching {name} ({info.get('license', '?')} license) "
+          f"from HuggingFace…")
+    try:
+        path = fetch_model(name, dest=args.dest or "", repo=args.repo or "")
+    except Exception as exc:
+        print(f"fetch failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"backend": name, "path": path,
+                          "repo": args.repo or info.get("hf_repo")},
+                         indent=2))
+    else:
+        print(f"weights ready at {path}")
+        print("speak with them: "
+              f"nm voice say \"hello there\" --backend {name} --perform")
     return 0
 
 

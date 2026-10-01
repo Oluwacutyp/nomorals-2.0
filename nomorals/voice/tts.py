@@ -5,10 +5,17 @@ integrated with the framework:
 
 - Backends: **Bark** (best tag/non-speech support), **XTTS v2** (best
   cloning quality, NON-COMMERCIAL CPML license), **Kokoro** (lightest,
-  CPU-friendly, Apache-2.0 — commercial OK).  Each is lazy-imported;
-  nothing breaks when a backend is not installed.
+  CPU-friendly, Apache-2.0 — commercial OK), **CosyVoice** (multilingual
+  + instruction-driven paralinguistics: laughter, breaths, emphasis —
+  MIT, fetched from HuggingFace).  Each is lazy-imported; nothing
+  breaks when a backend is not installed.
 - A tag system for emotion / pauses / non-speech sounds that the AI can
   use directly in its own text: [happy] [whisper] [laughs] [pause:300] …
+- The **director** (``nomorals/voice/director.py``) turns plain text
+  into a performance script — laughs, sighs, coughs, breaths, stutters,
+  fillers, pauses, emphasis — and each backend renders the canonical
+  markup in its own native vocabulary. ``UniversalTTS.perform()`` is
+  the one-call path: text in, human-sounding wav out.
 - Voice profiles persisted to disk, with a hard consent gate on cloning
   backends (reference audio is only used when consent_confirmed=True).
 - A mood bridge: the partner's mood system maps straight into tags.
@@ -19,6 +26,8 @@ Install one backend on the phone:
     pip install git+https://github.com/suno-ai/bark.git   # Bark
     pip install TTS                                       # XTTS v2
     pip install kokoro                                    # Kokoro
+    pip install cosyvoice                                 # CosyVoice
+    nm voice fetch --backend cosyvoice                    # pull the weights
 """
 from __future__ import annotations
 
@@ -66,6 +75,9 @@ class VoiceProfile:
     language: str = "en"
     consent_confirmed: bool = False
     description: str = ""
+    #: Transcript of the reference clip. Zero-shot backends (CosyVoice)
+    #: need it to clone; XTTS does not.
+    prompt_text: str = ""
 
     def validate_for_cloning(self) -> None:
         if self.reference_audio_path and not self.consent_confirmed:
@@ -82,6 +94,7 @@ class VoiceProfile:
             "language": self.language,
             "consent_confirmed": self.consent_confirmed,
             "description": self.description,
+            "prompt_text": self.prompt_text,
         }
 
 
@@ -303,6 +316,8 @@ def available_backends() -> list[str]:
         out.append("xtts")
     if _spec("kokoro"):
         out.append("kokoro")
+    if _spec("cosyvoice"):
+        out.append("cosyvoice")
     return out
 
 
@@ -321,7 +336,8 @@ class BarkBackend:
         self._generate_audio = generate_audio
 
     def synthesize(self, text: str,
-                   voice: Optional[VoiceProfile]) -> Any:
+                   voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
         history_prompt = voice.preset_id if voice else None
         return self._generate_audio(text, history_prompt=history_prompt)
 
@@ -342,7 +358,8 @@ class XTTSBackend:
 
         self.model = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
 
-    def synthesize(self, text: str, voice: Optional[VoiceProfile]) -> Any:
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
         if voice:
             voice.validate_for_cloning()
         # TTS.api returns (audio_chunks, sampled_rate, length)
@@ -378,7 +395,8 @@ class KokoroBackend:
 
         self.pipeline = KPipeline(lang_code="a")
 
-    def synthesize(self, text: str, voice: Optional[VoiceProfile]) -> Any:
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
         voice_id = (voice.preset_id if voice and voice.preset_id
                     else "af_heart")
         generator = self.pipeline(text, voice=voice_id)
@@ -398,7 +416,93 @@ class KokoroBackend:
             return flat
 
 
-_BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend, "kokoro": KokoroBackend}
+class CosyVoiceBackend:
+    """CosyVoice: multilingual + instruction-driven paralinguistics.
+
+    Weights fetched from HuggingFace (``nm voice fetch --backend
+    cosyvoice``), MIT license. Two modes:
+
+    - **instruct** (default): ``inference_instruct`` with a preset speaker
+      id and a natural-language instruction — this is where the
+      director's cues land: ``[laughter]`` / ``[breath]`` bursts,
+      ``<laughter>`` / ``<strong>`` spans, emotion and rate.
+    - **zero-shot**: ``inference_zero_shot`` clones a voice profile's
+      reference clip (3–10s). Needs ``voice.prompt_text`` — the
+      transcript of the reference clip — plus the consent gate.
+
+    API follows the documented ``cosyvoice.cli.cosyvoice.CosyVoice``
+    interface (300M-Instruct / CosyVoice-3). Not live-tested here —
+    needs a GPU box to verify; the director renderers and the fetch
+    plumbing are covered by tests with a stubbed ``cosyvoice`` module.
+    """
+
+    name = "cosyvoice"
+    supports_native_tags = True    # instruct tokens, see director.py
+    supports_cloning = True        # zero-shot from reference clip
+    sample_rate = 22050
+
+    #: Where ``nm voice fetch`` puts the weights; override with
+    #: ``COSYVOICE_MODEL_DIR``.
+    @staticmethod
+    def _default_model_dir() -> str:
+        from .fetch import default_cache_dir
+
+        return default_cache_dir("cosyvoice")
+
+    def __init__(self, model_dir: str = "") -> None:
+        from cosyvoice.cli.cosyvoice import CosyVoice
+
+        self.model_dir = (
+            model_dir
+            or os.environ.get("COSYVOICE_MODEL_DIR", "")
+            or self._default_model_dir()
+        )
+        if not os.path.isdir(self.model_dir):
+            raise RuntimeError(
+                f"CosyVoice weights not found at {self.model_dir} — "
+                "run: nm voice fetch --backend cosyvoice")
+        self.cosyvoice = CosyVoice(self.model_dir)
+
+    def _collect(self, gen: Any) -> Any:
+        chunks = []
+        for out in gen:
+            chunks.append(out["tts_speech"])
+        if not chunks:
+            raise ValueError("cosyvoice produced no audio")
+        try:
+            import torch
+
+            return torch.cat([c.reshape(-1) for c in chunks],
+                             dim=0).cpu().numpy()
+        except ImportError:
+            import numpy as np
+
+            return np.concatenate(
+                [np.asarray(c).reshape(-1) for c in chunks])
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        cv = self.cosyvoice
+        ref = voice.reference_audio_path if voice else None
+        if ref:
+            if voice is not None:
+                voice.validate_for_cloning()
+            prompt_text = (voice.prompt_text if voice else "").strip()
+            if not prompt_text:
+                raise ValueError(
+                    f"voice '{voice.name}' needs prompt_text (the transcript "
+                    "of its reference clip) for CosyVoice zero-shot cloning")
+            gen = cv.inference_zero_shot(text, prompt_text, ref, stream=False)
+        else:
+            spk_id = (voice.preset_id if voice and voice.preset_id
+                      else "英文女")
+            gen = cv.inference_instruct(
+                text, spk_id, instruct or "Speak naturally.", stream=False)
+        return self._collect(gen)
+
+
+_BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
+             "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend}
 
 
 # ----------------------------------------------------
@@ -465,14 +569,15 @@ class UniversalTTS:
                 raise RuntimeError(
                     "no neural TTS backend installed — pip install one of: "
                     "kokoro (lightest, Apache-2.0) | TTS (XTTS v2, "
-                    "non-commercial) | git+https://github.com/suno-ai/bark.git")
+                    "non-commercial) | cosyvoice (multilingual+paralinguistics, "
+                    "MIT) | git+https://github.com/suno-ai/bark.git")
             wanted = available[0]
         if wanted not in _BACKENDS:
             raise RuntimeError(
                 f"unknown TTS backend {wanted!r}; use one of "
                 f"{', '.join(_BACKENDS)} or 'auto'")
         if not _spec({"bark": "bark", "xtts": "TTS",
-                      "kokoro": "kokoro"}[wanted]):
+                      "kokoro": "kokoro", "cosyvoice": "cosyvoice"}[wanted]):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is not installed on this machine")
         self._impl = _BACKENDS[wanted]()
@@ -520,6 +625,58 @@ class UniversalTTS:
             "sample_rate": sample_rate,
             "backend": backend.name,
             "segments": len(segments),
+        }
+
+    def perform(self, text: str, voice_name: Optional[str] = None,
+                out_path: str = "", *, mood: str = "neutral",
+                intensity: int = 3, seed: Optional[int] = None) -> dict:
+        """Text in, human-sounding wav out.
+
+        Runs the director (``nomorals/voice/director.py``) over ``text``
+        — laughs, sighs, coughs, breaths, stutters, fillers, pauses,
+        emphasis — then renders the performance script in whatever the
+        active backend natively understands:
+
+        - cosyvoice: instruct tokens + emotion/rate instruction
+        - bark: native paralinguistic tags
+        - xtts/kokoro: speakable words + spliced silence pauses
+
+        Returns the usual speak() dict plus ``script`` (the marked-up
+        performance text) and ``cues`` (what the director inserted).
+        """
+        from .director import (direct, render_bark, render_cosyvoice,
+                               render_plain)
+
+        script = direct(text, mood=mood, intensity=intensity, seed=seed)
+        voice = self.voices.get(voice_name) if voice_name else None
+        backend = self._load_backend()
+        sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
+
+        instruct = ""
+        pause_points: list = []
+        if backend.name == "cosyvoice":
+            final_text, instruct = render_cosyvoice(script)
+        elif backend.name == "bark":
+            final_text = render_bark(script)
+        else:
+            final_text, pause_points = render_plain(script)
+
+        audio = backend.synthesize(final_text, voice, instruct=instruct)
+        audio = self._insert_pauses(audio, pause_points, final_text,
+                                    sample_rate)
+
+        path = out_path or os.path.join(
+            self.voices.storage_dir, "..",
+            f"tts-{int(__import__('time').time() * 1000)}.wav")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        written = write_wav(path, audio, sample_rate)
+        return {
+            "path": path,
+            "bytes": written,
+            "sample_rate": sample_rate,
+            "backend": backend.name,
+            "script": script.text,
+            "cues": script.cues,
         }
 
     def _insert_pauses(self, audio: Any, pause_points: List[tuple],
