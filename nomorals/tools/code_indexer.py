@@ -42,6 +42,12 @@ from ..core.logging_setup import get_logger
 from ..llm.base import LLMProvider
 from ..storage.db import Database
 from ..storage.vectors import VectorStore
+from .repo_index import (
+    build_repo_map as _build_repo_map,
+    callers as _repo_callers,
+    find_symbol as _repo_find_symbol,
+    who_imports as _repo_who_imports,
+)
 
 __all__ = ["CodeIndexer", "CodeUnit", "CodeSearchResult"]
 
@@ -702,3 +708,42 @@ def register(registry: Any) -> None:
         if unit is None:
             raise ToolError(f"symbol {name!r} not found in {path}")
         return unit.to_dict()
+
+    @registry.register(
+        "repo_map",
+        description="Structural repo map: bounded directory tree, per-file "
+                    "purpose lines, per-module symbol index. Fast overview "
+                    "for coding missions.",
+        capability=Capability.FS_READ,
+    )
+    def repo_map(path: str = ".", max_files: int = 400) -> dict[str, Any]:
+        target = safe_path(context, path)
+        if not target.is_dir():
+            raise ToolError(f"not a directory: {path}")
+        return _build_repo_map(str(target), max_files=max_files).to_dict()
+
+    @registry.register(
+        "symbol_search",
+        description="Ranked symbol search over a repo "
+                    "(exact > prefix > substring > fuzzy). "
+                    "op=find|who_imports|callers.",
+        capability=Capability.FS_READ,
+    )
+    def symbol_search(path: str = ".", op: str = "find", name: str = "",
+                      kind: str = "", fuzzy: bool = False) -> dict[str, Any]:
+        target = safe_path(context, path)
+        if not target.is_dir():
+            raise ToolError(f"not a directory: {path}")
+        root = str(target)
+        if op == "who_imports":
+            return {"op": op, "target": name,
+                    "importers": _repo_who_imports(root, name)}
+        if op == "callers":
+            return {"op": op, "target": name,
+                    "callers": [c.to_dict() for c in _repo_callers(root, name)]}
+        if op != "find":
+            raise ToolError(
+                f"unknown op: {op!r} (want find|who_imports|callers)")
+        hits = _repo_find_symbol(root, name, kind=kind or None, fuzzy=fuzzy)
+        return {"op": op, "query": name,
+                "results": [h.to_dict() for h in hits]}

@@ -108,10 +108,12 @@ CODING_TOOLS: tuple[str, ...] = (
     "git_diff",
     "search_code",
     "index_repo",    # Phase D: warm the code index the coding loop searches
+    "repo_map",      # structural repo map (tools/repo_index)
+    "symbol_search", # ranked symbol search / who-imports / callers
 )
 
 #: Capability grant covering exactly the allowlisted tools' capabilities:
-#: fs.read (fs_read, git_status, git_diff),
+#: fs.read (fs_read, git_status, git_diff, repo_map, symbol_search),
 #: fs.write (edit_file, apply_patch),
 #: exec.shell (shell_run, run_tests, lint),
 #: mem.read (search_code — reads the code index).
