@@ -1,0 +1,4 @@
+[submodule "vendor/sentinel"]
+	path = vendor/sentinel
+	url = https://github.com/Oluwacutyp/Sentinel.py
+	branch = arena/01a0a420-sentinel-py

@@ -374,6 +374,17 @@ class ImprovementSettings:
     auto_tick: bool = False
 
 @dataclass
+class TradingSettings:
+    """FinancialExpert / trading gates. Live trading is inert by default."""
+    live_enabled: bool = False
+    max_daily_loss_pct: float = 3.0
+    min_sharpe: float = 1.0
+    max_drawdown_pct: float = 20.0
+    min_profit_factor: float = 1.3
+    unlock_ttl_hours: float = 24.0
+    followed_symbols: list = field(default_factory=list)
+
+@dataclass
 class OsintSettings:
     enabled: bool = False
     sources: list = field(default_factory=list)
@@ -480,6 +491,7 @@ class Settings:
     audio: "AudioSettings" = field(default_factory=lambda: AudioSettings())
     osint: "OsintSettings" = field(default_factory=lambda: OsintSettings())
     improvement: "ImprovementSettings" = field(default_factory=lambda: ImprovementSettings())
+    trading: "TradingSettings" = field(default_factory=lambda: TradingSettings())
 
     # -- path helpers --------------------------------------------------------
     @property

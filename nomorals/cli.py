@@ -304,6 +304,80 @@ def _parser() -> argparse.ArgumentParser:
     imp_rollback.add_argument("hash", help="version hash to restore")
     imp_rollback.add_argument("--json", action="store_true", help="Output as JSON")
 
+    trade = sub.add_parser(
+        "trade",
+        help="FinancialExpert trading brain (Sentinel.py engine)",
+        description=("nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
+                     "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
+                     "nm trade signal ETH/USDT\n"
+                     "nm trade compare BTC/USDT,ETH/USDT,SOL/USDT\n"
+                     "nm trade strategies --market crypto\n"
+                     "nm trade paper start BTC/USDT --capital 10000\n"
+                     "nm trade paper status [--session ID]\n"
+                     "nm trade paper stop [--session ID]\n"
+                     "nm trade live unlock --confirm \"I understand\"\n"
+                     "nm trade live order BTC/USDT --side buy --size 0.01\n"
+                     "nm trade kill\n"
+                     "nm trade doctor"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trade_sub = trade.add_subparsers(dest="trade_action", required=True)
+    t_analyze = trade_sub.add_parser("analyze", help="plain-language regime + strategy brief")
+    t_analyze.add_argument("symbol", help="e.g. BTC/USDT, XAUUSD")
+    t_analyze.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_analyze.add_argument("--timeframe", default="1h", help="bar timeframe")
+    t_analyze.add_argument("--bars", type=int, default=2000, help="bars to load")
+    t_analyze.add_argument("--json", action="store_true", help="Output as JSON")
+    t_backtest = trade_sub.add_parser("backtest", help="backtest + pass/fail verdict vs the bar")
+    t_backtest.add_argument("symbol", help="e.g. XAUUSD")
+    t_backtest.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_backtest.add_argument("--profile", default="default",
+                            help="default|aggressive|conservative")
+    t_backtest.add_argument("--json", action="store_true", help="Output as JSON")
+    t_signal = trade_sub.add_parser("signal", help="directional bias + invalidation")
+    t_signal.add_argument("symbol", help="e.g. ETH/USDT")
+    t_signal.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_signal.add_argument("--json", action="store_true", help="Output as JSON")
+    t_compare = trade_sub.add_parser("compare", help="side-by-side regime + strategy fit")
+    t_compare.add_argument("symbols", help="comma-separated symbols")
+    t_compare.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_compare.add_argument("--json", action="store_true", help="Output as JSON")
+    t_strat = trade_sub.add_parser("strategies", help="list Sentinel strategies")
+    t_strat.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_strat.add_argument("--limit", type=int, default=40)
+    t_strat.add_argument("--json", action="store_true", help="Output as JSON")
+    t_paper = trade_sub.add_parser("paper", help="paper-trading sessions (simulated)")
+    t_paper_sub = t_paper.add_subparsers(dest="paper_action", required=True)
+    t_pstart = t_paper_sub.add_parser("start", help="open a paper session")
+    t_pstart.add_argument("symbol", help="e.g. BTC/USDT")
+    t_pstart.add_argument("--market", default="crypto")
+    t_pstart.add_argument("--capital", type=float, default=10000.0)
+    t_pstart.add_argument("--json", action="store_true", help="Output as JSON")
+    t_pstatus = t_paper_sub.add_parser("status", help="mark session to market")
+    t_pstatus.add_argument("--session", default="", help="session id (default: latest open)")
+    t_pstatus.add_argument("--symbol", default="", help="symbol of open session")
+    t_pstatus.add_argument("--json", action="store_true", help="Output as JSON")
+    t_pstop = t_paper_sub.add_parser("stop", help="close a paper session")
+    t_pstop.add_argument("--session", default="", help="session id (default: latest open)")
+    t_pstop.add_argument("--json", action="store_true", help="Output as JSON")
+    t_live = trade_sub.add_parser("live", help="live-trading gates (inert by default)")
+    t_live_sub = t_live.add_subparsers(dest="live_action", required=True)
+    t_lunlock = t_live_sub.add_parser("unlock", help="unlock live for 24h")
+    t_lunlock.add_argument("--confirm", default="",
+                           help='must be exactly "I understand"')
+    t_lunlock.add_argument("--json", action="store_true", help="Output as JSON")
+    t_lorder = t_live_sub.add_parser("order", help="place ONE live market order")
+    t_lorder.add_argument("symbol", help="e.g. BTC/USDT")
+    t_lorder.add_argument("--side", required=True, help="buy|sell")
+    t_lorder.add_argument("--size", type=float, required=True,
+                          help="size in base units")
+    t_lorder.add_argument("--exchange", default="binance")
+    t_lorder.add_argument("--json", action="store_true", help="Output as JSON")
+    t_kill = trade_sub.add_parser("kill", help="kill switch: cancel live, revoke unlocks")
+    t_kill.add_argument("--json", action="store_true", help="Output as JSON")
+    t_doctor = trade_sub.add_parser("doctor", help="check the Sentinel integration")
+    t_doctor.add_argument("--json", action="store_true", help="Output as JSON")
+
 
     # Additional subcommands
     book = sub.add_parser("book", help="AI-assisted book writing")
@@ -782,6 +856,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_finance(args, context)
         if args.command == "improve":
             return _cmd_improve(args, context)
+        if args.command == "trade":
+            return _cmd_trade(args, context)
         if args.command == "native":
             return _cmd_native(args, context)
         if args.command == "cards":
@@ -1389,6 +1465,108 @@ def _cmd_improve(args: argparse.Namespace, context: Any) -> int:
         print(f"improve: {exc}", file=sys.stderr)
         return 1
     print(f"unknown improve action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm trade` to the FinancialExpert / trading tool actions."""
+    from .agents.financial_expert import FinancialExpert
+    from .integrations import sentinel_bridge as bridge
+    from .tools import trading as trading_tool
+
+    as_json = getattr(args, "json", False)
+    action = args.trade_action
+    try:
+        if action == "analyze":
+            rep = FinancialExpert(context).analyze(
+                args.symbol, market=args.market,
+                timeframe=args.timeframe, bars=args.bars)
+            _emit(args, rep.to_dict(), rep.summary_text())
+            return 0
+        if action == "backtest":
+            rep = FinancialExpert(context).backtest(
+                args.symbol, market=args.market, profile=args.profile)
+            _emit(args, rep.to_dict(), rep.summary_text())
+            return 0
+        if action == "signal":
+            rep = FinancialExpert(context).signal(args.symbol,
+                                                  market=args.market)
+            _emit(args, rep.to_dict(), rep.summary_text())
+            return 0
+        if action == "compare":
+            symbols = [s.strip() for s in args.symbols.split(",")
+                       if s.strip()]
+            rep = FinancialExpert(context).compare(symbols,
+                                                   market=args.market)
+            _emit(args, rep.to_dict(), rep.summary_text())
+            return 0
+        if action == "strategies":
+            names = bridge.list_strategies()[: args.limit]
+            _emit(args, {"market": args.market, "count": len(names),
+                         "strategies": names},
+                  "\n".join(f"  {n}" for n in names) or "no strategies")
+            return 0
+        if action == "paper":
+            paction = args.paper_action
+            if paction == "start":
+                out = trading_tool.paper_start(context, args.symbol,
+                                               market=args.market,
+                                               capital=args.capital)
+                _emit(args, out,
+                      f"paper session {out['session_id']} "
+                      f"({'resumed' if out.get('resumed') else 'opened'}): "
+                      f"{args.symbol} capital={out.get('capital')}")
+                return 0
+            if paction == "status":
+                out = trading_tool.paper_status(
+                    context, session_id=args.session, symbol=args.symbol)
+                _emit(args, out,
+                      f"{out['symbol']} equity={out['equity']:,.2f} "
+                      f"pnl={out['pnl']:+,.2f} ({out['pnl_pct']:+.2%}) "
+                      f"units={out['units']} orders={out['orders']} "
+                      f"regime={out['last_action'].get('regime')}")
+                return 0
+            if paction == "stop":
+                out = trading_tool.paper_stop(context,
+                                              session_id=args.session)
+                _emit(args, out,
+                      f"paper session {out['session_id']} closed "
+                      f"({out['symbol']})")
+                return 0
+        if action == "live":
+            laction = args.live_action
+            if laction == "unlock":
+                out = trading_tool.live_unlock(context,
+                                               confirm=args.confirm)
+                _emit(args, out,
+                      f"live unlocked for {out['expires_in_hours']}h "
+                      f"(id {out['unlock_id']})")
+                return 0
+            if laction == "order":
+                out = trading_tool.live_order(context, args.symbol,
+                                              args.side, args.size,
+                                              exchange=args.exchange)
+                _emit(args, out,
+                      f"LIVE {out['side']} {out['size']} {out['symbol']} "
+                      f"order={out['order_id']}")
+                return 0
+        if action == "kill":
+            out = trading_tool.kill_switch(context, "nm trade kill")
+            _emit(args, out,
+                  f"kill switch engaged: {out['reason']} "
+                  f"(journal {out['journal_id']})")
+            return 0
+        if action == "doctor":
+            rep = bridge.doctor()
+            _emit(args, rep.to_dict(), rep.summary_text())
+            return 0 if rep.ok else 1
+    except bridge.LiveTradingDisabled as exc:
+        print(f"trade: live trading disabled: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:  # noqa: BLE001
+        print(f"trade: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown trade action: {action}", file=sys.stderr)
     return 2
 
 

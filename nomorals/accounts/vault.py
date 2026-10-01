@@ -43,6 +43,9 @@ from ..storage.db import Database
 
 __all__ = ["CredentialVault", "Credential", "AccountProfile"]
 
+# PBKDF2 iterations for vault key derivation (matches the cipher tool default).
+_KDF_ITERATIONS = 100_000
+
 _log = get_logger(__name__)
 
 
@@ -116,7 +119,9 @@ class CredentialVault:
     
     def __init__(self, db: Database, master_passphrase: str) -> None:
         self.db = db
-        self._master_key = derive_key(master_passphrase.encode(), salt=b"nomorals-vault-master")
+        self._master_key = derive_key(
+            master_passphrase, salt=b"nomorals-vault-master",
+            iterations=_KDF_ITERATIONS).hex()
         self._ensure_schema()
         _log.info("Credential vault initialized")
     
@@ -154,15 +159,17 @@ class CredentialVault:
         """Encrypt password with a key derived from master + credential ID."""
         # Derive a unique key for this credential
         salt = f"credential-{credential_id}".encode()
-        key = derive_key(self._master_key, salt=salt)
+        key = derive_key(self._master_key, salt=salt,
+                         iterations=_KDF_ITERATIONS)
         encrypted = aes_encrypt(password.encode(), key=key)
-        return encrypted.decode("utf-8")
+        return encrypted
     
     def _decrypt_password(self, encrypted: str, credential_id: int) -> str:
         """Decrypt password with a key derived from master + credential ID."""
         salt = f"credential-{credential_id}".encode()
-        key = derive_key(self._master_key, salt=salt)
-        decrypted = aes_decrypt(encrypted.encode(), key=key)
+        key = derive_key(self._master_key, salt=salt,
+                         iterations=_KDF_ITERATIONS)
+        decrypted = aes_decrypt(encrypted, key=key)
         return decrypted.decode("utf-8")
     
     def store(
@@ -227,7 +234,7 @@ class CredentialVault:
                 _log.info(f"Updated credential: {service}/{username}")
             else:
                 # Insert new (with placeholder encryption, we'll update after getting ID)
-                self.db.execute("""
+                cur = self.db.execute("""
                     INSERT INTO credentials (
                         service, username, password_encrypted, credential_type,
                         tags, metadata, created_at, updated_at, expires_at,
@@ -237,7 +244,7 @@ class CredentialVault:
                     service, username, "placeholder", credential_type,
                     json.dumps(tags), json.dumps(metadata), now, now, expires_at,
                 ))
-                cred_id = self.db.last_insert_rowid()
+                cred_id = cur.lastrowid
                 # Now encrypt with the actual ID
                 encrypted = self._encrypt_password(password, cred_id)
                 self.db.execute(

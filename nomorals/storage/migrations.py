@@ -1653,6 +1653,48 @@ def _apply_cipher_vault(db: object) -> None:
     )
 
 
+def _apply_trading_tables(db: object) -> None:
+    """Prompt 07 (FinancialExpert): paper-trading sessions, the append-only
+    live/paper trade journal, and live-unlock grants.
+
+    Tables are created IF NOT EXISTS so re-runs and partial builds are safe.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS paper_sessions (
+            id          TEXT PRIMARY KEY,
+            symbol      TEXT NOT NULL,
+            market      TEXT NOT NULL DEFAULT 'crypto',
+            capital     REAL NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'open',   -- open | closed
+            state_json  TEXT NOT NULL DEFAULT '{}',     -- broker state
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS trade_journal (
+            id          TEXT PRIMARY KEY,
+            ts          REAL NOT NULL,
+            kind        TEXT NOT NULL,                  -- paper | live
+            symbol      TEXT NOT NULL DEFAULT '',
+            side        TEXT NOT NULL DEFAULT '',       -- buy | sell | kill
+            size        REAL NOT NULL DEFAULT 0,
+            price       REAL NOT NULL DEFAULT 0,
+            order_id    TEXT NOT NULL DEFAULT '',
+            reason      TEXT NOT NULL DEFAULT '',
+            meta_json   TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_journal_ts
+            ON trade_journal(ts DESC);
+        CREATE TABLE IF NOT EXISTS live_unlocks (
+            id          TEXT PRIMARY KEY,
+            granted_at  REAL NOT NULL,
+            expires_at  REAL NOT NULL,
+            note        TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+
+
 def _apply_self_improvement_v2(db: object) -> None:
     """Self-improvement engine v2 (prompt 01): lesson usefulness scoring,
     skill self-rewrite records, canary rollouts, and surfacing ledger.
@@ -1803,6 +1845,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(50, "companion_schema", fn=_apply_companion_schema),
     Migration(51, "cipher_vault", fn=_apply_cipher_vault),
     Migration(52, "self_improvement_v2", fn=_apply_self_improvement_v2),
+    Migration(53, "trading_tables", fn=_apply_trading_tables),
 )
 
 

@@ -122,6 +122,7 @@ class ToolRegistry:
             "network", "osint", "osint_graph", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "workspace",
+            "trading",
             # the agent bridge registers last: agent modules own the real
             # implementations, and thin tools/ wrappers of the same name
             # must never shadow them (last registration wins).
