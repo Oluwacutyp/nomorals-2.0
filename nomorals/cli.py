@@ -242,6 +242,42 @@ def _parser() -> argparse.ArgumentParser:
                         help="with video: block until the background job finishes")
     m_conv.add_argument("--json", action="store_true", help="Output as JSON")
 
+    inbox = sub.add_parser(
+        "inbox",
+        help="Drop-in inbox: drop a file, link, or note — Devon acts",
+        description=("nm inbox list [--status pending] [--room slug]\n"
+                     "nm inbox show <id>\n"
+                     "nm inbox retry <id>\n"
+                     "nm inbox release <id>\n"
+                     "nm inbox add-link <url> [--room slug] [--note ...]\n"
+                     "nm inbox sweep"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    inbox_sub = inbox.add_subparsers(dest="inbox_action", required=True)
+    i_list = inbox_sub.add_parser("list", help="list inbox items")
+    i_list.add_argument("--status", default="",
+                        help="filter: pending|processing|done|needs_input|quarantined|failed")
+    i_list.add_argument("--room", default="", help="filter by room slug")
+    i_list.add_argument("--limit", type=int, default=20)
+    i_list.add_argument("--json", action="store_true", help="Output as JSON")
+    i_show = inbox_sub.add_parser("show", help="show one inbox item")
+    i_show.add_argument("id", help="item id")
+    i_show.add_argument("--json", action="store_true", help="Output as JSON")
+    i_retry = inbox_sub.add_parser("retry", help="re-queue a failed/needs_input item")
+    i_retry.add_argument("id", help="item id")
+    i_retry.add_argument("--json", action="store_true", help="Output as JSON")
+    i_release = inbox_sub.add_parser("release",
+                                     help="release a quarantined item (explicit, logged)")
+    i_release.add_argument("id", help="item id")
+    i_release.add_argument("--json", action="store_true", help="Output as JSON")
+    i_addlink = inbox_sub.add_parser("add-link", help="drop a link into the inbox")
+    i_addlink.add_argument("url", help="http(s) URL")
+    i_addlink.add_argument("--room", default="", help="room slug")
+    i_addlink.add_argument("--note", default="", help="note attached to the link")
+    i_addlink.add_argument("--json", action="store_true", help="Output as JSON")
+    i_sweep = inbox_sub.add_parser("sweep", help="run one inbox sweep cycle now")
+    i_sweep.add_argument("--json", action="store_true", help="Output as JSON")
+
 
 
     # Additional subcommands
@@ -743,6 +779,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_code(args, context)
         if args.command == "media":
             return _cmd_media(args, context)
+        if args.command == "inbox":
+            return _cmd_inbox(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -1220,6 +1258,81 @@ def _cmd_media_convert(args: argparse.Namespace, context: Any) -> int:
     if result.get("job_id") and args.wait:
         return _cmd_media_wait(args, context, result["job_id"], as_json)
     return 0
+
+
+def _inbox_obj(context: Any) -> Any:
+    """Build the drop-in Inbox for the CLI context's workspace."""
+    from .workspace.inbox import Inbox
+
+    root = Path(context.settings.workspace_dir)
+    return Inbox(root, db=context.db)
+
+
+def _cmd_inbox(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm inbox` to list / show / retry / release / add-link / sweep."""
+    as_json = getattr(args, "json", False)
+    try:
+        inbox = _inbox_obj(context)
+    except Exception as exc:  # noqa: BLE001
+        print(f"inbox unavailable: {exc}", file=sys.stderr)
+        return 1
+    action = args.inbox_action
+    try:
+        if action == "list":
+            items = inbox.list_items(
+                status=args.status or None, room=args.room or None,
+                limit=args.limit)
+            payload = [i.to_dict() for i in items]
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                if not payload:
+                    print("inbox is empty")
+                for i in payload:
+                    print(f"{i['id']}  [{i['status']}] {i['kind']}: {i['name']}"
+                          + (f"  → {i['intent']}" if i["intent"] else ""))
+            return 0
+        if action == "show":
+            item = inbox.get_item(args.id).to_dict()
+            if as_json:
+                print(json.dumps(item, indent=2, default=str))
+            else:
+                for k, v in item.items():
+                    print(f"{k}: {v}")
+                hist = inbox.history(args.id, limit=10)
+                if hist:
+                    print("history:")
+                    for h in hist:
+                        print(f"  {h['intent']} → {h['outcome']}: "
+                              f"{h['detail'][:100]}")
+            return 0
+        if action == "retry":
+            item = inbox.retry(args.id)
+            print(f"{item.id} re-queued (status={item.status})")
+            return 0
+        if action == "release":
+            item = inbox.release(args.id)
+            print(f"{item.id} released from quarantine (status={item.status})")
+            return 0
+        if action == "add-link":
+            item = inbox.add_link(args.url, note=args.note,
+                                  room=args.room or None)
+            print(f"link queued: {item.id} → "
+                  f"{'room ' + args.room if args.room else 'global inbox'}")
+            return 0
+        if action == "sweep":
+            report = inbox.sweep()
+            if as_json:
+                print(json.dumps(report, indent=2, default=str))
+            else:
+                print(f"swept: {report.get('pending_found', 0)} pending, "
+                      f"{report.get('counts', {})}")
+            return 0
+    except (KeyError, ValueError) as exc:
+        print(f"inbox: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown inbox action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_run(args: argparse.Namespace, context: Any) -> int:
