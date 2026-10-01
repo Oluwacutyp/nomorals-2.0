@@ -1174,6 +1174,16 @@ class PartnerRuntime:
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "self-improvement schedule not registered: %s", exc)
+                # Prompt 03: watchers sweeper — one durable "watchers sweep"
+                # job (every 1m) that runs the watch tool's sweep action.
+                # ensure_sweeper_job is idempotent by name; the sweep itself
+                # is a no-op when no watchers exist.
+                try:
+                    from .watchers import ensure_sweeper_job
+                    ensure_sweeper_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "watchers sweeper job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on

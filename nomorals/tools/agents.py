@@ -53,6 +53,7 @@ AGENT_TOOL_MODULES = (
     "skills",
     "structuring",
     "toolmaker",
+    "watchers",
 )
 
 

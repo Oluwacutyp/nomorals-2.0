@@ -41,12 +41,18 @@ class Notifier:
         *,
         force: bool = False,
         critical: bool = False,
+        channels: list[str] | None = None,
     ) -> dict[str, Any]:
         """Persist an alert and best-effort deliver it. Never raises.
 
         ``critical`` bypasses the feature gate AND dedupe: build failures and
         security-relevant events must get through even when the owner has the
         notifier muted.
+
+        ``channels`` optionally restricts delivery to a subset of the
+        owner's platforms (e.g. ``["telegram"]``); ``None`` (default)
+        delivers to every live owner channel, preserving the historical
+        behavior for all existing callers.
         """
         if self.db is not None and not force and not critical:
             if self._is_duplicate(kind, title):
@@ -58,7 +64,8 @@ class Notifier:
             if not feature_enabled(self.context, "notifier"):
                 # still record it — the owner can read the queue with /notify
                 return self._store(kind, title, body, delivered=0)
-        return self._store(kind, title, body, delivered=self._deliver(kind, title, body))
+        return self._store(kind, title, body, delivered=self._deliver(
+            kind, title, body, channels=channels))
 
     def _is_duplicate(self, kind: str, title: str) -> bool:
         """True when the same (kind, title) alerted within the dedupe window."""
@@ -86,8 +93,13 @@ class Notifier:
                 pass
         return {"id": nid, "kind": kind, "title": title, "delivered": bool(delivered)}
 
-    def _deliver(self, kind: str, title: str, body: str) -> int:
-        """Send to the owner on every live channel. Returns channels reached."""
+    def _deliver(self, kind: str, title: str, body: str,
+                 channels: list[str] | None = None) -> int:
+        """Send to the owner on every live channel. Returns channels reached.
+
+        ``channels`` restricts delivery to the named platforms
+        (``["telegram"]``); ``None`` delivers to all live owner channels.
+        """
         if self.gateway is None:
             return 0
         from ..social.chat.base import ChatRef
@@ -97,9 +109,12 @@ class Notifier:
         partner = getattr(self.settings, "partner", None) if self.settings else None
         raw = getattr(partner, "owner_chats", "") or ""
         reached = 0
+        want = {c.strip().lower() for c in (channels or []) if c.strip()}
         for key in raw.split(","):
             plat, _, cid = key.strip().partition(":")
             if not (plat and cid):
+                continue
+            if want and plat.strip().lower() not in want:
                 continue
             try:
                 status = self.gateway.status()

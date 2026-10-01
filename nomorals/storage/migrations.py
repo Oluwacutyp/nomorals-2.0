@@ -1653,6 +1653,82 @@ def _apply_cipher_vault(db: object) -> None:
     )
 
 
+def _apply_watchers_tables(db: object) -> None:
+    """Prompt 03 (watchers): the general watcher model, check history, and
+    the alert audit log.
+
+    A NEW ``watchers`` table rather than an extension of ``monitors``:
+    ``monitors`` is narrowly shaped for MonitorAgent's URL/file/page model
+    (webhook_url, volatile, auto_decode, content-vs-size); six watcher kinds
+    plus structured conditions, severity, channels, cooldowns and flap state
+    would leave a dozen nullable columns and confuse both systems.
+
+    Tables are created IF NOT EXISTS so re-runs and partial builds are safe.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS watchers (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL DEFAULT '',
+            kind        TEXT NOT NULL DEFAULT '',   -- url|file|price|repo|keyword|condition
+            target      TEXT NOT NULL DEFAULT '{}', -- JSON kind-specific params
+            condition   TEXT NOT NULL DEFAULT '{}', -- JSON structured predicate
+            interval_s  REAL NOT NULL DEFAULT 3600,
+            cooldown_s  REAL NOT NULL DEFAULT 0,    -- 0 = interval_s * 6
+            severity    TEXT NOT NULL DEFAULT 'info',
+            channels    TEXT NOT NULL DEFAULT '[]', -- JSON subset of notifier channels
+            quiet_hours TEXT NOT NULL DEFAULT '',   -- JSON {start,end,tz} or ''
+            expires_at  REAL NOT NULL DEFAULT 0,
+            state       TEXT NOT NULL DEFAULT 'active',
+            last_check  REAL NOT NULL DEFAULT 0,
+            last_value  TEXT NOT NULL DEFAULT '',   -- JSON baseline value
+            last_alert_ts REAL NOT NULL DEFAULT 0,
+            last_alert_severity TEXT NOT NULL DEFAULT '',
+            error_streak INTEGER NOT NULL DEFAULT 0,
+            last_changed INTEGER NOT NULL DEFAULT 0,
+            flip_times  TEXT NOT NULL DEFAULT '[]', -- JSON flap timestamps
+            created_at  REAL NOT NULL DEFAULT 0,
+            updated_at  REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_watchers_state
+            ON watchers(state);
+        CREATE INDEX IF NOT EXISTS idx_watchers_due
+            ON watchers(state, last_check);
+        -- last N check results per watcher (pruned to 50 by the store)
+        CREATE TABLE IF NOT EXISTS watcher_checks (
+            id          TEXT PRIMARY KEY,
+            watcher_id  TEXT NOT NULL,
+            checked_at  REAL NOT NULL DEFAULT 0,
+            changed     INTEGER NOT NULL DEFAULT 0,
+            summary     TEXT NOT NULL DEFAULT '',
+            value_hash  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_watcher_checks_watcher
+            ON watcher_checks(watcher_id, checked_at);
+        -- audit log: every sent/held/digested/suppressed alert
+        CREATE TABLE IF NOT EXISTS watcher_alerts (
+            id          TEXT PRIMARY KEY,
+            watcher_id  TEXT NOT NULL,
+            severity    TEXT NOT NULL DEFAULT '',
+            channel     TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT '',   -- sent|held|digested|suppressed
+            title       TEXT NOT NULL DEFAULT '',
+            body        TEXT NOT NULL DEFAULT '',
+            created_at  REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_watcher_alerts_watcher
+            ON watcher_alerts(watcher_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_watcher_alerts_status
+            ON watcher_alerts(status, created_at);
+        -- sweeper-level state (digest bookkeeping)
+        CREATE TABLE IF NOT EXISTS watcher_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+
+
 def _apply_trading_tables(db: object) -> None:
     """Prompt 07 (FinancialExpert): paper-trading sessions, the append-only
     live/paper trade journal, and live-unlock grants.
@@ -1846,6 +1922,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(51, "cipher_vault", fn=_apply_cipher_vault),
     Migration(52, "self_improvement_v2", fn=_apply_self_improvement_v2),
     Migration(53, "trading_tables", fn=_apply_trading_tables),
+    Migration(54, "watchers_tables", fn=_apply_watchers_tables),
 )
 
 

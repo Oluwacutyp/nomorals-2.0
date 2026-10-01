@@ -38,7 +38,18 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.policy import Capability
 
-__all__ = ["MonitorAgent", "register"]
+__all__ = [
+    "MonitorAgent",
+    "register",
+    # Extracted fetch/hash primitives (Prompt 03): reused by the general
+    # watcher system instead of being duplicated.  MonitorAgent's methods
+    # delegate to these, so its public API is unchanged.
+    "fetch_url_bytes",
+    "fetch_file_bytes",
+    "fetch_page_bytes",
+    "hash_bytes",
+    "unified_content_diff",
+]
 
 #: how much previous content to keep around so a change can be diffed
 _MAX_STORED_CONTENT = 100_000
@@ -51,6 +62,108 @@ _ERROR_ALERT_STREAK = 3
 def _hmac_hex(secret: str, body: bytes) -> str:
     """Slack-style request signature over the exact JSON body."""
     return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
+# ── extracted fetch/hash primitives (Prompt 03) ─────────────────────────────
+# These were MonitorAgent._fetch / _fetch_page / _diff.  They are module-level
+# now so the watcher system (nomorals/agents/watchers.py) can reuse the
+# exact same fetching, rendering and hashing behaviour without duplicating it.
+
+
+def fetch_url_bytes(url: str, *,
+                    max_bytes: int = _MAX_FETCH_BYTES) -> bytes:
+    """Fetch a URL's raw body through the proxy-aware HttpClient."""
+    from ..core.http import HttpClient
+
+    client = HttpClient()
+    resp = client.get(url)
+    if getattr(resp, "status", 200) >= 400:
+        raise RuntimeError(f"HTTP {resp.status}")
+    body = getattr(resp, "body", b"") or b""
+    if not body and getattr(resp, "text", ""):
+        body = resp.text.encode("utf-8", "ignore")
+    return body[:max_bytes]
+
+
+def fetch_file_bytes(context: Any, path: str, *,
+                     max_bytes: int = _MAX_FETCH_BYTES) -> bytes:
+    """Read a workspace file's bytes (sandboxed through ``safe_path``)."""
+    from ..tools.filesystem import safe_path
+
+    target = safe_path(context, path, must_exist=True)
+    with target.open("rb") as fh:
+        return fh.read(max_bytes)
+
+
+def fetch_page_bytes(target: str, *, volatile: str = "",
+                     max_bytes: int = _MAX_FETCH_BYTES) -> bytes:
+    """Render a page headless (DOM → markdown, boilerplate stripped) and
+    return the normalized visible text.
+
+    A change in what a visitor can ACTUALLY SEE is what hashes — not a nonce,
+    a comment, or a byte of markup churn.  ``volatile`` is newline-separated
+    regexes stripped from the rendered text before hashing (rotating nonces,
+    timestamps, CSRF tokens in visible text); bad patterns are skipped, never
+    fatal.
+    """
+    from ..tools.browser import BrowserSession, parse_html, node_to_markdown
+
+    session = BrowserSession()
+    try:
+        result = session._fetch(target)  # status + raw html (+cookie jar)
+        status = result.get("status", 200)
+        html = result.get("text", "") or ""
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+    if status >= 400:
+        raise RuntimeError(f"HTTP {status}")
+    if not html:
+        return b""
+    dom = parse_html(html)
+    rendered = node_to_markdown(dom)
+    volatile = (volatile or "").strip()
+    if volatile:
+        import re as _re
+
+        # newline-separated patterns (a comma belongs to regex
+        # syntax, so it can never be the delimiter)
+        for pat in volatile.splitlines():
+            pat = pat.strip()
+            if not pat:
+                continue
+            try:
+                rendered = _re.sub(
+                    pat, "", rendered, flags=_re.IGNORECASE)
+            except _re.error:
+                continue
+    # collapse whitespace runs (trailing spaces, repeated blank lines)
+    # so pure reflow / markup churn is not a "change"
+    lines = [ln.rstrip() for ln in rendered.splitlines()]
+    tight: list[str] = []
+    for ln in lines:
+        if ln == "" and tight and tight[-1] == "":
+            continue
+        tight.append(ln)
+    while tight and tight[-1] == "":
+        tight.pop()
+    rendered = "\n".join(tight)
+    return rendered.encode("utf-8", "ignore")[:max_bytes]
+
+
+def hash_bytes(data: bytes) -> str:
+    """SHA-256 hex digest of ``data``."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def unified_content_diff(old: str, new: str, limit: int = 4000) -> str:
+    """Short unified diff between two text snapshots (truncated)."""
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(), new.splitlines(),
+        fromfile="before", tofile="after", lineterm=""))
+    return diff[:limit] + ("\n… (truncated)" if len(diff) > limit else "")
 
 
 class MonitorAgent:
@@ -268,82 +381,20 @@ class MonitorAgent:
                 "now": now}
 
     def _fetch(self, row: dict[str, Any]) -> bytes:
+        # Delegates to the module-level primitives (Prompt 03 extraction)
+        # so watchers reuse the exact same behaviour.
         if row["kind"] == "file":
-            from ..tools.filesystem import safe_path
-
-            target = safe_path(self.context, row["target"], must_exist=True)
-            with target.open("rb") as fh:
-                return fh.read(_MAX_FETCH_BYTES)
+            return fetch_file_bytes(self.context, row["target"])
         if row["kind"] == "page":
-            return self._fetch_page(row)
-        from ..core.http import HttpClient
+            return fetch_page_bytes(row["target"],
+                                    volatile=row.get("volatile") or "")
+        return fetch_url_bytes(row["target"])
 
-        client = HttpClient()
-        resp = client.get(row["target"])
-        if getattr(resp, "status", 200) >= 400:
-            raise RuntimeError(f"HTTP {resp.status}")
-        body = getattr(resp, "body", b"") or b""
-        if not body and getattr(resp, "text", ""):
-            body = resp.text.encode("utf-8", "ignore")
-        return body[:_MAX_FETCH_BYTES]
-
-    # -- browser-acted page watch (wave 77) -----------------------------------
-    # A "page" watch does not hash the raw HTML.  It renders the page through
-    # the headless DOM (scripts/styles/boilerplate stripped to real content)
-    # and hashes the rendered markdown, so a change in what a visitor can
-    # ACTUALLY SEE is what alerts — not a nonce, a comment, or a byte of
-    # markup churn.  This is the difference between watching a URL and
-    # watching a page the way a person sees it.
     def _fetch_page(self, row: dict[str, Any]) -> bytes:
-        from ..tools.browser import BrowserSession, parse_html, node_to_markdown
-
-        target = row["target"]
-        session = BrowserSession()
-        try:
-            result = session._fetch(target)  # status + raw html (+cookie jar)
-            status = result.get("status", 200)
-            html = result.get("text", "") or ""
-        finally:
-            try:
-                session.close()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
-        if status >= 400:
-            raise RuntimeError(f"HTTP {status}")
-        if not html:
-            return b""
-        dom = parse_html(html)
-        rendered = node_to_markdown(dom)
-        # volatile patterns (e.g. a rotating nonce, a timestamp, a CSRF
-        # token in visible text) are stripped BEFORE hashing so only real
-        # content changes alert.  Bad patterns are skipped, never fatal.
-        volatile = (row.get("volatile") or "").strip()
-        if volatile:
-            import re as _re
-
-            # newline-separated patterns (a comma belongs to regex
-            # syntax, so it can never be the delimiter)
-            for pat in volatile.splitlines():
-                pat = pat.strip()
-                if not pat:
-                    continue
-                try:
-                    rendered = _re.sub(
-                        pat, "", rendered, flags=_re.IGNORECASE)
-                except _re.error:
-                    continue
-        # collapse whitespace runs (trailing spaces, repeated blank lines)
-        # so pure reflow / markup churn is not a "change"
-        lines = [ln.rstrip() for ln in rendered.splitlines()]
-        tight: list[str] = []
-        for ln in lines:
-            if ln == "" and tight and tight[-1] == "":
-                continue
-            tight.append(ln)
-        while tight and tight[-1] == "":
-            tight.pop()
-        rendered = "\n".join(tight)
-        return rendered.encode("utf-8", "ignore")[:_MAX_FETCH_BYTES]
+        """Thin wrapper kept for backward compatibility; see
+        :func:`fetch_page_bytes`."""
+        return fetch_page_bytes(row["target"],
+                                volatile=row.get("volatile") or "")
 
     def _note_check(self, row: dict[str, Any], content: bytes,
                     now: float, changed: list[dict[str, Any]]) -> None:
@@ -533,10 +584,9 @@ class MonitorAgent:
 
     @staticmethod
     def _diff(old: str, new: str, limit: int = 4000) -> str:
-        diff = "".join(difflib.unified_diff(
-            old.splitlines(), new.splitlines(),
-            fromfile="before", tofile="after", lineterm=""))
-        return diff[:limit] + ("\n… (truncated)" if len(diff) > limit else "")
+        # Delegates to the extracted primitive (Prompt 03); behaviour
+        # identical, kept as a method for backward compatibility.
+        return unified_content_diff(old, new, limit)
 
 
 def register(registry: Any) -> None:

@@ -516,6 +516,24 @@ def _parser() -> argparse.ArgumentParser:
                          help="minimum seconds between alerts for this watch")
     monitor.add_argument("--watch", default="content", choices=["content", "size"])
     monitor.add_argument("--json", action="store_true", help="Output as JSON")
+    watch = sub.add_parser("watch", help="background watchers with smart alerts")
+    watch.add_argument("action", nargs="?", default="list",
+                       choices=["add", "list", "tick", "pause", "resume", "rm",
+                                "history", "alerts"])
+    watch.add_argument("ref", nargs="?", default="",
+                       help="plain-language spec (add) or watcher id/name")
+    watch.add_argument("--severity", default="",
+                       choices=["", "info", "important", "urgent"],
+                       help="override parsed severity")
+    watch.add_argument("--interval", type=float, default=None,
+                       help="override check interval, seconds")
+    watch.add_argument("--quiet", default="",
+                       help="quiet hours, e.g. '22:00-07:00' (owner tz)")
+    watch.add_argument("--channels", default="",
+                       help="alert channels, e.g. 'telegram' or 'telegram,whatsapp'")
+    watch.add_argument("--limit", type=int, default=50,
+                       help="history/alert rows to show")
+    watch.add_argument("--json", action="store_true", help="Output as JSON")
     crack = sub.add_parser("crack", help="Offline hash cracking (md5/sha1/sha256/…)")
     crack.add_argument("hashes", nargs="*", help="digest(s) to attack")
     crack.add_argument("--hash", default="", metavar="DIGEST",
@@ -865,6 +883,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_workspace(args, context)
         if args.command == "monitor":
             return _cmd_monitor(args, context)
+        if args.command == "watch":
+            return _cmd_watch(args, context)
         if args.command == "crack":
             return _cmd_crack(args, context)
         if args.command == "decode":
@@ -2952,6 +2972,104 @@ def _cmd_monitor(args, context):
             print(f"no monitor matching {ref}")
             return 1
         _emit(args, row, f"{ref} {action}d")
+        return 0
+    print(f"unknown action: {action}")
+    return 2
+
+
+def _cmd_watch(args, context):
+    """Background watchers with smart alerts — thin shell over agents.watchers."""
+    from .agents.watchers import WatcherAgent
+
+    agent = WatcherAgent(context)
+    action = getattr(args, "action", "") or "list"
+    ref = getattr(args, "ref", "") or ""
+
+    if action == "add":
+        if not ref:
+            print('usage: nm watch add "<plain language>" '
+                  '[--severity info|important|urgent] [--interval SECONDS] '
+                  '[--quiet "22:00-07:00"]')
+            print('  e.g. nm watch add "tell me if BTC drops below $60000"')
+            return 2
+        overrides: dict = {}
+        if getattr(args, "severity", ""):
+            overrides["severity"] = args.severity
+        if getattr(args, "interval", None):
+            overrides["interval_s"] = float(args.interval)
+        quiet = getattr(args, "quiet", "") or ""
+        if quiet:
+            m = quiet.replace(" ", "")
+            if "-" in m:
+                start, _, end = m.partition("-")
+                overrides["quiet_hours"] = {"start": start, "end": end}
+        channels = getattr(args, "channels", "") or ""
+        if channels:
+            overrides["channels"] = [c.strip().lower() for c in
+                                     channels.replace(",", " ").split()
+                                     if c.strip()]
+        try:
+            res = agent.add(ref, **overrides)
+        except ValueError as exc:
+            print(f"watch add failed: {exc}")
+            return 1
+        if not res.get("ok"):
+            # ambiguity policy: one clarifying question, no guessed watcher
+            print(res.get("question", "could not parse that"))
+            return 1
+        w = res["watcher"]
+        _emit(args, res, f"{res.get('echo', '')}\nwatcher {w['id']} created")
+        return 0
+    if action == "list":
+        rows = agent.list()
+        if not rows:
+            _emit(args, [], "no watchers — add one with `nm watch add \"...\"`")
+            return 0
+        lines = [f" {r['id']}  {r['name'][:45]:45}  {r['kind']:9}  "
+                 f"{r['state']:7}  {r['severity']:9}  "
+                 f"every {int(r['interval_s'])}s" for r in rows]
+        _emit(args, rows, "\n".join(lines))
+        return 0
+    if action in ("pause", "resume"):
+        fn = agent.pause if action == "pause" else agent.resume
+        row = fn(ref)
+        if row is None:
+            print(f"no watcher matching {ref!r}")
+            return 1
+        _emit(args, row, f"{row['id']} {action}d")
+        return 0
+    if action == "rm":
+        ok = agent.remove(ref)
+        print(f"removed {ref}" if ok else f"no watcher matching {ref!r}")
+        return 0 if ok else 1
+    if action == "history":
+        row = agent.history(ref, limit=int(getattr(args, "limit", 50) or 50))
+        if row is None:
+            print(f"no watcher matching {ref!r}")
+            return 1
+        checks = row["checks"]
+        lines = [f" {c['checked_at']:.0f}  "
+                 f"{'CHANGED' if c['changed'] else 'same':7}  "
+                 f"{c['summary'][:70]}" for c in checks]
+        _emit(args, row, f"history for {row['watcher']['name']} "
+                         f"({len(checks)} checks):\n" + "\n".join(lines)
+              if lines else "no checks recorded yet")
+        return 0
+    if action == "alerts":
+        rows = agent.alert_log(ref, limit=int(getattr(args, "limit", 50) or 50))
+        if not rows:
+            _emit(args, [], "no alerts recorded")
+            return 0
+        lines = [f" {a['created_at']:.0f}  {a['status']:10} {a['severity']:9}  "
+                 f"{a['title'][:70]}" for a in rows]
+        _emit(args, rows, "\n".join(lines))
+        return 0
+    if action == "tick":
+        result = agent.tick()
+        text = (f"tick: checked={result.get('checked')} "
+                f"changed={result.get('changed')} "
+                f"errors={result.get('errors')}")
+        _emit(args, result, text)
         return 0
     print(f"unknown action: {action}")
     return 2

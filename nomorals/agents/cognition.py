@@ -441,6 +441,20 @@ class CognitiveLoop:
         else:
             summary["stages"]["training"] = {"skipped": "tick_train off"}
 
+        # 4. watchers sweep — model-free: check due watchers, route alerts.
+        # Runs on the autonomy tick as well as the scheduler's sweeper job;
+        # both are idempotent (per-watcher due timestamps), so overlap is
+        # harmless. Not budget-guarded: no model calls involved.
+        do_watch = bool(getattr(auto, "tick_watchers", True))
+        if do_watch:
+            try:
+                summary["stages"]["watchers"] = _run(
+                    "watchers", self._tick_watchers, guard=False)
+            except Exception as exc:  # noqa: BLE001
+                summary["stages"]["watchers"] = {"error": str(exc)}
+        else:
+            summary["stages"]["watchers"] = {"skipped": "tick_watchers off"}
+
         summary["seconds"] = round(time.monotonic() - started, 3)
         # settle the tick's spend in the daily ledger, then report it
         budget.record(total["calls"], total["tokens"])
@@ -454,6 +468,13 @@ class CognitiveLoop:
         return summary
 
     # ── model-usage metering (wave 64) ─────────────────────────────────────
+    def _tick_watchers(self) -> dict[str, Any]:
+        """One watchers sweep inside the autonomy tick (Prompt 03)."""
+        from .watchers import WatcherAgent
+
+        agent = WatcherAgent(self.context)
+        return agent.tick()
+
     def _usage_snapshot(self) -> Optional[dict[str, int]]:
         """Cumulative model usage across the router chain (shared with the
         budget governor so tick and out-of-tick work meter alike)."""
