@@ -452,6 +452,31 @@ def _parser() -> argparse.ArgumentParser:
     b_rc.add_argument("--score", required=True, help="HG-AG, e.g. 2-1")
     b_rc.add_argument("--league", default="GEN")
 
+    wx = sub.add_parser(
+        "weather",
+        help="live weather + USA situations + timezone utilities (keyless)",
+        description=("nm weather now [PLACE]\n"
+                     "nm weather forecast [PLACE] [--days N]\n"
+                     "nm weather alerts [PLACE]\n"
+                     "nm weather usa\n"
+                     "nm weather tz [YYYY-MM-DD HH:MM [FROM] [TO]]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    wx_sub = wx.add_subparsers(dest="weather_action", required=True)
+    w_now = wx_sub.add_parser("now", help="current conditions + alerts")
+    w_now.add_argument("place", nargs="?", default=None)
+    w_fc = wx_sub.add_parser("forecast", help="daily forecast")
+    w_fc.add_argument("place", nargs="?", default=None)
+    w_fc.add_argument("--days", type=int, default=3)
+    w_al = wx_sub.add_parser("alerts", help="active weather alerts")
+    w_al.add_argument("place", nargs="?", default=None)
+    wx_sub.add_parser("usa", help="USA national situations overview")
+    w_tz = wx_sub.add_parser("tz", help="timezone conversion / owner clock")
+    w_tz.add_argument("when", nargs="?", default=None,
+                      help="YYYY-MM-DD HH:MM, ISO, or unix ts")
+    w_tz.add_argument("from_zone", nargs="?", default=None)
+    w_tz.add_argument("to_zone", nargs="?", default=None)
+
     voice = sub.add_parser(
         "voice",
         help="Live voice loop: talk to Devon through your mic and speakers",
@@ -1414,6 +1439,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_captcha(args, context)
         if args.command == "bet":
             return _cmd_bet(args, context)
+        if args.command == "weather":
+            return _cmd_weather(args, context)
         if args.command == "vision":
             return _cmd_vision(args, context)
         if args.command == "inbox":
@@ -2430,6 +2457,37 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
 
     print(f"unknown captcha action: {action}", file=sys.stderr)
     return 2
+
+
+def _cmd_weather(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm weather` subcommands — keyless live weather + tz utilities."""
+    from .agents.weather import (USASituations, Weather, convert_time, owner_tz,
+                                 tz_note)
+
+    action = args.weather_action
+    if action == "now":
+        print(Weather().now(args.place)["text"])
+    elif action == "forecast":
+        print(Weather().forecast(args.place, days=args.days)["text"])
+    elif action == "alerts":
+        res = Weather().now(args.place)
+        alerts = res.get("alerts") or []
+        if alerts:
+            print("\n".join(f"• [{a.get('severity', '?')}] "
+                            f"{a.get('title', '')}" for a in alerts[:10]))
+        else:
+            print(f"no active alerts — {res['text']}")
+    elif action == "usa":
+        print(USASituations(Weather()).overview()["text"])
+    elif action == "tz":
+        if not args.when:
+            print(tz_note(owner_tz()))
+        else:
+            res = convert_time(args.when,
+                               args.from_zone or owner_tz(),
+                               args.to_zone or owner_tz())
+            print(res.get("text") or f"couldn't parse: {res.get('error', '')}")
+    return 0
 
 
 def _cmd_bet(args: argparse.Namespace, context: Any) -> int:

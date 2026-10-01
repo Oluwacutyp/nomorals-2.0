@@ -170,6 +170,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
+    "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
+    "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "image": (1, 3),         # /image <path-or-url> — lookup
@@ -701,6 +703,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/task add <instruction> | run [id] | list",
              "example": "/task add check the backups",
              "related": "/schedule /devon"},
+    "weather": {"what": "live weather awareness: current conditions, forecast, severe alerts (keyless), plus a USA national situations overview.",
+                "usage": "/weather [place] | /weather forecast <place> | /weather alerts [place] | /weather usa | /weather tz",
+                "example": "/weather Lagos",
+                "related": "/tz /briefing"},
+    "tz": {"what": "timezone utilities: your local time labeled, and conversions between zones with DST handling.",
+           "usage": "/tz | /tz 2026-10-02 14:00 [from-zone] [to-zone]",
+           "example": "/tz 2026-10-02 14:00 America/New_York Africa/Lagos",
+           "related": "/weather /briefing"},
     "notify": {"what": "recent alerts.", "usage": "/notify [n]",
                "example": "/notify 10", "related": ""},
     "image": {"what": "look up an image: hash, dimensions, seen-before.",
@@ -997,7 +1007,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "features", "decode", "cookies", "cipher",
-      "monitor", "bet"]),
+      "monitor", "bet", "weather", "tz"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1100,6 +1110,8 @@ LIST_ONELINERS: dict[str, str] = {
     "tts": "speak text, send the audio back",
     "speak": "neural voice note of your text",
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
+    "weather": "live weather, alerts, USA situations overview",
+    "tz": "timezone conversion + your labeled local time",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "image": "image lookup: hash, dims, seen-before",

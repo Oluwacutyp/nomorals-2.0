@@ -1762,6 +1762,15 @@ class PartnerRuntime:
         if kind == "voice":
             return self._control_voice(command.tail, chat_key,
                                        message=message)
+        if kind == "bet":
+            return self._control_bet(command.tail or arg, chat_key=chat_key)
+        if kind == "money":
+            from .opportunities import handle_money_command
+            return handle_money_command(command.tail or arg, self.context)
+        if kind == "weather":
+            return self._control_weather(command.tail or arg)
+        if kind == "tz":
+            return self._control_tz(command.tail or arg)
         if kind == "task":
             return self._control_task(command.tail or arg, chat_key=chat_key)
         if kind == "mind":
@@ -5419,6 +5428,186 @@ class PartnerRuntime:
             score = "n/a" if d.score is None else f"{d.score:.0%}"
             lines.append(f"  {name}: {score} ({d.passed}/{d.total})")
         return "\n".join(lines)
+
+    # ── weather awareness + USA situations + timezones ───────────────────
+    def _control_weather(self, tail: str) -> str:
+        """/weather [place] | usa | forecast <place> | alerts <place> — keyless live weather."""
+        from .weather import Weather, USASituations, owner_tz, tz_note
+
+        w = Weather()
+        sub = (tail or "").strip()
+        if not sub or sub.lower() == "now":
+            return w.now()["text"]
+        low = sub.lower()
+        if low == "usa":
+            return USASituations(w).overview()["text"]
+        if low.startswith("forecast"):
+            place = sub[8:].strip() or None
+            return w.forecast(place, days=3)["text"]
+        if low.startswith("alerts"):
+            place = sub[6:].strip() or None
+            res = w.now(place)
+            alerts = res.get("alerts") or []
+            if not alerts:
+                return f"no active alerts — {res['text']}"
+            return "\n".join(f"• [{a.get('severity','?')}] {a.get('title','')}"
+                             for a in alerts[:8])
+        if low.startswith("tz"):
+            return tz_note(owner_tz())
+        return w.now(sub)["text"]
+
+    def _control_tz(self, tail: str) -> str:
+        """/tz [YYYY-MM-DD HH:MM [from-zone] [to-zone]] — convert time zones."""
+        from .weather import convert_time, owner_tz, tz_note
+
+        toks = (tail or "").strip().split()
+        if not toks:
+            return tz_note(owner_tz())
+        # optional "YYYY-MM-DD HH:MM" glued at the front
+        raw = " ".join(toks[:2]) if len(toks) > 1 and toks[1].count(":") else toks[0]
+        rest = toks[2:] if len(toks) > 1 and toks[1].count(":") else toks[1:]
+        from_zone = rest[0] if len(rest) > 0 else owner_tz()
+        to_zone = rest[1] if len(rest) > 1 else owner_tz()
+        res = convert_time(raw, from_zone, to_zone)
+        return res.get("text") or f"couldn't parse that: {res.get('error','')}"
+
+    # ── sports bet analyst: /bet (analysis only — never places bets) ─────────
+    def _control_bet(self, tail: str, chat_key: str) -> str:
+        """The ensemble-ML sports bet analyst.
+
+        /bet analyze <home> vs <away> [h d a] [--league L]
+        /bet bankroll [set <amount>]
+        /bet backtest [n] [--seed S]
+        /bet record <home> <away> <hg>-<ag> [--league L]
+        """
+        from .sports_bet import (BetStore, Fixture, OddsSnapshot, backtest,
+                                 render_analysis, render_backtest,
+                                 synthetic_history)
+
+        store = BetStore()
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+
+        def _usage() -> str:
+            return (
+                "/bet analyze <home> vs <away> [home_odds draw_odds away_odds] "
+                "[--league L]\n"
+                "/bet bankroll [set <amount>]  — the paper bankroll\n"
+                "/bet backtest [n] [--seed S]  — walk-forward backtest on "
+                "synthetic history\n"
+                "/bet record <home> <away> <hg>-<ag> [--league L]  — feed a "
+                "result back in\n"
+                f"bankroll: {store.bankroll:.2f}")
+
+        if verb in ("", "help"):
+            return _usage()
+
+        if verb == "bankroll":
+            if rest.lower().startswith("set"):
+                try:
+                    amt = float(rest.split()[1])
+                except (IndexError, ValueError):
+                    return "usage: /bet bankroll set <amount>"
+                store.bankroll = amt
+                store.save()
+                return f"bankroll set to {amt:.2f}"
+            return f"paper bankroll: {store.bankroll:.2f}"
+
+        if verb == "backtest":
+            n = 400
+            seed = 7
+            toks = rest.split()
+            i = 0
+            while i < len(toks):
+                t = toks[i]
+                if t == "--seed" and i + 1 < len(toks):
+                    try:
+                        seed = int(toks[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                    continue
+                if t.startswith("--seed="):
+                    try:
+                        seed = int(t.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                elif t.isdigit():
+                    n = int(t)
+                i += 1
+            entries = synthetic_history(n=n, seed=seed)
+            r = backtest(entries, bankroll=store.bankroll, seed=seed)
+            return render_backtest(r)
+
+        if verb == "record":
+            toks = rest.split()
+            if len(toks) < 3:
+                return "usage: /bet record <home> <away> <hg>-<ag> [--league L]"
+            home, away = toks[0], toks[1]
+            try:
+                hg_s, ag_s = toks[2].split("-")
+                hg, ag = int(hg_s), int(ag_s)
+            except ValueError:
+                return "usage: /bet record <home> <away> <hg>-<ag> [--league L]"
+            league = "GEN"
+            if "--league" in toks:
+                try:
+                    league = toks[toks.index("--league") + 1]
+                except IndexError:
+                    pass
+            store.record(Fixture(home=home, away=away, league=league,
+                                 home_goals=hg, away_goals=ag))
+            elo_h = store.analyst.elo.rating(home)
+            elo_a = store.analyst.elo.rating(away)
+            return (f"recorded: {home} {hg}-{ag} {away}  "
+                    f"(elo {elo_h:.0f} / {elo_a:.0f})")
+
+        if verb == "analyze":
+            league = "GEN"
+            if "--league" in rest:
+                toks = rest.split()
+                try:
+                    league = toks[toks.index("--league") + 1]
+                except IndexError:
+                    pass
+                rest = " ".join(t for i, t in enumerate(toks)
+                                if t != "--league" and
+                                (i == 0 or toks[i - 1] != "--league"))
+            import re as _re
+            m = _re.split(r"\s+vs\.?\s+", rest, maxsplit=1, flags=_re.I)
+            if len(m) < 2:
+                return ("usage: /bet analyze <home> vs <away> "
+                        "[home_odds draw_odds away_odds]")
+            home = m[0].strip()
+            tail2 = m[1].strip().split()
+            away_parts: list = []
+            odds: list = []
+            for t in tail2:
+                try:
+                    odds.append(float(t))
+                except ValueError:
+                    if odds:
+                        break  # odds started, team name done
+                    away_parts.append(t)
+                if len(odds) == 3:
+                    break
+            away = " ".join(away_parts).strip()
+            if not home or not away:
+                return ("usage: /bet analyze <home> vs <away> "
+                        "[home_odds draw_odds away_odds]")
+            snaps = []
+            if len(odds) == 3:
+                snaps = [OddsSnapshot(bookmaker="chat", home=odds[0],
+                                      draw=odds[1], away=odds[2])]
+            elif odds:
+                return "give all three odds (home draw away) or none"
+            a = store.analyst.analyze(
+                home, away, league=league, odds=snaps,
+                fixtures=store.fixtures())
+            return render_analysis(a)
+
+        return f"unknown /bet verb {verb!r}\n{_usage()}"
 
     # ── directives (direct instructions to the core) ─────────────────────────
     def _control_task(self, tail: str, chat_key: str) -> str:
