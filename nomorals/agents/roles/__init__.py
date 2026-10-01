@@ -13,10 +13,34 @@ from typing import Any
 from ..base import Agent
 from ..tasks import Task
 from ...core.policy import Capability
+# Prompt 02: the role specs live in ..role_specs (this name is a package, so
+# the spec module could not be called roles.py); re-exported here so the
+# whole swarm API is importable from nomorals.agents.roles.
+from ..role_specs import (
+    RoleRegistry,
+    RoleSpec,
+    SwarmAgent,
+    check_spec_call,
+    default_registry,
+    record_tool_denial,
+)
 
 
 class RoleAgent(Agent):
-    """Base for tool-driven roles."""
+    """Base for tool-driven roles.
+
+    A Prompt-02 :class:`RoleSpec` may be bound via ``role_spec=`` (or
+    :func:`build_agent(..., role_spec=...)`).  When bound, :meth:`_call_tool`
+    enforces the spec's allowlist, read-only flag, and path guards *before*
+    the registry call — the same rule the swarm layer applies, so the
+    existing agents are held to the locked contract on every path.
+    Unbound agents behave exactly as before.
+    """
+
+    def __init__(self, *, role_spec: RoleSpec | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.role_spec = role_spec
 
     def _tools(self) -> Any:
         return getattr(self.context, "tools", None) if self.context else None
@@ -25,6 +49,17 @@ class RoleAgent(Agent):
         tools = self._tools()
         if tools is None:
             raise RuntimeError(f"agent {self.name} has no tool registry")
+        spec = getattr(self, "role_spec", None)
+        if spec is not None:
+            get_spec = getattr(tools, "get", None)
+            tool_spec = get_spec(name) if callable(get_spec) else None
+            denied = check_spec_call(
+                spec, name, kwargs,
+                getattr(tool_spec, "capability", "") or "")
+            if denied is not None:
+                record_tool_denial(self.context, spec.name, name,
+                                   denied.reason, str(denied))
+                raise denied
         outcome = tools.call(name, actor=self.name, capabilities=self.capabilities, **kwargs)
         if not outcome.ok:
             raise RuntimeError(f"tool {name} failed: {outcome.error}")

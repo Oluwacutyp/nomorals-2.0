@@ -31,6 +31,7 @@ __all__ = [
     "RoleSpec", "RoleRegistry", "SwarmAgent", "RoleEnforcingRegistry",
     "BUILTIN_ROLES", "SAFE_EXECUTION_SPEC", "ROLE_ALIASES",
     "default_registry", "MUTATING_CAPABILITIES", "is_mutating_tool",
+    "check_spec_call", "record_tool_denial",
 ]
 
 _log = get_logger(__name__)
@@ -68,6 +69,84 @@ def is_mutating_tool(name: str, capability: str = "") -> bool:
         "edit_", "apply_", "fs_write", "fs_delete", "fs_copy", "file_create",
         "shell_", "python_", "run_", "git_commit", "git_push",
     ))
+
+
+def _path_guard_reason(spec: "RoleSpec", tool_name: str,
+                       call_kwargs: dict[str, Any]) -> str:
+    """Why a guarded write tool call is forbidden; '' when allowed."""
+    guard = spec.path_guard
+    if not guard or tool_name not in _GUARDED_WRITE_TOOLS:
+        return ""
+    kind, values = guard
+    paths = [str(call_kwargs[k]) for k in _PATH_KWARGS if k in call_kwargs]
+    if not paths:
+        return (f"role {spec.name!r} may call {tool_name!r} only with an "
+                f"explicit, verifiable path")
+    for path in paths:
+        ok = (any(path.startswith(v) for v in values) if kind == "prefix"
+              else any(path.endswith(v) for v in values))
+        if not ok:
+            allowed = ", ".join(values)
+            return (f"role {spec.name!r} may write only "
+                    f"({'paths starting with' if kind == 'prefix' else 'paths ending with'} "
+                    f"{allowed}); got {path!r}")
+    return ""
+
+
+def check_spec_call(spec: "RoleSpec", tool_name: str,
+                    call_kwargs: dict[str, Any],
+                    tool_capability: str = "") -> "ToolDenied | None":
+    """One enforcement rule for every call path.
+
+    Returns a :class:`ToolDenied` when ``spec`` forbids the call, else None.
+    Used by :class:`RoleEnforcingRegistry` *and* by the legacy
+    :class:`~nomorals.agents.roles.RoleAgent` base, so a bound spec is
+    enforced identically whether the call goes through the swarm layer or
+    straight through a pre-existing role agent.
+    """
+    if tool_name not in spec.tool_allowlist:
+        return ToolDenied(
+            f"role {spec.name!r} may not call {tool_name!r}: "
+            f"not on its allowlist",
+            role=spec.name, tool=tool_name, reason="not_allowlisted")
+    if spec.read_only and is_mutating_tool(tool_name, tool_capability):
+        return ToolDenied(
+            f"role {spec.name!r} is read-only and may not call mutating "
+            f"tool {tool_name!r}",
+            role=spec.name, tool=tool_name, reason="read_only")
+    guard_reason = _path_guard_reason(spec, tool_name, call_kwargs)
+    if guard_reason:
+        return ToolDenied(guard_reason, role=spec.name, tool=tool_name,
+                          reason="path_guard")
+    return None
+
+
+def record_tool_denial(context: Any, role: str, tool_name: str,
+                       reason: str, message: str = "") -> None:
+    """Best-effort denial telemetry: event bus + ``tool_denied`` ledger row.
+
+    Never raises; enforcement must not depend on telemetry succeeding.
+    """
+    if context is not None:
+        emit = getattr(context, "emit", None)
+        if callable(emit):
+            try:
+                emit("swarm.tool_denied", role=role, tool=tool_name,
+                     reason=reason)
+            except Exception:  # noqa: BLE001 - telemetry never breaks calls
+                pass
+    db = getattr(context, "db", None) if context is not None else None
+    if db is None:
+        return
+    try:
+        db.execute(
+            "INSERT INTO failures (id, source, summary, error, family,"
+            " lesson, ts) VALUES (?,?,?,?,?,?,?)",
+            (f"deny-{int(time.time_ns())}", "role",
+             f"role {role!r} denied {tool_name!r} ({reason})"[:500],
+             (message or reason)[:500], "tool_denied", "", time.time()))
+    except Exception:  # noqa: BLE001 - the ledger never sinks the result
+        pass
 
 
 @dataclass
@@ -126,9 +205,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         budget=_budget(600, 200_000),
         output_contract=("findings", "sources", "confidence", "open_questions"),
         read_only=True,
-        capabilities=CapabilitySet.of(
-            Capability.NET_OUT, Capability.NET_DOWNLOAD, Capability.NET_BROWSER,
-            Capability.MEM_READ, Capability.DB_READ, Capability.FS_READ),
     ),
     "coder": RoleSpec(
         name="coder",
@@ -145,9 +221,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         ),
         budget=_budget(1200, 500_000),
         output_contract=("files_changed", "tests_run", "tests_passed", "notes"),
-        capabilities=CapabilitySet.of(
-            Capability.FS_READ, Capability.FS_WRITE, Capability.EXEC_SHELL,
-            Capability.MEM_READ),
     ),
     "critic": RoleSpec(
         name="critic",
@@ -167,8 +240,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         budget=_budget(600, 200_000),
         output_contract=("verdict", "issues", "score"),
         read_only=True,
-        capabilities=CapabilitySet.of(
-            Capability.FS_READ, Capability.MEM_READ, Capability.DB_READ),
     ),
     "architect": RoleSpec(
         name="architect",
@@ -186,7 +257,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         budget=_budget(600, 200_000),
         output_contract=("steps", "risks", "role_assignments"),
         read_only=True,
-        capabilities=CapabilitySet.of(Capability.FS_READ, Capability.MEM_READ),
     ),
     "tester": RoleSpec(
         name="tester",
@@ -204,9 +274,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         ),
         budget=_budget(900, 300_000),
         output_contract=("tests_run", "tests_passed", "failures", "notes"),
-        capabilities=CapabilitySet.of(
-            Capability.EXEC_SHELL, Capability.EXEC_CODE,
-            Capability.FS_READ, Capability.FS_WRITE, Capability.MEM_READ),
         path_guard=("prefix", ("tests/", "test_", "testing/")),
     ),
     "writer": RoleSpec(
@@ -223,7 +290,6 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         ),
         budget=_budget(600, 200_000),
         output_contract=("files_changed", "notes"),
-        capabilities=CapabilitySet.of(Capability.FS_READ, Capability.FS_WRITE),
         path_guard=("suffix", (".md",)),
     ),
 }
@@ -240,7 +306,6 @@ SAFE_EXECUTION_SPEC = RoleSpec(
     budget=_budget(300, 100_000),
     output_contract=("result",),
     read_only=True,
-    capabilities=CapabilitySet.of(Capability.FS_READ),
 )
 
 #: Legacy plan-role strings mapped onto first-class specs.
@@ -422,18 +487,11 @@ class RoleEnforcingRegistry:
         tool_spec = self._inner.get(name)
         if tool_spec is None:
             return Err(ToolNotFound(f"unknown tool {name!r}"))
-        if name not in self._spec.tool_allowlist:
-            return self._deny(name, "not_allowlisted",
-                              f"role {self._spec.name!r} may not call {name!r}: "
-                              f"not on its allowlist", actor)
-        if self._spec.read_only and is_mutating_tool(
-                name, getattr(tool_spec, "capability", "")):
-            return self._deny(name, "read_only",
-                              f"role {self._spec.name!r} is read-only and may "
-                              f"not call mutating tool {name!r}", actor)
-        guard_reason = self._check_path_guard(name, kwargs)
-        if guard_reason:
-            return self._deny(name, "path_guard", guard_reason, actor)
+        denied = check_spec_call(
+            self._spec, name, kwargs,
+            getattr(tool_spec, "capability", "") or "")
+        if denied is not None:
+            return self._deny(denied, actor)
         grant = self._spec.capabilities
         if grant is not None and capabilities is not None:
             grant = grant.intersect(capabilities)
@@ -449,57 +507,16 @@ class RoleEnforcingRegistry:
                 for name, kw in calls]
 
     # ── guards ───────────────────────────────────────────────────────────────
-    def _check_path_guard(self, name: str, kwargs: dict[str, Any]) -> str:
-        guard = self._spec.path_guard
-        if not guard or name not in _GUARDED_WRITE_TOOLS:
-            return ""
-        kind, values = guard
-        paths = [str(kwargs[k]) for k in _PATH_KWARGS if k in kwargs]
-        if not paths:
-            return (f"role {self._spec.name!r} may call {name!r} only with an "
-                    f"explicit, verifiable path")
-        for path in paths:
-            ok = (any(path.startswith(v) for v in values) if kind == "prefix"
-                  else any(path.endswith(v) for v in values))
-            if not ok:
-                allowed = ", ".join(values)
-                return (f"role {self._spec.name!r} may write only "
-                        f"({'paths starting with' if kind == 'prefix' else 'paths ending with'} "
-                        f"{allowed}); got {path!r}")
-        return ""
-
-    def _deny(self, name: str, reason: str, message: str,
-              actor: str) -> Outcome[Any]:
-        entry = {"id": new_id(), "role": self._spec.name, "tool": name,
-                 "reason": reason, "ts": time.time()}
+    def _deny(self, denied: ToolDenied, actor: str) -> Outcome[Any]:
+        entry = {"id": new_id(), "role": self._spec.name, "tool": denied.tool,
+                 "reason": denied.reason, "ts": time.time()}
         with self._lock:
             self.denials.append(entry)
         _log.warning("tool denied: role=%s tool=%s reason=%s",
-                     self._spec.name, name, reason)
-        self._record_ledger(name, reason, message)
-        context = self._context
-        if context is not None:
-            try:
-                context.emit("swarm.tool_denied", role=self._spec.name,
-                             tool=name, reason=reason)
-            except Exception:  # noqa: BLE001 - telemetry never breaks calls
-                pass
-        return Err(ToolDenied(message, role=self._spec.name, tool=name,
-                              reason=reason))
-
-    def _record_ledger(self, name: str, reason: str, message: str) -> None:
-        db = getattr(self._context, "db", None) if self._context else None
-        if db is None:
-            return
-        try:
-            db.execute(
-                "INSERT INTO failures (id, source, summary, error, family,"
-                " lesson, ts) VALUES (?,?,?,?,?,?,?)",
-                (f"deny-{int(time.time_ns())}", "role",
-                 f"role {self._spec.name!r} denied {name!r} ({reason})"[:500],
-                 message[:500], "tool_denied", "", time.time()))
-        except Exception:  # noqa: BLE001 - the ledger never sinks the result
-            pass
+                     self._spec.name, denied.tool, denied.reason)
+        record_tool_denial(self._context, self._spec.name, denied.tool,
+                           denied.reason, str(denied))
+        return Err(denied)
 
     def denial_count(self) -> int:
         with self._lock:
@@ -587,8 +604,11 @@ class SwarmAgent:
         if legacy_role is not None:
             from .roles import build_agent
 
+            # The spec is bound to the existing agent: its _call_tool
+            # enforces the allowlist/read-only/path guards, so the legacy
+            # path is held to exactly the same contract as the swarm path.
             agent = build_agent(legacy_role, context=self.context,
-                                budget=self.budget)
+                                budget=self.budget, role_spec=self.spec)
             result = agent.run(payload)
             output = result.output
             return output if isinstance(output, dict) else {"result": output}

@@ -420,5 +420,97 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("budget", roles[name])
 
 
+class SpecBoundLegacyAgentTests(unittest.TestCase):
+    """The pre-existing role agents enforce a bound RoleSpec.
+
+    One rule on every path: whether a call goes through SwarmAgent or
+    straight through a legacy agent, the locked contract holds.
+    """
+
+    def _bound(self, legacy_role: str, spec_name: str, db=None):
+        from nomorals.agents.roles import build_agent
+        ctx = _context(db=db)
+        return (build_agent(legacy_role, context=ctx,
+                            role_spec=default_registry().resolve(spec_name)),
+                ctx)
+
+    def test_researcher_spec_denies_write_despite_legacy_caps(self):
+        # Legacy ResearchAgent declares FS_WRITE in required_capabilities;
+        # the researcher spec forbids all writes. Spec wins.
+        agent, _ = self._bound("research", "researcher")
+        with self.assertRaises(ToolDenied) as cm:
+            agent._call_tool("fs_write", path="/tmp/x.txt", content="hi")
+        self.assertEqual(cm.exception.reason, "not_allowlisted")
+        self.assertEqual(cm.exception.role, "researcher")
+
+    def test_critic_spec_denies_db_tool_despite_legacy_caps(self):
+        # Legacy CriticAgent has DB_READ; the critic spec has no db tools.
+        agent, _ = self._bound("critic", "critic")
+        with self.assertRaises(ToolDenied):
+            agent._call_tool("db_query", sql="SELECT 1")
+
+    def test_read_only_blocks_allowlisted_mutating_tool(self):
+        # Even a mistakenly-allowlisted mutating tool is denied for
+        # read-only roles — enforcement is in code, not in the prompt.
+        from nomorals.agents.role_specs import RoleSpec
+        from nomorals.agents.roles import build_agent
+        spec = RoleSpec(name="auditor", description="read-only test",
+                        tool_allowlist=("fs_write", "fs_read"),
+                        read_only=True, output_contract=())
+        agent = build_agent("execution", context=_context(), role_spec=spec)
+        with self.assertRaises(ToolDenied) as cm:
+            agent._call_tool("fs_write", path="/tmp/x.txt", content="hi")
+        self.assertEqual(cm.exception.reason, "read_only")
+
+    def test_architect_cannot_write_via_execution_agent(self):
+        # architect spec is read-only; it delegates to legacy
+        # ExecutionAgent which declares FS_WRITE. The spec must hold.
+        agent, _ = self._bound("execution", "architect")
+        with self.assertRaises(ToolDenied):
+            agent._call_tool("fs_write", path="/tmp/x.txt", content="hi")
+
+    def test_unbound_legacy_agent_unchanged(self):
+        from nomorals.agents.roles import build_agent
+        agent = build_agent("research", context=_context())
+        self.assertIsNone(agent.role_spec)
+
+    def test_denial_recorded_in_ledger_from_legacy_path(self):
+        tmp = tempfile.mkdtemp()
+        db = Database(os.path.join(tmp, "t.db"))
+        db.migrate()
+        agent, _ = self._bound("research", "researcher", db=db)
+        with self.assertRaises(ToolDenied):
+            agent._call_tool("fs_write", path="/tmp/x.txt", content="hi")
+        rows = db.execute(
+            "SELECT family, source FROM failures WHERE family='tool_denied'"
+        ).fetchall()
+        self.assertTrue(rows)
+        self.assertEqual(rows[0][1], "role")
+
+    def test_roles_package_reexports_spec_api(self):
+        from nomorals.agents import roles as roles_pkg
+        import nomorals.agents.role_specs as rs
+        for name in ("RoleSpec", "RoleRegistry", "SwarmAgent",
+                     "default_registry"):
+            self.assertIs(getattr(roles_pkg, name), getattr(rs, name), name)
+
+    def test_grant_covers_allowlist_no_silent_denials(self):
+        # Every allowlisted tool's capability must be grantable: a locked
+        # allowlist must never silently deny one of its own tools.
+        reg = _registry()
+        registry = default_registry()
+        for name in registry.names():
+            spec = registry.resolve(name)
+            grant = spec.capabilities
+            for tool in spec.tool_allowlist:
+                ts = reg.get(tool)
+                self.assertIsNotNone(ts, f"{name}: {tool} not registered")
+                cap = ts.capability or ""
+                if grant is not None and cap:
+                    self.assertTrue(
+                        grant.grants(cap),
+                        f"{name}: allowlisted {tool} (cap {cap}) not granted")
+
+
 if __name__ == "__main__":
     unittest.main()
