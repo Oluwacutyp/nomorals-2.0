@@ -286,6 +286,12 @@ class VisionSettings:
     ocr_binary: str = ""
     ocr_language: str = "eng"
     enabled: bool = False
+    # Prompt 09: vision tool knobs. Screenshots stay a privileged, explicit,
+    # per-call-confirmed action — never scheduled, never background.
+    allow_screenshot: bool = False
+    max_dimension: int = 1568  # downscale images over this (px) before sending
+    max_image_bytes: int = 25 * 1024 * 1024  # reject inputs over this
+    log_calls: bool = True  # per-call audit log (timestamp/source/bytes, never pixels)
 
 
 @dataclass

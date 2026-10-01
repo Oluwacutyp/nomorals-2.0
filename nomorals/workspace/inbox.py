@@ -71,6 +71,7 @@ KINDS = ("file", "link", "note")
 INTENTS = (
     "summarize", "describe", "file", "remind", "watch", "research",
     "transcribe", "media_square", "media_trim", "media_gif", "needs_input",
+    "image",  # Prompt 09: vision intent for dropped images
 )
 
 #: quarantined before any model sees the content (spec §3)
@@ -106,6 +107,8 @@ DIRECTIVE_INTENTS = {
     "square": "media_square",  # Prompt 15: image/video edit directives
     "trim": "media_trim",
     "gif": "media_gif",
+    "read-text": "image",  # Prompt 09: vision directives for dropped images
+    "locate": "image",
 }
 
 _WEEKDAYS = {
@@ -406,6 +409,7 @@ class Inbox:
         handlers: dict[str, Callable[["Inbox", InboxItem], ActionResult]] | None = None,
         fetcher: Callable[[str], str] | None = None,
         room_provider: RoomProvider | None = None,
+        vision: Callable[[bytes, str, str], dict[str, Any]] | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.dir = self.root / "inbox"
@@ -424,6 +428,10 @@ class Inbox:
         self._scheduler = scheduler
         self._classifier = classifier or _default_classify
         self._fetch = fetcher or default_fetch
+        #: Prompt 09 vision hook: ``(image_bytes, action, prompt) -> dict``.
+        #: action is "describe" | "read_text" | "locate" (prompt = locate
+        #: target). None → the image intent degrades to probe-only, honestly.
+        self._vision = vision
         self.rooms = room_provider or FilesystemRooms(self.root)
         self.handlers: dict[str, Callable[[Inbox, InboxItem], ActionResult]] = {
             **_default_handlers(), **(handlers or {}),
@@ -747,7 +755,7 @@ class Inbox:
                 if cand.exists() and cand.is_file():
                     target = str(cand)
                     arg = " ".join(arg.split()[1:])
-            if not target and name in ("square", "trim", "gif"):
+            if not target and name in ("square", "trim", "gif", "read-text", "locate"):
                 # media directive without a target: am I a sidecar note for a
                 # sibling media file? If so, defer — the media file claims it.
                 p = Path(item.path)
@@ -1007,7 +1015,9 @@ def _default_classify(inbox: Inbox, item: InboxItem) -> str | None:
     ext = Path(item.name).suffix.lower()
     if item.kind == "link":
         return "research"
-    if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+    if ext in IMAGE_EXTS:
+        return "image"  # Prompt 09: dropped images go to the vision intent
+    if ext in VIDEO_EXTS:
         return "describe"  # Prompt 15: default (no directive) is probe + describe
     if ext in AUDIO_EXTS:
         return "transcribe"
@@ -1303,10 +1313,78 @@ def _handle_media_trim(inbox: Inbox, item: InboxItem) -> ActionResult:
     return _handle_media(inbox, item, instruction)
 
 
+def _handle_image(inbox: Inbox, item: InboxItem) -> ActionResult:
+    """Prompt 09 image intent: probe + vision, directive-aware.
+
+    Default (no directive) is ``describe`` + file. ``@read-text`` transcribes,
+    ``@locate <target>`` returns an approximate region. Without a vision hook
+    the handler degrades to probe-only and says so — it never pretends to
+    have seen the image.
+    """
+    try:
+        from ..media_edit import images as _images
+        info = _images.image_probe(item.path)
+        detail = (f"{info.get('width')}x{info.get('height')} "
+                  f"{info.get('format') or ''}".strip())
+    except Exception as exc:  # noqa: BLE001 - unreadable media isn't fatal
+        detail = f"unreadable: {exc}"
+
+    action, prompt = "describe", ""
+    if item.directive:
+        parsed = parse_directive(item.directive)
+        if parsed:
+            name, arg = parsed
+            if name == "read-text":
+                action = "read_text"
+            elif name == "locate":
+                action, prompt = "locate", arg
+
+    hook = getattr(inbox, "_vision", None)
+    if hook is None:
+        summary = (f"{item.mime or 'image'}: {detail} — vision not wired, "
+                   "probe only")
+        return ActionResult(summary=summary, notify=f"image → {detail}",
+                            disposition="processed")
+    try:
+        data = Path(item.path).read_bytes()
+    except OSError as exc:
+        item.error = f"can't read image: {exc}"
+        return ActionResult(summary=item.error, notify=item.error,
+                            disposition="failed")
+    try:
+        seen = hook(data, action, prompt)
+    except Exception as exc:  # noqa: BLE001 - vision failure parks, doesn't crash
+        item.error = f"vision {action} failed: {exc}"
+        return ActionResult(summary=item.error,
+                            notify="vision hiccup — I'll retry next sweep",
+                            disposition="stay")
+    if action == "read_text":
+        seen_text = (seen.get("text") or "").strip()
+        summary = f"read-text {item.name}: {seen_text[:400]}"
+        notify = f"transcribed → {seen_text[:140]}"
+    elif action == "locate":
+        if seen.get("found"):
+            summary = (f"locate '{prompt}' in {item.name}: "
+                       f"{seen.get('x')},{seen.get('y')} "
+                       f"{seen.get('w')}x{seen.get('h')} "
+                       f"(confidence {seen.get('confidence')}) — approximate")
+        else:
+            summary = f"locate '{prompt}' in {item.name}: not found"
+        notify = summary[:140]
+    else:
+        desc = (seen.get("description") or "").strip()
+        summary = f"image {item.name} ({detail}): {desc[:400]}"
+        notify = f"described → {desc[:140]}"
+    return ActionResult(summary=redact_secrets(summary),
+                        notify=redact_secrets(notify),
+                        disposition="processed")
+
+
 def _default_handlers() -> dict[str, Callable[[Inbox, InboxItem], ActionResult]]:
     return {
         "summarize": _handle_summarize,
         "describe": _handle_describe,
+        "image": _handle_image,
         "file": _handle_file,
         "remind": _handle_remind,
         "watch": _handle_watch,

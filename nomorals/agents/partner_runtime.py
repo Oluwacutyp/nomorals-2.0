@@ -877,6 +877,19 @@ class PartnerRuntime:
                 import dataclasses
 
                 message = dataclasses.replace(message, media=[])
+        # Prompt 09 attachment glue: with vision on, the current message's
+        # image attachments are addressable as attachment:<n> by the vision
+        # tool. The chat media dirs sit outside the workspace sandbox — this
+        # is their explicit intake allowance. (Shared context: concurrent
+        # chats can clobber the list; the window is one brain turn.)
+        if message.media:
+            self.context.extras["attachments"] = [
+                {"path": m.path, "name": m.name or f"image-{i}", "mime": m.mime}
+                for i, m in enumerate(message.media)
+                if m.kind == "image"
+            ]
+        else:
+            self.context.extras.pop("attachments", None)
         # Games: while a game is live in this chat, the room owns the
         # conversation — plain messages are moves and the in-game commands
         # (/status /pass /shop /leave …) work for every participant.

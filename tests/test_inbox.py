@@ -354,9 +354,11 @@ class MediaDirectiveTestCase(unittest.TestCase):
         self.assertTrue(all(r["status"] == "done" for r in rows.values()))
 
     def test_plain_image_drop_describes_without_directive(self):
+        # Prompt 09: images now classify to the dedicated "image" intent
+        # (describe by default, probe-only when no vision hook is wired).
         self._drop_image("plain.jpg")
         report = self.inbox.sweep()
-        self.assertEqual(report["intents"].get("describe"), 1)
+        self.assertEqual(report["intents"].get("image"), 1)
         bodies = " ".join(n["body"] for n in self.notifier.published)
         self.assertIn("1600x1200", bodies)
 

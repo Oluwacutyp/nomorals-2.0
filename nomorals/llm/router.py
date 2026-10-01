@@ -239,8 +239,12 @@ class LLMRouter:
         chain = self._chain()
         if require is not None:
             capable = [p for p in chain if require in p.capabilities]
-            if capable:
-                chain = capable
+            if not capable:
+                # mirror embed(): never silently fall back to providers that
+                # can't do the job — the owner gets one clean error instead
+                # of a chain of doomed attempts.
+                raise ModelError(f"no registered provider supports {require}")
+            chain = capable
         if not chain:
             return LLMResponse(text="", error="no providers registered")
 
