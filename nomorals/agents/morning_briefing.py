@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
@@ -177,20 +177,29 @@ def _owner_tz(context: Any) -> str:
     import os
     return os.environ.get("TZ", "UTC")
 
-# ── market data provider protocol ────────────────────────────────────────
+# ── market data provider ─────────────────────────────────────────────────
+# The ``MarketDataProvider`` protocol lives in
+# ``nomorals/integrations/sentinel_bridge.py`` — it was defined there
+# explicitly for the briefing to depend on (Prompt 07 / FinancialExpert
+# plugs a richer Sentinel-backed provider in later).  Reused here per the
+# standing survey-first rule; NOT redefined.
 
-class MarketDataProvider(Protocol):
-    """Pluggable market snapshot source.  Prompt 07 (FinancialExpert)
-    can plug a richer provider in later; the briefing only needs quotes."""
+try:
+    from ..integrations.sentinel_bridge import (
+        MarketDataProvider as _MarketDataProvider)
+except Exception:  # noqa: BLE001 — integrations optional in some builds
+    _MarketDataProvider = None  # type: ignore[assignment]
 
-    def quote(self, symbol: str) -> dict[str, Any] | None:
-        """Return ``{"symbol", "price", "change_pct_24h"}`` or None."""
-        ...
+#: the protocol the briefing's markets section programs against
+MarketDataProvider = _MarketDataProvider
 
 
 class CoinGeckoMarketProvider:
     """Keyless CoinGecko ``simple/price`` quotes — the same pattern the
-    watchers ``price`` kind uses in-repo.  Read-only, no key needed."""
+    watchers ``price`` kind uses in-repo.  Read-only, no key needed.
+
+    Implements the shared ``MarketDataProvider`` protocol (structural:
+    ``quote(symbol, market="crypto")`` + ``overnight_movers``)."""
 
     _SYMBOL_MAP = {
         "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
@@ -212,7 +221,8 @@ class CoinGeckoMarketProvider:
             proxy_url=getattr(tools, "proxy_url", ""),
         )
 
-    def quote(self, symbol: str) -> dict[str, Any] | None:
+    def quote(self, symbol: str,
+              market: str = "crypto") -> dict[str, Any] | None:
         sym = (symbol or "").strip().upper()
         cg_id = self._SYMBOL_MAP.get(sym)
         if not cg_id:
@@ -232,6 +242,23 @@ class CoinGeckoMarketProvider:
         except Exception as exc:  # noqa: BLE001 — one bad quote ≠ no briefing
             _log.debug("market quote failed for %s: %s", sym, exc)
             return None
+
+    def overnight_movers(self, symbols: list[str],
+                         market: str = "crypto") -> list[dict[str, Any]]:
+        """Quotes sorted by absolute overnight change, descending."""
+        quotes = []
+        for sym in symbols:
+            try:
+                q = self.quote(sym, market=market)
+            except Exception:  # noqa: BLE001
+                q = None
+            if q:
+                quotes.append(q)
+        def _abs_chg(q: dict[str, Any]) -> float:
+            chg = q.get("change_pct_24h")
+            return abs(chg) if isinstance(chg, (int, float)) else 0.0
+        quotes.sort(key=_abs_chg, reverse=True)
+        return quotes
 
 
 # ── section providers ────────────────────────────────────────────────────
@@ -361,7 +388,7 @@ class MarketsProvider(_Provider):
     title = "Markets"
     priority = 30
 
-    def __init__(self, provider: MarketDataProvider | None = None) -> None:
+    def __init__(self, provider: Any | None = None) -> None:
         self._provider = provider
 
     def collect(self, ctx: Any, since: float) -> BriefingSection | None:

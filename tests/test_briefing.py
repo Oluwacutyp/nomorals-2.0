@@ -313,6 +313,35 @@ class RoomsSectionTests(unittest.TestCase):
         self.assertIn("Crashy Project", sec.render_text())
 
 
+class MarketsProtocolTests(unittest.TestCase):
+    """The briefing reuses the MarketDataProvider protocol defined in
+    nomorals/integrations/sentinel_bridge.py (it was put there explicitly
+    for Prompt 04) — no parallel protocol."""
+
+    def test_shared_protocol_imported(self):
+        from nomorals.integrations.sentinel_bridge import (
+            MarketDataProvider as Shared)
+        self.assertIs(mb.MarketDataProvider, Shared)
+
+    def test_coingecko_provider_implements_protocol(self):
+        ctx, _ = make_ctx()
+        prov = mb.CoinGeckoMarketProvider(ctx)
+        # structural: quote(symbol, market=...) + overnight_movers(...)
+        import inspect
+        self.assertIn("market", inspect.signature(prov.quote).parameters)
+        self.assertIn("market",
+                      inspect.signature(prov.overnight_movers).parameters)
+
+    def test_overnight_movers_sorts_by_abs_change(self):
+        ctx, _ = make_ctx()
+        prov = mb.CoinGeckoMarketProvider(ctx)
+        prov.quote = lambda s, market="crypto": {  # type: ignore[method-assign]
+            "symbol": s, "price": 1.0,
+            "change_pct_24h": {"A": 5.0, "B": -12.0, "C": 1.0}[s]}
+        movers = prov.overnight_movers(["A", "B", "C"])
+        self.assertEqual([m["symbol"] for m in movers], ["B", "A", "C"])
+
+
 class ToolRegistrationTests(unittest.TestCase):
     def setUp(self):
         self.ctx, self.tmp = make_ctx()
