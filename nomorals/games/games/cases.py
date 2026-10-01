@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["CASES"]
+__all__ = ["CASES", "BANK_SIZE", "generate_case", "random_case"]
 
 
 CASES: tuple[dict[str, Any], ...] = (
@@ -714,4 +714,586 @@ CASES: tuple[dict[str, Any], ...] = (
                                 "yard clear at 02:00.",
         },
     },
+    # ── 21 ──────────────────────────────────────────────────────────
+    {
+        "story": "The Stradivarius vanished from the concert hall's "
+                 "green room during intermission. The room locks from "
+                 "the inside; four people had the spare key.",
+        "suspects": ["the concertmaster", "the page turner",
+                     "the stage manager", "the instrument tech"],
+        "culprit": "the page turner",
+        "clues": [
+            "The spare key was used at 20:52 — the lock log shows one "
+            "clean turn, no force.",
+            "The concertmaster was on stage; the broadcast feed has "
+            "her in frame from 20:40 to 21:10.",
+            "The stage manager's radio log shows continuous check-ins "
+            "from the wings until 21:05.",
+            "The instrument tech was seen polishing a cello in the "
+            "workshop at 20:52 — on the workshop camera, timestamped.",
+            "In the page turner's satchel: a rosin cloth monogrammed "
+            "with the soloist's initials, and a pawn ticket dated "
+            "that night.",
+        ],
+        "statements": {
+            "the concertmaster": "I was on stage the whole intermission. "
+                                 "The broadcast feed proves it.",
+            "the page turner": "I was fetching scores from the library. "
+                               "A satchel? I carry scores, not violins.",
+            "the stage manager": "My radio never went quiet. Check the log.",
+            "the instrument tech": "I was polishing the cello in the "
+                                   "workshop. The camera was on.",
+        },
+    },
+    # ── 22 ──────────────────────────────────────────────────────────
+    {
+        "story": "The data center's backup tapes were swapped for "
+                 "blanks during the night shift. The tape library "
+                 "needs a badge and a PIN.",
+        "suspects": ["the night-shift operator", "the facilities "
+                     "engineer", "the courier", "the security analyst"],
+        "culprit": "the night-shift operator",
+        "clues": [
+            "The library door logged a badge plus PIN at 02:14 — the "
+            "PIN pad shows no smudge pattern, entered cleanly.",
+            "The facilities engineer was on the roof unit from 01:00 "
+            "to 03:00; the work order GPS agrees.",
+            "The courier's van was at the gate at 02:14 — the gate "
+            "camera shows the van, driver inside, engine running.",
+            "The security analyst was in the SOC; the session log has "
+            "keystrokes every minute until 04:00.",
+            "In the operator's locker: a tape label printer ribbon "
+            "with the backup set's barcodes, still warm.",
+        ],
+        "statements": {
+            "the night-shift operator": "I was at the console all night. "
+                                        "The tapes? I never touched the "
+                                        "library.",
+            "the facilities engineer": "Roof unit, 01:00 to 03:00. The "
+                                       "work order has the GPS.",
+            "the courier": "I was at the gate at 02:14, engine running. "
+                           "The camera saw me.",
+            "the security analyst": "SOC session log, keystrokes every "
+                                    "minute. I never left.",
+        },
+    },
+    # ── 23 ──────────────────────────────────────────────────────────
+    {
+        "story": "The favorite's saddle was swapped for a weighted "
+                 "replica before the derby. The tack room was locked; "
+                 "four had the combination.",
+        "suspects": ["the head groom", "the stablehand", "the jockey's "
+                     "agent", "the track vet"],
+        "culprit": "the stablehand",
+        "clues": [
+            "The replica weighs 4 kg more — the swap needed the "
+            "tack room's hanging scale, used at 05:20.",
+            "The head groom was at the feed store; the receipt is "
+            "timestamped 05:15, twenty minutes away.",
+            "The jockey's agent was on a recorded call with the "
+            "stewards from 05:00 to 05:40.",
+            "The track vet was drawing blood in barn C; the lab "
+            "requisition is timed 05:25.",
+            "In the stablehand's trunk: lead sheeting cut to saddle "
+            "panels, and the favorite's real stirrup leathers.",
+        ],
+        "statements": {
+            "the head groom": "Feed store at 05:15. The receipt is "
+                              "twenty minutes from the track.",
+            "the stablehand": "I mucked stalls all morning. Lead "
+                              "sheeting? That's for the roof repairs.",
+            "the jockey's agent": "I was on with the stewards, recorded, "
+                                  "05:00 to 05:40.",
+            "the track vet": "Barn C, drawing blood. The lab "
+                             "requisition is timed.",
+        },
+    },
+    # ── 24 ──────────────────────────────────────────────────────────
+    {
+        "story": "The one-penny black was lifted from the philately "
+                 "exhibition's case during the members' hour. The case "
+                 "opens with a key and a code.",
+        "suspects": ["the exhibit designer", "the society president",
+                     "the case maker", "the evening guard"],
+        "culprit": "the exhibit designer",
+        "clues": [
+            "The case was opened with key AND code — the code log "
+            "shows the designer's personal code at 19:12.",
+            "The society president was giving the opening address; "
+            "two hundred members heard it.",
+            "The case maker's van broke down on the motorway; the "
+            "recovery invoice is timed 18:40.",
+            "The evening guard's rounds log has the case sealed at "
+            "19:00 and 19:30 — both with tablet photos.",
+            "In the designer's flat: a stock book with the "
+            "one-penny black hinged in, and the exhibition's spare "
+            "case key.",
+        ],
+        "statements": {
+            "the exhibit designer": "I set the case at noon and never "
+                                    "went back. My code? Someone must "
+                                    "have watched me type it.",
+            "the society president": "Two hundred members heard my "
+                                     "address. I was on the podium.",
+            "the case maker": "My van died on the motorway. The "
+                              "recovery invoice is timed.",
+            "the evening guard": "Rounds logged, photos taken. The case "
+                                 "was sealed at 19:00 and 19:30.",
+        },
+    },
+    # ── 25 ──────────────────────────────────────────────────────────
+    {
+        "story": "The chef's recipe book was photographed page by "
+                 "page in the locked office during service. Only four "
+                 "had the office key.",
+        "suspects": ["the sous-chef", "the line cook", "the restaurant "
+                     "critic", "the delivery driver"],
+        "culprit": "the line cook",
+        "clues": [
+            "The office camera was unplugged at 20:03 — the plug shows "
+            "a clean pull, someone who knew the blind spot.",
+            "The sous-chef was on the pass; the ticket rail has her "
+            "initials on every order until 22:00.",
+            "The critic filed her review from the dining room at "
+            "20:30; the timestamp is on the submission.",
+            "The delivery driver's route log shows the restaurant "
+            "drop at 19:40 and the next stop at 20:10.",
+            "On the line cook's phone: 47 photos of handwritten "
+            "recipe pages, taken 20:04 to 20:19.",
+        ],
+        "statements": {
+            "the sous-chef": "I was on the pass all service. The ticket "
+                             "rail has my initials.",
+            "the line cook": "I was on grill all night. Photos? I "
+                             "photograph plating for my portfolio.",
+            "the restaurant critic": "I filed from the dining room at "
+                                     "20:30. The submission is timestamped.",
+            "the delivery driver": "Drop at 19:40, next stop 20:10. The "
+                                   "route log is there.",
+        },
+    },
+    # ── 26 ──────────────────────────────────────────────────────────
+    {
+        "story": "A logbook page covering the comet's closest approach "
+                 "was razored out of the observatory's bound volume. "
+                 "Four had the dome key that night.",
+        "suspects": ["the resident astronomer", "the visiting "
+                     "researcher", "the telescope tech", "the night "
+                     "watchman"],
+        "culprit": "the telescope tech",
+        "clues": [
+            "The cut is a single razor pass — the blade width matches "
+            "the tech's box cutter, not the archive scalpel.",
+            "The resident astronomer was guiding a school group; the "
+            "booking sheet and thirty students agree.",
+            "The visiting researcher's hire car GPS shows the "
+            "motorway services from 23:00 to 01:00.",
+            "The night watchman's rounds log has the dome locked at "
+            "midnight and 02:00, both with photos.",
+            "In the tech's toolbox: a box cutter with paper dust in "
+            "the slide, and a folded logbook page in a star chart.",
+        ],
+        "statements": {
+            "the resident astronomer": "School group all night. Thirty "
+                                       "students and a booking sheet.",
+            "the visiting researcher": "I was at the motorway services. "
+                                        "The hire car GPS knows.",
+            "the telescope tech": "I was collimating the secondary all "
+                                  "night. The cutter's for opening "
+                                  "boxes.",
+            "the night watchman": "Dome locked at midnight and 02:00. "
+                                  "The photos are logged.",
+        },
+    },
+    # ── 27 ──────────────────────────────────────────────────────────
+    {
+        "story": "The high-denomination chip mold went missing from "
+                 "the casino's cage during the count. The cage needs "
+                 "two keys turned together.",
+        "suspects": ["the cage cashier", "the count supervisor",
+                     "the chip runner", "the surveillance operator"],
+        "culprit": "the cage cashier",
+        "clues": [
+            "The mold left in a chip rack — the rack's RFID logged "
+            "the cage door at 03:12, then nothing.",
+            "The count supervisor was in the count room; the room "
+            "camera and the scale logs agree to the minute.",
+            "The chip runner's route sheet has the floor run "
+            "timestamped 03:10 to 03:25, signed by two dealers.",
+            "The surveillance operator's console log shows the cage "
+            "camera feed live on her monitor all night.",
+            "In the cashier's car: a chip rack with the mold's "
+            "serial etched inside, wrapped in a cage towel.",
+        ],
+        "statements": {
+            "the cage cashier": "I was balancing the drawer all night. "
+                                "A rack in my car? That's the laundry "
+                                "run.",
+            "the count supervisor": "Count room, on camera, scale logs "
+                                    "to the minute.",
+            "the chip runner": "Floor run 03:10 to 03:25, signed by two "
+                               "dealers.",
+            "the surveillance operator": "The cage feed was on my monitor "
+                                         "all night. The console log "
+                                         "proves it.",
+        },
+    },
+    # ── 28 ──────────────────────────────────────────────────────────
+    {
+        "story": "The original negative of the finale was swapped for "
+                 "a dupe in the editing suite overnight. The suite "
+                 "needs a fob after hours.",
+        "suspects": ["the lead editor", "the assistant editor",
+                     "the colorist", "the night cleaner"],
+        "culprit": "the assistant editor",
+        "clues": [
+            "The dupe's edge code is one generation off — swapped by "
+            "someone who knew which can to take.",
+            "The lead editor's fob logged the parking garage at "
+            "23:40; the garage camera agrees.",
+            "The colorist was rendering at home; the render farm log "
+            "has her jobs queued until 04:00.",
+            "The night cleaner's cart GPS shows the third floor from "
+            "01:00 to 02:00, never the suite.",
+            "In the assistant editor's drawer: the original negative "
+            "in a mislabeled can, and a pawn ticket for camera gear.",
+        ],
+        "statements": {
+            "the lead editor": "I left at 23:40. The garage camera saw "
+                               "my fob.",
+            "the assistant editor": "I was logging footage at my "
+                                     "station. The negative? I've never "
+                                     "opened that can.",
+            "the colorist": "Rendering from home. The farm log has my "
+                            "jobs until 04:00.",
+            "the night cleaner": "Third floor all night. The cart GPS "
+                                 "never went near the suite.",
+        },
+    },
+    # ── 29 ──────────────────────────────────────────────────────────
+    {
+        "story": "The 17th-century globe was lifted from the library's "
+                 "map room during the storm. The room was locked; four "
+                 "had the master.",
+        "suspects": ["the map curator", "the night shelver", "the "
+                     "restoration volunteer", "the security guard"],
+        "culprit": "the night shelver",
+        "clues": [
+            "The globe's cradle was unscrewed, not forced — a "
+            "screwdriver job by someone who knew the mount.",
+            "The map curator was at a donors' dinner; the seating "
+            "chart and photos agree.",
+            "The restoration volunteer's timesheet ends at 17:00; the "
+            "exit gate logged her out at 17:04.",
+            "The security guard's rounds put him in the east wing "
+            "during the storm; the log is timestamped.",
+            "In the shelver's cart: brass screws matching the cradle, "
+            "and a shipping label made out to a private collector.",
+        ],
+        "statements": {
+            "the map curator": "Donors' dinner all evening. The seating "
+                               "chart has me.",
+            "the night shelver": "I shelved returns all night. Screws? "
+                                 "From the book truck repairs.",
+            "the restoration volunteer": "Out at 17:04. The gate logged "
+                                          "me.",
+            "the security guard": "East wing during the storm. The "
+                                  "rounds log is timestamped.",
+        },
+    },
+    # ── 30 ──────────────────────────────────────────────────────────
+    {
+        "story": "The race leader's timing chip was swapped at the "
+                 "marathon's halfway point, erasing her split. Four "
+                 "marshals worked that station.",
+        "suspects": ["the station chief", "the course marshal",
+                     "the timing tech", "the water volunteer"],
+        "culprit": "the course marshal",
+        "clues": [
+            "The chip was swapped, not lost — the dead chip was found "
+            "in the station's bin, wiped.",
+            "The station chief was on the radio net; the net log has "
+            "her voice every five minutes.",
+            "The timing tech's laptop shows the swap as a manual "
+            "override from the station terminal at 09:12.",
+            "The water volunteer was photographed handing out cups "
+            "at 09:12, two stations down.",
+            "In the marshal's vest: the leader's live chip, still "
+            "pinging, tucked in the inner pocket.",
+        ],
+        "statements": {
+            "the station chief": "Radio net all morning, every five "
+                                 "minutes. The log has my voice.",
+            "the course marshal": "I was directing runners all morning. "
+                                  "A chip in my vest? Must have fallen "
+                                  "in.",
+            "the timing tech": "The override came from the station "
+                               "terminal, not my laptop.",
+            "the water volunteer": "I was two stations down at 09:12. "
+                                   "The photos show it.",
+        },
+    },
 )
+
+# ── how many hand-written cases the bank holds (the generator adds more) ──
+BANK_SIZE = len(CASES)
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Dynamic case generator — seeded, combinatorial, airtight by construction.
+#
+# Every generated case follows the same 5-clue contract as the bank:
+#   clue 1 = the mechanism (how it was done)
+#   clue 2 = an alibi clearing innocent A
+#   clue 3 = an alibi clearing innocent B
+#   clue 4 = a red herring (suspicious-looking, provably innocent)
+#   clue 5 = the smoking gun, naming the culprit by name
+# The culprit's statement denies the smoking gun; every innocent's
+# statement is consistent with their own clue. Because the pieces are
+# assembled from matched (clue, statement) pairs, a generated case
+# cannot contradict itself.
+#
+# Difficulty: easy → blunt herring + blunt gun; hard → subtle herring
+# + subtle gun; medium → mixed. ~12 scenes × C(24,4) suspect sets ×
+# templates = millions of distinct, solvable cases.
+# ══════════════════════════════════════════════════════════════════════
+
+_GEN_ROLES = (
+    "the night guard", "the curator", "the janitor", "the sous-chef",
+    "the florist", "the valet", "the electrician", "the intern",
+    "the archivist", "the stagehand", "the sommelier", "the locksmith",
+    "the chauffeur", "the housekeeper", "the gardener", "the bartender",
+    "the dispatcher", "the lab tech", "the docent", "the projectionist",
+    "the bookkeeper", "the courier", "the radio operator",
+    "the pastry chef",
+)
+
+_GEN_SCENES = (
+    {"item": "first-edition map", "place": "the sealed vault",
+     "lock": "keycard reader"},
+    {"item": "championship trophy", "place": "the trophy room",
+     "lock": "code lock"},
+    {"item": "sapphire necklace", "place": "the gallery case",
+     "lock": "case key"},
+    {"item": "leather-bound ledger", "place": "the corner office",
+     "lock": "master key"},
+    {"item": "concert violin", "place": "the green room",
+     "lock": "spare key"},
+    {"item": "reserve wine barrel", "place": "the cellar",
+     "lock": "cellar key"},
+    {"item": "illuminated manuscript", "place": "the reading room",
+     "lock": "reading-room key"},
+    {"item": "studio camera", "place": "the equipment cage",
+     "lock": "studio fob"},
+    {"item": "pocket watch", "place": "the wall safe",
+     "lock": "combination dial"},
+    {"item": "oil painting", "place": "the storage wing",
+     "lock": "badge reader"},
+    {"item": "field laptop", "place": "the server room",
+     "lock": "biometric pad"},
+    {"item": "signet ring", "place": "the bridal suite",
+     "lock": "door code"},
+)
+
+_GEN_PLACE2 = (
+    "the lobby", "the east wing", "the loading dock", "the courtyard",
+    "the far stairwell", "the service corridor",
+)
+
+_GEN_TIMES = (
+    ("19:40", "20:15"), ("20:52", "21:30"), ("21:41", "22:20"),
+    ("22:15", "23:00"), ("01:47", "02:30"), ("02:14", "03:00"),
+    ("05:20", "06:00"),
+)
+
+_GEN_TOOLS = ("wrench", "torch", "screwdriver", "multitool")
+
+# (clue template, statement template) — the statement always agrees
+# with the clue, so innocents can never contradict themselves.
+_GEN_ALIBIS = (
+    ("{s} was on the {place2} camera from {t1} to {t2}; the loop is unbroken.",
+     "I was on the camera the whole time. Check the loop."),
+    ("{s}'s badge logged the far wing at {t1} — the reader log is timestamped.",
+     "My badge never left the far wing. The reader log proves it."),
+    ("{s} was on a live call from {t1} to {t2}; the call record is unbroken.",
+     "I was on a live call the whole time. The record is unbroken."),
+    ("Two witnesses place {s} at {place2} at {t1}; both statements agree.",
+     "Two people saw me at {place2}. Ask them."),
+    ("{s}'s van GPS pinged {place2} until {t1}; the tracker log is intact.",
+     "My van never moved. The tracker log is intact."),
+    ("{s} clocked the {place2} register at {t1} — the tape agrees to the minute.",
+     "I clocked the register at {t1}. The tape agrees."),
+)
+
+# (clue, statement, subtle) — subtle herrings look worse before the
+# exonerating tail lands.
+_GEN_HERRINGS = (
+    ("{s} was seen near {place} at {t1} — but the {place2} camera catches "
+     "{s} buying coffee at that exact minute.",
+     "I was buying coffee. The camera has me.", False),
+    ("A {tool} belonging to {s} was found at {place} — reported missing "
+     "from {s}'s kit three days earlier.",
+     "My {tool} went missing days ago. I filed the report.", False),
+    ("{s} asked about the {item}'s value that afternoon — as part of an "
+     "insurance inventory, filed at {t1}.",
+     "It was for the insurance inventory. The filing is timestamped.", False),
+    ("{s}'s fingerprints are on the {lock} — from the morning opening "
+     "shift, logged at {t1}.",
+     "I open up every morning. The log has my shift.", True),
+    ("{s} had {item} dust on their cuffs — but the lab confirms it is from "
+     "{s}'s legitimate bench work at {t1}.",
+     "That is from my bench work. The lab confirmed it.", True),
+    ("{s} left {place} in a hurry at {t1} — to catch the last ferry; "
+     "the manifest lists {s}.",
+     "I was catching the ferry. The manifest lists me.", True),
+)
+
+# (evidence, incriminating detail, evidence noun)
+_GEN_EVIDENCE = (
+    ("a duplicate key, freshly cut",
+     "the {item}'s serial scratched into the tang", "duplicate key"),
+    ("a pawn ticket dated last night",
+     "the {item}'s description written on the stub", "pawn ticket"),
+    ("photos of the {item}",
+     "timestamps from {t1}, before anyone reported it gone", "photos"),
+    ("a shipping label",
+     "made out to a private buyer, in {s}'s own hand", "shipping label"),
+    ("a cloth with {item} fibers",
+     "monogrammed with {s}'s initials", "cloth"),
+    ("a burner phone",
+     "one {t1} call to a known fence, logged", "burner phone"),
+)
+
+# (clue template, subtle)
+_GEN_GUNS = (
+    ("In {s}'s locker: {ev} — {det}.", False),
+    ("On {s}'s workbench: {ev}, and {det}.", False),
+    ("Tucked inside {s}'s bag: {ev}; {det}.", False),
+    ("{s}'s phone location pinged {place} at {t1} — and {det}.", True),
+    ("The {item}'s packing straw turned up in {s}'s locker: {ev} — {det}.", True),
+    ("A receipt in {s}'s name surfaced at the pawn shop: {ev}, {det}.", True),
+)
+
+_GEN_DENIALS = (
+    "\"I've never touched the {item}.\"",
+    "\"I was nowhere near {place} that night.\"",
+    "\"That {noun} isn't mine — someone planted it.\"",
+    "\"Ask anyone — I left well before {t1}.\"",
+    "\"I don't even know what the {item} looks like.\"",
+    "\"Check the cameras — you'll see I'm innocent.\"",
+)
+
+_RECENT_CASE_IDS: Any = None  # lazy deque, avoids import cost at module load
+
+
+def _recent() -> Any:
+    global _RECENT_CASE_IDS
+    if _RECENT_CASE_IDS is None:
+        from collections import deque
+
+        _RECENT_CASE_IDS = deque(maxlen=12)
+    return _RECENT_CASE_IDS
+
+
+def generate_case(rng: Any, difficulty: str = "medium") -> dict[str, Any]:
+    """Compose a fresh, solvable case from the template pools.
+
+    ``rng`` is any ``random.Random``-like; the same seed always builds
+    the same case. ``difficulty`` is ``easy`` | ``medium`` | ``hard``.
+    """
+    import random as _random
+
+    if not isinstance(rng, _random.Random):
+        rng = _random.Random(rng)
+    difficulty = difficulty if difficulty in ("easy", "medium", "hard") else "medium"
+
+    scene = rng.choice(_GEN_SCENES)
+    item, place, lock = scene["item"], scene["place"], scene["lock"]
+    suspects = list(rng.sample(_GEN_ROLES, 4))
+    culprit = rng.choice(suspects)
+    others = [s for s in suspects]
+    rng.shuffle(others)
+    others = [s for s in others if s != culprit]
+    cleared_a, cleared_b, herring_suspect = others[0], others[1], others[2]
+
+    t1, t2 = rng.choice(_GEN_TIMES)
+    place2 = rng.choice(_GEN_PLACE2)
+    tool = rng.choice(_GEN_TOOLS)
+
+    def fill(tpl: str, s: str = "", **kw: str) -> str:
+        return tpl.format(s=s, item=item, place=place, lock=lock,
+                          place2=place2, t1=t1, t2=t2, tool=tool, **kw)
+
+    story = (f"The {item} vanished from {place} overnight. "
+             f"Four people had access.")
+    clues = [fill(f"The {lock} shows one clean entry at {t1} — "
+                   "no force, no alarm.")]
+
+    statements: dict[str, str] = {}
+    for sus, (ctpl, stpl) in zip(
+            (cleared_a, cleared_b), rng.sample(_GEN_ALIBIS, 2)):
+        clues.append(fill(ctpl, sus))
+        statements[sus] = fill(stpl, sus)
+
+    # Red herring: difficulty picks the subtlety.
+    herring_pool = [h for h in _GEN_HERRINGS
+                    if (h[2] == (difficulty == "hard"))
+                    or difficulty == "medium"]
+    hclue, hstmt, _ = rng.choice(herring_pool or _GEN_HERRINGS)
+    clues.append(fill(hclue, herring_suspect))
+    statements[herring_suspect] = fill(hstmt, herring_suspect)
+
+    # Smoking gun: always names the culprit.
+    gun_pool = [g for g in _GEN_GUNS
+                if (g[1] == (difficulty == "hard")) or difficulty == "medium"]
+    gtpl, _ = rng.choice(gun_pool or _GEN_GUNS)
+    ev, det, noun = rng.choice(_GEN_EVIDENCE)
+    ev_f = fill(ev, culprit)
+    det_f = fill(det, culprit)
+    clues.append(fill(gtpl, culprit, ev=ev_f, det=det_f))
+
+    denial = rng.choice(_GEN_DENIALS)
+    statements[culprit] = f"{culprit}: {fill(denial, culprit, noun=noun)}"
+
+    return {
+        "id": f"gen-{rng.getrandbits(32):08x}",
+        "story": story,
+        "suspects": suspects,
+        "culprit": culprit,
+        "clues": clues,
+        "statements": statements,
+        "difficulty": difficulty,
+        "generated": True,
+    }
+
+
+def random_case(rng: Any, difficulty: str | None = None) -> dict[str, Any]:
+    """A case for a new game: ~55% from the hand-written bank, the rest
+    freshly generated. Never repeats one of the last 12 served cases,
+    and always carries a ``difficulty`` grade for scoring."""
+    import random as _random
+
+    if not isinstance(rng, _random.Random):
+        rng = _random.Random(rng)
+    difficulty = difficulty or rng.choice(("easy", "medium", "hard"))
+    recent = _recent()
+
+    if rng.random() < 0.55:
+        candidates = [(f"bank:{i}", c) for i, c in enumerate(CASES)
+                      if f"bank:{i}" not in recent]
+        if not candidates:
+            candidates = [(f"bank:{i}", c) for i, c in enumerate(CASES)]
+        cid, picked = rng.choice(candidates)
+        case = dict(picked)
+        case["id"] = cid
+        case["statements"] = dict(picked.get("statements") or {})
+        case["generated"] = False
+    else:
+        case = generate_case(rng, difficulty)
+        cid = case["id"]
+
+    case = dict(case)
+    case["difficulty"] = difficulty
+    recent.append(cid)
+    return case

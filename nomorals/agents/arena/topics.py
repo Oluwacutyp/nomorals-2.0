@@ -1,9 +1,24 @@
-"""Topic sampling for the self-improvement arena.
+"""Dynamic topic tables for the self-improvement arena.
 
-The arena picks a random subject from a curated bank of real tech topics
-(white and grey: systems, security fundamentals, networking, data, AI,
-automation, history) — never one it has already digested (checked against
-``arena_knowledge``), so the stream stays fresh.
+The arena used to pick from 48 static one-liners. Now:
+
+* **Rich topic tables** — ~170 topics across 14 categories, each with a
+  difficulty grade (1 = accessible, 2 = practitioner, 3 = deep) and
+  keyword tags. ``/arena topics`` renders the full table;
+  ``/arena topics <category>`` drills into one.
+* **Personalized sampling** — ``sample_topic`` takes an interest
+  ``profile`` (category → weight) built by
+  ``nomorals/agents/arena/activity.py`` from what the user actually
+  does: recent searches, arena digest history, custom topics, goals.
+  Categories the user engages with get picked more often.
+* **Random rotation** — ``surprise_topic`` ignores the profile
+  entirely (pure random, optional seed), and every sampler skips
+  topics already in ``arena_knowledge`` plus an anti-repeat window on
+  recently served categories.
+
+``TOPIC_BANK`` values are dicts (``t`` = text, ``d`` = difficulty,
+``tags`` = keywords); the topic *text* stays the dedup identity so
+old ``arena_knowledge`` rows keep working.
 """
 
 from __future__ import annotations
@@ -11,7 +26,17 @@ from __future__ import annotations
 import random
 from typing import Any
 
-__all__ = ["CATEGORIES", "TOPIC_BANK", "sample_topic"]
+__all__ = [
+    "CATEGORIES",
+    "TOPIC_BANK",
+    "bank_size",
+    "category_stats",
+    "sample_topic",
+    "surprise_topic",
+    "topic_text",
+    "topics_in",
+    "topics_table",
+]
 
 CATEGORIES = (
     "web",
@@ -22,75 +47,248 @@ CATEGORIES = (
     "automation",
     "systems",
     "history",
+    "crypto",
+    "mobile",
+    "devtools",
+    "os",
+    "hardware",
+    "languages",
 )
 
-TOPIC_BANK: dict[str, list[str]] = {
+
+def _t(text: str, difficulty: int, *tags: str) -> dict[str, Any]:
+    return {"t": text, "d": difficulty, "tags": tags}
+
+
+TOPIC_BANK: dict[str, list[dict[str, Any]]] = {
     "web": [
-        "how CDN cache invalidation actually works",
-        "why HTTP/3 switched to QUIC and what broke",
-        "serverless cold starts and the ways people hide them",
-        "how DNS-over-HTTPS changed what ISPs can see",
-        "the state of HTTP field order and performance tuning in 2026",
-        "how browsers decide a site is slow before it loads",
+        _t("how CDN cache invalidation actually works", 2, "cdn", "caching", "edge"),
+        _t("why HTTP/3 switched to QUIC and what broke", 2, "http", "quic", "protocol"),
+        _t("serverless cold starts and the ways people hide them", 2, "serverless", "lambda"),
+        _t("how DNS-over-HTTPS changed what ISPs can see", 2, "dns", "privacy"),
+        _t("the state of HTTP field order and performance tuning in 2026", 3, "http", "performance"),
+        _t("how browsers decide a site is slow before it loads", 2, "browser", "performance"),
+        _t("islands architecture: partial hydration without the framework wars", 2, "frontend", "ssr"),
+        _t("how WebSockets stay alive through hostile middleboxes", 2, "websocket", "networking"),
+        _t("cookie-less tracking: fingerprinting surfaces browsers actually expose", 3, "privacy", "tracking"),
+        _t("edge compute vs origin: where the logic really lives in 2026", 2, "edge", "cdn"),
+        _t("how certificate stapling and OCSP keep TLS handshakes fast", 2, "tls", "security"),
+        _t("the anatomy of a service worker cache poisoning attack", 3, "pwa", "security", "caching"),
     ],
     "security": [
-        "passkeys and how WebAuthn replaced passwords under the hood",
-        "how eBPF changed rootkit and process monitoring games",
-        "the history of format string attacks and why they still matter",
-        "how sandbox escapes in mobile runtimes typically chain",
-        "certificate transparency and what it hides from attackers",
-        "why most 'quantum-safe' migration advice is premature",
+        _t("passkeys and how WebAuthn replaced passwords under the hood", 2, "auth", "webauthn"),
+        _t("how eBPF changed rootkit and process monitoring games", 3, "ebpf", "kernel"),
+        _t("the history of format string attacks and why they still matter", 2, "exploit", "c"),
+        _t("how sandbox escapes in mobile runtimes typically chain", 3, "mobile", "sandbox"),
+        _t("certificate transparency and what it hides from attackers", 2, "tls", "pki"),
+        _t("why most 'quantum-safe' migration advice is premature", 2, "crypto", "pqc"),
+        _t("how supply-chain attacks poison build pipelines undetected", 2, "supply-chain", "ci"),
+        _t("memory-safe languages vs hardened C: the 2026 scoreboard", 2, "rust", "memory-safety"),
+        _t("how phishing kits bypass MFA with adversary-in-the-middle proxies", 3, "phishing", "mfa"),
+        _t("the economics of bug bounties: what actually gets paid", 1, "bug-bounty"),
+        _t("how YARA rules catch malware families without signatures", 2, "malware", "detection"),
+        _t("side-channel attacks on shared cloud CPUs and the mitigations that stuck", 3, "side-channel", "cloud"),
     ],
     "networking": [
-        "how BGP hijacks happen and how route origin validation stops them",
-        "the inside of a 10Gbps home link: what the CPU actually does",
-        "how Tor's onion routing stays anonymous against a compromised relay",
-        "MPLS vs SD-WAN: what enterprises actually run in 2026",
-        "how DNS tunneling works and how it gets detected",
-        "the real cost of TLS handshakes on 2G and how 0-RTT helps",
+        _t("how BGP hijacks happen and how route origin validation stops them", 2, "bgp", "routing"),
+        _t("the inside of a 10Gbps home link: what the CPU actually does", 2, "ethernet", "performance"),
+        _t("how Tor's onion routing stays anonymous against a compromised relay", 3, "tor", "privacy"),
+        _t("MPLS vs SD-WAN: what enterprises actually run in 2026", 2, "wan", "enterprise"),
+        _t("how DNS tunneling works and how it gets detected", 3, "dns", "exfiltration"),
+        _t("the real cost of TLS handshakes on 2G and how 0-RTT helps", 2, "tls", "mobile"),
+        _t("how anycast makes one IP live on every continent", 2, "anycast", "dns"),
+        _t("bufferbloat: why your gigabit line feels slow and what FQ-CoDel does", 2, "qos", "latency"),
+        _t("how QUIC connection migration survives switching from wifi to 5G", 2, "quic", "mobile"),
+        _t("the quiet death of NAT and what replaced it at the edge", 2, "nat", "ipv6"),
+        _t("how submarine cables are repaired without breaking the internet", 1, "infrastructure"),
+        _t("VXLAN and overlay networks: why datacenters stopped trusting VLANs", 3, "datacenter", "sdn"),
     ],
     "data": [
-        "how LSM trees beat B-trees in modern storage engines",
-        "columnar storage and why analytics engines love it",
-        "how vector databases index meaning and where they fail",
-        "compaction strategies in key-value stores",
-        "how data lakes quietly turn into data swamps",
-        "the economics of object storage vs block storage",
+        _t("how LSM trees beat B-trees in modern storage engines", 2, "storage", "lsm"),
+        _t("columnar storage and why analytics engines love it", 2, "analytics", "parquet"),
+        _t("how vector databases index meaning and where they fail", 2, "vector", "ai"),
+        _t("compaction strategies in key-value stores", 3, "lsm", "rocksdb"),
+        _t("how data lakes quietly turn into data swamps", 1, "lakehouse"),
+        _t("the economics of object storage vs block storage", 2, "s3", "storage"),
+        _t("how CRDTs let replicas agree without a leader", 3, "distributed", "consistency"),
+        _t("stream processing exactly-once semantics: the checkpoint trick", 3, "kafka", "flink"),
+        _t("how Postgres MVCC makes concurrent writes not fight", 2, "postgres", "mvcc"),
+        _t("the rise of zero-ETL: databases that read each other's files", 2, "etl", "lakehouse"),
+        _t("how time-series databases compress a year of metrics into megabytes", 2, "timeseries"),
+        _t("sharding vs partitioning: picking the split that won't haunt you", 2, "scaling", "sql"),
     ],
     "ai": [
-        "how mixture-of-experts models route tokens",
-        "the history of GANs and where they lost to diffusion",
-        "how inference engines quantize without wrecking quality",
-        "RLHF vs DPO: what the training loops actually optimize",
-        "how small language models beat big ones with distillation",
-        "the engineering of prompt caching and KV-cache reuse",
+        _t("how mixture-of-experts models route tokens", 3, "moe", "llm"),
+        _t("the history of GANs and where they lost to diffusion", 2, "gan", "diffusion"),
+        _t("how inference engines quantize without wrecking quality", 2, "quantization", "inference"),
+        _t("RLHF vs DPO: what the training loops actually optimize", 3, "rlhf", "training"),
+        _t("how small language models beat big ones with distillation", 2, "distillation", "slm"),
+        _t("the engineering of prompt caching and KV-cache reuse", 2, "inference", "caching"),
+        _t("how retrieval-augmented generation fails at the retrieval step", 2, "rag", "embeddings"),
+        _t("speculative decoding: free tokens from a draft model", 3, "inference", "speed"),
+        _t("how diffusion models actually denoise, step by step", 3, "diffusion"),
+        _t("the data wall: where training corpora come from in 2026", 2, "training", "data"),
+        _t("how tool-calling agents plan multi-step work without drifting", 2, "agents"),
+        _t("evaluation hell: why LLM benchmarks disagree with each other", 2, "eval", "benchmarks"),
     ],
     "automation": [
-        "how CI systems survive flaky tests without lying",
-        "the design of idempotent pipelines and why retries break them",
-        "how feature flag systems avoid config drift at scale",
-        "self-healing infrastructure and where it backfires",
-        "how schedulers place jobs on heterogeneous hardware",
-        "the art of observable dead-letter queues",
+        _t("how CI systems survive flaky tests without lying", 2, "ci", "testing"),
+        _t("the design of idempotent pipelines and why retries break them", 2, "pipelines"),
+        _t("how feature flag systems avoid config drift at scale", 2, "feature-flags"),
+        _t("self-healing infrastructure and where it backfires", 2, "sre", "kubernetes"),
+        _t("how schedulers place jobs on heterogeneous hardware", 3, "scheduling", "gpu"),
+        _t("the art of observable dead-letter queues", 2, "queues", "messaging"),
+        _t("how GitOps reconciles the cluster you have with the one you declared", 2, "gitops", "kubernetes"),
+        _t("canary deploys vs blue-green: failure modes compared", 2, "deploy", "sre"),
+        _t("how cron replacements handle millions of scheduled jobs", 2, "scheduling"),
+        _t("the anatomy of a Terraform state meltdown and recovery", 2, "terraform", "iac"),
+        _t("how build caches make 10-minute pipelines take 40 seconds", 2, "ci", "caching"),
+        _t("chaos engineering beyond the hype: what actually breaks first", 2, "chaos", "sre"),
     ],
     "systems": [
-        "how Linux namespaces and cages compose into containers",
-        "the memory barrier problem and why ARM code surprises x86 devs",
-        "how JIT compilers balance speed of compilation vs speed of code",
-        "NUMA awareness and why multi-socket servers lie about locality",
-        "how the page cache decides what to evict",
-        "the history of the Unix process and why threads exist",
+        _t("how Linux namespaces and cages compose into containers", 2, "containers", "linux"),
+        _t("the memory barrier problem and why ARM code surprises x86 devs", 3, "concurrency", "arm"),
+        _t("how JIT compilers balance speed of compilation vs speed of code", 3, "jit", "compilers"),
+        _t("NUMA awareness and why multi-socket servers lie about locality", 3, "numa", "performance"),
+        _t("how the page cache decides what to evict", 2, "linux", "memory"),
+        _t("the history of the Unix process and why threads exist", 1, "unix", "history"),
+        _t("how io_uring killed the async I/O debate on Linux", 3, "linux", "io"),
+        _t("cgroups v2: how your container's CPU limit is actually enforced", 2, "containers", "linux"),
+        _t("how debuggers freeze a running process without its cooperation", 3, "debugging", "ptrace"),
+        _t("the real reason fork() still exists in 2026", 2, "unix", "process"),
+        _t("how memory allocators fragment and what jemalloc does about it", 3, "memory", "malloc"),
+        _t("seccomp filters: the syscall firewall every container runs", 2, "linux", "security"),
     ],
     "history": [
-        "how ARPANET routing evolved into today's internet",
-        "the history of the terminal and why ANSI colors exist",
-        "how mainframe job schedulers shaped modern batch systems",
-        "the rise and fall of groupware and what it taught us",
-        "how punch cards actually stored programs",
-        "the history of open-source licensing wars",
+        _t("how ARPANET routing evolved into today's internet", 1, "internet"),
+        _t("the history of the terminal and why ANSI colors exist", 1, "terminal"),
+        _t("how mainframe job schedulers shaped modern batch systems", 1, "mainframe"),
+        _t("the rise and fall of groupware and what it taught us", 1, "collaboration"),
+        _t("how punch cards actually stored programs", 1, "retro"),
+        _t("the history of open-source licensing wars", 1, "oss", "licensing"),
+        _t("how the Morris worm accidentally invented incident response", 2, "worm", "1988"),
+        _t("why the QWERTY layout survived a century of better ideas", 1, "keyboards"),
+        _t("the browser wars: how Netscape lost and the web won", 1, "browser"),
+        _t("how Usenet invented every social media argument by 1993", 1, "usenet", "culture"),
+        _t("the 640K myth and the real limits of early PCs", 1, "retro", "dos"),
+        _t("how shareware distribution built the first indie software market", 1, "shareware", "business"),
+    ],
+    "crypto": [
+        _t("how zero-knowledge proofs verify without revealing", 3, "zk", "cryptography"),
+        _t("UTXO vs account model: why blockchains count money differently", 2, "bitcoin", "ethereum"),
+        _t("how MEV bots reorder your transactions for profit", 3, "mev", "defi"),
+        _t("the anatomy of a bridge hack: where the trust actually lives", 3, "bridge", "defi"),
+        _t("how proof-of-stake finality differs from proof-of-work", 2, "pos", "consensus"),
+        _t("stablecoin mechanics: collateralized vs algorithmic, post-mortem", 2, "stablecoin"),
+        _t("how wallets derive infinite keys from one seed phrase", 2, "bip39", "wallets"),
+        _t("rollups: how L2s inherit L1 security without L1 costs", 3, "l2", "rollup"),
+        _t("the oracle problem: why smart contracts can't see the weather", 2, "oracle", "defi"),
+        _t("how mixers and privacy pools actually obscure trails", 3, "privacy", "mixer"),
+        _t("post-quantum signatures: what changes for blockchains first", 3, "pqc", "signatures"),
+        _t("how on-chain forensics clusters wallets into people", 2, "forensics", "chainalysis"),
+    ],
+    "mobile": [
+        _t("how iOS and Android sandbox apps differently", 2, "ios", "android"),
+        _t("the anatomy of a push notification's 4-second journey", 2, "push", "apns"),
+        _t("how mobile GPUs render 120fps without melting the battery", 3, "gpu", "battery"),
+        _t("background execution limits: what your app can do while asleep", 2, "ios", "android"),
+        _t("how app thinning ships one binary to every device", 2, "ios", "build"),
+        _t("the real cost of cross-platform frameworks in 2026", 2, "flutter", "react-native"),
+        _t("how biometric auth stays on-device and out of the cloud", 2, "biometrics", "security"),
+        _t("mobile deep links vs app links: the routing wars", 2, "deeplink"),
+        _t("how offline-first apps sync without losing writes", 3, "sync", "crdt"),
+        _t("the 5G reality check: what actually got faster", 1, "5g"),
+        _t("how foldables broke every assumption in layout engines", 2, "foldable", "ui"),
+        _t("battery chemistry vs software: where standby drain really goes", 2, "battery"),
+    ],
+    "devtools": [
+        _t("how language servers answer 'go to definition' in milliseconds", 2, "lsp", "ide"),
+        _t("the design of incremental builds that actually stay correct", 3, "build", "bazel"),
+        _t("how debuggers map optimized machine code back to your source", 3, "debugging", "dwarf"),
+        _t("tree-sitter: how one parser powers every editor's highlighting", 2, "parsing", "editor"),
+        _t("how package managers resolve dependency hell without SAT solvers choking", 3, "npm", "cargo"),
+        _t("the anatomy of a good CLI: flags, pipes, and exit codes", 1, "cli", "ux"),
+        _t("how formatters end style wars without anyone noticing", 1, "formatting", "prettier"),
+        _t("remote dev environments: why the editor left your laptop", 2, "codespaces", "remote"),
+        _t("how test runners parallelize without flaking", 2, "testing", "pytest"),
+        _t("the rise of the AI pair programmer inside the IDE", 2, "copilot", "ai"),
+        _t("how profilers sample a running program without slowing it much", 3, "profiling"),
+        _t("monorepo tooling: how thousands of engineers share one repo", 2, "monorepo", "bazel"),
+    ],
+    "os": [
+        _t("how a bootloader hands off to the kernel without breaking", 2, "boot", "kernel"),
+        _t("virtual memory: how every process thinks it owns the RAM", 2, "memory", "mmu"),
+        _t("how schedulers decide which thread runs next, 1000 times a second", 3, "scheduling", "kernel"),
+        _t("the anatomy of a context switch: what it really costs", 3, "kernel", "performance"),
+        _t("how filesystems journal their way out of a power cut", 2, "filesystem", "ext4"),
+        _t("copy-on-write: the trick behind instant snapshots", 2, "btrfs", "zfs"),
+        _t("how signals interrupt a process mid-syscall", 3, "unix", "signals"),
+        _t("the /proc filesystem: the kernel's confession booth", 1, "linux", "proc"),
+        _t("how containers share one kernel without seeing each other", 2, "containers", "namespaces"),
+        _t("microkernels vs monoliths: the debate that never died", 2, "kernel", "design"),
+        _t("how hibernation freezes a whole machine to disk", 2, "power", "acpi"),
+        _t("the init wars: what systemd actually replaced", 1, "systemd", "linux"),
+    ],
+    "hardware": [
+        _t("how a CPU pipeline predicts branches and recovers from lies", 3, "cpu", "branch-prediction"),
+        _t("the memory hierarchy: why L1 cache is 1ns and RAM is 100ns", 2, "cpu", "cache"),
+        _t("how SSDs wear-level without the OS ever knowing", 2, "ssd", "flash"),
+        _t("the physics of why clock speeds stopped growing", 2, "cpu", "moore"),
+        _t("how GPUs turned into AI accelerators by accident", 2, "gpu", "cuda"),
+        _t("chiplet design: why CPUs are Lego bricks now", 2, "cpu", "packaging"),
+        _t("how ECC memory catches the bit flips cosmic rays cause", 2, "ram", "reliability"),
+        _t("the anatomy of a data center power failure", 2, "datacenter", "power"),
+        _t("RISC-V: the open ISA's road from hobby to hyperscaler", 2, "riscv", "isa"),
+        _t("how network cards bypass the CPU with RDMA", 3, "nic", "rdma"),
+        _t("the thermals of a rack: where 40kW of heat actually goes", 2, "datacenter", "cooling"),
+        _t("how Apple Silicon unified memory changed the performance math", 2, "arm", "soc"),
+    ],
+    "languages": [
+        _t("how Rust's borrow checker proves memory safety at compile time", 3, "rust", "memory-safety"),
+        _t("garbage collector designs: from mark-sweep to ZGC's colored pointers", 3, "gc", "jvm"),
+        _t("how Python's GIL survived and what free-threading changes", 2, "python", "gil"),
+        _t("the lambda calculus hiding inside every functional language", 3, "functional", "theory"),
+        _t("how TypeScript's type system erases itself before runtime", 2, "typescript", "types"),
+        _t("why Go chose goroutines over async/await", 2, "go", "concurrency"),
+        _t("the actor model: how Erlang survives failures that kill other systems", 3, "erlang", "actors"),
+        _t("how Zig does comptime metaprogramming without macros", 3, "zig", "metaprogramming"),
+        _t("pattern matching: the feature every language is stealing", 2, "types", "design"),
+        _t("how interpreters, compilers, and JITs form a spectrum, not a ladder", 2, "compilers", "interpreters"),
+        _t("the economics of language adoption: why better rarely wins", 1, "history", "design"),
+        _t("effect systems: the next big idea after async/await", 3, "types", "functional"),
     ],
 }
 
+
+def topic_text(entry: dict[str, Any]) -> str:
+    """The dedup identity of a topic entry — its text."""
+    return str(entry.get("t", ""))
+
+
+def topics_in(category: str) -> list[dict[str, Any]]:
+    """All topic entries for a category (empty list for unknown ones)."""
+    return list(TOPIC_BANK.get((category or "").lower(), []))
+
+
+def bank_size() -> int:
+    """Total topics across every category."""
+    return sum(len(v) for v in TOPIC_BANK.values())
+
+
+def category_stats() -> dict[str, dict[str, int]]:
+    """Per-category counts plus difficulty spread."""
+    out: dict[str, dict[str, int]] = {}
+    for cat, entries in TOPIC_BANK.items():
+        spread = {1: 0, 2: 0, 3: 0}
+        for e in entries:
+            d = int(e.get("d", 2))
+            spread[min(3, max(1, d))] += 1
+        out[cat] = {"topics": len(entries), "easy": spread[1],
+                    "medium": spread[2], "deep": spread[3]}
+    return out
+
+
+# ── sampling ──────────────────────────────────────────────────────────────
 
 def _used_topics(db: Any) -> set[str]:
     used: set[str] = set()
@@ -103,24 +301,170 @@ def _used_topics(db: Any) -> set[str]:
     return used
 
 
-def sample_topic(db: Any = None, category: str | None = None, rng: random.Random | None = None) -> tuple[str, str]:
-    """Pick ``(category, topic)`` — random category unless one is given.
+def _recent_categories(db: Any, n: int = 3) -> list[str]:
+    """Categories served most recently (anti-repeat window)."""
+    if db is None:
+        return []
+    try:
+        row = db.query_one(
+            "SELECT value FROM kv_store WHERE key = 'arena.recent_categories'")
+        if row:
+            import json
 
-    Repeats within a category are allowed; a topic already in
-    ``arena_knowledge`` is skipped (with a bounded retry).
+            data = json.loads(row["value"]).get("cats", [])
+            return [str(c) for c in data[:n] if str(c)]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _record_category(db: Any, category: str) -> None:
+    if db is None:
+        return
+    try:
+        import json
+        import time
+
+        cats = [category] + [c for c in _recent_categories(db, 9)
+                             if c != category]
+        with db.transaction():
+            db.execute(
+                """INSERT INTO kv_store (key, value, kind, updated_at)
+                   VALUES (?, ?, 'json', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                                  updated_at = excluded.updated_at""",
+                ("arena.recent_categories", json.dumps({"cats": cats[:10]}),
+                 time.time()),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _weighted_categories(profile: dict[str, float] | None,
+                         exclude: set[str]) -> list[tuple[str, float]]:
+    cats = [(c, float((profile or {}).get(c, 1.0))) for c in CATEGORIES
+            if c not in exclude]
+    if not cats:  # anti-repeat window ate everything — fall back to all
+        cats = [(c, float((profile or {}).get(c, 1.0))) for c in CATEGORIES]
+    return [(c, max(w, 0.01)) for c, w in cats]
+
+
+def _pick_weighted(rng: random.Random,
+                   weighted: list[tuple[str, float]]) -> str:
+    total = sum(w for _, w in weighted)
+    roll = rng.random() * total
+    acc = 0.0
+    for cat, w in weighted:
+        acc += w
+        if roll <= acc:
+            return cat
+    return weighted[-1][0]
+
+
+def sample_topic(db: Any = None, category: str | None = None,
+                 rng: random.Random | None = None,
+                 profile: dict[str, float] | None = None,
+                 difficulty: int | None = None) -> tuple[str, str]:
+    """Pick ``(category, topic)``.
+
+    * ``category`` forces one; otherwise the pick is weighted by
+      ``profile`` (category → weight; see ``activity.interest_profile``).
+    * The last few served categories are deprioritized (anti-repeat).
+    * Topics already digested into ``arena_knowledge`` are skipped
+      (bounded retry).
+    * ``difficulty`` (1–3) restricts the pool when given.
     """
     rng = rng or random.Random()
     used = _used_topics(db)
-    cats = [category] if category else list(CATEGORIES)
-    # Retry bound sized so a nearly-exhausted category still lands on the
-    # unused topic with overwhelming probability (pool 6, one free: (5/6)^64 ≈ 5e-5).
-    for _ in range(64):
-        cat = rng.choice(cats)
-        pool = TOPIC_BANK.get(cat, [])
+    recent = set(_recent_categories(db))
+
+    def pool_for(cat: str) -> list[dict[str, Any]]:
+        pool = topics_in(cat)
+        if difficulty in (1, 2, 3):
+            # Strict: a category with nothing at this grade is skipped
+            # for this round (the retry loop picks another category).
+            pool = [e for e in pool if int(e.get("d", 2)) == difficulty]
+        return [e for e in pool if topic_text(e) not in used]
+
+    # Retry bound: a nearly-exhausted bank still terminates.
+    for _ in range(128):
+        if category:
+            cat = category
+        else:
+            cat = _pick_weighted(rng, _weighted_categories(profile, recent))
+        pool = pool_for(cat)
         if not pool:
+            if category:
+                break  # forced category is dry — fall through to fallback
+            recent.discard(cat)  # let the weighted pick try elsewhere
             continue
-        topic = rng.choice(pool)
-        if topic not in used:
-            return cat, topic
-    cat = cats[0]
-    return cat, rng.choice(TOPIC_BANK.get(cat) or ["general computing"])
+        entry = rng.choice(pool)
+        _record_category(db, cat)
+        return cat, topic_text(entry)
+
+    # Fallback: anything unused, anywhere (never fails callers).
+    for cat in CATEGORIES:
+        pool = pool_for(cat)
+        if pool:
+            _record_category(db, cat)
+            return cat, topic_text(rng.choice(pool))
+    cat = category or CATEGORIES[0]
+    _record_category(db, cat)
+    return cat, "general computing"
+
+
+def surprise_topic(db: Any = None, rng: random.Random | None = None,
+                   seed: int | None = None) -> tuple[str, str]:
+    """Pure random topic — ignores the interest profile.
+
+    ``seed`` makes the surprise reproducible.
+    """
+    if seed is not None:
+        rng = random.Random(seed)
+    return sample_topic(db=db, rng=rng or random.Random(), profile=None)
+
+
+# ── display ───────────────────────────────────────────────────────────────
+
+_DIFF_LABEL = {1: "easy", 2: "medium", 3: "deep"}
+
+
+def topics_table(profile: dict[str, float] | None = None,
+                 db: Any = None) -> str:
+    """The full topic table, multi-line, with counts and difficulty spread.
+
+    When a profile is given, the top-weighted categories are flagged —
+    that's the personalization made visible.
+    """
+    stats = category_stats()
+    order = sorted(stats, key=lambda c: -float((profile or {}).get(c, 1.0)))
+    lines = [f"arena topic tables — {bank_size()} topics, "
+             f"{len(CATEGORIES)} categories:"]
+    for cat in order:
+        st = stats[cat]
+        star = " ★" if profile and float(profile.get(cat, 1.0)) >= 2.0 else ""
+        lines.append(
+            f"  {cat:<11} {st['topics']:>3} topics "
+            f"(easy {st['easy']} · med {st['medium']} · deep {st['deep']}){star}")
+    if db is not None:
+        used = _used_topics(db)
+        lines.append(f"digested so far: {len(used)} — the sampler skips those.")
+    lines.append("usage: /arena topics <category> · /arena run [topic] · "
+                 "/arena surprise [seed]")
+    return "\n".join(lines)
+
+
+def category_table(category: str, limit: int = 20) -> str:
+    """Drill into one category: topics with difficulty grades."""
+    entries = topics_in(category)
+    if not entries:
+        return (f"no category {category!r} — pick from: "
+                + ", ".join(CATEGORIES))
+    lines = [f"{category} — {len(entries)} topics:"]
+    for e in entries[:max(1, limit)]:
+        d = int(e.get("d", 2))
+        label = _DIFF_LABEL.get(min(3, max(1, d)), "?")
+        lines.append(f"  [{label:<6}] {topic_text(e)}")
+    if len(entries) > limit:
+        lines.append(f"  … and {len(entries) - limit} more")
+    return "\n".join(lines)

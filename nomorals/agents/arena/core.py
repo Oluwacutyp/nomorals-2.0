@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..search.engine import SearchEngine
-from .topics import sample_topic
+from . import activity
+from .topics import sample_topic, surprise_topic
 
 __all__ = ["Arena", "run_cycle_safe"]
 
@@ -469,18 +470,51 @@ class Arena:
         return random.choice(free), "custom"
 
     # ── the cycle ────────────────────────────────────────────────────────────
+    def _interest_profile(self) -> dict[str, float]:
+        """What the owner does most → category weights for the sampler."""
+        queries: list[str] = []
+        goals: list[str] = []
+        try:
+            engine = SearchEngine(self.context)
+            queries = [str(r.get("query", "")) for r in engine.history(60)]
+        except Exception:  # noqa: BLE001
+            pass
+        if self.db is not None:
+            try:
+                rows = self.db.query("SELECT title FROM agent_goals LIMIT 40")
+                goals = [str(r.get("title", "")) for r in rows]
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            return activity.interest_profile(
+                self.db, search_queries=queries, goal_texts=goals)
+        except Exception:  # noqa: BLE001
+            from .topics import CATEGORIES
+
+            return {c: 1.0 for c in CATEGORIES}
+
+    def interest_profile(self) -> dict[str, float]:
+        """Public: the current personalization weights (for /arena topics)."""
+        return self._interest_profile()
+
     def run_cycle(self, topic: str | None = None, category: str | None = None,
-                  notify: Callable[[str], None] | None = None) -> dict[str, Any]:
+                  notify: Callable[[str], None] | None = None,
+                  surprise: bool = False,
+                  seed: int | None = None) -> dict[str, Any]:
         started = time.time()
         if topic:
             cat = category or "general"
         else:
-            # Owner-supplied topics get priority over the built-in bank.
-            custom = self._pick_custom_topic()
+            # Owner-supplied topics get priority over the bank (unless the
+            # owner asked for a surprise).
+            custom = None if surprise else self._pick_custom_topic()
             if custom is not None:
                 topic, cat = custom
+            elif surprise:
+                cat, topic = surprise_topic(self.db, seed=seed)
             else:
-                cat, topic = sample_topic(self.db, category)
+                cat, topic = sample_topic(
+                    self.db, category, profile=self._interest_profile())
         self._stream("topic", {"topic": topic, "category": cat})
         try:
             report = self._research(topic)
@@ -500,6 +534,7 @@ class Arena:
             return {"ok": False, "topic": topic, "category": cat,
                     "error": "research returned nothing readable (no network? try again later)"}
         self._save_knowledge(topic, cat, digest, sources)
+        activity.record(self.db, "arena_run", f"{cat}: {topic}")
         self._stream("digest", {"topic": topic, "category": cat, "digest": digest[:2000],
                                  "sources": sources[:8]})
         result: dict[str, Any] = {
@@ -583,9 +618,11 @@ class Arena:
         return self._loop_thread is not None and self._loop_thread.is_alive()
 
 
-def run_cycle_safe(arena: Arena, topic: str | None = None) -> dict[str, Any]:
+def run_cycle_safe(arena: Arena, topic: str | None = None,
+                   surprise: bool = False,
+                   seed: int | None = None) -> dict[str, Any]:
     """Wrapper used by CLI/tests: never raises, always returns a report."""
     try:
-        return arena.run_cycle(topic=topic)
+        return arena.run_cycle(topic=topic, surprise=surprise, seed=seed)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

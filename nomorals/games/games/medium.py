@@ -13,7 +13,7 @@ from typing import Any
 from ..ai import GameMind
 from ..players import Player
 from .base import MultiGame, Room
-from .cases import CASES
+from .cases import CASES, random_case  # noqa: F401 - CASES kept for back-compat
 from .easy import TRIVIA
 
 __all__ = ["MEDIUM_GAMES"]
@@ -1459,13 +1459,15 @@ class QuizDuelGame(MultiGame):
 
 class InvestigationGame(MultiGame):
     name = "case"
-    description = "the house opens a case — evidence, interviews, " \
+    description = "a fresh case every time — evidence, interviews, " \
                   "name the culprit"
     min_players = 1
     max_players = 6
     ai_seats = 1
     move_timeout = 180
-    rules = ("I open a case with four suspects. 'clue' earns the next "
+    rules = ("I open a case with four suspects — a hand-written one or a "
+             "fresh one from the case generator, graded easy/medium/hard "
+             "(harder pays more). 'clue' earns the next "
              "piece of evidence (5 exist, each one sharper than the "
              "last). 'ask <name>' interviews a suspect — ask everyone, "
              "one of them is lying to you. 'accuse <name>' names the "
@@ -1475,15 +1477,17 @@ class InvestigationGame(MultiGame):
              "— sometimes it accuses first.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
-        case = dict(rng.choice(CASES))
-        case["statements"] = dict(case.get("statements") or {})
+        case = random_case(rng)
         return {"case": case, "clues_shown": 0, "strikes": 0,
                 "max_strikes": 3, "asked": [], "done": False}
 
     def setup(self, room, mind):
         c = room.state["case"]
         sus = ", ".join(c["suspects"])
-        return (f"the case — {c['story']}\n"
+        diff = c.get("difficulty", "medium")
+        fresh = " — fresh from the generator, never seen before" \
+            if c.get("generated") else ""
+        return (f"the case [{diff}]{fresh} — {c['story']}\n"
                 f"suspects: {sus}.\n"
                 f"'clue' for evidence · 'ask <name>' to interview "
                 f"them · 'accuse <name>' when you're sure.\n"
@@ -1603,7 +1607,9 @@ class InvestigationGame(MultiGame):
 
     def score(self, room, player):
         s = room.state
-        return (5 - s.get("strikes", 0)) + \
+        base = {"easy": 3, "medium": 5, "hard": 8}.get(
+            s.get("case", {}).get("difficulty", "medium"), 5)
+        return max(1, base - s.get("strikes", 0)) + \
             (1 if s.get("asked") else 0)  # interviewing pays a little
 
     def describe_state(self, room):

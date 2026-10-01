@@ -984,8 +984,18 @@ class PartnerRuntime:
 
             if parse_control(message.text) is not None:
                 self.stats["controls"] += 1
+                # Feed the arena's interest profiler: what the owner runs
+                # most shapes future topic picks. Never raises.
                 try:
-                    reply = self.handle_control(message.text, message.chat.key)
+                    from .arena import activity as _arena_activity
+
+                    verb = message.text.strip().split()[0].lstrip("/").lower()
+                    _arena_activity.record(self.context.db, "command", verb)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    reply = self.handle_control(message.text, message.chat.key,
+                                                message=message)
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("control command failed: %s", exc)
                     reply = f"control error: {exc}"
@@ -1458,7 +1468,8 @@ class PartnerRuntime:
 
         return build_adapter(self.settings, name)
 
-    def handle_control(self, text: str, chat_key: str) -> str:
+    def handle_control(self, text: str, chat_key: str,
+                       message: Any = None) -> str:
         """Parse + dispatch one control command. Returns the reply to send."""
         from ..social.chat.control import detailed_help, parse_control
         from .power import power_mode_for
@@ -1748,6 +1759,9 @@ class PartnerRuntime:
             return self._control_evolve(command.tail or arg, chat_key=chat_key)
         if kind == "speak":
             return self._control_speak(command.tail or arg, chat_key=chat_key)
+        if kind == "voice":
+            return self._control_voice(command.tail, chat_key,
+                                       message=message)
         if kind == "task":
             return self._control_task(command.tail or arg, chat_key=chat_key)
         if kind == "mind":
@@ -3290,9 +3304,35 @@ class PartnerRuntime:
             return (f"arena cycle done: “{result['topic']}” — digested into knowledge "
                     f"in {result.get('seconds', 0)}s. {build_line}")
         if verb == "topics":
-            from .arena.topics import TOPIC_BANK
+            from .arena.topics import category_table, topics_table
 
-            return "topic categories: " + ", ".join(sorted(TOPIC_BANK))
+            if tail and tail.strip().lower() not in {"", "all"}:
+                return category_table(tail.strip().lower()[:40])
+            try:
+                profile = arena.interest_profile()
+            except Exception:  # noqa: BLE001
+                profile = None
+            return topics_table(profile=profile, db=self.context.db)
+        if verb == "surprise":
+            if not feature_enabled(self.context, "arena"):
+                return "arena is off. /features arena on"
+            seed = None
+            if tail and tail.strip().lstrip("-").isdigit():
+                seed = int(tail.strip())
+            chat = self._ref_from_key(chat_key)
+
+            def _notify2(text: str) -> None:
+                try:
+                    self.gateway.send(chat.platform, chat, text)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            result = arena.run_cycle(notify=_notify2, surprise=True, seed=seed)
+            if not result.get("ok"):
+                return f"surprise cycle failed: {result.get('error')}"
+            return (f"🎲 surprise cycle done: “{result['topic']}” "
+                    f"[{result.get('category')}] — digested into knowledge "
+                    f"in {result.get('seconds', 0)}s.")
         if verb == "stream":
             limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
             kind_filter = parts[1].lower() if len(parts) > 1 and not parts[1].isdigit() else None
@@ -3329,8 +3369,8 @@ class PartnerRuntime:
         # An unknown verb is a topic: /arena hacking == /arena run hacking.
         if (tail or "").strip():
             return self._control_arena(f"run {tail.strip()}", chat_key=chat_key)
-        return ("usage: /arena [status|run [topic]|stats|digest [n]|schedule [h]|loop on|off|"
-                "topic add <t>|builds|topics|stream [kind|n]|export [n]|approve <id>|deny <id>]")
+        return ("usage: /arena [status|run [topic]|surprise [seed]|stats|digest [n]|schedule [h]|loop on|off|"
+                "topic add <t>|builds|topics [category]|stream [kind|n]|export [n]|approve <id>|deny <id>]")
 
     def _arena_knowledge_count(self) -> int:
         try:
@@ -5099,10 +5139,185 @@ class PartnerRuntime:
             except Exception:  # noqa: BLE001 - report the file, don't crash
                 sent = False
         backend = v.get("backend", "?")
+        return self._deliver_voice_note(chat_key, v["path"], text, backend,
+                                        size_kb=v["bytes"] // 1024)
+
+    def _deliver_voice_note(self, chat_key: str, path: str, text: str,
+                            backend: str, size_kb: int = 0) -> str:
+        """Send a wav back into the chat as a voice note; reply text."""
+        ref = self._ref_from_key(chat_key)
+        gateway = self.context.extras.get("gateway")
+        sent = False
+        if gateway is not None and ref.platform in getattr(gateway, "adapters", {}):
+            try:
+                # Caption ceiling is ~1024 chars on the platforms; the full
+                # transcript rides beside the voice note so it's readable
+                # and searchable in chat.
+                result = gateway.send_file(ref.platform, ref, path,
+                                           caption=text[:1024])
+                sent = bool(getattr(result, "ok", False))
+                if sent and len(text) > 1024:
+                    try:
+                        gateway.send(ref.platform, ref, text)
+                    except Exception:  # noqa: BLE001 - transcript is a bonus
+                        _log.debug("voice-note transcript send failed",
+                                   exc_info=True)
+            except Exception:  # noqa: BLE001 - report the file, don't crash
+                sent = False
+        if not size_kb and os.path.exists(path):
+            size_kb = os.path.getsize(path) // 1024
         if sent:
-            return f"🎙️ said it ({backend}, {v['bytes'] // 1024} KB voice note)"
-        return (f"🎙️ voice note ready ({backend}, {v['bytes'] // 1024} KB): "
-                f"{v['path']}")
+            return f"🎙️ said it ({backend}, {size_kb} KB voice note)"
+        return (f"🎙️ voice note ready ({backend}, {size_kb} KB): {path}")
+
+    # ── voice catalogue: /voice (Telegram / WhatsApp / console) ─────────────
+    def _control_voice(self, tail: str, chat_key: str,
+                       message: Any = None) -> str:
+        """The voice catalogue, live from any chat.
+
+        /voice list                              catalogue + active voice
+        /voice use <name>                        switch this chat's voice now
+        /voice say <text>                        speak as the chat's voice
+        /voice clone <name> [path]               clone a voice note / file
+        /voice transcript <name> <text>          set a clone's prompt text
+        /voice describe <name> <text>            describe a catalogue voice
+        /voice backend <name> <backend>          change a voice's backend
+        /voice rm <name>                         drop a catalogue voice
+        """
+        from ..voice.catalogue import default_catalogue
+
+        cat = default_catalogue()
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if verb in ("list", "ls"):
+            voices = cat.list()
+            if not voices:
+                return ("no voices in the catalogue yet — clone one:\n"
+                        "/voice clone <name> (attach a voice note to the "
+                        "command message, or give a file path)")
+            lines = ["voices:"]
+            for v in voices:
+                mark = "●" if v["active"] else "○"
+                chat_mark = (" [this chat]"
+                             if cat.chat_overrides.get(chat_key) == v["name"]
+                             else "")
+                desc = f" — {v['description']}" if v["description"] else ""
+                prof = f" (profile: {v['profile']})" if v["profile"] else ""
+                lines.append(f"  {mark} {v['name']} [{v['backend']}]"
+                             f"{prof}{chat_mark}{desc}")
+            return "\n".join(lines)
+
+        if verb == "use":
+            name = rest.strip()
+            if not name:
+                return "usage: /voice use <name>"
+            try:
+                cat.set_chat_voice(chat_key, name)
+            except KeyError:
+                return f"unknown voice {name!r} — /voice list"
+            return f"🎙️ this chat now speaks as '{name}'"
+
+        if verb == "say":
+            text = rest.strip()
+            if not text:
+                return "usage: /voice say <text>"
+            mood = self._voice_mood()
+            try:
+                out = cat.speak(text, chat_key=chat_key, mood=mood or "neutral")
+            except Exception as exc:  # noqa: BLE001
+                return f"voice say failed: {exc}"
+            return self._deliver_voice_note(chat_key, out["path"], text,
+                                            out.get("backend", "?"))
+
+        if verb == "clone":
+            cparts = rest.strip().split(None, 1)
+            if not cparts:
+                return ("usage: /voice clone <name> [audio path] — attach a "
+                        "voice note to this message or pass a file path")
+            name, path = cparts[0], (cparts[1] if len(cparts) > 1 else "")
+            if not path and message is not None:
+                for media in getattr(message, "media", None) or []:
+                    if getattr(media, "kind", "") in ("audio", "voice"):
+                        path = getattr(media, "path", "")
+                        break
+            if not path or not os.path.exists(path):
+                return ("no audio found — attach a voice note to the /voice "
+                        "clone message or pass a file path")
+            transcript = ""
+            try:
+                outcome = self.context.tools.call("transcribe", path=path)
+                if outcome.ok and outcome.value:
+                    transcript = outcome.value.get("text", "") or ""
+            except Exception:  # noqa: BLE001 - transcript is a bonus
+                transcript = ""
+            try:
+                voice = cat.clone(name, path, transcript=transcript,
+                                  consent_confirmed=True,
+                                  description="cloned by owner via /voice clone")
+            except Exception as exc:  # noqa: BLE001
+                return f"clone failed: {exc}"
+            note = (f" (transcript: {transcript[:80]}…)"
+                    if transcript else " (no transcript — set one with "
+                    "/voice transcript <name> <text>)")
+            return (f"🎙️ cloned '{voice.name}' from your voice note{note}\n"
+                    f"say something: /voice say hello there")
+
+        if verb == "transcript":
+            tparts = rest.strip().split(None, 1)
+            if len(tparts) < 2:
+                return "usage: /voice transcript <name> <text>"
+            name, text = tparts
+            profile = cat.library.get(name)
+            if profile is None:
+                return f"unknown voice {name!r} — /voice list"
+            profile.prompt_text = text.strip()
+            cat.library._save_index()
+            return f"transcript set for '{name}' ({len(text)} chars)"
+
+        if verb == "describe":
+            dparts = rest.strip().split(None, 1)
+            if len(dparts) < 2:
+                return "usage: /voice describe <name> <text>"
+            voice = cat.get(dparts[0])
+            if voice is None:
+                return f"unknown voice {dparts[0]!r} — /voice list"
+            voice.description = dparts[1].strip()
+            cat._save()
+            return f"description set for '{voice.name}'"
+
+        if verb == "backend":
+            bparts = rest.strip().split(None, 1)
+            if len(bparts) < 2:
+                return "usage: /voice backend <name> <backend>"
+            voice = cat.get(bparts[0])
+            if voice is None:
+                return f"unknown voice {bparts[0]!r} — /voice list"
+            voice.backend = bparts[1].strip()
+            cat._save()
+            return f"'{voice.name}' now prefers backend '{voice.backend}'"
+
+        if verb in ("rm", "remove", "delete"):
+            name = rest.strip()
+            if not name:
+                return "usage: /voice rm <name>"
+            if not cat.remove(name):
+                return f"unknown voice {name!r} — /voice list"
+            return f"removed '{name}' from the catalogue"
+
+        return ("usage: /voice list | use <name> | say <text> | clone <name> "
+                "[path] | transcript <name> <text> | describe <name> <text> | "
+                "backend <name> <backend> | rm <name>")
+
+    def _voice_mood(self) -> str:
+        """Best-effort current mood label for voice performances."""
+        mood_box = self.context.extras.get("mood")
+        if mood_box is None:
+            return ""
+        return str(getattr(mood_box, "mood", "") or
+                   (mood_box.get("mood") if isinstance(mood_box, dict)
+                    else "") or "")
 
     # ── devon: the autonomous dev & investigation agent ──────────────────────
     def _control_devon(self, tail: str, chat_key: str) -> str:
