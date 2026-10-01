@@ -625,6 +625,16 @@ class BriefingComposer:
             RoomsProvider(),
             DevonSelfProvider(),
         ]
+        # Weather + USA situations (agents/weather.py): appended lazily so
+        # there is no import cycle (weather.py imports _Provider from here).
+        # A failed import/construct never sinks the briefing.
+        try:
+            from .weather import USASituationsProvider, WeatherProvider
+            # weather slots between calendar and markets; USA after news.
+            self.providers.insert(2, WeatherProvider())
+            self.providers.append(USASituationsProvider())
+        except Exception:  # noqa: BLE001
+            pass
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)

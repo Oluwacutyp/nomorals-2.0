@@ -142,7 +142,14 @@ class RunDeliverTests(unittest.TestCase):
             def publish(self, kind, title, body, **kw):
                 return {"delivered": True}
 
-        with patch("nomorals.agents.notifier.Notifier", FakeNotifier):
+        # the ambient weather/USA providers are live-network: simulate a
+        # fully quiet world (all providers empty) to keep this hermetic.
+        from nomorals.agents import weather as _wx
+        with patch.object(_wx.WeatherProvider, "collect",
+                          return_value=None), \
+             patch.object(_wx.USASituationsProvider, "collect",
+                          return_value=None), \
+             patch("nomorals.agents.notifier.Notifier", FakeNotifier):
             res = mb.run_briefing(self.ctx)
         self.assertIn("quiet night", res["text"])
 
@@ -175,7 +182,14 @@ class FollowupTests(unittest.TestCase):
                 "published, created_at) VALUES (?,?,?,?,?,?,?)",
                 (new_id(), "BBC", f"story {i}", f"https://x/{i}", "sum",
                  0, time.time()))
-        b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
+        # keep this fixture news-only: the ambient weather/USA providers
+        # are live-network and would shift item numbering.
+        from nomorals.agents import weather as _wx
+        with patch.object(_wx.WeatherProvider, "collect",
+                          return_value=None), \
+             patch.object(_wx.USASituationsProvider, "collect",
+                          return_value=None):
+            b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
         mb.store_briefing(self.ctx, b)
 
     def test_item_3_resolves(self):
