@@ -29,7 +29,6 @@ import concurrent.futures as cf
 import multiprocessing
 import os
 import pickle
-import platform
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,6 +36,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from ..core.errors import DeadlineExceeded, TaskCancelled, TaskFailed, classify
 from ..core.logging_setup import get_logger
+from ..core.platform import detect_platform
 from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
 __all__ = ["ExecutionReport", "HybridExecutor", "run_pickled"]
@@ -144,9 +144,10 @@ class HybridExecutor:
         cpu = os.cpu_count() or 2
         self.threads = threads or min(32, cpu * 4)
         if use_processes is None:
-            # fork() is unreliable on Android and macOS spawn differs; Termux
-            # profile disables it outright. Detect rather than assume.
-            use_processes = platform.system() != "Android"
+            # Ask the platform backend instead of sniffing uname: Termux and
+            # Android declare process_pool=False (fork is unreliable there),
+            # desktop/server platforms declare True.
+            use_processes = detect_platform().supports("process_pool")
         self.use_processes = use_processes
         self.processes = processes if processes else max(1, cpu // 2)
         self.max_in_flight = max_in_flight or max(self.threads, self.processes) * 2

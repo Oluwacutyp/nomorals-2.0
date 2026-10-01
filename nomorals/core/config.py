@@ -330,6 +330,12 @@ class PartnerSettings:
     autonomy_mode: str = "suggest"
     typing_cap_seconds: float = 0.0
     platforms: str = "local"
+    #: Power mode default.  When True (the default), power mode auto-activates
+    #: on first use without requiring the owner key — the owner's standing
+    #: choice is unlimited/unrestricted operation.  An explicit `nm power
+    #: lock` persists a locked state that survives reboots until unlocked
+    #: again.  Env: NM_PARTNER_POWER_DEFAULT_ON=0 to require manual unlock.
+    power_default_on: bool = True
     owner_chats: str = ""
     us_chats: str = ""
     personality: str = "helpful"

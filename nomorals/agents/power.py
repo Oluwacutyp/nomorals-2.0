@@ -12,12 +12,26 @@ Deliberate invariants:
 
 * The key is **never printed** in status, logs, or replies. Comparisons use
   :func:`hmac.compare_digest`.
-* An empty ``owner_key`` means power mode can **never** be unlocked, no
-  matter what is typed.
-* Every unlock/lock is written to ``audit_log`` with the actor's chat.
+* Default posture (``partner.power_default_on``, env
+  ``NM_PARTNER_POWER_DEFAULT_ON``, default true): power mode **auto-activates**
+  on first use — the owner's standing choice is unlimited/unrestricted
+  operation.  No key required for the default; the auto-activation is
+  audited like any unlock.
+* An explicit ``lock`` persists a locked state that survives reboots until
+  the owner unlocks again — the owner's explicit choice always wins over
+  the default.
+* With ``power_default_on=false`` and no key configured, power mode can
+  never activate, no matter what is typed.
+* Every unlock/lock/auto-activation is written to ``audit_log`` with the actor.
 * Unlocking changes *dials*, not *constraints*: rate limits, the owner-chat
   trust rules, and the persona's voice are untouched.
 * Locking restores the configured values exactly.
+
+Power ON means unlimited/unrestricted: no volume caps, autonomy cascaded on,
+the improvement auto-tick on.  Power OFF (explicitly locked) is the limited
+profile: the configured protective defaults stay in force — bounded
+parallelism, bounded proactive sends, suggest-mode autonomy.  See
+:meth:`PowerMode.limited_profile`.
 """
 
 from __future__ import annotations
@@ -166,7 +180,9 @@ class PowerMode:
         if was_active:
             self._restore()
             self._active = False
-        self._persist(False, actor)  # clear persisted state even from a fresh process
+        # Persist an explicit lock: it survives reboots and beats the
+        # default-on posture until the owner unlocks again.
+        self._persist(False, actor, locked=True)
         self._audit("power.lock", {"actor": actor})
         _log.info("power mode LOCKED by %s", actor)
         return {
@@ -184,11 +200,12 @@ class PowerMode:
         The key was already verified at unlock time; restoring on a new
         machine boot is the owner's own machine re-honoring the owner's
         choice. Widens the dials again from the base config and journals it.
+        An explicit lock is honored — it is never overridden here.
         """
         if self._active:
             return False
         persisted = self._read_persisted()
-        if not persisted:
+        if not persisted or not persisted.get("active"):
             return False
         changes = self._widen()
         self._restored = changes
@@ -200,7 +217,22 @@ class PowerMode:
         _log.info("power mode restored from persisted state (by %s)", self.unlocked_by)
         return True
 
-    def _persist(self, active: bool, actor: str) -> None:
+    def limited_profile(self) -> dict[str, Any]:
+        """The concrete limits in force while power mode is OFF.
+
+        This is the "a bit limited" profile: the configured protective
+        defaults, reported honestly so status can show what is capped.
+        """
+        partner = self.context.settings.partner
+        return {
+            "autonomy_mode": getattr(partner, "autonomy_mode", "suggest"),
+            "max_parallel_chats": getattr(partner, "max_parallel_chats", 5),
+            "max_proactive_dm_per_day": getattr(partner, "max_proactive_dm_per_day", 10),
+            "max_group_posts_per_day": getattr(partner, "max_group_posts_per_day", 5),
+            "history_window": getattr(partner, "history_window", 50),
+        }
+
+    def _persist(self, active: bool, actor: str, *, locked: bool = False) -> None:
         db = getattr(self.context, "db", None)
         if db is None:
             return
@@ -208,8 +240,8 @@ class PowerMode:
             db.execute(
                 "INSERT INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (ACTIVE_KEY, json.dumps({"active": bool(active), "by": actor,
-                                         "ts": time.time()}), time.time()),
+                (ACTIVE_KEY, json.dumps({"active": bool(active), "locked": bool(locked),
+                                         "by": actor, "ts": time.time()}), time.time()),
             )
         except Exception as exc:  # noqa: BLE001
             _log.warning("power-mode persist failed: %s", exc)
@@ -223,11 +255,39 @@ class PowerMode:
             if row is None:
                 return None
             data = json.loads(row["value"] or "{}")
-            if not isinstance(data, dict) or not data.get("active"):
+            if not isinstance(data, dict):
                 return None
             return data
         except Exception:  # noqa: BLE001
             return None
+
+    def _persisted_locked(self) -> bool:
+        data = self._read_persisted()
+        return bool(data and data.get("locked") and not data.get("active"))
+
+    def _default_on(self) -> bool:
+        return bool(getattr(self.context.settings.partner, "power_default_on", True))
+
+    def _auto_activate(self) -> bool:
+        """Activate from the default-on posture.  Returns True when activated."""
+        if self._active:
+            return False
+        if not self._default_on():
+            return False
+        if self._persisted_locked():
+            return False
+        changes = self._widen()
+        self._restored = changes
+        self._active = True
+        self.unlocked_by = "default"
+        self.unlocked_at = time.time()
+        self._persist(True, "default")
+        self._audit("power.auto_activate",
+                    {"actor": "default",
+                     "fields": [c.field for c in changes]})
+        _log.info("power mode AUTO-ACTIVATED (default-on): %s",
+                  [c.field for c in changes])
+        return True
 
     def status(self) -> dict[str, Any]:
         if self._active:
@@ -236,17 +296,19 @@ class PowerMode:
                 "applied_in_process": True,
                 "unlocked_by": self.unlocked_by,
                 "unlocked_at": self.unlocked_at,
+                "default_on": self._default_on(),
                 "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
                 or seal_configured(),
                 "changes": [c.to_dict() for c in self._restored],
             }
         persisted = self._read_persisted()
-        if persisted:
+        if persisted and persisted.get("active"):
             return {
                 "active": True,
                 "applied_in_process": False,
                 "unlocked_by": str(persisted.get("by") or "owner"),
                 "unlocked_at": float(persisted.get("ts", 0.0)),
+                "default_on": self._default_on(),
                 "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
                 or seal_configured(),
                 "changes": [],
@@ -256,6 +318,9 @@ class PowerMode:
             "applied_in_process": False,
             "unlocked_by": "",
             "unlocked_at": 0.0,
+            "default_on": self._default_on(),
+            "explicitly_locked": self._persisted_locked(),
+            "limited_profile": self.limited_profile(),
             "key_configured": bool(str(getattr(self.context.settings.partner, "owner_key", "") or ""))
                 or seal_configured(),
             "changes": [],
@@ -341,9 +406,20 @@ class PowerMode:
 
 
 def power_mode_for(context: Any) -> PowerMode:
-    """Fetch (or create) the runtime's PowerMode instance."""
+    """Fetch (or create) the runtime's PowerMode instance.
+
+    This is the choke point every power-mode consultation goes through, so
+    the default-on posture is honored here: the first consultation
+    auto-activates unless the owner explicitly locked power mode or turned
+    the default off.  The auto-activation is audited.
+    """
     power = context.extras.get("power")
     if not isinstance(power, PowerMode):
         power = PowerMode(context)
         context.extras["power"] = power
+    if not power.active:
+        # Restore a previously unlocked session first; otherwise honor the
+        # default-on posture (explicit locks always win).
+        if not power.adopt_persisted_state():
+            power._auto_activate()
     return power
