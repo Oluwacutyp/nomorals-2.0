@@ -126,7 +126,7 @@ class ChatGateway:
         for name in list(self.adapters):
             try:
                 self.adapters[name].preflight()
-            except KeyboardInterrupt:
+            except KeyboardInterrupt:  # noqa: E106 - re-raised; only adapter errors are swallowed
                 raise
             except Exception as exc:  # noqa: BLE001 - login failed: keep the rest
                 _log.warning("chat preflight failed for %s: %s", name, exc)

@@ -17,6 +17,7 @@ Each is deterministic, parameter-overridable, and scored the same way.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 
@@ -24,6 +25,9 @@ from .indicators import adx as _adx
 from .indicators import bollinger, donchian, macd as _macd
 from .indicators import rsi as _rsi
 from .math import atr, ema, ensure_ohlcv, rolling_zscore, sharpe
+
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "BaseStrategy",
@@ -269,7 +273,8 @@ def run_zoo(names: list[str], df: pd.DataFrame,
             if set(sig.columns) == {"signal", "confidence", "gate"} \
                     and len(sig) == len(df):
                 out[n] = sig
-        except Exception:
+        except Exception as e:
+            _log.debug("strategy %s failed: %s", n, e)
             continue
     return out
 
@@ -309,7 +314,8 @@ def rank_strategies(frames: dict[str, pd.DataFrame], close: pd.Series,
             s = quick_score(sig, close, periods)
             s["name"] = name
             rows.append(s)
-        except Exception:
+        except Exception as e:
+            _log.debug("strategy scoring failed for %s: %s", name, e)
             continue
     cols = ["name", "sharpe", "hit_rate", "turnover", "exposure", "trades"]
     if not rows:

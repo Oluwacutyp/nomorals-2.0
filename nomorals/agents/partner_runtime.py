@@ -1361,7 +1361,7 @@ class PartnerRuntime:
                 while not self._stopped.is_set():
                     self._tick_beacon()
                     time.sleep(0.5)
-        except KeyboardInterrupt:  # noqa: E103 - interrupt ends the beacon loop; finally stops it
+        except KeyboardInterrupt:  # noqa: E103, E106 - interrupt ends the beacon loop; finally stops it
             pass
         finally:
             self.stop()

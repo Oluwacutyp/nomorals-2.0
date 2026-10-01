@@ -476,7 +476,8 @@ class TrainingCollector:
         fingerprints: list[int] = []
         try:
             datasets = DatasetRegistry(self.db).list(limit=5000)
-        except Exception:
+        except Exception as e:
+            _log.debug("dataset registry list failed: %s", e)
             return fingerprints
         stats.existing_datasets = len(datasets)
         for dataset in datasets:

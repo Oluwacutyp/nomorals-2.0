@@ -244,7 +244,7 @@ class BackupManager:
         try:
             try:
                 self._extract(target, probe)
-            except (OSError, EOFError, Exception) as exc:
+            except Exception as exc:
                 # Corrupt gzip, truncated file, unreadable archive: that IS the
                 # finding. verify() must report it, never raise it at the caller.
                 problems.append(f"cannot extract {target.name}: {type(exc).__name__}: {exc}")

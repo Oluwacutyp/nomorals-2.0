@@ -111,6 +111,6 @@ class WatchLoop:
                             and self.ticks >= max_ticks):
                     break
                 time.sleep(max(1.0, self.interval - (time.time() - started)))
-        except KeyboardInterrupt:  # pragma: no cover
+        except KeyboardInterrupt:  # pragma: no cover  # noqa: E106 - deliberate top-level shutdown
             print(f"\nstopped after {self.ticks} tick(s)", file=sys.stderr)
         return 0

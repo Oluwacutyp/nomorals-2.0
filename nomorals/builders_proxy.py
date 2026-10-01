@@ -291,7 +291,7 @@ def run(listen_host: str, listen_port: int, backend_host: str,
           flush=True)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:  # pragma: no cover  # noqa: E103 - deliberate top-level shutdown hook
+    except KeyboardInterrupt:  # pragma: no cover  # noqa: E103, E106 - deliberate top-level shutdown hook
         pass
     finally:
         httpd.server_close()

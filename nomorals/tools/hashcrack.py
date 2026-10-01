@@ -618,7 +618,7 @@ class Engine:
             for _ in pool:
                 wq.put(None)
             wq.join()
-        except KeyboardInterrupt:
+        except KeyboardInterrupt:  # noqa: E106 - deliberate: save checkpoint on interrupt
             interrupted = True
             self._interrupted = True
             self._stop.set()

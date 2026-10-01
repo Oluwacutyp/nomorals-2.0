@@ -766,7 +766,7 @@ def _resolved_types(cls: type) -> dict[str, Any]:
 
     try:
         return typing.get_type_hints(cls)
-    except Exception:  # pragma: no cover - unresolvable forward ref
+    except Exception:  # pragma: no cover - unresolvable forward ref  # noqa: E104 - expected fallback
         return {f.name: f.type for f in fields(cls)}  # type: ignore[arg-type]
 
 

@@ -899,7 +899,7 @@ class VoiceSession:
                     # _pending_barge; the next listen consumes it as the
                     # start of the owner's turn.
                     continue
-        except KeyboardInterrupt:
+        except KeyboardInterrupt:  # noqa: E106 - deliberate: record interrupted end_reason
             report.end_reason = "interrupted"
         except Exception as exc:  # noqa: BLE001 - session must end cleanly
             report.end_reason = "error"

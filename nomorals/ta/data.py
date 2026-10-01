@@ -7,10 +7,14 @@ minus the keyed loaders (ccxt / yfinance), which Devon covers keylessly in
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 
 from .math import ensure_ohlcv, resample_ohlcv
+
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "make_synthetic",
@@ -88,7 +92,8 @@ def multi_timeframe(df: pd.DataFrame, rules=("4h", "1D")) -> dict:
     for r in rules:
         try:
             out[r] = resample_ohlcv(df, r)
-        except Exception:
+        except Exception as e:
+            _log.debug("resample to %s failed: %s", r, e)
             continue
     return out
 

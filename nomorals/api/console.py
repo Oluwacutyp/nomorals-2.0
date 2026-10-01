@@ -251,7 +251,7 @@ class WebConsole:
         _log.info("web console on http://%s:%s (key %s…)", host, port, self.token[:4])
         try:
             httpd.serve_forever()
-        except KeyboardInterrupt:  # pragma: no cover  # noqa: E103 - deliberate top-level shutdown hook
+        except KeyboardInterrupt:  # pragma: no cover  # noqa: E103, E106 - deliberate top-level shutdown hook
             pass
         finally:
             httpd.shutdown()

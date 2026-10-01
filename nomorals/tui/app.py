@@ -147,7 +147,7 @@ class TuiApp:
                 code = screen.get_wch()
             except curses.error:
                 continue
-            except KeyboardInterrupt:
+            except KeyboardInterrupt:  # noqa: E106 - deliberate: break the input loop
                 break
             key = code if isinstance(code, str) else _key_name(code)
             if not self.handle(key):

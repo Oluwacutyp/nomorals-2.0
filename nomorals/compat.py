@@ -130,7 +130,7 @@ def load_optional(name: str) -> Any:
             break
     try:
         return importlib.import_module(target)
-    except Exception:  # pragma: no cover - broken install
+    except Exception:  # pragma: no cover - broken install  # noqa: E104 - optional import probe; None means unavailable
         return None
 
 

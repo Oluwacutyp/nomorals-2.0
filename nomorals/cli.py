@@ -1138,7 +1138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     setup_logging(args.log_level, force=True)
     try:
         return _dispatch(args)
-    except KeyboardInterrupt:  # pragma: no cover
+    except KeyboardInterrupt:  # pragma: no cover  # noqa: E106 - deliberate top-level shutdown; exit 130
         print("interrupted", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001 - CLI is the last line of defence
@@ -3359,7 +3359,8 @@ def _work_from_json(text: str, brief: str) -> "WorkArtifact":
 
     try:
         data = _json.loads(text)
-    except Exception:
+    except Exception as e:
+        _log.debug("could not parse work artifact JSON: %s", e)
         data = {}
     if not isinstance(data, dict):
         data = {}
@@ -3375,7 +3376,8 @@ def _critique_from_json(text: str) -> "Critique":
 
     try:
         data = _json.loads(text)
-    except Exception:
+    except Exception as e:
+        _log.debug("could not parse critique JSON: %s", e)
         data = {}
     if not isinstance(data, dict):
         data = {}

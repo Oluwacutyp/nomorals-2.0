@@ -481,7 +481,8 @@ class LiveVerifier:
                 req = urllib.request.Request(url, method="HEAD")
                 with urllib.request.urlopen(req, timeout=5):
                     successes.append(url)
-            except Exception:
+            except Exception as e:
+                _log.debug("connectivity check failed for %s: %s", url, e)
                 failures.append(url)
         
         if not successes:

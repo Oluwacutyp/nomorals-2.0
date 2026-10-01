@@ -636,7 +636,8 @@ class SwarmAgent:
 
         try:
             data = _json.loads(response.text)
-        except Exception:
+        except Exception as e:
+            _log.debug("role output not JSON, using raw text: %s", e)
             data = {"raw": response.text[:2000]}
         return data if isinstance(data, dict) else {"raw": str(data)[:2000]}
 

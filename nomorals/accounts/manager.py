@@ -81,7 +81,8 @@ class AccountManager:
         try:
             cred = self.vault.get(service, username, mark_used=False)
             return cred.is_expired()
-        except Exception:
+        except Exception as e:
+            _log.debug("credential expiry check failed: %s", e)
             return False
     
     def refresh_credential(

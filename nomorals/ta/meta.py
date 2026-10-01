@@ -92,7 +92,8 @@ class MetaGate:
         try:
             self.model = self._build()
             self.model.fit(Xa, ya)
-        except Exception:
+        except Exception as e:
+            _log.debug("meta model fit failed, disabling: %s", e)
             self.model = None
         return self
 
@@ -103,7 +104,8 @@ class MetaGate:
             return np.full(len(Xa), 0.5)
         try:
             return self.model.predict_proba(Xa)[:, 1]
-        except Exception:
+        except Exception as e:
+            _log.debug("meta model predict failed, using 0.5: %s", e)
             return np.full(len(Xa), 0.5)
 
     def approve(self, X, threshold: float | None = None) -> np.ndarray:
@@ -128,5 +130,6 @@ class MetaGate:
             self.model, self.threshold = d["model"], d["thr"]
             self.n_features, self.train_pos_rate = d["nf"], d["pos"]
             return True
-        except Exception:
+        except Exception as e:
+            _log.debug("meta model load failed: %s", e)
             return False
