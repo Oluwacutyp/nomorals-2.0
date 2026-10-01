@@ -1,0 +1,53 @@
+# ============================================================
+# DEVON — Termux first-run .env (API-only, no local model needed)
+# ============================================================
+# HOW TO USE
+#   1. Copy this file to ~/.devon-bot.env   (Termux: $HOME/.devon-bot.env)
+#   Template lives in the repo at docs/TERMUX_ENV_TEMPLATE.txt
+#   2. Fill in every value marked  FILL ME
+#   3. chmod 600 ~/.devon-bot.env            (secrets stay private)
+#   4. Never paste these values into any chat — type them here only.
+# WHERE TO GET EACH KEY  (all free)
+#   HF token      -> huggingface.co/settings/tokens  (fine-grained, inference:read)
+#   Groq key      -> console.groq.com/keys            (starts gsk_)
+#   OpenRouter    -> openrouter.ai/keys
+#   api_id/hash   -> my.telegram.org  (API development tools)
+#   Your numeric Telegram id -> message @userinfobot on Telegram
+# ============================================================
+
+# ---------- BRAIN: cloud APIs, HF first, Groq then OpenRouter ----------
+NM_LLM_PROVIDER=hf_serverless
+NM_LLM_FALLBACK_CHAIN=hf_serverless,groq,openrouter
+
+NM_HF_TOKEN=FILL ME            # hf_...
+NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
+
+NM_GROQ_API_KEY=FILL ME        # gsk_...
+NM_GROQ_MODEL=llama-3.3-70b-versatile
+
+NM_OPENROUTER_API_KEY=FILL ME
+# Pin a free model from openrouter.ai/models (catalog changes); this alias auto-routes free models:
+NM_OPENROUTER_MODEL=openrouter/free
+
+# ---------- TELEGRAM: your own account (userbot via Telethon) ----------
+NM_CHAT_TELEGRAM_ENABLED=1
+NM_CHAT_TELEGRAM_API_ID=FILL ME        # digits from my.telegram.org
+NM_CHAT_TELEGRAM_API_HASH=FILL ME      # hex from my.telegram.org
+NM_CHAT_TELEGRAM_SESSION=/data/data/com.termux/files/home/.devon-tg.session
+# Numeric chat ids Devon may operate in (your DM with yourself, groups). Comma-separated:
+NM_CHAT_TELEGRAM_CHATS=FILL ME
+
+# ---------- OWNER: who Devon answers to ----------
+# Your numeric Telegram id — Devon treats this chat as the owner:
+NM_PARTNER_OWNER_CHATS=FILL ME
+# NM_PARTNER_PERSONALITY=devon
+
+# ---------- OPTIONAL: OSINT keys (Devon works without them) ----------
+# NM_OSINT_HIBP_KEY=
+# NM_OSINT_ABUSEIPDB_KEY=
+# NM_OSINT_SHODAN_KEY=
+
+# ---------- OPTIONAL: proactive pings (default ON) ----------
+# NM_PARTNER_PROACTIVE_ENABLED=1
+# NM_PARTNER_QUIET_START=23
+# NM_PARTNER_QUIET_END=7
