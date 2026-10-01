@@ -123,6 +123,13 @@ def _parse_edits_block(text: str) -> list[dict[str, str]] | None:
     return out
 
 
+def _bg_progress(status: dict[str, Any]) -> None:
+    """Live progress from a background test run (Phase D)."""
+    _log.info("background tests: %d passed, %d failed, %d errors "
+              "(%.1fs elapsed)", status["passed"], status["failed"],
+              status["errors"], status["seconds"])
+
+
 def _unified_diff(before: str, after: str, rel: str) -> str:
     """Unified diff of two file texts ("" when identical)."""
     if before == after:
@@ -207,6 +214,55 @@ class CodingAgent:
             return candidate
         return safe_path(self.context, rel)
 
+    def _explore_reads(
+        self, plan: list[dict[str, Any]],
+    ) -> dict[str, str | None]:
+        """Phase D explore phase: read every planned file in one parallel
+        ``call_many`` block (bounded at 8 workers) instead of N sequential
+        reads.
+
+        Routes through the registry's ``fs_read`` so explore reads are
+        audited like every other tool call.  Falls back to direct reads
+        when no registry is available (minimal contexts) or when
+        ``fs_read`` cannot resolve a path — e.g. the agent root sits
+        outside the tool workspace, or the file exceeds ``fs_read``'s
+        byte cap.
+        """
+        rels = [spec["path"] for spec in plan]
+        tools = getattr(self.context, "tools", None)
+        call_many = getattr(tools, "call_many", None)
+        if call_many is not None:
+            outcomes: Any = None
+            try:
+                outcomes = call_many(
+                    [("fs_read", {"path": str(self._resolve(rel))})
+                     for rel in rels],
+                    max_workers=8,
+                )
+            except Exception as exc:  # noqa: BLE001 — fall back to direct
+                _log.debug("parallel explore reads failed: %s", exc)
+            if outcomes is not None:
+                texts: dict[str, str | None] = {}
+                for rel, outcome in zip(rels, outcomes):
+                    content: str | None = None
+                    if getattr(outcome, "ok", False):
+                        value = outcome.value or {}
+                        content = value.get("content")
+                    if content is None:
+                        p = self._resolve(rel)
+                        content = (p.read_text(encoding="utf-8")
+                                   if p.is_file() else None)
+                    texts[rel] = content
+                return texts
+        # legacy sequential path (no registry on the context)
+        texts = {}
+        for spec in plan:
+            p = self._resolve(spec["path"])
+            texts[spec["path"]] = (
+                p.read_text(encoding="utf-8") if p.is_file() else None
+            )
+        return texts
+
     def chat(self, prompt: str) -> Any:
         """Simple chat interface for tools like EditLoop and CodeExecutor."""
         return self.router.chat([{"role": "user", "content": prompt}])
@@ -221,6 +277,8 @@ class CodingAgent:
         max_iterations: int = 5,
         timeout: float = 60.0,
         seed_code: str = "",
+        background_tests: bool = False,
+        test_cap_seconds: float = 900.0,
     ) -> CodingResult:
         """Run the surgical multi-file edit loop (audit Phase B).
 
@@ -230,6 +288,9 @@ class CodingAgent:
         lint.  An explicitly passed ``accept`` command overrides the test
         runner (the ``--accept`` escape hatch for non-Python / exotic
         cases).  ``seed_code`` pre-loads the default file on round 1.
+        ``background_tests`` (Phase D) runs the suite in the background
+        while the lint gate runs concurrently, instead of blocking on it;
+        ``test_cap_seconds`` caps the background run (default 15 min).
         """
         from ..tools import lint as _lint_mod
         from ..tools import pytest_runner as _pytest_mod
@@ -259,12 +320,9 @@ class CodingAgent:
         plan = self._plan_files(draft_task, filename, workdir)
         per_file = max(1, max_iterations // max(1, len(plan)))
         budgets = {spec["path"]: per_file for spec in plan}
-        texts: dict[str, str | None] = {}
-        for spec in plan:
-            p = self._resolve(spec["path"])
-            texts[spec["path"]] = (
-                p.read_text(encoding="utf-8") if p.is_file() else None
-            )
+        # Phase D: explore phase reads all planned files in one parallel
+        # call_many block instead of N sequential reads.
+        texts = self._explore_reads(plan)
         file_errors = {spec["path"]: "" for spec in plan}
         changed: list[str] = []
         last_error = ""
@@ -351,10 +409,26 @@ class CodingAgent:
                         + "; ".join(flaws))
 
             # ── verify ──
+            bg_lint_res: Any = None
             if use_runner:
-                tres = _pytest_mod.run_tests(
-                    repo=str(workdir),
-                    timeout=min(max(timeout * 5.0, 60.0), 600.0))
+                if background_tests:
+                    # Phase D: the suite runs in the background while the
+                    # agent does the lint gate concurrently (prep work
+                    # instead of blocking); poll surfaces live progress.
+                    from .bg_tests import background_run_tests
+
+                    bg = background_run_tests(
+                        str(workdir), cap_seconds=test_cap_seconds)
+                    if isinstance(bg, dict):
+                        tres = bg  # honest skip: nothing matched
+                    else:
+                        bg_lint_res = _lint_mod.lint(
+                            changed or [filename], repo=str(workdir))
+                        tres = bg.wait(on_progress=_bg_progress)
+                else:
+                    tres = _pytest_mod.run_tests(
+                        repo=str(workdir),
+                        timeout=min(max(timeout * 5.0, 60.0), 600.0))
                 green = (tres["ok"] and not tres["failed"]
                          and not tres["errors"])
                 verify_out = _pytest_mod.format_test_result(tres)
@@ -380,9 +454,12 @@ class CodingAgent:
 
             if green:
                 # ── lint gate: runs AFTER tests go green; lint failures
-                # become fix-iterations exactly like test failures. ──
-                lint_res = _lint_mod.lint(changed or [filename],
-                                          repo=str(workdir))
+                # become fix-iterations exactly like test failures.  In
+                # background mode it already ran concurrently with the
+                # suite — reuse it instead of running it twice. ──
+                lint_res = (bg_lint_res if bg_lint_res is not None
+                            else _lint_mod.lint(changed or [filename],
+                                                repo=str(workdir)))
                 if not lint_res["ruff_installed"]:
                     _log.info("ruff not installed — lint gate skipped "
                               "(honest skip, never a silent pass)")

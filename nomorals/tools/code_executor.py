@@ -174,8 +174,9 @@ class CodeExecutor:
         """
         from ..core.ids import new_id
         
-        # Build project context
-        project_context = await self._gather_project_context(context_files)
+        # Build project context (Phase D: ranked by relevance to the goal)
+        project_context = await self._gather_project_context(
+            context_files, task=goal)
         
         prompt = f"""You are a coding agent planning a code change.
 
@@ -407,41 +408,114 @@ Return your plan as JSON:
         
         return await self.execute_plan(plan)
     
+    class _RegistrySymbolSearch:
+        """Symbol search over the registry's Phase-A code index.
+
+        Plain ``__call__`` runs one query (warming the index first);
+        ``search_many`` fires the index warm-up together with all initial
+        queries in a single bounded ``call_many`` block (Phase D) instead
+        of warm-then-serial-searches.  Every step is best-effort — ranking
+        also works from targets, test files, and import neighbors when
+        the index is unavailable.
+        """
+
+        def __init__(self, tools: Any, root: str | Path) -> None:
+            self._tools = tools
+            self._root = str(root)
+            self._warmed = False
+
+        def _warm(self) -> None:
+            if self._warmed:
+                return
+            try:
+                self._tools.call_many(
+                    [("index_repo", {"path": self._root})], max_workers=1)
+            except Exception as exc:  # noqa: BLE001 — warm-up is advisory
+                _log.debug("code index warm-up failed: %s", exc)
+            self._warmed = True
+
+        @staticmethod
+        def _paths(out: Any) -> list[str]:
+            if not getattr(out, "ok", False):
+                return []
+            paths: list[str] = []
+            for r in (out.value or {}).get("results", []):
+                f = r.get("file")
+                if f:
+                    paths.append(f)
+            return paths
+
+        def __call__(self, query: str, limit: int = 10) -> list[str]:
+            self._warm()
+            try:
+                out = self._tools.call("search_code", query=query,
+                                       limit=limit)
+            except Exception:  # noqa: BLE001 — search is advisory
+                return []
+            return self._paths(out)
+
+        def search_many(self, queries: list[str],
+                        limit: int = 10) -> dict[str, list[str]]:
+            """Warm the index and run every query in one parallel block."""
+            calls = [("index_repo", {"path": self._root})]
+            calls += [("search_code", {"query": q, "limit": limit})
+                      for q in queries]
+            try:
+                results = self._tools.call_many(
+                    calls, max_workers=min(8, len(calls)))
+            except Exception as exc:  # noqa: BLE001 — advisory
+                _log.debug("parallel index warm + search failed: %s", exc)
+                return {}
+            self._warmed = True
+            return {q: self._paths(res)
+                    for q, res in zip(queries, results[1:])}
+
+    def _symbol_search_fn(self) -> Any:
+        """Build a symbol-search helper over the registry's ``search_code``
+        tool (Phase A code index), or None when no registry is wired."""
+        agent = self.agent
+        context = getattr(agent, "context", None)
+        tools = getattr(context, "tools", None)
+        if tools is None or not hasattr(tools, "call_many"):
+            return None
+        return self._RegistrySymbolSearch(tools, self.project_root)
+
     async def _gather_project_context(
         self,
         context_files: list[str] | None = None,
+        task: str = "",
+        *,
+        ranked: bool = True,
+        budget_tokens: int = 12000,
     ) -> dict[str, str]:
-        """Gather project context for planning."""
-        context: dict[str, str] = {}
-        
-        # Project structure
-        try:
-            files = []
-            for path in self.project_root.rglob("*"):
-                if path.is_file() and not any(
-                    skip in str(path)
-                    for skip in [".git", "__pycache__", "node_modules", ".venv"]
-                ):
-                    rel = path.relative_to(self.project_root)
-                    files.append(str(rel))
-                    if len(files) > 100:  # Limit
-                        break
-            context["structure"] = "\n".join(sorted(files))
-        except Exception:
-            context["structure"] = "Unable to read project structure"
-        
-        # Context files
-        if context_files:
-            file_contents = []
-            for f in context_files:
-                full_path = self.project_root / f
-                if full_path.exists():
-                    content = full_path.read_text(encoding="utf-8", errors="ignore")
-                    file_contents.append(f"--- {f} ---\n{content[:2000]}")  # Limit
-            context["files"] = "\n\n".join(file_contents)
-        
-        return context
-    
+        """Gather project context for planning.
+
+        Phase D: ranked assembly under a token budget by default
+        (``ranked=False`` keeps the old truncation for debugging).
+        """
+        if not ranked:
+            from .repo_context import legacy_context
+
+            return legacy_context(self.project_root, context_files)
+        from .repo_context import rank_context
+
+        ctx = rank_context(
+            self.project_root,
+            task or " ".join(context_files or []),
+            targets=context_files,
+            budget_tokens=budget_tokens,
+            symbol_search=self._symbol_search_fn(),
+        )
+        files_block = "\n\n".join(
+            f"--- {rel} ---\n{content}"
+            for rel, content in ctx.files.items()
+        )
+        return {
+            "structure": ctx.structure,
+            "files": files_block,
+            "metadata": ctx.metadata_json(),
+        }
+
     async def _create_file(self, file_path: str, description: str) -> None:
         """Create a new file with LLM-generated content."""
         prompt = f"""Create a new file at `{file_path}`.

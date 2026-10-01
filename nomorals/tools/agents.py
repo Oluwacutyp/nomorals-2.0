@@ -91,6 +91,7 @@ CODING_TOOLS: tuple[str, ...] = (
     "git_status",
     "git_diff",
     "search_code",
+    "index_repo",    # Phase D: warm the code index the coding loop searches
 )
 
 #: Capability grant covering exactly the allowlisted tools' capabilities:
@@ -170,6 +171,39 @@ class RoleScopedRegistry:
                  else self._grant.intersect(capabilities))
         return self._inner.call(name, *args, actor=actor,
                                 capabilities=grant, **kwargs)
+
+    def call_many(self, calls: list[tuple[str, dict[str, Any]]],
+                  *, max_workers: int = 1, actor: str = "coding",
+                  **common: Any) -> list[Any]:
+        """Parallel dispatch honoring the role allowlist (Phase D).
+
+        Pre-filters to allowlisted tools so a batch never leaks a denied
+        call into the inner registry's parallel path; refusals come back
+        as ``Err(CapabilityDenied)`` outcomes in position."""
+        scoped: list[tuple[str, dict[str, Any]]] = []
+        refused: dict[int, Any] = {}
+        for i, (name, kwargs) in enumerate(calls):
+            spec = self._inner.get(name)
+            if spec is None:
+                refused[i] = Err(ToolNotFound(f"unknown tool {name!r}"))
+            elif name not in self._allowlist:
+                refused[i] = Err(CapabilityDenied(
+                    f"role {self._role!r} may not call {name!r}: capability "
+                    f"{getattr(spec, 'capability', '?')!r} is not granted to "
+                    f"this role",
+                    capability=getattr(spec, "capability", ""),
+                    actor=actor,
+                ))
+            else:
+                scoped.append((name, kwargs))
+        results = self._inner.call_many(
+            scoped, max_workers=max_workers, actor=actor,
+            capabilities=self._grant, **common)
+        out: list[Any] = []
+        it = iter(results)
+        for i in range(len(calls)):
+            out.append(refused[i] if i in refused else next(it))
+        return out
 
 
 class CodingRoleAgent:

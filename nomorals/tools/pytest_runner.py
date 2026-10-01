@@ -180,15 +180,45 @@ def _run_pytest(root: Path, paths: list[str] | None,
             "runner": "pytest", "note": note}
 
 
+def _path_to_module(path: str) -> str:
+    """``tests/test_mod.py`` -> ``tests.test_mod``.
+
+    pytest accepts file paths on its command line; ``python -m unittest``
+    needs dotted module names.  The changed-only selector returns paths,
+    so the unittest fallback converts them.
+    """
+    p = path.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    if p.endswith(".py"):
+        p = p[:-3]
+    return p.replace("/", ".")
+
+
+def _unittest_cmd(root: Path,
+                  paths: list[str] | None) -> list[str] | None:
+    """Argv for the unittest fallback, or None when there is nothing to
+    run (mirrors the pytest exit-5 honest skip: no tests is not a
+    failure)."""
+    if paths:
+        return [sys.executable, "-u", "-m", "unittest",
+                *[_path_to_module(p) for p in paths]]
+    if (root / "tests").is_dir():
+        return [sys.executable, "-u", "-m", "unittest", "discover",
+                "-s", "tests", "-t", "."]
+    return None
+
+
 def _run_unittest(root: Path, paths: list[str] | None,
                   timeout: float) -> dict[str, Any]:
     """Fallback when pytest is not installed: the repo's own discover cmd."""
     t0 = time.perf_counter()
-    if paths:
-        cmd = [sys.executable, "-u", "-m", "unittest", *paths]
-    else:
-        cmd = [sys.executable, "-u", "-m", "unittest", "discover",
-               "-s", "tests", "-t", "."]
+    cmd = _unittest_cmd(root, paths)
+    if cmd is None:
+        return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                "seconds": round(time.perf_counter() - t0, 2),
+                "selected": [], "runner": "unittest",
+                "note": "no tests directory — nothing ran"}
     try:
         proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
                               text=True, timeout=timeout)
@@ -214,6 +244,14 @@ def _run_unittest(root: Path, paths: list[str] | None,
     passed = 0
     pm = re.search(r"Ran (\d+) tests?", out)
     ran = int(pm.group(1)) if pm else 0
+    if ran == 0 and proc.returncode == 0:
+        # nothing collected (e.g. pytest-style test functions with no
+        # pytest installed): honest skip, not a failure — mirrors the
+        # pytest exit-5 handling above.
+        return {"ok": True, "passed": 0, "failed": [], "errors": 0,
+                "seconds": round(time.perf_counter() - t0, 2),
+                "selected": paths or ["tests"], "runner": "unittest",
+                "ran": 0, "note": "no tests collected — nothing ran"}
     if ok:
         passed = ran
     return {"ok": ok, "passed": passed, "failed": failed,

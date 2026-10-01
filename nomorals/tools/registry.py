@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -60,6 +62,8 @@ class ToolRegistry:
         self._call_limit = 2000
         self.stats = {"calls": 0, "denied": 0, "errors": 0, "seconds": 0.0}
         self._builtin_registered = False
+        # Phase D: guards shared audit/stats state for parallel call_many.
+        self._lock = threading.Lock()
 
     # ── registration ─────────────────────────────────────────────────────────
     def register(
@@ -248,11 +252,11 @@ class ToolRegistry:
             )
             if not decision.allowed:
                 self._audit(name, actor, spec.capability, "deny", kwargs, 0.0, error=decision.reason)
-                self.stats["denied"] += 1
+                self._bump_stats(denied=1)
                 return Err(CapabilityDenied(decision.reason, capability=spec.capability, actor=actor))
         elif self.enforce and spec.capability and not grant.grants(spec.capability):
             self._audit(name, actor, spec.capability, "deny", kwargs, 0.0, error="not granted")
-            self.stats["denied"] += 1
+            self._bump_stats(denied=1)
             return Err(
                 CapabilityDenied(
                     f"actor {actor!r} lacks {spec.capability!r}",
@@ -266,17 +270,14 @@ class ToolRegistry:
             elapsed = time.perf_counter() - started
             error = classify(exc)
             self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, error=error.message)
-            self.stats["errors"] += 1
-            self.stats["calls"] += 1
-            self.stats["seconds"] += elapsed
+            self._bump_stats(errors=1, calls=1, seconds=elapsed)
             _log.debug("tool %s failed: %s", name, error.message)
             self._record_failure_ledger(name, error.message, str(exc))
             return Err(error)
 
         elapsed = time.perf_counter() - started
         self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, ok=True)
-        self.stats["calls"] += 1
-        self.stats["seconds"] += elapsed
+        self._bump_stats(calls=1, seconds=elapsed)
         return Ok(result)
 
     def _record_failure_ledger(self, tool: str, message: str,
@@ -310,8 +311,29 @@ class ToolRegistry:
         except Exception:  # noqa: BLE001
             return "tool"
 
-    def call_many(self, calls: list[tuple[str, dict[str, Any]]], **common: Any) -> list[Outcome[Any]]:
-        return [self.call(name, **{**common, **kwargs}) for name, kwargs in calls]
+    def _bump_stats(self, **deltas: float) -> None:
+        """Thread-safe stats increments (Phase D parallel call_many)."""
+        with self._lock:
+            for key, delta in deltas.items():
+                self.stats[key] = self.stats.get(key, 0.0) + delta
+
+    def call_many(self, calls: list[tuple[str, dict[str, Any]]],
+                  *, max_workers: int = 1, **common: Any) -> list[Outcome[Any]]:
+        """Run several tool calls; ``max_workers > 1`` runs them in parallel
+        (Phase D, bounded — default 8 in the explore phase) and preserves
+        call order in the results.  ``max_workers=1`` is the old serial
+        behavior."""
+        if max_workers <= 1 or len(calls) <= 1:
+            return [self.call(name, **{**common, **kwargs})
+                    for name, kwargs in calls]
+
+        def _one(call: tuple[str, dict[str, Any]]) -> Outcome[Any]:
+            name, kwargs = call
+            return self.call(name, **{**common, **kwargs})
+
+        with ThreadPoolExecutor(max_workers=max_workers,
+                                thread_name_prefix="tool-call") as pool:
+            return list(pool.map(_one, calls))
 
     # ── auditing ─────────────────────────────────────────────────────────────
     def _audit(
@@ -338,9 +360,10 @@ class ToolRegistry:
             "error": error,
             "ts": time.time(),
         }
-        self.calls.append(entry)
-        if len(self.calls) > self._call_limit:
-            del self.calls[: len(self.calls) - self._call_limit]
+        with self._lock:
+            self.calls.append(entry)
+            if len(self.calls) > self._call_limit:
+                del self.calls[: len(self.calls) - self._call_limit]
         db = getattr(self.context, "db", None) if self.context else None
         if db is not None:
             try:
