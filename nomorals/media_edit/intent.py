@@ -50,6 +50,11 @@ _HINTS = (
     "'convert to webp', 'watermark with logo.png', 'rotate 90', 'grayscale', "
     "'circle the <thing>', 'add text \"hello\"', 'make a thumbnail', "
     "'flip horizontal', 'sharpen', 'crop to 16:9', 'meme top: ... bottom: ...'; "
+    "studio intents: 'cinematic look', 'make it warmer/cooler', 'letterbox', "
+    "'smart crop to 4:5', 'title: My Video'; "
+    "AI instruction edits: 'make a bird sit on the tree', "
+    "'put him in a grand room', 'make it sunset', 'change the car to red', "
+    "'remove the trash can' (need a configured generative backend); "
     "supported video intents: 'trim the first 30 seconds', 'trim 0:30-1:00', "
     "'extract the audio', 'make a gif', 'extract 5 thumbnails', "
     "'convert to mp4', 'resize to 720p'"
@@ -62,10 +67,51 @@ def _fail(instruction: str) -> AmbiguousInstructionError:
 
 
 # ---------------------------------------------------------------------------
+# generative (AI instruction) image intents
+# ---------------------------------------------------------------------------
+
+# "make a bird sit on the tree", "put him in a grand room", "make it sunset",
+# "change the car to a convertible", "turn day into night", "remove the bins".
+# Kept strictly separate from the mechanical edit intents above: these map to
+# the generative_edit op (needs an AI backend), never to deterministic ops.
+_GEN_PATTERNS = (
+    r"put (?:the |a |an )?(.+?) in(?:to)? (?:a |an |the )?(.+)",
+    r"place (?:the |a |an )?(.+?) in(?:to)? (?:a |an |the )?(.+)",
+    r"change (?:the |a |an )?(.+?) to (?:a |an |the )?(.+)",
+    r"turn (?:the |a |an )?(.+?) into (?:a |an |the )?(.+)",
+    r"add (?:a |an |the )?(.+)",
+    r"remove (?:the |a |an )?(.+)",
+    r"make (?:a |an |the )?(.+?) (?:sit|stand|lie|fly|swim|run|walk|sleep|"
+    r"smile|laugh|cry|dance)(?:\s+(?:on|in|under|behind|next to|beside)\s+"
+    r"(?:the |a |an )?(.+))?",
+)
+
+
+def _gen_intent(text: str, instruction: str) -> ParsedIntent | None:
+    """Match AI-instruction phrasing → generative_edit op."""
+    for pat in _GEN_PATTERNS:
+        if re.search(pat, text):
+            return ParsedIntent(
+                kind="image",
+                ops=[{"op": "generative_edit", "instruction": instruction}],
+                summary=f"AI edit: {instruction}")
+    # "make it sunset" / "make her smile bigger" — but never the mechanical
+    # "make it square" / "make a thumbnail" (those matched earlier anyway).
+    m = re.search(r"^make (?!(?:it square|a thumbnail|an? gif|a meme)\b)(.+)$",
+                  text)
+    if m:
+        return ParsedIntent(
+            kind="image",
+            ops=[{"op": "generative_edit", "instruction": instruction}],
+            summary=f"AI edit: {instruction}")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # image intents
 # ---------------------------------------------------------------------------
 
-def _parse_image(text: str) -> ParsedIntent | None:
+def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
     # 1. square (instagram default 1080)
     if re.search(r"\bsquare\b", text):
         size = 1080 if "insta" in text else None
@@ -179,8 +225,8 @@ def _parse_image(text: str) -> ParsedIntent | None:
         return ParsedIntent(kind="image",
                             ops=[{"op": "enhance", "sharpness": 1.8}],
                             summary="sharpen")
-    # 13. crop to aspect
-    m = re.search(r"crop to (\d+\s*:\s*\d+)", text)
+    # 13. crop to aspect (not "smart crop", which is a studio intent below)
+    m = re.search(r"(?<!smart )crop to (\d+\s*:\s*\d+)", text)
     if m:
         aspect = m.group(1).replace(" ", "")
         return ParsedIntent(kind="image",
@@ -209,6 +255,68 @@ def _parse_image(text: str) -> ParsedIntent | None:
         return ParsedIntent(kind="image",
                             ops=[{"op": "enhance", "contrast": 0.7}],
                             summary="less contrast")
+    # -- studio mechanical intents (lazy import registers the studio ops) --
+    from . import studio as _studio  # noqa: F401
+    # 17. filter presets: "cinematic look", "apply vintage filter"
+    m = re.search(r"\b(portrait|cinematic|vintage|bw-drama|vibrant|"
+                  r"teal-orange|noir|golden-hour|cool-matte|warm-fade)\b",
+                  text)
+    if m and re.search(r"look|filter|style|preset|apply|make it|give it", text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "filter", "preset": m.group(1),
+                                  "strength": 1.0}],
+                            summary=f"filter: {m.group(1)}")
+    # 18. quick grades: warmer / cooler / moodier / more vivid
+    if re.search(r"\bwarmer\b", text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "grade", "temperature": 800}],
+                            summary="grade: warmer")
+    if re.search(r"\bcooler\b", text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "grade", "temperature": -800}],
+                            summary="grade: cooler")
+    if re.search(r"\bmoodier\b|\bmoodier look\b", text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "grade", "vignette": 0.6,
+                                  "lift": [-0.04, -0.04, -0.04]}],
+                            summary="grade: moodier")
+    if re.search(r"\bmore vivid\b|\bmore vibrant\b", text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "grade", "vibrance": 0.5,
+                                  "saturation": 1.2}],
+                            summary="grade: more vivid")
+    # 19. letterbox: "letterbox", "cinematic bars", "anamorphic"
+    if re.search(r"letterbox|cinematic bars|anamorphic|\b2\.39:1\b|\b21:9\b",
+                 text):
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "letterbox", "aspect": "21:9",
+                                  "color": "black"}],
+                            summary="letterbox 21:9")
+    # 20. smart crop / reframe to an aspect
+    m = re.search(r"(?:smart[ -]?crop|reframe)(?:\s+to)?\s+"
+                  r"(\d+(?:\.\d+)?\s*[:x]\s*\d+(?:\.\d+)?)", text)
+    if m:
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "smart_crop",
+                                  "aspect": m.group(1).replace(" ", ""),
+                                  "mode": "saliency"}],
+                            summary=f"smart crop {m.group(1)}")
+    # 21. title text: "title: My Day"
+    m = re.search(r"^title\s*:\s*(.+)$", text)
+    if m:
+        return ParsedIntent(kind="image",
+                            ops=[{"op": "text_layer", "text": m.group(1),
+                                  "position": "top", "size": 72,
+                                  "color": "white", "stroke_width": 3,
+                                  "shadow": True, "margin": 40}],
+                            summary=f"title: {m.group(1)}")
+    # -- generative (AI instruction) edits --------------------------------
+    # These come AFTER every mechanical intent so "make it square",
+    # "make a thumbnail", "add text ..." etc. never land here.
+    from . import generate as _generate  # noqa: F401
+    gen = _gen_intent(text, raw or text)
+    if gen is not None:
+        return gen
     return None
 
 
@@ -317,7 +425,6 @@ def parse_instruction(instruction: str, *,
     if hit:
         return hit
     raise _fail(instruction)
-
 
 def describe_plan(intent: ParsedIntent) -> str:
     """Human-readable plan for --dry-run / chat confirmation."""

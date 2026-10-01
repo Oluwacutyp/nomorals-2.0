@@ -272,3 +272,211 @@ def register(registry: Any) -> None:
         raise MediaEditError(
             f"unsupported target format {format!r}; images: "
             f"{sorted(image_fmts)}; video: {sorted(video_fmts)}")
+
+    register_studio(registry)
+
+
+def _resolve_studio_paths(context: Any,
+                          ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sandbox every file path referenced inside a studio op chain."""
+    resolved = []
+    for op in ops:
+        op = dict(op)
+        name = op.get("op", "")
+        if name in ("v_clip", "v_image") and op.get("path"):
+            op["path"] = str(_sandbox(context, op["path"]))
+        elif name == "v_duck" and op.get("bgm"):
+            op["bgm"] = str(_sandbox(context, op["bgm"]))
+        elif name == "collage" and op.get("images"):
+            op["images"] = [str(_sandbox(context, p))
+                            for p in op["images"]]
+        elif name == "composite" and op.get("layers"):
+            layers = []
+            for layer in op["layers"]:
+                layer = dict(layer)
+                if layer.get("path"):
+                    layer["path"] = str(_sandbox(context, layer["path"]))
+                layers.append(layer)
+            op["layers"] = layers
+        elif name == "generative_edit" and isinstance(op.get("mask"), str):
+            op["mask"] = str(_sandbox(context, op["mask"]))
+        resolved.append(op)
+    return resolved
+
+
+def _sandbox_template_params(context: Any,
+                             params: dict[str, Any]) -> dict[str, Any]:
+    out = dict(params)
+    for key in ("source", "background", "image", "logo", "bgm"):
+        if out.get(key):
+            out[key] = str(_sandbox(context, out[key]))
+    if out.get("images"):
+        out["images"] = [str(_sandbox(context, p)) for p in out["images"]]
+    return out
+
+
+def register_studio(registry: Any) -> None:
+    """Attach the EditStudio session tools to a registry."""
+    context = registry.context
+
+    @registry.register(
+        "studio_run",
+        description=("Run a pro edit session: an explicit op chain "
+                     "(filter, grade, text_layer, composite, collage, "
+                     "smart_crop, letterbox, generative_edit, v_* video ops) "
+                     "replayed non-destructively from the source. Images "
+                     "render synchronously; video renders as a background "
+                     "job unless wait=true."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_run(source: str, ops: list[dict[str, Any]],
+                   *, name: str = "untitled", suffix: str = "studio",
+                   wait: bool = False) -> dict[str, Any]:
+        """Run an EditStudio op chain against a workspace file."""
+        from ..media_edit.studio import EditStudio, MediaEditError
+        src = _sandbox(context, source)
+        _check_image_size(src) if src.suffix.lower() in (
+            ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
+            ".gif", ".avif") else _check_video_size(src)
+        st = EditStudio(str(src), name=name)
+        for op in _resolve_studio_paths(context, ops):
+            op = dict(op)
+            st.op(op.pop("op"), **op)
+        try:
+            return st.render(suffix=suffix, wait=wait)
+        except MediaEditError:
+            raise
+
+    @registry.register(
+        "studio_template",
+        description=("Build + render a one-call studio template: "
+                     "podcast-clip, quote-card, product-showcase, meme, "
+                     "slideshow. Pass template params as a dict."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_template(template: str, params: dict[str, Any],
+                        *, wait: bool = False,
+                        suffix: str = "studio") -> dict[str, Any]:
+        """Build a template project and render it."""
+        from ..media_edit.studio import build_template
+        st = build_template(template,
+                            **_sandbox_template_params(context, params))
+        result = st.render(suffix=suffix, wait=wait)
+        result["template"] = template
+        return result
+
+    @registry.register(
+        "studio_project",
+        description=("Save an EditStudio project (action='save'), load one "
+                     "('load'), describe it ('describe'), or render a saved "
+                     "project ('render'). Projects are JSON op stacks."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_project(action: str, *,
+                       source: str | None = None,
+                       ops: list[dict[str, Any]] | None = None,
+                       project_path: str | None = None,
+                       name: str = "untitled",
+                       wait: bool = False,
+                       suffix: str = "studio") -> dict[str, Any]:
+        """Save/load/describe/render EditStudio project files."""
+        from ..media_edit.studio import EditStudio
+        action = action.strip().lower()
+        if action == "save":
+            if not source or not project_path:
+                from ..media_edit.images import MediaEditError
+                raise MediaEditError("save needs source + project_path")
+            src = _sandbox(context, source)
+            st = EditStudio(str(src), name=name)
+            for op in _resolve_studio_paths(context, ops or []):
+                op = dict(op)
+                st.op(op.pop("op"), **op)
+            dest = _sandbox(context, project_path, must_exist=False)
+            st.save_project(dest)
+            return {"saved": str(dest), "ops": len(st.ops)}
+        if action in ("load", "describe", "render"):
+            if not project_path:
+                from ..media_edit.images import MediaEditError
+                raise MediaEditError(f"{action} needs project_path")
+            proj = _sandbox(context, project_path)
+            st = EditStudio.load_project(proj)
+            if action == "describe":
+                return {"project": str(proj), "describe": st.describe()}
+            # re-sandbox paths referenced by the loaded project
+            st.ops = _resolve_studio_paths(context, st.ops)
+            if st.source:
+                try:
+                    st.source = str(_sandbox(context, st.source))
+                except Exception:  # noqa: BLE001
+                    pass  # slideshow templates legitimately have no source
+            result = st.render(suffix=suffix, wait=wait)
+            result["project"] = str(proj)
+            return result
+        from ..media_edit.images import MediaEditError
+        raise MediaEditError(
+            f"unknown studio_project action {action!r}; "
+            "use save|load|describe|render")
+
+    @registry.register(
+        "studio_batch",
+        description=("Apply a saved studio project to every file in a folder "
+                     "(pattern like '*.jpg'). Returns per-file results."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_batch(src_dir: str, project: str, *,
+                     pattern: str = "*.jpg",
+                     out_dir: str | None = None,
+                     suffix: str = "studio") -> dict[str, Any]:
+        """Batch-apply a studio project across a directory."""
+        from ..media_edit.studio import EditStudio
+        d = _sandbox(context, src_dir)
+        proj = _sandbox(context, project)
+        target = (_sandbox(context, out_dir, must_exist=False)
+                  if out_dir else None)
+        results = EditStudio.batch(d, proj, pattern=pattern,
+                                   out_dir=target, suffix=suffix)
+        ok = sum(1 for r in results if "error" not in r)
+        return {"files": len(results), "ok": ok, "results": results}
+
+    @registry.register(
+        "studio_compare",
+        description=("Render a studio op chain and export a before/after "
+                     "comparison: 'side-by-side', 'split', 'stacked', or "
+                     "'html' (interactive slider)."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_compare(source: str, ops: list[dict[str, Any]],
+                       *, mode: str = "side-by-side",
+                       suffix: str = "studio") -> dict[str, Any]:
+        """Render + export a before/after comparison."""
+        from ..media_edit.studio import EditStudio
+        src = _sandbox(context, source)
+        _check_image_size(src)
+        st = EditStudio(str(src), name="compare")
+        for op in _resolve_studio_paths(context, ops):
+            op = dict(op)
+            st.op(op.pop("op"), **op)
+        return st.compare(mode=mode)
+
+    @registry.register(
+        "studio_presets",
+        description=("List everything the studio offers: filter presets, "
+                     "transitions, export presets, templates, blend modes."),
+        capability=Capability.FS_READ,
+    )
+    def studio_presets() -> dict[str, Any]:
+        """List studio filters, transitions, exports, templates."""
+        from ..media_edit.studio import studio_presets as _sp
+        return _sp()
+
+    @registry.register(
+        "studio_gen_status",
+        description=("Check generative-edit backend status: which AI backends "
+                     "are usable (hf/diffusers), configured model, and the "
+                     "env vars to set. Makes no model calls."),
+        capability=Capability.FS_READ,
+    )
+    def studio_gen_status() -> dict[str, Any]:
+        """Report generative backend availability (no model calls)."""
+        from ..media_edit.generate import backend_status
+        return backend_status()
