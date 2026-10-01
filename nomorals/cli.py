@@ -423,6 +423,35 @@ def _parser() -> argparse.ArgumentParser:
     c_solve.add_argument("--json", action="store_true",
                          help="output as JSON")
 
+    bet = sub.add_parser(
+        "bet",
+        help="sports bet analyst: ensemble ML, value + Kelly staking (analysis only)",
+        description=("nm bet analyze --home H --away A [--league L] "
+                     "[--odds H D A]\n"
+                     "nm bet bankroll [--set AMOUNT]\n"
+                     "nm bet backtest [--n N] [--seed S]\n"
+                     "nm bet record --home H --away A --score HG-AG [--league L]"),
+    )
+    bet_sub = bet.add_subparsers(dest="bet_action", required=True)
+    b_an = bet_sub.add_parser("analyze", help="ensemble analysis of a match")
+    b_an.add_argument("--home", required=True)
+    b_an.add_argument("--away", required=True)
+    b_an.add_argument("--league", default="GEN")
+    b_an.add_argument("--odds", nargs=3, type=float, metavar=("H", "D", "A"),
+                      help="bookmaker odds: home draw away")
+    b_an.add_argument("--bookmaker", default="cli")
+    b_an.add_argument("--min-edge", type=float, default=0.04)
+    b_br = bet_sub.add_parser("bankroll", help="show/set the paper bankroll")
+    b_br.add_argument("--set", type=float, default=None)
+    b_bt = bet_sub.add_parser("backtest", help="walk-forward backtest")
+    b_bt.add_argument("--n", type=int, default=400)
+    b_bt.add_argument("--seed", type=int, default=7)
+    b_rc = bet_sub.add_parser("record", help="record a played result")
+    b_rc.add_argument("--home", required=True)
+    b_rc.add_argument("--away", required=True)
+    b_rc.add_argument("--score", required=True, help="HG-AG, e.g. 2-1")
+    b_rc.add_argument("--league", default="GEN")
+
     voice = sub.add_parser(
         "voice",
         help="Live voice loop: talk to Devon through your mic and speakers",
@@ -1383,6 +1412,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_voice(args, context)
         if args.command == "captcha":
             return _cmd_captcha(args, context)
+        if args.command == "bet":
+            return _cmd_bet(args, context)
         if args.command == "vision":
             return _cmd_vision(args, context)
         if args.command == "inbox":
@@ -2398,6 +2429,60 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
         return _out(out)
 
     print(f"unknown captcha action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_bet(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm bet` subcommands.  Analysis only — never places bets."""
+    from .agents.sports_bet import (BetStore, Fixture, OddsSnapshot, backtest,
+                                    render_analysis, render_backtest,
+                                    synthetic_history)
+
+    store = BetStore()
+    action = args.bet_action
+
+    if action == "bankroll":
+        if args.set is not None:
+            store.bankroll = args.set
+            store.save()
+            print(f"bankroll set to {args.set:.2f}")
+        else:
+            print(f"paper bankroll: {store.bankroll:.2f}")
+        return 0
+
+    if action == "record":
+        try:
+            hg_s, ag_s = args.score.split("-")
+            hg, ag = int(hg_s), int(ag_s)
+        except ValueError:
+            print("bad --score, want HG-AG like 2-1", file=sys.stderr)
+            return 2
+        store.record(Fixture(home=args.home, away=args.away,
+                             league=args.league, home_goals=hg,
+                             away_goals=ag))
+        print(f"recorded: {args.home} {hg}-{ag} {args.away}")
+        return 0
+
+    if action == "backtest":
+        entries = synthetic_history(n=args.n, seed=args.seed)
+        r = backtest(entries, bankroll=store.bankroll, seed=args.seed)
+        print(render_backtest(r))
+        return 0
+
+    if action == "analyze":
+        snaps = []
+        if args.odds:
+            h, d, a = args.odds
+            snaps = [OddsSnapshot(bookmaker=args.bookmaker, home=h,
+                                  draw=d, away=a)]
+        an = store.analyst.analyze(args.home, args.away,
+                                   league=args.league, odds=snaps,
+                                   fixtures=store.fixtures(),
+                                   min_edge=args.min_edge)
+        print(render_analysis(an))
+        return 0
+
+    print(f"unknown bet action: {action}", file=sys.stderr)
     return 2
 
 

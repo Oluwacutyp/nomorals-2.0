@@ -169,6 +169,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "evolve": (1, None),     # /evolve <instruction> | /evolve apply <id> | /evolve list
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
+    "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "image": (1, 3),         # /image <path-or-url> — lookup
@@ -290,6 +291,8 @@ _HELP_TEXT = "\n".join(
         "  /evolve git | publish [branch] [--push]   where commits land + make permanent",
         "  /speak <text>                            I say it as a voice note",
         "  /voice list|use|say|clone…                the voice catalogue (switch voices live)",
+        "  /bet analyze <home> vs <away> [h d a]     ensemble ML match analysis + value",
+        "  /bet bankroll [set <amt>] | backtest [n]  bankroll + walk-forward backtest",
         "  /task add <instruction> | /task run [id] | /task list",
         "  /notify [n]                             recent alerts",
         "  /image <path-or-url>                    look it up (hash, dims, seen?)",
@@ -690,6 +693,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "speak": {"what": "she says it back to you as a neural voice note.",
               "usage": "/speak <text>", "example": "/speak all done",
               "related": "/tts"},
+    "bet": {"what": "the sports bet analyst: ensemble ML (Elo + Poisson + form + market, logistic meta-learner) gives 1X2 probabilities, expected value vs bookmaker odds, and Kelly stakes. Analysis only — it never places bets.",
+            "usage": "/bet analyze <home> vs <away> [home_odds draw_odds away_odds] [--league L] | /bet bankroll [set <amount>] | /bet backtest [n] [--seed S] | /bet record <home> <away> <hg-ag>",
+            "example": "/bet analyze Arsenal vs Chelsea 2.10 3.40 3.60",
+            "related": "/api"},
     "task": {"what": "queued instructions she runs and reports back on.",
              "usage": "/task add <instruction> | run [id] | list",
              "example": "/task add check the backups",
@@ -990,7 +997,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "features", "decode", "cookies", "cipher",
-      "monitor"]),
+      "monitor", "bet"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1092,6 +1099,7 @@ LIST_ONELINERS: dict[str, str] = {
     "political": "political — 3 elections, be mayor (groups)",
     "tts": "speak text, send the audio back",
     "speak": "neural voice note of your text",
+    "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "image": "image lookup: hash, dims, seen-before",
