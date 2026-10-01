@@ -291,6 +291,45 @@ def _parser() -> argparse.ArgumentParser:
                      "nm room stale [--days 30]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+
+    briefing = sub.add_parser(
+        "briefing",
+        help="Morning briefing: the overnight digest",
+        description=("nm briefing now            generate + deliver immediately\n"
+                     "nm briefing today           print the last stored briefing\n"
+                     "nm briefing retry           regenerate + deliver\n"
+                     "nm briefing config          show time/timezone/topics/sections\n"
+                     "nm briefing topics add|rm X  manage news topic filter\n"
+                     "nm briefing symbols add|rm X  manage market symbols\n"
+                     "nm briefing sections pin|unpin <name>\n"
+                     "nm briefing followup <n>    expand item n from the briefing"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    briefing_sub = briefing.add_subparsers(dest="briefing_action",
+                                           required=True)
+    for _name in ("now", "today", "retry", "config"):
+        _p = briefing_sub.add_parser(_name, help=f"briefing {_name}")
+        _p.add_argument("--json", action="store_true", help="Output as JSON")
+    b_topics = briefing_sub.add_parser("topics", help="manage news topics")
+    b_topics.add_argument("op", choices=["add", "rm"])
+    b_topics.add_argument("topic", help="topic string")
+    b_topics.add_argument("--json", action="store_true", help="Output as JSON")
+    b_symbols = briefing_sub.add_parser("symbols", help="manage market symbols")
+    b_symbols.add_argument("op", choices=["add", "rm"])
+    b_symbols.add_argument("symbol", help="e.g. BTC")
+    b_symbols.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+    b_sections = briefing_sub.add_parser("sections",
+                                         help="pin/unpin a section")
+    b_sections.add_argument("op", choices=["pin", "unpin"])
+    b_sections.add_argument("name", help="section name")
+    b_sections.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    b_followup = briefing_sub.add_parser("followup",
+                                         help="expand a briefing item")
+    b_followup.add_argument("n", type=int, help="1-based item number")
+    b_followup.add_argument("--json", action="store_true",
+                            help="Output as JSON")
     room_sub = room.add_subparsers(dest="room_action", required=True)
     r_new = room_sub.add_parser("new", help="create a room")
     r_new.add_argument("title", help="room title")
@@ -982,6 +1021,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_inbox(args, context)
         if args.command == "room":
             return _cmd_room(args, context)
+        if args.command == "briefing":
+            return _cmd_briefing(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -1953,6 +1994,117 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
         print(f"room error: {exc}", file=sys.stderr)
         return 1
     print(f"unknown room action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm briefing` to now / today / retry / config / topics /
+    symbols / sections / followup."""
+    from .agents import morning_briefing as mb
+
+    as_json = getattr(args, "json", False)
+    action = args.briefing_action
+    try:
+        if action in ("now", "retry"):
+            result = mb.run_briefing(context)
+            if as_json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(result.get("text", ""))
+                if not result.get("delivered"):
+                    print("(notifier off — printed locally only)")
+            return 0 if result.get("ok") else 1
+        if action == "today":
+            b = mb.latest_briefing(context)
+            if b is None:
+                print("no briefing stored yet — run `nm briefing now`",
+                      file=sys.stderr)
+                return 1
+            if as_json:
+                print(json.dumps(b, indent=2, default=str))
+            else:
+                print(f"☀️ Morning briefing — {b['date']}"
+                      + (" (late)" if b.get("late") else ""))
+                if not b["sections"]:
+                    print("(quiet night — nothing was reported.)")
+                for s in b["sections"]:
+                    print(f"\n— {s['title']} —")
+                    for line in s.get("lines", []):
+                        print(line)
+            return 0
+        if action == "config":
+            prefs = mb._prefs(context)
+            payload = {
+                "time": mb.briefing_time(context),
+                "timezone": mb._owner_tz(context),
+                "topics": prefs.get("topics", []),
+                "symbols": prefs.get("symbols", []),
+                "pinned_sections": prefs.get("pinned_sections", []),
+                "max_words": mb.MAX_WORDS,
+            }
+            if as_json:
+                print(json.dumps(payload, indent=2))
+            else:
+                for k, v in payload.items():
+                    print(f"{k}: {v}")
+            return 0
+        if action == "topics":
+            prefs = mb._prefs(context)
+            topic = args.topic.strip()
+            if args.op == "add":
+                if topic not in prefs["topics"]:
+                    prefs["topics"].append(topic)
+            else:
+                prefs["topics"] = [t for t in prefs["topics"] if t != topic]
+            mb._save_prefs(context, prefs)
+            print(f"topics: {prefs['topics']}")
+            return 0
+        if action == "symbols":
+            prefs = mb._prefs(context)
+            sym = args.symbol.strip().upper()
+            if args.op == "add":
+                if sym not in prefs["symbols"]:
+                    prefs["symbols"].append(sym)
+            else:
+                prefs["symbols"] = [s for s in prefs["symbols"] if s != sym]
+            mb._save_prefs(context, prefs)
+            print(f"symbols: {prefs['symbols']}")
+            return 0
+        if action == "sections":
+            prefs = mb._prefs(context)
+            name = args.name.strip()
+            if args.op == "pin":
+                if name not in prefs["pinned_sections"]:
+                    prefs["pinned_sections"].append(name)
+            else:
+                prefs["pinned_sections"] = [
+                    s for s in prefs["pinned_sections"] if s != name]
+            mb._save_prefs(context, prefs)
+            store = mb._engagement_store(context)
+            if store is not None:
+                store.set_pinned(name, args.op == "pin")
+            print(f"pinned sections: {prefs['pinned_sections']}")
+            return 0
+        if action == "followup":
+            item = mb.followup_item(context, args.n)
+            if item is None:
+                print(f"no item {args.n} in the latest briefing",
+                      file=sys.stderr)
+                return 1
+            if as_json:
+                print(json.dumps(item, indent=2, default=str))
+            else:
+                it = item["item"]
+                print(f"[{item['section']}] {it.get('title', '')}")
+                if it.get("body"):
+                    print(it["body"])
+                if it.get("url"):
+                    print(it["url"])
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"briefing error: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown briefing action: {action}", file=sys.stderr)
     return 2
 
 

@@ -39,6 +39,7 @@ AGENT_TOOL_MODULES = (
     "kg",
     "mission",
     "monitor",
+    "morning_briefing",
     "osint_graph",
     "projects",
     "reasoning",

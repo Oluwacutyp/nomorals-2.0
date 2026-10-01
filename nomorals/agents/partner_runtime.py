@@ -1194,6 +1194,18 @@ class PartnerRuntime:
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "rooms tick job not registered: %s", exc)
+                # Prompt 04: morning briefing — one durable "briefing" job
+                # (daily at settings.briefing.time, default 07:00, owner
+                # tz) that composes + delivers the overnight digest.
+                # Idempotent by name; catch-up runs once on boot if Devon
+                # was down at briefing time.
+                try:
+                    from .morning_briefing import (
+                        ensure_briefing_job, check_catchup)
+                    ensure_briefing_job(self.context)
+                    check_catchup(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("briefing job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on

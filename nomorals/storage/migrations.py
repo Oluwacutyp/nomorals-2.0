@@ -1732,6 +1732,35 @@ def _apply_room_tables(db: object) -> None:
     )
 
 
+def _apply_briefing_tables(db: object) -> None:
+    """Prompt 04 (morning briefing): stored briefings for ``nm briefing
+    today`` + cross-session follow-ups, and per-section engagement counts
+    (views/followups/pinned — counts only, no content).
+
+    Tables are created IF NOT EXISTS so re-runs are safe.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS briefings (
+            id            TEXT PRIMARY KEY,
+            date          TEXT NOT NULL,          -- YYYY-MM-DD (owner tz)
+            sections_json TEXT NOT NULL DEFAULT '[]',
+            generated_at  REAL NOT NULL DEFAULT 0,
+            generation_ms REAL NOT NULL DEFAULT 0,
+            late          INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_briefings_date
+            ON briefings (date, generated_at DESC);
+        CREATE TABLE IF NOT EXISTS briefing_engagement (
+            section   TEXT PRIMARY KEY,  -- alerts|calendar|markets|repos|news|rooms|devon
+            views     INTEGER NOT NULL DEFAULT 0,
+            followups INTEGER NOT NULL DEFAULT 0,
+            pinned    INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+
+
 def _apply_watchers_tables(db: object) -> None:
     """Prompt 03 (watchers): the general watcher model, check history, and
     the alert audit log.
@@ -2004,6 +2033,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(54, "watchers_tables", fn=_apply_watchers_tables),
     Migration(55, "game_relay_tables", fn=_apply_game_relay_tables),
     Migration(56, "room_tables", fn=_apply_room_tables),
+    Migration(57, "briefing_tables", fn=_apply_briefing_tables),
 )
 
 
