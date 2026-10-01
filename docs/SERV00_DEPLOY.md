@@ -56,7 +56,7 @@ Create `~/.devon-bot.env` (note the leading dot) with **your real values**:
 ```bash
 # --- brain: Hugging Face serverless Inference API (primary) ---
 NM_LLM_PROVIDER=hf_serverless
-NM_HF_MODEL=SicariusSicariiStuff/Phi-3.5-mini-instruct_Uncensored
+NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
 HF_TOKEN=hf_paste_yours_here
 
 # --- brain fallbacks: used automatically when HF errors or its $0.10/mo
@@ -75,17 +75,16 @@ NM_CHAT_TELEGRAM_BOT_CHATS=8012345678
 ```
 
 Notes on the brain section:
-- `NM_HF_MODEL` is an uncensored (abliterated) Phi-3.5-mini in safetensors
-  format — no training needed, ready today. Before deploying, verify HF
-  actually serves it with this 10-second test (replace the token and model):
-  ```bash
-  curl -s -o /dev/null -w "%{http_code}\n" \
-    -H "Authorization: Bearer hf_paste_yours_here" \
-    https://router.huggingface.co/hf-inference/models/SicariusSicariiStuff/Phi-3.5-mini-instruct_Uncensored
-  ```
-  `200` = she can talk through it. Anything else (404/410) = HF doesn't
-  serve that model — fall back to `microsoft/Phi-3.5-mini-instruct` (the
-  stock, censored one) until your own `Cutyp/codebeast-3.8b` is trained.
+- `NM_HF_MODEL` is the **stock** Phi-3.5-mini — a censored but working
+  interim brain. We verified on 2026-10-01 that HF's Inference Providers
+  serve a curated catalog only: six uncensored/abliterated candidates
+  (including SicariusSicariiStuff/Phi-3.5-mini-instruct_Uncensored,
+  mlabonne's abliterated Llamas, huihui-ai's abliterated 3B, TinyDolphin)
+  all returned "not supported by any provider". OpenRouter's free tier was
+  checked the same day (21 free models) — also no uncensored models.
+  Uncensored inference stays local: the `Cutyp/dolphin-8b-merged` GGUF on
+  your phone (docs/TERMUX_DEPLOY.md) or your own `Cutyp/codebeast-3.8b`
+  once trained.
 - **Groq key (free, no card):** [console.groq.com](https://console.groq.com)
   → sign in → API Keys → Create. Free tier is generous (30 req/min).
   Note: Groq only hosts mainstream models (no uncensored ones) — it's a
