@@ -2,7 +2,9 @@
 
 The companion's three (or four) faces:
 
-* ``telegram``  — Telethon *userbot*: full account control (DMs, groups, channels)
+* ``telegram``      — Telethon *userbot*: full account control (DMs, groups, channels)
+* ``telegram-bot``  — the Bot API: her *own* bot identity, long-polling, no
+  webhook server needed; runs alongside the userbot
 * ``discord``   — the owner's own Discord *account* (user client): DMs,
   servers, threads; opens first DMs, reports new server members
 * ``whatsapp``  — Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``)
@@ -66,6 +68,21 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> Cha
             )
         except Exception as exc:  # noqa: BLE001 - optional dependency or bad creds
             raise ValueError(f"telegram unavailable: {exc}") from exc
+    if name == "telegram-bot":
+        if not chat.telegram_bot_enabled:
+            return None
+        try:
+            from .telegram import TelegramBotAdapter
+
+            return TelegramBotAdapter(
+                token=chat.telegram_bot_token,
+                chat_allow=chat.telegram_bot_chats,
+                media_dir=str(settings.resolve("data/media/telegram-bot")),
+                media_in_groups=chat.media_in_groups,
+                media_max_mb=chat.media_max_mb,
+            )
+        except Exception as exc:  # noqa: BLE001 - bad token or no requests
+            raise ValueError(f"telegram-bot unavailable: {exc}") from exc
     if name == "discord":
         if not chat.discord_enabled:
             return None
@@ -94,6 +111,21 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> Cha
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"whatsapp unavailable: {exc}") from exc
+    if name == "webhook":
+        if not chat.webhook_enabled:
+            return None
+        try:
+            from .webhook import WebhookAdapter
+
+            return WebhookAdapter(
+                host=chat.webhook_host,
+                port=chat.webhook_port,
+                token=chat.webhook_token,
+                reply_url=chat.webhook_reply_url,
+                media_dir=str(settings.resolve("data/media/webhook")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"webhook unavailable: {exc}") from exc
     return None
 
 
@@ -113,7 +145,8 @@ def build_adapters(
     wanted = {p.strip().lower() for p in (partner.platforms or "").split(",") if p.strip()}
     adapters: dict[str, ChatAdapter] = {}
     skipped: list[str] = []
-    for name in ("local", "telegram", "discord", "whatsapp"):
+    for name in ("local", "telegram", "telegram-bot", "discord", "whatsapp",
+                 "webhook"):
         if name not in wanted and not (name == "local" and settings.chat.local_enabled):
             continue
         try:

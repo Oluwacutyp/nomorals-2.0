@@ -35,7 +35,7 @@ from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 
-__all__ = ["TelegramAdapter"]
+__all__ = ["TelegramAdapter", "TelegramBotAdapter"]
 
 _log = get_logger(__name__)
 
@@ -597,13 +597,18 @@ class TelegramAdapter(ChatAdapter):
         if reply_to:
             kwargs["reply_to"] = int(reply_to)
         kwargs.update(self._thread_kwargs(chat))
-        try:
-            result = await client.send_message(entity, text, **kwargs)
-        except TypeError:  # older Telethon without message_thread_id
-            thread = kwargs.pop("message_thread_id", None)
-            if thread is not None and not kwargs.get("reply_to"):
-                kwargs["reply_to"] = thread
-            result = await client.send_message(entity, text, **kwargs)
+        result = None
+        for chunk in _chunk_text(text, 4096):
+            try:
+                result = await client.send_message(entity, chunk, **kwargs)
+            except TypeError:  # older Telethon without message_thread_id
+                thread = kwargs.pop("message_thread_id", None)
+                if thread is not None and not kwargs.get("reply_to"):
+                    kwargs["reply_to"] = thread
+                result = await client.send_message(entity, chunk, **kwargs)
+            # Only the first chunk carries the reply/thread reference.
+            kwargs.pop("reply_to", None)
+            kwargs.pop("message_thread_id", None)
         self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
         return result
 
@@ -732,3 +737,299 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram history failed: %s", exc)
             return []
+
+
+# ── Bot API adapter ────────────────────────────────────────────────────────────
+
+_BOT_API = "https://api.telegram.org/bot{token}/{method}"
+_BOT_FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
+
+_BOT_CHAT_TYPES = {
+    "private": ChatKind.DM,
+    "group": ChatKind.GROUP,
+    "supergroup": ChatKind.GROUP,
+    "channel": ChatKind.CHANNEL,
+}
+
+
+def _chunk_text(text: str, limit: int) -> list[str]:
+    """Split text into chunks of at most ``limit`` chars, preferring newlines."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        chunks.append(rest)
+    return chunks
+
+
+class TelegramBotAdapter(ChatAdapter):
+    """Devon's own Telegram bot, over the Bot API.
+
+    This is the bot's *own identity* (``@HerBot`` talking to people), not the
+    owner's account — the companion to :class:`TelegramAdapter`, which drives
+    the owner's user account over MTProto. Both can run at once: the userbot
+    sees everything the owner sees, the bot talks as herself.
+
+    Long-polling ``getUpdates`` on this adapter's own thread; no webhook
+    server needed, works behind NAT. Media downloads go through
+    ``getFile``. Sending splits at Telegram's 4096-char limit.
+    """
+
+    name = "telegram-bot"
+    supported_kinds = (ChatKind.DM, ChatKind.GROUP)
+
+    #: Bot API text limit per message.
+    MAX_TEXT = 4096
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        chat_allow: str = "",
+        media_dir: str = "data/media/telegram-bot",
+        media_in_groups: bool = False,
+        media_max_mb: float = 25.0,
+        poll_timeout: int = 30,
+        session: Any = None,
+    ) -> None:
+        super().__init__(media_dir=media_dir)
+        if not token:
+            raise ValidationError("telegram bot token is required")
+        self.token = token
+        self.chat_allow = {c.strip() for c in chat_allow.split(",") if c.strip()}
+        self.media_in_groups = media_in_groups
+        self.media_max_mb = media_max_mb
+        self.poll_timeout = poll_timeout
+        self._session = session
+        self._offset = 0
+        self._bot_id: int | None = None
+        self._bot_username = ""
+
+    # ── HTTP ────────────────────────────────────────────────────────────────
+    def _sess(self) -> Any:
+        if self._session is None:
+            import requests
+
+            self._session = requests.Session()
+        return self._session
+
+    def _api(self, method: str, **params: Any) -> Any:
+        url = _BOT_API.format(token=self.token, method=method)
+        resp = self._sess().post(url, json=params, timeout=self.poll_timeout + 10)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise ValidationError(f"telegram bot api: non-JSON reply from {method}")
+        if not data.get("ok"):
+            raise ValidationError(
+                f"telegram bot api: {method} failed: {data.get('description', 'unknown')}"
+            )
+        return data["result"]
+
+    # ── lifecycle ───────────────────────────────────────────────────────────
+    def preflight(self) -> None:
+        me = self._api("getMe")
+        self._bot_id = me.get("id")
+        self._bot_username = me.get("username", "")
+        _log.info("telegram bot connected as @%s (id=%s)",
+                  self._bot_username, self._bot_id)
+
+    def run(self, handler: IncomingHandler) -> None:
+        try:
+            self.preflight()
+        except Exception as exc:  # noqa: BLE001 - fail fast, gateway logs the skip
+            raise ValueError(f"telegram-bot unavailable: {exc}") from exc
+        # Drop whatever piled up while we were away; only fresh mail.
+        try:
+            pending = self._api("getUpdates", offset=-1, timeout=1)
+            if pending:
+                self._offset = max(u["update_id"] for u in pending) + 1
+                _log.info("telegram-bot: skipped %d stale updates", len(pending))
+        except Exception as exc:  # noqa: BLE001 - non-fatal, polling continues
+            _log.debug("telegram-bot: stale-skip failed: %s", exc)
+        while not self._stopped.is_set():
+            try:
+                updates = self._api("getUpdates", offset=self._offset,
+                                    timeout=self.poll_timeout,
+                                    allowed_updates=["message", "edited_message",
+                                                     "channel_post"])
+            except Exception as exc:  # noqa: BLE001 - transient, back off a little
+                _log.debug("telegram-bot poll failed: %s", exc)
+                self._stopped.wait(5)
+                continue
+            for update in updates:
+                self._offset = max(self._offset, update.get("update_id", 0) + 1)
+                message = self._convert(update)
+                if message is not None:
+                    self._deliver(handler, message)
+
+    # ── inbound ───────────────────────────────────────────────────────────
+    def _convert(self, update: dict[str, Any]) -> ChatMessage | None:
+        msg = update.get("message") or update.get("edited_message") \
+            or update.get("channel_post")
+        if not msg:
+            return None
+        sender = msg.get("from") or {}
+        if sender.get("is_bot"):
+            return None  # loop guard: never answer other bots (or our echoes)
+        chat = msg.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        if not chat_id:
+            return None
+        if self.chat_allow and chat_id not in self.chat_allow:
+            _log.info("telegram-bot: ignoring chat %s — not in allowlist", chat_id)
+            return None
+        kind = _BOT_CHAT_TYPES.get(chat.get("type", ""), ChatKind.DM)
+        text = msg.get("text") or msg.get("caption") or ""
+        mentioned = False
+        if kind != ChatKind.DM and self._bot_username:
+            for ent in msg.get("entities") or msg.get("caption_entities") or []:
+                if ent.get("type") == "mention":
+                    piece = text[ent["offset"]:ent["offset"] + ent["length"]]
+                    if piece.lower() == f"@{self._bot_username.lower()}":
+                        mentioned = True
+                        break
+        media = self._inbound_media(msg, kind)
+        reply_to = ""
+        replied = msg.get("reply_to_message") or {}
+        if replied.get("message_id"):
+            reply_to = str(replied["message_id"])
+        who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
+        return ChatMessage(
+            chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
+                         title=chat.get("title", "") or who, peer=who),
+            incoming=True,
+            text=text,
+            sender=who,
+            media=media,
+            reply_to=reply_to,
+            mentioned=mentioned,
+            ts=float(msg.get("date", time.time())),
+            message_id=str(msg.get("message_id", "")),
+            meta={"update_id": update.get("update_id")},
+        )
+
+    def _inbound_media(self, msg: dict[str, Any], kind: str) -> list[MediaRef]:
+        """Download the largest attached file, when the gates allow it."""
+        file_id, fkind, fname = "", "", ""
+        if msg.get("photo"):
+            biggest = max(msg["photo"], key=lambda p: p.get("file_size", 0))
+            file_id, fkind, fname = biggest["file_id"], "image", "photo.jpg"
+        elif msg.get("document"):
+            d = msg["document"]
+            file_id, fkind = d["file_id"], "document"
+            fname = d.get("file_name", "file")
+        elif msg.get("video"):
+            file_id, fkind, fname = msg["video"]["file_id"], "video", "video.mp4"
+        elif msg.get("voice"):
+            file_id, fkind, fname = msg["voice"]["file_id"], "audio", "voice.ogg"
+        elif msg.get("audio"):
+            file_id, fkind, fname = msg["audio"]["file_id"], "audio", "audio.mp3"
+        elif msg.get("video_note"):
+            file_id, fkind, fname = msg["video_note"]["file_id"], "video", "note.mp4"
+        if not file_id:
+            return []
+        size = 0
+        try:
+            info = self._api("getFile", file_id=file_id)
+            size = int(info.get("file_size", 0))
+            path = info.get("file_path", "")
+        except Exception as exc:  # noqa: BLE001 - media is best-effort
+            _log.debug("telegram-bot getFile failed: %s", exc)
+            return []
+        if not media_download_allowed(kind, size, self.media_in_groups, self.media_max_mb):
+            return []
+        if not path:
+            return []
+        dest = Path(self.media_dir) / f"{file_id[:16]}_{fname}"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            url = _BOT_FILE_API.format(token=self.token, path=path)
+            resp = self._sess().get(url, timeout=60)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("telegram-bot media download failed: %s", exc)
+            return []
+        return [MediaRef(path=str(dest), kind=fkind, name=fname)]
+
+    # ── outbound ──────────────────────────────────────────────────────────
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+        started = time.perf_counter()
+        last_id = ""
+        try:
+            params_base: dict[str, Any] = {"chat_id": int(chat.chat_id)}
+            if chat.thread_id:
+                try:
+                    params_base["message_thread_id"] = int(chat.thread_id)
+                except (TypeError, ValueError):
+                    pass
+            if reply_to:
+                try:
+                    params_base["reply_parameters"] = {"message_id": int(reply_to)}
+                except (TypeError, ValueError):
+                    pass
+            for chunk in _chunk_text(text, self.MAX_TEXT):
+                result = self._api("sendMessage", text=chunk, **params_base)
+                last_id = str(result.get("message_id", ""))
+                # Only the first chunk carries the reply reference.
+                params_base.pop("reply_parameters", None)
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name, message_id=last_id,
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001 - ordinary failure, report as result
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
+        started = time.perf_counter()
+        path = Path(media.path)
+        if not path.is_file():
+            return SendResult(ok=False, platform=self.name,
+                              error=f"media file not found: {media.path}")
+        method = {
+            "image": "sendPhoto",
+            "video": "sendVideo",
+            "audio": "sendVoice" if path.suffix.lower() == ".ogg" else "sendAudio",
+        }.get(media.kind, "sendDocument")
+        field = {"sendPhoto": "photo", "sendVideo": "video",
+                 "sendVoice": "voice", "sendAudio": "audio"}.get(method, "document")
+        try:
+            url = _BOT_API.format(token=self.token, method=method)
+            data: dict[str, Any] = {"chat_id": chat.chat_id}
+            if caption:
+                data["caption"] = caption[:1024]
+            with open(path, "rb") as fh:
+                files = {field: (path.name, fh, _mime_for(str(path)))}
+                resp = self._sess().post(url, data=data, files=files, timeout=120)
+            result = resp.json()
+            if not result.get("ok"):
+                raise ValidationError(result.get("description", "send failed"))
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(result["result"].get("message_id", "")),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+        try:
+            self._api("sendChatAction", chat_id=int(chat.chat_id), action="typing")
+            return True
+        except Exception:  # noqa: BLE001 - best-effort
+            return False
+
+    def health(self) -> dict[str, Any]:
+        info = super().health()
+        info["bot_username"] = self._bot_username
+        return info

@@ -231,10 +231,18 @@ class ChatSettings:
     telegram_session: str = ""
     telegram_api_id: str = ""
     telegram_api_hash: str = ""
+    telegram_bot_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_bot_chats: str = ""
     discord_enabled: bool = False
     discord_token: str = ""
     whatsapp_enabled: bool = False
     whatsapp_port: int = 0
+    webhook_enabled: bool = False
+    webhook_host: str = "127.0.0.1"
+    webhook_port: int = 0
+    webhook_token: str = ""
+    webhook_reply_url: str = ""
     max_per_hour: int = 60
 
 
@@ -641,6 +649,14 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_TOKEN": "api.token",
     "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
     "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
+    "NM_CHAT_TELEGRAM_BOT_ENABLED": "chat.telegram_bot_enabled",
+    "NM_CHAT_TELEGRAM_BOT_TOKEN": "chat.telegram_bot_token",
+    "NM_CHAT_TELEGRAM_BOT_CHATS": "chat.telegram_bot_chats",
+    "NM_CHAT_WEBHOOK_ENABLED": "chat.webhook_enabled",
+    "NM_CHAT_WEBHOOK_HOST": "chat.webhook_host",
+    "NM_CHAT_WEBHOOK_PORT": "chat.webhook_port",
+    "NM_CHAT_WEBHOOK_TOKEN": "chat.webhook_token",
+    "NM_CHAT_WEBHOOK_REPLY_URL": "chat.webhook_reply_url",
     "NM_ARENA_ENABLED": "arena.enabled",
     "NM_ARENA_BUILD": "arena.build",
     "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",
