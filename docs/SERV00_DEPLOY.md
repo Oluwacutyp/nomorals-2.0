@@ -54,10 +54,18 @@ library — no heavy packages to install.
 Create `~/.devon-bot.env` (note the leading dot) with **your real values**:
 
 ```bash
-# --- brain: Hugging Face serverless Inference API ---
+# --- brain: Hugging Face serverless Inference API (primary) ---
 NM_LLM_PROVIDER=hf_serverless
-NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
+NM_HF_MODEL=SicariusSicariiStuff/Phi-3.5-mini-instruct_Uncensored
 HF_TOKEN=hf_paste_yours_here
+
+# --- brain fallbacks: used automatically when HF errors or its $0.10/mo
+# --- free credits run out. You only need the ones you have keys for.
+NM_LLM_FALLBACK_CHAIN=groq,openrouter
+NM_GROQ_API_KEY=gsk_paste_yours_here
+NM_GROQ_MODEL=openai/gpt-oss-120b
+NM_OPENROUTER_API_KEY=sk-or-paste_yours_here
+NM_OPENROUTER_MODEL=qwen/qwen3-8b:free
 
 # --- chat: Telegram bot (long-polling, no webhook needed) ---
 NM_PARTNER_PLATFORMS=telegram-bot
@@ -65,6 +73,29 @@ NM_CHAT_TELEGRAM_BOT_ENABLED=true
 NM_CHAT_TELEGRAM_BOT_TOKEN=123456:ABC-paste-yours-here
 NM_CHAT_TELEGRAM_BOT_CHATS=8012345678
 ```
+
+Notes on the brain section:
+- `NM_HF_MODEL` is an uncensored (abliterated) Phi-3.5-mini in safetensors
+  format — no training needed, ready today. Before deploying, verify HF
+  actually serves it with this 10-second test (replace the token and model):
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "Authorization: Bearer hf_paste_yours_here" \
+    https://router.huggingface.co/hf-inference/models/SicariusSicariiStuff/Phi-3.5-mini-instruct_Uncensored
+  ```
+  `200` = she can talk through it. Anything else (404/410) = HF doesn't
+  serve that model — fall back to `microsoft/Phi-3.5-mini-instruct` (the
+  stock, censored one) until your own `Cutyp/codebeast-3.8b` is trained.
+- **Groq key (free, no card):** [console.groq.com](https://console.groq.com)
+  → sign in → API Keys → Create. Free tier is generous (30 req/min).
+  Note: Groq only hosts mainstream models (no uncensored ones) — it's a
+  capability fallback, not a personality fallback.
+- **OpenRouter key (free models available):** [openrouter.ai](https://openrouter.ai)
+  → sign in → Keys → Create. Pick any `:free`-suffixed model for
+  `NM_OPENROUTER_MODEL` from [openrouter.ai/models](https://openrouter.ai/models)
+  (e.g. `qwen/qwen3-8b:free`); free models get 50 requests/day.
+- Leave a fallback's lines out entirely if you don't have its key — the
+  bot skips unconfigured providers quietly instead of failing.
 
 Then lock it down:
 
@@ -155,6 +186,116 @@ Steps:
    chmod 600 ~/.devon-telegram.session
    ```
    Never commit it, never upload it anywhere.
+
+## Optional: connect WhatsApp (your own account, via a bridge)
+
+WhatsApp has no free official API for a personal account, so Devon talks to
+it through a small **bridge** (`bridge/whatsapp-bridge.mjs`): a Node.js
+program that holds your WhatsApp Web session (like WhatsApp Web in a
+browser) and passes messages to the Python bot over your own machine only.
+Nothing leaves the Serv00 box.
+
+**Read this first:**
+- The bridge saves its login in `bridge/.creds/` — that folder is a *live
+  login* to your WhatsApp, same as the Telegram session file. `chmod 700`
+  it, never copy it anywhere.
+- WhatsApp can limit accounts that behave like spam bots. Keep auto-messaging
+  modest; don't let her message strangers.
+
+### Step A — Install Node.js and the bridge's dependencies
+
+SSH into Serv00 and run:
+
+```bash
+node --version          # you need v18 or newer
+cd ~/devon/bridge
+npm install             # installs the Baileys WhatsApp library
+```
+
+If `node` is missing or too old, check Serv00's docs/forum for enabling a
+newer Node — most Serv00 accounts already have one.
+
+### Step B — Link your WhatsApp (one time, in the foreground)
+
+This is the only interactive part. Run the bridge **directly** (not via the
+script, not via cron) so you can see the QR code:
+
+```bash
+node ~/devon/bridge/whatsapp-bridge.mjs
+```
+
+You'll see a big QR code printed in the terminal. On your phone:
+
+1. Open WhatsApp → **Settings** → **Linked Devices**
+2. Tap **Link a Device** → point the camera at the QR code in the terminal
+
+Within seconds the bridge prints `connected as 23480...@s.whatsapp.net`.
+The login is now saved in `~/devon/bridge/.creds/` — every future start is
+silent, no QR needed again. Lock it down and stop the foreground bridge:
+
+```bash
+chmod 700 ~/devon/bridge/.creds
+# press Ctrl+C to stop the foreground bridge
+```
+
+If the QR expires before you scan (about a minute), a fresh one prints
+automatically. If you ever get logged out, delete `~/devon/bridge/.creds/`
+and redo this step.
+
+### Step C — Tell the bot about WhatsApp
+
+Add to `~/.devon-bot.env`:
+
+```bash
+NM_PARTNER_PLATFORMS=telegram,telegram-bot,whatsapp
+NM_CHAT_WHATSAPP_ENABLED=true
+# NM_CHAT_WHATSAPP_HOST=127.0.0.1   # defaults are fine — bridge runs locally
+# NM_CHAT_WHATSAPP_PORT=8787
+```
+
+Make the start script executable:
+
+```bash
+chmod +x ~/devon/scripts/serv00/start_whatsapp.sh
+```
+
+### Step D — Start the bridge and the bot
+
+```bash
+bash ~/devon/scripts/serv00/start_whatsapp.sh   # keeps the bridge alive
+bash ~/devon/scripts/serv00/start_bot.sh        # the bot itself
+```
+
+Watch both logs to confirm:
+
+```bash
+tail -5 ~/whatsapp-bridge.log   # want: "connected as ..."
+tail -5 ~/bot.log               # want: adapters started including 'whatsapp'
+```
+
+Send your own WhatsApp account a message — she should reply.
+
+### Step E — Keep the bridge alive with cron
+
+Add a second cron line next to the bot's:
+
+```cron
+* * * * * /bin/bash $HOME/devon/scripts/serv00/start_bot.sh
+* * * * * /bin/bash $HOME/devon/scripts/serv00/start_whatsapp.sh
+```
+
+Both scripts exit immediately if their program is already running, so cron
+just acts as a watchdog.
+
+### WhatsApp troubleshooting
+
+| Symptom | Check |
+|---|---|
+| `whatsapp bridge not reachable at 127.0.0.1:8787` | the bridge isn't running — start it (Step D) |
+| QR never appears | phone has no internet, or the bridge can't reach WhatsApp's servers |
+| `connected` then drops every few minutes | network flapping — the bridge auto-reconnects; check `~/whatsapp-bridge.log` |
+| Logged out, QR keeps reappearing | delete `~/devon/bridge/.creds/` and redo Step B |
+| Bot sees WhatsApp but never replies | `NM_PARTNER_PLATFORMS` must include `whatsapp` and the bot must be restarted |
 
 ## Limits to respect
 

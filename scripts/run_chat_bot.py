@@ -7,6 +7,10 @@ a cheap VPS) is:
 
     NM_LLM_PROVIDER=hf_serverless          # brain = HF Inference API, no local model
     NM_HF_MODEL=<your HF repo>             # e.g. <user>/codebeast-3.8b
+    # Optional brain fallbacks (auto-used when HF errors or credits run out):
+    # NM_LLM_FALLBACK_CHAIN=groq,openrouter
+    # NM_GROQ_API_KEY=...  NM_GROQ_MODEL=openai/gpt-oss-120b
+    # NM_OPENROUTER_API_KEY=...  NM_OPENROUTER_MODEL=qwen/qwen3-8b:free
     HF_TOKEN=...                           # huggingface.co/settings/tokens
     NM_PARTNER_PLATFORMS=telegram-bot   # or: telegram,telegram-bot for +userbot
     NM_CHAT_TELEGRAM_BOT_ENABLED=true
@@ -19,6 +23,11 @@ a cheap VPS) is:
     # NM_CHAT_TELEGRAM_API_ID=...          # from my.telegram.org
     # NM_CHAT_TELEGRAM_API_HASH=...
     # NM_CHAT_TELEGRAM_SESSION=~/.devon-telegram.session
+
+    # Optional WhatsApp (your own account via the Node bridge — needs
+    # `cd bridge && npm install` and a one-time QR scan):
+    # NM_CHAT_WHATSAPP_ENABLED=true        # also add whatsapp to NM_PARTNER_PLATFORMS
+    # and start the bridge: bash scripts/serv00/start_whatsapp.sh
 
 The Telegram *bot* adapter long-polls ``getUpdates`` — no webhook, no inbound
 ports, no public IP needed — so it works behind any NAT/shared host.

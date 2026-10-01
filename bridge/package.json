@@ -1,0 +1,1 @@
+{"dependencies":{"@whiskeysockets/baileys":"^6.7.18","qrcode-terminal":"^0.12.0"},"description":"Baileys WhatsApp bridge for Devon's Python WhatsAppAdapter. Speaks JSON-lines over localhost TCP.","engines":{"node":">=18"},"name":"devon-whatsapp-bridge","private":true,"scripts":{"start":"node whatsapp-bridge.mjs"},"type":"module","version":"1.0.0"}

@@ -18,7 +18,7 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         from .mock import MockProvider
 
         return MockProvider(**kwargs)
-    if kind in {"openai", "openai_compat", "vllm", "ollama", "lmstudio", "openrouter"}:
+    if kind in {"openai", "openai_compat", "vllm", "ollama", "lmstudio", "openrouter", "groq"}:
         from .openai_compat import OpenAICompatProvider
 
         return OpenAICompatProvider(**kwargs)

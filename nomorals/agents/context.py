@@ -317,6 +317,26 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             }
         if kind in {"llama_cpp", "llamacpp", "gguf"}:
             return {**common, "base_url": llm.llama_cpp_url, "model": llm.openai_model or "local"}
+        if kind == "groq":
+            return {
+                **common,
+                "base_url": llm.groq_base_url,
+                "api_key": llm.groq_api_key,
+                "model": llm.groq_model,
+            }
+        if kind == "openrouter":
+            return {
+                **common,
+                "base_url": llm.openrouter_base_url,
+                "api_key": llm.openrouter_api_key,
+                "model": llm.openrouter_model,
+                # OpenRouter asks apps to identify themselves; harmless, helps
+                # with their abuse handling and analytics.
+                "extra_headers": {
+                    "HTTP-Referer": "https://github.com/Oluwacutyp/nomorals-2.0",
+                    "X-Title": "Devon",
+                },
+            }
         if kind in {"mock", "offline", "test"}:
             return {**common, "model": llm.openai_model or "mock-7b"}
         return {
@@ -331,6 +351,15 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
 
     def add(kind: str, *, primary: bool = False) -> None:
         if kind in registered:
+            return
+        # Keyed cloud fallbacks with no key configured are skipped quietly —
+        # a provider that can only fail at call time just adds noise to the
+        # failover chain. Set the key and it registers on next boot.
+        if kind == "groq" and not llm.groq_api_key:
+            _log.info("skipping groq fallback: NM_GROQ_API_KEY not set")
+            return
+        if kind == "openrouter" and not llm.openrouter_api_key:
+            _log.info("skipping openrouter fallback: NM_OPENROUTER_API_KEY not set")
             return
         try:
             router.add(build_provider(kind, **kwargs_for(kind)), primary=primary, name=kind)

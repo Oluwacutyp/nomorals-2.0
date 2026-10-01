@@ -119,6 +119,13 @@ class LLMSettings:
     #: 2026-08-16) — the default must be a live ID, and NM_GROQ_MODEL exists
     #: so a drift event is a .env edit, not a re-release.
     groq_model: str = "openai/gpt-oss-120b"
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    #: OpenRouter fallback. Model IDs (esp. :free ones) churn — set
+    #: NM_OPENROUTER_MODEL explicitly, e.g. "qwen/qwen3-8b:free".
+    openrouter_api_key: str = ""
+    openrouter_model: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     local_lora: str = ""
 
     #: comma-separated GGUF LoRA adapter(s) the llama.cpp server stacks on
@@ -239,7 +246,8 @@ class ChatSettings:
     discord_enabled: bool = False
     discord_token: str = ""
     whatsapp_enabled: bool = False
-    whatsapp_port: int = 0
+    whatsapp_host: str = "127.0.0.1"
+    whatsapp_port: int = 8787
     webhook_enabled: bool = False
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 0
@@ -639,6 +647,12 @@ _ENV_MAP: dict[str, str] = {
     "NM_BUDGET_CHILDREN": "budget.children",
     "NM_LLM_PROVIDER": "llm.provider",
     "NM_LLM_FALLBACK_CHAIN": "llm.fallback_chain",
+    "NM_GROQ_API_KEY": "llm.groq_api_key",
+    "NM_GROQ_MODEL": "llm.groq_model",
+    "NM_GROQ_BASE_URL": "llm.groq_base_url",
+    "NM_OPENROUTER_API_KEY": "llm.openrouter_api_key",
+    "NM_OPENROUTER_MODEL": "llm.openrouter_model",
+    "NM_OPENROUTER_BASE_URL": "llm.openrouter_base_url",
     "NM_LLM_ACTIVE_MODEL": "llm.active_model",
     "NM_LLM_TIMEOUT": "llm.timeout",
     "NM_LLM_CACHE_DIR": "llm.cache_dir",

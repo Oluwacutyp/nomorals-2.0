@@ -50,6 +50,44 @@ class LoadSettingsChannelConfigTest(unittest.TestCase):
     """The exact variables a user puts in ~/.nomorals/.env must land in
     settings — this is what was silently dropped before the fix."""
 
+    def test_llm_fallback_env_reaches_settings(self) -> None:
+        settings = load_settings(
+            env={
+                "NM_LLM_PROVIDER": "hf_serverless",
+                "NM_LLM_FALLBACK_CHAIN": "groq,openrouter",
+                "NM_GROQ_API_KEY": "gsk_test_key",
+                "NM_GROQ_MODEL": "openai/gpt-oss-120b",
+                "NM_OPENROUTER_API_KEY": "sk-or-test-key",
+                "NM_OPENROUTER_MODEL": "qwen/qwen3-8b:free",
+            },
+            use_env_file=False,
+        )
+        self.assertEqual(settings.llm.provider, "hf_serverless")
+        self.assertEqual(settings.llm.fallback_chain, ["groq", "openrouter"])
+        self.assertEqual(settings.llm.groq_api_key, "gsk_test_key")
+        self.assertEqual(settings.llm.groq_model, "openai/gpt-oss-120b")
+        self.assertEqual(settings.llm.groq_base_url, "https://api.groq.com/openai/v1")
+        self.assertEqual(settings.llm.openrouter_api_key, "sk-or-test-key")
+        self.assertEqual(settings.llm.openrouter_model, "qwen/qwen3-8b:free")
+        self.assertEqual(settings.llm.openrouter_base_url, "https://openrouter.ai/api/v1")
+
+    def test_groq_builds_as_openai_compat_provider(self) -> None:
+        from nomorals.llm.providers import build_provider
+
+        provider = build_provider(
+            "groq",
+            base_url="https://api.groq.com/openai/v1",
+            api_key="gsk_test_key",
+            model="openai/gpt-oss-120b",
+        )
+        self.assertEqual(provider.base_url, "https://api.groq.com/openai/v1")
+        self.assertEqual(provider.model, "openai/gpt-oss-120b")
+
+    def test_whatsapp_host_and_port_defaults(self) -> None:
+        settings = load_settings(env={}, use_env_file=False)
+        self.assertEqual(settings.chat.whatsapp_host, "127.0.0.1")
+        self.assertEqual(settings.chat.whatsapp_port, 8787)
+
     def test_chat_and_partner_env_reach_settings(self) -> None:
         settings = load_settings(
             env={
