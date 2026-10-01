@@ -1,8 +1,9 @@
 """News system: a news sub-agent + a summarizer sub-agent.
 
-* **Fetcher** — keyless RSS feeds (BBC, The Verge, Hacker News, TechCrunch,
-  Ars Technica) over the proxy-aware search client, robots-aware, deduped
-  by URL in ``news_items``.
+* **Fetcher** — keyless RSS feeds (29 across world / tech / nigeria /
+  business / science / sports — see ``FEED_CATEGORIES``) over the
+  proxy-aware search client, robots-aware, deduped by URL in
+  ``news_items``.
 * **Summarizer** — model-sourced when a live model is answering, extractive
   one-liners otherwise. Never invents a headline it didn't read.
 * **Digest** — top N items per source, delivered through the notifier.
@@ -20,17 +21,75 @@ from ..core.ids import new_id
 from ..core.http import HttpClient
 from .search.engine import SearchEngine
 
-__all__ = ["DEFAULT_FEEDS", "NewsAgent", "parse_feed"]
+__all__ = ["DEFAULT_FEEDS", "FEED_CATEGORIES", "feeds_for", "NewsAgent",
+           "parse_feed"]
 
 #: Sane keyless defaults when settings.news.feeds is empty.
-DEFAULT_FEEDS: tuple[tuple[str, str], ...] = (
-    ("BBC News", "https://feeds.bbci.co.uk/news/rss.xml"),
-    ("BBC Tech", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
-    ("The Verge", "https://www.theverge.com/rss/index.xml"),
-    ("Hacker News", "https://hnrss.org/frontpage"),
-    ("TechCrunch", "https://techcrunch.com/feed/"),
-    ("Ars Technica", "https://arstechnica.com/feed/"),
-)
+#: Categorized so callers can subscribe by interest (``feeds_for``);
+#: ``DEFAULT_FEEDS`` is the general-interest flattening.
+FEED_CATEGORIES: dict[str, tuple[tuple[str, str], ...]] = {
+    "world": (
+        ("BBC News", "https://feeds.bbci.co.uk/news/rss.xml"),
+        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        ("NPR News", "https://feeds.npr.org/1001/rss.xml"),
+        ("DW", "https://rss.dw.com/rdf/rss-en-all"),
+        ("France 24", "https://www.france24.com/en/rss"),
+    ),
+    "tech": (
+        ("BBC Tech", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
+        ("The Verge", "https://www.theverge.com/rss/index.xml"),
+        ("Hacker News", "https://hnrss.org/frontpage"),
+        ("TechCrunch", "https://techcrunch.com/feed/"),
+        ("Ars Technica", "https://arstechnica.com/feed/"),
+        ("MIT Tech Review", "https://www.technologyreview.com/feed/"),
+    ),
+    "nigeria": (
+        ("Punch", "https://punchng.com/feed/"),
+        ("Vanguard", "https://www.vanguardngr.com/feed/"),
+        ("Premium Times", "https://www.premiumtimesng.com/feed"),
+        ("Channels TV", "https://www.channelstv.com/feed/"),
+        ("TheCable", "https://www.thecable.ng/feed"),
+        ("TechCabal", "https://techcabal.com/feed/"),
+    ),
+    "business": (
+        ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
+        ("Business Insider", "https://www.businessinsider.com/rss"),
+        ("Nairametrics", "https://nairametrics.com/feed/"),
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ),
+    "science": (
+        ("BBC Science", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
+        ("ScienceDaily", "https://www.sciencedaily.com/rss/all.xml"),
+        ("New Scientist", "https://www.newscientist.com/feed/home"),
+        ("NASA", "https://www.nasa.gov/rss/dyn/breaking_news.rss"),
+    ),
+    "sports": (
+        ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
+        ("ESPN", "https://www.espn.com/espn/rss/news"),
+        ("Sky Sports", "https://www.skysports.com/rss/12040"),
+        ("Complete Sports", "https://www.completesports.com/feed/"),
+    ),
+}
+
+def feeds_for(*categories: str) -> list[tuple[str, str]]:
+    """Union of feeds for the named categories (deduped, order kept).
+
+    Unknown category names are ignored. No args → every category.
+    """
+    wanted = [c.lower() for c in categories] or list(FEED_CATEGORIES)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for cat in wanted:
+        for name, url in FEED_CATEGORIES.get(cat, ()):
+            if url not in seen:
+                seen.add(url)
+                out.append((name, url))
+    return out
+
+
+#: world + tech + nigeria — the general default digest.
+DEFAULT_FEEDS: tuple[tuple[str, str], ...] = tuple(
+    feeds_for("world", "tech", "nigeria"))
 
 _TAG = re.compile(r"<[^>]+>")
 

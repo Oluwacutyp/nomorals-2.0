@@ -199,11 +199,26 @@ _RHYME_GROUPS: tuple[tuple[str, ...], ...] = (
     ("glow", "low", "go", "know", "show", "slow", "flow", "so"),
     ("light", "flight", "tonight", "right", "bright", "sight", "white", "tight"),
     ("down", "town", "crown", "brown", "frown", "found", "sound", "wound"),
+    ("wild", "child", "mild", "styled", "piled", "beguiled", "undefiled", "reconciled"),
+    ("ocean", "motion", "devotion", "notion", "explosion", "slow motion", "commotion", "emotion"),
+    ("electric", "hectic", "poetic", "magnetic", "kinetic", "eclectic", "apologetic", "sympathetic"),
+    ("rhythm", "with them", "dismiss them", "kiss them", "prism", "schism", "tourism", "realism"),
+    ("midnight", "first light", "satellite", "meteorite", "dynamite", "overnight", "moonlight", "spotlight"),
+    ("gravity", "sanity", "vanity", "humanity", "clarity", "charity", "rarity", "parody"),
+    ("fever", "believer", "deceiver", "receiver", "achiever", "reliever", "griever", "weaver"),
+    ("soldier", "shoulder", "bolder", "colder", "holder", "folder", "smolder", "beholder"),
+    ("static", "dramatic", "ecstatic", "pragmatic", "enigmatic", "traumatic", "emphatic", "dogmatic"),
+    ("afterglow", "overflow", "vertigo", "indigo", "calico", "scenario", "ratio", "patio"),
+    ("avenue", "continue", "into you", "outgrew", "pursue", "rendezvous", "subdue", "untrue"),
 )
 
 _VERB_BANK = ("chase", "hold", "carve", "burn", "wake", "fall", "rise",
               "carry", "breathe", "turn", "run", "wait", "build", "break",
-              "learn", "dream", "search", "remember", "follow", "find")
+              "learn", "dream", "search", "remember", "follow", "find",
+              "gather", "spill", "mend", "sway", "drift", "climb", "fold",
+              "ignite", "whisper", "roar", "stumble", "soar", "weave",
+              "unravel", "glisten", "tremble", "bloom", "fade", "linger",
+              "charge", "surrender", "reclaim", "wander", "shine", "ache")
 
 
 def _ing(verb: str) -> str:
@@ -214,9 +229,23 @@ def _ing(verb: str) -> str:
 _IMAGERY = ("neon rain", "paper stars", "midnight smoke", "gold horizon",
             "silver wires", "distant thunder", "soft static", "open sky",
             "broken mirrors", "fading film", "slow lightning", "warm static",
-            "city embers", "quiet flames", "heavy air", "bright concrete")
+            "city embers", "quiet flames", "heavy air", "bright concrete",
+            "velvet dusk", "chrome rivers", "hollow cathedrals", "wild mercury",
+            "amber traffic", "frozen fireworks", "tangled satellites",
+            "moonlit gravel", "electric moss", "rusted halos", "paper moons",
+            "glass deserts", "midnight orchards", "copper skies",
+            "sleeping sirens", "velvet static", "iron blossoms",
+            "quicksilver tides", "burning atlases", "silent carnivals",
+            "phosphor dreams", "withered neon", "salt cathedrals",
+            "obsidian waves", "lantern smoke", "fractured auroras",
+            "midnight terminals", "gilded wreckage", "pale machinery",
+            "velvet thunder", "hollow suns", "drifting embers")
 _EMOTION = ("quiet", "restless", "golden", "distant", "endless", "hollow",
-            "fierce", "tender", "electric", "weightless")
+            "fierce", "tender", "electric", "weightless",
+            "haunted", "feverish", "patient", "wild",
+            "sleepless", "gentle", "reckless", "luminous", "aching",
+            "defiant", "honeyed", "fractured", "brave",
+            "lonely", "radiant", "unbroken", "velvet", "smoldering")
 
 _LINE_TEMPLATES = (
     "{ing} the {topic_short} under the {em} {imagery}",
@@ -227,6 +256,22 @@ _LINE_TEMPLATES = (
     "Every {noun} {ing} a little {em}",
     "The {imagery} hold what the {topic_short} is worth",
     "Say the word and we will {verb} {em}",
+    "{ing} past the {imagery}, never looking {em}",
+    "A {noun} for the {em}, a spark for the {imagery}",
+    "We {verb} like the {imagery} owes us {em}",
+    "Hold a {noun} up to the {em} {imagery}",
+    "{ing} where the {imagery} forgets to be {em}",
+    "The {em} {imagery} taught the {noun} to {verb}",
+    "Nobody {ing} here without a little {imagery}",
+    "Trade your {noun} for a pocket of {em} {imagery}",
+    "We {verb} the {topic_short} till the {imagery} bends",
+    "{ing} on {em} feet across the {imagery}",
+    "A {noun} in the {imagery} keeps {ing} {em}",
+    "The {topic_short} {ing}, and the {imagery} answer {em}",
+    "We {verb} our names into the {em} {imagery}",
+    "{imagery} on repeat while the {noun} keeps {ing}",
+    "{ing} through {em} nights of {imagery}",
+    "Give the {imagery} a {noun} and watch it {verb}",
 )
 #: hook lines for choruses — short, repeatable, singable
 _HOOK_TEMPLATES = (
@@ -234,6 +279,16 @@ _HOOK_TEMPLATES = (
     "This is the {topic_short}, baby, {verb}",
     "Hold the {em} {imagery} tight",
     "We were made to {verb} in the {imagery}",
+    "Sing it {em}, sing it like {imagery}",
+    "Oh, we {verb} tonight",
+    "Forever {ing} through the {imagery}",
+    "{em} hearts in the {imagery}",
+    "We {verb}, we {verb}, never {em}",
+    "Light up the {imagery}, {verb} with me",
+    "This {topic_short} is ours to {verb}",
+    "Higher than {imagery}, we {verb}",
+    "Stay {em} inside the {imagery}",
+    "We were born to {verb} {em}",
 )
 
 
@@ -536,9 +591,19 @@ class MusicCreator:
         move = rng.choice(("stepwise, conversational", "leaping, expressive",
                            "rising and falling around the root",
                            "pentatonic, call-and-response",
-                           "syncopated, rhythm-first"))
+                           "syncopated, rhythm-first",
+                           "arch-shaped, peaking on the chorus",
+                           "descending, confessional",
+                           "repetitive motif with small variations",
+                           "wide-interval, anthemic leaps",
+                           "staccato, percussive phrasing"))
         register = rng.choice(("low and warm", "mid-range, intimate",
-                               "soaring on the chorus"))
+                               "soaring on the chorus",
+                               "breathy and close-mic'd",
+                               "belting the bridge",
+                               "falsetto flourishes on the hook",
+                               "spoken-word verses, sung chorus",
+                               "layered harmonies stacking upward"))
         return (f"{key} {spec.mode}, {tempo} BPM — a {move} line that sits "
                 f"{register}; chorus lifts a third over the pre-chorus, "
                 f"bridges drop to a half-phrase and resolve on the downbeat.")

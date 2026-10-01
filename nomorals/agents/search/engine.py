@@ -70,12 +70,24 @@ def _extract_external_links(markup: str, page_domain: str, cap: int = 300) -> li
 
 #: Legit platforms where people get paid for small tasks — research list only.
 #: The engine reports these; it never signs anyone up anywhere.
+#: Query angles for the /searchleads research pass — broadened so one
+#: dead angle doesn't sink the list. Nigeria-relevant angles included.
 _LEAD_QUERIES = (
     "get paid for user testing websites",
     "legitimate microtask platforms pay per task",
     "paid online transcription work real companies",
     "freelance platforms for beginners first gig",
     "paid survey sites that actually pay",
+    "data annotation labeling jobs remote beginners",
+    "AI training data gigs get paid to train AI",
+    "website usability testing jobs work from home",
+    "paid translation gigs online no degree",
+    "virtual assistant jobs beginners remote",
+    "sell stock photos videos online passive income",
+    "video game testing jobs remote playtesters",
+    "bug bounty platforms beginners first payout",
+    "remote microtask sites that pay to Nigeria Africa",
+    "get paid to test websites Nigeria work from home",
 )
 
 

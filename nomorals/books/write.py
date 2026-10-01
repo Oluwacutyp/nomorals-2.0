@@ -138,12 +138,24 @@ _BRIDGES = (
     "None of this matters until you see it running — so here it is.",
     "The detail that separates people who get this from people who don't is what comes next.",
     "So far this has been about understanding. Now it's about doing.",
+    "Everything up to now was scaffolding. This is the building.",
+    "Here's where the abstract turns into something you can touch.",
+    "The pattern from the last section repeats here — but with teeth.",
+    "If the previous part was the map, this is the territory.",
+    "Time to trade the lecture for the workshop.",
+    "The idea is only half the asset; the execution is the rest.",
+    "What follows is the part you'll actually reach for later.",
 )
 
 _TAKEAWAY_OPENERS = (
     "If you remember three things from this chapter, they should be these:",
     "The short version, before we move on:",
     "What this chapter actually gives you:",
+    "Boil the whole chapter down and you get this:",
+    "Carry these forward and the rest takes care of itself:",
+    "The chapter in one breath:",
+    "Pin these to the wall before the next chapter:",
+    "If you skimmed everything else, read this part twice:",
 )
 
 

@@ -43,7 +43,30 @@ _PERSPECTIVES = (
     "evidence and facts",
     "risks, unknowns, and failure modes",
     "concrete step-by-step plan",
+    "costs, trade-offs, and cheaper alternatives",
+    "who this affects and second-order effects",
+    "prior art and what already exists",
+    "the skeptical counter-case",
+    "timeline, sequencing, and dependencies",
+    "how to verify it worked",
 )
+
+
+def _rotate_perspectives(goal: str, workers: int) -> list[str]:
+    """Seeded rotation over the perspective pool.
+
+    Same goal → same angles (reproducible); different goals → different
+    angles, so repeated heuristic swarms don't always investigate the
+    same three things.
+    """
+    import hashlib
+    import random as _random
+
+    seed = int(hashlib.sha256(goal.encode("utf-8")).hexdigest(), 16)
+    rng = _random.Random(seed)
+    pool = list(_PERSPECTIVES)
+    rng.shuffle(pool)
+    return pool[:max(1, workers)]
 
 
 @dataclass
@@ -145,7 +168,8 @@ class SwarmAgent:
             parts = parts[1:]
         if len(parts) >= 2:
             return parts[:workers]
-        return [f"investigate the {pers} for: {goal}" for pers in _PERSPECTIVES[:workers]]
+        return [f"investigate the {pers} for: {goal}"
+                for pers in _rotate_perspectives(goal, workers)]
 
     # ── workers ──────────────────────────────────────────────────────────────
     def _run_leg(self, subtask: str, deadline: float) -> dict[str, Any]:
