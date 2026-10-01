@@ -7,7 +7,7 @@ Acceptance criteria covered:
 - locate returns 0-1000 coords + confidence + approximate disclaimer
 - screenshot refused without allow_screenshot; still needs per-call confirm
 - inbox image drops classify to the image intent and get described
-- identity questions get observable description + decline-to-name template
+- identity questions pass through to the provider untouched (no refusal layer)
 - size guards, downscaling, tokens_used, attachment refs
 """
 
@@ -184,10 +184,12 @@ class DescribeTests(unittest.TestCase):
         self.assertTrue(second["cached"])
 
 
-# ── identity guard ───────────────────────────────────────────────────────────
+# ── identity passthrough (no refusal layer) ────────────────────────────────
+# Devon adds no identity refusal of its own: the owner's prompt reaches the
+# provider verbatim.  Whatever the provider answers is what the owner gets.
 
 
-class IdentityGuardTests(unittest.TestCase):
+class IdentityPassthroughTests(unittest.TestCase):
     def _described(self, prompt: str) -> tuple[dict[str, Any], str]:
         stub = StubVisionProvider(text="[stub] a person in a blue jacket")
         router = LLMRouter()
@@ -196,15 +198,11 @@ class IdentityGuardTests(unittest.TestCase):
         result = V.describe(ctx, _png(), prompt)
         return result, stub.seen[0][1]
 
-    def test_who_is_this_declines_to_name(self) -> None:
-        result, _ = self._described("who is this person in the photo?")
-        self.assertTrue(result.get("identity_declined"))
-        self.assertIn("can't identify people", result["identity_note"])
-
-    def test_identity_prompt_rewritten_to_observables(self) -> None:
-        _, sent_prompt = self._described("who is this person in the photo?")
-        self.assertIn("directly observable", sent_prompt)
-        self.assertNotIn("who is this", sent_prompt.lower())
+    def test_who_is_this_passes_through_untouched(self) -> None:
+        result, sent_prompt = self._described("who is this person in the photo?")
+        self.assertNotIn("identity_declined", result)
+        self.assertNotIn("identity_note", result)
+        self.assertEqual(sent_prompt, "who is this person in the photo?")
 
     def test_ordinary_prompt_untouched(self) -> None:
         result, sent_prompt = self._described("describe this chart")

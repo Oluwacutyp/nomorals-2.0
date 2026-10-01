@@ -43,18 +43,6 @@ def _is_private(record: MemoryRecord) -> bool:
         return False
 
 
-def _is_sensitive(content: str, kind: str) -> str:
-    """Prompt 11: refuse to persist sensitive attributes as FACT/PREFERENCE/
-    RELATIONSHIP.  Lazy import keeps manager ↔ persona dependency one-way."""
-    if kind not in (MemoryKind.FACT, MemoryKind.PREFERENCE,
-                    MemoryKind.RELATIONSHIP):
-        return ""
-    try:
-        from .persona import is_sensitive_text
-        return is_sensitive_text(content)
-    except Exception:  # noqa: BLE001
-        return ""
-
 _log = get_logger(__name__)
 
 
@@ -144,15 +132,12 @@ class MemoryManager:
     ) -> str:
         """Store a memory and index it for both vector and lexical recall.
 
-        Prompt 11: FACT/PREFERENCE/RELATIONSHIP records touching sensitive
-        attributes (health, politics, religion, race, sexuality) are refused
-        — the owner never gets a shadow profile.  Returns "" on refusal.
+        The owner decides what is remembered — no content-based refusals.
+        Use ``mark_private`` / the ``private`` metadata flag when a record
+        should stay out of model context.
         """
         content = (content or "").strip()
         if not content:
-            return ""
-        if _is_sensitive(content, kind):
-            _log.info("remember refused: sensitive attribute (%s)", kind)
             return ""
         now = time.time()
         record_id = new_id()

@@ -43,8 +43,6 @@ __all__ = [
     "PersonaGuide",
     "ProactiveRecall",
     "MemoryCurator",
-    "SENSITIVE_PATTERNS",
-    "is_sensitive_text",
     "ensure_persona_jobs",
     "register",
     "PERSONA_REBUILD_JOB",
@@ -57,54 +55,6 @@ CONFIDENCE_FLOOR = 0.45
 ROUTINE_ESTABLISHED_AT = 5
 #: PersonaGuide hard cap (spec: 5–10 lines)
 GUIDE_MAX_LINES = 10
-
-
-# ── sensitive-attribute guard ──────────────────────────────────────────────
-# The owner owns their model.  We store only what was explicitly stated, and
-# NEVER infer or persist sensitive attributes — even when baited.
-
-SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("health", re.compile(
-        r"\b(diagnos(?:ed|is)|disease|illness|disorder|syndrome|hiv|aids|"
-        r"cancer|diabetes|depress(?:ion|ed)|anxi(?:ety|ous)|bipolar|"
-        r"schizo|autis|adhd|medication|prescription|therap(?:y|ist)|"
-        r"surgery|hospitali[sz]ed|disab(?:led|ility)|chronic pain)\b",
-        re.IGNORECASE)),
-    ("politics", re.compile(
-        r"\b(vot(?:e|ed|ing) for|support(?:s|ed)? (?:the )?(?:party|candidate)|"
-        r"democrat|republican|labour|conservative|apc\b|pdp\b|lp\b|"
-        r"political (?:party|affiliation|leaning)|left-wing|right-wing|"
-        r"socialist|fascist|communist)\b",
-        re.IGNORECASE)),
-    ("religion", re.compile(
-        r"\b(christian|muslim|jew(?:ish)?|hindu|buddhist|atheist|agnostic|"
-        r"pastor|imam|rabbi|church|mosque|synagogue|religio(?:n|us)|"
-        r"faith\b|denomination)\b",
-        re.IGNORECASE)),
-    ("race", re.compile(
-        r"\b(race\b|ethnic(?:ity)?|tribal\b|yoruba|igbo|hausa|fulani|"
-        r"african-american|caucasian|asian\b|white\b|black\b) (?:man|woman|"
-        r"person|people|guy|girl)\b|\bmy race is\b",
-        re.IGNORECASE)),
-    ("sexuality", re.compile(
-        r"\b(gay|lesbian|bisexual|transgender|trans\b|queer|homosexual|"
-        r"sexual orientation|coming out)\b|"
-        r"\b(dating|attracted to|into|prefer dating)\s+"
-        r"(men|women|guys|girls)\b",
-        re.IGNORECASE)),
-)
-
-
-def is_sensitive_text(text: str) -> str:
-    """Return the sensitive category a text touches, or \"\" if none.
-
-    Used as a storage guard: FACT/PREFERENCE/RELATIONSHIP records matching
-    these patterns are refused — the owner never gets a shadow profile.
-    """
-    for category, pattern in SENSITIVE_PATTERNS:
-        if pattern.search(text or ""):
-            return category
-    return ""
 
 
 def _is_private(record: MemoryRecord) -> bool:
@@ -250,7 +200,7 @@ class UserModel:
                     lowered)
                 if m:
                     value = m.group(1).strip().strip(".")[:80]
-                    if value and not is_sensitive_text(text):
+                    if value:
                         identity[key] = ModelAttribute(
                             name=key, value=value, confidence=0.9,
                             evidence=_evidence_ids(record), kind="fact")
@@ -261,8 +211,6 @@ class UserModel:
             prefs: list[MemoryRecord]) -> list[ModelAttribute]:
         out: list[ModelAttribute] = []
         for record in prefs:
-            if is_sensitive_text(record.content):
-                continue
             # confidence from importance + reinforcement.  A barely-stated
             # preference (importance ~0) lands below the floor: offered,
             # never acted on silently.
@@ -426,8 +374,8 @@ class PersonEntry:
 class PeopleGraph:
     """Graph view over RELATIONSHIP records: who matters to the owner.
 
-    Stores only what the owner stated, verbatim-ish.  No inference of
-    sensitive attributes — the storage guard refuses those records.
+    Stores only what the owner stated, verbatim-ish.  No inference beyond
+    what was said.
     """
 
     def __init__(self) -> None:
@@ -447,7 +395,7 @@ class PeopleGraph:
                 continue
             name = (record.metadata or {}).get("person") or _guess_name(
                 record.content)
-            if not name or is_sensitive_text(record.content):
+            if not name:
                 continue
             key = name.lower()
             entry = graph.people.get(key)
@@ -496,8 +444,8 @@ def _guess_name(text: str) -> str:
 class PersonaGuide:
     """5–10 line system-context injection synthesized from the user model.
 
-    Hard rules: ≤10 lines, no raw episode text, no private-marked records,
-    no sensitive attributes.  Rebuilt when the model changes.
+    Hard rules: ≤10 lines, no raw episode text, no private-marked records.
+    Rebuilt when the model changes.
     """
 
     def __init__(self, lines: list[str]) -> None:
@@ -686,7 +634,7 @@ class MemoryCurator:
         if new is None or new.kind not in (MemoryKind.FACT,
                                            MemoryKind.PREFERENCE):
             return {}
-        if _is_private(new) or is_sensitive_text(new.content):
+        if _is_private(new):
             return {}
         try:
             result = self.manager.recall(new.content, limit=12,
@@ -908,8 +856,6 @@ def register(registry: Any) -> None:
                 for r in result.records]}
         if action == "remember":
             body = text or query
-            if is_sensitive_text(body):
-                return {"ok": False, "error": "refused: sensitive attribute"}
             rid = manager.remember(body, kind=kind or MemoryKind.EPISODE,
                                    source="agent")
             note: dict[str, Any] = {}
@@ -919,8 +865,6 @@ def register(registry: Any) -> None:
         if action == "update":
             if not record_id:
                 return {"ok": False, "error": "record_id required"}
-            if is_sensitive_text(text):
-                return {"ok": False, "error": "refused: sensitive attribute"}
             n = manager.update(record_id, content=text)
             return {"ok": n > 0, "updated": n}
         if action == "forget":

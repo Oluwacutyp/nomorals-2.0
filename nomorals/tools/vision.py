@@ -18,8 +18,6 @@ Privacy rules (hard, in code):
 - every vision call is audit-logged (timestamp, action, source, byte sizes —
   never the image itself) and the first call per process emits a one-time
   notice that images leave the machine for the model provider;
-- the tool never identifies people: identity-seeking prompts get an
-  observable-attributes description plus a decline-to-name template;
 - ``locate`` coordinates are approximate and the result says so;
 - screenshots are privileged: settings gate + explicit per-call confirmation,
   never scheduled, never background.
@@ -53,21 +51,6 @@ _log = get_logger(__name__)
 
 DEFAULT_MAX_DIMENSION = 1568
 DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024
-
-#: hard rule: the tool describes what is visible; it never names people.
-_IDENTITY_RE = re.compile(
-    r"\b(who\s+is|who's|who’s|whose)\b.{0,40}\b(person|people|man|woman|guy|girl|boy|"
-    r"face|photo|picture|image|this|that|he|she|they)\b"
-    r"|\b(identify|identification|recogni[sz]e)\b.{0,40}\b(person|people|him|her|them|face)\b"
-    r"|\bname\s+the\s+person\b",
-    re.IGNORECASE,
-)
-
-IDENTITY_REFUSAL_TEMPLATE = (
-    "I can't identify people in photos — I won't guess a name or personal "
-    "details for anyone visible. What I can do is describe what's directly "
-    "observable (clothing, setting, objects, activity)."
-)
 
 _LOCATE_DISCLAIMER = (
     "Coordinates are approximate (0-1000 normalized, origin top-left). "
@@ -333,27 +316,6 @@ def _downscale(data: bytes, max_dim: int) -> tuple[bytes, str]:
     return buf.getvalue(), note
 
 
-# ── identity guard ───────────────────────────────────────────────────────────
-
-
-def _identity_guard(prompt: str) -> tuple[str, bool]:
-    """Rewrite identity-seeking prompts to observable-attributes only.
-
-    Returns (instruction_to_send, declined_identity). The decline is a hard
-    rule in code — not just prompt wording — and the refusal template is
-    attached to the result by the caller.
-    """
-    if _IDENTITY_RE.search(prompt or ""):
-        instruction = (
-            "Describe ONLY directly observable attributes of any people "
-            "visible: clothing, approximate age range, setting, objects, "
-            "activity. Do NOT guess, infer, or state any identity, name, or "
-            "personal details."
-        )
-        return instruction, True
-    return prompt, False
-
-
 # ── the four actions ─────────────────────────────────────────────────────────
 
 
@@ -432,14 +394,10 @@ def describe(
         "Describe this image thoroughly: layout, text, objects, and anything notable. "
         "Transcribe any visible text verbatim."
     )
-    instruction, declined = _identity_guard(instruction)
     result = _vision_call(
         context, data, instruction, action="describe", source=source,
         cache=cache, cache_extra=instruction, strict=strict,
     )
-    if declined:
-        result["identity_declined"] = True
-        result["identity_note"] = IDENTITY_REFUSAL_TEMPLATE
     return result
 
 

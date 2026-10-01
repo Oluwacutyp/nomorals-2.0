@@ -5,7 +5,7 @@ routine proposal at 5+ episodes with confirmation-before-acting, PeopleGraph,
 PersonaGuide (≤10 lines, no raw episodes, no private records), ProactiveRecall
 anti-creep rules, MemoryCurator (dedup, contradiction→superseded_by + one
 gentle note, archive + 30-day undo), private-flag exclusion from recall and
-training, the sensitive-attribute storage guard (bait test), the correction
+training, owner-controlled memory with no content refusals, the correction
 path ("forget that"), and the `nm memory` CLI surface.
 """
 
@@ -26,7 +26,6 @@ from nomorals.memory.persona import (
     PersonaGuide,
     ProactiveRecall,
     UserModel,
-    is_sensitive_text,
 )
 
 
@@ -231,9 +230,12 @@ class CorrectionPathTests(PersonaTestBase):
                             for r in found.records))
 
 
-# ── 5. bait test: no sensitive attributes stored ──────────────────────
+# ── 5. owner memory: no content-based refusals ─────────────────────────
+# The owner decides what is remembered.  Sensitive attributes store exactly
+# like any other fact; the private-metadata flag (not a refusal) is the
+# tool for keeping records out of model context.
 
-class SensitiveGuardTests(PersonaTestBase):
+class OwnerMemoryTests(PersonaTestBase):
     BAITS = [
         ("I was diagnosed with diabetes last year", MemoryKind.FACT),
         ("I voted for the Labour party", MemoryKind.FACT),
@@ -242,26 +244,28 @@ class SensitiveGuardTests(PersonaTestBase):
         ("my therapist says I have anxiety", MemoryKind.EPISODE),
     ]
 
-    def test_bait_conversation_stores_nothing_sensitive(self):
+    def test_sensitive_facts_store_like_any_other(self):
         for text, kind in self.BAITS:
             rid = self.memory.remember(text, kind=kind, source="test")
-            if kind in (MemoryKind.FACT, MemoryKind.PREFERENCE,
-                        MemoryKind.RELATIONSHIP):
-                self.assertEqual(
-                    rid, "",
-                    f"sensitive {kind} must be refused: {text[:40]}")
-        # and the user model must not contain them either
+            self.assertTrue(rid, f"must store, not refuse: {text[:40]}")
+        # stored records are retrievable through normal recall
+        blob = " ".join(
+            r.content for r in self.memory.recall("", limit=50)).lower()
+        for needle in ("diabetes", "labour", "muslim", "therapist",
+                       "dating men"):
+            self.assertIn(needle, blob)
+        # and the user model reflects what it models (preferences here)
+        model = UserModel.rebuild(self.memory)
+        self.assertIn("dating men",
+                      json.dumps(model.to_dict()).lower())
+
+    def test_private_flag_still_excludes_from_context(self):
+        rid = self.memory.remember("my secret project", kind=MemoryKind.FACT,
+                                   source="test")
+        self.memory.mark_private(rid)
         model = UserModel.rebuild(self.memory)
         blob = json.dumps(model.to_dict()).lower()
-        for needle in ("diabetes", "labour", "muslim", "therapist"):
-            self.assertNotIn(needle, blob)
-
-    def test_is_sensitive_text_categories(self):
-        self.assertEqual(is_sensitive_text("diagnosed with cancer"), "health")
-        self.assertEqual(is_sensitive_text("I support the APC party"), "politics")
-        self.assertEqual(is_sensitive_text("I am Christian"), "religion")
-        self.assertEqual(is_sensitive_text("I am gay"), "sexuality")
-        self.assertEqual(is_sensitive_text("I like short answers"), "")
+        self.assertNotIn("secret project", blob)
 
     def test_non_sensitive_facts_still_store(self):
         rid = self.remember("my name is death", kind=MemoryKind.FACT)

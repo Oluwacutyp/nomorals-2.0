@@ -1350,10 +1350,6 @@ def _cmd_memory_action(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if action == "edit":
-        from .memory.persona import is_sensitive_text
-        if is_sensitive_text(args.text):
-            print("refused: sensitive attribute", file=sys.stderr)
-            return 1
         n = memory.update(args.record_id, content=args.text)
         print("updated" if n else "not found")
         return 0 if n else 1
