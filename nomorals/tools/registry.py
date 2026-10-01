@@ -188,6 +188,16 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
+    def agent_for(self, role: str) -> Any | None:
+        """Resolve an orchestrator plan role to a bound agent (Phase C).
+
+        Delegates to ``nomorals.tools.agents.agent_for``; unknown roles
+        return None so the orchestrator falls through to "no handler".
+        """
+        from .agents import agent_for as _agent_for
+
+        return _agent_for(self, role)
+
     def schemas(self, *, capabilities: CapabilitySet | None = None) -> list[dict[str, Any]]:
         """Tool list for a model prompt, filtered to what the caller may use."""
         out = []

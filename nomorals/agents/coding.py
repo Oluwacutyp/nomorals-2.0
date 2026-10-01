@@ -132,6 +132,14 @@ def _unified_diff(before: str, after: str, rel: str) -> str:
         fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm=""))
 
 
+# Phase C: focus line for the diff-review gate — the critic reads the
+# full multi-file unified diff, not a single draft.
+_DIFF_REVIEW_FOCUS = (
+    "a unified diff of the complete multi-file change: does the diff "
+    "implement the task, are there wrong operators, indices, or names, "
+    "does any hunk break something the diff touches or contradict the "
+    "task's acceptance criteria")
+
 def _format_lint_result(lint_res: dict[str, Any]) -> str:
     """Lint violations as fix-loop feedback."""
     lines = ["ruff lint failed:"]
@@ -149,6 +157,9 @@ class CodingResult:
     output: str = ""
     error: str = ""
     seconds: float = 0.0
+    # Phase C: diff-review gate verdict — {"passed": bool, "rounds": int,
+    # "objections": [str]}.  Empty when the gate never ran.
+    review: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +169,7 @@ class CodingResult:
             "output": self.output[-2000:],
             "error": self.error[-2000:],
             "seconds": round(self.seconds, 2),
+            "review": self.review,
         }
 
 
@@ -172,6 +184,17 @@ class CodingAgent:
         # files resolve under it with a containment check instead of the
         # workspace sandbox — so the agent can work on a real repo checkout.
         self._root = Path(root).expanduser().resolve() if root else None
+        # Override in tests to isolate the error-recall index.
+        self._recall_path: str | Path | None = None
+        self._recall_index: Any | None = None
+
+    def _error_recall(self) -> Any:
+        """The Phase C embedding recall index (lazy, cached, best-effort)."""
+        if self._recall_index is None:
+            from .error_recall import ErrorRecallIndex
+
+            self._recall_index = ErrorRecallIndex(store_path=self._recall_path)
+        return self._recall_index
 
     def _resolve(self, rel: str) -> Path:
         """Resolve a project-relative path, honoring an explicit root."""
@@ -246,6 +269,13 @@ class CodingAgent:
         changed: list[str] = []
         last_error = ""
         rounds = max(1, max_iterations)
+        # Phase C: diff-review gate state.  all_diffs keeps the latest diff
+        # per file across attempts so the critic always sees the full
+        # change; review_rounds bounds the critic->rework loop at 2.
+        all_diffs: dict[str, str] = {}
+        review_rounds = 0
+        review_objections: list[str] = []
+        gate_exhausted = False
 
         for attempt in range(1, rounds + 1):
             if not any(v > 0 for v in budgets.values()):
@@ -343,6 +373,7 @@ class CodingAgent:
             for rel in touched:
                 self._journal(task, rel, attempt,
                               diffs.get(rel, "")[:60000], vresult)
+            all_diffs.update({rel: d for rel, d in diffs.items() if d.strip()})
             _log.info("coding agent round %d: %s%s", attempt,
                       "green" if green else "failing",
                       "" if green else " — fixing")
@@ -365,6 +396,42 @@ class CodingAgent:
                                       {"exit_code": 1, "timed_out": False,
                                        "stdout": "", "stderr": last_error})
                     continue
+                # ── Phase C: diff-review gate.  The critic reads the FULL
+                # multi-file diff; its objections become one more targeted
+                # fix iteration (max 2 review rounds — never infinite).
+                gate_flaws: list[str] = []
+                if changed:
+                    full_diff = "\n".join(
+                        all_diffs.get(rel, "") for rel in changed
+                        if all_diffs.get(rel))
+                    if full_diff.strip():
+                        gate_flaws = self._review_flaws(
+                            draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
+                if gate_flaws:
+                    review_objections.extend(gate_flaws)
+                    review_rounds += 1
+                    if review_rounds < 2:
+                        objection_block = (
+                            "CODE REVIEW objections — address EACH with a "
+                            "minimal edit:\n- " + "\n- ".join(gate_flaws))
+                        for rel in changed:
+                            file_errors[rel] = objection_block
+                            self._journal(
+                                task, rel, attempt,
+                                all_diffs.get(rel, "")[:60000],
+                                {"exit_code": 1, "timed_out": False,
+                                 "stdout": "",
+                                 "stderr": (f"code-review round "
+                                            f"{review_rounds} objections:\n"
+                                            f"{objection_block}")})
+                        _log.info("code-review round %d found %d flaw(s); "
+                                  "reworking", review_rounds, len(gate_flaws))
+                        continue
+                    # critic never approved and the 2-round budget is spent:
+                    # ship the green diff WITH the objections attached —
+                    # never a third rework round, never a hang.
+                    gate_exhausted = True
+                    break
                 # closed loop (wave 66): distill per changed file.
                 for rel in changed:
                     self._distill_session(task, rel, attempt)
@@ -374,22 +441,52 @@ class CodingAgent:
                     files=changed or [filename],
                     output=verify_out[-2000:],
                     seconds=time.perf_counter() - started,
+                    review={"passed": not gate_flaws,
+                            "rounds": review_rounds,
+                            "objections": review_objections},
                 )
             last_error = verify_err
             for rel in touched:
                 if not file_errors[rel]:
                     file_errors[rel] = verify_err[-2000:]
 
+        if gate_exhausted:
+            # Green diff, but the critic never approved within its 2-round
+            # budget: ship it WITH the objections attached.
+            for rel in changed:
+                self._distill_session(task, rel, attempt)
+            return CodingResult(
+                ok=True,
+                iterations=attempt,
+                files=changed or [filename],
+                output=verify_out[-2000:],
+                seconds=time.perf_counter() - started,
+                review={"passed": False,
+                        "rounds": review_rounds,
+                        "objections": review_objections},
+            )
         stuck = [s["path"] for s in plan
                  if budgets[s["path"]] <= 0 and file_errors[s["path"]]]
         error = f"still failing after {rounds} attempts: {last_error[-500:]}"
         if stuck:
             error += f" | files that did not converge: {', '.join(stuck)}"
+        # Phase C: report-only critic on exhausted runs — the diff is still
+        # reviewed, but no rework is scheduled.
+        exhausted_objections: list[str] = []
+        if changed:
+            full_diff = "\n".join(all_diffs.get(rel, "") for rel in changed
+                                  if all_diffs.get(rel))
+            if full_diff.strip():
+                exhausted_objections = self._review_flaws(
+                    draft_task, full_diff, focus=_DIFF_REVIEW_FOCUS)
         return CodingResult(
             ok=False,
             iterations=rounds,
             error=error,
             seconds=time.perf_counter() - started,
+            review={"passed": not exhausted_objections,
+                    "rounds": review_rounds,
+                    "objections": review_objections + exhausted_objections},
         )
 
     def _plan_files(self, task: str, default: str,
@@ -572,6 +669,16 @@ class CodingAgent:
                       slug.split("-")[0] if slug.split("-") else "error"],
                 source="coding_session")
             _log.info("coding session distilled into skill fix-%s", slug)
+            # Phase C: index the error signature + trail for embedding
+            # recall — a renamed-variable variant of this error should
+            # still find the fix.
+            try:
+                skill = SkillLibrary(self.db).get_by_name(f"fix-{slug}")
+                if skill is not None:
+                    self._error_recall().index(
+                        skill.id, sig + " " + " ".join(trail))
+            except Exception as exc:  # noqa: BLE001 — recall is best-effort
+                _log.debug("error-recall indexing failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
             _log.debug("session distillation failed: %s", exc)
 
@@ -622,22 +729,34 @@ class CodingAgent:
         return extract_code_block(response.text)
 
     def _recall_error_fixes(self, last_error: str) -> str:
-        """Wave 67 hard recall: deterministic match of the current error
-        against distilled session skills; returns a prompt block with the
-        proven fix trail(s), or '' when nothing matches.  Best-effort —
+        """Phase C recall: embedding similarity search over distilled
+        session skills, with the old deterministic string matcher as a
+        fallback.  Returns a prompt block with the proven fix trail(s)
+        and similarity scores, or '' when nothing matches.  Best-effort —
         memory must never break a build."""
         try:
             from .skills import SkillLibrary
 
-            hits = SkillLibrary(self.db).match_errors(last_error, limit=3)
-            if not hits:
+            library = SkillLibrary(self.db)
+            hits = self._error_recall().recall(last_error, top_k=3)
+            skills: list[tuple[Any, float]] = []
+            for hit in hits:
+                skill = library.get(hit["skill_id"])
+                if skill is not None and not skill.pruned:
+                    skills.append((skill, hit["score"]))
+            if not skills:
+                # fallback: the wave-67 deterministic matcher
+                for s in library.match_errors(last_error, limit=3):
+                    skills.append((s, 0.0))
+            if not skills:
                 return ""
             lines = ["\nKNOWN FIX from a previous self-corrected session "
-                     "for THIS error (apply the same pattern):\n"]
-            for s in hits:
+                     "for a SIMILAR error (apply the same pattern):\n"]
+            for s, score in skills:
                 body = s.body[:500].replace("\n", "\n    ")
-                lines.append(f"  skill '{s.name}' (tried {s.uses}x, success "
-                             f"{s.success_rate:.0%}): {body}")
+                score_bit = f"similarity {score:.2f}, " if score else ""
+                lines.append(f"  skill '{s.name}' ({score_bit}tried {s.uses}x, "
+                             f"success {s.success_rate:.0%}): {body}")
             return "\n".join(lines)
         except Exception as exc:  # noqa: BLE001
             _log.debug("error-fix recall failed: %s", exc)

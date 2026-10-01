@@ -20,7 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from nomorals.agents.coding import CodingAgent, _parse_edits_block
+from nomorals.agents.coding import (
+    CodingAgent, _DIFF_REVIEW_FOCUS, _parse_edits_block)
 from nomorals.tools import pytest_runner
 from nomorals.tools import lint as lint_mod
 
@@ -261,8 +262,15 @@ class ReviewEveryDiffTests(unittest.TestCase):
                                     timeout=30)
         self.assertTrue(result.ok, f"loop failed: {result.error}")
         self.assertTrue(rt.called)
-        self.assertEqual(counted.call_count, 2,
-                         f"expected one review per applied diff, got {counted.call_count}")
+        per_diff = [c for c in counted.call_args_list
+                    if c.kwargs.get("focus") != _DIFF_REVIEW_FOCUS]
+        gate = [c for c in counted.call_args_list
+                if c.kwargs.get("focus") == _DIFF_REVIEW_FOCUS]
+        self.assertEqual(len(per_diff), 2,
+                         f"expected one review per applied diff, got {len(per_diff)}")
+        # Phase C: one full-diff gate review runs after the green loop.
+        self.assertEqual(len(gate), 1,
+                         f"expected one diff-review gate call, got {len(gate)}")
 
 
 class ParseEditsTests(unittest.TestCase):

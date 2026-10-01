@@ -945,8 +945,30 @@ def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
     return 0 if result.ok else 1
 
 
+def _critic_verdict(context: Any, diff_text: str) -> tuple[str, list[str]]:
+    """Run the harsh reviewer over a diff.  Never raises — a failed review
+    means 'no verdict', which is the conservative outcome."""
+    if not diff_text.strip():
+        return "no changes — nothing to review", []
+    try:
+        from .agents.coding import CodingAgent, _DIFF_REVIEW_FOCUS
+
+        flaws = CodingAgent(context)._review_flaws(
+            "review the working tree diff", diff_text,
+            focus=_DIFF_REVIEW_FOCUS)
+    except Exception:  # noqa: BLE001 — review must never break the CLI
+        return "critic unavailable", []
+    if flaws:
+        return "VERDICT: FAIL — do not commit as-is", flaws
+    return "VERDICT: PASS", []
+
+
 def _cmd_code_review(args: argparse.Namespace, context: Any, ref: str | None) -> int:
-    """Render a readable diff of the working tree (or ref) for review."""
+    """Render a readable diff of the working tree (or ref) for review.
+
+    Phase C: the diff is ALWAYS shown with the critic's verdict before
+    any commit is proposed, and the owner gets an explicit commit prompt.
+    """
     from .tools.git import git_diff, git_status
 
     root = str(Path(args.root).expanduser().resolve())
@@ -956,20 +978,31 @@ def _cmd_code_review(args: argparse.Namespace, context: Any, ref: str | None) ->
     except Exception as exc:
         print(f"review failed: {exc}", file=sys.stderr)
         return 1
+    body = diff["diff"]
     if args.json:
-        print(json.dumps({"status": status, "diff": diff}, indent=2, default=str))
+        verdict, flaws = _critic_verdict(context, body)
+        print(json.dumps({"status": status, "diff": diff, "verdict": verdict,
+                          "flaws": flaws}, indent=2, default=str))
         return 0
     print(f"repo: {root}  branch: {status['branch']}")
     dirty = status["staged"] + status["unstaged"] + status["untracked"]
     print(f"dirty files ({len(dirty)}): "
           + (", ".join(dirty[:20]) if dirty else "none"))
-    body = diff["diff"]
     if not body.strip():
         print("\n(no diff)")
         return 0
     print(f"\n--- diff{f' vs {ref}' if ref else ''} "
           f"({diff['bytes']} bytes{', truncated' if diff['truncated'] else ''}) ---")
     print(body if not diff["truncated"] else body + "\n... [truncated at 50KB]")
+    # ── Phase C: critic verdict + explicit commit prompt ──
+    verdict, flaws = _critic_verdict(context, body)
+    print(f"\ncritic: {verdict}")
+    for flaw in flaws:
+        print(f"  - {flaw}")
+    if dirty:
+        print("\nCommit these changes?")
+        print(f'  git -C "{root}" add -A && git -C "{root}" commit -m "<message>"')
+        print("  (nothing is committed until you run it)")
     return 0
 
 
