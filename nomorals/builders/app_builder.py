@@ -45,9 +45,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .core.errors import ToolError
-from .core.logging_setup import get_logger
-from .core.policy import Capability
+from ..core.errors import ToolError
+from ..core.logging_setup import get_logger
+from ..core.policy import Capability
 
 _log = get_logger(__name__)
 

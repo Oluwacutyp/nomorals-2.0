@@ -50,6 +50,9 @@ LAYERS: dict[str, int] = {
     "missions": 5,
     "tui": 6,
     "api": 7,
+    # builders/ is a package (templates, run/serve/smoke, install, export):
+    # the whole subtree sits at L7 like the other entry-point organs.
+    "builders": 7,
 }
 
 #: Modules that sit outside the layer stack and may be imported by anything.
@@ -65,7 +68,6 @@ TOP_LEVEL_LAYER = {
     "__main__": 7,
     "archives": 7,
     "bench": 7,
-    "builders": 7,
     "builders_proxy": 7,
     "execbox": 7,
     "exporter": 7,
@@ -99,6 +101,7 @@ MODULE_PINS: dict[str, int] = {
 #: a foundation half (L4) and an agent-composition half (L5).
 #: Added 2026-10-01 during the layering-map completion.
 KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
+    ("nomorals.agents.partner_runtime", "nomorals.builders"),
     ("nomorals.tools.agents", "nomorals.agents.coding"),
     ("nomorals.tools.code_executor", "nomorals.agents.coding"),
     ("nomorals.tools.edit_loop", "nomorals.agents.coding"),

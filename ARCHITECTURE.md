@@ -28,7 +28,9 @@ Strictly layered. Lower layers never import higher layers. Dependencies point do
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│ L7  SURFACE        cli.py · api/server.py · api/routes.py · tui           │
+│ L7  SURFACE        cli.py · api/server.py · api/routes.py · tui · builders/    │
+│                    (scaffolding + app lifecycle: templates, run/serve/smoke,  │
+│                    policy-gated install, export)                              │
 ├───────────────────────────────────────────────────────────────────────────┤
 │ L6  MISSIONS       mission · planner · reflector · runner · checkpoints   │
 ├───────────────────────────────────────────────────────────────────────────┤
