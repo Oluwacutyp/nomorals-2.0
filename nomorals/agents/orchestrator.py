@@ -157,6 +157,17 @@ class MasterOrchestrator:
         )
         if context_hint:
             prompt = f"{prompt}\n\nContext: {context_hint}"
+        # Prompt 01: lesson-memory injection at the planner choke point —
+        # the decomposition sees known failure patterns before emitting steps.
+        try:
+            if self.context is not None:
+                from .failure import enrich_with_lessons
+                lessons_block = enrich_with_lessons(
+                    self.context, goal, limit=3)
+                if lessons_block:
+                    prompt = f"{prompt}\n\n{lessons_block}"
+        except Exception:  # noqa: BLE001 — lessons are a bonus, never fatal
+            pass
 
         plan = Plan(goal=goal)
         router = getattr(self.context, "router", None) if self.context is not None else None

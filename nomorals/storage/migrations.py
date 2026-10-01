@@ -1653,6 +1653,99 @@ def _apply_cipher_vault(db: object) -> None:
     )
 
 
+def _apply_self_improvement_v2(db: object) -> None:
+    """Self-improvement engine v2 (prompt 01): lesson usefulness scoring,
+    skill self-rewrite records, canary rollouts, and surfacing ledger.
+
+    Guarded per column like the earlier _apply_* migrations so re-runs and
+    partial builds never stall on a duplicate column.
+    """
+    wanted = {
+        "lessons": {
+            "times_surfaced": "INTEGER NOT NULL DEFAULT 0",
+            "times_prevented": "INTEGER NOT NULL DEFAULT 0",
+            "fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "demoted": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "failures": {
+            "fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "skill": "TEXT NOT NULL DEFAULT ''",
+        },
+    }
+    for table, columns in wanted.items():
+        try:
+            have = {r["name"] for r in db.query(  # type: ignore[attr-defined]
+                f"PRAGMA table_info({table})")}
+        except Exception:  # noqa: BLE001 — table missing entirely: skip
+            continue
+        for column, decl in columns.items():
+            if column in have:
+                continue
+            db.execute(  # type: ignore[attr-defined]
+                f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS lessons_archive ("
+        "id TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT '', "
+        "category TEXT NOT NULL DEFAULT '', root_cause TEXT NOT NULL DEFAULT '', "
+        "lesson TEXT NOT NULL DEFAULT '', fix TEXT NOT NULL DEFAULT '', "
+        "prevention TEXT NOT NULL DEFAULT '', skill_id TEXT NOT NULL DEFAULT '', "
+        "times_seen INTEGER NOT NULL DEFAULT 1, "
+        "times_surfaced INTEGER NOT NULL DEFAULT 0, "
+        "times_prevented INTEGER NOT NULL DEFAULT 0, "
+        "fingerprint TEXT NOT NULL DEFAULT '', "
+        "archived_at REAL NOT NULL DEFAULT 0, archive_reason TEXT NOT NULL DEFAULT '')"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS lesson_surfacings ("
+        "id TEXT PRIMARY KEY, lesson_id TEXT NOT NULL DEFAULT '', "
+        "fingerprint TEXT NOT NULL DEFAULT '', surfaced_at REAL NOT NULL DEFAULT 0, "
+        "evaluated INTEGER NOT NULL DEFAULT 0)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE INDEX IF NOT EXISTS idx_surfacings_lesson "
+        "ON lesson_surfacings(lesson_id, evaluated)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS skill_edits ("
+        "id TEXT PRIMARY KEY, skill_name TEXT NOT NULL DEFAULT '', "
+        "target_kind TEXT NOT NULL DEFAULT '', target_ref TEXT NOT NULL DEFAULT '', "
+        "before_hash TEXT NOT NULL DEFAULT '', after_hash TEXT NOT NULL DEFAULT '', "
+        "diff TEXT NOT NULL DEFAULT '', triggering_failures TEXT NOT NULL DEFAULT '[]', "
+        "gate_results TEXT NOT NULL DEFAULT '{}', mode TEXT NOT NULL DEFAULT '', "
+        "status TEXT NOT NULL DEFAULT 'proposed', fingerprint TEXT NOT NULL DEFAULT '', "
+        "created_at REAL NOT NULL DEFAULT 0, decided_at REAL NOT NULL DEFAULT 0)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE INDEX IF NOT EXISTS idx_skill_edits_skill "
+        "ON skill_edits(skill_name, created_at DESC)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS skill_versions ("
+        "id TEXT PRIMARY KEY, skill_name TEXT NOT NULL DEFAULT '', "
+        "version_hash TEXT NOT NULL DEFAULT '', parent_hash TEXT NOT NULL DEFAULT '', "
+        "body TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', "
+        "created_at REAL NOT NULL DEFAULT 0)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE INDEX IF NOT EXISTS idx_skill_versions_skill "
+        "ON skill_versions(skill_name, created_at DESC)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS canary_runs ("
+        "id TEXT PRIMARY KEY, skill_name TEXT NOT NULL DEFAULT '', "
+        "canary_hash TEXT NOT NULL DEFAULT '', baseline_hash TEXT NOT NULL DEFAULT '', "
+        "fraction REAL NOT NULL DEFAULT 0.2, status TEXT NOT NULL DEFAULT 'running', "
+        "decision TEXT NOT NULL DEFAULT '', decision_detail TEXT NOT NULL DEFAULT '{}', "
+        "started_at REAL NOT NULL DEFAULT 0, decided_at REAL NOT NULL DEFAULT 0)"
+    )
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE TABLE IF NOT EXISTS canary_observations ("
+        "id TEXT PRIMARY KEY, canary_id TEXT NOT NULL DEFAULT '', "
+        "version_hash TEXT NOT NULL DEFAULT '', success INTEGER NOT NULL DEFAULT 0, "
+        "observed_at REAL NOT NULL DEFAULT 0)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -1709,6 +1802,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(49, "skills_table_unify", fn=_apply_skills_table_unify),
     Migration(50, "companion_schema", fn=_apply_companion_schema),
     Migration(51, "cipher_vault", fn=_apply_cipher_vault),
+    Migration(52, "self_improvement_v2", fn=_apply_self_improvement_v2),
 )
 
 

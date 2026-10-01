@@ -374,9 +374,10 @@ class ProjectManager:
                 + (f" → {s.result[:120]}" if s.result else "")
                 for s in tried[:6]))
         try:
-            from .failure import FailureAnalyzer
+            from .failure import enrich_with_lessons
 
-            lessons = FailureAnalyzer(self.context).prevention_context(
+            lessons = enrich_with_lessons(
+                self.context,
                 (p.objective or p.title) + " " + p.report[:200], limit=4)
             if lessons:
                 bits.append(lessons)
@@ -599,10 +600,10 @@ class ProjectManager:
         # by past experience, not just the last error message.
         known = ""
         try:
-            from .failure import FailureAnalyzer
+            from .failure import enrich_with_lessons
 
-            known = FailureAnalyzer(self.context).prevention_context(
-                f"{description} {error}", limit=3)
+            known = enrich_with_lessons(
+                self.context, f"{description} {error}", limit=3)
         except Exception:  # noqa: BLE001 — lessons are a bonus, never fatal
             known = ""
         user = f"Step: {description}\nError: {error}"

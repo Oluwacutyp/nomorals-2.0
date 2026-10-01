@@ -1165,6 +1165,15 @@ class PartnerRuntime:
                     except Exception as exc:  # noqa: BLE001 - optional
                         _log.warning(
                             "improvement tick job not registered: %s", exc)
+                # Prompt 01: skill self-rewrite loop + synthesis scan jobs.
+                # ensure_improvement_schedule is idempotent by name; both
+                # jobs are no-ops while settings.improvement.mode == "off".
+                try:
+                    from .skill_evolution import ensure_improvement_schedule
+                    ensure_improvement_schedule(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "self-improvement schedule not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on

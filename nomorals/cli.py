@@ -182,7 +182,6 @@ def _parser() -> argparse.ArgumentParser:
                     help="Action to perform")
     kg.add_argument("--limit", default="10", help="rows to show (top/communities)")
     kg.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("improve", help="Self-improvement operations")
     sub.add_parser("simulate", help="Sandbox code execution")
     code = sub.add_parser(
         "code",
@@ -278,6 +277,32 @@ def _parser() -> argparse.ArgumentParser:
     i_sweep = inbox_sub.add_parser("sweep", help="run one inbox sweep cycle now")
     i_sweep.add_argument("--json", action="store_true", help="Output as JSON")
 
+
+    improve = sub.add_parser(
+        "improve",
+        help="Self-improvement engine: skill rewrites, lessons, canaries",
+        description=("nm improve status\n"
+                     "nm improve lessons [--query Q]\n"
+                     "nm improve skill <name> --propose\n"
+                     "nm improve rollback <skill> <hash>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    improve_sub = improve.add_subparsers(dest="improve_action", required=True)
+    imp_status = improve_sub.add_parser("status", help="loop state, recent edits, lesson stats")
+    imp_status.add_argument("--json", action="store_true", help="Output as JSON")
+    imp_lessons = improve_sub.add_parser("lessons", help="list lessons, optionally filtered by relevance")
+    imp_lessons.add_argument("--query", default="", help="filter by relevance to Q")
+    imp_lessons.add_argument("--limit", type=int, default=20)
+    imp_lessons.add_argument("--json", action="store_true", help="Output as JSON")
+    imp_skill = improve_sub.add_parser("skill", help="skill operations")
+    imp_skill.add_argument("name", help="skill name")
+    imp_skill.add_argument("--propose", action="store_true",
+                           help="manually trigger a skill-edit proposal (gate only, no apply)")
+    imp_skill.add_argument("--json", action="store_true", help="Output as JSON")
+    imp_rollback = improve_sub.add_parser("rollback", help="restore a previous skill version")
+    imp_rollback.add_argument("skill", help="skill name")
+    imp_rollback.add_argument("hash", help="version hash to restore")
+    imp_rollback.add_argument("--json", action="store_true", help="Output as JSON")
 
 
     # Additional subcommands
@@ -755,6 +780,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_connectors(args, context)
         if args.command == "finance":
             return _cmd_finance(args, context)
+        if args.command == "improve":
+            return _cmd_improve(args, context)
         if args.command == "native":
             return _cmd_native(args, context)
         if args.command == "cards":
@@ -771,8 +798,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_mission(args, context)
         if args.command == "kg":
             return _cmd_kg(args, context)
-        if args.command == "improve":
-            return _cmd_stub(args, context, "improve")
         if args.command == "simulate":
             return _cmd_stub(args, context, "simulate")
         if args.command == "code":
@@ -1266,6 +1291,105 @@ def _inbox_obj(context: Any) -> Any:
 
     root = Path(context.settings.workspace_dir)
     return Inbox(root, db=context.db)
+
+
+def _cmd_improve(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm improve` to status / lessons / skill / rollback."""
+    as_json = getattr(args, "json", False)
+    action = args.improve_action
+    try:
+        if action == "status":
+            from .agents.skill_evolution import SkillEvolutionLoop
+            payload = SkillEvolutionLoop(context).status()
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                print(f"mode: {payload['mode']}")
+                cands = payload.get("candidates", [])
+                print(f"candidates: {len(cands)}")
+                for c in cands[:10]:
+                    print(f"  {c['skill']}: {c['count']} failures")
+                print("recent edits:")
+                for e in payload.get("recent_edits", [])[:10]:
+                    print(f"  {e['id']} {e['skill_name']} [{e['status']}] "
+                          f"(mode={e['mode']})")
+                print(f"lessons: {payload.get('lessons', {})}")
+            return 0
+        if action == "lessons":
+            from .agents.failure import FailureAnalyzer
+            analyzer = FailureAnalyzer(context)
+            if args.query:
+                lessons = analyzer.rank(args.query, limit=args.limit)
+            else:
+                lessons = analyzer.recent(limit=args.limit)
+            payload = [l.to_dict() for l in lessons]
+            if as_json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                if not payload:
+                    print("no lessons yet")
+                for l in payload:
+                    print(f"{l['id']} [{l['category']}] "
+                          f"usefulness={l['usefulness']} "
+                          f"surfaced={l['times_surfaced']} "
+                          f"{'DEMOTED ' if l['demoted'] else ''}"
+                          f"{(l['prevention'] or l['lesson'])[:100]}")
+            return 0
+        if action == "skill":
+            from .agents.skill_evolution import (
+                SkillEvolutionLoop, SkillEvolutionError)
+            loop = SkillEvolutionLoop(context)
+            try:
+                proposal = loop.propose(args.name)
+            except SkillEvolutionError as exc:
+                print(f"improve: {exc}", file=sys.stderr)
+                return 1
+            if args.propose:
+                passed, results = loop.gate(proposal)
+                payload = {
+                    "skill_name": proposal["skill_name"],
+                    "target": f"{proposal['target_kind']}:{proposal['target_ref']}",
+                    "changed_lines": proposal["changed_lines"],
+                    "before_hash": proposal["before_hash"],
+                    "after_hash": proposal["after_hash"],
+                    "fingerprint": proposal["fingerprint"],
+                    "gate_passed": passed,
+                    "gate": results,
+                    "diff": proposal["diff"],
+                }
+                if as_json:
+                    print(json.dumps(payload, indent=2, default=str))
+                else:
+                    print(f"proposal for {proposal['skill_name']}: "
+                          f"{proposal['changed_lines']} changed lines, "
+                          f"gate {'PASSED' if passed else 'FAILED'}")
+                    for phase, r in results.items():
+                        print(f"  {phase}: "
+                              f"{'ok' if r.get('ok') else 'FAIL'} — "
+                              f"{r.get('detail', '')[:120]}")
+                    print("--- diff ---")
+                    print(proposal["diff"][:3000])
+                return 0
+            print("nothing to do: pass --propose to draft a skill-edit "
+                  "proposal", file=sys.stderr)
+            return 2
+        if action == "rollback":
+            from .agents.skill_canary import CanaryRollout
+            out = CanaryRollout(context).restore_version(args.skill,
+                                                        args.hash)
+            if as_json:
+                print(json.dumps(out, indent=2, default=str))
+            elif out.get("ok"):
+                print(f"{args.skill} restored to version {args.hash}")
+            else:
+                print(f"improve: {out.get('error')}", file=sys.stderr)
+                return 1
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"improve: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown improve action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_inbox(args: argparse.Namespace, context: Any) -> int:

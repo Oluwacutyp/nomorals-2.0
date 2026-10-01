@@ -485,9 +485,8 @@ class EvolutionAgent:
         except Exception:  # noqa: BLE001
             pass
         try:
-            from .failure import FailureAnalyzer
-            prev = FailureAnalyzer(self.context).prevention_context(
-                instruction, limit=3)
+            from .failure import enrich_with_lessons
+            prev = enrich_with_lessons(self.context, instruction, limit=3)
             if prev:
                 parts.append(prev)
         except Exception:  # noqa: BLE001

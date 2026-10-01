@@ -250,9 +250,9 @@ class SkillLibrary:
             if traps:
                 parts.append(traps)
             try:
-                from .failure import FailureAnalyzer
-                prev = FailureAnalyzer(type("_Ctx", (), {"db": self.db})()). \
-                    prevention_context(query)
+                from .failure import enrich_with_lessons
+                prev = enrich_with_lessons(
+                    type("_Ctx", (), {"db": self.db})(), query)
                 if prev:
                     parts.append(prev)
             except Exception:  # noqa: BLE001
