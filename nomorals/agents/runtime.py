@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures as cf
+import concurrent.futures.process  # noqa: F401 -- makes cf.process.BrokenProcessPool resolvable
 import multiprocessing
 import os
 import pickle
@@ -325,6 +326,22 @@ class HybridExecutor:
                     doomed.state = TaskState.SKIPPED
                     doomed.error = "dependency failed"
                     doomed.finished_at = time.time()
+
+                # Enforce per-task timeouts *while* the graph runs.  A hung
+                # thread cannot be killed, so its future is abandoned (the
+                # thread finishes on its own and its late result is dropped)
+                # and the task fails honestly instead of wedging the loop.
+                now = time.time()
+                for future, task in list(in_flight.items()):
+                    if (
+                        task.timeout is not None
+                        and task.started_at
+                        and not future.done()
+                        and now - task.started_at > task.timeout
+                    ):
+                        future.cancel()
+                        in_flight.pop(future, None)
+                        task.mark_failed(f"timed out after {task.timeout}s")
 
                 slots = self.max_in_flight - len(in_flight)
                 if slots > 0:
