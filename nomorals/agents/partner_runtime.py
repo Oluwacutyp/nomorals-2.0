@@ -3680,10 +3680,13 @@ class PartnerRuntime:
             if player is None:
                 return "start a game from a chat — I need to know who's at the table."
             # "/hangman daily" — same word for everyone, all day
-            daily = "daily" in [p.lower() for p in parts[1:]]
+            # "/game case timed" — countdown mode with a speed bonus
+            words = [p.lower() for p in parts[1:]]
+            daily = "daily" in words
+            timed = "timed" in words
             try:
                 room, msgs = engine.start(chat_key, verb, player, kind=kind,
-                                          daily=daily)
+                                          daily=daily, timed=timed)
             except ValueError as exc:
                 return str(exc)
             if msgs and not msgs[0].startswith("🎮"):

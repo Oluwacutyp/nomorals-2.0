@@ -48,6 +48,13 @@ ACHIEVEMENTS: tuple[Achievement, ...] = (
     # Hangman
     Achievement("hangman_5_wins", "Word Wizard", "Win 5 Hangman games", "common"),
     Achievement("hangman_perfect", "No Mistakes", "Win Hangman with 0 wrong guesses", "rare"),
+    # Case game
+    Achievement("case_first", "Rookie Sleuth", "Solve your first case", "common"),
+    Achievement("case_streak_3", "Hot Trail", "Solve 3 cases in a row", "rare"),
+    Achievement("case_streak_5", "Untouchable", "Solve 5 cases in a row", "epic"),
+    Achievement("case_expert", "Master Detective", "Solve an expert-tier case", "epic"),
+    Achievement("case_clean", "Clean Solve", "Solve a case with no strikes and no hints", "rare"),
+    Achievement("case_timed", "Beat the Clock", "Solve a timed case with a speed bonus", "rare"),
     # World
     Achievement("world_50_pop", "Booming Town", "Reach 50 population in World", "rare"),
     Achievement("world_all_buildings", "Master Builder", "Build every type of building", "epic"),
@@ -83,18 +90,14 @@ def unlock_achievement(db: Database, player_key: str, achievement_id: str) -> bo
         return False
     now = time.time()
     try:
-        db.execute(
+        cursor = db.execute(
             "INSERT OR IGNORE INTO achievements (player_key, achievement_id, unlocked_at) "
             "VALUES (?, ?, ?)",
             (player_key, achievement_id, now),
         )
-        # Check if it was actually inserted (rowcount > 0 means new unlock)
-        cursor = db.execute(
-            "SELECT unlocked_at FROM achievements WHERE player_key = ? AND achievement_id = ?",
-            (player_key, achievement_id),
-        )
-        row = cursor.fetchone()
-        return row and abs(row[0] - now) < 1.0  # just unlocked if timestamp matches
+        # INSERT OR IGNORE inserts exactly one row on a new unlock and
+        # zero when the player already has it — no timestamp guessing.
+        return cursor.rowcount > 0
     except Exception:  # noqa: BLE001
         return False
 

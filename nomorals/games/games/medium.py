@@ -8,12 +8,24 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from typing import Any
 
 from ..ai import GameMind
 from ..players import Player
 from .base import MultiGame, Room
-from .cases import CASES, random_case  # noqa: F401 - CASES kept for back-compat
+from .cases import (  # noqa: F401 - CASES kept for back-compat
+    CASES,
+    HINT_COST,
+    HISTORY_VERSION,
+    TIME_BONUS_MAX,
+    TIME_LIMITS,
+    blank_history,
+    deal_case,
+    random_case,
+    record_played,
+    score_solve,
+)
 from .easy import TRIVIA
 
 __all__ = ["MEDIUM_GAMES"]
@@ -1459,166 +1471,276 @@ class QuizDuelGame(MultiGame):
 
 class InvestigationGame(MultiGame):
     name = "case"
-    description = "a fresh case every time — evidence, interviews, " \
-                  "name the culprit"
+    description = ("a fresh case every time — evidence, interviews, name "
+                   "the culprit. 52 hand-written cases across "
+                   "easy/medium/hard/expert, skill-adaptive clues, hints, "
+                   "timed countdowns, and anti-repeat until the pool runs "
+                   "dry. the house investigates too — and someone is lying.")
     min_players = 1
     max_players = 6
     ai_seats = 1
     move_timeout = 180
-    rules = ("I open a case with four suspects — a hand-written one or a "
-             "fresh one from the case generator, graded easy/medium/hard "
-             "(harder pays more). 'clue' earns the next "
-             "piece of evidence (5 exist, each one sharper than the "
-             "last). 'ask <name>' interviews a suspect — ask everyone, "
-             "one of them is lying to you. 'accuse <name>' names the "
-             "culprit — right, you close the case; wrong, the suspect "
-             "walks and your credibility cracks (3 strikes and the "
-             "culprit vanishes). The house investigates alongside you "
-             "— sometimes it accuses first.")
+    rules = ("I open a case with four suspects — 52 hand-written cases "
+             "across easy/medium/hard/expert plus fresh generated ones, "
+             "graded by tier (harder pays more). 'clue' reveals the next "
+             "piece of evidence, sharpest last. 'ask <name>' interviews a "
+             "suspect — ask everyone, one of them is lying. 'hint' buys an "
+             "escalating nudge (−2 pts each, max 3). 'accuse <name>' names "
+             "the culprit — right and you close the case; wrong and the "
+             "suspect walks (3 strikes and the culprit vanishes). Cases "
+             "never repeat until you've seen the whole tier pool — then "
+             "it reshuffles. Struggling players get a background-check "
+             "clue; sharp ones get extra red herrings. Start with "
+             "'/game case timed' for a countdown with a speed bonus. "
+             "Solve streaks multiply your score. The house investigates "
+             "alongside you — sometimes it accuses first.")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
-        case = random_case(rng)
-        return {"case": case, "clues_shown": 0, "strikes": 0,
-                "max_strikes": 3, "asked": [], "done": False}
+    def new_state(self, rng, **kw):
+        """Deal a case for this player.
+
+        ``kw`` carries ``history`` (the player's case history dict, or
+        None → fresh) and ``timed`` (bool → countdown mode). The dealt
+        case is already skill-adapted by ``deal_case``.
+        """
+        history = kw.get("history") or blank_history()
+        timed = bool(kw.get("timed"))
+        case, tier, reshuffled = deal_case(rng, history)
+        state = {
+            "case": case,
+            "tier": tier,
+            "clues_shown": 0,
+            "strikes": 0,
+            "max_strikes": 3,
+            "asked": [],
+            "done": False,
+            "solved": False,
+            "solver": None,
+            "hints_used": 0,
+            "timed": timed,
+            "time_bonus": 0,
+            "streak_in": int(history.get("streak") or 0),
+            "reshuffled": reshuffled,
+            "history": history,
+        }
+        if timed:
+            limit = TIME_LIMITS.get(tier, 240)
+            state["time_limit"] = limit
+            state["deadline"] = time.time() + limit
+        return state
+
+    # ── per-player history (persisted via the engine) ──────────────────
+    def load_history(self, store, player):
+        """Load this player's case history from their profile."""
+        try:
+            prof = store.get(player.key)
+            hist = (prof.per_game or {}).get("case")
+            if isinstance(hist, dict) and hist.get("v") == HISTORY_VERSION:
+                return hist
+        except Exception:
+            pass
+        return blank_history()
+
+    def save_history(self, store, player, state):
+        """Record the finished game in the player's case history."""
+        history = state.get("history") or blank_history()
+        case = state.get("case") or {}
+        tier = state.get("tier") or case.get("tier") or "medium"
+        solved = state.get("solver") == player.key
+        record_played(history, case.get("id", ""), tier, solved,
+                      reshuffled=bool(state.get("reshuffled")))
+        history["hints_taken"] = (int(history.get("hints_taken") or 0)
+                                  + int(state.get("hints_used") or 0))
+        if solved and state.get("timed"):
+            history["timed_solved"] = int(history.get("timed_solved") or 0) + 1
+        try:
+            prof = store.get(player.key, name=player.name,
+                             platform=player.platform)
+            per_game = prof.per_game or {}
+            per_game["case"] = history
+            prof.per_game = per_game
+            store._upsert(prof)  # same package; no public per-game setter
+        except Exception:
+            pass
+        return history
 
     def setup(self, room, mind):
         c = room.state["case"]
-        sus = ", ".join(c["suspects"])
-        diff = c.get("difficulty", "medium")
-        fresh = " — fresh from the generator, never seen before" \
-            if c.get("generated") else ""
-        return (f"the case [{diff}]{fresh} — {c['story']}\n"
-                f"suspects: {sus}.\n"
-                f"'clue' for evidence · 'ask <name>' to interview "
-                f"them · 'accuse <name>' when you're sure.\n"
-                f"the house is looking too — and one of them is "
-                f"lying.")
-
-    # ── moves ─────────────────────────────────────────────────────────
-    def _reveal_clue(self, room: Room) -> str:
         s = room.state
-        i = s["clues_shown"]
-        if i >= len(s["case"]["clues"]):
-            return "the file is empty — you've seen everything."
+        tier = s.get("tier") or c.get("tier", "medium")
+        fresh = (" — fresh from the generator, never seen before"
+                 if c.get("generated") else "")
+        timed = " ⏱ timed" if s.get("timed") else ""
+        streak_bit = (f" · 🔥 streak {s['streak_in']}"
+                      if s.get("streak_in") else "")
+        lines = [
+            f"the case [{tier}]{timed}{fresh} — {c['story']}",
+            f"suspects: {', '.join(c['suspects'])}.",
+            (f"'clue' for evidence · 'ask <name>' to interview · "
+             f"'hint' (−{HINT_COST} pts) · 'accuse <name>' when you're sure."),
+            f"3 wrong names and the culprit walks.{streak_bit}",
+        ]
+        if s.get("reshuffled"):
+            lines.append("🔀 the case pool reshuffled — fresh faces again.")
+        if s.get("timed"):
+            lines.append(
+                f"⏱ {int(s['time_limit'])}s on the clock — faster solves "
+                f"earn up to +{TIME_BONUS_MAX.get(tier, 6)} bonus.")
+        if c.get("assisted"):
+            lines.append("📋 the file includes a background check — "
+                         "you've earned the help.")
+        if c.get("sharpened"):
+            lines.append("🌶 the file is thicker than usual — someone's "
+                         "laying false trails.")
+        lines.append("the house is looking too — and one of them is lying.")
+        return "\n".join(lines)
+
+    def _reveal_clue(self, room):
+        s = room.state
+        c = s["case"]
+        if s["clues_shown"] >= len(c["clues"]):
+            return ["that's the whole file — all "
+                    f"{len(c['clues'])} pieces. time to 'accuse <name>'."]
         s["clues_shown"] += 1
-        return f"evidence {i+1}/{len(s['case']['clues'])}: " \
-               f"{s['case']['clues'][i]}"
+        return [f"📎 clue {s['clues_shown']}/{len(c['clues'])}: "
+                f"{c['clues'][s['clues_shown'] - 1]}"]
 
-    def _interview(self, room: Room, name: str) -> list[str]:
+    def _interview(self, room, name, asked_by):
         s = room.state
         c = s["case"]
-        for suspect in c["suspects"]:
-            if suspect in name.lower() or name.lower() in suspect:
-                line = c.get("statements", {}).get(suspect, "")
-                if not line:
-                    return [f"{suspect} looks at you and says "
-                            f"nothing. try another question."]
-                first = suspect not in s.get("asked", [])
-                if first:
-                    s.setdefault("asked", []).append(suspect)
-                tag = "🎙 " if first else "🎙 (again) "
-                return [f"{tag}{suspect}: \"{line}\""]
-        return [f"who — {name!r}? the suspects are: "
-                f"{', '.join(c['suspects'])}."]
+        target = next((x for x in c["suspects"]
+                       if name and x.lower() in name.lower()), None)
+        if not target:
+            return ["who? " + " ".join(c["suspects"])]
+        line = c["statements"][target]
+        tag = "🎙 " if target not in s["asked"] else "🎙 (again) "
+        if target not in s["asked"]:
+            s["asked"].append(target)
+        return [f"{tag}{target}: \"{line}\""]
 
-    def _accuse(self, room: Room, name: str, accuser: str) -> list[str]:
+    def _accuse(self, room, name, player):
         s = room.state
         c = s["case"]
-        for suspect in c["suspects"]:
-            if suspect in name.lower() or name.lower() in suspect:
-                if suspect == c["culprit"]:
-                    s["done"] = True
-                    return [f"🏁 {accuser} closes the case — it was "
-                            f"**{suspect}**. the file is signed."]
-                s["strikes"] += 1
-                left = s["max_strikes"] - s["strikes"]
-                if left <= 0:
-                    s["done"] = True
-                    return [f"three wrong names — {suspect} walks, "
-                            f"and the culprit melts into the crowd. "
-                            f"it was {c['culprit']}. 🏁"]
-                return [f"{suspect} walks. that's strike {s['strikes']}"
-                        f" ({left} left). the case is still open."]
-        return [f"who — {name!r}? the suspects are: "
-                f"{', '.join(c['suspects'])}."]
+        accuser = player.name
+        suspect = next((x for x in c["suspects"]
+                        if name and x.lower() in name.lower()), None)
+        if not suspect:
+            return ["name a suspect: " + " ".join(c["suspects"])]
+        if suspect == c["culprit"]:
+            s["done"] = True
+            s["solved"] = True
+            s["solver"] = player.key
+            bonus = 0
+            if s.get("timed") and s.get("deadline"):
+                left = s["deadline"] - time.time()
+                if left > 0:
+                    tier = s.get("tier") or c.get("tier", "medium")
+                    frac = left / max(1, s.get("time_limit", 1))
+                    bonus = int(round(TIME_BONUS_MAX.get(tier, 6) * frac))
+            s["time_bonus"] = bonus
+            msg = (f"🏁 {accuser} closes the case — it was **{suspect}**.")
+            if bonus:
+                msg += f" ⏱ +{bonus} time bonus."
+            return [msg + " the file is signed."]
+        s["strikes"] += 1
+        if s["strikes"] >= s["max_strikes"]:
+            s["done"] = True
+            return [f"❌ {accuser} blunders — {suspect} walks, and the "
+                    f"culprit slips away. it was {c['culprit']}."]
+        return [f"❌ {accuser}: not {suspect}. "
+                f"strike {s['strikes']}/{s['max_strikes']}."]
+
+    def _hint(self, room):
+        s = room.state
+        c = s["case"]
+        used = int(s.get("hints_used") or 0)
+        if used >= 3:
+            return ["the file's dry — no more hints on this case."]
+        s["hints_used"] = used + 1
+        if used == 0:
+            return [f"🕵️ hint (−{HINT_COST} pts): two of the four have "
+                    "airtight alibis — find them in the evidence, then "
+                    "look at who's left."]
+        if used == 1:
+            hs = c.get("herring_suspect") or "someone"
+            return [f"🕵️ hint (−{HINT_COST} pts): stop chasing {hs} — "
+                    "that trail goes cold. re-read the evidence."]
+        return [f"🕵️ hint (−{HINT_COST} pts): interview everyone — exactly "
+                "one statement contradicts the evidence. that's your liar."]
 
     def on_move(self, room, player, text, mind):
-        s = room.state
-        t = text.strip().lower()
-        if t in {"clue", "evidence", "look"}:
-            return [self._reveal_clue(room)]
+        t = (text or "").strip().lower()
+        if t in ("clue", "evidence", "look"):
+            return self._reveal_clue(room)
         if t.startswith("ask"):
-            name = t[3:].strip().lstrip(":,- ").strip()
-            if not name:
-                return ["ask whom? 'ask <name>'."]
-            return self._interview(room, name)
+            return self._interview(room, t[3:], player.name)
+        if t == "hint":
+            return self._hint(room)
         if t.startswith("accuse"):
-            name = t[6:].strip()
-            if not name:
-                return ["accuse whom? 'accuse <name>'."]
-            return self._accuse(room, name, player.name)
-        return ["'clue' for evidence · 'ask <name>' to interview · "
-                "'accuse <name>' to close it."]
+            return self._accuse(room, t[6:], player)
+        return ["say 'clue', 'ask <name>', 'hint', or 'accuse <name>'."]
 
     def ai_turn(self, room, mind):
+        c = room.state["case"]
         s = room.state
-        c = s["case"]
-        shown = s["clues_shown"]
-        asked = s.get("asked", [])
-        # the house investigates: a clue every 2 rounds, interviews the
-        # suspects it hasn't heard from, and after 4 clues starts
-        # accusing with growing confidence
-        if shown % 2 == 0 and shown < len(c["clues"]):
-            return [self._reveal_clue(room)]
-        unheard = [x for x in c["suspects"] if x not in asked]
-        if shown >= 3 and unheard and mind.rng.random() < 0.4:
-            return self._interview(room, mind.rng.choice(unheard))
-        if shown >= 4 and mind.rng.random() < 0.25:
-            confidence = shown / len(c["clues"])
-            if mind.rng.random() < confidence:
-                return self._accuse(room, c["culprit"], room.current.name)
-            wrong = [x for x in c["suspects"] if x != c["culprit"]]
-            return self._accuse(room, mind.rng.choice(wrong),
-                                room.current.name)
-        return []
+        known = s["clues_shown"]
+        asked = set(s["asked"])
+        all_sus = list(c["suspects"])
+        if known < len(c["clues"]):
+            msgs = self._reveal_clue(room)
+        else:
+            todo = [x for x in all_sus if x not in asked]
+            msgs = self._interview(room, todo[0], "house") if todo else []
+        # If the smoking gun is on the table and we've interviewed
+        # everyone, the house puts it together.
+        if (s["clues_shown"] == len(c["clues"])
+                and len(s["asked"]) == len(all_sus)):
+            msgs = msgs + self._accuse(room, c["culprit"], room.current)
+        return msgs
 
     def is_over(self, room):
-        return room.state.get("done", False)
+        return bool(room.state["done"])
 
     def winner(self, room):
         s = room.state
-        if not s.get("done"):
-            return None
-        # the house closed it, or the culprit escaped
-        if s["strikes"] >= s["max_strikes"]:
-            return Player(key="ai:case", platform="ai",
-                          name="The House", is_ai=True)
-        return "draw"  # a human closed it (the final_message carries it)
+        if s.get("solver"):
+            for p in room.players:
+                if p.key == s["solver"]:
+                    return p
+        return None
 
     def final_message(self, room, mind):
         s = room.state
         c = s["case"]
-        if s.get("done") and s["strikes"] < s["max_strikes"]:
-            return "🏁 case closed — " + (
-                "you did it, the table is in the record books."
-                if not room.current else
-                f"{c['culprit']} is in custody.")
+        if s["done"] and s["strikes"] < s["max_strikes"]:
+            return ("🏁 case closed — the detective who solved it gets the "
+                    "glory, the evidence, and the points.")
         return super().final_message(room, mind)
 
     def score(self, room, player):
         s = room.state
-        base = {"easy": 3, "medium": 5, "hard": 8}.get(
-            s.get("case", {}).get("difficulty", "medium"), 5)
-        return max(1, base - s.get("strikes", 0)) + \
-            (1 if s.get("asked") else 0)  # interviewing pays a little
+        c = s.get("case") or {}
+        tier = s.get("tier") or c.get("tier") or c.get("difficulty", "medium")
+        if not s.get("solved"):
+            # show up: 1 if they interviewed, else 0
+            return 1 if s.get("asked") else 0
+        return score_solve(tier, s.get("strikes", 0), s.get("hints_used", 0),
+                           s.get("streak_in", 0), s.get("time_bonus", 0))
 
     def describe_state(self, room):
         s = room.state
+        c = s.get("case") or {}
         asked = s.get("asked", [])
-        return (f"evidence: {s['clues_shown']}/"
-                f"{len(s['case']['clues'])} · interviewed: "
-                f"{len(asked)}/{len(s['case']['suspects'])} · strikes: "
-                f"{s['strikes']}/{s['max_strikes']}")
+        bits = [f"evidence: {s.get('clues_shown', 0)}/"
+                f"{len(c.get('clues', ()))}",
+                f"interviewed: {len(asked)}/{len(c.get('suspects', ()))}",
+                f"strikes: {s.get('strikes', 0)}/{s.get('max_strikes', 3)}"]
+        if s.get("hints_used"):
+            bits.append(f"hints: {s['hints_used']}")
+        if s.get("timed") and s.get("deadline"):
+            bits.append(f"⏱ {max(0, int(s['deadline'] - time.time()))}s left")
+        if s.get("streak_in"):
+            bits.append(f"🔥 streak {s['streak_in']}")
+        return " · ".join(bits)
 
 
 MEDIUM_GAMES: tuple[MultiGame, ...] = (

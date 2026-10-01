@@ -45,6 +45,26 @@ def _new_state_accepts_kwargs(game: MultiGame) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def _new_state_kwargs(game: MultiGame, **kw: Any) -> dict[str, Any]:
+    """Keep only the kwargs a game's ``new_state`` will accept.
+
+    Extra flags (e.g. ``timed``, ``history``) are opt-in: games whose
+    ``new_state`` takes ``**kw`` get everything; the rest only get the
+    named parameters they declare. Everyone else plays as always.
+    """
+    try:
+        params = inspect.signature(game.new_state).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD
+           for p in params.values()):
+        return dict(kw)
+    named = {name for name, p in params.items()
+             if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                           inspect.Parameter.KEYWORD_ONLY)}
+    return {k: v for k, v in kw.items() if k in named}
+
+
 def _scheduler_worker(engine_ref: "weakref.ref") -> None:
     """Ticker thread target. Holds only a weakref + the wake event
     (neither references the engine), so a dead engine's thread dies at
@@ -233,7 +253,8 @@ class GameEngine:
 
     def start(self, chat_key: str, game_name: str,
               host: Player, *, kind: str = "dm",
-              platform: str = "", daily: bool = False) -> tuple[Room, list[str]]:
+              platform: str = "", daily: bool = False,
+              timed: bool = False) -> tuple[Room, list[str]]:
         """Open a room and seat the host (plus AI seats).
 
         Returns (room, messages_to_send). Raises ValueError when the
@@ -262,12 +283,20 @@ class GameEngine:
             )
             room.players = [host]
             self._fill_ai(room, game)
-            # daily is an opt-in: only handed to games whose new_state
-            # accepts kwargs (hangman).  The rest play as always.
-            if daily and _new_state_accepts_kwargs(game):
-                room.state = game.new_state(game.rng(room), daily=True)
-            else:
-                room.state = game.new_state(game.rng(room))
+            # daily/timed/history are opt-in: only handed to games
+            # whose new_state accepts kwargs (hangman: daily; case:
+            # history + timed). The rest play as always.
+            history = None
+            load = getattr(game, "load_history", None)
+            if load is not None and _new_state_accepts_kwargs(game):
+                try:
+                    history = load(self.store, host)
+                except Exception:  # noqa: BLE001
+                    _log.debug("history load failed", exc_info=True)
+            room.state = game.new_state(
+                game.rng(room),
+                **_new_state_kwargs(
+                    game, daily=daily, timed=timed, history=history))
             self._mirror_inventory(room)
             self._rooms[chat_key] = room
             self._by_id[room.id] = room
@@ -595,6 +624,16 @@ class GameEngine:
                                           won=bool(won), score=score)
                     except Exception:  # noqa: BLE001
                         _log.debug("game stats update failed", exc_info=True)
+                    # persist per-player history (case game: anti-repeat,
+                    # skill adaptation, streaks)
+                    try:
+                        save = getattr(game, "save_history", None)
+                        if save is not None:
+                            hist = save(self.store, p, room.state)
+                            room.state.setdefault(
+                                "player_histories", {})[p.key] = hist
+                    except Exception:  # noqa: BLE001
+                        _log.debug("history save failed", exc_info=True)
                     # award achievements
                     try:
                         new_ach = self._award_achievements(
@@ -799,6 +838,28 @@ class GameEngine:
             reels = room.state.get("reels", [])
             if len(reels) == 3 and reels[0] == reels[1] == reels[2] == "💎":
                 grant("slots_jackpot")
+
+        # Case achievements
+        elif game_name == "case":
+            hist = ((room.state.get("player_histories") or {})
+                    .get(player.key) or {})
+            if won and room.state.get("solved"):
+                grant("case_first")
+                streak = int(hist.get("streak") or 0)
+                if streak >= 3:
+                    grant("case_streak_3")
+                if streak >= 5:
+                    grant("case_streak_5")
+                tier = (room.state.get("tier")
+                        or (room.state.get("case") or {}).get("tier"))
+                if tier == "expert":
+                    grant("case_expert")
+                if (room.state.get("strikes", 0) == 0
+                        and room.state.get("hints_used", 0) == 0):
+                    grant("case_clean")
+                if (room.state.get("timed")
+                        and int(room.state.get("time_bonus", 0)) > 0):
+                    grant("case_timed")
 
         return newly
 

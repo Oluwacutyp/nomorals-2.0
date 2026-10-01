@@ -2,15 +2,15 @@
 expanded content pools for the lighter games.
 
 Covers:
-- CASES: 30 hand-written cases, every one airtight (culprit in
-  suspects, 5 clues, smoking gun names the culprit, every suspect has
-  a statement).
+- CASES: 52 hand-written cases (easy/medium/hard/expert), every one
+  airtight (culprit in suspects, 5 clues, smoking gun names the
+  culprit, every suspect has a statement) and fair-play verified.
 - generate_case: seeded determinism, airtightness across 200 seeds x
-  3 difficulties, no unfilled template slots, difficulty honored.
+  4 difficulties, no unfilled template slots, difficulty honored.
 - random_case: bank/generator mix, id + difficulty on every case,
   anti-repeat window.
 - InvestigationGame end-to-end through the engine (generated case can
-  be closed; strikes still escape; scoring scales with difficulty).
+  be closed; strikes still escape; scoring scales with tier).
 - Content pools: wyrr 60, auction 36, spy 62, trivia 143.
 """
 from __future__ import annotations
@@ -74,9 +74,9 @@ def assert_airtight(test: unittest.TestCase, case: dict) -> None:
 # ── the bank ──────────────────────────────────────────────────────────────
 
 class BankTests(unittest.TestCase):
-    def test_bank_holds_thirty_hand_written_cases(self):
-        self.assertEqual(BANK_SIZE, 30)
-        self.assertEqual(len(CASES), 30)
+    def test_bank_holds_fifty_two_hand_written_cases(self):
+        self.assertEqual(BANK_SIZE, 52)
+        self.assertEqual(len(CASES), 52)
 
     def test_every_bank_case_is_airtight(self):
         for i, case in enumerate(CASES):
@@ -103,11 +103,11 @@ class GeneratorTests(unittest.TestCase):
 
     def test_airtight_across_seeds_and_difficulties(self):
         for seed in range(200):
-            for difficulty in ("easy", "medium", "hard"):
+            for difficulty in ("easy", "medium", "hard", "expert"):
                 with self.subTest(seed=seed, difficulty=difficulty):
                     case = generate_case(random.Random(seed), difficulty)
                     assert_airtight(self, case)
-                    self.assertEqual(case["difficulty"], difficulty)
+                    self.assertEqual(case["tier"], difficulty)
                     self.assertTrue(case["generated"])
 
     def test_culprit_statement_denies_the_gun(self):
@@ -197,20 +197,35 @@ class InvestigationGameTests(unittest.TestCase):
         self.assertIsNone(self.engine.live("telegram:strikes"))
         self.assertTrue(any("walks" in m for m in msgs))
 
-    def test_scoring_scales_with_difficulty(self):
+    def test_scoring_scales_with_tier(self):
+        from nomorals.games.games.cases import TIER_BASE_SCORE
         from nomorals.games.games.medium import InvestigationGame
 
         game = InvestigationGame()
         scores = {}
-        for difficulty, base in (("easy", 3), ("medium", 5), ("hard", 8)):
+        for tier in ("easy", "medium", "hard", "expert"):
             room = type("R", (), {})()
-            room.state = {"case": {"difficulty": difficulty},
-                          "strikes": 0, "asked": ["x"]}
-            player = ADA
-            scores[difficulty] = game.score(room, player)
-            self.assertEqual(scores[difficulty], base + 1)
+            room.state = {"case": {"tier": tier}, "tier": tier,
+                          "strikes": 0, "hints_used": 0, "streak_in": 0,
+                          "time_bonus": 0, "solved": True, "asked": ["x"]}
+            scores[tier] = game.score(room, ADA)
+            self.assertEqual(scores[tier], TIER_BASE_SCORE[tier])
         self.assertLess(scores["easy"], scores["medium"])
         self.assertLess(scores["medium"], scores["hard"])
+        self.assertLess(scores["hard"], scores["expert"])
+        # strikes and hints cost points
+        room.state = {"case": {"tier": "medium"}, "tier": "medium",
+                      "strikes": 2, "hints_used": 1, "streak_in": 0,
+                      "time_bonus": 0, "solved": True, "asked": ["x"]}
+        self.assertEqual(game.score(room, ADA),
+                         TIER_BASE_SCORE["medium"] - 2 - 2)
+        # unsolved: 1 if they interviewed, else 0
+        room.state = {"case": {"tier": "medium"}, "tier": "medium",
+                      "solved": False, "asked": ["x"], "strikes": 3}
+        self.assertEqual(game.score(room, ADA), 1)
+        room.state = {"case": {"tier": "medium"}, "tier": "medium",
+                      "solved": False, "asked": [], "strikes": 0}
+        self.assertEqual(game.score(room, ADA), 0)
 
     def test_interview_then_accuse_flow(self):
         self.engine.start("telegram:flow", "case", ADA)
