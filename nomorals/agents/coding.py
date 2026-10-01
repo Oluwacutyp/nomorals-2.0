@@ -22,6 +22,8 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -32,6 +34,8 @@ from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..llm.base import LLMResponse, Message, SamplingParams
 from ..tools.filesystem import safe_path
+from .patch import apply_unified_diff, parse_unified_diff
+from .repo_map import build_repo_map
 
 _log = get_logger(__name__)
 
@@ -97,6 +101,24 @@ def _parse_json_block(text: str) -> Any:
         return json.loads(raw.strip())
     except (ValueError, TypeError):
         return None
+
+
+_PATCH_BLOCK = re.compile(r"```(?:diff|patch)[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def _parse_patch_block(text: str) -> str | None:
+    """Pull the first fenced ```diff (or ```patch) block out of a model
+    reply.  Returns the raw unified-diff text, or None when there is no
+    usable diff block."""
+    if not text:
+        return None
+    match = _PATCH_BLOCK.search(text)
+    if not match:
+        return None
+    patch_text = match.group(1).strip()
+    if not patch_text or "--- " not in patch_text:
+        return None
+    return patch_text
 
 
 def _parse_edits_block(text: str) -> list[dict[str, str]] | None:
@@ -194,6 +216,10 @@ class CodingAgent:
         # Override in tests to isolate the error-recall index.
         self._recall_path: str | Path | None = None
         self._recall_index: Any | None = None
+        # Git mission snapshot (snapshot()/rollback()); None when the
+        # workdir is not a git repo or no mission is in flight.
+        self._mission_snapshot: dict[str, Any] | None = None
+        self._mission_touched: list[str] = []
 
     def _error_recall(self) -> Any:
         """The Phase C embedding recall index (lazy, cached, best-effort)."""
@@ -213,6 +239,177 @@ class CodingAgent:
                 raise ValueError(f"path {rel!r} escapes project root {self._root}") from exc
             return candidate
         return safe_path(self.context, rel)
+
+    def _git(self, *args: str, cwd: Path | None = None,
+             timeout: int = 60) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=cwd or self._resolve("."),
+            capture_output=True, text=True, timeout=timeout)
+
+    def _is_git_repo(self, workdir: Path) -> bool:
+        try:
+            proc = self._git("rev-parse", "--is-inside-work-tree",
+                             cwd=workdir)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.debug("snapshot: git probe failed: %s", exc)
+            return False
+        return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+    # ── git mission rollback ──────────────────────────────────────────
+    def snapshot(self) -> dict[str, Any] | None:
+        """Snapshot the workdir before a mission starts.
+
+        When the workdir is a git repo with a dirty tree, the dirty state
+        is stashed under a mission id; otherwise the current HEAD is
+        recorded.  Returns the snapshot dict, or None when the workdir is
+        not a git repo (debug-logged, never a crash).
+        """
+        workdir = self._resolve(".")
+        if not self._is_git_repo(workdir):
+            _log.debug("snapshot: %s is not a git repo — skipping",
+                       workdir)
+            self._mission_snapshot = None
+            return None
+        mission_id = new_short_id("mission")
+        head = self._git("rev-parse", "HEAD", cwd=workdir).stdout.strip()
+        status = self._git("status", "--porcelain", cwd=workdir).stdout
+        dirty = bool(status.strip())
+        # Untracked files/dirs present BEFORE the mission: anything
+        # untracked that appears later is a mission side effect and gets
+        # removed by rollback().
+        untracked_before = sorted(
+            line[3:].strip().strip('"')
+            for line in status.splitlines()
+            if line.startswith("??"))
+        stashed = False
+        if dirty:
+            proc = self._git("stash", "push", "-m",
+                             f"coding-mission {mission_id}", cwd=workdir)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    "mission snapshot failed: "
+                    f"git stash push: {proc.stderr.strip()}")
+            stashed = True
+            _log.info("mission %s: stashed dirty workdir", mission_id)
+        self._mission_snapshot = {
+            "mission_id": mission_id, "head": head,
+            "stashed": stashed, "repo": str(workdir),
+            "untracked_before": untracked_before,
+        }
+        self._mission_touched = []
+        return self._mission_snapshot
+
+    def rollback(self) -> bool:
+        """Restore the pre-mission state captured by snapshot().
+
+        Reverts exactly the files the mission touched (tracked files via
+        ``git checkout --``, mission-created new files by deletion), then
+        pops the mission stash when one was taken.  Files the mission
+        never touched are never modified.  Returns True on success, False
+        when any step failed (the failure is logged loudly — callers
+        surface it in the mission error).
+        """
+        snap = self._mission_snapshot
+        if not snap:
+            _log.debug("rollback: no snapshot — nothing to restore")
+            return True
+        workdir = Path(snap["repo"])
+        ok = True
+        for rel in self._mission_touched:
+            target = workdir / rel
+            try:
+                target.resolve().relative_to(workdir.resolve())
+            except ValueError:
+                _log.error("rollback: %r escapes repo — skipping", rel)
+                ok = False
+                continue
+            try:
+                untracked = (self._git("ls-files", "--error-unmatch", rel,
+                                      cwd=workdir).returncode != 0)
+                if untracked:
+                    # Mission-created file: checkout cannot restore it,
+                    # so it must be removed for a true rollback.
+                    if target.is_file():
+                        target.unlink()
+                        _log.info("rollback: removed mission-created %s",
+                                  rel)
+                else:
+                    proc = self._git("checkout", "--", rel, cwd=workdir)
+                    if proc.returncode != 0:
+                        raise RuntimeError(proc.stderr.strip())
+            except (OSError, RuntimeError,
+                    subprocess.SubprocessError) as exc:
+                _log.error("rollback: failed to revert %s: %s", rel, exc)
+                ok = False
+        if snap.get("stashed"):
+            try:
+                proc = self._git("stash", "pop", cwd=workdir)
+            except (OSError, subprocess.SubprocessError) as exc:
+                _log.error("rollback: git stash pop crashed: %s", exc)
+                return False
+            if proc.returncode != 0:
+                _log.error("rollback: git stash pop failed: %s",
+                           (proc.stderr.strip() or proc.stdout.strip()))
+                return False
+            _log.info("mission %s: stash popped", snap.get("mission_id"))
+        # Remove untracked files/dirs the mission created as side effects
+        # (.edit_backups, __pycache__, …).  Anything untracked BEFORE the
+        # mission is in the snapshot set and is never touched.
+        try:
+            status = self._git("status", "--porcelain",
+                               cwd=workdir).stdout
+            current = {line[3:].strip().strip('"')
+                       for line in status.splitlines()
+                       if line.startswith("??")}
+            before = set(snap.get("untracked_before", []))
+            for rel in sorted(current - before):
+                target = workdir / rel
+                try:
+                    target.resolve().relative_to(workdir.resolve())
+                except ValueError:
+                    _log.error("rollback: %r escapes repo — skipping", rel)
+                    ok = False
+                    continue
+                try:
+                    if target.is_dir() and not target.is_symlink():
+                        shutil.rmtree(target)
+                    elif target.is_file() or target.is_symlink():
+                        target.unlink()
+                    else:
+                        continue
+                    _log.info("rollback: removed mission side effect %s",
+                              rel)
+                except OSError as exc:
+                    _log.error("rollback: failed to remove %s: %s",
+                               rel, exc)
+                    ok = False
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.error("rollback: untracked cleanup failed: %s", exc)
+            ok = False
+        self._mission_snapshot = None
+        self._mission_touched = []
+        return ok
+
+    def _rollback_after_failure(self, changed: list[str]) -> str:
+        """Roll back a failed mission that made changes.
+
+        Returns a warning suffix for the mission error ("" when the
+        rollback succeeded or there was nothing to roll back).
+        """
+        if not changed:
+            return ""
+        self._mission_touched = list(dict.fromkeys(changed))
+        try:
+            rolled_back = self.rollback()
+        except Exception as exc:  # noqa: BLE001 — never mask the mission error
+            _log.error("mission rollback crashed: %s", exc)
+            return (" | WARNING: mission rollback crashed — "
+                    "working tree may be dirty")
+        if not rolled_back:
+            return (" | WARNING: mission rollback failed — "
+                    "working tree may be dirty")
+        _log.info("failed mission rolled back %d file(s)", len(changed))
+        return ""
 
     def _explore_reads(
         self, plan: list[dict[str, Any]],
@@ -314,6 +511,15 @@ class CodingAgent:
             pass
 
         workdir = self._resolve(".")
+        # Git mission rollback: snapshot the workdir before any change is
+        # made.  A failed snapshot must never kill the mission — it just
+        # means rollback() becomes a no-op (loudly logged).
+        try:
+            self.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("mission snapshot failed — rollback disabled: %s",
+                         exc)
+            self._mission_snapshot = None
         editor = EditLoop(agent=None, project_root=str(workdir))
 
         # ── plan step: which files change and why ──
@@ -355,10 +561,12 @@ class CodingAgent:
                         (seed_code if seeded else texts[rel] or ""),
                         file_errors[rel] or last_error, attempt, seeded=seeded)
                     if not code:
+                        rb_note = self._rollback_after_failure(changed)
                         return CodingResult(
                             ok=False,
                             iterations=attempt - 1,
-                            error="model returned no code block (check the active provider in /status)",
+                            error=("model returned no code block (check the "
+                                   "active provider in /status)") + rb_note,
                             seconds=time.perf_counter() - started,
                         )
                     if attempt == 1:
@@ -366,13 +574,35 @@ class CodingAgent:
                     path.write_text(code, encoding="utf-8")
                     texts[rel] = code
                 else:
-                    edits = self._draft_edits(
+                    change = self._draft_change(
                         draft_task, rel, texts[rel] or "",
-                        file_errors[rel] or last_error, attempt)
-                    if edits is None:
+                        file_errors[rel] or last_error, attempt, workdir)
+                    if change is None:
                         file_errors[rel] = "model returned no usable edits"
                         budgets[rel] -= 1
                         continue
+                    kind, payload = change
+                    if kind == "patch":
+                        # Unified-diff protocol: the model shipped a whole
+                        # diff (possibly multi-file); apply it directly.
+                        patch_ok, patch_err = self._apply_model_patch(
+                            payload, workdir, texts, diffs, touched, changed)
+                        budgets[rel] -= 1
+                        if not patch_ok:
+                            file_errors[rel] = patch_err
+                            continue
+                        file_errors[rel] = ""
+                        # Phase B: the harsh reviewer runs over patch diffs
+                        # too, not just surgical-edit diffs.
+                        if diffs.get(rel):
+                            flaws = self._review_flaws(
+                                draft_task, diffs[rel])
+                            if flaws:
+                                file_errors[rel] = (
+                                    "reviewer found flaws in the applied "
+                                    "diff: " + "; ".join(flaws))
+                        continue
+                    edits = payload
                     if not edits:
                         continue  # model judges no change needed
                     apply_errors: list[str] = []
@@ -547,6 +777,8 @@ class CodingAgent:
         error = f"still failing after {rounds} attempts: {last_error[-500:]}"
         if stuck:
             error += f" | files that did not converge: {', '.join(stuck)}"
+        # Failed mission after making changes: restore the pre-mission state.
+        error += self._rollback_after_failure(changed)
         # Phase C: report-only critic on exhausted runs — the diff is still
         # reviewed, but no rework is scheduled.
         exhausted_objections: list[str] = []
@@ -582,8 +814,20 @@ class CodingAgent:
             '"new_file": false}]} — paths are relative to the project root. '
             "No prose outside the block."
         )
+        # Repo map as mission context: the planner sees the real layout
+        # (top-level dirs, file purposes, symbol counts) instead of
+        # guessing paths.  Best-effort — the mission never breaks over it.
+        user = f"Task: {task}"
+        try:
+            repo_map = build_repo_map(workdir)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("repo map failed: %s", exc)
+            repo_map = ""
+        if repo_map:
+            user += ("\n\nRepository map — real layout, prefer these paths "
+                     "when choosing files:\n" + repo_map)
         response = self.router.chat(
-            [Message.system(system), Message.user(f"Task: {task}")],
+            [Message.system(system), Message.user(user)],
             SamplingParams(temperature=0.2),
         )
         specs = self._default_plan(default, workdir)
@@ -618,24 +862,29 @@ class CodingAgent:
         return [{"path": default, "why": "default target (plan step fallback)",
                  "new_file": not (workdir / default).is_file()}]
 
-    def _draft_edits(self, task: str, rel: str, current: str,
-                     last_error: str, attempt: int) -> list[dict[str, str]] | None:
-        """Ask the model for surgical edits to an existing file.
+    def _draft_change(self, task: str, rel: str, current: str,
+                      last_error: str, attempt: int,
+                      workdir: Path) -> tuple[str, Any] | None:
+        """One model call for an existing file; two answer protocols.
 
-        Returns a list of ``{old_text, new_text}`` (possibly empty when the
-        model judges no change is needed), or None when the model gave
-        nothing usable.
+        Returns ``("edits", [{old_text, new_text}])`` for the surgical-edit
+        protocol, ``("patch", patch_text)`` for a unified diff (the caller
+        applies it via :meth:`_apply_model_patch`), or None when the model
+        gave nothing usable.
         """
         system = (
             "You are a surgical code editor. Fix the file below with minimal "
-            "exact-text replacements. Respond with EXACTLY ONE fenced ```json "
-            "block shaped like "
+            "changes. Answer with EXACTLY ONE fenced block, either:\n"
+            "(a) a ```json block shaped like "
             '{"edits": [{"old_text": "<exact text copied verbatim from the file>", '
-            '"new_text": "<replacement>"}]}. old_text must appear EXACTLY as '
+            '"new_text": "<replacement>"}]} — old_text must appear EXACTLY as '
             "written in the file (copy it verbatim, including whitespace) and "
-            "should be unique — include surrounding context lines. Change "
-            "only what the task needs. If no change is needed, return "
-            '{"edits": []}. No prose outside the block.'
+            "should be unique — include surrounding context lines; or\n"
+            "(b) a ```diff block holding a standard unified diff — use this "
+            "for multi-file or large changes; paths are relative to the "
+            "project root.\n"
+            'For (a), if no change is needed, return {"edits": []}. '
+            "No prose outside the block."
         )
         user = (f"Task: {task}\n\nFile: {rel}\n\nCurrent content:\n```\n"
                 f"{current}\n```\n\nAttempt {attempt}.")
@@ -658,7 +907,61 @@ class CodingAgent:
             _log.warning("coding agent: edit-model call failed: %s",
                          getattr(response, "error", "?"))
             return None
-        return _parse_edits_block(response.text)
+        edits = _parse_edits_block(response.text)
+        if edits is not None:
+            return ("edits", edits)
+        patch_text = _parse_patch_block(response.text)
+        if patch_text is not None:
+            return ("patch", patch_text)
+        return None
+
+    def _apply_model_patch(self, patch_text: str, workdir: Path,
+                           texts: dict[str, str | None],
+                           diffs: dict[str, str], touched: list[str],
+                           changed: list[str]) -> tuple[bool, str]:
+        """Apply a model-supplied unified diff; refresh texts/diffs/touched.
+
+        Returns ``(True, "")`` on full success, ``(False, reason)`` when the
+        patch is unparseable, rejected, or any hunk failed (per-file
+        all-or-nothing is enforced by apply_unified_diff).
+        """
+        try:
+            file_patches = parse_unified_diff(patch_text)
+        except ValueError as exc:
+            return False, f"unparseable unified diff: {exc}"
+        if not file_patches:
+            return False, "unified diff contained no file patches"
+        before: dict[str, str] = {}
+        for fp in file_patches:
+            try:
+                p = self._resolve(fp.target_rel)
+            except ValueError as exc:
+                return False, f"patch target rejected: {exc}"
+            before[fp.target_rel] = (p.read_text(encoding="utf-8")
+                                    if p.is_file() else "")
+        try:
+            result = apply_unified_diff(patch_text, workdir)
+        except ValueError as exc:
+            return False, f"patch rejected: {exc}"
+        failed = result["failed_hunks"]
+        if failed:
+            detail = "; ".join(
+                f"{h['file']} hunk {h['hunk']}: {h['reason']}"
+                for h in failed[:5])
+            return False, f"patch application failed: {detail}"
+        for target_rel in result["applied_files"]:
+            p = self._resolve(target_rel)
+            after = p.read_text(encoding="utf-8") if p.is_file() else ""
+            texts[target_rel] = after
+            diff_text = _unified_diff(before.get(target_rel, ""), after,
+                                      target_rel)
+            if diff_text.strip():
+                diffs[target_rel] = diff_text
+                if target_rel not in touched:
+                    touched.append(target_rel)
+                if target_rel not in changed:
+                    changed.append(target_rel)
+        return True, ""
 
     def _review_flaws(self, task: str, text: str,
                       focus: str | None = None) -> list[str]:

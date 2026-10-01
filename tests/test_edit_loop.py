@@ -12,13 +12,17 @@ All tests are offline and hermetic (tmp dirs only).
 from __future__ import annotations
 
 import asyncio
+import random
 import shutil
+import subprocess
 import tempfile
 import types
 import unittest
+from difflib import unified_diff
 from pathlib import Path
 from unittest import mock
 
+from nomorals.core.diff import apply_unified_diff as core_apply_unified_diff
 from nomorals.tools import edit_loop
 from nomorals.tools.edit_loop import (
     DiffApplyError,
@@ -556,6 +560,74 @@ class TestPurePythonApplier(unittest.TestCase):
         )
         out = apply_unified_diff(diff, {"f.txt": "a\nb\nc\nd\ne"})
         self.assertEqual(out["f.txt"], "a\nB\nc\nd\nE")
+
+
+@unittest.skipUnless(shutil.which("patch"), "GNU patch binary not available")
+class TestDifferentialVsGnuPatch(unittest.TestCase):
+    """The canonical engine must agree with GNU patch, including on the
+    adjacent/overlapping hunks difflib emits (a cursor-model applier cannot
+    express those)."""
+
+    TRIALS = 120
+
+    def _gnu_apply(self, old_text: str, diff: str) -> str | None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "f.txt").write_text(old_text)
+            (root / "t.diff").write_text(diff)
+            r = subprocess.run(
+                ["patch", "-p1", "--no-backup-if-mismatch", "-i", "t.diff"],
+                cwd=td, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return None  # GNU itself refuses this diff; not our problem
+            return (root / "f.txt").read_text()
+
+    def test_random_diffs_match_gnu(self):
+        rng = random.Random(20261001)
+        vocab = ["alpha", "beta", "gamma", "delta", "import os", "x = 1",
+                 "return None", ""]
+        compared = 0
+        for _ in range(self.TRIALS):
+            old = [rng.choice(vocab) for _ in range(rng.randint(1, 12))]
+            new = list(old)
+            for _ in range(rng.randint(1, 4)):
+                op = rng.choice(["chg", "ins", "del"])
+                pos = rng.randrange(len(new) + 1) if new else 0
+                if op == "chg" and new:
+                    new[pos % len(new)] = rng.choice(vocab)
+                elif op == "ins":
+                    new.insert(pos, rng.choice(vocab))
+                elif new:
+                    del new[pos % len(new)]
+            old_text = "\n".join(old) + ("\n" if rng.random() < 0.8 else "")
+            new_text = "\n".join(new) + ("\n" if rng.random() < 0.8 else "")
+            diff = "".join(unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True), "a/f.txt", "b/f.txt"))
+            if not diff.strip():
+                continue
+            gnu = self._gnu_apply(old_text, diff)
+            if gnu is None:
+                continue
+            ours = core_apply_unified_diff(diff, {"f.txt": old_text})["f.txt"]
+            self.assertEqual(ours, gnu, f"divergence on diff:\n{diff}")
+            compared += 1
+        self.assertGreater(compared, 50, "too few comparable trials ran")
+
+    def test_adjacent_hunks_match_gnu(self):
+        # difflib-style adjacent hunks: hunk 2's stated position overlaps
+        # the region hunk 1 already rewrote.
+        old_text = "p = 'a'\nq = 'b'\n"
+        diff = (
+            "--- a/f.txt\n+++ b/f.txt\n"
+            "@@ -1,2 +1,2 @@\n-p = 'a'\n+p = 'A'\n q = 'b'\n"
+            "@@ -2,1 +2,2 @@\n q = 'b'\n+r = 'new'\n"
+        )
+        gnu = self._gnu_apply(old_text, diff)
+        self.assertIsNotNone(gnu)
+        ours = core_apply_unified_diff(diff, {"f.txt": old_text})["f.txt"]
+        self.assertEqual(ours, gnu)
+        self.assertEqual(ours, "p = 'A'\nq = 'b'\nr = 'new'\n")
 
 
 class TestApplyPatchTool(unittest.TestCase):
