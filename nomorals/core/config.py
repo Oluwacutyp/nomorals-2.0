@@ -318,6 +318,10 @@ class ArenaSettings:
     build: bool = False
     research_pages: int = 3
     interval_hours: int = 24
+    #: Topic anti-repeat window: no topic repeats within the last N
+    #: served. Env: NM_ARENA_ANTI_REPEAT_WINDOW. A per-DB kv override
+    #: (arena.anti_repeat_window) wins when set.
+    anti_repeat_window: int = 10
 
 
 @dataclass
@@ -697,6 +701,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_ARENA_BUILD": "arena.build",
     "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",
     "NM_ARENA_RESEARCH_PAGES": "arena.research_pages",
+    "NM_ARENA_ANTI_REPEAT_WINDOW": "arena.anti_repeat_window",
     "NM_PARTNER_PLATFORMS": "partner.platforms",
     "NM_PARTNER_OWNER_CHATS": "partner.owner_chats",
     "NM_PARTNER_PERSONALITY": "partner.personality",

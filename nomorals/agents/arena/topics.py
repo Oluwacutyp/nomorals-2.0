@@ -6,15 +6,27 @@ The arena used to pick from 48 static one-liners. Now:
   difficulty grade (1 = accessible, 2 = practitioner, 3 = deep) and
   keyword tags. ``/arena topics`` renders the full table;
   ``/arena topics <category>`` drills into one.
+* **Topic packs** — the bank is a registry of packs. The built-in
+  tables ship as the ``"core"`` pack; new packs register with
+  ``register_topic_pack(name, topics, weights)`` where ``topics`` is
+  ``{category: [entries]}`` (entries are ``_t`` dicts or plain
+  strings) and ``weights`` is an optional ``{category: multiplier}``.
+  ``TOPIC_BANK`` is the merged view of every registered pack.
 * **Personalized sampling** — ``sample_topic`` takes an interest
   ``profile`` (category → weight) built by
   ``nomorals/agents/arena/activity.py`` from what the user actually
-  does: recent searches, arena digest history, custom topics, goals.
-  Categories the user engages with get picked more often.
+  does: recent searches, arena digest history, custom topics, goals,
+  command usage. Categories the user engages with get picked more
+  often; pack weights multiply on top.
 * **Random rotation** — ``surprise_topic`` ignores the profile
-  entirely (pure random, optional seed), and every sampler skips
-  topics already in ``arena_knowledge`` plus an anti-repeat window on
-  recently served categories.
+  entirely (pure random, optional seed). Every sampler skips topics
+  already in ``arena_knowledge``, deprioritizes recently served
+  categories, and enforces a **topic anti-repeat window**: no topic
+  repeats within the last N served (default 10, configurable via
+  ``anti_repeat`` / ``set_anti_repeat_window`` / the
+  ``arena.anti_repeat_window`` setting). The window is persisted in
+  ``kv_store`` so it survives restarts; when the eligible pool is
+  exhausted the window reshuffles (clears) instead of failing.
 
 ``TOPIC_BANK`` values are dicts (``t`` = text, ``d`` = difficulty,
 ``tags`` = keywords); the topic *text* stays the dedup identity so
@@ -23,19 +35,34 @@ old ``arena_knowledge`` rows keep working.
 
 from __future__ import annotations
 
+import json
 import random
+import threading
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
     "CATEGORIES",
+    "DEFAULT_ANTI_REPEAT",
     "TOPIC_BANK",
+    "TopicPack",
+    "all_categories",
+    "anti_repeat_window",
     "bank_size",
     "category_stats",
+    "category_table",
+    "clear_recent_topics",
+    "recent_topics",
+    "register_topic_pack",
     "sample_topic",
+    "set_anti_repeat_window",
     "surprise_topic",
+    "topic_packs",
     "topic_text",
     "topics_in",
     "topics_table",
+    "unregister_topic_pack",
 ]
 
 CATEGORIES = (
@@ -60,7 +87,13 @@ def _t(text: str, difficulty: int, *tags: str) -> dict[str, Any]:
     return {"t": text, "d": difficulty, "tags": tags}
 
 
-TOPIC_BANK: dict[str, list[dict[str, Any]]] = {
+def topic_text(entry: dict[str, Any]) -> str:
+    """The dedup identity of a topic entry — its text."""
+    return str(entry.get("t", ""))
+
+
+# The built-in tables, shipped as the "core" topic pack (registered below).
+_CORE_TOPICS: dict[str, list[dict[str, Any]]] = {
     "web": [
         _t("how CDN cache invalidation actually works", 2, "cdn", "caching", "edge"),
         _t("why HTTP/3 switched to QUIC and what broke", 2, "http", "quic", "protocol"),
@@ -260,9 +293,147 @@ TOPIC_BANK: dict[str, list[dict[str, Any]]] = {
 }
 
 
-def topic_text(entry: dict[str, Any]) -> str:
-    """The dedup identity of a topic entry — its text."""
-    return str(entry.get("t", ""))
+# ── topic packs ───────────────────────────────────────────────────────────
+# The bank is a registry. Every pack contributes {category: [entries]};
+# TOPIC_BANK is the merged view (mutated in place so `from ... import
+# TOPIC_BANK` holders always see the current merge). Topic text is the
+# dedup identity across packs — first pack registered wins.
+
+@dataclass
+class TopicPack:
+    """One registered topic pack.
+
+    ``topics``: ``{category: [entries]}`` — entries are ``_t`` dicts
+    (``t``/``d``/``tags``) or plain strings (normalized to
+    difficulty 2, no tags). ``weights``: optional
+    ``{category: multiplier}`` applied on top of the interest profile
+    during sampling.
+    """
+
+    name: str
+    topics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    weights: dict[str, float] = field(default_factory=dict)
+
+
+_PACKS: dict[str, TopicPack] = {}
+_PACK_LOCK = threading.Lock()
+
+#: Merged view of every registered pack. Rebuilt in place on
+#: register/unregister — never rebind this name.
+TOPIC_BANK: dict[str, list[dict[str, Any]]] = {}
+
+
+def _normalize_entry(entry: Any) -> dict[str, Any]:
+    if isinstance(entry, str):
+        text = entry.strip()
+        if not text:
+            raise ValueError("topic pack entry must not be an empty string")
+        return {"t": text, "d": 2, "tags": ()}
+    if isinstance(entry, dict):
+        text = str(entry.get("t", "")).strip()
+        if not text:
+            raise ValueError("topic pack entry dict needs a 't' text")
+        d = entry.get("d", 2)
+        try:
+            d = min(3, max(1, int(d)))
+        except (TypeError, ValueError):
+            d = 2
+        tags = entry.get("tags", ())
+        tags = tuple(str(t) for t in tags) if tags else ()
+        return {"t": text, "d": d, "tags": tags}
+    raise ValueError(
+        f"topic pack entries must be str or dict, got {type(entry).__name__}")
+
+
+def _rebuild_bank() -> None:
+    merged: dict[str, list[dict[str, Any]]] = {}
+    seen: set[str] = set()
+    for pack in _PACKS.values():  # registration order — first pack wins
+        for cat, entries in pack.topics.items():
+            bucket = merged.setdefault(str(cat), [])
+            for e in entries:
+                text = topic_text(e)
+                if text and text not in seen:
+                    seen.add(text)
+                    bucket.append(e)
+    TOPIC_BANK.clear()
+    TOPIC_BANK.update(merged)
+
+
+def register_topic_pack(name: str,
+                        topics: dict[str, list[Any]],
+                        weights: dict[str, float] | None = None) -> TopicPack:
+    """Register (or replace) a topic pack; returns the stored pack.
+
+    ``topics`` maps category → list of entries (``_t`` dicts or plain
+    strings). ``weights`` maps category → sampling multiplier
+    (default 1.0). Re-registering a name replaces that pack's
+    contribution; the bank is rebuilt from all packs in registration
+    order.
+    """
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("topic pack needs a non-empty name")
+    if not isinstance(topics, dict) or not topics:
+        raise ValueError("topic pack needs a non-empty {category: [entries]} mapping")
+    norm_topics: dict[str, list[dict[str, Any]]] = {}
+    for cat, entries in topics.items():
+        cat = str(cat or "").strip().lower()
+        if not cat:
+            raise ValueError("topic pack category names must be non-empty")
+        if not isinstance(entries, (list, tuple)) or not entries:
+            raise ValueError(f"topic pack category {cat!r} needs a non-empty entry list")
+        norm_topics[cat] = [_normalize_entry(e) for e in entries]
+    norm_weights: dict[str, float] = {}
+    for cat, w in (weights or {}).items():
+        try:
+            norm_weights[str(cat).strip().lower()] = max(0.0, float(w))
+        except (TypeError, ValueError):
+            raise ValueError(f"topic pack weight for {cat!r} must be numeric")
+    pack = TopicPack(name=name, topics=norm_topics, weights=norm_weights)
+    with _PACK_LOCK:
+        _PACKS[name] = pack
+        _rebuild_bank()
+    return pack
+
+
+def unregister_topic_pack(name: str) -> bool:
+    """Remove a pack by name. The built-in ``"core"`` pack is protected."""
+    name = str(name or "").strip()
+    if name == "core":
+        return False
+    with _PACK_LOCK:
+        if name not in _PACKS:
+            return False
+        del _PACKS[name]
+        _rebuild_bank()
+    return True
+
+
+def topic_packs() -> list[str]:
+    """Names of registered packs, in registration order."""
+    with _PACK_LOCK:
+        return list(_PACKS)
+
+
+def all_categories() -> tuple[str, ...]:
+    """Every category in the merged bank: core order, then pack extras."""
+    extra = sorted(c for c in TOPIC_BANK if c not in CATEGORIES)
+    return tuple(CATEGORIES) + tuple(extra)
+
+
+def _pack_weight(category: str) -> float:
+    """Max sampling multiplier any pack assigns to a category (≥ 0)."""
+    best = 0.0
+    found = False
+    for pack in _PACKS.values():
+        if category in pack.topics:
+            found = True
+            best = max(best, float(pack.weights.get(category, 1.0)))
+    return best if found else 1.0
+
+
+register_topic_pack("core", _CORE_TOPICS)
 
 
 def topics_in(category: str) -> list[dict[str, Any]]:
@@ -290,6 +461,13 @@ def category_stats() -> dict[str, dict[str, int]]:
 
 # ── sampling ──────────────────────────────────────────────────────────────
 
+#: Default anti-repeat window: no topic repeats within the last N served.
+DEFAULT_ANTI_REPEAT = 10
+
+_RECENT_TOPICS_KEY = "arena.recent_topics"
+_ANTI_REPEAT_WINDOW_KEY = "arena.anti_repeat_window"
+
+
 def _used_topics(db: Any) -> set[str]:
     used: set[str] = set()
     try:
@@ -309,8 +487,6 @@ def _recent_categories(db: Any, n: int = 3) -> list[str]:
         row = db.query_one(
             "SELECT value FROM kv_store WHERE key = 'arena.recent_categories'")
         if row:
-            import json
-
             data = json.loads(row["value"]).get("cats", [])
             return [str(c) for c in data[:n] if str(c)]
     except Exception:  # noqa: BLE001
@@ -322,9 +498,6 @@ def _record_category(db: Any, category: str) -> None:
     if db is None:
         return
     try:
-        import json
-        import time
-
         cats = [category] + [c for c in _recent_categories(db, 9)
                              if c != category]
         with db.transaction():
@@ -340,12 +513,100 @@ def _record_category(db: Any, category: str) -> None:
         pass
 
 
+# ── topic anti-repeat window (persisted, survives restarts) ────────────────
+
+def anti_repeat_window(db: Any = None,
+                       default: int = DEFAULT_ANTI_REPEAT) -> int:
+    """Effective anti-repeat window: kv override → default. 0 disables."""
+    if db is not None:
+        try:
+            row = db.query_one(
+                "SELECT value FROM kv_store WHERE key = ?",
+                (_ANTI_REPEAT_WINDOW_KEY,))
+            if row:
+                return max(0, min(int(json.loads(row["value"]).get("window", default)),
+                                  10000))
+        except Exception:  # noqa: BLE001
+            pass
+    return max(0, int(default))
+
+
+def set_anti_repeat_window(db: Any, n: int) -> bool:
+    """Persist the anti-repeat window (sessions without a topic repeat)."""
+    if db is None:
+        return False
+    try:
+        with db.transaction():
+            db.execute(
+                """INSERT INTO kv_store (key, value, kind, updated_at)
+                   VALUES (?, ?, 'json', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                                  updated_at = excluded.updated_at""",
+                (_ANTI_REPEAT_WINDOW_KEY, json.dumps({"window": max(0, int(n))}),
+                 time.time()),
+            )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def recent_topics(db: Any, n: int | None = None) -> list[str]:
+    """Most-recently served topic texts, newest first (persisted)."""
+    if db is None:
+        return []
+    if n is None:
+        n = anti_repeat_window(db)
+    try:
+        row = db.query_one(
+            "SELECT value FROM kv_store WHERE key = ?", (_RECENT_TOPICS_KEY,))
+        if row:
+            data = json.loads(row["value"]).get("topics", [])
+            return [str(t) for t in data[:max(0, int(n))] if str(t)]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def _record_topic(db: Any, topic: str, window: int) -> None:
+    if db is None or window <= 0 or not topic:
+        return
+    try:
+        topics = [topic] + [t for t in recent_topics(db, window - 1)
+                            if t != topic]
+        with db.transaction():
+            db.execute(
+                """INSERT INTO kv_store (key, value, kind, updated_at)
+                   VALUES (?, ?, 'json', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                                  updated_at = excluded.updated_at""",
+                (_RECENT_TOPICS_KEY, json.dumps({"topics": topics[:window]}),
+                 time.time()),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def clear_recent_topics(db: Any) -> int:
+    """Clear the anti-repeat window (the reshuffle). Returns topics cleared."""
+    if db is None:
+        return 0
+    cleared = len(recent_topics(db, 10000))
+    try:
+        with db.transaction():
+            db.execute("DELETE FROM kv_store WHERE key = ?",
+                       (_RECENT_TOPICS_KEY,))
+    except Exception:  # noqa: BLE001
+        pass
+    return cleared
+
+
 def _weighted_categories(profile: dict[str, float] | None,
                          exclude: set[str]) -> list[tuple[str, float]]:
-    cats = [(c, float((profile or {}).get(c, 1.0))) for c in CATEGORIES
-            if c not in exclude]
+    cats = [(c, float((profile or {}).get(c, 1.0)) * _pack_weight(c))
+            for c in all_categories() if c not in exclude]
     if not cats:  # anti-repeat window ate everything — fall back to all
-        cats = [(c, float((profile or {}).get(c, 1.0))) for c in CATEGORIES]
+        cats = [(c, float((profile or {}).get(c, 1.0)) * _pack_weight(c))
+                for c in all_categories()]
     return [(c, max(w, 0.01)) for c, w in cats]
 
 
@@ -364,19 +625,30 @@ def _pick_weighted(rng: random.Random,
 def sample_topic(db: Any = None, category: str | None = None,
                  rng: random.Random | None = None,
                  profile: dict[str, float] | None = None,
-                 difficulty: int | None = None) -> tuple[str, str]:
+                 difficulty: int | None = None,
+                 anti_repeat: int | None = None) -> tuple[str, str]:
     """Pick ``(category, topic)``.
 
     * ``category`` forces one; otherwise the pick is weighted by
-      ``profile`` (category → weight; see ``activity.interest_profile``).
-    * The last few served categories are deprioritized (anti-repeat).
+      ``profile`` (category → weight; see ``activity.interest_profile``)
+      multiplied by any pack weights.
+    * The last few served categories are deprioritized (anti-repeat),
+      and no *topic* repeats within the last ``anti_repeat`` served
+      (default: ``kv arena.anti_repeat_window`` → 10; 0 disables).
     * Topics already digested into ``arena_knowledge`` are skipped
       (bounded retry).
     * ``difficulty`` (1–3) restricts the pool when given.
+    * When the anti-repeat window leaves no eligible topic anywhere,
+      the window reshuffles (clears) once and sampling retries —
+      recent history is persisted in ``kv_store``, so it survives
+      restarts.
     """
     rng = rng or random.Random()
     used = _used_topics(db)
-    recent = set(_recent_categories(db))
+    window = (max(0, int(anti_repeat)) if anti_repeat is not None
+              else anti_repeat_window(db))
+    recent_cats = set(_recent_categories(db))
+    recent = set(recent_topics(db, window)) if window > 0 else set()
 
     def pool_for(cat: str) -> list[dict[str, Any]]:
         pool = topics_in(cat)
@@ -384,44 +656,59 @@ def sample_topic(db: Any = None, category: str | None = None,
             # Strict: a category with nothing at this grade is skipped
             # for this round (the retry loop picks another category).
             pool = [e for e in pool if int(e.get("d", 2)) == difficulty]
-        return [e for e in pool if topic_text(e) not in used]
+        return [e for e in pool
+                if topic_text(e) not in used and topic_text(e) not in recent]
 
     # Retry bound: a nearly-exhausted bank still terminates.
     for _ in range(128):
         if category:
             cat = category
         else:
-            cat = _pick_weighted(rng, _weighted_categories(profile, recent))
+            cat = _pick_weighted(rng, _weighted_categories(profile, recent_cats))
         pool = pool_for(cat)
         if not pool:
             if category:
-                break  # forced category is dry — fall through to fallback
-            recent.discard(cat)  # let the weighted pick try elsewhere
+                break  # forced category is dry — reshuffle/fallback below
+            recent_cats.discard(cat)  # let the weighted pick try elsewhere
             continue
         entry = rng.choice(pool)
+        text = topic_text(entry)
         _record_category(db, cat)
-        return cat, topic_text(entry)
+        _record_topic(db, text, window)
+        return cat, text
+
+    # The window ate the whole eligible pool → reshuffle once and retry.
+    if window > 0 and clear_recent_topics(db) > 0:
+        return sample_topic(db=db, category=category, rng=rng,
+                            profile=profile, difficulty=difficulty,
+                            anti_repeat=window)
 
     # Fallback: anything unused, anywhere (never fails callers).
-    for cat in CATEGORIES:
+    for cat in all_categories():
         pool = pool_for(cat)
         if pool:
+            entry = rng.choice(pool)
+            text = topic_text(entry)
             _record_category(db, cat)
-            return cat, topic_text(rng.choice(pool))
+            _record_topic(db, text, window)
+            return cat, text
     cat = category or CATEGORIES[0]
     _record_category(db, cat)
     return cat, "general computing"
 
 
 def surprise_topic(db: Any = None, rng: random.Random | None = None,
-                   seed: int | None = None) -> tuple[str, str]:
+                   seed: int | None = None,
+                   anti_repeat: int | None = None) -> tuple[str, str]:
     """Pure random topic — ignores the interest profile.
 
-    ``seed`` makes the surprise reproducible.
+    ``seed`` makes the surprise reproducible. The topic anti-repeat
+    window still applies (pass ``anti_repeat=0`` to disable).
     """
     if seed is not None:
         rng = random.Random(seed)
-    return sample_topic(db=db, rng=rng or random.Random(), profile=None)
+    return sample_topic(db=db, rng=rng or random.Random(), profile=None,
+                        anti_repeat=anti_repeat)
 
 
 # ── display ───────────────────────────────────────────────────────────────
@@ -438,8 +725,12 @@ def topics_table(profile: dict[str, float] | None = None,
     """
     stats = category_stats()
     order = sorted(stats, key=lambda c: -float((profile or {}).get(c, 1.0)))
+    pack_bits = []
+    for name in topic_packs():
+        n = sum(len(v) for v in _PACKS[name].topics.values())
+        pack_bits.append(f"{name} ({n})")
     lines = [f"arena topic tables — {bank_size()} topics, "
-             f"{len(CATEGORIES)} categories:"]
+             f"{len(stats)} categories, packs: {', '.join(pack_bits)}:"]
     for cat in order:
         st = stats[cat]
         star = " ★" if profile and float(profile.get(cat, 1.0)) >= 2.0 else ""

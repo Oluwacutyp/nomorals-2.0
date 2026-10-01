@@ -497,11 +497,24 @@ class Arena:
         """Public: the current personalization weights (for /arena topics)."""
         return self._interest_profile()
 
+    def _anti_repeat(self) -> int | None:
+        """Topic anti-repeat window: settings → None (topics.py resolves
+        kv override → default 10)."""
+        arena_cfg = getattr(self.settings, "arena", None)
+        raw = getattr(arena_cfg, "anti_repeat_window", None)
+        if raw is None:
+            return None
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return None
+
     def run_cycle(self, topic: str | None = None, category: str | None = None,
                   notify: Callable[[str], None] | None = None,
                   surprise: bool = False,
                   seed: int | None = None) -> dict[str, Any]:
         started = time.time()
+        anti_repeat = self._anti_repeat()
         if topic:
             cat = category or "general"
         else:
@@ -511,10 +524,12 @@ class Arena:
             if custom is not None:
                 topic, cat = custom
             elif surprise:
-                cat, topic = surprise_topic(self.db, seed=seed)
+                cat, topic = surprise_topic(self.db, seed=seed,
+                                            anti_repeat=anti_repeat)
             else:
                 cat, topic = sample_topic(
-                    self.db, category, profile=self._interest_profile())
+                    self.db, category, profile=self._interest_profile(),
+                    anti_repeat=anti_repeat)
         self._stream("topic", {"topic": topic, "category": cat})
         try:
             report = self._research(topic)

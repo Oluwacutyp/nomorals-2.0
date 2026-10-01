@@ -4,27 +4,41 @@ Covers the dynamic topic system in nomorals/agents/arena/:
 - the expanded bank (size, categories, per-entry metadata)
 - weighted/personalized sampling + determinism with a seeded RNG
 - used-topic skipping and the anti-repeat category window
+- the topic anti-repeat window (persisted, reshuffles on exhaustion)
+- topic packs: registration, weights, replacement, removal
 - surprise mode (pure random, reproducible with a seed)
 - the interest profiler in activity.py (search/custom/goal/command signals)
 - the table renderers behind /arena topics
 """
 from __future__ import annotations
 
+import os
 import random
+import tempfile
 import unittest
 
 from nomorals.agents.arena import activity
 from nomorals.agents.arena.topics import (
     CATEGORIES,
+    DEFAULT_ANTI_REPEAT,
     TOPIC_BANK,
+    TopicPack,
+    all_categories,
+    anti_repeat_window,
     bank_size,
     category_stats,
     category_table,
+    clear_recent_topics,
+    recent_topics,
+    register_topic_pack,
     sample_topic,
+    set_anti_repeat_window,
     surprise_topic,
+    topic_packs,
     topic_text,
     topics_in,
     topics_table,
+    unregister_topic_pack,
 )
 from nomorals.storage.db import Database
 
@@ -279,6 +293,223 @@ class CoreWiringTests(unittest.TestCase):
         out = run_cycle_safe(Boom())  # type: ignore[arg-type]
         self.assertFalse(out["ok"])
         self.assertIn("boom", out["error"])
+
+
+# ── topic packs ─────────────────────────────────────────────────────────
+
+class PackTests(unittest.TestCase):
+    def tearDown(self):
+        for name in ("pack_a", "pack_b", "tiny", "strpack"):
+            unregister_topic_pack(name)
+
+    def test_register_adds_topics_and_category(self):
+        before = bank_size()
+        pack = register_topic_pack("pack_a", {
+            "packcat": [
+                {"t": "pack topic one about testing", "d": 1, "tags": ("x",)},
+                "pack topic two, plain string entry",
+            ],
+        })
+        self.assertIsInstance(pack, TopicPack)
+        self.assertEqual(pack.name, "pack_a")
+        self.assertIn("pack_a", topic_packs())
+        self.assertIn("packcat", all_categories())
+        self.assertEqual(bank_size(), before + 2)
+        entries = topics_in("packcat")
+        self.assertEqual(len(entries), 2)
+        # string entry normalized: difficulty 2, no tags
+        plain = next(e for e in entries
+                     if topic_text(e) == "pack topic two, plain string entry")
+        self.assertEqual(int(plain["d"]), 2)
+        self.assertEqual(tuple(plain["tags"]), ())
+
+    def test_pack_weights_steer_sampling(self):
+        register_topic_pack("pack_b", {
+            "packcat": [{"t": f"weighted pack topic {i}", "d": 2,
+                         "tags": ()} for i in range(6)],
+        }, weights={"packcat": 40.0})
+        cats = [sample_topic(rng=random.Random(n))[0] for n in range(40)]
+        share = sum(1 for c in cats if c == "packcat") / 40
+        self.assertGreater(share, 0.5)
+
+    def test_reregister_replaces_pack(self):
+        register_topic_pack("pack_a", {"packcat": ["only topic alpha"]})
+        register_topic_pack("pack_a", {"packcat": ["only topic beta"]})
+        texts = [topic_text(e) for e in topics_in("packcat")]
+        self.assertEqual(texts, ["only topic beta"])
+
+    def test_unregister_removes_pack(self):
+        register_topic_pack("pack_a", {"packcat": ["temporary topic"]})
+        self.assertTrue(unregister_topic_pack("pack_a"))
+        self.assertNotIn("pack_a", topic_packs())
+        self.assertNotIn("packcat", all_categories())
+        self.assertFalse(unregister_topic_pack("pack_a"))  # twice → False
+
+    def test_core_pack_is_protected(self):
+        self.assertFalse(unregister_topic_pack("core"))
+        self.assertIn("core", topic_packs())
+
+    def test_cross_pack_duplicates_deduped(self):
+        victim = topic_text(TOPIC_BANK["ai"][0])
+        before = bank_size()
+        register_topic_pack("pack_a", {"ai": [victim, "brand new topic xyz"]})
+        self.assertEqual(bank_size(), before + 1)  # dup skipped, new kept
+
+    def test_register_validates_input(self):
+        with self.assertRaises(ValueError):
+            register_topic_pack("", {"c": ["t"]})
+        with self.assertRaises(ValueError):
+            register_topic_pack("pack_a", {})
+        with self.assertRaises(ValueError):
+            register_topic_pack("pack_a", {"c": []})
+        with self.assertRaises(ValueError):
+            register_topic_pack("pack_a", {"c": [""]})
+        with self.assertRaises(ValueError):
+            register_topic_pack("pack_a", {"c": [123]})
+        with self.assertRaises(ValueError):
+            register_topic_pack("pack_a", {"c": ["ok"]},
+                                weights={"c": "heavy"})
+
+
+# ── topic anti-repeat window ──────────────────────────────────────────────
+
+class AntiRepeatTests(unittest.TestCase):
+    def tearDown(self):
+        unregister_topic_pack("tiny")
+
+    def test_no_topic_repeats_within_window(self):
+        db = make_db()
+        window = 8
+        seq = [sample_topic(db=db, rng=random.Random(n),
+                            anti_repeat=window)[1] for n in range(30)]
+        for i, t in enumerate(seq):
+            self.assertNotIn(t, seq[max(0, i - window):i],
+                             f"topic repeated within window at {i}: {t}")
+
+    def test_window_is_configurable_per_call(self):
+        db = make_db()
+        seq = [sample_topic(db=db, rng=random.Random(n), anti_repeat=3)[1]
+               for n in range(20)]
+        for i, t in enumerate(seq):
+            self.assertNotIn(t, seq[max(0, i - 3):i])
+
+    def test_window_persisted_via_kv(self):
+        db = make_db()
+        self.assertTrue(set_anti_repeat_window(db, 4))
+        self.assertEqual(anti_repeat_window(db), 4)
+        seq = [sample_topic(db=db, rng=random.Random(n))[1]
+               for n in range(16)]
+        for i, t in enumerate(seq):
+            self.assertNotIn(t, seq[max(0, i - 4):i])
+
+    def test_window_zero_disables_tracking(self):
+        db = make_db()
+        for n in range(5):
+            sample_topic(db=db, rng=random.Random(n), anti_repeat=0)
+        self.assertEqual(recent_topics(db), [])
+
+    def test_recent_topics_recorded_newest_first(self):
+        db = make_db()
+        seen = [sample_topic(db=db, rng=random.Random(n))[1]
+                for n in range(4)]
+        self.assertEqual(recent_topics(db), seen[::-1])
+
+    def test_default_window_is_sensible(self):
+        self.assertGreaterEqual(DEFAULT_ANTI_REPEAT, 8)
+        self.assertLessEqual(DEFAULT_ANTI_REPEAT, 12)
+
+    def test_reshuffle_on_exhaustion(self):
+        db = make_db()
+        register_topic_pack("tiny", {"tinycat": ["tiny topic one",
+                                                 "tiny topic two"]})
+        got = [sample_topic(db=db, rng=random.Random(n), category="tinycat",
+                            anti_repeat=5)[1] for n in range(3)]
+        # 2 topics, window 5: the 3rd sample must reshuffle, not fail
+        self.assertEqual(set(got[:2]), {"tiny topic one", "tiny topic two"})
+        self.assertIn(got[2], {"tiny topic one", "tiny topic two"})
+        # after reshuffle the window holds just the newest pick
+        self.assertEqual(len(recent_topics(db)), 1)
+
+    def test_true_exhaustion_falls_back(self):
+        db = make_db()
+        register_topic_pack("tiny", {"tinycat": ["tiny topic one",
+                                                 "tiny topic two"]})
+        # A dry forced category falls back to another category's topic —
+        # the cycle must never fail and never serve a used topic.
+        with db.transaction():
+            for i, t in enumerate(["tiny topic one", "tiny topic two"]):
+                db.execute(
+                    "INSERT INTO arena_knowledge (id, topic, category, digest, sources, created_at)"
+                    " VALUES (?, ?, 'tinycat', 'd', '[]', 0)",
+                    (f"e{i}", t))
+        cat, topic = sample_topic(db=db, rng=random.Random(1),
+                                  category="tinycat", anti_repeat=5)
+        self.assertNotEqual(cat, "tinycat")
+        self.assertTrue(topic)
+        self.assertNotIn(topic, {"tiny topic one", "tiny topic two"})
+
+    def test_bank_fully_digested_never_fails(self):
+        db = make_db()
+        with db.transaction():
+            i = 0
+            for entries in TOPIC_BANK.values():
+                for e in entries:
+                    db.execute(
+                        "INSERT INTO arena_knowledge (id, topic, category, digest, sources, created_at)"
+                        " VALUES (?, ?, 'c', 'd', '[]', 0)",
+                        (f"u{i}", topic_text(e)))
+                    i += 1
+        cat, topic = sample_topic(db=db, rng=random.Random(1))
+        self.assertEqual((cat, topic), (CATEGORIES[0], "general computing"))
+
+    def test_clear_recent_topics(self):
+        db = make_db()
+        sample_topic(db=db, rng=random.Random(1))
+        sample_topic(db=db, rng=random.Random(2))
+        self.assertGreater(clear_recent_topics(db), 0)
+        self.assertEqual(recent_topics(db), [])
+
+
+# ── persistence across restarts ───────────────────────────────────────────
+
+class PersistenceTests(unittest.TestCase):
+    def test_recent_history_survives_restart(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = Database(path)
+            db.migrate()
+            seen = [sample_topic(db=db, rng=random.Random(n))[1]
+                    for n in range(6)]
+            before = recent_topics(db)
+            self.assertEqual(before, seen[::-1])
+            db.close()
+
+            # "restart": fresh handle on the same file
+            db2 = Database(path)
+            db2.migrate()
+            self.assertEqual(recent_topics(db2), before)
+            # and the window is still honored after the restart
+            nxt = sample_topic(db=db2, rng=random.Random(99))[1]
+            self.assertNotIn(nxt, before)
+            db2.close()
+        finally:
+            os.unlink(path)
+
+    def test_window_setting_survives_restart(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = Database(path)
+            db.migrate()
+            set_anti_repeat_window(db, 7)
+            db.close()
+            db2 = Database(path)
+            db2.migrate()
+            self.assertEqual(anti_repeat_window(db2), 7)
+            db2.close()
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":
