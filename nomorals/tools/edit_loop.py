@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import py_compile
 import re
 import shutil
 import subprocess
@@ -59,6 +60,12 @@ __all__ = [
     "EditResult",
     "EditPlan",
     "TestResult",
+    "EditConflictError",
+    "EditSyntaxError",
+    "DiffApplyError",
+    "verify_format_preserved",
+    "write_text_verified",
+    "apply_unified_diff",
 ]
 
 _log = get_logger(__name__)
@@ -129,6 +136,422 @@ class EditResult:
             "test_passed": self.test_result.passed if self.test_result else None,
             "error": self.error,
         }
+
+
+# ── surgical edit machinery (module level, agent-testable) ─────────────────
+
+
+class EditConflictError(ValueError):
+    """An edit could not be applied cleanly: ambiguous, overlapping, or
+    invalidated match. The target file is always left untouched."""
+
+
+class EditSyntaxError(ValueError):
+    """An edit produced syntactically invalid Python. The pre-edit content
+    has already been restored when this is raised."""
+
+
+class DiffApplyError(ValueError):
+    """A unified diff could not be parsed or applied."""
+
+
+def _locate_unique(text: str, needle: str, *, label: str) -> tuple[int, int]:
+    """Return the (start, end) span of ``needle`` in ``text``.
+
+    Raises :class:`EditConflictError` unless ``needle`` occurs exactly once.
+    """
+    if not needle:
+        raise EditConflictError(f"{label}: old_text is empty")
+    first = text.find(needle)
+    if first < 0:
+        raise EditConflictError(f"{label}: old_text not found")
+    if text.find(needle, first + 1) >= 0:
+        n = text.count(needle)
+        raise EditConflictError(
+            f"{label}: old_text occurs {n} times; it must be unique — "
+            "include more surrounding context"
+        )
+    return (first, first + len(needle))
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def verify_format_preserved(
+    original: str,
+    modified: str,
+    spans: list[tuple[int, int]],
+) -> bool:
+    """Check that every byte of ``original`` outside ``spans`` is unchanged.
+
+    ``spans`` are (start, end) offsets into ``original`` covering the replaced
+    regions. Every difference between ``original`` and ``modified`` must fall
+    inside those spans; untouched regions must be byte-identical. Pure
+    insertions are allowed only exactly at a span boundary (i.e. where a
+    replacement grew the text).
+    """
+    merged = _merge_spans(spans)
+
+    def covered(a: int, b: int) -> bool:
+        return any(s <= a and b <= e for s, e in merged)
+
+    matcher = difflib.SequenceMatcher(None, original, modified, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            if original[i1:i2] != modified[j1:j2]:
+                return False
+            continue
+        if tag == "insert" and i1 == i2:
+            if not any(s == i1 or e == i1 for s, e in merged):
+                return False
+            continue
+        if not covered(i1, i2):
+            return False
+    return True
+
+
+def _apply_edits_atomic(
+    original: str,
+    edits: list[tuple[str, str]],
+) -> tuple[str, list[tuple[int, int]]]:
+    """Validate and apply several (old_text, new_text) replacements.
+
+    All ``old_text`` blocks are located in ``original`` first: each must occur
+    exactly once, and no two spans may overlap. The edits are then applied one
+    at a time to an evolving buffer, re-validating each ``old_text`` before
+    applying it — so an edit whose match was consumed or duplicated by an
+    earlier edit in the same batch is reported with both edit indexes.
+
+    Returns (modified, spans). Raises :class:`EditConflictError` without
+    touching anything on any failure (the caller writes only on success, so
+    the operation is all-or-nothing).
+    """
+    if not edits:
+        raise EditConflictError("edits must contain at least one (old_text, new_text) pair")
+
+    # Phase 1 — locate every old_text in the ORIGINAL text.
+    spans: list[tuple[int, int]] = []
+    for i, (old_text, _new_text) in enumerate(edits):
+        spans.append(_locate_unique(original, old_text, label=f"edit {i}"))
+
+    # Phase 2 — reject overlapping spans before writing anything.
+    order = sorted(range(len(spans)), key=lambda i: spans[i][0])
+    for a, b in zip(order, order[1:]):
+        s1, e1 = spans[a]
+        s2, e2 = spans[b]
+        lo, hi = max(s1, s2), min(e1, e2)
+        if lo < hi:
+            shared = original[lo:hi]
+            raise EditConflictError(
+                f"edits {a} and {b} overlap: their old_text spans "
+                f"[{s1}:{e1}] and [{s2}:{e2}] share [{lo}:{hi}] "
+                f"({shared[:60]!r}) — disambiguate the old_text blocks"
+            )
+
+    # Phase 3 — apply sequentially against the evolving buffer.
+    buffer = original
+    for i, (old_text, new_text) in enumerate(edits):
+        count = buffer.count(old_text)
+        if count != 1:
+            earlier = ", ".join(str(j) for j in range(i)) or "none"
+            raise EditConflictError(
+                f"edit {i} was invalidated by an earlier edit in the same batch "
+                f"(applied edits: {earlier}): its old_text now occurs "
+                f"{count} times instead of exactly once"
+            )
+        buffer = buffer.replace(old_text, new_text, 1)
+    return buffer, spans
+
+
+def _check_python_syntax(path: str | Path) -> None:
+    """Raise :class:`EditSyntaxError` if ``path`` is a .py file that no longer
+    compiles. Non-Python files are skipped — other grammars are not guessed."""
+    path = Path(path)
+    if path.suffix.lower() != ".py":
+        return
+    try:
+        py_compile.compile(str(path), doraise=True)
+    except py_compile.PyCompileError as e:
+        exc = getattr(e, "exc_value", None)
+        lineno = getattr(exc, "lineno", None) or "?"
+        msg = getattr(exc, "msg", None) or str(e).strip().splitlines()[-1]
+        raise EditSyntaxError(
+            f"{path.name} has invalid Python syntax after edit "
+            f"(line {lineno}: {msg})"
+        ) from e
+
+
+def write_text_verified(path: str | Path, original: str, modified: str) -> None:
+    """Write ``modified`` to ``path``; if it is a .py file, compile-check the
+    result and restore ``original`` on SyntaxError.
+
+    Never leaves a syntactically broken .py behind: on failure the original
+    content is written back and :class:`EditSyntaxError` is raised with the
+    compile message and line number.
+    """
+    path = Path(path)
+    path.write_text(modified, encoding="utf-8")
+    try:
+        _check_python_syntax(path)
+    except EditSyntaxError:
+        path.write_text(original, encoding="utf-8")
+        raise
+
+
+# ── pure-Python unified diff parser / applier ───────────────────────────────
+# Replaces the `patch`-binary dependency where the binary is missing (Termux).
+
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DEV_NULL = "/dev/null"
+
+
+@dataclass
+class _Hunk:
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    # (kind, text, newline_terminated); a "\ No newline at end of file"
+    # marker flips newline_terminated on the preceding entry.
+    body: list[tuple[str, str, bool]] = field(default_factory=list)
+
+
+@dataclass
+class _FilePatch:
+    old_path: str
+    new_path: str
+    hunks: list[_Hunk] = field(default_factory=list)
+
+
+def _clean_diff_path(raw: str) -> str:
+    p = raw.split("\t", 1)[0].strip().strip('"')
+    if p.startswith(("a/", "b/")) and p != _DEV_NULL:
+        p = p[2:]
+    return p
+
+
+def _parse_unified_diff(diff_text: str) -> list[_FilePatch]:
+    """Parse a unified diff into per-file patches."""
+    patches: list[_FilePatch] = []
+    lines = diff_text.split("\n")
+    i = 0
+    current: _FilePatch | None = None
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("--- "):
+            if i + 1 >= len(lines) or not lines[i + 1].startswith("+++ "):
+                raise DiffApplyError("diff has '---' header without a matching '+++' header")
+            current = _FilePatch(
+                old_path=_clean_diff_path(line[4:]),
+                new_path=_clean_diff_path(lines[i + 1][4:]),
+            )
+            patches.append(current)
+            i += 2
+            continue
+        if line.startswith("@@") and current is not None:
+            m = _HUNK_RE.match(line)
+            if not m:
+                raise DiffApplyError(f"malformed hunk header: {line[:80]!r}")
+            os_, oc, ns, nc = m.groups()
+            hunk = _Hunk(int(os_), int(oc) if oc is not None else 1,
+                         int(ns), int(nc) if nc is not None else 1)
+            i += 1
+            # Consume exactly the lines the hunk header claims: this keeps
+            # content lines that start with "---", "+++" or "@@" (e.g. a
+            # removed "--- foo" line) from being mistaken for structure.
+            need_old, need_new = hunk.old_count, hunk.new_count
+            while (need_old > 0 or need_new > 0) and i < len(lines):
+                bl = lines[i]
+                if bl.startswith("\\"):
+                    if not hunk.body:
+                        raise DiffApplyError(
+                            f"stray '\\ No newline' marker in hunk for {current.old_path!r}")
+                    kind, text, _term = hunk.body[-1]
+                    hunk.body[-1] = (kind, text, False)
+                elif bl[:1] in (" ", "-", "+"):
+                    kind = bl[0]
+                    if kind in (" ", "-"):
+                        if need_old <= 0:
+                            raise DiffApplyError(
+                                f"hunk for {current.old_path!r} has more old-side lines "
+                                f"than its header claims ({hunk.old_count})")
+                        need_old -= 1
+                    if kind in (" ", "+"):
+                        if need_new <= 0:
+                            raise DiffApplyError(
+                                f"hunk for {current.old_path!r} has more new-side lines "
+                                f"than its header claims ({hunk.new_count})")
+                        need_new -= 1
+                    hunk.body.append((kind, bl[1:], True))
+                elif bl == "" and i == len(lines) - 1:
+                    break  # trailing newline of the diff text itself
+                else:
+                    raise DiffApplyError(
+                        f"unexpected line inside hunk for {current.old_path!r}: {bl[:60]!r}")
+                i += 1
+            if need_old > 0 or need_new > 0:
+                raise DiffApplyError(
+                    f"truncated hunk for {current.old_path!r}: header claims "
+                    f"-{hunk.old_count}/+{hunk.new_count} lines")
+            # A "\ No newline at end of file" marker trails the body line it
+            # describes, so it can arrive after the header counts are met.
+            while i < len(lines) and lines[i].startswith("\\"):
+                kind, text, _term = hunk.body[-1]
+                hunk.body[-1] = (kind, text, False)
+                i += 1
+            if not hunk.body:
+                raise DiffApplyError(f"empty hunk for {current.old_path!r}")
+            current.hunks.append(hunk)
+            continue
+        i += 1
+    return patches
+
+
+def _hunk_matches_at(lines: list[str], at: int, hunk: _Hunk) -> bool:
+    p = at
+    for kind, text, _term in hunk.body:
+        if kind == "+":
+            continue
+        if p >= len(lines) or lines[p] != text:
+            return False
+        p += 1
+    return True
+
+
+def _locate_hunk(lines: list[str], cursor: int, want: int, hunk: _Hunk) -> int | None:
+    """Find where a hunk applies: exact position first, then a forward scan
+    (patch-style offset tolerance), never before already-consumed lines."""
+    if want >= cursor and _hunk_matches_at(lines, want, hunk):
+        return want
+    for at in range(cursor, len(lines) + 1):
+        if at != want and _hunk_matches_at(lines, at, hunk):
+            return at
+    return None
+
+
+def _apply_hunks_to_lines(
+    lines: list[str],
+    ends_with_newline: bool,
+    hunks: list[_Hunk],
+    label: str,
+) -> str:
+    out: list[str] = []
+    # Newline-termination of the last emitted line; decides the result's
+    # trailing newline. A diff "\ No newline" marker is authoritative for
+    # '+' lines; file lines keep their original termination otherwise.
+    last_terminated = ends_with_newline
+    cursor = 0
+    for n, hunk in enumerate(hunks, 1):
+        has_anchor = any(kind in (" ", "-") for kind, _t, _n in hunk.body)
+        if has_anchor:
+            want = max(hunk.old_start - 1, cursor)
+        else:
+            # Pure insertion: old_start names the line AFTER which to insert.
+            want = min(max(hunk.old_start, cursor), len(lines))
+        at = _locate_hunk(lines, cursor, want, hunk)
+        if at is None:
+            raise DiffApplyError(
+                f"hunk {n} for {label!r} does not match the file "
+                f"(context mismatch around line {hunk.old_start})")
+        out.extend(lines[cursor:at])
+        p = at
+        for kind, text, terminated in hunk.body:
+            if kind == "+":
+                out.append(text)
+                last_terminated = terminated
+                continue
+            if p >= len(lines) or lines[p] != text:
+                raise DiffApplyError(
+                    f"hunk {n} for {label!r}: expected {kind} line {text[:60]!r} "
+                    f"does not match file line {p + 1}")
+            if kind == " ":
+                out.append(lines[p])
+                file_terminated = (p < len(lines) - 1) or ends_with_newline
+                last_terminated = file_terminated and terminated
+            p += 1
+        cursor = p
+    tail = lines[cursor:]
+    out.extend(tail)
+    if tail:
+        last_terminated = ends_with_newline
+    text = "\n".join(out)
+    return text + "\n" if (last_terminated and out) else text
+
+
+def _split_text_lines(text: str) -> tuple[list[str], bool]:
+    ends_nl = text.endswith("\n")
+    lines = text.split("\n")
+    if ends_nl and lines and lines[-1] == "":
+        lines.pop()
+    return lines, ends_nl
+
+
+def _apply_parsed_diff(
+    patches: list[_FilePatch],
+    file_texts: dict[str, str | None],
+) -> dict[str, str | None]:
+    """Apply parsed patches to an in-memory {relpath: text} mapping.
+
+    Returns a new mapping; a ``None`` value means "delete this file".
+    """
+    result = dict(file_texts)
+    for fp in patches:
+        if fp.old_path == _DEV_NULL:
+            target = fp.new_path
+            if result.get(target) is not None:
+                raise DiffApplyError(f"cannot create {target!r}: file already exists")
+            result[target] = _apply_hunks_to_lines([], True, fp.hunks, target)
+        elif fp.new_path == _DEV_NULL:
+            target = fp.old_path
+            current = result.get(target)
+            if current is None:
+                raise DiffApplyError(f"cannot delete {target!r}: no such file")
+            lines, ends_nl = _split_text_lines(current)
+            _apply_hunks_to_lines(lines, ends_nl, fp.hunks, target)  # verify match
+            result[target] = None
+        else:
+            target = fp.new_path
+            current = result.get(target)
+            if current is None:
+                raise DiffApplyError(
+                    f"diff targets {target!r} but no such file was provided")
+            lines, ends_nl = _split_text_lines(current)
+            result[target] = _apply_hunks_to_lines(lines, ends_nl, fp.hunks, target)
+    return result
+
+
+def apply_unified_diff(
+    diff_text: str,
+    file_texts: dict[str, str | None],
+) -> dict[str, str | None]:
+    """Apply a unified diff to in-memory file contents, pure Python.
+
+    Args:
+        diff_text: Unified diff (``---``/``+++``/``@@`` format).
+        file_texts: Mapping of relative path → current text (``None`` for
+            files known to be absent).
+
+    Returns:
+        New mapping of relative path → patched text; ``None`` marks a file
+        the diff deletes. Supports multiple files, multiple hunks per file,
+        file creation (``--- /dev/null``) and deletion (``+++ /dev/null``).
+
+    Raises:
+        DiffApplyError: on malformed diffs, context mismatches, creating an
+            existing file, or deleting a missing one.
+    """
+    patches = _parse_unified_diff(diff_text)
+    if not patches:
+        raise DiffApplyError("no file sections found in diff")
+    return _apply_parsed_diff(patches, file_texts)
 
 
 class EditLoop:
@@ -223,7 +646,7 @@ class EditLoop:
                 diff = self._generate_diff(current, modified, file_path)
                 
                 # Apply changes
-                full_path.write_text(modified, encoding="utf-8")
+                write_text_verified(full_path, current, modified)
                 
                 # Run tests if specified
                 if test_command:
@@ -361,7 +784,11 @@ class EditLoop:
         if self.auto_backup:
             backup_path = self._backup_file(full_path)
         
-        full_path.write_text(plan.modified, encoding="utf-8")
+        original = (
+            full_path.read_text(encoding="utf-8", errors="ignore")
+            if full_path.exists() else ""
+        )
+        write_text_verified(full_path, original, plan.modified)
         
         return EditResult(
             success=True,
@@ -535,12 +962,26 @@ Return the COMPLETE modified file contents in a code block. Include ALL code, no
         # No code block found - maybe the whole response is code
         return response.strip()
     
-    def surgical_replace(self, file_path: str, old_text: str, new_text: str) -> str:
+    def surgical_replace(
+        self,
+        file_path: str,
+        old_text: str,
+        new_text: str,
+        *,
+        dry_run: bool = False,
+    ) -> str:
         """Exact-text surgical replacement, no LLM involved.
 
         The ``old_text`` must occur exactly once in the file; zero or
         multiple matches raise :class:`ValueError` so a sloppy match can
         never silently edit the wrong place. Returns the unified diff.
+
+        If the file is Python, the result is compile-checked; on SyntaxError
+        the original content is restored and :class:`EditSyntaxError` is
+        raised — a broken .py is never left behind.
+
+        With ``dry_run=True`` nothing is written (no backup either); the
+        diff that *would* be applied is returned.
         """
         full_path = self.project_root / file_path
         if not full_path.is_file():
@@ -557,12 +998,87 @@ Return the COMPLETE modified file contents in a code block. Include ALL code, no
             )
 
         modified = original.replace(old_text, new_text, 1)
+        diff = self._generate_diff(original, modified, file_path)
+        if dry_run:
+            return diff
         if self.auto_backup:
             self._backup_file(full_path)
-        full_path.write_text(modified, encoding="utf-8")
+        write_text_verified(full_path, original, modified)
         _log.info("surgical_replace %s (%d chars changed)", file_path,
                   abs(len(modified) - len(original)))
-        return self._generate_diff(original, modified, file_path)
+        return diff
+
+    def surgical_replace_many(
+        self,
+        file_path: str,
+        edits: list[tuple[str, str]],
+        *,
+        dry_run: bool = False,
+    ) -> str:
+        """Apply several exact-text replacements atomically, no LLM involved.
+
+        Every ``old_text`` must occur exactly once in the file, and no two
+        ``old_text`` spans may overlap; each edit is also re-validated against
+        the evolving buffer so an edit invalidated by an earlier one in the
+        same batch is reported. If ANY validation fails the file is left
+        untouched (all-or-nothing). Untouched regions are verified
+        byte-identical, and Python results are compile-checked with auto-revert
+        on SyntaxError.
+
+        Returns the unified diff of the combined change. With
+        ``dry_run=True`` nothing is written; the would-be diff is returned.
+        """
+        full_path = self.project_root / file_path
+        if not full_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        edits = list(edits)
+        original = full_path.read_text(encoding="utf-8", errors="ignore")
+        modified, spans = _apply_edits_atomic(original, edits)
+        if not verify_format_preserved(original, modified, spans):
+            raise EditConflictError(
+                f"internal error: format-preservation check failed for "
+                f"{file_path}; file left untouched"
+            )
+        diff = self._generate_diff(original, modified, file_path)
+        if dry_run:
+            return diff
+        if self.auto_backup:
+            self._backup_file(full_path)
+        write_text_verified(full_path, original, modified)
+        _log.info("surgical_replace_many %s (%d edits applied)", file_path, len(edits))
+        return diff
+
+    def preview_replace(
+        self,
+        file_path: str,
+        edits: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Preview what :meth:`surgical_replace_many` would do. Writes nothing.
+
+        Returns ``{"diff", "would_change", "matches", "file_path"}`` where
+        ``matches`` lists each edit's ``old_text`` with its occurrence count
+        and 1-based line number (``None`` when not found).
+        """
+        full_path = self.project_root / file_path
+        if not full_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        edits = list(edits)
+        original = full_path.read_text(encoding="utf-8", errors="ignore")
+        modified, _spans = _apply_edits_atomic(original, edits)
+        matches = []
+        for old_text, _new_text in edits:
+            count = original.count(old_text)
+            idx = original.find(old_text)
+            line = original.count("\n", 0, idx) + 1 if idx >= 0 else None
+            matches.append({"old_text": old_text, "count": count, "line": line})
+        return {
+            "file_path": file_path,
+            "diff": self._generate_diff(original, modified, file_path),
+            "would_change": modified != original,
+            "matches": matches,
+        }
 
     def _generate_diff(self, original: str, modified: str, file_path: str) -> str:
         """Generate unified diff between original and modified."""
@@ -637,32 +1153,99 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "apply_patch",
-        description="Apply a unified diff to the file at path (uses the `patch` binary).",
+        description=("Apply a unified diff to the file at path. Uses the `patch` "
+                     "binary when available, otherwise a built-in pure-Python "
+                     "applier. Python results are compile-checked; a syntax "
+                     "break reverts the change."),
         capability=Capability.FS_WRITE,
     )
     def apply_patch(path: str, unified_diff: str) -> dict[str, Any]:
         import subprocess as _sp
 
         target = safe_path(context, path, must_exist=True)
-        patch_bin = shutil.which("patch")
-        if not patch_bin:
-            raise ToolError("`patch` binary not found on PATH")
+        if not target.is_file():
+            raise ToolError(f"not a file: {path}")
         root = _workspace_root(context)
-        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as fh:
-            fh.write(unified_diff)
-            diff_file = fh.name
+        rel = str(target.relative_to(root))
+        original = target.read_text(encoding="utf-8", errors="ignore")
+
+        def _revert_syntax_break(reason: str) -> None:
+            target.write_text(original, encoding="utf-8")
+            raise ToolError(f"{reason}; change reverted: {target.name} kept its original content")
+
+        patch_bin = shutil.which("patch")
+        if patch_bin:
+            with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as fh:
+                fh.write(unified_diff)
+                diff_file = fh.name
+            try:
+                proc = _sp.run(
+                    [patch_bin, "-p1", "--no-backup-if-mismatch", "-i", diff_file,
+                     str(target.relative_to(root))],
+                    cwd=str(root), capture_output=True, text=True, timeout=60,
+                )
+            finally:
+                Path(diff_file).unlink(missing_ok=True)
+            if proc.returncode != 0:
+                raise ToolError(f"patch failed: {(proc.stderr or proc.stdout).strip()[:500]}")
+            try:
+                _check_python_syntax(target)
+            except EditSyntaxError as e:
+                _revert_syntax_break(f"patch applied but broke Python syntax ({e})")
+            return {"path": str(target), "applied": True,
+                    "output": proc.stdout.strip()[:500]}
+
+        # Pure-Python fallback for hosts without the `patch` binary (Termux).
         try:
-            proc = _sp.run(
-                [patch_bin, "-p1", "--no-backup-if-mismatch", "-i", diff_file,
-                 str(target.relative_to(root))],
-                cwd=str(root), capture_output=True, text=True, timeout=60,
+            patches = _parse_unified_diff(unified_diff)
+        except DiffApplyError as e:
+            raise ToolError(f"could not parse diff: {e}")
+        if not patches:
+            raise ToolError("no file sections found in diff")
+        texts: dict[str, str | None] = {}
+        for fp in patches:
+            key = fp.new_path if fp.new_path != "/dev/null" else fp.old_path
+            p = root / key
+            texts[key] = (
+                p.read_text(encoding="utf-8", errors="ignore") if p.is_file() else None
             )
-        finally:
-            Path(diff_file).unlink(missing_ok=True)
-        if proc.returncode != 0:
-            raise ToolError(f"patch failed: {(proc.stderr or proc.stdout).strip()[:500]}")
-        return {"path": str(target), "applied": True,
-                "output": proc.stdout.strip()[:500]}
+        try:
+            results = _apply_parsed_diff(patches, texts)
+        except DiffApplyError as e:
+            raise ToolError(f"pure-python patch failed: {e}")
+        saved: dict[str, str | None] = {}
+        touched: list[str] = []
+        for key, new_text in results.items():
+            p = root / key
+            saved[key] = (
+                p.read_text(encoding="utf-8", errors="ignore") if p.is_file() else None
+            )
+            if new_text is None:
+                if p.is_file():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(new_text, encoding="utf-8")
+            touched.append(key)
+        try:
+            for key in touched:
+                p = root / key
+                if p.is_file():
+                    _check_python_syntax(p)
+        except EditSyntaxError as e:
+            for key, old in saved.items():
+                p = root / key
+                if old is None:
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                else:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(old, encoding="utf-8")
+            raise ToolError(f"patch applied but broke Python syntax ({e}); all changes reverted")
+        if rel not in touched:
+            raise ToolError(f"diff did not touch {rel}")
+        return {"path": str(target), "applied": True, "files": touched,
+                "fallback": "pure-python"}
 
     @registry.register(
         "show_diff",
