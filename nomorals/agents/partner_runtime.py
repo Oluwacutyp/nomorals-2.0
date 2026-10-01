@@ -5613,7 +5613,7 @@ class PartnerRuntime:
 
         return f"unknown /bet verb {verb!r}\n{_usage()}"
 
-    # ── finance: the Sentinel-backed FinancialExpert ─────────────────────────
+    # ── finance: the native-TA FinancialExpert ─────────────────────────────
     def _control_finance(self, tail: str, chat_key: str) -> str:
         """Conversational finance over free market data.
 
@@ -5621,7 +5621,8 @@ class PartnerRuntime:
         /finance analyze <symbol> [market] [timeframe]
         /finance signal <symbol> [market]
         /finance idea <symbol> [market] [--profile default|aggressive|conservative]
-        /finance backtest <symbol> [market] [--profile P]
+        /finance backtest <symbol> [market] [--profile P] [--strategy NAME]
+        /finance strategies — the native strategy zoo
         /finance compare <sym1,sym2,..> [market]
         /finance watch <symbol> <above|below> <price> [market]
         /finance doctor
@@ -5639,7 +5640,8 @@ class PartnerRuntime:
                 "/finance analyze <symbol> [market] [timeframe] — regime + bias\n"
                 "/finance signal <symbol> [market] — directional call\n"
                 "/finance idea <symbol> [market] [--profile P] — full trade plan\n"
-                "/finance backtest <symbol> [market] [--profile P]\n"
+                "/finance backtest <symbol> [market] [--profile P] [--strategy NAME]\n"
+                "/finance strategies — list the strategy zoo\n"
                 "/finance compare <s1,s2,..> [market]\n"
                 "/finance watch <symbol> <above|below> <price> [market] — price alert\n"
                 "/finance doctor — integration health\n"
@@ -5656,6 +5658,16 @@ class PartnerRuntime:
         try:
             if verb == "doctor":
                 return bridge.doctor().summary_text()
+
+            if verb == "strategies":
+                rows = FinancialExpert(self.context).strategies()
+                lines = ["strategy zoo (native, no submodule needed):"]
+                for r in rows:
+                    params = ", ".join(f"{k}={v}"
+                                       for k, v in r["params"].items())
+                    lines.append(f"  {r['name']:15s} [{r['kind']:9s}] "
+                                 f"{r['blurb']} ({params})")
+                return "\n".join(lines)
 
             if verb == "quote":
                 toks = rest.split()
@@ -5683,12 +5695,20 @@ class PartnerRuntime:
                 if verb == "signal":
                     return expert.signal(symbol, market).summary_text()
                 profile = "default"
-                if "--profile" in toks:
-                    try:
-                        profile = toks[toks.index("--profile") + 1]
-                    except IndexError:
-                        pass
-                return expert.backtest(symbol, market, profile=profile).summary_text()
+                strategy = None
+                for flag, slot in (("--profile", "profile"),
+                                   ("--strategy", "strategy")):
+                    if flag in toks:
+                        try:
+                            val = toks[toks.index(flag) + 1]
+                        except IndexError:
+                            val = None
+                        if slot == "profile":
+                            profile = val or profile
+                        else:
+                            strategy = val
+                return expert.backtest(symbol, market, strategy=strategy,
+                                       profile=profile).summary_text()
 
             if verb == "idea":
                 toks = rest.split()

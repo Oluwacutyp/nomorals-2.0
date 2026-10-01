@@ -1,12 +1,14 @@
 """FinancialExpert: Devon's conversational trading brain (Prompt 07).
 
-Wraps the Sentinel.py engine (via
-:mod:`nomorals.integrations.sentinel_bridge`) in plain-language analysis:
-regime briefs, backtest verdicts, directional signals, and side-by-side
-comparisons. Everything is research/education — never financial advice.
+Runs Devon's native TA stack (:mod:`nomorals.ta` — regime detection,
+strategy committee, signal fusion, event backtester, risk manager ported
+from the user's own Sentinel.py bot) over keyless market data, and explains
+it in plain language: regime briefs, backtest verdicts, directional signals,
+and side-by-side comparisons. Everything is research/education — never
+financial advice.
 
-All Sentinel imports happen lazily inside the bridge; importing this module
-must stay cheap (no pandas at module top level).
+The TA stack is imported lazily inside methods; importing this module must
+stay cheap (no pandas at module top level).
 """
 
 from __future__ import annotations
@@ -120,6 +122,10 @@ class AnalysisReport:
                 lines.append(
                     f"  {i}. {s['name']} — score {s['score']}, "
                     f"sharpe {s['sharpe']}, hit-rate {s['hit_rate']:.0%}")
+            unranked = self.n_strategies - len(self.strategies)
+            if unranked > 0:
+                lines.append(f"  ({unranked} more in the committee — too few "
+                             "trades to rank)")
         if self.size_fraction:
             lines.append(
                 f"Suggested risk size ~{self.size_fraction:.1%} of equity, "
@@ -279,6 +285,31 @@ class FinancialExpert:
             "min_profit_factor": float(get("min_profit_factor", 1.3)),
         }
 
+    def _load_bars(self, symbol: str, market: str, timeframe: str,
+                   bars: int):
+        """OHLCV bars via the keyless market-data layer.
+
+        Raises :exc:`bridge.SentinelError` (not raw network errors) so the
+        /finance chat handler's existing error mapping keeps working.
+        """
+        from ..integrations import market_data
+        try:
+            return market_data.get_ohlcv(symbol, market=market,
+                                         timeframe=timeframe, bars=bars)
+        except market_data.MarketDataError as exc:
+            raise bridge.SentinelError(
+                f"market data unreachable for {symbol} [{market}]: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _ta():
+        """Lazy import of the native TA stack (keeps module import cheap)."""
+        from ..ta import backtest as ta_backtest
+        from ..ta import pipeline as ta_pipeline
+        from ..ta import risk as ta_risk
+        from ..ta import strategies as ta_strategies
+        return ta_pipeline, ta_strategies, ta_backtest, ta_risk
+
     def _room_log(self, text: str) -> None:
         """Best-effort log to the current Prompt-05 room, if any."""
         try:
@@ -294,33 +325,28 @@ class FinancialExpert:
     # ── public API ────────────────────────────────────────────────────
     def analyze(self, symbol: str, market: str = "crypto",
                 timeframe: str = "1h", bars: int = 2000) -> AnalysisReport:
-        engine = bridge.get_engine(market)
-        df = bridge.load_data(symbol, market, timeframe, bars)
-        report = engine.scan(df, symbol=symbol)
+        """Regime + committee read-out, fully native (no submodule needed)."""
+        ta_pipeline, _, _, _ = self._ta()
+        df = self._load_bars(symbol, market, timeframe, bars)
         try:
-            n_bars = int(getattr(report, "bars", 0) or 0)
-        except (TypeError, ValueError):
-            n_bars = 0
-        if not n_bars:
-            try:
-                n_bars = len(df)
-            except TypeError:
-                n_bars = 0
+            res = ta_pipeline.analyze(df)
+        except ValueError as exc:
+            raise bridge.SentinelError(f"analysis failed: {exc}") from exc
         out = AnalysisReport(
             id=new_id("ta"), symbol=symbol, market=market,
-            timeframe=timeframe, bars=n_bars,
-            regime_label=str(getattr(report, "regime_label", "")),
-            regime_plain=_regime_plain(
-                str(getattr(report, "regime_label", ""))),
-            bias=float(getattr(report, "bias", 0.0)),
-            agreement=float(getattr(report, "agreement", 0.0)),
-            position_now=float(getattr(report, "position_now", 0.0)),
-            approved=bool(getattr(report, "approved", False)),
-            size_fraction=float(getattr(report, "size_fraction", 0.0)),
-            stop_distance_pct=float(
-                getattr(report, "stop_distance", 0.0)) * 100.0,
-            strategies=_top_strategies(getattr(report, "ranked", None)),
-            n_strategies=int(getattr(report, "n_strategies", 0)),
+            timeframe=timeframe, bars=res["bars"],
+            regime_label=res["regime_label"],
+            regime_plain=_regime_plain(res["regime_label"]),
+            bias=res["bias"],
+            agreement=res["agreement"],
+            position_now=res["position_now"],
+            approved=res["approved"],
+            size_fraction=res["size_fraction"],
+            # pipeline reports a percent number; the dataclass/format below
+            # expect a fraction (also fixes the old engine's ×100 display bug).
+            stop_distance_pct=res["stop_distance_pct"] / 100.0,
+            strategies=_top_strategies(res["ranked"]),
+            n_strategies=res["n_strategies"],
             created_at=time.time(),
         )
         self._room_log(f"analyze {symbol}: {out.regime_label.strip()} "
@@ -332,9 +358,45 @@ class FinancialExpert:
     def backtest(self, symbol: str, market: str = "crypto",
                  strategy: str | None = None,
                  profile: str = "default") -> BacktestSummary:
-        engine = bridge.get_engine(market, profile)
-        df = bridge.load_data(symbol, market, "1h", 2000)
-        raw = engine.backtest(df)
+        """Event-driven backtest over the named strategy (or the committee).
+
+        Unlike the old engine path, ``strategy`` is actually honored here:
+        pass e.g. ``"trend_follow"`` to backtest just that strategy, or omit
+        it to backtest the fused committee. Runs Sentinel's bar-by-bar
+        broker simulator (fees, spread, ATR slippage, 1-bar latency).
+        """
+        ta_pipeline, ta_strategies, ta_backtest, ta_risk = self._ta()
+        profile = (profile or "default").strip().lower()
+        if profile not in ta_risk.PROFILES:
+            raise bridge.SentinelError(
+                f"unknown profile {profile!r}")
+        df = self._load_bars(symbol, market, "1h", 2000)
+        names: list[str]
+        if strategy:
+            # Validates the name; KeyError -> clean SentinelError.
+            try:
+                ta_strategies.get_strategy(strategy)
+            except KeyError as exc:
+                raise bridge.SentinelError(str(exc)) from exc
+            names = [strategy.strip().lower().replace("-", "_")]
+            label = names[0]
+        else:
+            names = ta_strategies.list_strategies()
+            label = f"committee({len(names)})"
+        frames = ta_strategies.run_zoo(names, df)
+        if not frames:
+            raise bridge.SentinelError(
+                f"no strategy produced signals for {symbol}")
+        if strategy:
+            sig = frames[names[0]]
+            pos = (sig["signal"].astype(float)
+                   * sig["confidence"].astype(float)
+                   * sig["gate"].astype(float))
+            position = pos.rename("position")
+        else:
+            position = ta_pipeline.committee_position(
+                df, names, min_agreement=0.0)
+        raw = ta_backtest.EventBacktester().run(df, position)
         metrics = {
             k: raw.get(k) for k in (
                 "final_equity", "total_return", "cagr", "sharpe", "sortino",
@@ -354,20 +416,19 @@ class FinancialExpert:
         ]
         passes = all(ok for _, ok in checks)
         verdict = (
-            f"{'PASSES' if passes else 'FAILS'} the bar: "
+            f"{'PASSES' if passes else 'FAILS'} the bar "
+            f"[{label}]: "
             + ", ".join(f"{name} {'✓' if ok else '✗'}"
                         for name, ok in checks))
-        if strategy:
-            verdict += f" (strategy filter {strategy!r} not applied — " \
-                       f"engine backtests the fused strategy mix)"
         out = BacktestSummary(
             id=new_id("tb"), symbol=symbol, market=market, profile=profile,
             metrics={k: (round(float(v), 4) if isinstance(v, (int, float))
                          else v) for k, v in metrics.items()},
             verdict=verdict, passes=passes, created_at=time.time(),
         )
-        self._room_log(f"backtest {symbol}: {verdict}")
-        _log.info("financial_expert.backtest %s passes=%s", symbol, passes)
+        self._room_log(f"backtest {symbol} [{label}]: {verdict}")
+        _log.info("financial_expert.backtest %s [%s] passes=%s", symbol,
+                  label, passes)
         return out
 
     def signal(self, symbol: str, market: str = "crypto") -> Signal:
@@ -417,55 +478,79 @@ class FinancialExpert:
                    profile: str = "default") -> TradeIdea:
         """A full trade plan: direction, entry, stop, targets, size.
 
-        Runs the engine scan under the requested risk profile
+        Runs the native committee under the requested risk profile
         (default|aggressive|conservative) and turns the fused signal +
-        risk-manager stops into plain language. Research only.
+        ATR stop ladder + risk-manager sizing into plain language.
+        Research only.
         """
+        ta_pipeline, _, _, ta_risk = self._ta()
         profile = (profile or "default").strip().lower()
-        if profile not in ("default", "aggressive", "conservative"):
+        if profile not in ta_risk.PROFILES:
             raise bridge.SentinelError(
                 f"unknown profile {profile!r}")
-        engine = bridge.get_engine(market, profile)
-        df = bridge.load_data(symbol, market, "1h", 600)
-        report = engine.scan(df, symbol=symbol)
-        pos = float(getattr(report, "position_now", 0.0) or 0.0)
-        direction = "long" if pos > 0 else "short" if pos < 0 else "flat"
+        df = self._load_bars(symbol, market, "1h", 600)
         try:
-            entry = float(df["close"].iloc[-1])
-        except (TypeError, IndexError, KeyError):
-            entry = 0.0
-        stops = getattr(report, "stops", None) or {}
-        stop = float(stops.get("stop", 0.0) or 0.0)
-        target_1 = float(stops.get("target_1", 0.0) or 0.0)
-        target_2 = float(stops.get("target_2", 0.0) or 0.0)
+            res = ta_pipeline.analyze(df, profile=profile)
+        except ValueError as exc:
+            raise bridge.SentinelError(f"analysis failed: {exc}") from exc
+        pos = res["position_now"]
+        direction = "long" if pos > 0 else "short" if pos < 0 else "flat"
+        entry = res["entry"]
+        stops = res["stops"]
+        stop = stops["stop"]
+        target_1 = stops["target_1"]
+        target_2 = stops["target_2"]
         risk = abs(entry - stop)
         reward = abs(target_2 - entry)
         rr = round(reward / risk, 2) if risk > 0 and reward > 0 else 0.0
-        bias = float(getattr(report, "bias", 0.0) or 0.0)
-        agreement = float(getattr(report, "agreement", 0.0) or 0.0)
+        bias = res["bias"]
+        agreement = res["agreement"]
         confidence = round(min(0.95, abs(bias) * 0.5 + agreement * 0.5), 2)
-        regime = str(getattr(report, "regime_label", "")).strip()
+        regime = res["regime_label"].strip()
+        top = (res["ranked"].index[0] if len(res["ranked"]) else "committee")
+        gate = res["approval_method"]
         if direction == "flat":
             rationale = (
-                f"engine is flat on {symbol}: "
+                f"committee is flat on {symbol}: "
                 f"{_regime_plain(regime)}, agreement "
                 f"{agreement:.0%} below the entry bar. Waiting is the "
                 f"position.")
         else:
             rationale = (
-                f"{regime} regime with {agreement:.0%} strategy agreement; "
-                f"ML gate {'approved' if getattr(report, 'approved', False) else 'did not approve'} "
-                f"the {direction}. Stop = engine ATR stop, targets = "
-                f"1R/2R.")
+                f"{regime} regime with {agreement:.0%} committee agreement "
+                f"(top: {top}); {gate} "
+                f"{'approved' if res['approved'] else 'did not approve'} "
+                f"the {direction}. Stop = {ta_risk.PROFILES[profile]['stop_atr']}×ATR, "
+                f"targets = 1R/2R.")
         out = TradeIdea(
             id=new_id("ti"), symbol=symbol, market=market, profile=profile,
             direction=direction, entry=entry, stop=stop,
             target_1=target_1, target_2=target_2,
-            size_fraction=float(getattr(report, "size_fraction", 0.0) or 0.0),
+            size_fraction=res["size_fraction"],
             risk_reward=rr, confidence=confidence, rationale=rationale,
             created_at=time.time(),
         )
         self._room_log(f"trade idea {symbol}: {direction} rr={rr}")
+        return out
+
+    def strategies(self) -> list[dict[str, Any]]:
+        """The native strategy zoo: name, kind, params, one-line blurb."""
+        _, ta_strategies, _, _ = self._ta()
+        blurbs = {
+            "trend_follow": "EMA-rail trend riding, momentum-confirmed",
+            "mean_reversion": "z-score fade with hysteresis + squeeze guard",
+            "breakout": "Donchian breakout, ADX-confirmed",
+            "momentum": "RSI + MACD agreement, ADX-gated",
+        }
+        out = []
+        for name in ta_strategies.list_strategies():
+            strat = ta_strategies.get_strategy(name)
+            out.append({
+                "name": name,
+                "kind": strat.kind,
+                "params": strat.describe()["params"],
+                "blurb": blurbs.get(name, ""),
+            })
         return out
 
     def quote(self, symbol: str,

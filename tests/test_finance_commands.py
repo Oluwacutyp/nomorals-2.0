@@ -1,8 +1,9 @@
-"""Tests for the deepened FinancialExpert: trade ideas, price-alert wiring,
-the keyless-first bridge routing, and the /finance chat command.
+"""Tests for the deepened FinancialExpert: trade ideas, analysis, backtests,
+price-alert wiring, the keyless-first bridge routing, and the /finance
+chat command.
 
-Engine and HTTP layers are faked — no network, no submodule needed for
-most of these (bridge._ensure_path is patched where load_data is hit).
+The native TA stack (nomorals.ta) runs for real here; only the market-data
+layer is faked with deterministic synthetic bars — no network needed.
 """
 from __future__ import annotations
 
@@ -10,41 +11,25 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+import pandas as pd
+
 from nomorals.agents import financial_expert as fe
 from nomorals.agents.partner_runtime import PartnerRuntime
+from nomorals.integrations import market_data
 from nomorals.integrations import sentinel_bridge as bridge
+from nomorals.integrations.market_data import MarketDataError
+from nomorals.ta import data as ta_data
 
 
-class _FakeReport:
-    regime_label = "TREND-UP"
-    bias = 0.5
-    agreement = 0.8
-    position_now = 1.0
-    approved = True
-    meta_proba = 0.7
-    size_fraction = 0.02
-    stop_distance = 0.02
-    stops = {"stop": 59000.0, "breakeven_trigger": 61200.0,
-             "target_1": 63000.0, "target_2": 65000.0}
-    n_strategies = 5
-    bars = 600
-
-
-class _FakeEngine:
-    def scan(self, df, symbol="SYM"):
-        return _FakeReport()
-
-
-class _FakeDF(dict):
-    """Pretends to be a pandas frame with a close column."""
-
-    def __init__(self, px):
-        super().__init__()
-        self._px = px
-
-    def __getitem__(self, key):
-        assert key == "close"
-        return SimpleNamespace(iloc=[self._px])
+def _trend_bars(n=600, drift=0.002, seed=0):
+    """Deterministic uptrend fixture the committee reads as LONG (default)."""
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(drift + rng.normal(0, 0.004, n)))
+    idx = pd.date_range("2023-01-01", periods=n, freq="h")
+    return pd.DataFrame(
+        {"open": close, "high": close * 1.002, "low": close * 0.998,
+         "close": close, "volume": 1000.0}, index=idx)
 
 
 def _expert():
@@ -52,38 +37,119 @@ def _expert():
 
 
 class TradeIdeaTests(unittest.TestCase):
-    def _run(self, pos=1.0):
-        _FakeReport.position_now = pos
-        try:
-            with patch.object(bridge, "get_engine",
-                              return_value=_FakeEngine()), \
-                 patch.object(bridge, "load_data",
-                              return_value=_FakeDF(61000.0)):
-                return _expert().trade_idea("BTC", "crypto", "conservative")
-        finally:
-            _FakeReport.position_now = 1.0
-
     def test_long_idea_math(self):
-        idea = self._run(pos=1.0)
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            idea = _expert().trade_idea("BTC", "crypto", "default")
         self.assertEqual(idea.direction, "long")
-        self.assertEqual(idea.profile, "conservative")
-        self.assertAlmostEqual(idea.entry, 61000.0)
-        self.assertAlmostEqual(idea.stop, 59000.0)
-        # risk 2000, reward 4000 → 1:2
+        self.assertAlmostEqual(idea.entry, df["close"].iloc[-1])
+        self.assertLess(idea.stop, idea.entry)
+        self.assertLess(idea.entry, idea.target_1)
+        self.assertLess(idea.target_1, idea.target_2)
+        # stop = entry - 2*ATR, target_2 = entry + 4*ATR → exactly 1:2
         self.assertAlmostEqual(idea.risk_reward, 2.0)
         self.assertGreater(idea.confidence, 0)
+        self.assertLessEqual(idea.confidence, 0.95)
         text = idea.summary_text()
         self.assertIn("LONG", text)
         self.assertIn("not financial advice", text)
 
-    def test_flat_idea(self):
-        idea = self._run(pos=0.0)
+    def test_conservative_gate_is_stricter(self):
+        # same bars, but conservative demands unanimous committee agreement
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            idea = _expert().trade_idea("BTC", "crypto", "conservative")
+        self.assertEqual(idea.direction, "flat")
+
+    def test_flat_idea_on_chop(self):
+        df = ta_data.make_synthetic(600, seed=7)
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            idea = _expert().trade_idea("BTC", "crypto", "default")
         self.assertEqual(idea.direction, "flat")
         self.assertIn("FLAT", idea.summary_text())
 
     def test_bad_profile_rejected(self):
         with self.assertRaises(bridge.SentinelError):
             _expert().trade_idea("BTC", "crypto", "yolo")
+
+    def test_data_unreachable_is_sentinel_error(self):
+        with patch.object(market_data, "get_ohlcv",
+                          side_effect=MarketDataError("no adapters")):
+            with self.assertRaises(bridge.SentinelError):
+                _expert().trade_idea("BTC", "crypto", "default")
+
+
+class AnalyzeTests(unittest.TestCase):
+    def test_analyze_report_shape(self):
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            rep = _expert().analyze("BTC", "crypto")
+        self.assertEqual(rep.symbol, "BTC")
+        self.assertEqual(rep.regime_label, "TREND_UP")
+        self.assertGreater(rep.bias, 0.5)
+        self.assertEqual(rep.position_now, 1.0)
+        self.assertEqual(rep.n_strategies, 4)
+        self.assertEqual(rep.bars, 600)
+        names = [s["name"] for s in rep.strategies]
+        # ranked = committee members with >= 5 round-trips; the rest still vote
+        self.assertTrue(0 < len(names) <= 4)
+        self.assertEqual(sorted(names), sorted(set(names)))
+        for n in names:
+            self.assertIn(n, ["breakout", "mean_reversion", "momentum",
+                              "trend_follow"])
+        # stop distance stored as a fraction — the summary must read ~1%, not ~100%
+        self.assertLess(rep.stop_distance_pct, 1.0)
+        text = rep.summary_text()
+        self.assertIn("too few trades to rank", text)
+        self.assertIn("TREND_UP", text)
+        self.assertIn("not financial advice", text)
+        self.assertNotIn("100.0%", text)
+
+    def test_analyze_data_unreachable(self):
+        with patch.object(market_data, "get_ohlcv",
+                          side_effect=MarketDataError("no adapters")):
+            with self.assertRaises(bridge.SentinelError):
+                _expert().analyze("BTC", "crypto")
+
+
+class BacktestExpertTests(unittest.TestCase):
+    def test_strategy_backtest_runs(self):
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            out = _expert().backtest("BTC", "crypto",
+                                     strategy="trend_follow")
+        self.assertIn("trend_follow", out.verdict)
+        for key in ("total_return", "sharpe", "max_dd", "win_rate",
+                    "trades", "final_equity"):
+            self.assertIn(key, out.metrics, key)
+        self.assertIn("PASSES the bar", out.verdict)
+
+    def test_committee_backtest_label(self):
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            out = _expert().backtest("BTC", "crypto")
+        self.assertIn("committee", out.verdict)
+
+    def test_unknown_strategy_rejected(self):
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            with self.assertRaises(bridge.SentinelError):
+                _expert().backtest("BTC", "crypto", strategy="nope")
+
+    def test_bad_profile_rejected(self):
+        df = _trend_bars()
+        with patch.object(market_data, "get_ohlcv", return_value=df):
+            with self.assertRaises(bridge.SentinelError):
+                _expert().backtest("BTC", "crypto", profile="yolo")
+
+    def test_strategies_registry(self):
+        rows = _expert().strategies()
+        self.assertEqual([r["name"] for r in rows],
+                         ["breakout", "mean_reversion", "momentum",
+                          "trend_follow"])
+        for r in rows:
+            self.assertTrue(r["blurb"])
+            self.assertTrue(r["params"])
 
 
 class WatchPriceTests(unittest.TestCase):
@@ -197,6 +263,27 @@ class FinanceCommandTests(unittest.TestCase):
         with patch.object(bridge, "doctor", return_value=rep):
             out = self._call("doctor")
         self.assertIn("OK", out)
+
+    def test_strategies_verb(self):
+        out = self._call("strategies")
+        self.assertIn("trend_follow", out)
+        self.assertIn("mean_reversion", out)
+
+    def test_backtest_strategy_flag(self):
+        seen = {}
+
+        def fake_backtest(self, symbol, market, strategy=None, profile="default"):
+            seen.update(strategy=strategy, profile=profile)
+            return fe.BacktestSummary(
+                symbol=symbol, market=market, profile=profile,
+                metrics={}, verdict="PASSES the bar")
+
+        with patch.object(fe.FinancialExpert, "backtest", fake_backtest):
+            out = self._call("backtest BTC crypto --strategy momentum "
+                             "--profile aggressive")
+        self.assertEqual(seen["strategy"], "momentum")
+        self.assertEqual(seen["profile"], "aggressive")
+        self.assertIn("PASSES the bar", out)
 
     def test_control_command_registered(self):
         from nomorals.social.chat.control import (COMMAND_DETAILS,

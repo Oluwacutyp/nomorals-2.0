@@ -1,10 +1,12 @@
-"""Acceptance tests for Prompt 07 — FinancialExpert + Sentinel integration.
+"""Acceptance tests for Prompt 07 — FinancialExpert over the native TA stack.
 
 Covers the spec's contract: submodule-absent doctor guidance; plain-language
-analysis and backtest verdicts on mocked feeds; paper session start/status/
-stop with restart persistence; live gates (LiveTradingDisabled, 24h unlock
-expiry, daily-loss auto-kill, 3-error auto-kill, vault-only keys, kill
-switch); and the lazy-import requirement (no pandas at module import).
+analysis and backtest verdicts on deterministic synthetic feeds (the native
+nomorals.ta pipeline runs for real; only market_data.get_ohlcv is faked);
+paper session start/status/stop with restart persistence; live gates
+(LiveTradingDisabled, 24h unlock expiry, daily-loss auto-kill, 3-error
+auto-kill, vault-only keys, kill switch); and the lazy-import requirement
+(no pandas at module import).
 """
 from __future__ import annotations
 
@@ -19,10 +21,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+import pandas as pd
+
 from nomorals.accounts.vault import CredentialVault
 from nomorals.agents.financial_expert import FinancialExpert
+from nomorals.integrations import market_data
 from nomorals.integrations import sentinel_bridge as bridge
 from nomorals.storage.db import Database
+from nomorals.ta.data import make_synthetic
 from nomorals.tools import trading as trading_tool
 
 
@@ -196,49 +203,65 @@ class BridgeTests(unittest.TestCase):
 
 
 class FinancialExpertTests(unittest.TestCase):
+    """Native-stack contract: deterministic synthetic bars in, verdicts out.
+
+    Only market_data.get_ohlcv is faked; the nomorals.ta pipeline
+    (regime -> committee -> fusion -> risk -> backtest) runs for real.
+    """
+
     def setUp(self):
         self.ctx = _ctx()
-        self._p1 = patch.object(bridge, "get_engine",
-                                return_value=_FakeEngine())
-        self._p2 = patch.object(bridge, "load_data",
-                                return_value=object())
-        self._p1.start(); self._p2.start()
+        self._p = patch.object(market_data, "get_ohlcv")
+        self._mock_bars = self._p.start()
+        self.addCleanup(self._p.stop)
 
-    def tearDown(self):
-        self._p1.stop(); self._p2.stop()
+    @staticmethod
+    def _trend(n=600, drift=0.002, seed=0):
+        """Deterministic uptrend the committee reads as LONG (default)."""
+        rng = np.random.default_rng(seed)
+        close = 100 * np.exp(np.cumsum(drift + rng.normal(0, 0.004, n)))
+        idx = pd.date_range("2023-01-01", periods=n, freq="h")
+        return pd.DataFrame(
+            {"open": close, "high": close * 1.002, "low": close * 0.998,
+             "close": close, "volume": 1000.0}, index=idx)
 
     def test_analyze_plain_language(self):
+        self._mock_bars.return_value = self._trend()
         rep = FinancialExpert(self.ctx).analyze("BTC/USDT")
         self.assertEqual(rep.symbol, "BTC/USDT")
         text = rep.summary_text()
         self.assertIn("trending", text)          # plain regime words
-        self.assertIn("StratAlpha", text)        # top strategies named
+        self.assertIn(rep.strategies[0]["name"], text)  # native zoo names
+        self.assertNotIn("StratAlpha", text)     # old codegen zoo is gone
         self.assertIn("not financial advice", text)
         d = rep.to_dict()
         self.assertEqual(d["position_now"], 1.0)
 
     def test_backtest_verdict_passes(self):
-        out = FinancialExpert(self.ctx).backtest("XAUUSD", "forex")
+        self._mock_bars.return_value = self._trend(n=1500)
+        out = FinancialExpert(self.ctx).backtest("XAUUSD", "forex",
+                                                 strategy="trend_follow")
         self.assertTrue(out.passes)
         self.assertIn("PASSES the bar", out.verdict)
         self.assertIn("sharpe ≥ 1.0", out.verdict)
 
     def test_backtest_verdict_fails(self):
-        with patch.object(bridge, "get_engine",
-                          return_value=_FakeEngine(
-                              _fake_metrics(sharpe=0.4, max_dd=0.35,
-                                            profit_factor=0.9))):
-            out = FinancialExpert(self.ctx).backtest("XAUUSD", "forex")
+        # choppy synthetic: trend_follow cannot clear the bar
+        self._mock_bars.return_value = make_synthetic(1500, seed=7)
+        out = FinancialExpert(self.ctx).backtest("XAUUSD", "forex",
+                                                 strategy="trend_follow")
         self.assertFalse(out.passes)
         self.assertIn("FAILS the bar", out.verdict)
 
     def test_signal_bullish_with_invalidation(self):
+        self._mock_bars.return_value = self._trend()
         sig = FinancialExpert(self.ctx).signal("ETH/USDT")
         self.assertEqual(sig.direction, "bullish")
         self.assertIn("adverse move", sig.invalidation)
         self.assertIn("not financial advice", sig.summary_text())
 
     def test_compare_table(self):
+        self._mock_bars.return_value = self._trend()
         comp = FinancialExpert(self.ctx).compare(["BTC/USDT", "ETH/USDT"])
         self.assertEqual(len(comp.rows), 2)
         self.assertEqual(comp.rows[0]["stance"], "LONG")
