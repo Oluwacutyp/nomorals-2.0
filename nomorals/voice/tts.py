@@ -7,17 +7,23 @@ integrated with the framework:
   cloning quality, NON-COMMERCIAL CPML license), **Kokoro** (lightest,
   CPU-friendly, Apache-2.0 — commercial OK), **CosyVoice** (multilingual
   + instruction-driven paralinguistics: laughter, breaths, emphasis —
-  MIT, fetched from HuggingFace).  Each is lazy-imported; nothing
-  breaks when a backend is not installed.
+  MIT, fetched from HuggingFace), **Orpheus** (LLM-class expressivity,
+  native ``<laugh>``/``<sigh>``/``<cough>`` tags, zero-shot cloning —
+  Apache-2.0), **Dia** (nari-labs dialogue model, native ``(laughs)``
+  / ``(coughs)`` / ``(sneezes)`` non-verbals — Apache-2.0, GPU-only).
+  Each is lazy-imported; nothing breaks when a backend is not installed.
 - A tag system for emotion / pauses / non-speech sounds that the AI can
   use directly in its own text: [happy] [whisper] [laughs] [pause:300] …
 - The **director** (``nomorals/voice/director.py``) turns plain text
-  into a performance script — laughs, sighs, coughs, breaths, stutters,
-  fillers, pauses, emphasis — and each backend renders the canonical
-  markup in its own native vocabulary. ``UniversalTTS.perform()`` is
-  the one-call path: text in, human-sounding wav out.
+  into a performance script — 30 vocal bursts (laughs, giggles, coughs,
+  sneezes, sighs, gasps, yawns, whistles, …), 53 emotion tags, fillers,
+  stutters, pauses, emphasis, pacing — and each backend renders the
+  canonical markup in its own native vocabulary. ``UniversalTTS.perform()``
+  is the one-call path: text in, human-sounding wav out.
 - Voice profiles persisted to disk, with a hard consent gate on cloning
   backends (reference audio is only used when consent_confirmed=True).
+  Multiple reference samples per voice are blended where the backend
+  supports it (XTTS averages the embeddings).
 - A mood bridge: the partner's mood system maps straight into tags.
 - Pure-stdlib WAV writing (no scipy); numpy is only touched by the
   backends themselves, never at import time.
@@ -27,6 +33,7 @@ Install one backend on the phone:
     pip install TTS                                       # XTTS v2
     pip install kokoro                                    # Kokoro
     pip install cosyvoice                                 # CosyVoice
+    pip install orpheus-speech                            # Orpheus (GPU)
     nm voice fetch --backend cosyvoice                    # pull the weights
 """
 from __future__ import annotations
@@ -41,6 +48,8 @@ import wave
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+from .director import CANONICAL_BURSTS
+
 __all__ = [
     "VoiceProfile",
     "VoiceLibrary",
@@ -48,6 +57,7 @@ __all__ = [
     "TagProcessor",
     "mood_to_tagged_text",
     "available_backends",
+    "probe_reference_audio",
     "UniversalTTS",
     "write_wav",
 ]
@@ -78,6 +88,10 @@ class VoiceProfile:
     #: Transcript of the reference clip. Zero-shot backends (CosyVoice)
     #: need it to clone; XTTS does not.
     prompt_text: str = ""
+    #: Extra reference clips for the same voice. Cloning backends that
+    #: accept several samples (XTTS averages the speaker embeddings)
+    #: blend them; single-sample backends use the first clip.
+    extra_samples: list = field(default_factory=list)
 
     def validate_for_cloning(self) -> None:
         if self.reference_audio_path and not self.consent_confirmed:
@@ -85,6 +99,14 @@ class VoiceProfile:
                 f"VoiceProfile '{self.name}' has reference audio but "
                 "consent_confirmed=False. Set it True only if this is "
                 "your own voice or you have explicit permission to use it.")
+
+    @property
+    def reference_audios(self) -> list[str]:
+        """All reference clips: the primary plus any extra samples."""
+        auds = ([self.reference_audio_path]
+                if self.reference_audio_path else [])
+        auds.extend(a for a in self.extra_samples if a)
+        return auds
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +117,7 @@ class VoiceProfile:
             "consent_confirmed": self.consent_confirmed,
             "description": self.description,
             "prompt_text": self.prompt_text,
+            "extra_samples": list(self.extra_samples),
         }
 
 
@@ -168,6 +191,39 @@ class VoiceLibrary:
         self._save_index()
         return profile
 
+    def add_sample(self, name: str, audio_file_path: str) -> VoiceProfile:
+        """Attach an extra reference clip to a voice.
+
+        Cloning backends that accept several samples (XTTS) blend them
+        for a more stable clone; single-sample backends ignore extras.
+        The consent gate still applies to every clip.
+        """
+        profile = self.profiles.get(name)
+        if profile is None:
+            raise KeyError(f"unknown voice profile {name!r}")
+        n = len(profile.extra_samples) + 1
+        dest = os.path.join(self.storage_dir, f"{name}_sample{n}.wav")
+        try:
+            shutil.copy(audio_file_path, dest)
+        except OSError as exc:
+            raise ValueError(f"cannot copy voice sample: {exc}") from exc
+        profile.extra_samples.append(dest)
+        self._save_index()
+        return profile
+
+    def set_transcript(self, name: str, transcript: str) -> VoiceProfile:
+        """Set/replace the prompt transcript of a voice's reference clip.
+
+        Zero-shot backends (CosyVoice, Dia voice-clone) need the exact
+        words spoken in the reference audio to clone well.
+        """
+        profile = self.profiles.get(name)
+        if profile is None:
+            raise KeyError(f"unknown voice profile {name!r}")
+        profile.prompt_text = (transcript or "").strip()
+        self._save_index()
+        return profile
+
     def remove(self, name: str) -> bool:
         profile = self.profiles.pop(name, None)
         if profile is None:
@@ -212,18 +268,74 @@ class Segment:
 
 # Tags usable directly in generated text:
 #   [happy] [sad] [angry] [jealous] [tired] [excited] [whisper]
-#   [annoyed] [serious] [horny]
-#   [laughs] [sighs] [gasps] [clears_throat] [chuckles]
+#   [annoyed] [serious] [horny] [terrified] [ecstatic] …
+#   [laughs] [sighs] [gasps] [clears_throat] [chuckles] + every
+#   canonical director burst ([sneeze] [bellylaugh] [whistle] …)
 #   [pause:300]  -> 300ms silence after the preceding chunk
 TAG_PATTERN = re.compile(r"\[([a-z_]+)(?::(\d+))?\]")
+
+#: Legacy Bark-style sound tags, kept for backward compatibility, plus
+#: every canonical director burst name (mapped to Bark-native in
+#: ``to_bark_format``).
+_LEGACY_SOUND_TAGS = {"laughs", "sighs", "gasps", "clears_throat",
+                      "chuckles"}
+
+
+def probe_reference_audio(path: str) -> dict[str, Any]:
+    """Inspect a reference clip before cloning (stdlib WAV probe).
+
+    Returns ``{"ok", "seconds", "sample_rate", "channels", "warnings"}``.
+    Warnings flag the usual clone-killers: clips under 3s, over 30s,
+    telephone-grade sample rates, stereo files, or unreadable data.
+    Never raises on bad input — ``ok`` is False and ``warnings``
+    explains why.
+    """
+    info: dict[str, Any] = {
+        "path": path, "ok": False, "seconds": 0.0,
+        "sample_rate": 0, "channels": 0, "warnings": [],
+    }
+    try:
+        with wave.open(path, "rb") as wav:
+            n_frames = wav.getnframes()
+            rate = wav.getframerate()
+            channels = wav.getnchannels()
+    except (wave.Error, OSError, EOFError) as exc:
+        info["warnings"].append(f"unreadable as WAV: {exc}")
+        return info
+    seconds = (n_frames / rate) if rate else 0.0
+    info.update(ok=True, seconds=round(seconds, 2),
+                sample_rate=rate, channels=channels)
+    warns = info["warnings"]
+    if seconds < 3:
+        warns.append("very short (<3s) — cloning will be unstable; "
+                     "6–30s of clean speech is ideal")
+    elif seconds > 30:
+        warns.append("longer than 30s — most zero-shot backends only "
+                     "need ~10s; trim it to save memory")
+    if rate and rate < 16000:
+        warns.append(f"low sample rate ({rate}Hz) — telephone-grade "
+                     "audio clones poorly")
+    if channels > 1:
+        warns.append("stereo — will be mixed down to mono")
+    return info
 
 
 class TagProcessor:
     """Parses inline tags out of generated text into structured segments."""
 
     EMOTION_TAGS = {"happy", "sad", "angry", "jealous", "tired",
-                    "excited", "whisper", "serious", "horny", "annoyed"}
-    SOUND_TAGS = {"laughs", "sighs", "gasps", "clears_throat", "chuckles"}
+                    "excited", "whisper", "serious", "horny", "annoyed",
+                    "nervous", "scared", "proud", "sarcastic", "curious",
+                    "surprised", "thoughtful", "confident", "empathetic",
+                    "reassuring", "tender", "playful", "nostalgic",
+                    "terrified", "ecstatic", "deadpan", "smug", "wistful",
+                    "hopeful", "triumphant", "desperate", "panicked",
+                    "disgusted", "amused", "relieved", "eager", "hesitant",
+                    "skeptical", "whispering", "shouting", "singing",
+                    "muttering", "soft", "loud", "crying", "screaming",
+                    "panting", "chanting", "aside"}
+    #: Legacy Bark-style tags plus every canonical director burst name.
+    SOUND_TAGS = _LEGACY_SOUND_TAGS | set(CANONICAL_BURSTS)
 
     def parse(self, raw_text: str) -> List[Segment]:
         segments: list[Segment] = []
@@ -249,11 +361,19 @@ class TagProcessor:
         return segments
 
     def to_bark_format(self, segments: List[Segment]) -> str:
-        """Bark understands bracket tags natively — reassemble directly."""
+        """Bark understands bracket tags natively — reassemble directly.
+
+        Canonical director bursts (``[sneeze]``) are mapped to their
+        Bark-native form (``[sneezes]``); legacy tags (``[laughs]``)
+        pass through untouched.
+        """
+        from .director import _BARK_BURSTS
+
         out: list[str] = []
         for seg in segments:
             if seg.tags == ["_sound_"]:
-                out.append(seg.text)
+                tag = seg.text.strip("[]").lower()
+                out.append(_BARK_BURSTS.get(tag, seg.text))
                 continue
             piece = (f"[whispers] {seg.text}" if "whisper" in seg.tags
                      else seg.text)
@@ -318,6 +438,10 @@ def available_backends() -> list[str]:
         out.append("kokoro")
     if _spec("cosyvoice"):
         out.append("cosyvoice")
+    if _spec("orpheus_tts"):
+        out.append("orpheus")
+    if _spec("dia"):
+        out.append("dia")
     if _spec("huggingface_hub"):
         out.append("hf-endpoint")
     return out
@@ -364,10 +488,12 @@ class XTTSBackend:
                    *, instruct: str = "") -> Any:
         if voice:
             voice.validate_for_cloning()
-        # TTS.api returns (audio_chunks, sampled_rate, length)
+        # XTTS averages the speaker embedding over several reference
+        # clips when given a list — multi-sample voices blend here.
+        wavs = voice.reference_audios if voice else []
         result = self.model.tts(
             text=text,
-            speaker_wav=voice.reference_audio_path if voice else None,
+            speaker_wav=wavs[0] if len(wavs) == 1 else (wavs or None),
             language=voice.language if voice else "en",
         )
         if isinstance(result, tuple) and len(result) >= 1:
@@ -503,6 +629,105 @@ class CosyVoiceBackend:
         return self._collect(gen)
 
 
+class DiaBackend:
+    """Dia (nari-labs): dialogue-grade paralinguistics, Apache-2.0.
+
+    Native parenthesized non-verbals — ``(laughs)`` ``(coughs)``
+    ``(sighs)`` ``(sneezes)`` ``(whistles)`` ``(groans)`` … — inside a
+    ``[S1]`` / ``[S2]`` dialogue script (the renderer adds the speaker
+    prefix). Voice cloning via an audio prompt, per the official
+    ``example/voice_clone.py``.
+
+    GPU-ONLY: ~10GB VRAM in fp16. Not for CPU boxes or phones — but
+    when a GPU is around it is the most human dialogue renderer here.
+    """
+
+    name = "dia"
+    supports_native_tags = True    # paren tags, see director.render_dia
+    supports_cloning = True        # via audio prompt
+    sample_rate = 44100
+
+    def __init__(self, model_id: str = "") -> None:
+        try:
+            from dia.model import Dia
+        except ImportError as exc:
+            raise RuntimeError(
+                "dia backend needs the dia package (GPU-only, ~10GB "
+                "VRAM): pip install git+https://github.com/nari-labs/"
+                "dia.git") from exc
+        self.model_id = (model_id or os.environ.get("DIA_MODEL_ID", "")
+                         or "nari-labs/Dia-1.6B-0626")
+        self.model = Dia.from_pretrained(self.model_id)
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        ref = voice.reference_audio_path if voice else None
+        if ref:
+            if voice is not None:
+                voice.validate_for_cloning()
+            try:
+                out = self.model.generate(text, audio_prompt=ref)
+            except TypeError:
+                # older dia releases without audio-prompt cloning
+                out = self.model.generate(text)
+        else:
+            out = self.model.generate(text)
+        try:
+            import numpy as np
+
+            return np.asarray(out, dtype=np.float32).reshape(-1)
+        except ImportError:
+            return [float(v) for v in out]
+
+
+class OrpheusBackend:
+    """Orpheus (Canopy Labs): LLM-class expressive TTS, Apache-2.0.
+
+    A Llama-3B fine-tune that emits SNAC audio codes, with native
+    angle-bracket emotion tags — ``<laugh>`` ``<chuckle>`` ``<sigh>``
+    ``<cough>`` ``<sniffle>`` ``<groan>`` ``<yawn>`` ``<gasp>`` —
+    zero-shot voice cloning, 8 preset voices (``tara``, ``josh``,
+    ``emma``, …), and ~200ms streaming latency.
+
+    Install: ``pip install orpheus-speech`` (vLLM under the hood —
+    needs a GPU). CPU path: run a GGUF quant (2–3.5 GB) under
+    llama.cpp / Orpheus-FastAPI and point this backend at it later.
+    Not live-tested here — needs a GPU box; the renderer and the
+    plumbing are covered by tests with a stubbed ``orpheus_tts``.
+    """
+
+    name = "orpheus"
+    supports_native_tags = True    # angle tags, see director.render_orpheus
+    supports_cloning = True        # zero-shot
+    sample_rate = 24000
+
+    def __init__(self, model_id: str = "") -> None:
+        try:
+            from orpheus_tts import OrpheusModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "orpheus backend needs: pip install orpheus-speech "
+                "(GPU via vLLM) — or serve a GGUF quant over HTTP for "
+                "the CPU path") from exc
+        self.model_id = (model_id or os.environ.get("ORPHEUS_MODEL_ID", "")
+                         or "canopylabs/orpheus-tts-0.1-finetune-prod")
+        self.model = OrpheusModel(model_name=self.model_id)
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if voice is not None:
+            voice.validate_for_cloning()
+        voice_id = (voice.preset_id if voice and voice.preset_id
+                    else "tara")
+        # generate_speech yields 16-bit mono PCM chunks at 24kHz
+        pcm = b"".join(
+            self.model.generate_speech(prompt=text, voice=voice_id))
+        if not pcm:
+            raise ValueError("orpheus produced no audio")
+        vals = struct.unpack("<%dh" % (len(pcm) // 2), pcm)
+        return [v / 32768.0 for v in vals]
+
+
 class HFEndpointBackend:
     """Hugging Face Inference Endpoints / serverless Inference API.
 
@@ -619,7 +844,16 @@ class HFEndpointBackend:
 
 _BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
              "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend,
+             "dia": DiaBackend, "orpheus": OrpheusBackend,
              "hf-endpoint": HFEndpointBackend}
+
+#: backend name → importable module proving it is installed. (This also
+#: fixes a latent KeyError: "hf-endpoint" was in _BACKENDS but missing
+#: from the old inline spec map.)
+_BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
+                  "cosyvoice": "cosyvoice", "dia": "dia",
+                  "orpheus": "orpheus_tts",
+                  "hf-endpoint": "huggingface_hub"}
 
 
 # ----------------------------------------------------
@@ -687,14 +921,15 @@ class UniversalTTS:
                     "no neural TTS backend installed — pip install one of: "
                     "kokoro (lightest, Apache-2.0) | TTS (XTTS v2, "
                     "non-commercial) | cosyvoice (multilingual+paralinguistics, "
-                    "MIT) | git+https://github.com/suno-ai/bark.git")
+                    "MIT) | orpheus-speech (Orpheus, Apache-2.0, GPU) | "
+                    "git+https://github.com/suno-ai/bark.git | "
+                    "git+https://github.com/nari-labs/dia.git (GPU-only)")
             wanted = available[0]
         if wanted not in _BACKENDS:
             raise RuntimeError(
                 f"unknown TTS backend {wanted!r}; use one of "
                 f"{', '.join(_BACKENDS)} or 'auto'")
-        if not _spec({"bark": "bark", "xtts": "TTS",
-                      "kokoro": "kokoro", "cosyvoice": "cosyvoice"}[wanted]):
+        if not _spec(_BACKEND_SPECS[wanted]):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is not installed on this machine")
         self._impl = _BACKENDS[wanted]()
@@ -758,16 +993,20 @@ class UniversalTTS:
         natively understands:
 
         - fish: near pass-through (S2 speaks free-form [tags] natively)
+        - dia: parenthesized non-verbals (laughs) (coughs) (sneezes)
+        - orpheus: angle-bracket emotion tags <laugh> <sigh> <cough>
         - cosyvoice: instruct tokens + emotion/rate instruction
         - bark: native paralinguistic tags
-        - xtts/kokoro/hf-endpoint: speakable words + spliced silence
+        - xtts/kokoro/hf-endpoint: speakable words + onomatopoeia bursts
+          + spliced silence
 
         ``effect`` picks a named director house style (see
         ``director.EFFECT_PRESETS``). Returns the usual speak() dict plus
         ``script`` (the marked-up performance text) and ``cues``.
         """
         from .director import (direct, render_bark, render_cosyvoice,
-                               render_fish, render_plain)
+                               render_dia, render_fish, render_orpheus,
+                               render_plain)
 
         script = direct(text, mood=mood, intensity=intensity, seed=seed,
                         effect=effect)
@@ -781,12 +1020,19 @@ class UniversalTTS:
             final_text, instruct = render_cosyvoice(script)
         elif backend.name == "bark":
             final_text = render_bark(script)
+        elif backend.name == "dia":
+            final_text = render_dia(script)
+        elif backend.name == "orpheus":
+            final_text = render_orpheus(script)
         elif backend.name == "fish" or (
                 backend.name == "hf-endpoint"
                 and getattr(backend, "_is_fish", lambda: False)()):
             final_text = render_fish(script)
         else:
-            final_text, pause_points = render_plain(script)
+            # plain backends: bursts become speakable onomatopoeia
+            # (achoo, ha-ha, ahem) instead of vanishing
+            final_text, pause_points = render_plain(script,
+                                                    speak_bursts=True)
 
         audio = backend.synthesize(final_text, voice, instruct=instruct)
         audio = self._insert_pauses(audio, pause_points, final_text,

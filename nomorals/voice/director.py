@@ -21,25 +21,43 @@ and Fish Audio S2's fine-grained control tags — see module notes):
   ``[nervous]`` ``[scared]`` ``[proud]`` ``[sarcastic]`` ``[curious]``
   ``[mischievously]`` ``[surprised]`` ``[thoughtful]`` ``[confident]``
   ``[annoyed]`` ``[empathetic]`` ``[reassuring]`` ``[tender]`` ``[playful]``
+  ``[nostalgic]`` ``[terrified]`` ``[ecstatic]`` ``[deadpan]`` ``[smug]``
+  ``[wistful]`` ``[bitter]`` ``[hopeful]`` ``[triumphant]`` ``[desperate]``
+  ``[panicked]`` ``[disgusted]`` ``[suspicious]`` ``[amused]`` ``[relieved]``
+  … (60+ total — see ``CANONICAL_EMOTIONS``)
 - delivery: ``[whisper]`` ``[whispering]`` ``[shouting]`` ``[singing]``
-  ``[muttering]`` ``[soft]`` ``[loud]``
-- vocal bursts: ``[laugh]`` ``[chuckle]`` ``[giggle]`` ``[sigh]``
-  ``[breath]`` ``[inhale]`` ``[exhale]`` ``[cough]`` ``[gasp]``
-  ``[clearthroat]`` ``[yawn]`` ``[snort]`` ``[tsk]`` ``[sob]`` ``[gulp]``
-- fillers: ``[um]`` ``[uh]`` ``[erm]`` ``[hmm]``
+  ``[muttering]`` ``[soft]`` ``[loud]`` ``[crying]`` ``[screaming]``
+  ``[panting]`` ``[chanting]`` ``[aside]``
+- vocal bursts: ``[laugh]`` ``[bellylaugh]`` ``[nervouslaugh]`` ``[chuckle]``
+  ``[giggle]`` ``[sigh]`` ``[breath]`` ``[inhale]`` ``[exhale]`` ``[pant]``
+  ``[cough]`` ``[sneeze]`` ``[sniffle]`` ``[gasp]`` ``[scream]``
+  ``[clearthroat]`` ``[yawn]`` ``[snore]`` ``[snort]`` ``[tsk]`` ``[sob]``
+  ``[whimper]`` ``[gulp]`` ``[groan]`` ``[hum]`` ``[whistle]`` ``[mumble]``
+  ``[beep]`` ``[clap]`` ``[applause]``
+- fillers: ``[um]`` ``[uh]`` ``[erm]`` ``[hmm]`` ``[like]`` ``[well]``
+  ``[yknow]`` ``[right]`` ``[so]``
 - pacing: ``[pause:MS]`` ``[beat]`` ``[rate:vslow|slow|fast|vfast]``
-- ``[stutter]`` — stammers the next word (``really`` → ``r-really``)
+- ``[stutter]`` / ``[stutter:N]`` — stammers the next word (``really`` →
+  ``r-really``, ``[stutter:2]`` → ``r-r-really``)
 - ``<strong>word</strong>`` — emphasis (``*word*`` is shorthand)
 
 Renderers translate canonical markup per backend:
 
 - Fish Audio S2: near pass-through — S2 natively accepts 15,000+
   free-form ``[tag]`` directions, so the director speaks its language.
+- Dia (nari-labs): parenthesized non-verbals — ``(laughs)`` ``(coughs)``
+  ``(sighs)`` ``(sneezes)`` ``(whistles)`` … — plus a ``[S1]`` speaker
+  prefix. GPU-only.
+- Orpheus (Canopy Labs, Apache-2.0): angle-bracket emotion tags —
+  ``<laugh>`` ``<chuckle>`` ``<sigh>`` ``<cough>`` ``<sniffle>``
+  ``<groan>`` ``<yawn>`` ``<gasp>`` — everything else falls back to
+  speakable onomatopoeia (``achoo``, ``aaah!``, …).
 - CosyVoice (instruct): ``[laughter]`` / ``[breath]`` bursts plus a
   natural-language emotion/rate instruction.
 - Bark: native ``[laughs]`` ``[sighs]`` ``[cough]`` ``[gasps]`` …
-- XTTS / Kokoro / anything else: clean speakable text + pause points
-  the engine splices as real silence.
+- XTTS / Kokoro / anything else: speakable words + spliced silence.
+  Bursts become onomatopoeia (``ha-ha``, ``achoo``, ``ahem``) instead
+  of vanishing.
 
 Honest approximations are marked in the code: only Bark has a native
 cough token; elsewhere a cough is a sharp breath plus a beat. A stutter
@@ -60,6 +78,7 @@ __all__ = [
     "CANONICAL_DELIVERY",
     "CANONICAL_FILLERS",
     "EFFECT_PRESETS",
+    "ONOMATOPOEIA",
     "Intent",
     "PerformanceScript",
     "PerformanceTuner",
@@ -67,8 +86,10 @@ __all__ = [
     "direct",
     "render_bark",
     "render_cosyvoice",
+    "render_dia",
     "render_fish",
     "render_for",
+    "render_orpheus",
     "render_plain",
     "strip_to_text",
 ]
@@ -80,36 +101,52 @@ __all__ = [
 #: Vocal bursts the director can emit. Every renderer must handle all of
 #: these (even if some become approximations — see module docstring).
 CANONICAL_BURSTS = (
-    "laugh", "chuckle", "giggle", "sigh", "breath", "inhale", "exhale",
-    "cough", "gasp", "clearthroat", "yawn", "snort", "tsk", "sob", "gulp",
+    "laugh", "bellylaugh", "nervouslaugh", "chuckle", "giggle",
+    "sigh", "breath", "inhale", "exhale", "pant",
+    "cough", "sneeze", "sniffle", "gasp", "scream",
+    "clearthroat", "yawn", "snore", "snort", "tsk",
+    "sob", "whimper", "gulp", "groan",
+    "hum", "whistle", "mumble", "beep", "clap", "applause",
 )
 
-#: Emotion / direction tags (ElevenLabs v3 + Fish S2 vocabularies).
+#: Emotion / direction tags (ElevenLabs v3 + Fish S2 vocabularies, plus
+#: the Hume cognitive set: doubt, realization, nostalgia, awkwardness…).
 CANONICAL_EMOTIONS = (
     "happy", "sad", "angry", "excited", "nervous", "scared", "proud",
     "sarcastic", "curious", "mischievously", "surprised", "thoughtful",
     "confident", "annoyed", "appalled", "empathetic", "reassuring",
     "tender", "playful", "bored", "determined", "guilty", "shy",
     "calm", "tired",
+    # advanced affect (Fish S2 advanced set + Hume-style cognitive states)
+    "nostalgic", "jealous", "contemptuous", "hysterical", "resigned",
+    "terrified", "ecstatic", "deadpan", "smug", "flustered", "wistful",
+    "bitter", "hopeful", "lonely", "awkward", "triumphant", "desperate",
+    "panicked", "disgusted", "suspicious", "amused", "envious",
+    "remorseful", "relieved", "eager", "hesitant", "skeptical",
+    "reflective",
 )
 
 #: Delivery-style tags.
 CANONICAL_DELIVERY = (
     "whisper", "whispering", "shouting", "singing", "muttering",
-    "soft", "loud",
+    "soft", "loud", "crying", "screaming", "panting", "chanting",
+    "aside",
 )
 
-CANONICAL_FILLERS = ("um", "uh", "erm", "hmm")
+CANONICAL_FILLERS = ("um", "uh", "erm", "hmm", "like", "well",
+                      "yknow", "right", "so")
 
+# Built from the canonical tuples (longest first) so the vocabulary
+# can't drift out of sync with the regex.
 _BURST_RE = re.compile(
-    r"\[(laugh|chuckle|giggle|sigh|breath|inhale|exhale|cough|gasp|"
-    r"clearthroat|yawn|snort|tsk|sob|gulp|um|uh|erm|hmm)\]",
+    r"\[(" + "|".join(sorted(CANONICAL_BURSTS + CANONICAL_FILLERS,
+                             key=len, reverse=True)) + r")\]",
     re.IGNORECASE,
 )
 _PAUSE_RE = re.compile(r"\[pause:(\d{2,4})\]", re.IGNORECASE)
 _BEAT_RE = re.compile(r"\[beat\]", re.IGNORECASE)
 _RATE_RE = re.compile(r"\[rate:(vslow|slow|fast|vfast)\]", re.IGNORECASE)
-_STUTTER_RE = re.compile(r"\[stutter\]\s*(\S+)", re.IGNORECASE)
+_STUTTER_RE = re.compile(r"\[stutter(?::(\d+))?\]\s*(\S+)", re.IGNORECASE)
 _STRONG_MD_RE = re.compile(r"\*(\S[^*]*\S|\S)\*")  # *word* → <strong>
 _STRONG_RE = re.compile(r"<strong>(.*?)</strong>", re.IGNORECASE | re.DOTALL)
 _EMOTION_RE = re.compile(
@@ -225,9 +262,11 @@ _CURRENCY = {"$": "dollars", "€": "euros", "£": "pounds", "₦": "naira",
              "¥": "yen", "₹": "rupees", "¢": "cents"}
 
 _EMOJI_CUES = {
-    "😂": "[laugh]", "🤣": "[laugh]", "😹": "[laugh]", "😆": "[chuckle]",
-    "😅": "[chuckle]", "😭": "[sob]", "😢": "[sigh]", "😮": "[gasp]",
-    "😯": "[gasp]", "🥱": "[yawn]", "🤔": "[hmm]", "😴": "[yawn]",
+    "😂": "[laugh]", "🤣": "[bellylaugh]", "😹": "[laugh]", "😆": "[chuckle]",
+    "😅": "[nervouslaugh]", "🤭": "[giggle]", "😭": "[sob]", "😢": "[sigh]",
+    "😮": "[gasp]", "😯": "[gasp]", "😱": "[scream]", "🥱": "[yawn]",
+    "🤔": "[hmm]", "😴": "[yawn]", "🤧": "[sneeze]", "🥵": "[pant]",
+    "😤": "[snort]", "🥲": "[nervouslaugh]",
 }
 
 
@@ -444,23 +483,49 @@ _INTENT_EFFECTS: dict[str, list[str]] = {
 }
 
 _MOOD_PROFILES = {
-    # burst/filler/stutter probabilities + pacing per mood
+    # burst/filler/stutter probabilities + pacing per mood.
+    # "bursts" is the extended table the tuner rolls after the classic
+    # laugh/chuckle/breath/sigh blocks; new moods welcome.
     "happy":    {"laugh": 0.45, "chuckle": 0.30, "breath": 0.10, "sigh": 0.0,
-                 "filler": 0.05, "stutter": 0.0, "rate": "fast"},
+                 "filler": 0.05, "stutter": 0.0, "rate": "fast",
+                 "bursts": {"giggle": 0.15, "bellylaugh": 0.08}},
     "excited":  {"laugh": 0.35, "chuckle": 0.25, "breath": 0.15, "sigh": 0.0,
-                 "filler": 0.05, "stutter": 0.05, "rate": "fast"},
+                 "filler": 0.05, "stutter": 0.05, "rate": "fast",
+                 "bursts": {"giggle": 0.15, "scream": 0.05, "clap": 0.05}},
     "sad":      {"laugh": 0.0, "chuckle": 0.0, "breath": 0.20, "sigh": 0.35,
-                 "filler": 0.15, "stutter": 0.05, "rate": "slow"},
+                 "filler": 0.15, "stutter": 0.05, "rate": "slow",
+                 "bursts": {"sob": 0.12, "whimper": 0.08, "sniffle": 0.06}},
     "nervous":  {"laugh": 0.15, "chuckle": 0.10, "breath": 0.20, "sigh": 0.10,
-                 "filler": 0.35, "stutter": 0.30, "rate": None},
+                 "filler": 0.35, "stutter": 0.30, "rate": None,
+                 "bursts": {"nervouslaugh": 0.15, "gulp": 0.10, "um": 0.0}},
     "tired":    {"laugh": 0.0, "chuckle": 0.0, "breath": 0.35, "sigh": 0.25,
-                 "filler": 0.10, "stutter": 0.0, "rate": "slow"},
+                 "filler": 0.10, "stutter": 0.0, "rate": "slow",
+                 "bursts": {"yawn": 0.20, "snore": 0.03}},
     "angry":    {"laugh": 0.0, "chuckle": 0.0, "breath": 0.25, "sigh": 0.15,
-                 "filler": 0.0, "stutter": 0.0, "rate": "fast"},
+                 "filler": 0.0, "stutter": 0.0, "rate": "fast",
+                 "bursts": {"groan": 0.12, "tsk": 0.10, "snort": 0.06}},
     "calm":     {"laugh": 0.0, "chuckle": 0.05, "breath": 0.25, "sigh": 0.05,
-                 "filler": 0.05, "stutter": 0.0, "rate": "slow"},
+                 "filler": 0.05, "stutter": 0.0, "rate": "slow",
+                 "bursts": {"hum": 0.06}},
     "neutral":  {"laugh": 0.05, "chuckle": 0.05, "breath": 0.12, "sigh": 0.03,
-                 "filler": 0.08, "stutter": 0.02, "rate": None},
+                 "filler": 0.08, "stutter": 0.02, "rate": None,
+                 "bursts": {}},
+    # extended moods
+    "hysterical": {"laugh": 0.50, "chuckle": 0.20, "breath": 0.10,
+                   "sigh": 0.0, "filler": 0.02, "stutter": 0.0,
+                   "rate": "fast",
+                   "bursts": {"bellylaugh": 0.30, "giggle": 0.25,
+                              "gasp": 0.15, "pant": 0.10}},
+    "sleepy":   {"laugh": 0.0, "chuckle": 0.0, "breath": 0.20, "sigh": 0.10,
+                 "filler": 0.10, "stutter": 0.0, "rate": "vslow",
+                 "bursts": {"yawn": 0.40, "mumble": 0.08, "snore": 0.05}},
+    "sick":     {"laugh": 0.0, "chuckle": 0.0, "breath": 0.15, "sigh": 0.10,
+                 "filler": 0.05, "stutter": 0.0, "rate": "slow",
+                 "bursts": {"cough": 0.35, "sniffle": 0.25, "sneeze": 0.20,
+                            "groan": 0.10}},
+    "playful":  {"laugh": 0.30, "chuckle": 0.30, "breath": 0.10, "sigh": 0.0,
+                 "filler": 0.10, "stutter": 0.0, "rate": "fast",
+                 "bursts": {"giggle": 0.25, "whistle": 0.08, "beep": 0.03}},
 }
 _MOOD_PROFILES["annoyed"] = _MOOD_PROFILES["angry"]
 
@@ -577,19 +642,35 @@ class PerformanceTuner:
                 sent = sent.rstrip() + " [chuckle]"
                 cues.append("chuckle")
 
-        # questions asked nervously start with a filler
+        # questions asked nervously start with a filler (slotted after
+        # any leading direction tags so the tags never mute it)
         if sent.rstrip().endswith("?") \
                 and maybe(self.profile["filler"] + 0.15):
-            filler = rng.choice(["[um]", "[uh]", "[hmm]"])
-            if not sent.lstrip().startswith("["):
+            filler = rng.choice(["[um]", "[uh]", "[hmm]", "[like]",
+                                 "[well]", "[yknow]"])
+            lead = re.match(r"(\[[^\]]+\]\s*)+", sent)
+            if lead:
+                sent = lead.group(0) + f"{filler} " + sent[lead.end():]
+            else:
                 sent = f"{filler} {sent}"
-                cues.append("filler")
+            cues.append("filler")
 
         # sighs open sad/tired lines
         if position == 0 and maybe(self.profile["sigh"]) \
                 and not sent.lstrip().startswith("["):
             sent = f"[sigh] {sent}"
             cues.append("sigh")
+
+        # extended mood burst table — at most one extra burst per segment
+        # (the classic laugh/chuckle/breath/sigh are handled above)
+        for burst, prob in self.profile.get("bursts", {}).items():
+            if burst in ("laugh", "chuckle", "breath", "sigh"):
+                continue
+            if prob and maybe(prob) \
+                    and f"[{burst}]" not in sent.lower():
+                sent = sent.rstrip() + f" [{burst}]"
+                cues.append(burst)
+                break
 
         # stutter the first content word when nervous
         if maybe(self.profile["stutter"]):
@@ -652,15 +733,17 @@ def _first_content_word(sentence: str) -> str | None:
     return None
 
 
-def _stutter_word(word: str) -> str:
-    """``really`` → ``r-really``. Keeps leading punctuation intact."""
+def _stutter_word(word: str, count: int = 1) -> str:
+    """``really`` → ``r-really`` (count=1); ``[stutter:2]really`` →
+    ``r-r-really``. Keeps leading punctuation intact."""
     m = re.match(r"^(\W*)(.+)$", word, re.DOTALL)
     if not m:
         return word
     punct, core = m.groups()
     if len(core) < 2:
         return word
-    return f"{punct}{core[0]}-{core}"
+    count = max(1, min(4, count))
+    return punct + "-".join([core[0]] * count) + "-" + core
 
 
 def direct(text: str, *, mood: str = "neutral", intensity: int = 3,
@@ -681,7 +764,11 @@ def direct(text: str, *, mood: str = "neutral", intensity: int = 3,
 # ---------------------------------------------------------------------------
 
 def _apply_stutter(script: str) -> str:
-    return _STUTTER_RE.sub(lambda m: _stutter_word(m.group(1)), script)
+    def _one(m: re.Match) -> str:
+        count = int(m.group(1)) if m.group(1) else 1
+        return _stutter_word(m.group(2), count)
+
+    return _STUTTER_RE.sub(_one, script)
 
 
 def _apply_beat(script: str) -> str:
@@ -690,13 +777,23 @@ def _apply_beat(script: str) -> str:
 
 # canonical burst → Fish S2 native (free-form tags: near pass-through)
 _FISH_BURSTS = {
-    "laugh": "[laughing]", "chuckle": "[chuckle]", "giggle": "[giggling]",
+    "laugh": "[laughing]", "bellylaugh": "[belly laughing]",
+    "nervouslaugh": "[nervous laughter]", "chuckle": "[chuckle]",
+    "giggle": "[giggling]",
     "sigh": "[sigh]", "breath": "[inhale]", "inhale": "[inhale]",
-    "exhale": "[exhale]", "cough": "[cough]", "gasp": "[gasp]",
-    "clearthroat": "[clearing throat]", "yawn": "[yawn]", "snort": "[snort]",
-    "tsk": "[tsk]", "sob": "[sobbing]", "gulp": "[gulp]",
+    "exhale": "[exhale]", "pant": "[panting]",
+    "cough": "[cough]", "sneeze": "[sneeze]", "sniffle": "[sniffle]",
+    "gasp": "[gasp]", "scream": "[scream]",
+    "clearthroat": "[clearing throat]", "yawn": "[yawn]", "snore": "[snoring]",
+    "snort": "[snort]", "tsk": "[tsk]", "sob": "[sobbing]",
+    "whimper": "[whimpering]", "gulp": "[gulp]", "groan": "[groan]",
+    "hum": "[humming]", "whistle": "[whistle]", "mumble": "[mumbling]",
+    "beep": "[beep]", "clap": "[clapping]", "applause": "[applause]",
     "um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,",
+    "like": "like,", "well": "well,", "yknow": "y'know,",
+    "right": "right,", "so": "so,",
 }
+
 _FISH_RATES = {
     "vslow": "[speaking very slowly]", "slow": "[speaking slowly]",
     "fast": "[speaking quickly]", "vfast": "[speaking very quickly]",
@@ -726,16 +823,27 @@ def render_fish(script: str | PerformanceScript) -> str:
 
 # canonical burst → CosyVoice instruct vocabulary
 _COSY_BURSTS = {
-    "laugh": "[laughter]", "chuckle": "[laughter]", "giggle": "[laughter]",
+    "laugh": "[laughter]", "bellylaugh": "[laughter]",
+    "nervouslaugh": "[laughter]", "chuckle": "[laughter]",
+    "giggle": "[laughter]",
     "sigh": "[breath] [pause:300]", "breath": "[breath]",
     "inhale": "[breath]", "exhale": "[breath] [pause:200]",
+    "pant": "[breath] [pause:200]",
     # no native cough token: sharp breath + beat (approximation)
     "cough": "[breath] [pause:250]",
-    "gasp": "[breath]", "clearthroat": "[breath] [pause:200]",
-    "yawn": "[breath] [pause:400]", "snort": "[breath]",
-    "tsk": "[breath]", "sob": "[breath] [pause:300]",
-    "gulp": "[breath]",
+    "sneeze": "achoo! [breath]", "sniffle": "[breath]",
+    "gasp": "[breath]", "scream": "aaah! [breath]",
+    "clearthroat": "[breath] [pause:200]",
+    "yawn": "[breath] [pause:400]", "snore": "[breath] [pause:500]",
+    "snort": "[breath]", "tsk": "[breath]",
+    "sob": "[breath] [pause:300]", "whimper": "[breath] [pause:300]",
+    "gulp": "[breath]", "groan": "uugh. [breath]",
+    "hum": "hmm,", "whistle": "[breath] [pause:300]",
+    "mumble": "[breath]", "beep": "[breath] [pause:200]",
+    "clap": "[breath]", "applause": "[breath] [pause:400]",
     "um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,",
+    "like": "like,", "well": "well,", "yknow": "y'know,",
+    "right": "right,", "so": "so,",
 }
 _COSY_RATES = {
     "vslow": "Speak very slowly.", "slow": "Speak slowly.",
@@ -792,15 +900,104 @@ def render_cosyvoice(script: str | PerformanceScript) -> tuple[str, str]:
     return s, " ".join(instruct_bits).strip()
 
 
-# canonical burst → Bark native tags (the paralinguistic king)
+# canonical burst → Bark native tags (the paralinguistic king).
+# Best-effort for the newer bursts: Bark was trained on varied bracket
+# tags and usually renders *something* plausible for unknown ones.
 _BARK_BURSTS = {
-    "laugh": "[laughs]", "chuckle": "[chuckles]", "giggle": "[giggles]",
+    "laugh": "[laughs]", "bellylaugh": "[laughs]",
+    "nervouslaugh": "[chuckles]", "chuckle": "[chuckles]",
+    "giggle": "[giggles]",
     "sigh": "[sighs]", "breath": "[sighs]", "inhale": "[sighs]",
-    "exhale": "[sighs]", "cough": "[cough]", "gasp": "[gasps]",
-    "clearthroat": "[clears throat]", "yawn": "[yawns]",
-    "snort": "[snorts]", "tsk": "[tsk]", "sob": "[sobs]", "gulp": "[gulps]",
+    "exhale": "[sighs]", "pant": "[sighs]",
+    "cough": "[cough]", "sneeze": "[sneezes]", "sniffle": "[sniffles]",
+    "gasp": "[gasps]", "scream": "[screams]",
+    "clearthroat": "[clears throat]", "yawn": "[yawns]", "snore": "[snores]",
+    "snort": "[snorts]", "tsk": "[tsk]", "sob": "[sobs]",
+    "whimper": "[whimpers]", "gulp": "[gulps]", "groan": "[groans]",
+    "hum": "[hums]", "whistle": "[whistles]", "mumble": "[mumbles]",
+    "beep": "[beeps]", "clap": "[claps]", "applause": "[applause]",
     "um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,",
+    "like": "like,", "well": "well,", "yknow": "y'know,",
+    "right": "right,", "so": "so,",
 }
+
+#: Speakable onomatopoeia for every burst — the universal fallback.
+#: Used by ``render_plain(speak_bursts=True)`` and by renderers whose
+#: backend has no native token for a burst, so cues degrade to words
+#: instead of vanishing into silence.
+_ONOMATOPOEIA = {
+    "laugh": "ha-ha", "bellylaugh": "HA-HA-HA", "nervouslaugh": "heh-heh",
+    "chuckle": "heh", "giggle": "hee-hee",
+    "sigh": "ahh", "breath": "", "inhale": "", "exhale": "hah",
+    "pant": "*panting*",
+    "cough": "*cough*", "sneeze": "achoo!", "sniffle": "*sniff*",
+    "gasp": "*gasps*", "scream": "aaah!",
+    "clearthroat": "ahem", "yawn": "*yawns*", "snore": "zzz",
+    "snort": "*snorts*", "tsk": "tsk", "sob": "*sobs*",
+    "whimper": "*whimpers*", "gulp": "*gulps*", "groan": "uugh",
+    "hum": "hmm-hmm", "whistle": "*whistles*", "mumble": "mumble-mumble",
+    "beep": "*beep*", "clap": "*claps*", "applause": "*applause*",
+    "um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,",
+    "like": "like,", "well": "well,", "yknow": "y'know,",
+    "right": "right,", "so": "so,",
+}
+
+#: Public alias — the speakable fallback vocabulary, keyed by canonical
+#: burst name. Renderers use it when a backend has no native token.
+ONOMATOPOEIA = _ONOMATOPOEIA
+
+# canonical burst → Dia (nari-labs) parenthesized non-verbals.
+# Dia's documented set: (laughs) (clears throat) (sighs) (gasps) (coughs)
+# (singing) (sings) (mumbles) (beep) (groans) (sniffs) (claps) (screams)
+# (inhales) (exhales) (applause) (burps) (humming) (sneezes) (chuckle)
+# (whistles). Unlisted tags can produce unexpected output, so everything
+# else maps to the nearest listed one.
+_DIA_BURSTS = {
+    "laugh": "(laughs)", "bellylaugh": "(laughs)",
+    "nervouslaugh": "(chuckle)", "chuckle": "(chuckle)",
+    "giggle": "(chuckle)",
+    "sigh": "(sighs)", "breath": "(inhales)", "inhale": "(inhales)",
+    "exhale": "(exhales)", "pant": "(exhales)",
+    "cough": "(coughs)", "sneeze": "(sneezes)", "sniffle": "(sniffs)",
+    "gasp": "(gasps)", "scream": "(screams)",
+    "clearthroat": "(clears throat)", "yawn": "(sighs)", "snore": "(sighs)",
+    "snort": "(sniffs)", "tsk": "(sniffs)", "sob": "(sighs)",
+    "whimper": "(sighs)", "gulp": "(exhales)", "groan": "(groans)",
+    "hum": "(humming)", "whistle": "(whistles)", "mumble": "(mumbles)",
+    "beep": "(beep)", "clap": "(claps)", "applause": "(applause)",
+    "um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,",
+    "like": "like,", "well": "well,", "yknow": "y'know,",
+    "right": "right,", "so": "so,",
+}
+
+# canonical burst → Orpheus (Canopy Labs) angle-bracket emotion tags.
+# Native: <laugh> <chuckle> <sigh> <cough> <sniffle> <groan> <yawn> <gasp>.
+# Everything else → speakable onomatopoeia (Orpheus has no token for it,
+# but it speaks plain words just fine).
+_ORPHEUS_NATIVE = {
+    "laugh": "<laugh>", "bellylaugh": "<laugh>",
+    "nervouslaugh": "<chuckle>", "chuckle": "<chuckle>",
+    "giggle": "<laugh>",
+    "sigh": "<sigh>",
+    "cough": "<cough>", "clearthroat": "<cough>",
+    "sneeze": "<sniffle>", "sniffle": "<sniffle>", "snort": "<sniffle>",
+    "groan": "<groan>",
+    "yawn": "<yawn>", "snore": "<yawn>",
+    "gasp": "<gasp>",
+}
+
+
+def _burst_or_onomatopoeia(native: dict[str, str],
+                           script: str) -> str:
+    """Replace ``[burst]`` with the renderer's native tag, else with
+    speakable onomatopoeia — never silence."""
+    def _one(m: re.Match) -> str:
+        burst = m.group(1).lower()
+        if burst in native:
+            return native[burst]
+        return _ONOMATOPOEIA.get(burst, "")
+
+    return _BURST_RE.sub(_one, script)
 
 
 def render_bark(script: str | PerformanceScript) -> str:
@@ -817,18 +1014,29 @@ def render_bark(script: str | PerformanceScript) -> str:
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
-def render_plain(script: str | PerformanceScript) -> tuple[str, list[tuple[int, int]]]:
+def render_plain(script: str | PerformanceScript, *,
+                 speak_bursts: bool = False) -> tuple[str, list[tuple[int, int]]]:
     """Canonical markup → clean text + pause points.
 
     For backends with no paralinguistic vocabulary (XTTS, Kokoro, HF
-    endpoints): fillers stay speakable, bursts are dropped, pauses are
-    returned as ``(char_offset, ms)`` so the engine can splice real
-    silence.
+    endpoints): fillers stay speakable, pauses are returned as
+    ``(char_offset, ms)`` so the engine can splice real silence.
+
+    ``speak_bursts=False`` (default) drops non-speech bursts, keeping
+    the historical behavior. ``speak_bursts=True`` renders them as
+    speakable onomatopoeia (``achoo!``, ``ha-ha``, ``ahem``) — the
+    better fallback the engine uses for plain backends.
     """
     s = _apply_beat(str(script))
-    s = _BURST_RE.sub(
-        lambda m: {"um": "um,", "uh": "uh,", "erm": "erm,", "hmm": "hmm,"}
-        .get(m.group(1).lower(), ""), s)
+    if speak_bursts:
+        s = _BURST_RE.sub(
+            lambda m: _ONOMATOPOEIA.get(m.group(1).lower(), ""), s)
+    else:
+        filler_words = {"um": "um,", "uh": "uh,", "erm": "erm,",
+                        "hmm": "hmm,", "like": "like,", "well": "well,",
+                        "yknow": "y'know,", "right": "right,", "so": "so,"}
+        s = _BURST_RE.sub(
+            lambda m: filler_words.get(m.group(1).lower(), ""), s)
     s = _apply_stutter(s)
     s = _RATE_RE.sub("", s)
     s = _EMOTION_RE.sub("", s)
@@ -856,6 +1064,51 @@ def strip_to_text(script: str | PerformanceScript) -> str:
     return text
 
 
+def render_dia(script: str | PerformanceScript) -> str:
+    """Canonical markup → Dia (nari-labs) native direction.
+
+    Dia speaks parenthesized non-verbals — ``(laughs)`` ``(coughs)``
+    ``(sighs)`` ``(sneezes)`` ``(whistles)`` … — inside a ``[S1]`` /
+    ``[S2]`` dialogue script. Emotion/delivery tags become parens too
+    (``[happy]`` → ``(happy)``); Dia is an LLM-class model and reads
+    them as direction. ``<strong>`` becomes CAPS (Dia stresses
+    capitalized words), stutters stay textual, pauses become ellipses.
+    Rate tags are dropped — Dia has no rate control. GPU-only backend.
+    """
+    s = _apply_beat(str(script))
+    s = _BURST_RE.sub(lambda m: _DIA_BURSTS[m.group(1).lower()], s)
+    s = _apply_stutter(s)
+    s = _RATE_RE.sub("", s)
+    s = _EMOTION_RE.sub(lambda m: f"({m.group(1).lower()})", s)
+    s = _PAUSE_RE.sub("... ", s)
+    s = _STRONG_RE.sub(lambda m: m.group(1).upper(), s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    if not re.match(r"\[S\d\]", s):
+        s = "[S1] " + s
+    return s
+
+
+def render_orpheus(script: str | PerformanceScript) -> str:
+    """Canonical markup → Orpheus (Canopy Labs) native direction.
+
+    Orpheus natively understands eight angle-bracket emotion tags:
+    ``<laugh>`` ``<chuckle>`` ``<sigh>`` ``<cough>`` ``<sniffle>``
+    ``<groan>`` ``<yawn>`` ``<gasp>``. Every other burst degrades to
+    speakable onomatopoeia (``achoo!``, ``aaah!``) — Orpheus speaks
+    plain words well, so nothing is lost to silence. Emotion/delivery
+    tags pass through as angle tags (best-effort; Orpheus is an
+    LLM-class model). Stutters stay textual, pauses become ellipses.
+    """
+    s = _apply_beat(str(script))
+    s = _burst_or_onomatopoeia(_ORPHEUS_NATIVE, s)
+    s = _apply_stutter(s)
+    s = _RATE_RE.sub("", s)
+    s = _EMOTION_RE.sub(lambda m: f"<{m.group(1).lower()}>", s)
+    s = _PAUSE_RE.sub("... ", s)
+    s = _STRONG_RE.sub(lambda m: m.group(1).upper(), s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
 def render_for(backend: str,
                script: str | PerformanceScript) -> tuple[str, str | None]:
     """Render a script for a backend. Returns ``(text, extra)`` where
@@ -868,5 +1121,9 @@ def render_for(backend: str,
         return text, instruct
     if backend == "bark":
         return render_bark(script), None
+    if backend == "dia":
+        return render_dia(script), None
+    if backend == "orpheus":
+        return render_orpheus(script), None
     text, _pauses = render_plain(script)
     return text, None

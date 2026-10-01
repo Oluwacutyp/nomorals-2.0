@@ -482,7 +482,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
-                     "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini\n"
+                     "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini|orpheus|dia\n"
                      "nm voice clone <name> <audio> --consent [--transcript T]\n"
                      "nm voice list | nm voice use <name> | nm voice current\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
@@ -564,7 +564,8 @@ def _parser() -> argparse.ArgumentParser:
         "fetch", help="download open TTS weights from HuggingFace")
     v_fetch.add_argument("--backend", default="cosyvoice",
                          help="model to fetch: cosyvoice (default), "
-                              "fish-s2-pro, fish-s1-mini")
+                              "fish-s2-pro, fish-s1-mini, orpheus, dia, "
+                              "qwen3-tts")
     v_fetch.add_argument("--dest", default="",
                          help="destination dir (default: ~/.cache/nomorals/voice_models/<backend>)")
     v_fetch.add_argument("--repo", default="",
