@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from ..core.errors import classify
+from ..core.errors import NoMoralsError, classify
 from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..core.result import Ok, Err
@@ -253,11 +253,10 @@ class MasterOrchestrator:
                 plan = self._parse_plan(goal, response.text) or plan
                 plan.model = response.model
             if not plan.steps:
-                reason = (
-                    f"model call failed ({getattr(response, 'error', '') or 'unknown error'})"
-                    if not response.ok
-                    else "model returned no usable plan"
-                )
+                if not response.ok:
+                    reason = _plan_model_failure_reason(response)
+                else:
+                    reason = "model returned no usable plan"
                 plan_error = f"{reason} — using template plan"
         if not plan.steps:
             plan = self._fallback_plan(goal)
@@ -386,14 +385,25 @@ class MasterOrchestrator:
             started = time.perf_counter()
             try:
                 result = chosen(task)
-                ok = not (isinstance(result, dict) and result.get("error"))
-            except Exception:
+            except Exception as exc:
                 self._record_role(task.role, time.perf_counter() - started,
                                   ok=False, denials=0)
-                raise
+                # Name the step, its role, and the handler behind the
+                # failure — the surfaced error must never be a bare
+                # "something went wrong".  The original classification
+                # (code/retryable) is preserved on the wrapper.
+                raise _named_step_error(task, chosen, exc) from exc
             elapsed = time.perf_counter() - started
             denials = _result_denials(result)
-            self._record_role(task.role, elapsed, ok=ok, denials=denials)
+            reported = result.get("error") if isinstance(result, dict) else ""
+            if reported:
+                # A handler that reports failure in its result failed the
+                # step — returning it as a success would hide the failure
+                # from the supervised retry, the mid-flight re-evaluation,
+                # and the final ok flag.  Fail fast and name it.
+                self._record_role(task.role, elapsed, ok=False, denials=denials)
+                raise _named_step_error(task, chosen, str(reported))
+            self._record_role(task.role, elapsed, ok=True, denials=denials)
             self.blackboard.post(
                 f"task.{task.name}", result, author=task.role, topic=goal,
                 metadata={"role": task.role},
@@ -488,9 +498,12 @@ class MasterOrchestrator:
         Rules, in order of severity:
 
         1. **abort** — failure cascade: at least 2 failures and at least
-           half of the settled steps failed.  The plan's assumptions look
-           invalid, so every non-terminal step is cancelled (the executor
-           sees the cancelled graph and exits promptly).
+           half of the settled steps failed.  "Failed" means the FAILED
+           state *or* a DONE step whose result carries error evidence —
+           a step that reports ``{"error": ...}`` in its result failed
+           just as loudly as one that raised.  The plan's assumptions
+           look invalid, so every non-terminal step is cancelled (the
+           executor sees the cancelled graph and exits promptly).
         2. **revise** — a settled task's result carried an explicit
            ``revise_plan`` directive
            (``{"drop": [...step names...], "note": "..."}`` or
@@ -511,7 +524,11 @@ class MasterOrchestrator:
         at = trigger.name if trigger is not None else ""
         settled = [t for t in graph.tasks.values()
                    if t.state in (TaskState.DONE, TaskState.FAILED)]
-        failed = [t for t in settled if t.state is TaskState.FAILED]
+        # A DONE step whose result carries error evidence counts as failed:
+        # through run() such results are converted to FAILED up front, but
+        # reevaluate() is also called on hand-built graphs, and a result
+        # that contradicts the plan's premise must trip the cascade rule.
+        failed = [t for t in settled if not _step_succeeded(t)]
         remaining = [t for t in graph.tasks.values() if not t.is_terminal]
 
         def _finish(action: str, reason: str,
@@ -817,6 +834,49 @@ def _step_succeeded(task: Task) -> bool:
         return False
     result = getattr(task, "result", None)
     return not (isinstance(result, dict) and result.get("error"))
+
+
+def _plan_model_failure_reason(response: Any) -> str:
+    """Name what failed when the planner model call fails.
+
+    Keeps the router's whole attempt chain — every provider that failed,
+    in order — so the surfaced degradation names names instead of a bare
+    "something went wrong".  Tolerates duck-typed routers (tests, stubs)
+    that only set ``error``.
+    """
+    detail = getattr(response, "error", "") or "unknown error"
+    reason = f"model call failed ({detail})"
+    provider = getattr(response, "provider", "") or ""
+    model = getattr(response, "model", "") or ""
+    who = provider or model
+    if who:
+        reason += f" [provider: {who}]"
+    chain = getattr(response, "fallback_note", "") or ""
+    if chain and chain not in reason:
+        reason += f" — {chain}"
+    return reason
+
+
+def _named_step_error(task: Task, handler: Callable, cause: Any) -> NoMoralsError:
+    """Wrap a step failure so the surfaced error names the step, its role,
+    and the handler/tool behind it.
+
+    The original error's ``code``/``retryable`` classification is preserved
+    on the wrapper, so downstream retry and routing logic still sees the
+    real failure kind — only the message gains its attribution.
+    """
+    name = getattr(handler, "__name__", None) or type(handler).__name__
+    if isinstance(cause, BaseException):
+        original = classify(cause)
+        detail = f"{type(cause).__name__}: {original.message}"
+        code, retryable = original.code, original.retryable
+    else:
+        detail, code, retryable = str(cause), "step.reported_error", False
+    return NoMoralsError(
+        f"step {task.name!r} (role {task.role!r}, handler {name}) failed: {detail}",
+        code=code,
+        retryable=retryable,
+    )
 
 
 def _revise_directive(result: Any) -> dict[str, Any] | None:

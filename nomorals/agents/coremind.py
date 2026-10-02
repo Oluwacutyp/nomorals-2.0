@@ -1428,7 +1428,24 @@ def _summarize_orchestration(result: Any, *, max_steps: int = 8) -> str:
     for step in steps[-max_steps:]:
         name = getattr(step, "name", getattr(step, "kind", "?"))
         ok = name in results and name not in failures
-        lines.append(f"  [{'✓' if ok else '✗'}] {name}")
+        if ok:
+            lines.append(f"  [✓] {name}")
+        else:
+            # Name WHY the step failed — a bare [✗] tells the owner
+            # nothing.  The error text already carries the step, role,
+            # and handler attribution from the orchestrator.
+            why = str(failures.get(name) or "")[:160].replace("\n", " ")
+            lines.append(f"  [✗] {name}" + (f" — {why}" if why else ""))
+    plan_error = getattr(plan, "plan_error", "") or ""
+    if plan_error:
+        # A template-fallback plan must never look like a clean model
+        # plan: the degradation rides along to the chat.
+        lines.append(f"  ⚠️ degraded plan: {plan_error[:300]}")
+    for ev in reversed(getattr(result, "reevaluations", None) or []):
+        if isinstance(ev, dict) and ev.get("action") not in ("continue", "", None):
+            lines.append(f"  ↩ plan {ev['action']} mid-flight: "
+                         f"{str(ev.get('reason') or '')[:200]}")
+            break
     return "\n".join(lines)[:2500]
 
 
