@@ -46,6 +46,49 @@ CLI_ALIASES: dict[str, list[str]] = {
     "briefing": ["br"],
     "train": ["tr"],
     "benchmark": ["bm"],
+    "apps": ["ap"],
+    "arena": ["ar"],
+    "autonomy": ["auto"],
+    "bet": ["bt"],
+    "book": ["bk"],
+    "captcha": ["cap"],
+    "cards": ["cd"],
+    "cipher": ["cip"],
+    "code": ["c"],
+    "commands": ["cmd"],
+    "connectors": ["conn"],
+    "cookies": ["ck"],
+    "crack": ["cr"],
+    "data": ["d"],
+    "decode": ["dec"],
+    "exec": ["e"],
+    "goal": ["g"],
+    "hub": ["hb"],
+    "improve": ["imp"],
+    "inbox": ["ib"],
+    "media": ["med"],
+    "money": ["mn"],
+    "music": ["mu"],
+    "native": ["nat"],
+    "owner": ["own"],
+    "reason": ["rea"],
+    "research-loop": ["rl"],
+    "room": ["rm"],
+    "serve": ["srv"],
+    "setup": ["su"],
+    "skill": ["sk"],
+    "structure": ["struct"],
+    "studio": ["stu"],
+    "swarm": ["sw"],
+    "tools": ["t"],
+    "trade": ["td"],
+    "trial": ["trl"],
+    "tui": ["ui"],
+    "vision": ["v"],
+    "voice": ["vc"],
+    "weather": ["wx"],
+    "workspace": ["ws"],
+    "zip": ["z"],
     "deliver": ["dlv"],
 }
 
@@ -64,7 +107,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="show environment capabilities and health")
     sub.add_parser("config", aliases=CLI_ALIASES["config"],
                    help="print the effective configuration")
-    sub.add_parser("setup", help="guided model setup wizard")
+    sub.add_parser("setup", aliases=CLI_ALIASES["setup"], help="guided model setup wizard")
 
     models = sub.add_parser("models", aliases=CLI_ALIASES["models"],
                             help="inspect the model registry and catalog")
@@ -79,7 +122,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="with --promote-local: GGUF LoRA adapter(s) to run "
                              "on top of the base model (comma-separated)")
 
-    data = sub.add_parser("data", help="fine-tune data: catalog, base models, persona mix")
+    data = sub.add_parser("data", aliases=CLI_ALIASES["data"], help="fine-tune data: catalog, base models, persona mix")
     data.add_argument("action", nargs="?", default="catalog",
                       choices=["catalog", "models", "mix"],
                       help="what to do (default: catalog)")
@@ -97,7 +140,7 @@ def _parser() -> argparse.ArgumentParser:
                       help="mix: output base path (default: <data dir>/persona-mix)")
     data.add_argument("--json", action="store_true", help="Output as JSON")
 
-    tools = sub.add_parser("tools", help="list available tools and their capabilities")
+    tools = sub.add_parser("tools", aliases=CLI_ALIASES["tools"], help="list available tools and their capabilities")
     tools.add_argument("--schema", action="store_true", help="emit full JSON schemas")
 
     memory = sub.add_parser("memory", aliases=CLI_ALIASES["memory"],
@@ -135,7 +178,7 @@ def _parser() -> argparse.ArgumentParser:
     mem_sub.add_parser("rebuild", help="rebuild the user model now")
     mem_sub.add_parser("curate", help="run one memory-curation pass")
 
-    owner = sub.add_parser("owner", help="owner identity seal (ingrained in code)")
+    owner = sub.add_parser("owner", aliases=CLI_ALIASES["owner"], help="owner identity seal (ingrained in code)")
     owner_sub = owner.add_subparsers(dest="owner_action")
     owner_sub.add_parser("seal",
                          help="bake your passphrase seal into the code "
@@ -214,14 +257,14 @@ def _parser() -> argparse.ArgumentParser:
     missions.add_argument("--resume-status", default="",
                           help="lift a pause and report the mission's status")
 
-    sub.add_parser("serve", help="start the HTTP API server")
-    sub.add_parser("tui", help="start the interactive terminal UI")
+    sub.add_parser("serve", aliases=CLI_ALIASES["serve"], help="start the HTTP API server")
+    sub.add_parser("tui", aliases=CLI_ALIASES["tui"], help="start the interactive terminal UI")
     queue = sub.add_parser("queue", aliases=CLI_ALIASES["queue"],
                            help="inspect the durable work queue")
     queue.add_argument("--topic", default="")
     
     # Additional subcommands expected by tests
-    commands = sub.add_parser("commands", help="list available commands")
+    commands = sub.add_parser("commands", aliases=CLI_ALIASES["commands"], help="list available commands")
     commands.add_argument("filter", nargs="?", default="")
 
     status_p = sub.add_parser(
@@ -252,7 +295,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="Action to perform")
     mind_p.add_argument("--json", action="store_true", help="Output as JSON")
     
-    zip_cmd = sub.add_parser("zip", help="create and manage zip archives")
+    zip_cmd = sub.add_parser("zip", aliases=CLI_ALIASES["zip"], help="create and manage zip archives")
     zip_cmd.add_argument("action", nargs="?", default="list")
     zip_cmd.add_argument("path", nargs="?", default="")
     zip_cmd.add_argument("--dest", default="")
@@ -281,7 +324,7 @@ def _parser() -> argparse.ArgumentParser:
     
 
     # Agent-tool subcommands
-    autonomy = sub.add_parser("autonomy", help="Manage autonomous agent operations")
+    autonomy = sub.add_parser("autonomy", aliases=CLI_ALIASES["autonomy"], help="Manage autonomous agent operations")
     autonomy.add_argument("action", nargs="?", default="status",
                          choices=["status", "tick", "report", "enable", "disable", "budget", "on", "off"],
                          help="Action to perform")
@@ -291,7 +334,7 @@ def _parser() -> argparse.ArgumentParser:
     autonomy.add_argument("--unlimited", action="store_true",
                           help="lift the daily model-call cap (budget action)")
     
-    goal = sub.add_parser("goal", help="Create and manage goals")
+    goal = sub.add_parser("goal", aliases=CLI_ALIASES["goal"], help="Create and manage goals")
     goal.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "get", "update", "delete", "replan",
                               "depends", "next", "priority", "advance", "adapt",
@@ -323,7 +366,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="Action to perform")
     mission.add_argument("--json", action="store_true", help="Output as JSON")
     
-    skill = sub.add_parser("skill",
+    skill = sub.add_parser("skill", aliases=CLI_ALIASES["skill"],
                            help="Reusable skills library: list, create, show, delete, prune, restore")
     skill.add_argument("action", nargs="?", default="list",
                       choices=["list", "create", "show", "delete", "prune",
@@ -379,7 +422,7 @@ def _parser() -> argparse.ArgumentParser:
     sim_risk.add_argument("cmd", help="shell command to classify")
     for _sp in (sim_dry, sim_run, sim_cmp, sim_risk):
         _sp.add_argument("--json", action="store_true", help="Output as JSON")
-    rl = sub.add_parser("research-loop",
+    rl = sub.add_parser("research-loop", aliases=CLI_ALIASES["research-loop"],
                         help="always-on research loop: status, tick, topics")
     rl.add_argument("action", nargs="?", default="status",
                     choices=["status", "tick", "run", "ensure", "enable",
@@ -392,8 +435,7 @@ def _parser() -> argparse.ArgumentParser:
     rl.add_argument("--max-topics", type=int, default=0,
                     help="tick: max topics per cycle (default: loop default)")
     rl.add_argument("--json", action="store_true", help="Output as JSON")
-    code = sub.add_parser(
-        "code",
+    code = sub.add_parser("code", aliases=CLI_ALIASES["code"],
         help="Coding agent: run a task, review diffs, run tests",
         description=("nm code \"<task>\" [--file F] [--accept CMD] [--max-iters N] [--root DIR]\n"
                      "nm code review [ref] [--root DIR]\n"
@@ -413,8 +455,7 @@ def _parser() -> argparse.ArgumentParser:
                       help="with test: only run tests for changed files")
     code.add_argument("--json", action="store_true", help="Output as JSON")
 
-    media = sub.add_parser(
-        "media",
+    media = sub.add_parser("media", aliases=CLI_ALIASES["media"],
         help="Edit images and video from plain language",
         description=("nm media edit <file> \"<instruction>\" [--dry-run] [--wait]\n"
                      "nm media probe <file>\n"
@@ -450,8 +491,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="with video: block until the background job finishes")
     m_conv.add_argument("--json", action="store_true", help="Output as JSON")
 
-    studio = sub.add_parser(
-        "studio",
+    studio = sub.add_parser("studio", aliases=CLI_ALIASES["studio"],
         help="Pro edit sessions: filters, grading, layers, AI edits, templates",
         description=("nm studio presets\n"
                      "nm studio filter <file> <preset> [--strength F]\n"
@@ -549,8 +589,7 @@ def _parser() -> argparse.ArgumentParser:
                                   help="generative backend status")
     _s_json(s_gen)
 
-    captcha = sub.add_parser(
-        "captcha",
+    captcha = sub.add_parser("captcha", aliases=CLI_ALIASES["captcha"],
         help="captcha detection and solving for browser automation",
         description=("nm captcha detect --html FILE | --url URL\n"
                      "nm captcha status\n"
@@ -585,8 +624,7 @@ def _parser() -> argparse.ArgumentParser:
     c_solve.add_argument("--json", action="store_true",
                          help="output as JSON")
 
-    bet = sub.add_parser(
-        "bet",
+    bet = sub.add_parser("bet", aliases=CLI_ALIASES["bet"],
         help="sports bet analyst: ensemble ML, value + Kelly staking (analysis only)",
         description=("nm bet analyze --home H --away A [--league L] "
                      "[--odds H D A]\n"
@@ -614,8 +652,7 @@ def _parser() -> argparse.ArgumentParser:
     b_rc.add_argument("--score", required=True, help="HG-AG, e.g. 2-1")
     b_rc.add_argument("--league", default="GEN")
 
-    wx = sub.add_parser(
-        "weather",
+    wx = sub.add_parser("weather", aliases=CLI_ALIASES["weather"],
         help="live weather + USA situations + timezone utilities (keyless)",
         description=("nm weather now [PLACE]\n"
                      "nm weather forecast [PLACE] [--days N]\n"
@@ -639,8 +676,7 @@ def _parser() -> argparse.ArgumentParser:
     w_tz.add_argument("from_zone", nargs="?", default=None)
     w_tz.add_argument("to_zone", nargs="?", default=None)
 
-    voice = sub.add_parser(
-        "voice",
+    voice = sub.add_parser("voice", aliases=CLI_ALIASES["voice"],
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
@@ -771,8 +807,7 @@ def _parser() -> argparse.ArgumentParser:
     v_vtr.add_argument("text", help="words spoken in the reference clip")
     v_vtr.add_argument("--json", action="store_true", help="Output as JSON")
 
-    inbox = sub.add_parser(
-        "inbox",
+    inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",
         description=("nm inbox list [--status pending] [--room slug]\n"
                      "nm inbox show <id>\n"
@@ -807,8 +842,7 @@ def _parser() -> argparse.ArgumentParser:
     i_sweep = inbox_sub.add_parser("sweep", help="run one inbox sweep cycle now")
     i_sweep.add_argument("--json", action="store_true", help="Output as JSON")
 
-    vision = sub.add_parser(
-        "vision",
+    vision = sub.add_parser("vision", aliases=CLI_ALIASES["vision"],
         help="See images: describe, read text, locate UI elements",
         description=("nm vision describe <file> [\"question\"]\n"
                      "nm vision read-text <file>\n"
@@ -838,8 +872,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="optional question about the screenshot")
     v_shot.add_argument("--json", action="store_true", help="Output as JSON")
 
-    room = sub.add_parser(
-        "room",
+    room = sub.add_parser("room", aliases=CLI_ALIASES["room"],
         help="Project rooms: persistent per-goal workspaces",
         description=("nm room new \"<title>\" [--kind goal|project|ad_hoc] [--linked ID]\n"
                      "nm room list [--status active]\n"
@@ -931,8 +964,7 @@ def _parser() -> argparse.ArgumentParser:
     r_stale.add_argument("--json", action="store_true", help="Output as JSON")
 
 
-    improve = sub.add_parser(
-        "improve",
+    improve = sub.add_parser("improve", aliases=CLI_ALIASES["improve"],
         help="Self-improvement engine: skill rewrites, lessons, canaries",
         description=("nm improve status\n"
                      "nm improve lessons [--query Q]\n"
@@ -957,8 +989,7 @@ def _parser() -> argparse.ArgumentParser:
     imp_rollback.add_argument("hash", help="version hash to restore")
     imp_rollback.add_argument("--json", action="store_true", help="Output as JSON")
 
-    trade = sub.add_parser(
-        "trade",
+    trade = sub.add_parser("trade", aliases=CLI_ALIASES["trade"],
         help="FinancialExpert trading brain (Sentinel.py engine)",
         description=("nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
                      "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
@@ -1031,8 +1062,7 @@ def _parser() -> argparse.ArgumentParser:
     t_doctor = trade_sub.add_parser("doctor", help="check the Sentinel integration")
     t_doctor.add_argument("--json", action="store_true", help="Output as JSON")
 
-    swarm = sub.add_parser(
-        "swarm",
+    swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",
         description=("nm swarm run \"<goal>\" [--roles researcher,coder,critic] [--rounds N] [--fanout N]\n"
                      "nm swarm roles\n"
@@ -1058,7 +1088,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
     # Additional subcommands
-    book = sub.add_parser("book", help="AI-assisted book writing: create, write, build")
+    book = sub.add_parser("book", aliases=CLI_ALIASES["book"], help="AI-assisted book writing: create, write, build")
     book.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "run", "status", "build"],
                      help="Action to perform")
@@ -1067,7 +1097,7 @@ def _parser() -> argparse.ArgumentParser:
     book.add_argument("--words", type=int, default=2000, help="Words per chapter")
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
-    hub = sub.add_parser("hub", help="MediaHub: one-call media orchestrator (song/video/podcast)")
+    hub = sub.add_parser("hub", aliases=CLI_ALIASES["hub"], help="MediaHub: one-call media orchestrator (song/video/podcast)")
     hub.add_argument("mode", nargs="?", default="status",
                      choices=["song", "video", "podcast", "status", "styles"],
                      help="what to run")
@@ -1078,7 +1108,7 @@ def _parser() -> argparse.ArgumentParser:
     hub.add_argument("--no-play", action="store_true",
                      help="don't queue/play the result")
     hub.add_argument("--json", action="store_true", help="Output as JSON")
-    cipher = sub.add_parser("cipher",
+    cipher = sub.add_parser("cipher", aliases=CLI_ALIASES["cipher"],
                             help="nmc1 encryption: encrypt, decrypt, classic ciphers, hmac")
     cipher.add_argument("action", nargs="?", default="",
                         choices=["", "encrypt", "decrypt", "classic", "hmac",
@@ -1125,12 +1155,12 @@ def _parser() -> argparse.ArgumentParser:
     _op.add_argument("action", nargs="?", default="stats")
     _op.add_argument("args", nargs="*")
     _op.add_argument("--source", default="cli")
-    structure_p = sub.add_parser("structure", help="Structure an objective into a brief")
+    structure_p = sub.add_parser("structure", aliases=CLI_ALIASES["structure"], help="Structure an objective into a brief")
     structure_p.add_argument("objective", nargs="?", default="",
                              help="task text to structure into a brief")
     structure_p.add_argument("--for", dest="for_", default="mission",
                              help="shape the brief for: mission|goal|chat")
-    money_p = sub.add_parser("money", help="money-making opportunities hunter")
+    money_p = sub.add_parser("money", aliases=CLI_ALIASES["money"], help="money-making opportunities hunter")
     msub = money_p.add_subparsers(dest="money_action")
     _m = msub.add_parser("scan", help="run the opportunity finders (web + curated)")
     _m.add_argument("kind", nargs="?", default="",
@@ -1143,12 +1173,12 @@ def _parser() -> argparse.ArgumentParser:
     structure_p.add_argument("--polish", action="store_true",
                              help="let the model rewrite the brief")
     structure_p.add_argument("--json", action="store_true", help="Output as JSON")
-    arena_parser = sub.add_parser("arena", help="Self-improvement arena: status + approve builds")
+    arena_parser = sub.add_parser("arena", aliases=CLI_ALIASES["arena"], help="Self-improvement arena: status + approve builds")
     arena_sub = arena_parser.add_subparsers(dest="arena_command", required=True)
     arena_sub.add_parser("status", help="Show arena status")
     arena_approve = arena_sub.add_parser("approve", help="Approve a pending arena build")
     arena_approve.add_argument("build_id", help="arena build id to approve")
-    trial_parser = sub.add_parser("trial", help="Single-account trial flow: save/list credentials")
+    trial_parser = sub.add_parser("trial", aliases=CLI_ALIASES["trial"], help="Single-account trial flow: save/list credentials")
     trial_sub = trial_parser.add_subparsers(dest="trial_command", required=True)
     trial_save = trial_sub.add_parser("save", help="Save trial credentials to the encrypted vault")
     trial_save.add_argument("platform", help="platform name")
@@ -1172,14 +1202,14 @@ def _parser() -> argparse.ArgumentParser:
     help_p.add_argument("topic", nargs="?", default="",
                         help="command or topic page (e.g. code, budget)")
     help_p.add_argument("--json", action="store_true", help="Output as JSON")
-    cookies_p = sub.add_parser("cookies", help="Cookie lab: parse, classify, ingest")
+    cookies_p = sub.add_parser("cookies", aliases=CLI_ALIASES["cookies"], help="Cookie lab: parse, classify, ingest")
     cookies_p.add_argument("text", nargs="*", default=[],
                            help="cookie/header text, or 'ingest <text>'")
     cookies_p.add_argument("--source", default="cookies",
                            help="source label for ingest")
     cookies_p.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("reason", help="Reasoning engine")
-    sub.add_parser("workspace", help="Workspace management")
+    sub.add_parser("reason", aliases=CLI_ALIASES["reason"], help="Reasoning engine")
+    sub.add_parser("workspace", aliases=CLI_ALIASES["workspace"], help="Workspace management")
     monitor = sub.add_parser("monitor", aliases=CLI_ALIASES["monitor"],
                              help="watch files/URLs for changes")
     monitor.add_argument("action", nargs="?", default="status",
@@ -1216,7 +1246,7 @@ def _parser() -> argparse.ArgumentParser:
     watch.add_argument("--limit", type=int, default=50,
                        help="history/alert rows to show")
     watch.add_argument("--json", action="store_true", help="Output as JSON")
-    crack = sub.add_parser("crack", help="Offline hash cracking (md5/sha1/sha256/…)")
+    crack = sub.add_parser("crack", aliases=CLI_ALIASES["crack"], help="Offline hash cracking (md5/sha1/sha256/…)")
     crack.add_argument("hashes", nargs="*", help="digest(s) to attack")
     crack.add_argument("--hash", default="", metavar="DIGEST",
                        help="one more digest (script-friendly)")
@@ -1229,7 +1259,7 @@ def _parser() -> argparse.ArgumentParser:
     crack.add_argument("--words", default="", metavar="FILE",
                        help="extra wordlist file")
     crack.add_argument("--json", action="store_true", help="Output as JSON")
-    decode = sub.add_parser("decode",
+    decode = sub.add_parser("decode", aliases=CLI_ALIASES["decode"],
                             help="decode/identify encodings, chains, hashes")
     decode.add_argument("text", nargs="?", default="",
                         help="data (or file:path) to decode")
@@ -1242,7 +1272,7 @@ def _parser() -> argparse.ArgumentParser:
     decode.add_argument("--show", default="", metavar="ID",
                         help="print one stored decode report (JSON)")
     decode.add_argument("--json", action="store_true", help="Output as JSON")
-    music = sub.add_parser("music", help="Music generation")
+    music = sub.add_parser("music", aliases=CLI_ALIASES["music"], help="Music generation")
     music.add_argument("action", nargs="?", default="styles",
                        choices=["styles", "compose", "songs"],
                        help="styles | compose <topic> | songs [name]")
@@ -1254,7 +1284,7 @@ def _parser() -> argparse.ArgumentParser:
     music.add_argument("--seed", default="0")
     music.add_argument("--json", action="store_true", help="Output as JSON")
 
-    exec_cmd = sub.add_parser("exec", help="run code in the sandbox")
+    exec_cmd = sub.add_parser("exec", aliases=CLI_ALIASES["exec"], help="run code in the sandbox")
     exec_cmd.add_argument("code", nargs="?", default="",
                           help="source to run (or: languages)")
     exec_cmd.add_argument("--lang", default="", help="python|bash|node|… (auto by default)")
@@ -1262,7 +1292,7 @@ def _parser() -> argparse.ArgumentParser:
     exec_cmd.add_argument("--file", default="", help="run a workspace file instead")
     exec_cmd.add_argument("--json", action="store_true", help="Output as JSON")
 
-    apps = sub.add_parser("apps", help="build and manage local web apps")
+    apps = sub.add_parser("apps", aliases=CLI_ALIASES["apps"], help="build and manage local web apps")
     apps.add_argument("action", nargs="?", default="list",
                       choices=["build", "list", "info", "stacks", "serve",
                                "stop", "served"],
@@ -1275,7 +1305,7 @@ def _parser() -> argparse.ArgumentParser:
     apps.add_argument("--json", action="store_true", help="Output as JSON")
     
     # Connector commands
-    connectors = sub.add_parser("connectors", help="Manage external service connectors")
+    connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")
     connectors.add_argument("action", nargs="?", default="list",
                            choices=["list", "status", "connect", "disconnect"],
                            help="Action to perform")
@@ -1293,14 +1323,14 @@ def _parser() -> argparse.ArgumentParser:
     finance.add_argument("--days", type=int, default=30, help="Transaction history days")
     
     # Native extensions command
-    native = sub.add_parser("native", help="native kernels: status and build")
+    native = sub.add_parser("native", aliases=CLI_ALIASES["native"], help="native kernels: status and build")
     native.add_argument("--build", action="store_true",
                         help="compile the C++ kernels when a compiler is present")
     native.add_argument("--benchmark", action="store_true",
                         help="time the vector-search kernel native vs pure Python and check agreement")
     
         # Virtual cards commands
-    cards = sub.add_parser("cards", help="Virtual card management")
+    cards = sub.add_parser("cards", aliases=CLI_ALIASES["cards"], help="Virtual card management")
     cards.add_argument("action", nargs="?", default="list",
                       choices=["list", "create", "pause", "close", "status"],
                       help="Action to perform")

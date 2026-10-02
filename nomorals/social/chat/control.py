@@ -108,6 +108,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "cookies": (1, None),    # /cookies <header> | /cookies file:<path> | /cookies ingest <header>
     # Prompt/mission structuring sub-agent
     "structure": (1, None),  # /structure <objective> — the structured brief
+    # one-pass investigation: decode → crack → OSINT → knowledge graph
+    "investigate": (1, None),  # /investigate <hash|jwt|cookie|url|blob|file> [file]
     "monitor": (0, None),    # /monitor [add <target> [every Ns] | list | tick | rm <ref>]
     # real crypto: AES-256 sealed blobs + classic ciphers
     "cipher": (0, None),     # /cipher enc|dec … with <pass> · /cipher vault put|get|list|rm
@@ -241,6 +243,7 @@ _HELP_TEXT = "\n".join(
         "  /cipher vault put <name> <secret> with <pass>   named secrets vault",
         "  /cipher vault get <name> with <pass> | list | rm <name>",
         "  /cipher dec <blob> with <pass>           open it (rejects wrong pass / tamper)",
+        "  /investigate <hash|jwt|cookie|url|…>   one pass: decode → crack → OSINT → graph",
         "  /monitor add <url|file> [every Ns]       alert on change (with diff)",
         "       [--webhook URL] [--min-gap 60]     POST alerts as JSON; throttle",
         "  /monitor alert <ref> [--webhook … --min-gap N]  change a watch's delivery",
@@ -508,6 +511,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/structure <objective>",
              "example": "/structure Build the decoder and verify it against the test corpus",
              "related": "/code, nm structure"},
+    "investigate": {"what": "one-pass investigation pipeline: decode → crack → "
+                            "OSINT → knowledge graph. Hand it any artifact — a "
+                            "hash, JWT, cookie, URL, encoded blob, or a file — "
+                            "and get back what it is, what it decodes to, "
+                            "whether it cracks, and who/what it links to.",
+                    "usage": "/investigate <hash|jwt|cookie|url|blob|file> [file]",
+                    "example": "/investigate 5d41402abc4b2a76b9719d911017c592",
+                    "related": "/decode /crack /osint"},
     "monitor": {"what": "Watches a URL or file and alerts you (with a short diff) "
                         "when its content actually changes. Auto-ticked while the bot runs.",
               "usage": "/monitor add <target> [every 300s] [--webhook URL] [--min-gap 60]   |   /monitor alert <ref> [--webhook …] [--min-gap N]   |   /monitor list   |   /monitor tick   |   /monitor rm <ref>",
@@ -911,7 +922,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "gomoku", "reversi", "checkers"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
-                           "monitor"]),
+                           "monitor", "investigate"]),
     ("media system", ["music", "play", "video", "hub", "podcast"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
@@ -1094,7 +1105,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "bet", "finance", "weather", "tz"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1144,6 +1155,7 @@ LIST_ONELINERS: dict[str, str] = {
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "decode": "identify + decode anything: /decode <data|file|hash>",
+    "investigate": "one-pass investigation: decode → crack → OSINT → knowledge graph",
     "cookies": "CookieLab: analyze & handle cookie headers",
     "cipher": "real crypto: AES-256 sealed blobs + classic ciphers + vault",
     "monitor": "watch a target on a cadence, alert on change",

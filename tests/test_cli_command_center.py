@@ -83,7 +83,15 @@ class AliasMapTests(unittest.TestCase):
                       "simulate": ["risk", "echo hi"],
                       "arena": ["status"], "trial": ["list"],
                       "research-loop": ["status"], "hub": ["status"],
-                      "skill": ["list"], "book": ["list"]}
+                      "skill": ["list"], "book": ["list"],
+                      # wave F3: every command has an alias now, so every
+                      # command with a required subaction needs dummy args
+                      "bet": ["bankroll"], "captcha": ["detect"],
+                      "improve": ["status"], "inbox": ["list"],
+                      "media": ["probe", "x"], "room": ["new", "x"],
+                      "studio": ["presets"], "swarm": ["run", "x"],
+                      "trade": ["analyze", "x"], "vision": ["describe", "x"],
+                      "voice": ["stats"], "weather": ["now"]}
         for canonical, aliases in CLI_ALIASES.items():
             for alias in aliases:
                 argv = [alias] + dummy_args.get(canonical, [])
