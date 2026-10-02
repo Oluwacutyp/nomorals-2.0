@@ -200,9 +200,14 @@ def _parse_pdf(data: bytes, doc: Document) -> Document:
 
 
 def _parse_docx(data: bytes, doc: Document) -> Document:
-    from docx import Document as DocxDocument
-    from docx.table import Table as DocxTable
-    from docx.text.paragraph import Paragraph
+    try:
+        from docx import Document as DocxDocument
+        from docx.table import Table as DocxTable
+        from docx.text.paragraph import Paragraph
+    except ImportError as exc:
+        raise DocumentError(
+            "parsing .docx requires the optional 'python-docx' package "
+            "(pip install python-docx)") from exc
 
     try:
         oxml_doc = DocxDocument(io.BytesIO(data))
@@ -275,7 +280,12 @@ def _cell_text(value: object) -> str:
 
 
 def _parse_xlsx(data: bytes, doc: Document) -> Document:
-    import openpyxl
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise DocumentError(
+            "parsing .xlsx requires the optional 'openpyxl' package "
+            "(pip install openpyxl)") from exc
 
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(data), read_only=True,

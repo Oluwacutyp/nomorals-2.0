@@ -15,8 +15,24 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from docx import Document as DocxDocument
-from openpyxl import Workbook
+try:
+    from docx import Document as DocxDocument
+    _HAS_DOCX = True
+except ImportError:  # python-docx is an optional test dependency
+    DocxDocument = None
+    _HAS_DOCX = False
+
+try:
+    from openpyxl import Workbook
+    _HAS_OPENPYXL = True
+except ImportError:  # openpyxl is an optional test dependency
+    Workbook = None
+    _HAS_OPENPYXL = False
+
+requires_docx = unittest.skipUnless(
+    _HAS_DOCX, "python-docx not installed")
+requires_openpyxl = unittest.skipUnless(
+    _HAS_OPENPYXL, "openpyxl not installed")
 
 from nomorals.core.pdf import render_pdf
 from nomorals.documents import (
@@ -157,6 +173,7 @@ class TestModel(unittest.TestCase):
 
 
 class TestParsers(unittest.TestCase):
+    @requires_docx
     def test_docx_headings_and_table(self) -> None:
         doc = parse_bytes(make_docx_bytes(), filename="report.docx")
         self.assertEqual(doc.format, "docx")
@@ -175,6 +192,7 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(table.headers, ["Segment", "Revenue"])
         self.assertEqual(table.rows, [["North", "120"], ["South", "95"]])
 
+    @requires_openpyxl
     def test_xlsx_two_sheets(self) -> None:
         doc = parse_bytes(make_xlsx_bytes(), filename="data.xlsx")
         self.assertEqual(doc.format, "xlsx")
@@ -281,6 +299,7 @@ class TestParsers(unittest.TestCase):
         with self.assertRaises(DocumentError):
             parse_bytes(b"PK\x03\x04not a real zip", filename="bad.docx")
 
+    @requires_docx
     def test_parse_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "report.docx"
@@ -295,6 +314,7 @@ class TestParsers(unittest.TestCase):
             parse_path("/nonexistent/dir/file.pdf")
 
 
+@requires_docx
 class TestConverters(unittest.TestCase):
     def setUp(self) -> None:
         self.doc = parse_bytes(make_docx_bytes(), filename="report.docx")

@@ -62,11 +62,12 @@ jobs:
           python3 -m pip install --upgrade pip
           # The offline suite exercises optional-acceleration paths for real
           # (numpy/pandas/Pillow/yt-dlp), so CI installs them to match a real
-          # dev checkout; pyyaml is for the workflow self-check below. None
+          # dev checkout; pyyaml is for the workflow self-check below;
+          # python-docx/openpyxl are for the document-engine tests. None
           # are added to the package's own extras on purpose: the package
           # keeps zero mandatory dependencies.
           python3 -m pip install -e ".[dev,fast,media,media-edit]" \
-            "pandas>=2" "pyyaml>=6"
+            "pandas>=2" "pyyaml>=6" "python-docx>=1.1" "openpyxl>=3.1"
 
       - name: Validate this workflow parses
         run: python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
