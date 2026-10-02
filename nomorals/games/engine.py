@@ -35,6 +35,12 @@ _log = get_logger(__name__)
 
 SendFn = Callable[[str, str], None]  # (chat_key, text) -> None
 
+#: A live room with no human activity (move/join/leave) for this long is
+#: closed by the scheduler and its table freed. Covers games with
+#: ``move_timeout = 0`` (no per-turn clock at all) and abandoned tables
+#: whose per-turn timeouts would otherwise ping-pong forever.
+IDLE_ROOM_TTL = 3600.0
+
 
 def _new_state_accepts_kwargs(game: MultiGame) -> bool:
     """True when the game's new_state takes **kw (hangman: the daily flag)."""
@@ -165,11 +171,18 @@ class GameEngine:
     def _sweep_timeouts(self) -> None:
         now = time.time()
         due: list[Room] = []
+        idle: list[Room] = []
         with self._lock:
             for room in self._rooms.values():
+                if room.status != "active":
+                    continue
+                # idle expiry runs regardless of the per-turn clock —
+                # games with move_timeout=0 never time out otherwise
+                if now - room.last_activity > IDLE_ROOM_TTL:
+                    idle.append(room)
+                    continue
                 game = self.games.get(room.game)
-                if (game is None or room.status != "active"
-                        or game.move_timeout <= 0):
+                if (game is None or game.move_timeout <= 0):
                     continue
                 cur = room.current
                 if (cur is not None and not cur.is_ai
@@ -180,6 +193,11 @@ class GameEngine:
                 self._handle_timeout(room)
             except Exception:  # noqa: BLE001
                 _log.exception("game timeout failed: %s", room.game)
+        for room in idle:
+            try:
+                self._finish_idle(room)
+            except Exception:  # noqa: BLE001
+                _log.exception("game idle-expiry failed: %s", room.game)
         # reap expired invites / long-idle relay rooms (throttled inside)
         try:
             relay = self._relay_obj
@@ -249,7 +267,9 @@ class GameEngine:
             room = self._rooms.get(chat_key)
             if room is not None and room.status == "active":
                 return room
-        return self._load_live(chat_key)
+            # DB restore happens under the same lock so two concurrent
+            # lookups can't resurrect the same room twice
+            return self._load_live(chat_key)
 
     def start(self, chat_key: str, game_name: str,
               host: Player, *, kind: str = "dm",
@@ -307,6 +327,7 @@ class GameEngine:
                 msgs.append(intro)
             room.status = "active"
             room.turn_started = time.time()
+            room.last_activity = time.time()
             self._persist(room)
             self._pump_ai(room, msgs)
             self._persist(room)
@@ -315,6 +336,10 @@ class GameEngine:
                 self._rooms.pop(chat_key, None)
                 self._by_id.pop(room.id, None)
             raise
+        # a fresh table supersedes the rematch memory — the old finished
+        # game is no longer the one to run back
+        with self._lock:
+            self._last_game.pop(chat_key, None)
         return room, msgs
 
     def _mirror_inventory(self, room: Room) -> None:
@@ -398,6 +423,7 @@ class GameEngine:
                 msgs.append(f"{player.name} sits down (replacing {replaced_ai.name}).")
             else:
                 msgs.append(f"{player.name} sits down.")
+        room.last_activity = time.time()
         self._persist(room)
         self._emit(room, *msgs)
         return msgs
@@ -419,6 +445,7 @@ class GameEngine:
         if not room.humans or len(room.players) <= len(room.ai_seats):
             return self._finish(room, notice)
         room.turn_started = time.time()
+        room.last_activity = time.time()
         self._persist(room)
         msgs = []
         if notice:
@@ -443,6 +470,7 @@ class GameEngine:
             game = self.games.get(room.game)
             if game is None:
                 return []
+            room.last_activity = time.time()
         # channel spectator mode: humans don't move, they watch
         if room.kind == "channel" and game.channel_mode == "house" \
                 and not sender.is_ai:
@@ -490,9 +518,16 @@ class GameEngine:
         out: list[str] = []
         try:
             out.extend(game.on_move(room, sender, text, self._mind))
-        except Exception:  # noqa: BLE001 - a game bug must not eat the chat
+        except Exception as exc:  # noqa: BLE001
+            # surface the REAL error — the player deserves to know the
+            # game broke, not a vague hiccup and not silent nothing
             _log.exception("game move failed: %s", room.game)
-            out.append("…the table hiccuped. try that again.")
+            detail = f"{type(exc).__name__}: {exc}".strip()
+            if len(detail) > 200:
+                detail = detail[:200].rstrip() + "…"
+            out.append(
+                f"⚠️ {game.name} errored on that move "
+                f"({detail or 'unknown error'}) — the table is still open.")
         if self.is_over(room):
             out.extend(self._finish(room))
         else:
@@ -514,9 +549,18 @@ class GameEngine:
     def quit(self, chat_key: str) -> list[str]:
         with self._lock:
             room = self._rooms.get(chat_key)
-            if room is None or room.status != "active":
-                return ["no game is live here."]
-        return self._finish(room, "everyone up? table closed.")
+            live = room is not None and room.status == "active"
+        if live:
+            return self._finish(room, "everyone up? table closed.")
+        # relay players quit from their own DM, but the room lives at the
+        # virtual relay key — tear the relay down too, or the duel sticks
+        # around forever with no way to close it from either chat
+        relay = self.relay.get_relay_for_chat(chat_key)
+        if relay is not None:
+            self.relay.close_relay(relay.room_id, reason="quit")
+            return [f"duel closed — the {relay.game_name} relay table "
+                    "is shut."]
+        return ["no game is live here."]
 
     def _pump_ai(self, room: Room, out: list[str]) -> None:
         """Play every consecutive AI seat until a human's turn (or the
@@ -532,9 +576,11 @@ class GameEngine:
                 return
             try:
                 out.extend(game.ai_turn(room, self._mind))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 _log.exception("ai turn failed: %s", room.game)
-                out.append("…the house fumbled that turn.")
+                out.append(
+                    f"⚠️ the house ({game.name} AI) errored "
+                    f"({type(exc).__name__}) — seat skipped.")
             if self.is_over(room):
                 return
             # did the game make progress? (removed the AI seat, changed
@@ -548,11 +594,16 @@ class GameEngine:
                 return
 
     def _handle_timeout(self, room: Room) -> None:
-        game = self.games.get(room.game)
-        cur = room.current
-        if game is None or cur is None or cur.is_ai:
-            return
         with self._lock:
+            # the sweep selected this room before the tick ran — it may
+            # have been quit/finished since. Never tick a dead room.
+            if (self._rooms.get(room.chat_key) is not room
+                    or room.status != "active"):
+                return
+            game = self.games.get(room.game)
+            cur = room.current
+            if game is None or cur is None or cur.is_ai:
+                return
             msgs = game.on_timeout(room, cur, self._mind)
             if self.is_over(room):
                 msgs.extend(self._finish(room))
@@ -565,6 +616,16 @@ class GameEngine:
             for m in msgs:
                 self._emit(room, m)
 
+    def _finish_idle(self, room: Room) -> None:
+        """Close a table the players abandoned: re-check liveness under
+        the lock (it may have been quit after the sweep selected it),
+        then finish it with an idle notice."""
+        with self._lock:
+            if (self._rooms.get(room.chat_key) is not room
+                    or room.status != "active"):
+                return
+        self._finish(room, "the table closed — idle too long.")
+
     def is_over(self, room: Room) -> bool:
         """Pure check — never mutates. ``_finish`` owns the close:
         persisting the finished status and popping the room."""
@@ -576,6 +637,7 @@ class GameEngine:
         try:
             return bool(game.is_over(room))
         except Exception:  # noqa: BLE001
+            _log.exception("game is_over failed: %s", room.game)
             return False
 
     def _finish(self, room: Room, extra: str | None = None) -> list[str]:
@@ -674,10 +736,11 @@ class GameEngine:
         with self._lock:
             last = self._last_game.get(chat_key)
             live = self._rooms.get(chat_key)
-        if last is None:
-            return None, ["no finished game here yet — /game list to start one."]
+        # a live table blocks everything — even a rematchable memory
         if live is not None and live.status == "active":
             return None, [f"a {live.game} is already live — /game quit first."]
+        if last is None:
+            return None, ["no finished game here yet — /game list to start one."]
         game_name, humans, kind = last
         host, rest = humans[0], humans[1:]
         try:

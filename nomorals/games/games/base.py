@@ -61,6 +61,10 @@ class Room:
     # transient (never persisted): the room's live random stream
     _rng_instance: random.Random | None = field(
         default=None, repr=False, compare=False)
+    #: Last human-initiated activity (start/move/join/leave). Turn
+    #: timeouts and AI pumps deliberately do NOT touch this — it drives
+    #: idle expiry, so only a real player keeps the table alive.
+    last_activity: float = field(default_factory=time.time)
 
     # ── players ─────────────────────────────────────────────────────────────
     def rng(self) -> random.Random:
@@ -117,6 +121,7 @@ class Room:
             "players": [p.key for p in self.players],
             "turn": self.turn, "state": self.state, "status": self.status,
             "started_at": self.started_at, "seed": self.seed,
+            "last_activity": self.last_activity,
         }
 
     @classmethod

@@ -81,7 +81,16 @@ class GameMind:
         if len(raw) > max_len:
             raw = raw[:max_len].rstrip() + "…"
         if cache_key:
-            self._cache[cache_key] = (time.time(), raw)
+            now = time.time()
+            # the mind lives as long as the engine — evict stale entries
+            # and cap the size so this cache can't grow without bound
+            stale = [k for k, (ts, _v) in self._cache.items()
+                     if now - ts >= 60]
+            for k in stale:
+                del self._cache[k]
+            while len(self._cache) >= 512:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[cache_key] = (now, raw)
         return raw
 
     # ── referee / host voice ─────────────────────────────────────────────────
