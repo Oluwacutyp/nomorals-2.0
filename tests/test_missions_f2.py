@@ -521,8 +521,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn("current: b", text)
         self.assertIn("eta:", text)
         self.assertIn("500 tokens", text)
-        self.assertIn("stalled: waiting on provider", text)
+        self.assertIn("stalled [waiting_on_provider]: waiting on provider", text)
         self.assertIn("Serv00 signup still pending review", text)
+        self.assertIn("unblocks:", text)
 
     def test_render_without_stall_omits_stall_line(self):
         mission = make_mission(self.store)

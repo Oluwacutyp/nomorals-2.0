@@ -16,6 +16,7 @@ drives every design decision here:
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,7 @@ from ..storage.repository import Repository
 from .progress import (
     clear_stall as _clear_stall_entry,
     estimate_eta,
+    fmt_duration,
     real_plan_steps,
     record_stall as _record_stall_entry,
 )
@@ -35,6 +37,35 @@ from .progress import _step_name as _plan_step_name
 __all__ = ["MissionStatus", "Mission", "MissionStore", "Checkpoint"]
 
 _log = get_logger(__name__)
+
+#: How long a mission may claim "running" without a runner heartbeat
+#: before ``MissionStore.reconcile`` treats the runner as dead (seconds).
+#: Overridable per call and via NM_MISSION_STALE_HEARTBEAT_S (floor 60s).
+STALE_HEARTBEAT_SECONDS = 900.0
+
+
+def _stale_heartbeat_after() -> float:
+    try:
+        return max(
+            60.0,
+            float(os.environ.get("NM_MISSION_STALE_HEARTBEAT_S", "")
+                  or STALE_HEARTBEAT_SECONDS),
+        )
+    except (TypeError, ValueError):
+        return STALE_HEARTBEAT_SECONDS
+
+
+def _process_alive(pid: int) -> bool:
+    """True when the OS still has this pid. Never raises."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
 
 
 class MissionStatus:
@@ -347,6 +378,54 @@ class MissionStore:
         if note:
             mission.state["status_note"] = note
         return self.save(mission)
+
+    def reconcile(
+        self, mission_id: str, *, stale_after: float | None = None
+    ) -> dict[str, Any]:
+        """Verify a mission that claims to be running is actually alive.
+
+        A mission survives ``kill -9``, so a crash can leave
+        ``status="running"`` with nobody driving it. On read we check the
+        runner heartbeat (``MissionRunner`` writes ``state["heartbeat"]``
+        — pid + timestamp — at start and after every step) plus the OS
+        process: a stale heartbeat *and* a gone process means the runner
+        died, so the mission flips to ``failed`` with an explicit reason
+        instead of reporting "running" forever. A stale heartbeat with a
+        *live* process is just a long step — it stays running.
+
+        Returns ``{"mission_id", "changed", "status", "reason"}``;
+        ``changed`` is True only when the status actually moved. Never
+        touches non-running missions.
+        """
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        if mission.status != MissionStatus.RUNNING:
+            return {"mission_id": mission_id, "changed": False,
+                    "status": mission.status, "reason": ""}
+        limit = stale_after if stale_after is not None else _stale_heartbeat_after()
+        hb = mission.state.get("heartbeat") or {}
+        try:
+            age = max(0.0, time.time() - float(hb.get("at") or 0.0))
+        except (TypeError, ValueError):
+            age = float("inf")
+        pid = hb.get("pid")
+        alive = _process_alive(pid) if isinstance(pid, int) and pid > 0 else False
+        if alive or age <= limit:
+            return {"mission_id": mission_id, "changed": False,
+                    "status": MissionStatus.RUNNING,
+                    "heartbeat_age_s": round(age, 1),
+                    "process_alive": alive, "reason": ""}
+        reason = (
+            f"runner died — no heartbeat for {fmt_duration(age)}"
+            + (f" (pid {pid} is gone)" if pid else " (no heartbeat ever recorded)")
+        )
+        mission.status = MissionStatus.FAILED
+        mission.state["last_error"] = reason
+        mission.state["status_note"] = f"reconciled: {reason}"
+        self.save(mission)
+        _log.warning("mission %s reconciled running->failed: %s",
+                     mission.id, reason)
+        return {"mission_id": mission_id, "changed": True,
+                "status": MissionStatus.FAILED, "reason": reason}
 
     def list(
         self,

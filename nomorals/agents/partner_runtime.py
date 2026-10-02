@@ -6425,13 +6425,18 @@ class PartnerRuntime:
                 return "no active missions."
             lines = [f"missions ({len(rows)} active):"]
             for m in rows[:15]:
+                # reconcile on read: a dead runner must not show as running
+                store.reconcile(m.id)
+                m = store.get(m.id)
                 p = store.progress(m.id)
                 stall = m.state.get("stall")
                 line = (f"  · {m.name} [{m.status}] — "
                         f"{p['steps_done']}/{p['total_steps']} steps "
                         f"({p['percent']:.0f}%)")
                 if stall:
-                    line += f" — ⚠️ stalled: {stall.get('code')}"
+                    code = stall.get("code")
+                    label = StallCode.LABELS.get(code, code)
+                    line += f" — ⚠️ stalled [{code}]: {label}"
                 lines.append(line)
             return "\n".join(lines)
 
@@ -6442,7 +6447,13 @@ class PartnerRuntime:
             if mission is None:
                 return (f"no mission matching {rest!r} — "
                         "/mission list to see the active ones.")
-            return render_status_text(store.detail(mission.id))
+            # reconcile on read: a dead runner must not report "running"
+            rec = store.reconcile(mission.id)
+            text = render_status_text(store.detail(mission.id))
+            if rec["changed"]:
+                text = (f"⚠️ reconciled: stale 'running' → {rec['status']}: "
+                        f"{rec['reason']}\n{text}")
+            return text
 
         if verb == "stall":
             sub = rest.split(None, 2)
@@ -6464,8 +6475,14 @@ class PartnerRuntime:
             except (NoMoralsError, ValueError) as exc:
                 return f"couldn't mark stall: {exc}"
             stall = out["stall"] or {}
-            return (f"⚠️ {mission.name} marked stalled: "
-                    f"{stall.get('code')} — {stall.get('message')}")
+            code = stall.get("code")
+            label = StallCode.LABELS.get(code, code)
+            hint = StallCode.UNBLOCK_HINTS.get(code, "")
+            reply = (f"⚠️ {mission.name} marked stalled [{code}]: "
+                     f"{label} — {stall.get('message')}")
+            if hint:
+                reply += f"\nunblocks: {hint}"
+            return reply
 
         if verb == "clear":
             mission, _amb = _resolve(rest)
@@ -6483,6 +6500,15 @@ class PartnerRuntime:
                 return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
+            # idempotent: double-pause is a no-op success, and a finished
+            # mission is already past pausing — never an error, never a
+            # state rewrite.
+            if mission.status == MissionStatus.PAUSED:
+                return (f"⏸ {mission.name}: already paused — no change "
+                        f"(/mission resume {mission.id} to continue).")
+            if mission.terminal:
+                return (f"{mission.name} is already {mission.status} — "
+                        "nothing to pause.")
             try:
                 store.set_status(mission.id, MissionStatus.PAUSED)
             except (NoMoralsError, ValueError) as exc:
@@ -6496,10 +6522,19 @@ class PartnerRuntime:
                 return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
+            # a "running" mission whose runner died is not running —
+            # reconcile first so resume restarts it instead of no-op'ing
+            rec = store.reconcile(mission.id)
+            if rec["changed"]:
+                mission = store.get(mission.id)
             if mission.terminal:
                 return (f"{mission.name} is {mission.status} — terminal "
                         "missions can't resume; /mission retry starts a "
                         "fresh attempt.")
+            # idempotent: resume of a live mission is a no-op success
+            if mission.status == MissionStatus.RUNNING:
+                return (f"▶ {mission.name}: already running — no change; "
+                        f"/mission status {mission.id} for progress.")
             runner = MissionRunner(self.context, store=store)
 
             def _resume_job() -> None:
@@ -6523,6 +6558,14 @@ class PartnerRuntime:
                 return _amb
             if mission is None:
                 return f"no mission matching {ref!r}."
+            # idempotent: a finished mission stays finished — cancelling
+            # must never rewrite done/failed into cancelled, and a second
+            # cancel is a no-op success, not an error.
+            if mission.status == MissionStatus.CANCELLED:
+                return f"⏹ {mission.name}: already cancelled — no change."
+            if mission.terminal:
+                return (f"⏹ {mission.name}: already {mission.status} — "
+                        "nothing to cancel.")
             try:
                 store.set_status(mission.id, MissionStatus.CANCELLED, note=reason)
             except (NoMoralsError, ValueError) as exc:
@@ -6548,7 +6591,9 @@ class PartnerRuntime:
                         "it first if you want to start over.")
             # cancel + requeue: a fresh mission row keeps the goal, the plan
             # skeleton, the name and the budgets; spend, errors, stalls and
-            # the milestone log start clean.
+            # the milestone log start clean. The original row is kept
+            # as-is when it is already terminal — its done/failed record
+            # is history, not something retry may rewrite.
             fresh_state: dict[str, Any] = {}
             if mission.state.get("plan"):
                 fresh_state["plan"] = mission.state["plan"]
@@ -6560,11 +6605,16 @@ class PartnerRuntime:
                 state=fresh_state,
                 metadata={**(mission.metadata or {}), "retry_of": mission.id},
             )
-            try:
-                store.set_status(mission.id, MissionStatus.CANCELLED,
-                                 note=f"superseded by retry {new.id}")
-            except (NoMoralsError, ValueError) as exc:
-                _log.debug("retry: could not cancel old mission: %s", exc)
+            if mission.terminal:
+                old_note = (f"the {mission.status} original is kept as-is; "
+                            "this is a brand-new attempt")
+            else:
+                try:
+                    store.set_status(mission.id, MissionStatus.CANCELLED,
+                                     note=f"superseded by retry {new.id}")
+                except (NoMoralsError, ValueError) as exc:
+                    _log.debug("retry: could not cancel old mission: %s", exc)
+                old_note = "the previous attempt was cancelled"
             runner = MissionRunner(self.context, store=store)
 
             def _retry_job() -> None:
@@ -6576,8 +6626,9 @@ class PartnerRuntime:
             threading.Thread(target=_retry_job,
                              name=f"mission-retry-{new.id[:8]}",
                              daemon=True).start()
-            return (f"🔁 retry of {mission.name} queued as {new.name} "
-                    f"[{new.id}] — running in the background.")
+            return (f"🔁 {mission.name} is {mission.status}: retry starts a "
+                    f"NEW attempt [{new.id}] linked via metadata.retry_of "
+                    f"({old_note}) — running in the background.")
 
         if verb == "watch":
             mission, _amb = _resolve(rest)
@@ -6587,12 +6638,16 @@ class PartnerRuntime:
                 return f"no mission matching {rest!r}."
             if not chat_key:
                 return "watch needs a chat context — run this from a chat."
+            # reconcile on read: report the true state, not stale "running"
+            store.reconcile(mission.id)
+            mission = store.get(mission.id)
             added = MissionWatchers(self.context.db).subscribe(
                 mission.id, chat_key)
+            state_note = f" (currently {mission.status})"
             if added:
                 return (f"👀 watching {mission.name}: milestone updates "
-                        "will land in this chat.")
-            return f"already watching {mission.name} from this chat."
+                        f"will land in this chat.{state_note}")
+            return f"already watching {mission.name} from this chat.{state_note}"
 
         if verb == "unwatch":
             mission, _amb = _resolve(rest)

@@ -17,6 +17,7 @@ Two consequences worth stating:
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -143,6 +144,16 @@ class MissionRunner:
         _log.info("mission cancellation requested: %s", reason)
 
     # ── milestones & stalls ──────────────────────────────────────────────
+
+    def _heartbeat(self, mission: Mission) -> None:
+        """Liveness marker for ``MissionStore.reconcile``.
+
+        Written when a run starts and after every step. A mission that
+        still says "running" with a stale heartbeat and a gone pid is a
+        dead runner, not a live mission — reconcile() flips it to failed
+        with an explicit reason instead of reporting "running" forever.
+        """
+        mission.state["heartbeat"] = {"pid": os.getpid(), "at": time.time()}
 
     def _report(self, method: str, *args: Any, **kwargs: Any) -> None:
         """Fire a milestone event. Telemetry: never breaks a run."""
@@ -278,6 +289,7 @@ class MissionRunner:
             )
 
         mission.status = MissionStatus.RUNNING
+        self._heartbeat(mission)
         self.store.save(mission)
         self._report("on_started", mission)
 
@@ -315,6 +327,7 @@ class MissionRunner:
 
             new_stall = self._apply_step_result(mission, outcome, step.name)
 
+            self._heartbeat(mission)
             self.store.save(mission)
             if index % self.checkpoint_every == 0:
                 self.store.checkpoint(mission, label=f"after:{step.name}")

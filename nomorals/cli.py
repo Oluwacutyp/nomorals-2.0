@@ -321,6 +321,19 @@ def _parser() -> argparse.ArgumentParser:
     d_report.add_argument("--no-pdf", action="store_true",
                           help="skip the PDF artifact (HTML only)")
     d_report.add_argument("--json", action="store_true", help="Output as JSON")
+    d_send = dsub.add_parser(
+        "send",
+        help="resend an already-built report zip to a chat")
+    d_send.add_argument(
+        "path", help="path to the report .zip from a previous build")
+    d_send.add_argument(
+        "--to", default="", metavar="platform:chat",
+        help="send the zip to this chat, e.g. telegram:123456")
+    d_send.add_argument("--platform", default="",
+                        help="platform when --to is a bare chat id")
+    d_send.add_argument("--caption", default="",
+                        help="caption for the sent archive")
+    d_send.add_argument("--json", action="store_true", help="Output as JSON")
     
 
     # Agent-tool subcommands
@@ -4300,6 +4313,8 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if args.show:
+        # reconcile on read: a dead runner must not report "running"
+        store.reconcile(args.show)
         mission = store.get(args.show)
         history = store.checkpoint_history(mission.id, limit=10)
         payload = {
@@ -6334,15 +6349,64 @@ def _cmd_commands(args: argparse.Namespace, context: Any) -> int:
 
 
 def _cmd_deliver(args: argparse.Namespace, context: Any) -> int:
-    """`nm deliver report <topic>` — create-and-deliver: generate → zip → send."""
+    """`nm deliver report <topic>` — create-and-deliver: generate → zip → send.
+
+    `nm deliver send <zip> --to platform:chat` — resend a previously built
+    archive (the recovery path when a deliver built the artifact but the
+    send failed).
+    """
     from .core.errors import ToolError
-    from .tools.deliver_report import deliver_report, generate_report
+    from .tools.deliver_report import (deliver_report, generate_report,
+                                       resend_report)
 
     action = getattr(args, "deliver_action", "") or ""
+
+    def _split_target() -> tuple[str, str]:
+        to = (getattr(args, "to", "") or "").strip()
+        platform = (getattr(args, "platform", "") or "").strip()
+        chat = to
+        if to and ":" in to:
+            platform, chat = to.split(":", 1)
+            platform, chat = platform.strip(), chat.strip()
+        return platform, chat
+
+    def _deliver_warnings(out: dict) -> str:
+        notes = out.get("warnings") or []
+        if not notes:
+            return ""
+        return "\n" + "\n".join(f"⚠️ {note}" for note in notes)
+
+    if action == "send":
+        platform, chat = _split_target()
+        path = (getattr(args, "path", "") or "").strip()
+        if not path:
+            _emit(args, {"error": "path required"},
+                  "usage: nm deliver send <zip-path> --to platform:chat")
+            return 2
+        if not platform or not chat:
+            _emit(args, {"error": "destination required"},
+                  "usage: nm deliver send <zip-path> --to platform:chat "
+                  "(e.g. --to telegram:123456) or --to <chat> --platform <name>")
+            return 2
+        caption = (getattr(args, "caption", "") or "").strip()
+        try:
+            out = resend_report(context, path, platform, chat,
+                                caption=caption)
+        except ToolError as exc:
+            _emit(args, {"error": str(exc)}, f"deliver send: {exc}")
+            return 1
+        name = out["zip_path"].rsplit("/", 1)[-1]
+        _emit(args, out,
+              f"📄 resent {name} → {out.get('platform', platform)}:"
+              f"{out.get('chat_id', chat)} "
+              f"({out['zip_bytes']} B, message {out['message_id']})")
+        return 0
+
     if action != "report":
         _emit(args, {"error": "unknown deliver action"},
               "usage: nm deliver report <topic> --section 'Title::markdown body' "
-              "[--to platform:chat] [--title T] [--no-pdf]")
+              "[--to platform:chat] [--title T] [--no-pdf]\n"
+              "       nm deliver send <zip-path> --to platform:chat")
         return 2
     topic = (getattr(args, "topic", "") or "").strip()
     if not topic:
@@ -6368,12 +6432,8 @@ def _cmd_deliver(args: argparse.Namespace, context: Any) -> int:
         return 2
     title = (getattr(args, "title", "") or "").strip()
     include_pdf = not getattr(args, "no_pdf", False)
+    platform, chat = _split_target()
     to = (getattr(args, "to", "") or "").strip()
-    platform = (getattr(args, "platform", "") or "").strip()
-    chat = to
-    if to and ":" in to:
-        platform, chat = to.split(":", 1)
-        platform, chat = platform.strip(), chat.strip()
 
     try:
         if to:
@@ -6387,8 +6447,10 @@ def _cmd_deliver(args: argparse.Namespace, context: Any) -> int:
                 include_pdf=include_pdf)
             name = out["zip_path"].rsplit("/", 1)[-1]
             _emit(args, out,
-                  f"📄 delivered {name} → {platform}:{chat} "
-                  f"({out['zip_bytes']} B, message {out['message_id']})")
+                  f"📄 delivered {name} → {out.get('platform', platform)}:"
+                  f"{out.get('chat_id', chat)} "
+                  f"({out['zip_bytes']} B, message {out['message_id']})"
+                  + _deliver_warnings(out))
         else:
             bundle = generate_report(context, topic, sections, title=title,
                                      include_pdf=include_pdf)
@@ -6399,7 +6461,8 @@ def _cmd_deliver(args: argparse.Namespace, context: Any) -> int:
             _emit(args, out,
                   f"📄 report built: {files} → {out['zip_path']} "
                   f"({out['zip_bytes']} B, {len(out['sections'])} sections)\n"
-                  f"add --to platform:chat to send it")
+                  f"add --to platform:chat to send it"
+                  + _deliver_warnings(out))
         return 0
     except ToolError as exc:
         _emit(args, {"error": str(exc)}, f"deliver: {exc}")

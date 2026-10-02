@@ -93,6 +93,22 @@ class StallCode:
         DEPENDENCY_MISSING: "dependency missing",
     }
 
+    #: what would unblock the mission for each stall code. The status
+    #: command and the stall reply always ship these, so a stall never
+    #: reads as a bare "stalled" with no way out.
+    UNBLOCK_HINTS = {
+        WAITING_ON_PROVIDER: "unblocks when the provider recovers, "
+            "or switch providers and /mission clear it",
+        BLOCKED_ON_APPROVAL: "unblocks when the owner approves — reply to "
+            "the approval request, then /mission clear it",
+        RETRY_BUDGET_EXHAUSTED: "unblocks with /mission clear after fixing "
+            "the failing step, or /mission retry for a fresh attempt",
+        BUDGET_EXHAUSTED: "unblocks when the budget is raised, or "
+            "/mission retry for a fresh attempt with a bigger budget",
+        DEPENDENCY_MISSING: "unblocks when the missing dependency is "
+            "installed, then /mission clear it",
+    }
+
 
 # ── stall state (pure helpers on the Mission object) ─────────────────────────
 
@@ -235,14 +251,18 @@ def render_status_text(detail: dict[str, Any]) -> str:
         spent += f" (budget: {fmt_duration(budget_wall) if budget_wall else '∞'} / {budget_tokens if budget_tokens else '∞'} tokens)"
     lines.append(spent + f" — {int(m.get('iterations') or 0)} iteration(s)")
     if stall:
-        label = StallCode.LABELS.get(stall.get("code"), stall.get("code"))
-        stall_line = f"⚠️ stalled: {label} — {stall.get('message')}"
+        code = stall.get("code")
+        label = StallCode.LABELS.get(code, code)
+        stall_line = f"⚠️ stalled [{code}]: {label} — {stall.get('message')}"
         if stall.get("step"):
             stall_line += f" (step: {stall['step']})"
         since = stall.get("since")
         if since:
             stall_line += f" [since {time.strftime('%H:%M', time.localtime(since))}]"
         lines.append(stall_line)
+        hint = StallCode.UNBLOCK_HINTS.get(code)
+        if hint:
+            lines.append(f"   → unblocks: {hint}")
     elif str(m.get("status") or "") in {"running", "paused", "pending"} \
             and not p.get("last_error"):
         lines.append("state: making progress")

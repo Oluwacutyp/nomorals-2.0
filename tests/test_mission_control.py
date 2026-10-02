@@ -136,11 +136,11 @@ class ControlVerbTests(unittest.TestCase):
         out = self.call("pause nope")
         self.assertIn("no mission matching", out)
 
-    def test_pause_terminal_refused(self):
+    def test_pause_terminal_is_idempotent_noop(self):
         m = make_mission(self.store)
         self.store.set_status(m.id, MissionStatus.DONE)
         out = self.call(f"pause {m.id}")
-        self.assertIn("couldn't pause", out)
+        self.assertIn("already done", out)
         self.assertEqual(self.store.get(m.id).status, MissionStatus.DONE)
 
     # resume ──
@@ -189,7 +189,7 @@ class ControlVerbTests(unittest.TestCase):
 
     # retry ──
 
-    def test_retry_creates_fresh_mission_and_cancels_old(self):
+    def test_retry_creates_fresh_mission_and_keeps_terminal_old(self):
         m = make_mission(self.store, name="build widget")
         self.store.set_status(m.id, MissionStatus.FAILED)
         with patch("nomorals.missions.MissionRunner") as mr, \
@@ -198,7 +198,8 @@ class ControlVerbTests(unittest.TestCase):
             out = self.call(f"retry {m.id}")
         self.assertIn("retry", out)
         old = self.store.get(m.id)
-        self.assertEqual(old.status, MissionStatus.CANCELLED)
+        # terminal history is never rewritten: the failed record stays failed
+        self.assertEqual(old.status, MissionStatus.FAILED)
         # the runner was told to run a *new* mission, not the old one
         run_mission = mr.return_value.run.call_args[0][0]
         self.assertNotEqual(run_mission.id, m.id)
