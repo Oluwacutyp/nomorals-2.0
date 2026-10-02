@@ -106,9 +106,14 @@ class TestResolveProposal(unittest.TestCase):
         self.assertEqual(p["id"], self.p1["id"])
 
     def test_id_prefix(self):
-        p, err = resolve_proposal(self.queue, self.p1["id"][:-2])
+        # Deterministic: with a single proposal in the queue, any proper
+        # prefix is unambiguous by construction (no timing dependence).
+        ctx = make_context()
+        p1 = propose_sample(ctx)
+        queue = UpgradeQueue(ctx)
+        p, err = resolve_proposal(queue, p1["id"][:16])
         self.assertEqual(err, "")
-        self.assertEqual(p["id"], self.p1["id"])
+        self.assertEqual(p["id"], p1["id"])
 
     def test_title_substring(self):
         p, err = resolve_proposal(self.queue, "embeddings between")
