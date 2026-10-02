@@ -659,6 +659,20 @@ class CheckpointStoreTests(unittest.TestCase):
         self.assertEqual(store.get(stale.id).state, CheckpointState.EXPIRED)
         self.assertEqual(store.get(fresh.id).state, CheckpointState.PENDING)
 
+    def test_expiry_evaluated_on_read(self) -> None:
+        from nomorals.connectors import (
+            CheckpointKind,
+            CheckpointState,
+            CheckpointStore,
+        )
+
+        store = CheckpointStore(_checkpoint_db())
+        stale = store.create("github", CheckpointKind.MANUAL_STEP, "S", "s",
+                             ttl_seconds=-1)
+        # No explicit expire_stale() call: reads evaluate expiry themselves.
+        self.assertEqual(store.list_pending(), [])
+        self.assertEqual(store.get(stale.id).state, CheckpointState.EXPIRED)
+
 
 class RequestHumanActionTests(unittest.TestCase):
     def test_noninteractive_persists_pings_and_pauses(self) -> None:
