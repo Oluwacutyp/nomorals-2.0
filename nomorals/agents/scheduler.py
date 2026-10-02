@@ -27,7 +27,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from ..core.ids import new_id
+from ..core.errors import AmbiguousRef
+from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
 from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
 from .notifier import Notifier
@@ -118,6 +119,13 @@ def _next_daily(hhmm: str, now: datetime) -> float:
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate.timestamp()
+
+
+def _like_escape(text: str) -> str:
+    """Escape SQL LIKE wildcards so a job ref is matched literally."""
+    return (text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_"))
 
 
 class Scheduler:
@@ -232,6 +240,12 @@ class Scheduler:
         return self._format_job(self._find(ref))
 
     def _find(self, ref: str) -> dict[str, Any] | None:
+        """Resolve a job by id, name, or id prefix — never guesses.
+
+        Exact id wins, then exact name, then a unique id prefix.  A prefix
+        matching two or more jobs raises :class:`AmbiguousRef` instead of
+        silently acting on the first row.
+        """
         if self.db is None:
             return None
         ref = (ref or "").strip()
@@ -240,11 +254,31 @@ class Scheduler:
         row = self.db.query_one("SELECT * FROM schedule_jobs WHERE id = ?", (ref,))
         if row:
             return row
+        row = self.db.query_one("SELECT * FROM schedule_jobs WHERE name = ?", (ref,))
+        if row:
+            return row
         rows = self.db.query(
-            "SELECT * FROM schedule_jobs WHERE name = ? OR id LIKE ? ORDER BY created_at DESC",
-            (ref, f"{ref}%"),
+            "SELECT * FROM schedule_jobs WHERE id LIKE ? ESCAPE '\\' "
+            "ORDER BY created_at DESC",
+            (_like_escape(ref) + "%",),
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        res = resolve_id_prefix(ref, [r["id"] for r in rows])
+        if res.outcome == "ambiguous":
+            by_id = {r["id"]: r for r in rows}
+            raise AmbiguousRef(
+                ref,
+                [(c, by_id[c].get("name") or c) for c in res.matches],
+                min_unique_prefix_len([r["id"] for r in rows]),
+                entity="scheduled job",
+            )
+        if res.outcome in ("exact", "unique"):
+            want = res.matches[0]
+            for r in rows:
+                if r["id"] == want:
+                    return r
+        return None
 
     # ── scheduling math ──────────────────────────────────────────────────────
     def _initial_next_run(self, kind: str, detail: Any, now: float) -> float:
