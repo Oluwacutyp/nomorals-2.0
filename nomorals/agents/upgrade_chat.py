@@ -16,6 +16,8 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
+from ..core.ids import min_unique_prefix_len, resolve_id_prefix
+
 __all__ = [
     "UPGRADE_USAGE",
     "resolve_proposal",
@@ -44,7 +46,10 @@ def resolve_proposal(queue: Any, ref: str) -> tuple[dict | None, str]:
 
     Returns ``(proposal, "")`` on success or ``(None, message)`` when the
     reference is missing, unknown, or ambiguous — the message is
-    chat-ready.
+    chat-ready. Resolution order: exact id → unique id prefix → unique
+    title substring. An id prefix matching 2+ proposals never resolves;
+    the message lists the candidates and the minimum id-prefix length
+    that disambiguates them.
     """
     filt = (ref or "").strip()
     if not filt:
@@ -53,27 +58,42 @@ def resolve_proposal(queue: Any, ref: str) -> tuple[dict | None, str]:
     direct = queue.get(filt)
     if direct is not None:
         return direct, ""
-    low = filt.lower()
-    seen: set[str] = set()
-    matches: list[dict[str, Any]] = []
+    # candidate pool: every proposal id across the review statuses
+    by_id: dict[str, dict[str, Any]] = {}
     for status in _STATUSES:
         for p in queue.list(status=status, limit=200):
             pid = str(p.get("id") or "")
-            if pid in seen:
-                continue
-            if (pid.lower().startswith(low)
-                    or low in str(p.get("title") or "").lower()):
-                seen.add(pid)
-                matches.append(p)
-    if len(matches) == 1:
-        return matches[0], ""
-    if not matches:
+            by_id.setdefault(pid, p)
+    if not by_id:
         return None, (f"no upgrade proposal matching {filt!r} — /upgrade "
                       "list to see the pending ones.")
-    lines = [f"{filt!r} is ambiguous — matches:"]
-    for p in matches[:8]:
-        lines.append(f"  {p.get('id')} [{p.get('status')}] "
+    res = resolve_id_prefix(filt, by_id)
+    if res.outcome in ("exact", "unique"):
+        # the id channel is authoritative: an exact id or a uniquely
+        # matching id prefix resolves; title search is only a fallback
+        # when the id channel finds nothing at all
+        return by_id[res.matches[0]], ""
+    low = filt.lower()
+    if res.outcome == "none":
+        title_hits = [pid for pid, p in by_id.items()
+                      if low in str(p.get("title") or "").lower()]
+        if len(title_hits) == 1:
+            return by_id[title_hits[0]], ""
+        if not title_hits:
+            return None, (f"no upgrade proposal matching {filt!r} — /upgrade "
+                          "list to see the pending ones.")
+        matches = title_hits
+    else:  # ambiguous id prefix — never guess
+        matches = list(res.matches)
+    lines = [f"{filt!r} is ambiguous — matches {len(matches)} proposals:"]
+    for pid in matches[:8]:
+        p = by_id[pid]
+        lines.append(f"  {pid} [{p.get('status')}] "
                      f"{str(p.get('title') or '')[:60]}")
+    if len(matches) > 8:
+        lines.append(f"  … +{len(matches) - 8} more")
+    lines.append(f"use a longer id prefix (at least "
+                 f"{min_unique_prefix_len(matches)} characters) to pick one.")
     return None, "\n".join(lines)
 
 

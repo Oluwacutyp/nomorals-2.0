@@ -25,7 +25,7 @@ import time
 import threading
 from typing import Any, Sequence
 
-from ..core.ids import new_id
+from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
 from .features import feature_enabled
 from .search.engine import SearchEngine
 
@@ -551,19 +551,76 @@ class ResearchAgent:
         return [dict(r) for r in rows]
 
     def resolve_proposal(self, ref: str) -> dict[str, Any] | None:
-        """Resolve an id or 'latest' to one proposal row."""
-        if self.db is None or not ref:
-            return None
+        """Resolve an id or 'latest' to one proposal row.
+
+        Compatibility wrapper — returns the row or None. Use
+        :meth:`resolve_proposal_detailed` when the caller needs to tell
+        "no match" apart from "ambiguous".
+        """
+        row, _err = self.resolve_proposal_detailed(ref)
+        return row
+
+    @staticmethod
+    def _like_escape(text: str) -> str:
+        """Escape SQL LIKE wildcards so a ref is matched literally."""
+        return (text.replace("\\", "\\\\")
+                     .replace("%", "\\%")
+                     .replace("_", "\\_"))
+
+    def resolve_proposal_detailed(
+            self, ref: str) -> tuple[dict[str, Any] | None, str]:
+        """Resolve an id, id prefix, or 'latest'/'last' to one proposal row.
+
+        Returns ``(row, "")`` on success or ``(None, message)`` when the
+        reference is missing, unknown, or ambiguous. Resolution order:
+        exact id → 'latest'/'last' → unique id prefix. An id prefix
+        matching 2+ rows never resolves — the message lists the candidates
+        and the minimum id-prefix length that disambiguates them.
+        """
+        if self.db is None or not (ref or "").strip():
+            return None, "no such proposal (ids: try /research ideas)"
         ref = ref.strip()
+        cols = ("id, domain, topic, suggestion, digest, score, status, "
+                "created_at")
         if ref in {"latest", "last"}:
             row = self.db.query_one(
-                "SELECT id, domain, topic, suggestion, digest, score, status, created_at "
-                "FROM research_log ORDER BY created_at DESC LIMIT 1")
-        else:
-            row = self.db.query_one(
-                "SELECT id, domain, topic, suggestion, digest, score, status, created_at "
-                "FROM research_log WHERE id LIKE ?", (ref + "%",))
-        return dict(row) if row else None
+                f"SELECT {cols} FROM research_log "
+                "ORDER BY created_at DESC LIMIT 1")
+            if row is None:
+                return None, "no such proposal (ids: try /research ideas)"
+            return dict(row), ""
+        # exact id wins — even when the full id is also a prefix of another
+        row = self.db.query_one(
+            f"SELECT {cols} FROM research_log WHERE id = ?", (ref,))
+        if row is not None:
+            return dict(row), ""
+        rows = self.db.query(
+            f"SELECT {cols} FROM research_log WHERE id LIKE ? ESCAPE '\\' "
+            "ORDER BY id",
+            (self._like_escape(ref) + "%",)) or []
+        if not rows:
+            return None, "no such proposal (ids: try /research ideas)"
+        by_id = {str(r["id"]): dict(r) for r in rows}
+        res = resolve_id_prefix(ref, by_id)
+        if res.outcome in ("exact", "unique"):
+            # "exact" covers case-variant full ids: SQLite LIKE is ASCII
+            # case-insensitive, so the row is in the LIKE result set
+            return by_id[res.matches[0]], ""
+        if res.outcome != "ambiguous" or not res.matches:
+            # unreachable: the LIKE query already matched these rows
+            return None, "no such proposal (ids: try /research ideas)"
+        # ambiguous — never pick one; list candidates + disambiguation length
+        ids = list(res.matches)
+        lines = [f"{ref!r} is ambiguous — matches {len(ids)} proposals:"]
+        for r in rows[:8]:
+            lines.append(f"  {r['id']} [{r['status']}] "
+                         f"{str(r['topic'])[:60]}")
+        if len(rows) > 8:
+            lines.append(f"  … +{len(rows) - 8} more")
+        lines.append(f"use a longer id prefix (at least "
+                     f"{min_unique_prefix_len(ids)} characters) — "
+                     f"/research ideas shows the ids.")
+        return None, "\n".join(lines)
 
     def _set_status(self, rid: str, status: str) -> None:
         if self.db is None:
@@ -575,9 +632,9 @@ class ResearchAgent:
 
     def approve(self, ref: str) -> str:
         """Approve a proposal; tech + code-actionable proposals start applying."""
-        row = self.resolve_proposal(ref)
+        row, err = self.resolve_proposal_detailed(ref)
         if row is None:
-            return "no such proposal (ids: try /research ideas)"
+            return err
         if row.get("status") in {"applied", "applying"}:
             return f"already {'applied' if row['status'] == 'applied' else 'applying'}: {row['topic'][:60]}"
         self._set_status(row["id"], "approved")
@@ -592,9 +649,9 @@ class ResearchAgent:
         return f"approved (not auto-applicable — keep it as a suggestion): {row['topic'][:70]}"
 
     def deny(self, ref: str) -> str:
-        row = self.resolve_proposal(ref)
+        row, err = self.resolve_proposal_detailed(ref)
         if row is None:
-            return "no such proposal (ids: try /research ideas)"
+            return err
         self._set_status(row["id"], "denied")
         return f"denied: {row['topic'][:70]}"
 

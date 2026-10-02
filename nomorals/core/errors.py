@@ -82,6 +82,49 @@ class NotFound(NoMoralsError):
     retryable = False
 
 
+class AmbiguousRef(NoMoralsError):
+    """A short id/name reference matched more than one entity.
+
+    Raised by id-prefix resolvers instead of guessing: the chat handler
+    catches it and asks the user to disambiguate. ``candidates`` is a list
+    of ``(id, human label)`` pairs; ``min_prefix_len`` is the smallest id
+    prefix length that identifies every candidate uniquely.
+    """
+
+    code = "resolve.ambiguous"
+    retryable = False
+
+    def __init__(
+        self,
+        ref: str,
+        candidates: list[tuple[str, str]],
+        min_prefix_len: int,
+        *,
+        entity: str = "entity",
+        hint: str = "",
+    ) -> None:
+        self.ref = ref
+        self.candidates = list(candidates)
+        self.min_prefix_len = min_prefix_len
+        self.entity = entity
+        self.hint = hint
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        lines = [f"{self.ref!r} is ambiguous — matches "
+                 f"{len(self.candidates)} {self.entity}s:"]
+        for cid, label in self.candidates[:8]:
+            lines.append(f"  · {cid} — {label}"[:120])
+        if len(self.candidates) > 8:
+            lines.append(f"  … +{len(self.candidates) - 8} more")
+        lines.append(
+            f"use a longer id prefix (at least {self.min_prefix_len} "
+            f"characters) to pick one.")
+        if self.hint:
+            lines.append(self.hint)
+        return "\n".join(lines)
+
+
 class ConstraintViolation(StorageError):
     code = "storage.constraint"
     retryable = False

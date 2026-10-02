@@ -4319,6 +4319,7 @@ class PartnerRuntime:
         return scheduler
 
     def _control_schedule(self, tail: str) -> str:
+        from ..core.errors import AmbiguousRef
         scheduler = self._scheduler_or_build()
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else "status"
@@ -4340,14 +4341,17 @@ class PartnerRuntime:
             ref = " ".join(parts[1:])
             if not ref:
                 return "usage: /schedule rm <name or id>"
-            return "removed." if scheduler.remove(ref) else f"no job named {ref!r}"
+            try:
+                return "removed." if scheduler.remove(ref) else f"no job named {ref!r}"
+            except AmbiguousRef as exc:
+                return str(exc)
         if verb in {"enable", "disable"}:
             ref = " ".join(parts[1:])
             if not ref:
                 return f"usage: /schedule {verb} <name or id>"
             try:
                 job = scheduler.set_enabled(ref, enabled=(verb == "enable"))
-            except LookupError as exc:
+            except (LookupError, AmbiguousRef) as exc:
                 return str(exc)
             return f"{job['name']} {'enabled' if job['enabled'] else 'disabled'} (next {job.get('next_run_iso') or '—'})."
         if verb == "run":
@@ -4356,7 +4360,7 @@ class PartnerRuntime:
                 return "usage: /schedule run <name or id>"
             try:
                 outcome = scheduler.run_now(ref)
-            except LookupError as exc:
+            except (LookupError, AmbiguousRef) as exc:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
         return ("usage: /schedule add <name> <when> <message|tool|command> <...> | list | "
@@ -6365,7 +6369,7 @@ class PartnerRuntime:
         /mission new <template> <args> — create from a template
             (research <topic> | build <what> | fix <target>)
         """
-        from ..core.errors import NoMoralsError
+        from ..core.errors import AmbiguousRef, NoMoralsError
         from ..missions import (
             MissionRunner,
             MissionStatus,
@@ -6376,6 +6380,20 @@ class PartnerRuntime:
         )
 
         store = MissionStore(self.context.db)
+
+        def _resolve(ref: str) -> tuple[Any, str]:
+            """_find_mission with ambiguity surfaced as a chat-ready reply.
+
+            Returns ``(mission, "")`` on success, ``(None, "")`` when
+            nothing matches, and ``(None, message)`` when the reference is
+            ambiguous — the message lists the candidates instead of the
+            resolver guessing one.
+            """
+            try:
+                return self._find_mission(store, ref), ""
+            except AmbiguousRef as exc:
+                return None, str(exc)
+
         usage = ("usage: /mission status [id|name] | /mission list | "
                  "/mission stall <id> <code> <message> | /mission clear <id> | "
                  "/mission pause <id> | /mission resume <id> | "
@@ -6405,7 +6423,9 @@ class PartnerRuntime:
             return "\n".join(lines)
 
         if verb == "status":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return (f"no mission matching {rest!r} — "
                         "/mission list to see the active ones.")
@@ -6417,7 +6437,9 @@ class PartnerRuntime:
                 return ("usage: /mission stall <id|name> <code> <message>\n"
                         f"codes: {', '.join(sorted(StallCode.ALL))}")
             ref, code, message = sub
-            mission = self._find_mission(store, ref)
+            mission, _amb = _resolve(ref)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {ref!r}."
             if code not in StallCode.ALL:
@@ -6433,7 +6455,9 @@ class PartnerRuntime:
                     f"{stall.get('code')} — {stall.get('message')}")
 
         if verb == "clear":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             cleared = MissionRunner(self.context, store=store).clear_stalled(mission.id)
@@ -6441,7 +6465,9 @@ class PartnerRuntime:
                     if cleared else f"{mission.name}: no stall recorded.")
 
         if verb == "pause":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             try:
@@ -6452,7 +6478,9 @@ class PartnerRuntime:
                     f"/mission resume {mission.id} to continue.")
 
         if verb == "resume":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             if mission.terminal:
@@ -6477,7 +6505,9 @@ class PartnerRuntime:
             sub = rest.split(None, 1)
             ref = sub[0] if sub else ""
             reason = sub[1].strip() if len(sub) > 1 else "cancelled by owner"
-            mission = self._find_mission(store, ref)
+            mission, _amb = _resolve(ref)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {ref!r}."
             try:
@@ -6495,7 +6525,9 @@ class PartnerRuntime:
             return f"⏹ {mission.name}: cancelled ({reason})."
 
         if verb == "retry":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             if mission.status == MissionStatus.RUNNING:
@@ -6535,7 +6567,9 @@ class PartnerRuntime:
                     f"[{new.id}] — running in the background.")
 
         if verb == "watch":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             if not chat_key:
@@ -6548,7 +6582,9 @@ class PartnerRuntime:
             return f"already watching {mission.name} from this chat."
 
         if verb == "unwatch":
-            mission = self._find_mission(store, rest)
+            mission, _amb = _resolve(rest)
+            if _amb:
+                return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
             if not chat_key:
@@ -6613,10 +6649,21 @@ class PartnerRuntime:
 
     @staticmethod
     def _find_mission(store: Any, ref: str) -> Any | None:
-        """Resolve an id, id prefix, or name/goal substring to a mission."""
-        from ..core.errors import NotFound
+        """Resolve an id, id prefix, or name/goal substring to a mission.
 
-        filt = (ref or "").strip().lower()
+        Empty ref → the default active mission (the documented ``[id|name]``
+        UX for ``/mission status``), or None when there is none — the
+        default never goes through prefix matching, so it can never
+        match-all.
+        Exact id wins, even when it is also a prefix of another mission's
+        id. A prefix/name matching 2+ missions raises
+        :class:`~nomorals.core.errors.AmbiguousRef` — the resolver never
+        guesses; the caller renders the candidates and asks the user.
+        """
+        from ..core.errors import AmbiguousRef, NotFound
+        from ..core.ids import min_unique_prefix_len, resolve_id_prefix
+
+        filt = (ref or "").strip()
         if not filt:
             active = store.resumable()
             if active:
@@ -6624,17 +6671,46 @@ class PartnerRuntime:
             rows = store.list(limit=1)
             return rows[0] if rows else None
         try:
-            return store.get(ref.strip())
+            return store.get(filt)
         except NotFound:
-            _log.debug("mission lookup: no exact id match for %r, trying prefix/name", ref)
+            _log.debug("mission lookup: no exact id match for %r, "
+                       "trying prefix/name", ref)
         rows = store.list(limit=100)
+        by_id: dict[str, Any] = {}
         for m in rows:
-            if m.id.lower().startswith(filt):
-                return m
-        for m in rows:
-            if filt in m.name.lower() or filt in m.goal.lower():
-                return m
-        return None
+            by_id.setdefault(m.id, m)
+        res = resolve_id_prefix(filt, by_id)
+        if res.outcome in ("exact", "unique"):
+            # the id channel is authoritative; name/goal search is only a
+            # fallback when the id channel finds nothing at all
+            return by_id[res.matches[0]]
+        low = filt.lower()
+        name_hits = [m for m in rows
+                     if low in (m.name or "").lower()
+                     or low in (m.goal or "").lower()]
+        if res.outcome == "none":
+            if len(name_hits) == 1:
+                return name_hits[0]
+            if not name_hits:
+                return None
+            ordered = [m.id for m in name_hits]
+        else:  # ambiguous id prefix — never guess; union with name hits
+            ordered = list(res.matches)
+            for m in name_hits:
+                if m.id not in ordered:
+                    ordered.append(m.id)
+        if len(ordered) == 1:
+            return by_id[ordered[0]]
+        if not ordered:
+            return None
+        raise AmbiguousRef(
+            ref=filt,
+            entity="mission",
+            candidates=[(mid, f"[{by_id[mid].status}] {by_id[mid].name}")
+                        for mid in ordered],
+            min_prefix_len=min_unique_prefix_len(ordered),
+            hint="/mission list shows the active ones.",
+        )
 
     # ── image tools ──────────────────────────────────────────────────────────
     @staticmethod

@@ -19,9 +19,11 @@ import os
 import secrets
 import threading
 import time
-from typing import Iterator
+from typing import Iterable, Iterator, NamedTuple
 
-__all__ = ["ULID", "decode_time", "new_id", "new_short_id", "ulid_now", "ulid_range"]
+__all__ = ["ULID", "decode_time", "new_id", "new_short_id", "ulid_now",
+           "ulid_range", "PrefixResolution", "resolve_id_prefix",
+           "min_unique_prefix_len"]
 
 _ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _DECODING = {c: i for i, c in enumerate(_ENCODING)}
@@ -192,3 +194,96 @@ def random_token(urlsafe: bool = True) -> str:
 
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return raw.hex()
+
+
+# ── short-prefix resolution ────────────────────────────────────────────────
+#
+# Every chat/CLI resolver that accepts a short id prefix funnels through
+# :func:`resolve_id_prefix` so the contract is identical everywhere:
+#
+# * empty / whitespace-only reference → ``"empty"`` (never match-all)
+# * exact full-id match → ``"exact"`` — wins even when the id is also a
+#   prefix of another id
+# * prefix matching exactly one id → ``"unique"``
+# * prefix matching nothing → ``"none"``
+# * prefix matching two or more ids → ``"ambiguous"`` — callers must ask
+#   the user to disambiguate; they must NEVER pick the first match.
+#
+# Matching is case-insensitive by default: ULIDs are uppercase Crockford
+# but humans type lowercase prefixes.
+
+
+class PrefixResolution(NamedTuple):
+    """Outcome of :func:`resolve_id_prefix`."""
+
+    outcome: str  # "empty" | "none" | "exact" | "unique" | "ambiguous"
+    matches: tuple[str, ...]  # matched ids, in candidate order
+    min_unique_len: int  # "ambiguous" only: smallest L such that every
+    # matched id's first L characters identify it uniquely
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        n += 1
+    return n
+
+
+def min_unique_prefix_len(ids: Iterable[str]) -> int:
+    """Smallest L such that every id's first L chars are unique among *ids*.
+
+    Returns 0 for fewer than two ids. Duplicate ids can never be
+    disambiguated by length, so the answer is capped at the id length —
+    callers should then ask for the full id.
+    """
+    lowered = [str(i).lower() for i in ids]
+    if len(lowered) < 2:
+        return 0
+    best = 0
+    for i, a in enumerate(lowered):
+        need = 0
+        for j, b in enumerate(lowered):
+            if i != j:
+                need = max(need, _common_prefix_len(a, b) + 1)
+        best = max(best, min(need, len(a)))
+    return best
+
+
+def resolve_id_prefix(
+    ref: str,
+    ids: Iterable[str],
+    *,
+    case_insensitive: bool = True,
+) -> PrefixResolution:
+    """Classify a short id reference against candidate ids.
+
+    ``ids`` may contain duplicates; they are de-duplicated preserving order.
+    """
+    filt = (ref or "").strip()
+    if not filt:
+        return PrefixResolution("empty", (), 0)
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for cand in ids:
+        c = str(cand)
+        if c not in seen:
+            seen.add(c)
+            candidates.append(c)
+    if case_insensitive:
+        norm = str.lower
+    else:
+        norm = lambda s: s  # noqa: E731
+    want = norm(filt)
+    # exact full-id match wins — even when it is also a prefix of another id
+    for c in candidates:
+        if norm(c) == want:
+            return PrefixResolution("exact", (c,), 0)
+    matches = tuple(c for c in candidates if norm(c).startswith(want))
+    if not matches:
+        return PrefixResolution("none", (), 0)
+    if len(matches) == 1:
+        return PrefixResolution("unique", matches, 0)
+    return PrefixResolution(
+        "ambiguous", matches, min_unique_prefix_len(matches))
