@@ -120,6 +120,40 @@ def _attach_cli_session(context: Any) -> None:
         _log.debug("CLI os.Session attach skipped", exc_info=True)
 
 
+def _attach_timeline(context: Any) -> None:
+    """Best-effort: persist bus events to the H2 event timeline for this run.
+
+    Without this, ``nm timeline`` and ``nm mission replay`` only ever saw
+    what tests persisted — the production serving path never called
+    ``Timeline.attach()``. Attaching here (L7 entry point) keeps L5/L6
+    decoupled: missions emit on ``global_bus`` and this persists them into
+    the same database file ``nm timeline`` reads (``context.db.path``).
+
+    Delivery is inline when the bus dispatcher isn't running (see
+    ``EventBus.publish``), so no event is lost on quick CLI exit, and
+    ``Timeline.record`` commits immediately, so a later ``nm timeline``
+    process sees the events. Never raises and never changes any command's
+    behavior — any failure here is logged at debug and skipped.
+    """
+    try:
+        from ..core.events import global_bus
+        from ..os.timeline import Timeline
+
+        db = getattr(context, "db", None)
+        db_path = getattr(db, "path", None)
+        if not db_path:
+            return  # exotic context without a database file: nothing to persist to
+        tl = Timeline(db_path)
+        tl.attach(global_bus)
+        extras = getattr(context, "extras", None)
+        if isinstance(extras, dict):
+            extras["timeline"] = tl
+        else:  # exotic contexts without an extras dict
+            setattr(context, "timeline", tl)
+    except Exception:  # noqa: BLE001 - timeline attach must never break the CLI
+        _log.debug("CLI timeline attach skipped", exc_info=True)
+
+
 def _canonical_command(name: str) -> str:
     """Resolve a CLI alias to its canonical command name (``st`` → ``status``).
 
@@ -162,6 +196,7 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     with build_context(settings) as context:
         _attach_cli_session(context)  # best-effort os.Session for this run
+        _attach_timeline(context)  # best-effort: persist bus events to the timeline
         if args.command == "models":
             if getattr(args, "model_action", ""):
                 return _cmd_model_broker(args, context)
