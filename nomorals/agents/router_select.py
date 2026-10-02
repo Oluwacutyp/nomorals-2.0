@@ -29,7 +29,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
 __all__ = ["ModelProfile", "TaskRouter", "TASK_TYPES", "OBJECTIVES", "register"]
+
+_log = get_logger(__name__)
 
 
 #: The task kinds the router understands.
@@ -247,9 +251,36 @@ class TaskRouter:
                     resp = provider.chat(msgs, params, **kwargs)
                     if resp.ok:
                         return resp
-                except Exception:  # noqa: BLE001 — fall through to the chain
-                    pass
-        return router.chat(msgs, params, **kwargs)
+                    choice_error = resp.error or "unknown error"
+                    _log.warning(
+                        "task router: chosen provider %s failed (%s); "
+                        "falling back to the default chain",
+                        choice.name, choice_error)
+                except Exception as exc:  # noqa: BLE001 — fall through to the chain
+                    choice_error = f"{type(exc).__name__}: {exc}"
+                    _log.warning(
+                        "task router: chosen provider %s raised (%s); "
+                        "falling back to the default chain",
+                        choice.name, exc)
+            else:
+                choice_error = "provider not registered"
+                _log.warning(
+                    "task router: chosen provider %s not registered; "
+                    "falling back to the default chain", choice.name)
+        else:
+            choice_error = ""
+        chain_resp = router.chat(msgs, params, **kwargs)
+        # The chosen provider failed and the chain answered: attribute the
+        # full degradation chain on the response instead of swallowing it.
+        if choice_error and chain_resp is not None:
+            chain_resp.degraded = True
+            chain_resp.failed_providers = (
+                [choice.name] + list(chain_resp.failed_providers))
+            prefix = f"{choice.name} failed ({choice_error})"
+            chain_resp.fallback_note = (
+                prefix + ("; " + chain_resp.fallback_note
+                          if chain_resp.fallback_note else ""))
+        return chain_resp
 
     def status(self) -> dict[str, Any]:
         return {

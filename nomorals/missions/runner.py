@@ -242,13 +242,28 @@ class MissionRunner:
         return point.label or point.id
 
     def _plan(self, mission: Mission) -> list[Any]:
-        """Ask the orchestrator for a decomposition, memoized in mission state."""
+        """Ask the orchestrator for a decomposition, memoized in mission state.
+
+        A degraded (template-fallback) plan is persisted to the router
+        telemetry so ``nm mind`` shows the last plan_error — a mission that
+        planned without a model must never look like a clean model plan.
+        """
         cached = mission.state.get("plan")
         if cached:
             return _rehydrate_plan(mission.goal, cached)
         orchestrator = MasterOrchestrator(self.context, max_steps=int(mission.metadata.get("max_steps", 8)))
         plan = orchestrator.plan(mission.goal)
-        mission.state["plan"] = _serialize_plan(plan)
+        plan_error = getattr(plan, "plan_error", "") or ""
+        if plan_error:
+            mission.state["plan_error"] = plan_error
+            try:
+                from ..storage import router_telemetry
+
+                router_telemetry.record_plan_error(
+                    getattr(self.context, "db", None), plan_error, route="mission")
+            except Exception:  # noqa: BLE001 - telemetry never breaks a mission
+                _log.debug("mission plan-error telemetry failed", exc_info=True)
+        mission.state["plan"] = _serialize_plan(plan, plan_error=plan_error)
         self.store.save(mission)
         return plan.steps
 
@@ -360,8 +375,8 @@ def _step_prompt(mission: Mission, step: Any) -> str:
     return "\n\n".join(parts)
 
 
-def _serialize_plan(plan: Any) -> list[dict[str, Any]]:
-    return [
+def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
+    entries = [
         {
             "name": s.name,
             "goal": s.goal,
@@ -371,6 +386,11 @@ def _serialize_plan(plan: Any) -> list[dict[str, Any]]:
         }
         for s in plan.steps
     ]
+    # The degradation marker rides along with the persisted plan so a
+    # resumed mission stays honest about how it was planned.
+    if plan_error:
+        entries.append({"__plan_error__": plan_error})
+    return entries
 
 
 def _rehydrate_plan(goal: str, raw: Iterable[dict[str, Any]]) -> list[Any]:
@@ -379,6 +399,9 @@ def _rehydrate_plan(goal: str, raw: Iterable[dict[str, Any]]) -> list[Any]:
 
     steps = []
     for entry in raw:
+        if "__plan_error__" in entry:
+            # Degradation marker (see _serialize_plan): not a step.
+            continue
         try:
             kind = TaskKind(entry.get("kind", "io"))
         except ValueError:

@@ -168,6 +168,14 @@ class LLMResponse:
     latency_ms: float = 0.0
     raw: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: True when a provider failed and the router served this response from
+    #: a fallback instead — the text alone never hides a degradation.
+    degraded: bool = False
+    #: Names of the providers that failed before the serving one, in order.
+    failed_providers: list[str] = field(default_factory=list)
+    #: Human-readable degradation line, e.g.
+    #: ``"hf_serverless failed (ModelError: 503); served by groq"``.
+    fallback_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -182,6 +190,9 @@ class LLMResponse:
             "finish_reason": self.finish_reason,
             "latency_ms": round(self.latency_ms, 2),
             "error": self.error,
+            "degraded": self.degraded,
+            "failed_providers": list(self.failed_providers),
+            "fallback_note": self.fallback_note,
         }
 
 

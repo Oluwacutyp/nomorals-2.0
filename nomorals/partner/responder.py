@@ -280,6 +280,12 @@ class ReplyBundle:
     #: claim of dynamic influence.
     lexicon_dynamic: bool = False
     lexicon_terms_used: int = 0
+    #: Provider degradation: True when the LLM chain failed over (a provider
+    #: failed and a fallback served the reply). ``degraded_note`` names
+    #: which provider failed and what served instead — the user-visible
+    #: result must not hide the failover behind the final answer.
+    degraded: bool = False
+    degraded_note: str = ""
 
     @property
     def text(self) -> str:
@@ -296,6 +302,8 @@ class ReplyBundle:
             "latency_ms": round(self.latency_ms, 1),
             "lexicon_dynamic": self.lexicon_dynamic,
             "lexicon_terms_used": self.lexicon_terms_used,
+            "degraded": self.degraded,
+            "degraded_note": self.degraded_note,
         }
 
 
@@ -397,6 +405,19 @@ class PartnerResponder:
         return should_answer_short(values, label, self.rng, self.persona.speech.short_reply_chance)
 
     # ── main pipeline ────────────────────────────────────────────────────────
+    @staticmethod
+    def _degradation(last_response: Any) -> tuple[bool, str]:
+        """Carry the provider chain's failover onto the reply bundle.
+
+        When the router failed over, the user-visible result must say which
+        provider failed and what served instead — the final answer alone
+        would hide the degradation.
+        """
+        if last_response is None:
+            return False, ""
+        return (bool(getattr(last_response, "degraded", False)),
+                str(getattr(last_response, "fallback_note", "") or ""))
+
     def respond(
         self,
         *,
@@ -539,6 +560,7 @@ class PartnerResponder:
 
         if last_response is None or not last_response.ok or not last_draft:
             parts, fb_dynamic = self._fallback_parts(label)
+            degraded, degraded_note = self._degradation(last_response)
             return ReplyBundle(
                 parts=parts,
                 mood_events=[],
@@ -549,6 +571,8 @@ class PartnerResponder:
                 latency_ms=(_time.perf_counter() - started) * 1000,
                 lexicon_dynamic=lexicon_terms_used > 0 or fb_dynamic > 0,
                 lexicon_terms_used=lexicon_terms_used + fb_dynamic,
+                degraded=degraded,
+                degraded_note=degraded_note,
             )
 
         draft = strip_robotic(
@@ -561,6 +585,7 @@ class PartnerResponder:
             # it: shipping a leak is worse than shipping an in-character line.
             _log.warning("character gate: final draft still leaks — using fallback line")
             parts, fb_dynamic = self._fallback_parts(label)
+            degraded, degraded_note = self._degradation(last_response)
             return ReplyBundle(
                 parts=parts,
                 mood_events=[],
@@ -571,6 +596,8 @@ class PartnerResponder:
                 latency_ms=(_time.perf_counter() - started) * 1000,
                 lexicon_dynamic=lexicon_terms_used > 0 or fb_dynamic > 0,
                 lexicon_terms_used=lexicon_terms_used + fb_dynamic,
+                degraded=degraded,
+                degraded_note=degraded_note,
             )
 
         # Plain-text discipline: no markdown in a text message, and emoji only
@@ -587,6 +614,10 @@ class PartnerResponder:
             first = re.split(r"(?<=[.!?…])\s+", draft, maxsplit=1)
             draft = first[0].strip()
         parts = split_messages(draft, max_chars=360) or [draft[:360]]
+        degraded, degraded_note = self._degradation(last_response)
+        if degraded:
+            _log.warning("reply served degraded: %s",
+                         degraded_note or "(provider failover)")
         return ReplyBundle(
             parts=parts,
             mood_events=[],
@@ -597,6 +628,8 @@ class PartnerResponder:
             latency_ms=(_time.perf_counter() - started) * 1000,
             lexicon_dynamic=lexicon_terms_used > 0,
             lexicon_terms_used=lexicon_terms_used,
+            degraded=degraded,
+            degraded_note=degraded_note,
         )
 
     @property

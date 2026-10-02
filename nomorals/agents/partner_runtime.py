@@ -444,6 +444,14 @@ class PartnerBrain:
 
         # Persist + downstream hooks.
         parts = bundle.parts
+        if getattr(bundle, "degraded", False) and not restricted:
+            # Provider failover: the owner sees WHICH provider failed and
+            # WHAT fallback ran — the final answer alone would hide the
+            # degradation. Restricted (non-owner) chats keep the human
+            # surface clean; the bundle + logs still carry it.
+            note = getattr(bundle, "degraded_note", "") or "provider failover"
+            _log.warning("reply to %s served degraded: %s", chat.key, note)
+            parts = parts + [f"⏬ {note}"]
         self._persist_outbound(chat, parts, bundle.model)
         self._note_reply(bundle, chat)
         self._log_training_pair(chat, message.text, "\n".join(parts), bundle.model,
@@ -1913,6 +1921,10 @@ class PartnerRuntime:
 
         Each chunk gets its own length-scaled typing run, so a report split
         into five pages reads as five real typing sessions, not a telegraph.
+
+        Returns the number of chunks actually delivered. A failed chunk is
+        a warning log, never silent — callers must not treat the return as
+        "delivered" without checking it (see :meth:`_send_long_checked`).
         """
         partner_cfg = self.settings.partner
         typing_on = (
@@ -1920,6 +1932,7 @@ class PartnerRuntime:
             or partner_cfg.typing_in_groups
         )
         sent = 0
+        chunks = max(1, (len(text) + limit - 1) // limit)
         for i in range(0, max(1, len(text)), limit):
             chunk = text[i:i + limit]
             if typing_on:
@@ -1937,9 +1950,32 @@ class PartnerRuntime:
                 result = self.gateway.send(platform, chat, chunk)
                 if result.ok:
                     sent += 1
-            except Exception:  # noqa: BLE001
+                else:
+                    _log.warning("send_long: chunk %d/%d to %s failed: %s",
+                                 sent + 1, chunks, getattr(chat, "key", chat),
+                                 result.error)
+                    break
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("send_long: chunk %d/%d to %s raised %s: %s",
+                             sent + 1, chunks, getattr(chat, "key", chat),
+                             type(exc).__name__, exc)
                 break
         return sent
+
+    def _send_long_checked(self, platform: str, chat, text: str,
+                           limit: int = 3800) -> str:
+        """Send a long text; ``""`` when delivered, an honest failure note
+        when NOTHING got through.
+
+        Callers that used to do ``self._send_long(...); return ""`` ("report
+        already delivered in chunks") must use this: a total send failure
+        used to vanish silently, leaving the owner with no reply at all.
+        """
+        sent = self._send_long(platform, chat, text, limit=limit)
+        if sent == 0 and (text or "").strip():
+            return ("⚠️ delivery failed — I couldn't send that message "
+                    "(gateway down?). Nothing was delivered; check the logs.")
+        return ""
 
     def _control_search(self, tail: str, mode: str, chat_key: str) -> str:
         from .features import feature_enabled
@@ -1967,8 +2003,7 @@ class PartnerRuntime:
             return f"search failed: {exc}"
         elapsed = time.time() - started
         text = self._format_search_report(report, query, mode, elapsed)
-        self._send_long(chat.platform, chat, text)
-        return ""  # report already delivered in chunks
+        return self._send_long_checked(chat.platform, chat, text)  # report already delivered in chunks
 
     @staticmethod
     def _format_search_report(report: dict, query: str, mode: str, elapsed: float) -> str:
@@ -3263,8 +3298,7 @@ class PartnerRuntime:
             text = "\n\n".join(lines)
             if len(text) > 1800:
                 chat = self._ref_from_key(chat_key)
-                self._send_long(chat.platform, chat, text)
-                return ""
+                return self._send_long_checked(chat.platform, chat, text)
             return text
         if verb == "schedule":
             if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit():
@@ -4054,8 +4088,7 @@ class PartnerRuntime:
             text = (f"❌ coding bot gave up after {result.iterations} iteration(s), {elapsed:.0f}s\n"
                     f"{str(getattr(result, 'error', ''))[:600]}\n"
                     f"it's in the workspace if you want to take over.")
-        self._send_long(chat.platform, chat, text)
-        return ""
+        return self._send_long_checked(chat.platform, chat, text)
 
     # ── code interpreter (run python, keep a session) ───────────────────────
     def _control_py(self, tail: str, chat_key: str) -> str:
@@ -4112,8 +4145,7 @@ class PartnerRuntime:
             head += " (timed out)"
         body = head + "\n" + "\n".join(l for l in lines if l)
         chat = self._ref_from_key(chat_key)
-        self._send_long(chat.platform, chat, body)
-        return ""
+        return self._send_long_checked(chat.platform, chat, body)
 
     # ── long-term memory: /remember /recall /forget ──────────────────────────
     def _control_remember(self, tail: str, *, chat_key: str = "") -> str:
@@ -4232,8 +4264,7 @@ class PartnerRuntime:
         if ocr_text:
             text += f"\n\n— verbatim text from the pixels (OCR) —\n{ocr_text[:2000]}"
         chat = self._ref_from_key(chat_key)
-        self._send_long(chat.platform, chat, text[:6000])
-        return ""
+        return self._send_long_checked(chat.platform, chat, text[:6000])
 
     # ── scheduler: /schedule ─────────────────────────────────────────────────
     def _scheduler_or_build(self) -> Any:
@@ -4444,8 +4475,7 @@ class PartnerRuntime:
         ok_legs = sum(1 for leg in result.legs if leg.get("ok"))
         text = (f"🐝 swarm done: {ok_legs}/{len(result.legs)} legs ok, {elapsed:.0f}s\n\n"
                 f"{result.synthesis}")
-        self._send_long(chat.platform, chat, text)
-        return ""
+        return self._send_long_checked(chat.platform, chat, text)
 
     def _control_swarm_research(self, topic: str, *, chat_key: str) -> str:
         """wave 86: /swarm research <topic> — parallel research swarm."""
@@ -4468,8 +4498,7 @@ class PartnerRuntime:
         text = (f"🔬 swarm: {len(report.findings)} findings, "
                 f"{len(report.angles)} angles, {len(report.sources)} sources, "
                 f"{elapsed:.0f}s\n\n" + report.to_text(3200))
-        self._send_long(chat.platform, chat, text)
-        return ""
+        return self._send_long_checked(chat.platform, chat, text)
 
     # ── power layer: network / proxy / gen / osint / record / macro ──────────
 
@@ -4480,8 +4509,7 @@ class PartnerRuntime:
         if not outcome.ok:
             return f"{tool} failed: {getattr(outcome.error, 'message', outcome.error)}"
         text = json.dumps(outcome.value, default=str, indent=1)
-        self._send_long(chat.platform, chat, text[:6000])
-        return ""
+        return self._send_long_checked(chat.platform, chat, text[:6000])
 
     def _control_dns(self, tail: str, chat_key: str = "") -> str:
         parts = (tail or "").split()
@@ -4652,9 +4680,8 @@ class PartnerRuntime:
                              f"({stats['discovered']} learned from the "
                              f"internet)")
             if len("\n".join(lines)) > 900:
-                self._send_long(self._ref_from_key(chat_key).platform,
+                return self._send_long_checked(self._ref_from_key(chat_key).platform,
                                 self._ref_from_key(chat_key), "\n".join(lines))
-                return ""
             return "\n".join(lines)
         if verb == "discover":
             seeds = " ".join(parts[1:])
@@ -4819,8 +4846,7 @@ class PartnerRuntime:
                     summary = f.get("summary") or {}
                     lines.append(f"  · {f['kind']}:{f['value'][:30]} — "
                                  f"{str(summary)[:90]}")
-            self._send_long(chat.platform, chat, "\n".join(lines))
-            return ""  # report already delivered in chunks
+            return self._send_long_checked(chat.platform, chat, "\n".join(lines))  # report already delivered in chunks
         # graph: identity correlation queries
         if target.startswith("graph"):
             parts = target.split()
@@ -4906,8 +4932,7 @@ class PartnerRuntime:
                 lines.append(f"· {key}: {joined or '—'}")
             elif value:
                 lines.append(f"· {key}: {str(value)[:300]}")
-        self._send_long(chat.platform, chat, "\n".join(lines))
-        return ""
+        return self._send_long_checked(chat.platform, chat, "\n".join(lines))
 
     def _control_record(self, tail: str, chat_key: str = "") -> str:
         parts = (tail or "").split()
@@ -4972,8 +4997,7 @@ class PartnerRuntime:
             mark = "✓" if step["ok"] else "✗"
             lines.append(f"  {mark} {step['step']}: {step['tool']} — {step['result'][:120]}")
         chat = self._ref_from_key(chat_key)
-        self._send_long(chat.platform, chat, "\n".join(lines))
-        return ""
+        return self._send_long_checked(chat.platform, chat, "\n".join(lines))
 
     def _control_file(self, tail: str, chat_key: str) -> str:
         parts = (tail or "").split()
@@ -5028,9 +5052,8 @@ class PartnerRuntime:
             lines = [f"🔬 audit ({time.time() - started:.1f}s): {report['summary']}"]
             for f in report["findings"][:10]:
                 lines.append(f"  [{f['severity']}] {f['where']} — {f['what']}")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), "\n".join(lines))
-            return ""
         if verb == "research" and len(parts) >= 2:
             topic = " ".join(parts[1:])
             started = time.time()
@@ -5044,9 +5067,8 @@ class PartnerRuntime:
                 targets = ", ".join(r.get("targets", [])[:3])
                 lines.append(f"  • {r.get('title', '?')} → {targets or 'framework'} "
                              f"(risk: {r.get('risk', '?')})")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), "\n".join(lines))
-            return ""
         if verb == "revert" and len(parts) >= 2:
             started = time.time()
             try:
@@ -5111,9 +5133,8 @@ class PartnerRuntime:
             for r in v["reverted"]:
                 lines.append(f"  ↩️ {r['source']} → {r['instruction'][:60]} "
                              f"(gate failed, rolled back)")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), "\n".join(lines))
-            return ""
         if verb == "queue":
             sub = parts[1].lower() if len(parts) > 1 else "list"
             if sub == "add" and len(parts) >= 3:
@@ -5190,9 +5211,8 @@ class PartnerRuntime:
                 lines.append(
                     f"NOT applied — normal mode. Approve with: "
                     f"/evolve apply {proposal['id']}   (or turn power mode on)")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), "\n".join(lines))
-            return ""
         return ("usage: /evolve <instruction> | /evolve apply <id> [commit] "
                 "| /evolve list")
 
@@ -5215,9 +5235,8 @@ class PartnerRuntime:
                     f"bundle: {v['dir']}/{v['name']}.* "
                     f"(alpaca + sharegpt + chatml)\n"
                     f"dataset id: {v.get('dataset_id') or '(not registered)'}")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), text)
-            return ""
         if verb in {"list", ""}:
             outcome = self.context.tools.call("train_datasets")
             if not outcome.ok:
@@ -5273,9 +5292,8 @@ class PartnerRuntime:
                 text += f"not fetched (skipped): {', '.join(v['missing_sources'])}\n"
             text += ("next: /file <platform> <chat> <path> to get the files, "
                      "or nm data on the console")
-            self._send_long(self._ref_from_key(chat_key).platform,
+            return self._send_long_checked(self._ref_from_key(chat_key).platform,
                             self._ref_from_key(chat_key), text)
-            return ""
         return ("usage: /data mine [name] | /data list | /data fetch <name> [rows] "
                 "| /data mix <name1,name2> [rows]")
 
@@ -5534,20 +5552,20 @@ class PartnerRuntime:
         # "planned by heuristic (model down)" beats a silent fallback.
         if result.planned_by == "heuristic" and result.plan_error:
             header += f" — {result.plan_error[:90]}"
-            # Persist the plan failure so `nm mind` shows the last
-            # plan_error with a timestamp (wave E router telemetry).
+        if result.plan_error:
+            # Persist EVERY plan degradation (heuristic AND reasoning-engine
+            # fallback) so `nm mind` shows the last plan_error with a
+            # timestamp (wave E router telemetry). Goes through the CoreMind
+            # helper built for exactly this — never raises, never breaks
+            # the reply.
             try:
-                from ..storage import router_telemetry
-                router_telemetry.record_plan_error(
-                    getattr(self.context, "db", None),
-                    result.plan_error, route="devon")
+                self.mind.record_plan_error(result.plan_error, route="devon")
             except Exception:  # noqa: BLE001 - telemetry never breaks a reply
-                pass
+                _log.debug("devon plan-error telemetry failed", exc_info=True)
         text = f"{header}\n{result.digest}"
         if len(text) > 1800:
             chat = self._ref_from_key(chat_key)
-            self._send_long(chat.platform, chat, text)
-            return ""  # report already delivered in chunks
+            return self._send_long_checked(chat.platform, chat, text)  # report already delivered in chunks
         return text
 
     # ── reasoning: /think — explicit, auditable multi-step thought ──────────
@@ -5582,8 +5600,7 @@ class PartnerRuntime:
             text = text[:3480] + "\n…(trace trimmed)"
         if len(text) > 1800:
             chat = self._ref_from_key(chat_key)
-            self._send_long(chat.platform, chat, text)
-            return ""  # report already delivered in chunks
+            return self._send_long_checked(chat.platform, chat, text)  # report already delivered in chunks
         return text
 
     # ── /benchmark — how sharp is the system right now ──────────────────────
@@ -5992,8 +6009,7 @@ class PartnerRuntime:
             if not result.get("ok"):
                 return f"task: {result.get('error')}"
             text = f"✅ {result['id'][:8]} done:\n{str(result.get('result', ''))[:3000]}"
-            self._send_long(chat.platform, chat, text)
-            return ""
+            return self._send_long_checked(chat.platform, chat, text)
         if verb == "list":
             return agent.format_list(agent.list(15))
         return "usage: /task add <instruction> | /task run [id] | /task list"

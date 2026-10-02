@@ -205,6 +205,7 @@ class LLMRouter:
         chain = [p for p in self._chain() if "embed" in p.capabilities]
         if not chain:
             raise ModelError("no registered provider supports embeddings")
+        failed: list[str] = []
         last_error = ""
         for provider in chain:
             health = self._health.get(provider.name)
@@ -215,8 +216,12 @@ class LLMRouter:
             except Exception as exc:  # noqa: BLE001
                 last_error = classify(exc).message
                 self._note_failure(provider.name, last_error)
+                failed.append(provider.name)
                 continue
             self._note_success(provider.name)
+            if failed:
+                _log.warning("embedding failover: %s failed; served by %s",
+                             ", ".join(failed), provider.name)
             return vectors
         raise ProviderUnavailable(f"all embedding providers failed; last error: {last_error}")
 
@@ -250,6 +255,7 @@ class LLMRouter:
 
         self.stats["calls"] += 1
         attempted = 0
+        failed: list[tuple[str, str]] = []  # (provider name, error) in attempt order
         last = LLMResponse(text="", error="no attempt made")
         for index, provider in enumerate(chain):
             health = self._health[provider.name]
@@ -260,26 +266,48 @@ class LLMRouter:
                 response = call(provider)
             except Exception as exc:  # noqa: BLE001 - never let a provider crash the router
                 error = classify(exc)
-                self._note_failure(provider.name, f"{error.code}: {error.message}")
+                note = f"{error.code}: {error.message}"
+                self._note_failure(provider.name, note)
+                failed.append((provider.name, note))
                 last = LLMResponse(
                     text="",
                     model=provider.model_id,
                     provider=provider.name,
-                    error=f"{error.code}: {error.message}",
+                    error=note,
                 )
                 continue
             if response.ok:
                 self._note_success(provider.name)
-                if index > 0:
+                if failed:
+                    # A failover happened: the response must say WHICH
+                    # provider failed and WHAT fallback served it — the
+                    # final answer alone would hide the degradation.
                     self.stats["failovers"] += 1
-                    _log.warning("failed over to %s for %s", provider.name, operation)
+                    response.degraded = True
+                    response.failed_providers = [name for name, _ in failed]
+                    response.fallback_note = (
+                        "; ".join(f"{name} failed ({err})" for name, err in failed)
+                        + f"; served by {provider.name}"
+                    )
+                    _log.warning(
+                        "provider failover for %s: %s",
+                        operation,
+                        response.fallback_note,
+                    )
                 return response
             self._note_failure(provider.name, response.error)
+            failed.append((provider.name, response.error or "unknown error"))
             last = response
 
         self.stats["failures"] += 1
         if attempted == 0:
             last.error = "all providers are cooling down"
+        # Even a total failure reports the whole attempt chain.
+        last.failed_providers = [name for name, _ in failed]
+        if failed:
+            chain_note = "; ".join(f"{name} failed ({err})" for name, err in failed)
+            last.fallback_note = (f"{chain_note}; no provider served this call"
+                                  if not last.fallback_note else last.fallback_note)
         return last
 
     def _note_success(self, name: str) -> None:
