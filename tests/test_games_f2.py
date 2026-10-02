@@ -290,6 +290,7 @@ class CheckersPlayTests(unittest.TestCase):
         st["grid"][3][3] = "w"   # d4
         st["grid"][4][4] = "b"   # e5 (white's victim)
         st["grid"][2][2] = "b"   # c3 (blocks e5xd4)
+        st["grid"][1][1] = "b"   # b2 (blocks d4xb2 — d4-f6 is the only take)
         st["grid"][2][6] = "b"   # g3 (black's simple move)
         out = self.engine.move("t:ch", "g3-h4", ADA)
         self.assertTrue(any("takes 1" in m and "house" in m for m in out),
