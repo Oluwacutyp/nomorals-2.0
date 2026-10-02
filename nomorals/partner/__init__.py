@@ -2,7 +2,7 @@
 
 The persona is data, the mood is a persistent state machine, the relationship
 is a long-arc record, and the background knowledge is gated context — nothing
-in this package *talks*. Talking happens in L5 (``agents/partner_runtime.py``)
+in this package *talks*. Talking happens in L5 (``agents/partner/``)
 through the LLM router; this package decides *who she is and how she feels*.
 
     from nomorals.partner import (

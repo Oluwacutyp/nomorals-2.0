@@ -38,7 +38,7 @@ from nomorals.cli import CLI_ALIASES, _cli_overview, _cli_subparsers
 
 REPO = Path(__file__).resolve().parent.parent
 CONTROL_SRC = REPO / "nomorals" / "social" / "chat" / "control.py"
-RUNTIME_SRC = REPO / "nomorals" / "agents" / "partner_runtime.py"
+RUNTIME_SRC = REPO / "nomorals" / "agents" / "partner" / "runtime.py"
 
 #: handle_control branch kinds that are intentionally NOT chat catalog
 #: entries.  Key → why it is fine.
@@ -131,8 +131,12 @@ class ChatCatalogSyncTests(unittest.TestCase):
         cls.games: set[str] = ns["games"]
         cls.body: str = _handle_control_source()
         cls.handled: set[str] = _handled_kinds(cls.body)
-        cls.defined_handlers: set[str] = set(
-            re.findall(r"def (_control_[a-z0-9_]+)\(", RUNTIME_SRC.read_text()))
+        # Wave H3: PartnerRuntime is a mixin composite — its _control_*
+        # handlers live across the partner/ package, so scan every module.
+        cls.defined_handlers: set[str] = set()
+        for _py in sorted(RUNTIME_SRC.parent.glob("*.py")):
+            cls.defined_handlers.update(
+                re.findall(r"def (_control_[a-z0-9_]+)\(", _py.read_text()))
         cls.called_handlers: set[str] = set(
             re.findall(r"self\.(_control_[a-z0-9_]+)\(", cls.body))
 

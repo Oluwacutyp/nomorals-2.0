@@ -501,7 +501,7 @@ class DevonAgent:
         elif has("message", "reply", "replied", "workflow", "brain", "chat flow", "sent to", "drop", "dropped"):
             add("message_flow", limit=14)
             add("find_code", grep="def handle_message|def deliver_reply|def _send_reply", path="nomorals/agents")
-            add("read_code", path="nomorals/agents/partner_runtime.py", grep="def _process")
+            add("read_code", path="nomorals/agents/partner/runtime.py", grep="def _process")
         elif has("log", "crash", "error", "exception", "traceback", "stack"):
             add("logs_tail", n=60)
             add("find_code", grep="Traceback|Exception", path="logs")
