@@ -242,9 +242,10 @@ def _paginate_blocks(
     current: list[tuple[str, str]] = []
 
     def push(block: tuple[str, str]) -> None:
+        nonlocal current
         if len(current) >= max_lines:
             pages.append(current)
-            current.clear()
+            current = []
         current.append(block)
 
     for kind, text in blocks:
