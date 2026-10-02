@@ -72,6 +72,8 @@ GAME_COMMANDS = (
     "2048", "snake", "connect4", "battleship",
     # casino (wave 98)
     "blackjack", "roulette", "slots",
+    # inbox (wave F2): async, one message per turn, no clock
+    "gomoku", "reversi", "checkers",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -135,6 +137,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "2048": (0, 0), "snake": (0, 0), "connect4": (0, 0), "battleship": (0, 0),
     # casino (wave 98)
     "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 0),
+    # inbox (wave F2): async, one message per turn, no clock
+    "gomoku": (0, 0), "reversi": (0, 0), "checkers": (0, 0),
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
     "news": (0, 2),          # /news [run|status]
@@ -256,10 +260,10 @@ _HELP_TEXT = "\n".join(
         "  /trial send <platform>                  send it via WhatsApp/Telegram",
         "  /trial list | /trial rm <platform>",
         "  — expansion —",
-        "  /game [list|<name>|quit]                19 games (DM + group): /game list",
+        "  /game [list|<name>|quit]                39 games (DM + group): /game list",
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
         "   /king /story /case /world /escape /political /auction\n"
-        "   /shop /wyrr /two_truths /numberguess   start any of the 19 (every chat)",
+        "   /shop /wyrr /two_truths /numberguess   start any of the 39 (every chat)",
         "  /game leaderboard|stats|shop|balance    the shared table: rankings, record, coins",
         "  /news [run|status]                      fetch + summarize the feeds",
         "  /research [run [domain]|status]         lifestyle | tech | cyber",
@@ -511,7 +515,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
               "usage": "/trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]",
               "example": "/trial list", "related": "/say"},
-    "game": {"what": "the social game engine — 19 games across DM, group and "
+    "game": {"what": "the social game engine — 39 games across DM, group and "
                      "channel, with a shared economy, items and leaderboards. "
                      "Works for every participant in every chat; in a group a "
                      "new player is seated the moment they speak.",
@@ -859,10 +863,14 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "arena", "trial", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "think",
                            "benchmark"]),
-    ("games — 19, DM + group, start them directly",
+    ("games — 39, DM + group, start them directly",
      ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
-      "duel", "case", "world", "escape", "political"]),
+      "duel", "case", "world", "escape", "political",
+      "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
+      "2048", "snake", "connect4", "battleship",
+      "blackjack", "roulette", "slots",
+      "gomoku", "reversi", "checkers"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor"]),
@@ -966,6 +974,9 @@ _GAME_HELP: dict[str, str] = {
     "blackjack": "blackjack vs the dealer, insurance off, double allowed.",
     "roulette": "roulette — red/black/odd/even/straight-up bets.",
     "slots": "three-reel slots — spin for combos, jackpot pays big.",
+    "gomoku": "gomoku — five in a row on 15×15, async, no clock.",
+    "reversi": "reversi (othello) — outflank and flip, most discs wins.",
+    "checkers": "english draughts — forced jumps, kings, async.",
 }
 for _kind in CONTROL_COMMANDS:
     if _kind not in COMMAND_DETAILS:
@@ -1031,10 +1042,14 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "think", "benchmark"]),
-    ("games — 19, DM + group, start them directly",
+    ("games — 39, DM + group, start them directly",
      ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
-      "duel", "case", "world", "escape", "political"]),
+      "duel", "case", "world", "escape", "political",
+      "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
+      "2048", "snake", "connect4", "battleship",
+      "blackjack", "roulette", "slots",
+      "gomoku", "reversi", "checkers"]),
     ("voice & vision",
      ["tts", "speak", "stt", "look", "image", "lens"]),
     ("tools & automation",
@@ -1065,7 +1080,7 @@ _LIST_GROUP_ALIASES = {
     "media": "media system — music · playback · video",
     "music": "media system — music · playback · video",
     "audio": "media system — music · playback · video",
-    "games": "games — 19, DM + group, start them directly",
+    "games": "games — 39, DM + group, start them directly",
     "discovery": "discovery",
 }
 
@@ -1120,7 +1135,7 @@ LIST_ONELINERS: dict[str, str] = {
     "forget": "delete a memory",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (0-1)",
-    "game": "the social game engine — 19 games, DM + group + channel, with economy and leaderboards",
+    "game": "the social game engine — 39 games, DM + group + channel, with economy and leaderboards",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",
