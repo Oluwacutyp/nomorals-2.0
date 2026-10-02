@@ -121,6 +121,12 @@ class MissionRunner:
         self.on_step = on_step
         self._clock = clock
         self._cancel = False
+        # OS control-plane hooks (Wave H2). Plain optional callables — the
+        # runner never imports nomorals.os (L6); whoever wires them provides
+        # the callables (see nomorals.os.mission_state.attach_runner and
+        # nomorals.os.resources.advisor_callable).
+        self._os_transition_hook: Callable[..., Any] | None = None
+        self._resource_advisor: Callable[..., Any] | None = None
         # Milestone pushes (started / step / stalled / done) go through the
         # existing Notifier — never a parallel channel. ``milestones=False``
         # disables them; ``milestone_reporter`` injects a pre-built one
@@ -163,6 +169,44 @@ class MissionRunner:
             getattr(self.reporter, method)(*args, **kwargs)
         except Exception:  # noqa: BLE001 - milestone pushes are best-effort
             _log.debug("mission milestone %s failed", method, exc_info=True)
+
+    def _os_transition(self, mission_id: str, to_state: str, note: str = "") -> Any:
+        """Fire the os state-machine hook.
+
+        Defensive by design: a missing hook, a hook failure, or an illegal
+        transition must never break a run — the os state machine is an
+        observer, not a gate. Returns the hook's result (the freshly
+        persisted mission) on success, else None — callers re-read from the
+        store so the hook's writes are not clobbered by a stale in-memory
+        copy.
+        """
+        hook = getattr(self, "_os_transition_hook", None)
+        if hook is None:
+            return None
+        try:
+            return hook(mission_id, to_state, note)
+        except Exception:  # noqa: BLE001 - hooks never break a run
+            _log.debug("os transition hook failed for %s -> %s",
+                       mission_id, to_state, exc_info=True)
+            return None
+
+    def _advise_resources(self, mission: Mission) -> None:
+        """Consult the resource advisor before a step.
+
+        Advisory only: the advice is logged, never acted on here. A failing
+        advisor is ignored — it must not be able to stall a mission.
+        """
+        advisor = getattr(self, "_resource_advisor", None)
+        if advisor is None:
+            return
+        try:
+            advice = advisor(mission)
+        except Exception:  # noqa: BLE001 - advisory only
+            _log.debug("resource advisor failed", exc_info=True)
+            return
+        if isinstance(advice, dict) and advice.get("throttled"):
+            _log.info("mission %s resource-throttled: %s",
+                      mission.id, advice.get("reasons"))
 
     def mark_stalled(
         self,
@@ -264,7 +308,11 @@ class MissionRunner:
         mission = self.store.create_new(
             goal, name=name, budget_wall=budget_wall, budget_tokens=budget_tokens
         )
-        return self.run(mission, max_iterations=max_iterations, reflect=reflect)
+        # Refresh from the store: the hook persists its own copy, and the
+        # stale in-memory mission must not clobber it on the next save.
+        updated = self._os_transition(mission.id, "PLANNED", "mission created")
+        return self.run(updated if updated is not None else mission,
+                        max_iterations=max_iterations, reflect=reflect)
 
     def run(
         self,
@@ -292,6 +340,9 @@ class MissionRunner:
         self._heartbeat(mission)
         self.store.save(mission)
         self._report("on_started", mission)
+        updated = self._os_transition(mission.id, "RUNNING", "run started")
+        if updated is not None:
+            mission = updated
 
         plan_steps = self._plan(mission)
         completed: set[str] = set(mission.state.get("completed_steps") or [])
@@ -408,6 +459,7 @@ class MissionRunner:
     def _execute_step(self, mission: Mission, step: Any) -> StepOutcome:
         """Run one plan step through the orchestrator's agent for that role."""
         started = self._clock()
+        self._advise_resources(mission)
         from ..agents.roles import build_agent
 
         prompt = _step_prompt(mission, step)
@@ -444,6 +496,16 @@ class MissionRunner:
     ) -> MissionResult:
         lessons: list[str] = []
         mission.status = status
+        final_state = {
+            MissionStatus.DONE: "COMPLETED",
+            MissionStatus.FAILED: "FAILED",
+            MissionStatus.CANCELLED: "CANCELLED",
+        }.get(status)
+        if final_state is not None:
+            updated = self._os_transition(mission.id, final_state,
+                                          f"finished: {status}")
+            if updated is not None:
+                mission = updated
 
         if reflect and status in {MissionStatus.DONE, MissionStatus.FAILED}:
             score, lessons = self._reflect(mission, steps, status)
