@@ -42,7 +42,7 @@ operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
 | L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
 | L7 Surface | CLI · HTTP API · TUI | ✅ tested |
 
-**~3,400 tests.** `python3 -m unittest discover -s tests -t .` — the unit suite runs offline by default (network calls are mocked); network-touching integration tests are gated behind `NM_RUN_INTEGRATION=1`.
+**~3,400 tests.** `python3 -m unittest discover -s tests -t .` — the suite runs offline by default (network calls are mocked); see `tests/taxonomy.py` for the unit/integration/live tier map and the `NM_RUN_INTEGRATION=1` gate for live tests.
 
 ## Architecture
 
