@@ -144,6 +144,16 @@ No-morals-ai/
 │   │   ├── media.py           video/audio download (yt-dlp + fallbacks), ffmpeg
 │   │   └── codegen.py         generate → sandbox → test → repair loop
 │   │
+│   ├── documents/             L4 — universal document engine (Wave K)
+│   │   ├── model.py           Document/Section/Table, unified object model
+│   │   ├── parsers.py         pdf·docx·xlsx·pptx·html·md·csv·txt (real parsers)
+│   │   ├── convert.py         md·html·pdf·csv·text generation + round-trips
+│   │   └── index.py           inverted-index search over parsed documents
+│   │
+│   ├── browser/               L4 — browser service (Wave K)
+│   │   └── service.py         sessions + tabs over tools/browser, downloads and
+│   │                          screenshots as first-class artifacts, persistence
+│   │
 │   ├── social/                L4
 │   │   ├── base.py            SocialPlatform protocol, post shape, audit log
 │   │   ├── queue.py           content queue, scheduling, retry, per-platform budget
@@ -170,6 +180,11 @@ No-morals-ai/
 │   │   ├── reflector.py       self-evaluation, lesson extraction, policy tuning
 │   │   ├── runner.py          long-running loop, resume, graceful shutdown
 │   │   └── goals.py           goal graph, progress metrics, success criteria
+│   │
+│   ├── codews/                L5 — code workspace object (Wave K)
+│   │   ├── workspace.py       repo/branch/worktree/diff/log over git
+│   │   ├── patch.py           patch review/apply/preview on core/diff
+│   │   └── run.py             test + build runners with real exit codes
 │   │
 │   └── api/                   L7
 │       ├── server.py          ThreadingHTTPServer + routing + auth + SSE
@@ -434,8 +449,11 @@ verified · ⬜ designed, not yet written.
 | L3    | llm/* (providers)   | 🟡 offline-verified; live HF path unverifiable in sandbox |
 | L3    | training/*          | 🟡 native loop ✅, GPU backends generate-and-handoff |
 | L4    | tools/*             | ✅ (media needs yt-dlp at runtime) |
+| L4    | documents/*         | ✅     |
+| L4    | browser/*           | ✅ (screenshots need playwright at runtime) |
 | L4    | social/*            | 🟡 adapter code written; needs live platform credentials |
 | L5    | agents/*            | ✅     |
+| L5    | codews/*            | ✅     |
 | L6    | missions/*          | 🟡     |
 | L7    | cli, api            | ✅     |
 

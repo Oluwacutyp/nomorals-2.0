@@ -18,7 +18,9 @@ from .commands.book import _cmd_book
 from .commands.briefing import _cmd_briefing
 from .commands.captcha import _cmd_captcha
 from .commands.cards import _cmd_cards
+from .commands.browse import _cmd_browse
 from .commands.code import _cmd_code
+from .commands.doc import _cmd_doc
 from .commands.data import _cmd_data
 from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
 from .commands.exec import _cmd_apps, _cmd_exec
@@ -45,6 +47,7 @@ from .commands.power import _cmd_power
 from .commands.project import _cmd_project
 from .commands.queue import _cmd_queue
 from .commands.recover import _cmd_recover
+from .commands.repo import _cmd_repo
 from .commands.research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
 from .commands.room import _cmd_room
 from .commands.security import (
@@ -324,6 +327,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_research_loop(args, context)
         if args.command == "code":
             return _cmd_code(args, context)
+        if args.command == "doc":
+            return _cmd_doc(args, context)
+        if args.command == "browse":
+            return _cmd_browse(args, context)
+        if args.command == "repo":
+            return _cmd_repo(args, context)
         if args.command == "media":
             return _cmd_media(args, context)
         if args.command == "studio":

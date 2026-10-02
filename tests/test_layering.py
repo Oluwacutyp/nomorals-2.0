@@ -38,7 +38,18 @@ LAYERS: dict[str, int] = {
     "skills": 4,
     "scheduler": 4,
     "goals": 4,
+    # documents/ is the universal document engine (Wave K): a service organ
+    # at L4 beside tools — it parses with tools/browser's HTML parser and
+    # core/pdf, and reaches only downward.
+    "documents": 4,
+    # browser/ is the Wave K browser service (sessions/tabs/downloads/
+    # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
+    "browser": 4,
     "agents": 5,
+    # codews/ is the Wave K code workspace object (repo/branch/worktree/
+    # patch/test/build): an L5 organ beside agents/missions, reusing
+    # core/diff and tools/git.
+    "codews": 5,
     "context": 5,
     "partner": 5,
     "games": 5,

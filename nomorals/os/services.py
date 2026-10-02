@@ -90,6 +90,19 @@ def _factory_queue(db_path: str | None) -> Any:
     return WorkQueue(db)
 
 
+def _factory_browser_service() -> Any:
+    from ..browser import BrowserService
+    return BrowserService()
+
+
+def _check_browser_service() -> tuple[bool, str]:
+    try:
+        from ..browser import BrowserService  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return False, f"browser service import failed: {exc!r}"
+    return True, "BrowserService importable"
+
+
 # ── registry ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -164,6 +177,10 @@ class ServiceRegistry:
         self.register("queue", lambda: _factory_queue(db_path),
                       health_check=_check_queue,
                       description="Durable SQLite work queue (storage/queue.WorkQueue)")
+        self.register("browser_service", _factory_browser_service,
+                      health_check=_check_browser_service,
+                      description="Wave K browser service: sessions/tabs/downloads/"
+                                  "screenshots as artifacts (browser.BrowserService)")
 
     # ── management ───────────────────────────────────────────────────────
     def register(self, name: str, factory: Callable[[], Any], *,

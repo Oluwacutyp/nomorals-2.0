@@ -78,6 +78,9 @@ CLI_ALIASES: dict[str, list[str]] = {
     "workspace": ["ws"],
     "zip": ["z"],
     "deliver": ["dlv"],
+    "doc": ["docs"],
+    "browse": ["brw"],
+    "repo": ["rp"],
 }
 
 
@@ -1437,5 +1440,98 @@ def _parser() -> argparse.ArgumentParser:
     cards.add_argument("--type", default="UNLOCKED", help="Card type")
     cards.add_argument("--limit", type=int, help="Spend limit in cents")
     cards.add_argument("--merchant", help="Merchant name")
+
+
+    # Wave K commands: document engine, browser service, code workspace.
+    doc = sub.add_parser("doc", aliases=CLI_ALIASES["doc"],
+        help="document engine: parse, convert, search documents",
+        description=("nm doc parse <file> [--json]\n"
+                     "nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]\n"
+                     "nm doc search <query> --dir DIR [--limit N]\n"
+                     "nm doc show <file>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    doc.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    doc.add_argument("--to", default="", help="convert target: md|html|txt|pdf|csv")
+    doc.add_argument("--out", default="", help="write converted output here")
+    doc.add_argument("--dir", default="", help="search: directory of documents")
+    doc.add_argument("--limit", type=int, default=10, help="search: max hits")
+    doc.add_argument("--json", action="store_true", help="Output as JSON")
+
+    browse = sub.add_parser("browse", aliases=CLI_ALIASES["browse"],
+        help="browser service: sessions, tabs, downloads, screenshots",
+        description=("nm browse open <url> [--session S]\n"
+                     "nm browse tabs|text|md|links|history [--session S]\n"
+                     "nm browse shot [--out PATH] | nm browse download <url>\n"
+                     "nm browse close | nm browse sessions"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    browse.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    browse.add_argument("--session", default="",
+                        help="browser session name (default: cli)")
+    browse.add_argument("--out", default="", help="shot: save PNG here")
+    browse.add_argument("--json", action="store_true", help="Output as JSON")
+
+    repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
+        help="code workspace: branches, worktrees, patches, test/build",
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
+                     "nm repo branch <name> | nm repo switch <name>\n"
+                     "nm repo worktree <add|list|remove> [path] [branch]\n"
+                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    repo.add_argument("--root", default=".", help="repository root")
+    repo.add_argument("--yes", action="store_true",
+                      help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--json", action="store_true", help="Output as JSON")
+
+    return parser
+
+    # Wave K commands: document engine, browser service, code workspace.
+    doc = sub.add_parser("doc", aliases=CLI_ALIASES["doc"],
+        help="document engine: parse, convert, search documents",
+        description=("nm doc parse <file> [--json]\n"
+                     "nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]\n"
+                     "nm doc search <query> --dir DIR [--limit N]\n"
+                     "nm doc show <file>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    doc.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    doc.add_argument("--to", default="", help="convert target: md|html|txt|pdf|csv")
+    doc.add_argument("--out", default="", help="write converted output here")
+    doc.add_argument("--dir", default="", help="search: directory of documents")
+    doc.add_argument("--limit", type=int, default=10, help="search: max hits")
+    doc.add_argument("--json", action="store_true", help="Output as JSON")
+
+    browse = sub.add_parser("browse", aliases=CLI_ALIASES["browse"],
+        help="browser service: sessions, tabs, downloads, screenshots",
+        description=("nm browse open <url> [--session S]\n"
+                     "nm browse tabs|text|md|links|history [--session S]\n"
+                     "nm browse shot [--out PATH] | nm browse download <url>\n"
+                     "nm browse close | nm browse sessions"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    browse.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    browse.add_argument("--session", default="",
+                        help="browser session name (default: cli)")
+    browse.add_argument("--out", default="", help="shot: save PNG here")
+    browse.add_argument("--json", action="store_true", help="Output as JSON")
+
+    repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
+        help="code workspace: branches, worktrees, patches, test/build",
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
+                     "nm repo branch <name> | nm repo switch <name>\n"
+                     "nm repo worktree <add|list|remove> [path] [branch]\n"
+                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    repo.add_argument("--root", default=".", help="repository root")
+    repo.add_argument("--yes", action="store_true",
+                      help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
