@@ -205,6 +205,27 @@ class GameEngine:
                 relay.maybe_cleanup()
         except Exception:  # noqa: BLE001
             _log.debug("relay cleanup failed", exc_info=True)
+        self._maybe_prune_history(now)
+
+    def _maybe_prune_history(self, now: float) -> None:
+        """Throttled: drop finished room rows older than 30 days.
+
+        Finished rows are write-only history — nothing reads them back
+        (``_load_live`` only ever wants 'active'), so letting them pile
+        up forever is just leaked DB weight.
+        """
+        if self.db is None:
+            return
+        last = getattr(self, "_last_prune", 0.0)
+        if now - last < 3600:
+            return
+        self._last_prune = now
+        try:
+            self.db.execute(
+                "DELETE FROM game_rooms WHERE status = 'finished' "
+                "AND updated_at < ?", (now - 30 * 86400,))
+        except Exception:  # noqa: BLE001
+            _log.debug("game room history prune failed", exc_info=True)
 
     # ── sending ────────────────────────────────────────────────────────────
     def _emit(self, room: Room, *texts: str) -> None:
@@ -260,6 +281,21 @@ class GameEngine:
         self._rooms[room.chat_key] = room
         self._by_id[room.id] = room
         return room
+
+    def _delete_room_row(self, room_id: str) -> None:
+        """Hard-delete one room's DB row.
+
+        Used when a start aborts mid-setup: the room was already
+        persisted as 'active' but never made it into the live tables, so
+        without this the next ``live()`` would resurrect it as a zombie.
+        """
+        if self.db is None:
+            return
+        try:
+            self.db.execute("DELETE FROM game_rooms WHERE id = ?",
+                            (room_id,))
+        except Exception:  # noqa: BLE001
+            _log.debug("game room row delete failed", exc_info=True)
 
     # ── room lifecycle ─────────────────────────────────────────────────────
     def live(self, chat_key: str) -> Room | None:
@@ -335,6 +371,9 @@ class GameEngine:
             with self._lock:
                 self._rooms.pop(chat_key, None)
                 self._by_id.pop(room.id, None)
+            # the first _persist already wrote an 'active' row — kill it
+            # too, or the next live() resurrects this stillborn table
+            self._delete_room_row(room.id)
             raise
         # a fresh table supersedes the rematch memory — the old finished
         # game is no longer the one to run back
@@ -547,11 +586,21 @@ class GameEngine:
         return cur is not None and not cur.is_ai and cur.key == sender.key
 
     def quit(self, chat_key: str) -> list[str]:
+        """Close everything this chat has open: the live room, a
+        DB-restored room (mid-game restart), the relay duel, and any
+        pending invites this chat sent. Nothing sticks around."""
         with self._lock:
             room = self._rooms.get(chat_key)
             live = room is not None and room.status == "active"
         if live:
             return self._finish(room, "everyone up? table closed.")
+        # the room may only exist in the DB (a restart stranded it):
+        # restore-then-finish so quit actually kills it instead of
+        # reporting "no game" while the active row keeps resurrecting
+        with self._lock:
+            restored = self._load_live(chat_key)
+        if restored is not None:
+            return self._finish(restored, "everyone up? table closed.")
         # relay players quit from their own DM, but the room lives at the
         # virtual relay key — tear the relay down too, or the duel sticks
         # around forever with no way to close it from either chat
@@ -560,6 +609,11 @@ class GameEngine:
             self.relay.close_relay(relay.room_id, reason="quit")
             return [f"duel closed — the {relay.game_name} relay table "
                     "is shut."]
+        # pending invites die with the quitter — nobody left to play with
+        cancelled = self.relay.cancel_invites_from_chat(chat_key)
+        if cancelled:
+            s = "s" if cancelled > 1 else ""
+            return [f"pending game invite{s} cancelled — table closed."]
         return ["no game is live here."]
 
     def _pump_ai(self, room: Room, out: list[str]) -> None:

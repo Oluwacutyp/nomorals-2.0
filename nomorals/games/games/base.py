@@ -139,7 +139,9 @@ class Room:
             platform=row.get("platform") or "local",
             kind=row.get("kind") or "dm",
             players=[Player(key=k, platform=k.split(":", 1)[0],
-                            name=k.split(":", 1)[-1], is_ai=k == AI_PLAYER)
+                            name=k.split(":", 1)[-1],
+                            is_ai=(k == AI_PLAYER
+                                   or k.startswith(AI_PLAYER + ":")))
                      for k in keys],
             turn=int(row.get("turn") or 0), state=state,
             status=row.get("status") or "active",

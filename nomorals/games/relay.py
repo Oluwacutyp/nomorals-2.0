@@ -303,6 +303,22 @@ class GameRelay:
         with self._lock:
             self._close_locked(room_id, reason=reason)
 
+    def cancel_invites_from_chat(self, chat_key: str) -> int:
+        """Cancel every pending invite sent from this chat.
+
+        Quit cleanup: a player who quits mid-invite leaves nobody to
+        play with, so the invite must die here rather than linger for
+        its full hour and ambush an acceptor later.
+        """
+        n = 0
+        with self._lock:
+            for code in [c for c, inv in self.invites.items()
+                         if inv.from_chat == chat_key]:
+                del self.invites[code]
+                self._delete_invite(code)
+                n += 1
+        return n
+
     def _close_locked(self, room_id: str, reason: str = "") -> None:
         relay = self.relays.get(room_id)
         if relay is None:
