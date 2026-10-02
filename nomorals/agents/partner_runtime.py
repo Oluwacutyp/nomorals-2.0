@@ -3378,6 +3378,113 @@ class PartnerRuntime:
                 return f"export failed: {exc}"
             return (f"exported {len(text.splitlines())} training rows → {path}\n"
                     "that's the live stream, in the export format — ready for the Colab training run.")
+        if verb == "ship":
+            from .arena.ship import ship_queue
+
+            try:
+                queue = ship_queue(self.context.db, self.context)
+            except Exception as exc:  # noqa: BLE001
+                return f"ship queue failed: {exc}"
+            if not queue:
+                return ("ship queue is empty — promote a build first "
+                        "(/arena promote <build-id>)")
+            lines = ["arena ship queue:"]
+            for q in queue:
+                files = q["edits"]
+                shown = ", ".join(files[:4])
+                if len(files) > 4:
+                    shown += f" (+{len(files) - 4} more)"
+                lines.append(f"  {q['id']} [{q['status']}] "
+                             f"{q['instruction'][:60]} :: {shown}")
+            return "\n".join(lines)
+        if verb == "promote":
+            if len(parts) < 2:
+                return "usage: /arena promote <build-id>"
+            from .arena.ship import promote_build
+            from .evolution import EvolutionAgent, _REPO_ROOT
+
+            try:
+                pid = promote_build(self.context.db, self.context, parts[1],
+                                    _REPO_ROOT)
+                prop = EvolutionAgent(self.context)._load(pid)
+                files = [e["path"] for e in (prop.edits if prop else [])
+                         if isinstance(e, dict)]
+            except Exception as exc:  # noqa: BLE001
+                return f"promote failed: {exc}"
+            shown = ", ".join(files[:6])
+            if len(files) > 6:
+                shown += f" (+{len(files) - 6} more)"
+            return (f"promoted build {parts[1]} → proposal {pid} "
+                    f"({len(files)} files: {shown})\n"
+                    f"verify with /arena apply {pid}")
+        if verb == "apply":
+            if len(parts) < 2:
+                return "usage: /arena apply <proposal-id>"
+            from .arena.ship import approve_ship
+            from .evolution import _REPO_ROOT
+
+            try:
+                result = approve_ship(self.context.db, self.context, parts[1],
+                                      _REPO_ROOT, commit=True, full_suite=False)
+            except Exception as exc:  # noqa: BLE001
+                return f"apply failed: {exc}"
+            if result.get("applied"):
+                files = ", ".join(result.get("edits", []))
+                return (f"shipped {result['proposal']} → {files} "
+                        f"(commit {result.get('commit', 'n/a')})")
+            return (f"not applied: {result.get('reason', 'unknown')} — "
+                    f"{str(result.get('report', ''))[:400]}")
+        if verb == "reject":
+            if len(parts) < 3:
+                return "usage: /arena reject <proposal-id> <reason>"
+            from .arena.ship import deny_ship
+
+            if deny_ship(self.context.db, self.context, parts[1],
+                         " ".join(parts[2:])):
+                return f"rejected {parts[1]}"
+            return f"no proposal {parts[1]!r}"
+        if verb == "scores":
+            try:
+                from .arena import scoring
+            except ImportError:
+                return ("arena scoring isn't available — the arena_scores "
+                        "table exists (migration 61) but no scoring module "
+                        "could be imported; nothing to show")
+            try:
+                table = scoring.category_scores(self.context.db)
+            except Exception as exc:  # noqa: BLE001
+                return f"scores failed: {exc}"
+            if not table:
+                return ("no arena scores recorded yet — the scoring worker "
+                        "logs to arena_scores after each build")
+            lines = ["arena category scores:"]
+            for cat in sorted(table):
+                s = table[cat]
+                avg = (f"{s['avg']:.2f}" if s.get("avg") is not None
+                       else "n/a")
+                lat = (f"{s['avg_latency']:.1f}s"
+                       if s.get("avg_latency") is not None else "n/a")
+                lines.append(f"  {cat:<16} runs={s['runs']:<4} avg={avg:<6} "
+                             f"latency={lat}")
+            return "\n".join(lines)
+        if verb == "sample":
+            from .arena.sampling import sample_challenge
+
+            try:
+                profile = arena.interest_profile()
+            except Exception:  # noqa: BLE001
+                profile = None
+            # db=None: a dry run — sample_challenge never touches the
+            # database then, so no anti-repeat state is written and the
+            # topic bank stays untouched.
+            cat, topic, entry = sample_challenge(db=None, profile=profile,
+                                                 anti_repeat=0)
+            return (f"arena sample (preview — nothing recorded):\n"
+                    f"  category:   {cat}\n"
+                    f"  difficulty: {entry.get('d', '?')}\n"
+                    f"  kind:       {entry.get('kind', '?')}\n"
+                    f"  topic:      {topic}\n"
+                    f"  verify:     {str(entry.get('verify', ''))[:120]}")
         if verb in {"approve", "deny"}:
             if len(parts) < 2:
                 return f"usage: /arena {verb} <build-id>"
@@ -3386,7 +3493,8 @@ class PartnerRuntime:
         if (tail or "").strip():
             return self._control_arena(f"run {tail.strip()}", chat_key=chat_key)
         return ("usage: /arena [status|run [topic]|surprise [seed]|stats|digest [n]|schedule [h]|loop on|off|"
-                "topic add <t>|builds|topics [category]|stream [kind|n]|export [n]|approve <id>|deny <id>]")
+                "topic add <t>|builds|topics [category]|stream [kind|n]|export [n]|approve <id>|deny <id>|"
+                "promote <build-id>|ship|apply <proposal-id>|reject <proposal-id> <reason>|scores|sample]")
 
     def _arena_knowledge_count(self) -> int:
         try:

@@ -2016,6 +2016,13 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_hash ON artifacts(content_hash);
 """
 
+_V61_ARENA_SCORES = """
+-- Arena build scoring (the scoring worker records per-build verdicts here)
+CREATE TABLE IF NOT EXISTS arena_scores (id TEXT PRIMARY KEY, ts REAL NOT NULL, topic TEXT NOT NULL, category TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'code', research_usefulness REAL, build_compiled INTEGER, tests_passed INTEGER, edit_precision REAL, latency_s REAL, notes TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS idx_arena_scores_category ON arena_scores(category);
+CREATE INDEX IF NOT EXISTS idx_arena_scores_ts ON arena_scores(ts);
+"""
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
@@ -2084,6 +2091,7 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql="ALTER TABLE notifications ADD COLUMN delivery_state "
                   "TEXT NOT NULL DEFAULT '';"),
     Migration(60, "artifacts", sql=_V60_ARTIFACTS),
+    Migration(61, "arena_scores", sql=_V61_ARENA_SCORES),
 )
 
 

@@ -1162,6 +1162,24 @@ class EvolutionAgent:
                 proposal.verify_result = f"path escapes repo: {edit['path']}"
                 self._save(proposal)
                 raise ToolError(f"path escapes repo: {edit['path']}") from None
+            if not target.exists():
+                if edit["old"] != "":
+                    # the plan referenced a file that was never created —
+                    # restore the tree (edits already written are rolled
+                    # back) and reject, like the stale-plan path above.
+                    self._revert_tree()
+                    proposal.status = "rejected"
+                    proposal.verify_result = (
+                        f"edit target missing: {edit['path']}")
+                    self._save(proposal)
+                    raise ToolError(
+                        f"edit target missing: {edit['path']}")
+                # new-file edit: create parent dirs, write the content,
+                # continue to the next edit (no stale check — the file is
+                # ours and the plan is the only author).
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(edit["new"], encoding="utf-8")
+                continue
             content = target.read_text(encoding="utf-8")
             if content.count(edit["old"]) != 1:
                 # stale plan: the file changed since planning
@@ -1186,8 +1204,9 @@ class EvolutionAgent:
                     "safety contract is that unverified changes never land")
             proposal.status = "applied"
             proposal.verify_result = "SKIPPED (force, power mode)"
+            out = self._applied_summary(proposal, commit, skip_verify=True)
             self._save(proposal)
-            return self._applied_summary(proposal, commit, skip_verify=True)
+            return out
 
         proposal.status = "verifying"
         self._save(proposal)

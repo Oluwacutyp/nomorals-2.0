@@ -502,7 +502,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/features [name on|off]", "example": "/features arena on",
                  "related": "/arena /power"},
     "arena": {"what": "the content arena: research a topic, stream drafts, review, export, approve builds.",
-              "usage": "/arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]",
+              "usage": "/arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>|promote <build-id>|ship|apply <proposal-id>|reject <proposal-id> <reason>|scores|sample]",
               "example": "/arena run llama fine-tuning",
               "related": "/features /research"},
     "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
