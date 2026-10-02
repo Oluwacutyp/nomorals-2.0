@@ -243,7 +243,9 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--model", default="", help="hot-swap to this provider for this call")
 
     backup = sub.add_parser("backup", aliases=CLI_ALIASES["backup"],
-                            help="create, list, verify, or restore backups")
+                            help="create, list, verify, prune, or restore backups")
+    backup.add_argument("verb", nargs="?", choices=["list", "verify", "prune"], default=None,
+                        help="list backups, verify the latest, or prune old ones")
     backup.add_argument("--create", action="store_true")
     backup.add_argument("--list", action="store_true")
     backup.add_argument("--verify", action="store_true")

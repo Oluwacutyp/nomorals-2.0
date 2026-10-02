@@ -19,6 +19,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tarfile
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +48,11 @@ class BackupInfo:
     created_at: float
     schema_version: int = 0
     label: str = ""
+    # Blob sidecar (artifact blobs tarred alongside the database snapshot).
+    blob_name: str = ""
+    blob_sha256: str = ""
+    blob_count: int = 0
+    blob_files: dict[str, str] = field(default_factory=dict)  # rel path -> sha256
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +64,10 @@ class BackupInfo:
             "created_at": self.created_at,
             "schema_version": self.schema_version,
             "label": self.label,
+            "blob_name": self.blob_name,
+            "blob_sha256": self.blob_sha256,
+            "blob_count": self.blob_count,
+            "blob_files": self.blob_files,
         }
 
 
@@ -116,6 +127,7 @@ class BackupManager:
             final_path = raw_path
 
         digest = _sha256_file(final_path)
+        blob_name, blob_sha256, blob_count, blob_files = self._archive_blobs(base)
         info = BackupInfo(
             name=final_path.name,
             path=str(final_path),
@@ -125,9 +137,16 @@ class BackupManager:
             created_at=time.time(),
             schema_version=schema_version,
             label=label,
+            blob_name=blob_name,
+            blob_sha256=blob_sha256,
+            blob_count=blob_count,
+            blob_files=blob_files,
         )
         self._append_manifest(info)
-        _log.info("backup created: %s (%d bytes, %d pages)", info.name, info.size, info.pages)
+        _log.info(
+            "backup created: %s (%d bytes, %d pages, %d blobs)",
+            info.name, info.size, info.pages, info.blob_count,
+        )
         return info
 
     def _schema_version(self, path: Path) -> int:
@@ -140,6 +159,95 @@ class BackupManager:
                 conn.close()
         except sqlite3.Error:
             return 0
+
+    # ── blob sidecar ─────────────────────────────────────────────────────────
+    def _archive_blobs(self, base: str) -> tuple[str, str, int, dict[str, str]]:
+        """Tar+gzip the artifact blob dir next to the database snapshot.
+
+        Returns ``(archive_name, sha256, file_count, {rel_path: sha256})``.
+        The per-file map is recorded in the manifest so ``verify()`` can check
+        the *presence and integrity of every blob*, not just the archive file.
+        """
+        if not self.include_blobs or not self.blob_dir:
+            return "", "", 0, {}
+        source = Path(self.blob_dir).expanduser()
+        if not source.is_dir():
+            _log.debug("blob dir %s missing; skipping blob backup", source)
+            return "", "", 0, {}
+        archive = self.directory / f"{base}-blobs.tar.gz"
+        files: dict[str, str] = {}
+        try:
+            with tarfile.open(archive, "w:gz", compresslevel=6) as tar:
+                for path in sorted(source.rglob("*")):
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    rel = path.relative_to(source).as_posix()
+                    digest = _sha256_file(path)
+                    files[rel] = digest
+                    tarinfo = tar.gettarinfo(str(path), arcname=rel)
+                    with path.open("rb") as handle:
+                        tar.addfile(tarinfo, handle)
+        except OSError as exc:
+            archive.unlink(missing_ok=True)
+            raise StorageError(f"cannot archive blobs from {source}: {exc}") from exc
+        return archive.name, _sha256_file(archive), len(files), files
+
+    def _extract_blob_archive(self, archive: Path, dest: Path) -> Path:
+        """Extract a blob tarball, refusing path-traversal entries."""
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                for member in tar.getmembers():
+                    name = member.name
+                    if not name or name.startswith("/") or ".." in Path(name).parts:
+                        raise StorageError(f"unsafe blob archive entry: {name!r}")
+                    if not member.isfile():
+                        continue
+                    target = dest / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    src = tar.extractfile(member)
+                    if src is None:
+                        raise StorageError(f"unreadable blob archive entry: {name!r}")
+                    with src, target.open("wb") as out:
+                        shutil.copyfileobj(src, out, CHUNK)
+        except (tarfile.TarError, EOFError, OSError) as exc:
+            raise StorageError(f"cannot extract blob archive {archive.name}: {exc}") from exc
+        return dest
+
+    def _verify_blobs(self, backup: BackupInfo) -> list[str]:
+        """Verify the blob sidecar: archive checksum, then every blob file.
+
+        Extraction failures, missing blobs, and per-file checksum mismatches
+        are all reported as problems — verify() must *catch* corruption, not
+        just confirm the archive file exists.
+        """
+        problems: list[str] = []
+        if not backup.blob_name:
+            return problems  # backup predates blob support, or blobs disabled
+        archive = self.directory / backup.blob_name
+        if not archive.is_file():
+            return [f"blob archive missing: {backup.blob_name}"]
+        if backup.blob_sha256:
+            actual = _sha256_file(archive)
+            if actual != backup.blob_sha256:
+                return [f"blob archive checksum mismatch for {backup.blob_name}"]
+        tmpdir = Path(tempfile.mkdtemp(prefix="nm-blob-verify-"))
+        try:
+            try:
+                self._extract_blob_archive(archive, tmpdir)
+            except StorageError as exc:
+                return [f"cannot extract blob archive {backup.blob_name}: {exc}"]
+            for rel, digest in sorted((backup.blob_files or {}).items()):
+                candidate = (tmpdir / rel).resolve()
+                if tmpdir not in candidate.parents:
+                    problems.append(f"unsafe blob path in manifest: {rel}")
+                    continue
+                if not candidate.is_file():
+                    problems.append(f"blob missing from archive: {rel}")
+                elif _sha256_file(candidate) != digest:
+                    problems.append(f"blob corrupted (checksum mismatch): {rel}")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return problems
 
     # ── manifest ─────────────────────────────────────────────────────────────
     @property
@@ -181,6 +289,10 @@ class BackupManager:
                     created_at=entry.get("created_at", 0.0),
                     schema_version=entry.get("schema_version", 0),
                     label=entry.get("label", ""),
+                    blob_name=entry.get("blob_name", ""),
+                    blob_sha256=entry.get("blob_sha256", ""),
+                    blob_count=entry.get("blob_count", 0),
+                    blob_files=entry.get("blob_files", {}) or {},
                 )
             )
         return sorted(out, key=lambda b: b.created_at)
@@ -211,6 +323,9 @@ class BackupManager:
             if backup.path in keepers:
                 continue
             Path(backup.path).unlink(missing_ok=True)
+            # A pruned snapshot's blob sidecar goes with it, or disk leaks.
+            if backup.blob_name:
+                (self.directory / backup.blob_name).unlink(missing_ok=True)
             removed.append(backup.name)
         if removed:
             removed_names = set(removed)
@@ -224,7 +339,14 @@ class BackupManager:
 
     # ── verification & restore ───────────────────────────────────────────────
     def verify(self, backup: BackupInfo | None = None) -> list[str]:
-        """Check a backup is a readable SQLite database with a matching checksum."""
+        """Verify a backup by restoring it into a temp dir and checking it.
+
+        Checks, in order: archive checksum, successful extraction, SQLite
+        openability + ``PRAGMA integrity_check`` + non-empty schema, then the
+        blob sidecar (archive checksum, extraction, per-blob presence and
+        checksums). Returns a list of human-readable problems; empty means
+        the backup is restorable.
+        """
         target = backup or self.latest()
         if target is None:
             return ["no backups present"]
@@ -240,8 +362,9 @@ class BackupManager:
                 # would be noise, and decompression may itself explode.
                 return problems
 
-        probe = self.directory / f".verify-{int(time.time())}.db"
+        tmpdir = Path(tempfile.mkdtemp(prefix="nm-backup-verify-"))
         try:
+            probe = tmpdir / "restore.db"
             try:
                 self._extract(target, probe)
             except Exception as exc:
@@ -249,22 +372,24 @@ class BackupManager:
                 # finding. verify() must report it, never raise it at the caller.
                 problems.append(f"cannot extract {target.name}: {type(exc).__name__}: {exc}")
                 return problems
-            conn = sqlite3.connect(str(probe))
             try:
-                result = conn.execute("PRAGMA integrity_check").fetchone()
-                if result is None or result[0] != "ok":
-                    problems.append(f"integrity_check returned {result}")
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-                ).fetchone()[0]
-                if count == 0:
-                    problems.append("backup contains no tables")
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            problems.append(f"cannot open backup as sqlite: {exc}")
+                conn = sqlite3.connect(str(probe))
+                try:
+                    result = conn.execute("PRAGMA integrity_check").fetchone()
+                    if result is None or result[0] != "ok":
+                        problems.append(f"integrity_check failed for {target.name}: {result}")
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+                    ).fetchone()[0]
+                    if count == 0:
+                        problems.append(f"backup {target.name} contains no tables")
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                problems.append(f"cannot open backup {target.name} as sqlite: {exc}")
+            problems.extend(self._verify_blobs(target))
         finally:
-            probe.unlink(missing_ok=True)
+            shutil.rmtree(tmpdir, ignore_errors=True)
         return problems
 
     def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None) -> Path:

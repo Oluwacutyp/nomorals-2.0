@@ -18,7 +18,17 @@ def _cmd_backup(args: argparse.Namespace, context: Any) -> int:
         keep=context.settings.backup.keep,
         compress=context.settings.backup.compress,
         git_repo=context.settings.backup.git_repo,
+        include_blobs=context.settings.backup.include_blobs,
+        blob_dir=context.settings.blob_dir,
     )
+    verb = getattr(args, "verb", None)
+    if verb == "verify":
+        args.verify = True
+    if verb == "prune":
+        removed = manager.rotate()
+        _emit(args, {"removed": removed},
+              "\n".join(removed) if removed else "nothing to prune")
+        return 0
     if args.create:
         info = manager.create(label="cli")
         manager.rotate()
