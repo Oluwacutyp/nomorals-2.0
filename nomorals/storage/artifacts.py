@@ -24,12 +24,28 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..core.ids import ulid_now
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
 ARTIFACT_URI_SCHEME = "artifact://"
 _URI_RE = re.compile(r"artifact://([A-Za-z0-9_-]+)")
+
+
+def _emit_created(art: "Artifact") -> None:
+    """Publish ``artifact.created`` on the process bus. Best-effort: a
+    broken subscriber must never break storage writes."""
+    try:
+        global_bus.publish(Event(
+            topic="artifact.created",
+            data={"artifact_id": art.id, "uri": art.uri, "type": art.type,
+                  "creator": art.creator, "mission_id": art.mission_id,
+                  "task_id": art.task_id},
+            source="nomorals.storage.artifacts",
+        ))
+    except Exception:  # noqa: BLE001 - events never break storage
+        _log.debug("artifact.created event failed", exc_info=True)
 
 
 @dataclass
@@ -133,6 +149,7 @@ class ArtifactStore:
              art.creator, art.mission_id, art.task_id, art.created_at,
              json.dumps(art.metadata), json.dumps(art.provenance.to_dict())),
         )
+        _emit_created(art)
         return art
 
     def put_text(self, text: str, **kwargs: Any) -> Artifact:
@@ -202,3 +219,77 @@ class ArtifactStore:
             "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at",
             (task_id,))
         return [Artifact.from_row(r) for r in rows]
+
+    # ── provenance graph ─────────────────────────────────────────────────
+    #
+    # The ``derived_from`` / ``supersedes`` lists in each artifact's
+    # provenance form a directed graph over the artifacts table. These
+    # traversals answer "where did this come from?" (lineage) and "what was
+    # built on top of this?" (descendants) without any new schema.
+
+    def lineage(self, artifact_id: str) -> list[Artifact]:
+        """All ancestors of ``artifact_id`` via ``derived_from`` (BFS).
+
+        Nearest parents come first. Cycle-safe: provenance written by hand
+        or by a buggy tool may loop back, and a lineage query must still
+        terminate. Missing ancestors are skipped. The artifact itself is
+        not included — only its ancestors.
+        """
+        seen = {artifact_id}
+        ancestors: list[Artifact] = []
+        queue = [artifact_id]
+        while queue:
+            current = self.get(queue.pop(0))
+            if current is None:
+                continue
+            for parent_id in current.provenance.derived_from or []:
+                if not parent_id or parent_id in seen:
+                    continue
+                seen.add(parent_id)
+                parent = self.get(parent_id)
+                if parent is not None:
+                    ancestors.append(parent)
+                    queue.append(parent_id)
+        return ancestors
+
+    def descendants(self, artifact_id: str) -> list[Artifact]:
+        """Every artifact whose provenance names ``artifact_id`` in
+        ``derived_from`` or ``supersedes`` — the reverse of :meth:`lineage`.
+        Ordered oldest-first."""
+        out: list[Artifact] = []
+        for row in self.db.query("SELECT * FROM artifacts ORDER BY created_at"):
+            art = Artifact.from_row(row)
+            prov = art.provenance
+            if (artifact_id in (prov.derived_from or [])
+                    or artifact_id in (prov.supersedes or [])):
+                out.append(art)
+        return out
+
+    def superseded_by(self, artifact_id: str) -> list[Artifact]:
+        """Artifacts that explicitly supersede ``artifact_id`` (a subset of
+        :meth:`descendants`: only the ``supersedes`` link, not ``derived_from``)."""
+        return [a for a in self.descendants(artifact_id)
+                if artifact_id in (a.provenance.supersedes or [])]
+
+    def rebuild(self, artifact_id: str, *, creator: str = "") -> Artifact:
+        """Create a fresh artifact re-derived from the same bytes as
+        ``artifact_id``, with ``derived_from=[artifact_id]``.
+
+        The new artifact carries the same type, mime, mission/task links
+        and metadata; ``creator`` overrides the original creator when given.
+        Emits ``artifact.created`` like any other write.
+        """
+        art = self.get(artifact_id)
+        if art is None:
+            raise KeyError(f"unknown artifact: {artifact_id}")
+        data = self.blobs.get_bytes(art.content_hash)
+        return self.derive(
+            data,
+            from_ids=[artifact_id],
+            type=art.type,
+            mime=art.mime,
+            creator=creator or art.creator,
+            mission_id=art.mission_id,
+            task_id=art.task_id,
+            metadata=dict(art.metadata),
+        )
