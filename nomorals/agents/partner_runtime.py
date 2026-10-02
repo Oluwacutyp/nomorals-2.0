@@ -41,6 +41,7 @@ from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
 from ..partner.background import BackgroundSelector
+from ..partner.lexicon_feed import LexiconFeed, seed_partner_lexicon
 from ..partner.mood import MoodEngine
 from ..partner.persona import Persona, default_persona
 from ..partner.gating import MODE_OWNER, classify_chat, is_restricted
@@ -98,6 +99,17 @@ class PartnerBrain:
         if partner_cfg.disclosure:
             self.persona.disclosure = partner_cfg.disclosure
         self.background = BackgroundSelector(mode=partner_cfg.background_gate)
+        # Dynamic voice feed: scored lexicon terms blended into her phrasing.
+        # None when the owner disabled it — lexical influence never overrides
+        # owner-set persona/style preferences, and off means off.
+        self.lexicon: LexiconFeed | None = None
+        if partner_cfg.lexicon_voice:
+            self.lexicon = LexiconFeed(context.db)
+            if partner_cfg.lexicon_seed and context.db is not None:
+                try:
+                    seed_partner_lexicon(context.db)
+                except Exception as exc:  # noqa: BLE001 - seeding must never break boot
+                    _log.warning("partner lexicon seed failed: %s", exc)
         self.responder = PartnerResponder(
             context.router,
             self.persona,
@@ -105,6 +117,7 @@ class PartnerBrain:
             self.relationship,
             context.memory,
             self.background,
+            lexicon=self.lexicon,
         )
         self.curator_hook = curator
         self._last_user_seen: dict[str, float] = {}
@@ -261,6 +274,8 @@ class PartnerBrain:
             "chat": chat.key,
             "latency_ms": round(float(getattr(bundle, "latency_ms", 0.0) or 0.0), 1),
             "fallback": bool(getattr(bundle, "fallback", False)),
+            "lexicon_dynamic": bool(getattr(bundle, "lexicon_dynamic", False)),
+            "lexicon_terms_used": int(getattr(bundle, "lexicon_terms_used", 0) or 0),
         }
         if not self._last_reply["fallback"]:
             return
@@ -412,7 +427,10 @@ class PartnerBrain:
             digest = self._reasoning_digest(message.text)
             if digest:
                 continuity = list(continuity) + [digest]
-        bundle = self.responder.respond(
+        # Interactive budget: the provider chain behind router.chat can stall
+        # for minutes; the chat thread gets INTERACTIVE_REPLY_TIMEOUT_S and
+        # then an honest fallback — never a ~90s polite wait.
+        bundle = self.responder.respond_bounded(
             chat_platform=chat.platform,
             user_text=message.text,
             gate_mode=gate_mode,
@@ -1420,6 +1438,17 @@ class PartnerRuntime:
             },
             "platforms": self.gateway.status(),
             "autonomy": self._autonomy.status() if self._autonomy else "off",
+            # Dynamic lexicon voice feed: per-category term counts so the
+            # owner can see what the feed is working with (deeper inspection
+            # via the research_lexicon tool: action=terms|stats).
+            "lexicon": (
+                self.brain.lexicon.status()
+                if self.brain.lexicon is not None
+                else {"available": False, "enabled": False, "module": "partner"}
+            ),
+            # Wave D: how many interactive replies hit the reply budget and
+            # fell back instead of stalling the chat.
+            "reply_timeouts": self.brain.responder.reply_timeouts,
         }
 
     def say(self, chat_key: str, text: str, *, reply_to: str = "") -> Any:
@@ -3703,7 +3732,17 @@ class PartnerRuntime:
             lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
             return "\n".join(lines)
         if verb == "quit":
-            return "\n".join(engine.quit(chat_key))
+            # capture the relay (if any) BEFORE quitting — the engine
+            # tears it down, and the opponent deserves to hear about it
+            relay = self._game_relay()
+            doomed = relay.get_relay_for_chat(chat_key)
+            out = engine.quit(chat_key)
+            if doomed is not None:
+                who = player.name if player is not None else "your opponent"
+                self._relay_send(
+                    doomed.other_chat(chat_key),
+                    f"🏁 {who} closed the {doomed.game_name} duel.")
+            return "\n".join(out)
         if verb == "rematch":
             room, msgs = engine.rematch(chat_key)
             return "\n".join(msgs)
@@ -6035,6 +6074,13 @@ class PartnerRuntime:
             "the scheduled briefing still goes out",
         ]
         recent = payload["recent"]
+        counts = payload.get("counts") or {}
+        if counts:
+            agg = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+            lines.append(f"  last 24h: {agg}")
+        health = payload.get("health") or {}
+        for reason in health.get("degraded", []):
+            lines.append(f"  ⚠️ degraded: {reason}")
         if not recent:
             lines.append("no proactive sends recorded yet")
         else:

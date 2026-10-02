@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import random
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -27,6 +28,7 @@ from ..llm.base import LLMResponse, Message, SamplingParams
 from ..memory.manager import MemoryManager
 from .background import BackgroundSelector
 from .context import PartnerContextBuilder, user_turn
+from .lexicon_feed import LexiconFeed
 from .mood import MoodEngine, MoodEvent
 from .persona import Persona
 from .relationship import Relationship
@@ -47,6 +49,14 @@ from .style import (
 __all__ = ["Signal", "detect_signals", "ReplyBundle", "PartnerResponder", "FALLBACK_LINES"]
 
 _log = get_logger(__name__)
+
+#: Interactive reply budget (seconds). The provider chain behind
+#: ``router.chat`` can stall for minutes (per-provider timeout × retries ×
+#: failover); the chat thread must never inherit that. When the budget is
+#: exceeded the reply falls back honestly (``fallback=True``) instead of
+#: keeping the owner waiting. Bounded per attempt-loop, not per provider —
+#: background organs keep their own longer budgets.
+INTERACTIVE_REPLY_TIMEOUT_S = 25.0
 
 
 # ── signal bank ────────────────────────────────────────────────────────────────
@@ -263,6 +273,13 @@ class ReplyBundle:
     fallback: bool = False
     gated: bool = False  # True when the character gate forced a rewrite
     latency_ms: float = 0.0
+    #: Measurability for the dynamic lexicon feed: True when at least one
+    #: lexicon term influenced this reply (prompt voice note, fallback
+    #: blend, or guard phrases), with the count in ``lexicon_terms_used``.
+    #: False + 0 is the visible "static bank" fallback — never a fake
+    #: claim of dynamic influence.
+    lexicon_dynamic: bool = False
+    lexicon_terms_used: int = 0
 
     @property
     def text(self) -> str:
@@ -277,6 +294,8 @@ class ReplyBundle:
             "fallback": self.fallback,
             "gated": self.gated,
             "latency_ms": round(self.latency_ms, 1),
+            "lexicon_dynamic": self.lexicon_dynamic,
+            "lexicon_terms_used": self.lexicon_terms_used,
         }
 
 
@@ -336,6 +355,7 @@ class PartnerResponder:
         retries: int = 2,
         builder: PartnerContextBuilder | None = None,
         rng: random.Random | None = None,
+        lexicon: LexiconFeed | None = None,
     ) -> None:
         self.router = router
         self.persona = persona
@@ -347,6 +367,12 @@ class PartnerResponder:
         self.retries = max(0, int(retries))
         self.builder = builder or PartnerContextBuilder()
         self.rng = rng or random.Random()
+        #: Dynamic voice feed (nomorals/partner/lexicon_feed.py). None means
+        #: the static banks carry the whole voice — e.g. the owner disabled
+        #: it via settings. Lexical influence never overrides owner-set
+        #: persona/style preferences: it only *adds* terms to the owner's
+        #: configured banks.
+        self.lexicon = lexicon
 
     # ── sampling by mood ─────────────────────────────────────────────────────
     def _sampling(self) -> SamplingParams:
@@ -394,6 +420,38 @@ class PartnerResponder:
         budget = length_budget(self.mood.current().values)
 
         restricted = is_restricted(gate_mode)
+
+        # Dynamic voice feed: blend lexicon terms into the prompt's voice
+        # note. Empty store / no DB -> the static banks carry it, visibly
+        # (debug log + bundle flags), never a pretend-dynamic note.
+        lexicon_terms_used = 0
+        lexicon_note = ""
+        if self.lexicon is not None:
+            lexicon_note, lexicon_terms_used, lexicon_fallback = self.lexicon.voice_note(
+                self.persona, label
+            )
+            if lexicon_fallback:
+                _log.debug(
+                    "lexicon voice: no dynamic terms for %s — static bank in use",
+                    ", ".join(lexicon_fallback),
+                )
+            if lexicon_terms_used:
+                _log.debug(
+                    "lexicon voice: %d dynamic terms blended into prompt (mood=%s)",
+                    lexicon_terms_used,
+                    label,
+                )
+        # Dynamic guard phrases: the lexicon's robotic_phrase category feeds
+        # strip_robotic's extra_phrases hook (support-voice detection only —
+        # the identity/character gate stays hardcoded on purpose).
+        robotic_extra: tuple[str, ...] = ()
+        if self.lexicon is not None:
+            robotic_extra = self.lexicon.terms("robotic_phrase", limit=12)
+            if robotic_extra:
+                _log.debug(
+                    "lexicon guard: %d dynamic robotic phrases armed", len(robotic_extra)
+                )
+
         system = self.builder.build(
             persona=self.persona,
             mood=self.mood,
@@ -410,7 +468,8 @@ class PartnerResponder:
             extra_notes=[
                 "Emoji rule: "
                 + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values)
-            ],
+            ]
+            + ([lexicon_note] if lexicon_note else []),
             gate_note=gate_block(gate_mode, platform=chat_platform) if restricted else "",
             relationship_override=relationship_block_for(gate_mode) if restricted else "",
         )
@@ -479,7 +538,7 @@ class PartnerResponder:
             ]
 
         if last_response is None or not last_response.ok or not last_draft:
-            parts = self._fallback_parts(label)
+            parts, fb_dynamic = self._fallback_parts(label)
             return ReplyBundle(
                 parts=parts,
                 mood_events=[],
@@ -488,14 +547,20 @@ class PartnerResponder:
                 fallback=True,
                 gated=gated,
                 latency_ms=(_time.perf_counter() - started) * 1000,
+                lexicon_dynamic=lexicon_terms_used > 0 or fb_dynamic > 0,
+                lexicon_terms_used=lexicon_terms_used + fb_dynamic,
             )
 
-        draft = strip_robotic(last_draft, allow_identity=(self.persona.disclosure == "always"))
+        draft = strip_robotic(
+            last_draft,
+            allow_identity=(self.persona.disclosure == "always"),
+            extra_phrases=robotic_extra or None,
+        )
         if gate and (not draft or not identity_leak_check(draft).ok):
             # The rewrite never landed and the last-ditch strip could not save
             # it: shipping a leak is worse than shipping an in-character line.
             _log.warning("character gate: final draft still leaks — using fallback line")
-            parts = self._fallback_parts(label)
+            parts, fb_dynamic = self._fallback_parts(label)
             return ReplyBundle(
                 parts=parts,
                 mood_events=[],
@@ -504,6 +569,8 @@ class PartnerResponder:
                 fallback=True,
                 gated=True,
                 latency_ms=(_time.perf_counter() - started) * 1000,
+                lexicon_dynamic=lexicon_terms_used > 0 or fb_dynamic > 0,
+                lexicon_terms_used=lexicon_terms_used + fb_dynamic,
             )
 
         # Plain-text discipline: no markdown in a text message, and emoji only
@@ -528,16 +595,94 @@ class PartnerResponder:
             fallback=False,
             gated=gated,
             latency_ms=(_time.perf_counter() - started) * 1000,
+            lexicon_dynamic=lexicon_terms_used > 0,
+            lexicon_terms_used=lexicon_terms_used,
         )
 
-    def _fallback_parts(self, label: str) -> list[str]:
-        lines = FALLBACK_LINES.get(label) or FALLBACK_LINES["calm"]
+    @property
+    def reply_timeouts(self) -> int:
+        """Interactive replies that exceeded the reply budget (observability).
+
+        Uses getattr: tests may build the responder via ``__new__`` without
+        ``__init__``.
+        """
+        return int(getattr(self, "_reply_timeouts", 0) or 0)
+
+    def respond_bounded(self, timeout_s: float = INTERACTIVE_REPLY_TIMEOUT_S,
+                        **kwargs: Any) -> ReplyBundle:
+        """``respond()`` with a hard interactive deadline.
+
+        Runs the full pipeline on a daemon thread and waits at most
+        ``timeout_s``. On expiry the in-flight attempt is abandoned and an
+        honest fallback bundle is returned (``fallback=True``) — the owner
+        gets a reply in seconds instead of waiting out the provider chain.
+        The timeout is logged and counted via :attr:`reply_timeouts`; it is
+        never silent.
+        """
+        import time as _time
+
+        started = _time.perf_counter()
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["bundle"] = self.respond(**kwargs)
+            except Exception as exc:  # noqa: BLE001 - never let the worker die silent
+                box["error"] = exc
+
+        worker = threading.Thread(target=_run, name="partner-reply",
+                                  daemon=True)
+        worker.start()
+        worker.join(timeout_s)
+        bundle = box.get("bundle")
+        if isinstance(bundle, ReplyBundle):
+            return bundle
+        # Timed out (or the worker raised): honest fallback, counted.
+        self._reply_timeouts = self.reply_timeouts + 1
+        err = box.get("error")
+        _log.warning("interactive reply exceeded %.1fs budget (%s) — "
+                     "returning fallback",
+                     timeout_s,
+                     f"{type(err).__name__}: {err}" if err is not None
+                     else "provider stall")
+        label = self.mood.current().label
+        parts, fb_dynamic = self._fallback_parts(label)
+        return ReplyBundle(
+            parts=parts,
+            mood_events=[],
+            model="fallback",
+            retries=0,
+            fallback=True,
+            gated=False,
+            latency_ms=(_time.perf_counter() - started) * 1000,
+            lexicon_dynamic=fb_dynamic > 0,
+            lexicon_terms_used=fb_dynamic,
+        )
+
+    def _fallback_parts(self, label: str) -> tuple[list[str], int]:
+        """One in-character line for the infrastructure-failure path.
+
+        Blends the static per-mood bank with the lexicon's ``fallback``
+        category when it has terms (dynamic terms get double weight).
+        Returns ``(parts, dynamic_terms_used)``.
+        """
+        lines = list(FALLBACK_LINES.get(label) or FALLBACK_LINES["calm"])
+        # getattr: tests may build the responder via __new__ without __init__.
+        lexicon = getattr(self, "lexicon", None)
+        dynamic: list[str] = (
+            list(lexicon.terms("fallback", limit=12)) if lexicon is not None else []
+        )
         # anti-repeat: don't serve the same line twice in a row
         last = getattr(self, "_last_fallback", "")
-        pool = [ln for ln in lines if ln != last] or list(lines)
-        pick = self.rng.choice(pool)
+        pool = [ln for ln in lines if ln != last]
+        dyn_pool = [t for t in dynamic if t != last]
+        weighted = pool + dyn_pool * 2  # dynamic terms get extra weight when present
+        pick = self.rng.choice(weighted or list(lines))
         self._last_fallback = pick
-        return [pick]
+        used = 1 if pick in set(dynamic) else 0
+        if used:
+            _log.debug("lexicon fallback: dynamic line served (%r)", pick)
+        return [pick], used
 
     # ── convenience: recall shared memories for a message ───────────────────
     def recall(self, text: str, limit: int = 5) -> list[str]:
