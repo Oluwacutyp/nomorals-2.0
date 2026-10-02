@@ -22,6 +22,7 @@ from .mission import Checkpoint, Mission, MissionStatus, MissionStore
 from .progress import (
     STALL_AFTER_FAILURES,
     MissionMilestones,
+    MissionWatchers,
     StallCode,
     clear_stall,
     estimate_eta,
@@ -39,6 +40,7 @@ __all__ = [
     "MissionStatus",
     "MissionStore",
     "MissionMilestones",
+    "MissionWatchers",
     "STALL_AFTER_FAILURES",
     "StallCode",
     "StepOutcome",

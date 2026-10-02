@@ -36,6 +36,7 @@ A milestone push must not be able to break a mission run.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable
 
@@ -53,6 +54,7 @@ __all__ = [
     "estimate_eta",
     "fmt_duration",
     "MissionMilestones",
+    "MissionWatchers",
     "real_plan_steps",
     "record_stall",
     "render_status_text",
@@ -251,6 +253,84 @@ def render_status_text(detail: dict[str, Any]) -> str:
 
 # ── milestone pushes ─────────────────────────────────────────────────────────
 
+class MissionWatchers:
+    """Chat-key subscriptions for mission milestone pushes.
+
+    ``/mission watch <id>`` subscribes the current chat; ``MissionMilestones``
+    fans every milestone push (started / step / stalled / terminal) out to
+    the subscribed chats on top of the normal Notifier publish to the owner
+    channels. Subscriptions persist in ``kv_store`` as JSON::
+
+        mission.watch.<mission_id> -> ["telegram:12345", "console:main"]
+
+    All methods are telemetry-safe: with no db they are silent no-ops, and
+    every db touch is best-effort so a subscription failure never breaks a
+    mission run or a chat command.
+    """
+
+    PREFIX = "mission.watch."
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+
+    def _key(self, mission_id: str) -> str:
+        return f"{self.PREFIX}{mission_id}"
+
+    def _read(self, mission_id: str) -> list[str]:
+        if self.db is None:
+            return []
+        try:
+            row = self.db.query_one(
+                "SELECT value FROM kv_store WHERE key = ?",
+                (self._key(mission_id),),
+            )
+        except Exception:  # noqa: BLE001 - subscriptions are best-effort
+            return []
+        if not row:
+            return []
+        try:
+            data = json.loads(row["value"])
+        except (ValueError, KeyError, TypeError):
+            return []
+        return [str(c) for c in data if c] if isinstance(data, list) else []
+
+    def _write(self, mission_id: str, chats: list[str]) -> None:
+        if self.db is None:
+            return
+        try:
+            self.db.execute(
+                "INSERT INTO kv_store (key, value, kind, updated_at) "
+                "VALUES (?, ?, 'json', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (self._key(mission_id), json.dumps(chats), time.time()),
+            )
+        except Exception:  # noqa: BLE001 - subscriptions are best-effort
+            pass
+
+    def subscribe(self, mission_id: str, chat_key: str) -> bool:
+        """Subscribe a chat; returns True when it was newly added."""
+        chats = self._read(mission_id)
+        if chat_key in chats:
+            return False
+        chats.append(chat_key)
+        self._write(mission_id, chats)
+        return True
+
+    def unsubscribe(self, mission_id: str, chat_key: str) -> bool:
+        """Unsubscribe a chat; returns True when one was removed."""
+        chats = self._read(mission_id)
+        if chat_key not in chats:
+            return False
+        chats = [c for c in chats if c != chat_key]
+        self._write(mission_id, chats)
+        return True
+
+    def watchers(self, mission_id: str) -> list[str]:
+        """Chat keys subscribed to this mission's milestones."""
+        return self._read(mission_id)
+
+
 class MissionMilestones:
     """Proactive chat pushes for mission milestones, via the Notifier.
 
@@ -274,6 +354,7 @@ class MissionMilestones:
         store: Any = None,
         clock: Callable[[], float] | None = None,
         step_cooldown_seconds: float = 600.0,
+        watch_store: "MissionWatchers | None" = None,
     ) -> None:
         self.context = context
         if store is None:
@@ -284,8 +365,54 @@ class MissionMilestones:
         self._clock = clock or time.time
         self.step_cooldown = max(0.0, float(step_cooldown_seconds))
         self._notifier = Notifier(context)
+        # Chat-key subscriptions fanned out on top of the Notifier publish.
+        # Default: backed by the context db (silent no-op when db is None).
+        if watch_store is None:
+            watch_store = MissionWatchers(getattr(context, "db", None))
+        self.watch_store = watch_store
 
     # ── events ───────────────────────────────────────────────────────────────
+
+    def _fanout(self, mission: Any, title: str, body: str) -> None:
+        """Push the same milestone to subscribed chats (``/mission watch``).
+
+        This rides on top of the normal Notifier publish, which still goes
+        to the owner channels with all Wave D discipline intact. Chats that
+        are already owner channels are skipped (the Notifier reached them).
+        Never raises: fan-out is telemetry.
+        """
+        try:
+            store = self.watch_store
+            if store is None:
+                return
+            chats = store.watchers(getattr(mission, "id", ""))
+        except Exception:  # noqa: BLE001 - telemetry never breaks a run
+            return
+        if not chats:
+            return
+        gateway = getattr(self._notifier, "gateway", None)
+        if gateway is None:
+            return
+        from ..social.chat.base import ChatRef
+
+        owner_keys = set()
+        settings = getattr(self.context, "settings", None)
+        partner = getattr(settings, "partner", None)
+        raw = getattr(partner, "owner_chats", "") or ""
+        for key in str(raw).split(","):
+            key = key.strip()
+            if key:
+                owner_keys.add(key)
+        text = f"🔔 {title}" + (f"\n{body}" if body else "")
+        text = text[:3900]
+        for key in chats:
+            plat, _, cid = str(key).partition(":")
+            if not (plat and cid) or key in owner_keys:
+                continue
+            try:
+                gateway.send(plat, ChatRef(platform=plat, chat_id=cid), text)
+            except Exception:  # noqa: BLE001 - one dead chat must not kill the rest
+                continue
 
     def on_started(self, mission: Any) -> dict[str, Any]:
         """Push once when a mission starts running. Resume-safe."""
@@ -298,6 +425,7 @@ class MissionMilestones:
                 + self._budget_line(mission)
             )
             res = self._notifier.publish(self.KIND, title, body)
+            self._fanout(mission, title, body)
             self._mark(mission, "started", title)
             # a fresh start push counts against the step cooldown, so the
             # first completing step doesn't double-notify seconds later.
@@ -340,6 +468,7 @@ class MissionMilestones:
             res["held"] = "quiet-hours"
         else:
             res = self._notifier.publish(self.KIND, title, body)
+        self._fanout(mission, title, body)
         mission.state["last_progress_push"] = now
         self.store.save(mission)
         return res
@@ -359,6 +488,7 @@ class MissionMilestones:
             title = f"mission stalled [{stall.get('code')}]: {mission.name}"
             body = render_status_text(self.store.detail(mission.id))
             res = self._notifier.publish(self.KIND, title, body)
+            self._fanout(mission, title, body)
             self._mark(mission, key, title)
             return res
         except Exception as exc:  # noqa: BLE001 - telemetry never breaks a run
@@ -379,6 +509,7 @@ class MissionMilestones:
             if error:
                 body += f"\nerror: {error[:200]}"
             res = self._notifier.publish(self.KIND, title, body)
+            self._fanout(mission, title, body)
             self._mark(mission, key, title)
             return res
         except Exception as exc:  # noqa: BLE001 - telemetry never breaks a run

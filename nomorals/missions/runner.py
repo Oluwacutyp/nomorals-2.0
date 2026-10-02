@@ -127,7 +127,11 @@ class MissionRunner:
         if milestone_reporter is not None:
             self.reporter: MissionMilestones | None = milestone_reporter
         elif milestones:
-            self.reporter = MissionMilestones(context, store=self.store)
+            from .progress import MissionWatchers
+
+            self.reporter = MissionMilestones(
+                context, store=self.store,
+                watch_store=MissionWatchers(getattr(context, "db", None)))
         else:
             self.reporter = None
 
