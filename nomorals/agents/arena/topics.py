@@ -84,7 +84,8 @@ CATEGORIES = (
 
 
 def _t(text: str, difficulty: int, *tags: str) -> dict[str, Any]:
-    return {"t": text, "d": difficulty, "tags": tags}
+    return {"t": text, "d": difficulty, "tags": tags,
+            "verify": "", "kind": "code"}
 
 
 def topic_text(entry: dict[str, Any]) -> str:
@@ -340,7 +341,12 @@ def _normalize_entry(entry: Any) -> dict[str, Any]:
             d = 2
         tags = entry.get("tags", ())
         tags = tuple(str(t) for t in tags) if tags else ()
-        return {"t": text, "d": d, "tags": tags}
+        verify = str(entry.get("verify", "") or "").strip()
+        kind = str(entry.get("kind", "code") or "code").strip().lower()
+        if kind not in ("code", "research", "build"):
+            kind = "code"
+        return {"t": text, "d": d, "tags": tags,
+                "verify": verify, "kind": kind}
     raise ValueError(
         f"topic pack entries must be str or dict, got {type(entry).__name__}")
 
