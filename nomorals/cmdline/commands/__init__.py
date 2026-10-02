@@ -27,6 +27,7 @@ from .meta import _reply_path_report, _cmd_commands, _cmd_deliver, _cmd_zip, _cm
 from .mind import _cmd_mind
 from .mission import _cmd_mission
 from .missions import _cmd_missions, _render_result
+from .models import _cmd_model_broker
 from .money import _cmd_money
 from .music import _cmd_music
 from .native import _cmd_native
@@ -39,6 +40,7 @@ from .research import _cmd_research_loop, _cmd_kg, _cmd_cookies, _cmd_structure
 from .room import _room_obj, _cmd_room
 from .security import _cmd_crack, _cmd_decode, _cmd_osint, _cmd_cipher, _cmd_monitor, _cmd_watch
 from .serve import _cmd_serve
+from .skills import _cmd_skill_pkg
 from .status import _status_section, _cmd_status
 from .swarm import _cmd_swarm, _work_from_json, _critique_from_json
 from .timeline import _render_timeline_row, _cmd_timeline
@@ -112,6 +114,7 @@ __all__ = [
     "_cmd_mission",
     "_cmd_missions",
     "_render_result",
+    "_cmd_model_broker",
     "_cmd_money",
     "_cmd_music",
     "_cmd_native",
@@ -135,6 +138,7 @@ __all__ = [
     "_cmd_monitor",
     "_cmd_watch",
     "_cmd_serve",
+    "_cmd_skill_pkg",
     "_status_section",
     "_cmd_status",
     "_cmd_swarm",

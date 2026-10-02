@@ -13,6 +13,7 @@ from .commands.data import _cmd_data
 from .commands.native import _cmd_native
 from .commands.timeline import _cmd_timeline
 from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
+from .commands.models import _cmd_model_broker
 from .commands.tools import _cmd_tools
 from .commands.owner import _cmd_owner
 from .commands.power import _cmd_power
@@ -42,6 +43,7 @@ from .commands.mind import _cmd_mind
 from .commands.hub import _cmd_hub
 from .commands.book import _cmd_book
 from .commands.games import _cmd_arena, _cmd_trial, _cmd_skill, _cmd_simulate
+from .commands.skills import _cmd_skill_pkg
 from .commands.research import _cmd_research_loop, _cmd_kg, _cmd_cookies, _cmd_structure
 from .commands.partner import _cmd_reason, _cmd_workspace
 from .commands.train import _cmd_train
@@ -147,6 +149,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     with build_context(settings) as context:
         _attach_cli_session(context)  # best-effort os.Session for this run
         if args.command == "models":
+            if getattr(args, "model_action", ""):
+                return _cmd_model_broker(args, context)
             return _cmd_models(args, context)
         if args.command == "data":
             return _cmd_data(args, context)
@@ -244,6 +248,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "goal":
             return _cmd_goal(args, context)
         if args.command == "skill":
+            # New executable-skill verbs go to the skills package; the
+            # legacy knowledge-library verbs stay on the games handler.
+            if args.action in {"list", "install", "enable", "disable",
+                               "run", "benchmark", "library"}:
+                return _cmd_skill_pkg(args, context)
             return _cmd_skill(args, context)
         if args.command == "project":
             return _cmd_project(args, context)

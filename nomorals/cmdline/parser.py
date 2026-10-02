@@ -113,6 +113,23 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--lora", default="",
                         help="with --promote-local: GGUF LoRA adapter(s) to run "
                              "on top of the base model (comma-separated)")
+    # Broker actions (nomorals.cmdline.commands.models).  Positional and
+    # optional so every pre-existing flag above keeps working unchanged.
+    models.add_argument("model_action", nargs="?", default="",
+                        choices=["list", "add", "remove", "benchmark", "use", "select"],
+                        help="broker action: list/add/remove/benchmark/use/select")
+    models.add_argument("model_target", nargs="?", default="",
+                        help="model id, HF repo id, or GGUF path for the action")
+    models.add_argument("--capability", default="",
+                        help="add: comma-separated capabilities (default: chat)")
+    models.add_argument("--quant", default="Q4_K_M",
+                        help="add: quantization label for a local GGUF")
+    models.add_argument("--context-len", type=int, default=0,
+                        help="add: context length for the model card")
+    models.add_argument("--task-kind", default="",
+                        help="select: task specialisation hint (e.g. code, judge)")
+    models.add_argument("--rounds", type=int, default=5,
+                        help="benchmark: probe rounds to measure (default: 5)")
 
     data = sub.add_parser("data", aliases=CLI_ALIASES["data"], help="fine-tune data: catalog, base models, persona mix")
     data.add_argument("action", nargs="?", default="catalog",
@@ -372,13 +389,18 @@ def _parser() -> argparse.ArgumentParser:
     mission.add_argument("--json", action="store_true", help="Output as JSON")
     
     skill = sub.add_parser("skill", aliases=CLI_ALIASES["skill"],
-                           help="Reusable skills library: list, create, show, delete, prune, restore")
+                           help="Executable skill packages: "
+                                "list/install/enable/disable/run/benchmark "
+                                "(library/create/show/delete/prune/restore/stats "
+                                "= knowledge-skill library)")
     skill.add_argument("action", nargs="?", default="list",
-                      choices=["list", "create", "show", "delete", "prune",
-                               "restore", "stats"],
+                      choices=["list", "install", "enable", "disable", "run",
+                               "benchmark", "library", "create", "show",
+                               "delete", "prune", "restore", "stats"],
                       help="Action to perform")
     skill.add_argument("name", nargs="?", default="",
-                       help="skill name (create/show/delete/restore)")
+                       help="skill name (run/enable/disable/benchmark, "
+                            "create/show/delete/restore)")
     skill.add_argument("--description", default="",
                        help="create: one-line description")
     skill.add_argument("--body", default="",
@@ -388,7 +410,13 @@ def _parser() -> argparse.ArgumentParser:
     skill.add_argument("--tags", default="",
                        help="create: comma-separated tags")
     skill.add_argument("--pruned", action="store_true",
-                       help="list: include pruned (quarantined) skills")
+                       help="library list: include pruned (quarantined) skills")
+    skill.add_argument("--manifest", default="",
+                       help="install: manifest JSON file path, @path, or inline JSON")
+    skill.add_argument("--input", default="",
+                       help="run: JSON object of skill inputs")
+    skill.add_argument("--version", default="",
+                       help="run: execute a specific installed version")
     skill.add_argument("--json", action="store_true", help="Output as JSON")
     
     project = sub.add_parser("project", aliases=CLI_ALIASES["project"],
