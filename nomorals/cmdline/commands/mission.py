@@ -99,5 +99,128 @@ def _cmd_mission(args: argparse.Namespace, context: Any) -> int:
             lines.append(f"  restart or cancel stuck mission: {mid}")
         _emit(args, h, "\n".join(lines))
         return 0
+    if action == "replay":
+        return _cmd_mission_replay(args, context)
+    if action == "redrive":
+        return _cmd_mission_redrive(args, context)
     print(f"mission: unknown action {action}", file=sys.stderr)
     return 2
+
+
+def _resolve_mission_ref(ref: str, context: Any) -> str:
+    """Resolve a mission id or unambiguous prefix to the full mission id.
+
+    Falls back to the raw reference when it matches no known mission — the
+    timeline may hold events for missions since deleted from the store.
+    """
+    from ...core.ids import resolve_id_prefix
+    from ...missions import MissionStore
+
+    ref = (ref or "").strip()
+    if not ref:
+        return ""
+    try:
+        ids = [m.id for m in MissionStore(context.db).list(limit=500)]
+    except Exception:  # noqa: BLE001 - resolution is a courtesy, not a gate
+        return ref
+    res = resolve_id_prefix(ref, ids)
+    if res.outcome in ("exact", "unique"):
+        return res.matches[0]
+    if res.outcome == "ambiguous":
+        raise ValueError(
+            "mission reference {!r} is ambiguous ({} matches); "
+            "use a longer prefix".format(ref, len(res.matches)))
+    return ref
+
+
+def _open_timeline(context: Any):
+    from ...os.timeline import Timeline
+
+    db_path = getattr(getattr(context, "db", None), "path", None)
+    return Timeline(db_path)
+
+
+def _cmd_mission_replay(args: argparse.Namespace, context: Any) -> int:
+    """``nm mission replay --mission <id>`` — retell a mission from the
+    persisted event timeline. Strictly read-only."""
+    from ...os.replay import replay_mission
+
+    try:
+        mission_id = _resolve_mission_ref(getattr(args, "mission", ""), context)
+    except ValueError as exc:
+        print(f"mission replay: {exc}", file=sys.stderr)
+        return 2
+    if not mission_id:
+        print("mission replay needs --mission <id>", file=sys.stderr)
+        return 2
+    tl = _open_timeline(context)
+    try:
+        report = replay_mission(tl, mission_id)
+    finally:
+        tl.close()
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), indent=2, default=str,
+                         ensure_ascii=False))
+        return 0
+    if not report.event_count:
+        print(f"no timeline events recorded for mission {mission_id}")
+        return 0
+    print(report.narrative())
+    return 0
+
+
+def _cmd_mission_redrive(args: argparse.Namespace, context: Any) -> int:
+    """``nm mission redrive --mission <id> --confirm`` — re-drive a terminal
+    mission's recorded plan as a new mission, linked derived_from the
+    original in the artifact graph. Refuses without --confirm and refuses
+    live missions."""
+    from pathlib import Path
+
+    from ...missions import MissionStore
+    from ...os.replay import RedriveRefused, redrive_mission
+    from ...storage.artifacts import ArtifactStore
+    from ...storage.blob import BlobStore
+
+    try:
+        mission_id = _resolve_mission_ref(getattr(args, "mission", ""), context)
+    except ValueError as exc:
+        print(f"mission redrive: {exc}", file=sys.stderr)
+        return 2
+    if not mission_id:
+        print("mission redrive needs --mission <id>", file=sys.stderr)
+        return 2
+    store = MissionStore(context.db)
+    db = getattr(context, "db", None)
+    db_path = getattr(db, "path", None)
+    blob_dir = Path(db_path).parent / "blobs" if db_path else Path("data/blobs")
+    artifacts = ArtifactStore(db, BlobStore(db, blob_dir))
+    try:
+        report = redrive_mission(
+            store, mission_id,
+            confirm=bool(getattr(args, "confirm", False)),
+            artifact_store=artifacts,
+            note="redrive from the CLI",
+        )
+    except RedriveRefused as exc:
+        print(f"mission redrive refused: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't trace
+        print(f"mission redrive failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        _emit(args, report.to_dict(),
+              json.dumps(report.to_dict(), indent=2, default=str))
+        return 0
+    lines = [
+        f"redrove {report.original_mission_id} as {report.new_mission_id}",
+        f"  plan steps carried over: {report.plan_steps}",
+        f"  os state: {report.os_state}",
+    ]
+    if report.artifact_id:
+        lines.append(f"  redrive record: artifact://{report.artifact_id} "
+                     f"(derived_from {len(report.derived_from_artifact_ids)} "
+                     "original artifact(s))")
+    lines.append(f"  start it with: nm missions --resume {report.new_mission_id}")
+    print("\n".join(lines))
+    return 0

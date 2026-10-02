@@ -35,6 +35,7 @@ from .progress import (
     record_stall,
 )
 from ..storage.db import Database
+from .idempotency import IdempotencyStore, dedupe, step_idempotency_key
 
 __all__ = ["StepOutcome", "MissionResult", "MissionRunner"]
 
@@ -61,6 +62,21 @@ class StepOutcome:
             "tokens": self.tokens,
             "payload": self.payload,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StepOutcome":
+        """Rebuild from :meth:`to_dict` — used when an idempotency hit
+        replays a stored step outcome without re-executing the agent."""
+        data = data or {}
+        payload = data.get("payload")
+        return cls(
+            step=str(data.get("step") or ""),
+            ok=bool(data.get("ok")),
+            detail=str(data.get("detail") or ""),
+            seconds=float(data.get("seconds") or 0.0),
+            tokens=int(data.get("tokens") or 0),
+            payload=dict(payload) if isinstance(payload, dict) else {},
+        )
 
 
 @dataclass
@@ -114,6 +130,7 @@ class MissionRunner:
         clock: Callable[[], float] = time.monotonic,
         milestones: bool = True,
         milestone_reporter: MissionMilestones | None = None,
+        idempotency: IdempotencyStore | None = None,
     ) -> None:
         self.context = context
         self.store = store or MissionStore(context.db)
@@ -121,6 +138,14 @@ class MissionRunner:
         self.on_step = on_step
         self._clock = clock
         self._cancel = False
+        # Idempotency (Wave J): when set, each step execution is wrapped in
+        # ``dedupe`` keyed by (mission, step name, goal, role). A step that
+        # already completed is never re-executed on resume/retry — its stored
+        # outcome is replayed instead — so a crash between a step's side
+        # effects and its checkpoint cannot duplicate them. A step that ran
+        # but reported ok=False is recorded as *failed* and may retry.
+        # ``None`` (the default) keeps the historical always-execute path.
+        self.idempotency = idempotency
         # OS control-plane hooks (Wave H2). Plain optional callables — the
         # runner never imports nomorals.os (L6); whoever wires them provides
         # the callables (see nomorals.os.mission_state.attach_runner and
@@ -457,8 +482,39 @@ class MissionRunner:
         return plan.steps
 
     def _execute_step(self, mission: Mission, step: Any) -> StepOutcome:
-        """Run one plan step through the orchestrator's agent for that role."""
+        """Run one plan step through the orchestrator's agent for that role.
+
+        With an idempotency store attached, the execution goes through
+        :func:`dedupe`: a step whose key already completed returns its
+        stored outcome (no duplicate side effects on the retry path), while
+        a step that failed may retry.
+        """
         started = self._clock()
+        if self.idempotency is None:
+            return self._run_step_agent(mission, step, started)
+        key = step_idempotency_key(mission.id, step)
+
+        def attempt() -> dict[str, Any]:
+            return self._run_step_agent(mission, step, started).to_dict()
+
+        result = dedupe(
+            self.idempotency,
+            key,
+            attempt,
+            owner=f"mission:{mission.id}",
+            succeeded=lambda value: bool(
+                value.get("ok")) if isinstance(value, dict) else True,
+        )
+        if not isinstance(result.value, dict):
+            _log.error("idempotency record for step %s of mission %s is not "
+                       "a dict; re-running without the stored outcome",
+                       step.name, mission.id)
+            return self._run_step_agent(mission, step, started)
+        return StepOutcome.from_dict(result.value)
+
+    def _run_step_agent(self, mission: Mission, step: Any,
+                        started: float) -> StepOutcome:
+        """The actual agent invocation for one step (always executes)."""
         self._advise_resources(mission)
         from ..agents.roles import build_agent
 

@@ -18,6 +18,19 @@ Public surface::
 
 from __future__ import annotations
 
+from .idempotency import (
+    COMPLETED as IDEMPOTENCY_COMPLETED,
+    FAILED as IDEMPOTENCY_FAILED,
+    RUNNING as IDEMPOTENCY_RUNNING,
+    DedupResult,
+    DedupeTimeout,
+    IdempotencyStore,
+    create_mission_once,
+    dedupe,
+    idempotency_key,
+    mission_idempotency_key,
+    step_idempotency_key,
+)
 from .mission import Checkpoint, Mission, MissionStatus, MissionStore
 from .progress import (
     STALL_AFTER_FAILURES,
@@ -34,6 +47,12 @@ from .runner import MissionResult, MissionRunner, StepOutcome
 
 __all__ = [
     "Checkpoint",
+    "DedupResult",
+    "DedupeTimeout",
+    "IDEMPOTENCY_COMPLETED",
+    "IDEMPOTENCY_FAILED",
+    "IDEMPOTENCY_RUNNING",
+    "IdempotencyStore",
     "Mission",
     "MissionResult",
     "MissionRunner",
@@ -45,8 +64,13 @@ __all__ = [
     "StallCode",
     "StepOutcome",
     "clear_stall",
+    "create_mission_once",
+    "dedupe",
     "estimate_eta",
     "fmt_duration",
+    "idempotency_key",
+    "mission_idempotency_key",
     "record_stall",
     "render_status_text",
+    "step_idempotency_key",
 ]

@@ -386,9 +386,15 @@ def _parser() -> argparse.ArgumentParser:
     mission = sub.add_parser("mission", aliases=CLI_ALIASES["mission"],
                              help="Mission control and planning")
     mission.add_argument("action", nargs="?", default="plan",
-                        choices=["plan", "next", "status", "health"],
+                        choices=["plan", "next", "status", "health",
+                                 "replay", "redrive"],
                         help="Action to perform")
     mission.add_argument("--json", action="store_true", help="Output as JSON")
+    mission.add_argument("--mission", default="",
+                        help="mission id for the replay/redrive actions "
+                             "(prefix ok when unambiguous)")
+    mission.add_argument("--confirm", action="store_true",
+                        help="required for redrive: actually create the new mission")
     
     skill = sub.add_parser("skill", aliases=CLI_ALIASES["skill"],
                            help="Executable skill packages: "

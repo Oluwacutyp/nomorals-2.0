@@ -12,10 +12,15 @@ from ..emit import _emit
 
 
 def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
-    from ...missions import MissionRunner, MissionStore
+    from ...missions import IdempotencyStore, MissionRunner, MissionStore
 
     store = MissionStore(context.db)
-    runner = MissionRunner(context, store=store)
+    # Idempotency on the retry path: a step that already completed is never
+    # re-executed on resume/retry — its stored outcome is replayed instead —
+    # so a crash between a step's side effects and its checkpoint cannot
+    # duplicate them. Failed steps stay retryable.
+    runner = MissionRunner(context, store=store,
+                           idempotency=IdempotencyStore(context.db))
     reflect = not args.no_reflect
 
     if args.start:
