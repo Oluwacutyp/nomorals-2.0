@@ -39,7 +39,11 @@ __all__ = ["KnowledgeGraph", "GraphNode", "GraphEdge",
 _TRANSITIVE = {"knows", "friend_of", "part_of", "works_at", "member_of",
                "caused", "located_in"}
 _NODE_TYPES = {"person", "concept", "event", "fact", "place",
-               "organization", "skill", "goal", "entity"}
+               "organization", "skill", "goal", "entity",
+               # research-digest claim graph (2026-10-01): research claims,
+               # their domains, and cited sources are first-class node types
+               # so upsert_node stops coercing them to generic "entity".
+               "claim", "domain", "source"}
 
 
 @dataclass
