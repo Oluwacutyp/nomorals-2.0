@@ -13,6 +13,7 @@ accept command.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import shutil
 import subprocess
@@ -105,7 +106,10 @@ def select_changed_tests(repo: str | None = None) -> list[str]:
 
 
 def _has_pytest() -> bool:
-    return shutil.which("pytest") is not None
+    # The runner invokes `sys.executable -m pytest`, so availability is about
+    # the module being importable — not about a `pytest` script on PATH
+    # (pip does not always install one, e.g. user-site installs).
+    return importlib.util.find_spec("pytest") is not None
 
 
 def format_test_result(tres: dict[str, Any]) -> str:

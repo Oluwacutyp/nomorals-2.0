@@ -212,6 +212,10 @@ class ReasoningAlwaysOnTests(unittest.TestCase):
 
     def test_auto_mode_keys_on_complexity(self) -> None:
         self.context.settings.reasoning_mode = "auto"
+        # Lock power explicitly: the default-on posture would otherwise force
+        # reasoning on and this test could never observe auto-mode keying.
+        from nomorals.agents.power import power_mode_for
+        power_mode_for(self.context).lock(actor="test")
         from nomorals.agents.reasoning import reasoning_enabled
 
         self.assertFalse(reasoning_enabled(self.context, complex_ok=False))

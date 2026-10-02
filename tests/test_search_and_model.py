@@ -231,7 +231,10 @@ class SearchEngineTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="nm-search-")
-        settings = _settings(self.tmp.name, **{"partner.platforms": "local", "chat.local_enabled": "true"})
+        # power_default_on=False: test_deep_requires_power_mode exercises the
+        # power gate itself, so the default-on posture must be off here.
+        settings = _settings(self.tmp.name, **{"partner.platforms": "local", "chat.local_enabled": "true",
+                                               "partner.power_default_on": False})
         self.context = build_context(settings, with_executor=False, with_tools=False)
         self.context.tools = _StubTools(self.RESULTS)
         self.context.router = _FakeRouter()

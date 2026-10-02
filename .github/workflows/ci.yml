@@ -55,9 +55,13 @@ jobs:
       - name: Install package + dev tooling
         run: |
           python3 -m pip install --upgrade pip
-          # pyyaml is for the "validate this workflow parses" self-check below;
-          # it is deliberately NOT added to the package's dev extra.
-          python3 -m pip install -e ".[dev]" "pyyaml>=6"
+          # The offline suite exercises optional-acceleration paths for real
+          # (numpy/pandas/Pillow/yt-dlp), so CI installs them to match a real
+          # dev checkout; pyyaml is for the workflow self-check below. None
+          # are added to the package's own extras on purpose: the package
+          # keeps zero mandatory dependencies.
+          python3 -m pip install -e ".[dev,fast,media,media-edit]" \
+            "pandas>=2" "pyyaml>=6"
 
       - name: Validate this workflow parses
         run: python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"

@@ -66,7 +66,17 @@ class SandboxLimits:
         _set(resource.RLIMIT_CPU, self.cpu_seconds, self.cpu_seconds + 5)
         _set(resource.RLIMIT_AS, self.address_space_mb * 1024 * 1024, self.address_space_mb * 1024 * 1024)
         _set(resource.RLIMIT_FSIZE, self.file_size_mb * 1024 * 1024, self.file_size_mb * 1024 * 1024)
-        _set(resource.RLIMIT_NPROC, self.max_processes, self.max_processes)
+        # RLIMIT_NPROC counts every thread of our UID machine-wide. Setting it
+        # below what this UID already runs makes even /bin/sh fail to fork
+        # ("Cannot fork") on a busy machine — so floor the ceiling above
+        # ambient usage. Fork-bomb protection is preserved: the ceiling still
+        # caps runaway forking, just never below what already exists.
+        try:
+            ambient = _uid_thread_count()
+        except Exception:  # noqa: BLE001 - /proc may be unavailable; keep the configured ceiling
+            ambient = 0
+        nproc = max(self.max_processes, ambient + 64)
+        _set(resource.RLIMIT_NPROC, nproc, nproc)
         _set(resource.RLIMIT_CORE, 0, 0)
         try:
             os.setsid()  # own process group, so the whole tree can be signalled
@@ -79,6 +89,30 @@ def _set(which: int, soft: int, hard: int) -> None:
         resource.setrlimit(which, (soft, hard))
     except (ValueError, OSError) as exc:  # pragma: no cover - platform limits vary
         _log.debug("setrlimit(%s) failed: %s", which, exc)
+
+
+def _uid_thread_count() -> int:
+    """Threads currently owned by our real UID.
+
+    RLIMIT_NPROC is enforced per real UID across the whole machine, not per
+    sandbox, so the sandbox ceiling must be measured against this.
+    """
+    uid = os.getuid()
+    count = 0
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return 0
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != uid:
+                continue
+            count += len(os.listdir(f"/proc/{pid}/task"))
+        except OSError:
+            continue  # exited (or unreadable) between the two syscalls
+    return count
 
 
 # Probe commands: trivial, no network, run once per process per backend.

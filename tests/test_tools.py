@@ -23,7 +23,7 @@ from nomorals.core.policy import CapabilitySet
 from nomorals.tools.filesystem import safe_path
 from nomorals.tools.parsers import detect_kind, parse, parse_pdf
 from nomorals.tools.registry import ToolRegistry
-from nomorals.tools.shell import detect_backend, run_sandboxed
+from nomorals.tools.shell import SandboxLimits, detect_backend, run_sandboxed
 from nomorals.tools.vision import image_metadata
 
 
@@ -153,6 +153,31 @@ class ShellSandboxTests(unittest.TestCase):
         result = run_sandboxed("sleep 30 & sleep 30", cwd=self.workdir, timeout=2.0)
         self.assertTrue(result["timed_out"])
         self.assertLess(result["seconds"], 10.0)
+
+    def test_sandbox_forks_under_high_ambient_thread_count(self):
+        # RLIMIT_NPROC is enforced per UID machine-wide: with more ambient
+        # threads than max_processes, the sandbox must still fork external
+        # commands (the ceiling is floored above ambient usage instead of
+        # failing with "/bin/sh: Cannot fork"). NOTE: the probe command must
+        # be an external binary — `echo` is a shell builtin and never forks.
+        import threading
+
+        stop = threading.Event()
+        threads = [threading.Thread(target=stop.wait, args=(30,), daemon=True)
+                   for _ in range(96)]
+        for t in threads:
+            t.start()
+        try:
+            result = run_sandboxed(
+                "/bin/echo hi", cwd=self.workdir, timeout=20.0,
+                limits=SandboxLimits(cpu_seconds=20, max_processes=64),
+            )
+        finally:
+            stop.set()
+            for t in threads:
+                t.join(timeout=5)
+        self.assertEqual(result["exit_code"], 0, result.get("stderr"))
+        self.assertIn("hi", result["stdout"])
 
     def test_backend_detection_auto_never_returns_unavailable(self):
         # "auto" degrades silently through bwrap -> unshare -> rlimit.

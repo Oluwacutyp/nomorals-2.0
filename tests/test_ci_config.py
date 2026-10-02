@@ -39,10 +39,12 @@ class CiConfigTests(unittest.TestCase):
         self.assertTrue(triggers, "workflow must declare triggers")
         self.assertIn("jobs", self.doc)
 
-    def test_python_matrix_covers_310_311_312(self) -> None:
+    def test_python_matrix_matches_requires_python(self) -> None:
         ci = self.jobs.get("ci", {})
         matrix = ci.get("strategy", {}).get("matrix", {}).get("python-version", [])
-        self.assertEqual(sorted(matrix), ["3.10", "3.11", "3.12"])
+        # pyproject.toml sets requires-python >= 3.11, so the matrix must not
+        # include 3.10 (pip refuses to install the package there).
+        self.assertEqual(sorted(matrix), ["3.11", "3.12"])
 
     def test_required_stages_present(self) -> None:
         text = self._job_text(self.jobs.get("ci", {}))

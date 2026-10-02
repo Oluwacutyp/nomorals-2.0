@@ -71,8 +71,12 @@ PAGES = {
 
 
 def _settings(tmp: str) -> Any:
+    # power_default_on=False: these tests exercise the power gate itself,
+    # so the default-on posture must be off — otherwise the gate under test
+    # auto-activates and the locked-state assertions can never hold.
     return load_settings(overrides={"home": tmp, "partner.platforms": "local",
-                                    "chat.local_enabled": "true"})
+                                    "chat.local_enabled": "true",
+                                    "partner.power_default_on": False})
 
 
 def _make_context(tmp: str) -> Any:
