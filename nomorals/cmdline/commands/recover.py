@@ -8,13 +8,12 @@ before touching the live state); ``--yes`` makes it non-interactive.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import Any
 
+from ...os.snapshots import SnapshotRefused, system_state
 from ..emit import _emit
 from .snapshot import _manager
-from ...os.snapshots import SnapshotRefused, system_state
 
 
 def _health(settings: Any) -> dict[str, Any]:

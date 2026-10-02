@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
-from ..core.errors import TaskCancelled, TaskFailed, ValidationError
+from ..core.errors import ValidationError
 from ..core.ids import new_id
 
 __all__ = [
@@ -57,7 +58,7 @@ class AcceptanceCriterion:
                 "spec": dict(self.spec), "required": self.required}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AcceptanceCriterion":
+    def from_dict(cls, data: dict[str, Any]) -> AcceptanceCriterion:
         return cls(name=data["name"], description=data.get("description", ""),
                    spec=dict(data.get("spec") or {}),
                    required=bool(data.get("required", True)))
@@ -120,7 +121,7 @@ class TaskResult:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TaskResult":
+    def from_dict(cls, data: dict[str, Any]) -> TaskResult:
         return cls(
             status=data.get("status", "done"),
             artifacts=list(data.get("artifacts") or []),
@@ -177,13 +178,13 @@ def _evaluate_criterion(crit: AcceptanceCriterion,
             return passed, detail
         if spec.get("manual"):
             approver = result.evidence.get("approved_by", "")
-            return bool(approver), f"approved_by={approver!r}" or "not approved"
+            return bool(approver), f"approved_by={approver!r}"
         return False, f"unknown spec kind: {sorted(spec)}"
     except Exception as exc:  # noqa: BLE001 - a broken check fails closed
         return False, f"evaluation error: {type(exc).__name__}: {exc}"
 
 
-class TaskState(str, Enum):
+class TaskState(str, Enum):  # noqa: UP042 - StrEnum needs 3.11+; CI tests 3.10
     PENDING = "pending"
     READY = "ready"
     RUNNING = "running"
@@ -193,7 +194,7 @@ class TaskState(str, Enum):
     SKIPPED = "skipped"
 
 
-class TaskKind(str, Enum):
+class TaskKind(str, Enum):  # noqa: UP042 - StrEnum needs 3.11+; CI tests 3.10
     IO = "io"
     CPU = "cpu"
     ASYNC = "async"

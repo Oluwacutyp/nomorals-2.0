@@ -26,8 +26,9 @@ import fnmatch
 import hashlib
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 __all__ = [
     "AUDIT_DENY",
@@ -187,19 +188,19 @@ class CapabilitySet:
     patterns: frozenset[str] = frozenset()
 
     @classmethod
-    def all(cls) -> "CapabilitySet":
+    def all(cls) -> CapabilitySet:
         return cls(frozenset({"*"}))
 
     @classmethod
-    def none(cls) -> "CapabilitySet":
+    def none(cls) -> CapabilitySet:
         return cls(frozenset())
 
     @classmethod
-    def of(cls, *caps: str) -> "CapabilitySet":
+    def of(cls, *caps: str) -> CapabilitySet:
         return cls(frozenset(caps))
 
     @classmethod
-    def role(cls, role: str) -> "CapabilitySet":
+    def role(cls, role: str) -> CapabilitySet:
         if role not in ROLE_PRESETS:
             raise KeyError(f"unknown role preset {role!r}; known: {sorted(ROLE_PRESETS)}")
         return cls(frozenset(ROLE_PRESETS[role]))
@@ -209,10 +210,10 @@ class CapabilitySet:
             return True
         return any(fnmatch.fnmatchcase(capability, p) for p in self.patterns)
 
-    def union(self, other: "CapabilitySet") -> "CapabilitySet":
+    def union(self, other: CapabilitySet) -> CapabilitySet:
         return CapabilitySet(self.patterns | other.patterns)
 
-    def intersect(self, other: "CapabilitySet") -> "CapabilitySet":
+    def intersect(self, other: CapabilitySet) -> CapabilitySet:
         """Narrow to capabilities both sides allow.
 
         Wildcards are handled conservatively: if either side is unrestricted the
@@ -226,7 +227,7 @@ class CapabilitySet:
         expanded_other = _expand(other.patterns)
         return CapabilitySet(frozenset(expanded_self & expanded_other))
 
-    def minus(self, *caps: str) -> "CapabilitySet":
+    def minus(self, *caps: str) -> CapabilitySet:
         expanded = _expand(self.patterns)
         for cap in caps:
             expanded = {c for c in expanded if not fnmatch.fnmatchcase(c, cap)}
@@ -337,16 +338,16 @@ class Policy:
         self._counts = {"allow": 0, "deny": 0, "confirm": 0}
 
     # -- rule management -----------------------------------------------------
-    def allow(self, capability: str, *, note: str = "", priority: int = 10) -> "Policy":
+    def allow(self, capability: str, *, note: str = "", priority: int = 10) -> Policy:
         return self._add(_Rule(capability, "allow", note, priority))
 
-    def deny(self, capability: str, *, note: str = "", priority: int = 100) -> "Policy":
+    def deny(self, capability: str, *, note: str = "", priority: int = 100) -> Policy:
         return self._add(_Rule(capability, "deny", note, priority))
 
-    def confirm(self, capability: str, *, note: str = "", priority: int = 50) -> "Policy":
+    def confirm(self, capability: str, *, note: str = "", priority: int = 50) -> Policy:
         return self._add(_Rule(capability, "confirm", note, priority))
 
-    def _add(self, rule: _Rule) -> "Policy":
+    def _add(self, rule: _Rule) -> Policy:
         with self._lock:
             self._rules.append(rule)
             self._rules.sort(key=lambda r: -r.priority)
@@ -452,18 +453,19 @@ class Policy:
             self._record(AUDIT_DENY, decision, context)
             return decision
 
-        if confirmable:
-            if not confirmation or not self._consume_confirmation(confirmation, capability):
-                decision = PolicyDecision(
-                    allowed=False,
-                    reason=reason
-                    or f"capability {capability!r} requires an operator confirmation token",
-                    capability=capability,
-                    actor=actor,
-                    needs_confirmation=True,
-                )
-                self._record(AUDIT_CONFIRM, decision, context)
-                return decision
+        if confirmable and (
+            not confirmation or not self._consume_confirmation(confirmation, capability)
+        ):
+            decision = PolicyDecision(
+                allowed=False,
+                reason=reason
+                or f"capability {capability!r} requires an operator confirmation token",
+                capability=capability,
+                actor=actor,
+                needs_confirmation=True,
+            )
+            self._record(AUDIT_CONFIRM, decision, context)
+            return decision
 
         decision = PolicyDecision(
             allowed=True,

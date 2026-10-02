@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from ..core.config import Settings, get_settings
 from ..core.events import EventBus
@@ -98,7 +98,7 @@ class AgentContext:
         actor: str = "",
         capabilities: CapabilitySet | None = None,
         **extras: Any,
-    ) -> "AgentContext":
+    ) -> AgentContext:
         """Derive a scoped context for a sub-agent.
 
         Capabilities can only narrow: the child receives the intersection of what
@@ -142,7 +142,7 @@ class AgentContext:
             _log.debug("db close: %s", exc)
         self.bus.stop()
 
-    def __enter__(self) -> "AgentContext":
+    def __enter__(self) -> AgentContext:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -410,26 +410,24 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
 
 def ensure_local_gguf(model_path_or_settings, **kwargs):
     """Ensure a local GGUF model is running and return the server manager.
-    
+
     Args:
         model_path_or_settings: Path to the GGUF model file or Settings object
         **kwargs: Additional parameters (ignored)
-    
+
     Returns:
         GGUFServerManager if auto-start is enabled and server is running/healed,
         None otherwise, or the model path string if it's just a path
     """
     import os
-    
+
     # Handle Settings object
     model_path = model_path_or_settings
-    settings = None
     if hasattr(model_path_or_settings, 'llm'):
-        settings = model_path_or_settings
         model_path = getattr(model_path_or_settings.llm, 'local_model', '')
         if not model_path:
             return None
-        
+
         # Check if auto-start is enabled
         auto_start = getattr(model_path_or_settings.llm, 'local_auto_start', False)
         if auto_start:
@@ -438,7 +436,7 @@ def ensure_local_gguf(model_path_or_settings, **kwargs):
                 from nomorals.llm import local_server as ls
                 port = getattr(model_path_or_settings.llm, 'local_port', 8080)
                 host = getattr(model_path_or_settings.llm, 'local_host', '127.0.0.1')
-                
+
                 # Check if port is in use
                 if ls.port_in_use(host, port):
                     # Port is in use, check if healthy
@@ -470,13 +468,13 @@ def ensure_local_gguf(model_path_or_settings, **kwargs):
             except Exception as e:
                 _log.warning("GGUF server heal/start failed for %s: %s",
                              model_path, e)
-        
+
         return model_path if os.path.exists(model_path) else None
-    
+
     # Just a path string
     if not model_path:
         return None
-    
+
     if os.path.exists(model_path):
         return model_path
     return None

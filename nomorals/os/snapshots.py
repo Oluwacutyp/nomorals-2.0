@@ -410,12 +410,12 @@ class SnapshotManager:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return fd
-                except BlockingIOError:
+                except BlockingIOError as err:
                     if time.time() >= deadline:
                         raise SnapshotRefused(
                             "another process holds the state lock; "
                             "stop the running system first"
-                        )
+                        ) from err
                     time.sleep(0.1)
         except Exception:
             os.close(fd)

@@ -26,7 +26,7 @@ import copy
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..core.errors import ValidationError
@@ -59,7 +59,7 @@ class RedriveRefused(ValidationError):
 
 def _fmt_ts(ts: float) -> str:
     try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime(
+        return datetime.fromtimestamp(float(ts), tz=UTC).strftime(
             "%Y-%m-%d %H:%M:%SZ")
     except (TypeError, ValueError, OverflowError, OSError):
         return "?"

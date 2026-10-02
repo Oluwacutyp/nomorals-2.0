@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from typing import Any
 
-from ..emit import _emit
 from ...os.snapshots import SnapshotManager, SnapshotRefused
+from ..emit import _emit
 
 
 def _manager(settings: Any, config_path: str | None) -> SnapshotManager:
     settings_dict: dict[str, Any] = {}
-    try:
+    with contextlib.suppress(Exception):  # noqa: BLE001 - best effort
         settings_dict = settings.to_dict()
-    except Exception:  # noqa: BLE001 - best effort
-        pass
     return SnapshotManager(
         home=settings.home_path,
         db_path=settings.db_path,
@@ -81,7 +80,7 @@ def _cmd_snapshot(args: argparse.Namespace, settings: Any) -> int:
     for snap in snaps:
         import datetime as _dt
         ts = _dt.datetime.fromtimestamp(
-            snap.created_at, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+            snap.created_at, tz=_dt.UTC).strftime("%Y-%m-%d %H:%M:%SZ")
         label = f"  [{snap.label}]" if snap.label else ""
         print(f"{snap.id}  {ts}  {snap.size_bytes:>10} bytes{label}")
     return 0

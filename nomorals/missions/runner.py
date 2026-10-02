@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from ..agents.orchestrator import MasterOrchestrator
-from ..core.tasks import TaskKind
-from ..core.errors import BudgetExceeded, NoMoralsError, ValidationError, classify
+from ..core.errors import NoMoralsError, ValidationError, classify
 from ..core.logging_setup import get_logger
+from ..core.tasks import TaskKind
 from ..missions.mission import Mission, MissionStatus, MissionStore
+from .idempotency import IdempotencyStore, dedupe, step_idempotency_key
 from .progress import (
     STALL_AFTER_FAILURES,
     MissionMilestones,
@@ -34,8 +36,6 @@ from .progress import (
     clear_stall,
     record_stall,
 )
-from ..storage.db import Database
-from .idempotency import IdempotencyStore, dedupe, step_idempotency_key
 
 __all__ = ["StepOutcome", "MissionResult", "MissionRunner"]
 
@@ -64,7 +64,7 @@ class StepOutcome:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "StepOutcome":
+    def from_dict(cls, data: dict[str, Any]) -> StepOutcome:
         """Rebuild from :meth:`to_dict` — used when an idempotency hit
         replays a stored step outcome without re-executing the agent."""
         data = data or {}

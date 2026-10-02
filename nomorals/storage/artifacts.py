@@ -23,8 +23,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..core.ids import ulid_now
 from ..core.events import Event, global_bus
+from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -33,7 +33,7 @@ ARTIFACT_URI_SCHEME = "artifact://"
 _URI_RE = re.compile(r"artifact://([A-Za-z0-9_-]+)")
 
 
-def _emit_created(art: "Artifact") -> None:
+def _emit_created(art: Artifact) -> None:
     """Publish ``artifact.created`` on the process bus. Best-effort: a
     broken subscriber must never break storage writes."""
     try:
@@ -65,7 +65,7 @@ class Provenance:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Provenance":
+    def from_dict(cls, data: dict[str, Any]) -> Provenance:
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -97,7 +97,7 @@ class Artifact:
         return d
 
     @classmethod
-    def from_row(cls, row: dict[str, Any]) -> "Artifact":
+    def from_row(cls, row: dict[str, Any]) -> Artifact:
         return cls(
             id=row["id"],
             type=row.get("type") or "blob",

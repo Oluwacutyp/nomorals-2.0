@@ -7,9 +7,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ...os.update import UpdateManager
 from ..emit import _emit
 from .snapshot import _manager
-from ...os.update import UpdateManager
 
 
 def _repo_dir(args: argparse.Namespace) -> Path:

@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from ..core.errors import NotFound, StorageError
+from ..core.errors import NotFound
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from .db import Database

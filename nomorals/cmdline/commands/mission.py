@@ -6,8 +6,8 @@ import argparse
 import json
 import sys
 from typing import Any
-from ..emit import _emit
 
+from ..emit import _emit
 
 
 def _cmd_mission(args: argparse.Namespace, context: Any) -> int:
@@ -128,8 +128,8 @@ def _resolve_mission_ref(ref: str, context: Any) -> str:
         return res.matches[0]
     if res.outcome == "ambiguous":
         raise ValueError(
-            "mission reference {!r} is ambiguous ({} matches); "
-            "use a longer prefix".format(ref, len(res.matches)))
+            f"mission reference {ref!r} is ambiguous ({len(res.matches)} matches); "
+            "use a longer prefix")
     return ref
 
 

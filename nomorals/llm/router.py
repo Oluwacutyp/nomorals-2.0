@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from ..core.errors import ModelError, ProviderUnavailable, classify
 from ..core.events import EventBus
@@ -120,7 +121,7 @@ class LLMRouter:
         self._learning: Any = None
 
     # ── registration ─────────────────────────────────────────────────────────
-    def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> "LLMRouter":
+    def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> LLMRouter:
         key = name or provider.name
         with self._lock:
             if key in self._by_name:
@@ -194,7 +195,7 @@ class LLMRouter:
             self._active = self._providers[0].name
 
     # ── capability broker ────────────────────────────────────────────────────
-    def set_broker(self, broker: Any | None) -> "LLMRouter":
+    def set_broker(self, broker: Any | None) -> LLMRouter:
         """Attach a :class:`nomorals.llm.broker.ModelBroker`.
 
         While attached, every :meth:`chat`/:meth:`complete`/:meth:`describe_image`
@@ -213,7 +214,7 @@ class LLMRouter:
             return self._broker
 
     # ── learning hook ────────────────────────────────────────────────────
-    def set_learning(self, hook: Any | None) -> "LLMRouter":
+    def set_learning(self, hook: Any | None) -> LLMRouter:
         """Attach/detach the learning hook.
 
         ``hook`` is called once per provider *attempt* as
@@ -338,7 +339,7 @@ class LLMRouter:
         failed: list[tuple[str, str]] = []  # (provider name, error) in attempt order
         last = LLMResponse(text="", error="no attempt made")
         learning = self._learning  # read once; a detach mid-dispatch is harmless
-        for index, provider in enumerate(chain):
+        for provider in chain:
             health = self._health[provider.name]
             if not health.available(self._clock()):
                 continue
@@ -421,7 +422,7 @@ class LLMRouter:
             return
         cooldown = self.cooldown_seconds if health.consecutive_failures + 1 >= self.failure_threshold else 0.0
         health.record_failure(error, cooldown)
-        
+
         # Call repair hooks with cooldown
         now = self._clock()
         if isinstance(self.repair_hooks, dict):

@@ -6,13 +6,13 @@ import argparse
 import json
 from typing import Any
 
-from ..emit import _emit
 from ...llm.benchmarks import BenchmarkDB
 from ...missions.golden import (
     GOLDEN_MISSIONS,
     GoldenRunner,
     list_golden_missions,
 )
+from ..emit import _emit
 
 
 def _cmd_golden(args: argparse.Namespace, context: Any) -> int:

@@ -12,6 +12,7 @@ daily sample so a month of history does not cost a month of disk.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -108,10 +109,8 @@ class BackupManager:
             destination.close()
 
         # Checkpoint first so the snapshot is self-contained (no -wal sidecar needed).
-        try:
+        with contextlib.suppress(StorageError):  # not in WAL mode; nothing to checkpoint
             self.db.checkpoint("TRUNCATE")
-        except StorageError:  # noqa: E103 - not in WAL mode; nothing to checkpoint (pragma: no cover)
-            pass
 
         pages = int(
             sqlite3.connect(str(raw_path)).execute("PRAGMA page_count").fetchone()[0]

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import argparse
+
 from ..version import __version__
-
-
 
 # Canonical top-level command → short aliases. The single source of truth:
 # each add_parser() below consumes CLI_ALIASES[name], and `nm help cli`
@@ -316,7 +315,7 @@ def _parser() -> argparse.ArgumentParser:
     queue = sub.add_parser("queue", aliases=CLI_ALIASES["queue"],
                            help="inspect the durable work queue")
     queue.add_argument("--topic", default="")
-    
+
     # Additional subcommands expected by tests
     commands = sub.add_parser("commands", aliases=CLI_ALIASES["commands"], help="list available commands")
     commands.add_argument("filter", nargs="?", default="")
@@ -348,7 +347,7 @@ def _parser() -> argparse.ArgumentParser:
                         choices=["status"],
                         help="Action to perform")
     mind_p.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     zip_cmd = sub.add_parser("zip", aliases=CLI_ALIASES["zip"], help="create and manage zip archives")
     zip_cmd.add_argument("action", nargs="?", default="list")
     zip_cmd.add_argument("path", nargs="?", default="")
@@ -388,7 +387,7 @@ def _parser() -> argparse.ArgumentParser:
     d_send.add_argument("--caption", default="",
                         help="caption for the sent archive")
     d_send.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
 
     # Agent-tool subcommands
     autonomy = sub.add_parser("autonomy", aliases=CLI_ALIASES["autonomy"], help="Manage autonomous agent operations")
@@ -400,7 +399,7 @@ def _parser() -> argparse.ArgumentParser:
                           help="set the daily model-call cap (budget action; persisted)")
     autonomy.add_argument("--unlimited", action="store_true",
                           help="lift the daily model-call cap (budget action)")
-    
+
     goal = sub.add_parser("goal", aliases=CLI_ALIASES["goal"], help="Create and manage goals")
     goal.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "get", "update", "delete", "replan",
@@ -425,7 +424,7 @@ def _parser() -> argparse.ArgumentParser:
                       help="filter list by status")
     goal.add_argument("--limit", default="20", help="max rows to list")
     goal.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     mission = sub.add_parser("mission", aliases=CLI_ALIASES["mission"],
                              help="Mission control and planning")
     mission.add_argument("action", nargs="?", default="plan",
@@ -438,7 +437,7 @@ def _parser() -> argparse.ArgumentParser:
                              "(prefix ok when unambiguous)")
     mission.add_argument("--confirm", action="store_true",
                         help="required for redrive: actually create the new mission")
-    
+
     skill = sub.add_parser("skill", aliases=CLI_ALIASES["skill"],
                            help="Executable skill packages: "
                                 "list/install/enable/disable/run/benchmark "
@@ -469,7 +468,7 @@ def _parser() -> argparse.ArgumentParser:
     skill.add_argument("--version", default="",
                        help="run: execute a specific installed version")
     skill.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     project = sub.add_parser("project", aliases=CLI_ALIASES["project"],
                              help="Manage projects")
     project.add_argument("action", nargs="?", default="list",
@@ -480,7 +479,7 @@ def _parser() -> argparse.ArgumentParser:
     project.add_argument("description", nargs="?", default="", help="Project objective")
     project.add_argument("--id", default="", help="Project ID (alternative to positional)")
     project.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     kg = sub.add_parser("kg", help="Knowledge graph operations")
     kg.add_argument("action", nargs="?", default="stats",
                     choices=["stats", "consolidate", "communities", "top",
@@ -1403,7 +1402,7 @@ def _parser() -> argparse.ArgumentParser:
     apps.add_argument("--title", default="")
     apps.add_argument("--port", default="")
     apps.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     # Connector commands
     connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")
     connectors.add_argument("action", nargs="?", default="list",
@@ -1411,7 +1410,7 @@ def _parser() -> argparse.ArgumentParser:
                            help="Action to perform")
     connectors.add_argument("--name", help="Connector name")
     connectors.add_argument("--provider", help="Provider (mono, plaid, etc.)")
-    
+
     # Finance commands
     finance = sub.add_parser("finance", aliases=CLI_ALIASES["finance"],
                              help="Bank account linking and transactions")
@@ -1421,14 +1420,14 @@ def _parser() -> argparse.ArgumentParser:
     finance.add_argument("--provider", default="auto", help="Provider (mono, plaid, auto)")
     finance.add_argument("--account-id", help="Account ID")
     finance.add_argument("--days", type=int, default=30, help="Transaction history days")
-    
+
     # Native extensions command
     native = sub.add_parser("native", aliases=CLI_ALIASES["native"], help="native kernels: status and build")
     native.add_argument("--build", action="store_true",
                         help="compile the C++ kernels when a compiler is present")
     native.add_argument("--benchmark", action="store_true",
                         help="time the vector-search kernel native vs pure Python and check agreement")
-    
+
         # Virtual cards commands
     cards = sub.add_parser("cards", aliases=CLI_ALIASES["cards"], help="Virtual card management")
     cards.add_argument("action", nargs="?", default="list",
@@ -1438,5 +1437,5 @@ def _parser() -> argparse.ArgumentParser:
     cards.add_argument("--type", default="UNLOCKED", help="Card type")
     cards.add_argument("--limit", type=int, help="Spend limit in cents")
     cards.add_argument("--merchant", help="Merchant name")
-    
+
     return parser

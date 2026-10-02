@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 from typing import Any
-from ..emit import _emit
 
+from ..emit import _emit
 
 
 def _cmd_backup(args: argparse.Namespace, context: Any) -> int:

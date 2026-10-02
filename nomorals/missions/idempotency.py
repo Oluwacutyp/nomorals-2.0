@@ -29,8 +29,9 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from ..core.logging_setup import get_logger
 
@@ -254,7 +255,6 @@ def dedupe(
     failed and the exception propagates.
     """
     tag = owner or _owner_tag()
-    now = time.time()
 
     # 1. Fast path: completed keys never re-execute.
     record = store.get(key)

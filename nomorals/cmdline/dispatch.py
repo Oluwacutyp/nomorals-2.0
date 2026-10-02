@@ -4,66 +4,73 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from ..core.logging_setup import setup_logging
-from .parser import CLI_ALIASES, _parser
-from .emit import _emit
-from .commands.data import _cmd_data
-from .commands.native import _cmd_native
-from .commands.timeline import _cmd_timeline
-from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
-from .commands.models import _cmd_model_broker
-from .commands.tools import _cmd_tools
-from .commands.owner import _cmd_owner
-from .commands.power import _cmd_power
-from .commands.memory import _cmd_memory
-from .commands.code import _cmd_code
-from .commands.media import _cmd_media, _cmd_studio
-from .commands.captcha import _cmd_captcha
-from .commands.weather import _cmd_weather
-from .commands.bet import _cmd_bet
-from .commands.voice import _cmd_voice
-from .commands.vision import _cmd_vision
-from .commands.improve import _cmd_improve
-from .commands.trade import _cmd_trade
-from .commands.swarm import _cmd_swarm
-from .commands.room import _cmd_room
-from .commands.benchmark import _cmd_benchmark
-from .commands.briefing import _cmd_briefing
-from .commands.inbox import _cmd_inbox
-from .commands.agent import _cmd_run, _cmd_ask
-from .commands.backup import _cmd_backup
-from .commands.snapshot import _cmd_snapshot
-from .commands.recover import _cmd_recover
-from .commands.update import _cmd_update
-from .commands.golden import _cmd_golden
-from .commands.missions import _cmd_missions
-from .commands.tui import _cmd_tui
-from .commands.serve import _cmd_serve
-from .commands.queue import _cmd_queue
-from .commands.status import _cmd_status
-from .commands.mind import _cmd_mind
-from .commands.hub import _cmd_hub
-from .commands.book import _cmd_book
-from .commands.games import _cmd_arena, _cmd_trial, _cmd_skill, _cmd_simulate
-from .commands.skills import _cmd_skill_pkg
-from .commands.research import _cmd_research_loop, _cmd_kg, _cmd_cookies, _cmd_structure
-from .commands.partner import _cmd_reason, _cmd_workspace
-from .commands.train import _cmd_train
-from .commands.security import _cmd_crack, _cmd_decode, _cmd_osint, _cmd_cipher, _cmd_monitor, _cmd_watch
-from .commands.money import _cmd_money
-from .commands.meta import _cmd_commands, _cmd_deliver, _cmd_zip, _cmd_connectors, _cmd_help
-from .commands.finance import _cmd_finance
-from .commands.cards import _cmd_cards
-from .commands.autonomy import _cmd_autonomy
-from .commands.music import _cmd_music
-from .commands.exec import _cmd_exec, _cmd_apps
-from .commands.project import _cmd_project
-from .commands.mission import _cmd_mission
-from .commands.goal import _cmd_goal
+from typing import Any
 
-from ..core.logging_setup import get_logger
+from ..core.logging_setup import get_logger, setup_logging
+from .commands.agent import _cmd_ask, _cmd_run
+from .commands.autonomy import _cmd_autonomy
+from .commands.backup import _cmd_backup
+from .commands.benchmark import _cmd_benchmark
+from .commands.bet import _cmd_bet
+from .commands.book import _cmd_book
+from .commands.briefing import _cmd_briefing
+from .commands.captcha import _cmd_captcha
+from .commands.cards import _cmd_cards
+from .commands.code import _cmd_code
+from .commands.data import _cmd_data
+from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
+from .commands.exec import _cmd_apps, _cmd_exec
+from .commands.finance import _cmd_finance
+from .commands.games import _cmd_arena, _cmd_simulate, _cmd_skill, _cmd_trial
+from .commands.goal import _cmd_goal
+from .commands.golden import _cmd_golden
+from .commands.hub import _cmd_hub
+from .commands.improve import _cmd_improve
+from .commands.inbox import _cmd_inbox
+from .commands.media import _cmd_media, _cmd_studio
+from .commands.memory import _cmd_memory
+from .commands.meta import _cmd_commands, _cmd_connectors, _cmd_deliver, _cmd_help, _cmd_zip
+from .commands.mind import _cmd_mind
+from .commands.mission import _cmd_mission
+from .commands.missions import _cmd_missions
+from .commands.models import _cmd_model_broker
+from .commands.money import _cmd_money
+from .commands.music import _cmd_music
+from .commands.native import _cmd_native
+from .commands.owner import _cmd_owner
+from .commands.partner import _cmd_reason, _cmd_workspace
+from .commands.power import _cmd_power
+from .commands.project import _cmd_project
+from .commands.queue import _cmd_queue
+from .commands.recover import _cmd_recover
+from .commands.research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
+from .commands.room import _cmd_room
+from .commands.security import (
+    _cmd_cipher,
+    _cmd_crack,
+    _cmd_decode,
+    _cmd_monitor,
+    _cmd_osint,
+    _cmd_watch,
+)
+from .commands.serve import _cmd_serve
+from .commands.skills import _cmd_skill_pkg
+from .commands.snapshot import _cmd_snapshot
+from .commands.status import _cmd_status
+from .commands.swarm import _cmd_swarm
+from .commands.timeline import _cmd_timeline
+from .commands.tools import _cmd_tools
+from .commands.trade import _cmd_trade
+from .commands.train import _cmd_train
+from .commands.tui import _cmd_tui
+from .commands.update import _cmd_update
+from .commands.vision import _cmd_vision
+from .commands.voice import _cmd_voice
+from .commands.weather import _cmd_weather
+from .emit import _emit
+from .parser import CLI_ALIASES, _parser
 
 _log = get_logger(__name__)
 
@@ -115,7 +122,7 @@ def _attach_cli_session(context: Any) -> None:
         if isinstance(extras, dict):
             extras["os_session"] = session
         else:  # exotic contexts without an extras dict
-            setattr(context, "os_session", session)
+            context.os_session = session
     except Exception:  # noqa: BLE001 - session attach must never break the CLI
         _log.debug("CLI os.Session attach skipped", exc_info=True)
 
@@ -149,7 +156,7 @@ def _attach_timeline(context: Any) -> None:
         if isinstance(extras, dict):
             extras["timeline"] = tl
         else:  # exotic contexts without an extras dict
-            setattr(context, "timeline", tl)
+            context.timeline = tl
     except Exception:  # noqa: BLE001 - timeline attach must never break the CLI
         _log.debug("CLI timeline attach skipped", exc_info=True)
 
@@ -358,46 +365,45 @@ def _render_config(settings: Any) -> str:
 
 def _configure_log_file(args: Any = None, settings: Any = None) -> None:
     """Configure file logging based on settings.
-    
+
     Args:
         args: Namespace with log_level attribute (optional)
         settings: Settings object with log.file path (optional)
     """
     import logging
     from logging.handlers import RotatingFileHandler
-    from pathlib import Path
-    
+
     # Get log level from args or default
     level = "INFO"
     if args is not None:
         level = getattr(args, "log_level", "INFO")
-    
+
     # Get log file path from settings
     log_file = ""
     if settings is not None:
         log_settings = getattr(settings, "log", None)
         if log_settings is not None:
             log_file = getattr(log_settings, "file", "")
-    
+
     # If no log file configured, do nothing
     if not log_file:
         return
-    
+
     # Resolve path against home if relative
     log_path = Path(log_file)
     if not log_path.is_absolute() and settings is not None:
         home = getattr(settings, "home", "~/.nomorals")
         log_path = Path(home).expanduser() / log_file
-    
+
     # Create parent directories
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Remove existing file handlers
     root_logger = logging.getLogger()
     for h in list(root_logger.handlers):
         if isinstance(h, RotatingFileHandler):
             root_logger.removeHandler(h)
-    
+
     # Add new rotating file handler
     handler = RotatingFileHandler(
         str(log_path),
@@ -410,7 +416,7 @@ def _configure_log_file(args: Any = None, settings: Any = None) -> None:
         "%(asctime)s %(levelname)s %(name)s: %(message)s"
     ))
     root_logger.addHandler(handler)
-    
+
     # Ensure root logger level allows messages through
     if root_logger.level > log_level or root_logger.level == logging.NOTSET:
         root_logger.setLevel(log_level)

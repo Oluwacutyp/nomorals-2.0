@@ -6,9 +6,9 @@ import argparse
 import json
 import sys
 from typing import Any
+
 from ...core.errors import NoMoralsError
 from ..emit import _emit
-
 
 
 def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
