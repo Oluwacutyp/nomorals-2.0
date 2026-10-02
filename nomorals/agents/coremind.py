@@ -51,7 +51,19 @@ from typing import Any, Callable
 
 _log = logging.getLogger("nomorals.coremind")
 
-__all__ = ["Intent", "CoreMind", "GAME_ALIASES", "game_names"]
+__all__ = ["Intent", "CoreMind", "GAME_ALIASES", "game_names",
+           "MODEL_CHECK_TIMEOUT_S", "CODING_JOB_TIMEOUT_S"]
+
+# ── fast-path vs heavy-path budgets (explicit, not magic numbers) ───────────
+#: INTERACTIVE budget: max wall time the chat thread waits for the model in
+#: ``_model_check``. On expiry the deterministic intent stands and the
+#: timeout is logged + counted (``status()``) — never silently swallowed.
+MODEL_CHECK_TIMEOUT_S = 8.0
+
+#: BACKGROUND budget: the builder organ's per-job wall clock. Heavy work
+#: always runs off the chat thread (``_send_async``), so a long budget here
+#: never blocks a reply.
+CODING_JOB_TIMEOUT_S = 300.0
 
 # ── the game catalogue (the games organ owns the rules — here is the map) ──
 
@@ -415,6 +427,8 @@ class CoreMind:
         self._jobs: list[dict[str, Any]] = self._state.get("jobs", [])[-40:]
         self._lock = threading.Lock()
         self._router_calls = 0  # observability: how often the model was consulted
+        self._router_timeouts = 0  # how often _model_check hit its deadline
+        self._model_check_note = ""  # last model-check degradation, surfaced in status()
 
     # ── continuity (state file + memory) ────────────────────────────────────
     def _load_state(self) -> dict[str, Any]:
@@ -535,7 +549,12 @@ class CoreMind:
     def _model_check(self, text: str, best: Intent) -> Intent | None:
         """The reasoning layer: one strict classification call, only when
         the deterministic pass is unsure (0.5..0.8) — never on plain chat.
-        Falls back to the deterministic intent when the model is down.
+
+        The chat thread waits at most MODEL_CHECK_TIMEOUT_S for the router;
+        past that the deterministic intent stands. A timeout or a router
+        failure is logged and counted (``status()`` shows it) — the model
+        layer must never silently kill the mind, and must never stall the
+        chat either.
         """
         router = getattr(self.context, "router", None)
         if router is None:
@@ -551,9 +570,40 @@ class CoreMind:
             f"{', '.join(game_names())}), status (system state), chat "
             f"(everything else). Message: {text[:400]}"
         )
+        # the router has no per-call deadline (providers default to
+        # 120s x 3 retries), so bound it here: run it on a daemon thread
+        # and take only what arrives within the interactive budget.
+        box: dict[str, Any] = {"resp": None, "exc": None}
+
+        def _call() -> None:
+            try:
+                box["resp"] = router.complete(prompt)
+            except Exception as exc:  # noqa: BLE001
+                box["exc"] = exc
+
+        self._router_calls += 1
+        worker = threading.Thread(target=_call, name="mind-model-check",
+                                  daemon=True)
+        worker.start()
+        worker.join(timeout=MODEL_CHECK_TIMEOUT_S)
+        if worker.is_alive():
+            self._router_timeouts += 1
+            self._model_check_note = (
+                f"model check timed out after {MODEL_CHECK_TIMEOUT_S:.0f}s "
+                f"— kept deterministic “{best.kind}”")
+            _log.warning("coremind model check timed out after %.0fs on %r — "
+                         "staying with deterministic %s", MODEL_CHECK_TIMEOUT_S,
+                         text[:60], best.kind)
+            return None
+        if box["exc"] is not None:
+            self._model_check_note = (
+                f"model check failed: {str(box['exc'])[:100]} "
+                f"— kept deterministic “{best.kind}”")
+            _log.warning("coremind model check failed (%s) — staying with "
+                         "deterministic %s", box["exc"], best.kind)
+            return None
+        resp = box["resp"]
         try:
-            self._router_calls += 1
-            resp = router.complete(prompt)
             if not getattr(resp, "ok", False):
                 return None
             raw = (getattr(resp, "text", "") or "").strip()
@@ -790,7 +840,8 @@ class CoreMind:
 
             started = time.time()
             result = CodingAgent(self.context).run(intent.target,
-                                                   max_iterations=5, timeout=300.0)
+                                                   max_iterations=5,
+                                                   timeout=CODING_JOB_TIMEOUT_S)
             elapsed = time.time() - started
             if result.ok:
                 files = ", ".join(getattr(result, "files", []) or []) or "output"
@@ -887,11 +938,21 @@ class CoreMind:
             return (f"📋 mission queued {result['id'][:8]}: “{intent.target[:80]}” — "
                     f"/task run to execute now.\n{self._route_line(intent)}")
         if intent.action == "run":
-            result = agent.run(intent.target or "")
-            if not result.get("ok"):
-                return f"❌ mission: {result.get('error')}"
-            return (f"✅ mission {str(result.get('id', ''))[:8]} done:\n"
-                    f"{str(result.get('result', ''))[:1500]}")
+            # executing a mission can take minutes (downloads, research) —
+            # it is heavy work, so it runs off the chat thread like every
+            # other organ. add/list stay inline: they are fast DB reads.
+            def job() -> str:
+                result = agent.run(intent.target or "")
+                if not result.get("ok"):
+                    return f"❌ mission: {result.get('error')}"
+                return (f"✅ mission {str(result.get('id', ''))[:8]} done:\n"
+                        f"{str(result.get('result', ''))[:1500]}")
+
+            return self._send_async(
+                chat_key, job, job_id,
+                f"running the mission — “{(intent.target or 'next queued')[:80]}”. "
+                f"I'll post the result here.\n{self._route_line(intent)}",
+                kind="mission")
         rows = agent.list(8)
         if not rows:
             return "no queued missions — give me one: “mission: …”."
@@ -981,8 +1042,10 @@ class CoreMind:
                     lines.append(f"  queued missions: {len(queued)} (/task list)")
             except Exception:  # noqa: BLE001
                 pass
-        lines.append(f"  model consulted {self._router_calls}× this session · "
-                     f"profile: {env}")
+        lines.append(f"  model consulted {self._router_calls}× this session "
+                     f"(timed out {self._router_timeouts}×) · profile: {env}")
+        if self._model_check_note:
+            lines.append(f"  last model check: {self._model_check_note}")
         return "\n".join(lines)
 
     def clear(self, chat_key: str = "") -> int:
@@ -1054,7 +1117,7 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
 
         started = time.time()
         result = CodingAgent(mind.context).run(intent.target, max_iterations=5,
-                                               timeout=300.0)
+                                               timeout=CODING_JOB_TIMEOUT_S)
         elapsed = time.time() - started
         ok = bool(result.ok)
         mind._job_done(job_id, ok)

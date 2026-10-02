@@ -126,7 +126,10 @@ class Plan:
     progress: float = 0.0  # 0-100
     current_step: Optional[str] = None
     error: Optional[str] = None
-    
+    #: WHY the plan degraded ("" when the model planned it) — the template
+    #: fallback is a degradation and must never look like a clean success.
+    plan_error: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return {
@@ -140,6 +143,7 @@ class Plan:
             "progress": self.progress,
             "current_step": self.current_step,
             "error": self.error,
+            "plan_error": self.plan_error,
         }
 
 
@@ -155,7 +159,10 @@ class PlanResult:
     errors: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
     summary: str = ""
-    
+    #: WHY the plan degraded ("" when the model planned it) — the template
+    #: fallback is a degradation and must never look like a clean success.
+    plan_error: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         return {
@@ -167,6 +174,7 @@ class PlanResult:
             "errors": self.errors,
             "duration_seconds": self.duration_seconds,
             "summary": self.summary,
+            "plan_error": self.plan_error,
         }
 
 
@@ -326,6 +334,7 @@ class AgentPlanner:
                 errors=errors,
                 duration_seconds=duration,
                 summary=self._generate_summary(plan, results, errors),
+                plan_error=plan.plan_error,
             )
             
             _log.info(f"Plan completed: {completed}/{len(plan.steps)} steps in {duration:.1f}s")
@@ -336,16 +345,22 @@ class AgentPlanner:
             del self._executions[task_id]
     
     async def _generate_plan(self, goal: str, account: str) -> Plan:
-        """Generate a plan from a goal using LLM."""
+        """Generate a plan from a goal using LLM, with an EXPLICIT template
+        fallback: whenever the model path fails or is missing, the plan
+        carries plan_error so a template plan never looks like a clean
+        model-made success."""
         plan_id = new_id("plan")
-        
-        # If LLM available, use it to generate plan
+
+        plan_error = ""
         if self.llm:
-            plan_data = await self._llm_generate_plan(goal, account)
+            plan_data, err = await self._llm_generate_plan(goal, account)
+            if plan_data is None:
+                plan_error = f"{err} — fell back to template plan"
+                plan_data = self._template_generate_plan(goal, account)
         else:
-            # Fallback to template-based planning
+            plan_error = "no LLM router configured — used template plan"
             plan_data = self._template_generate_plan(goal, account)
-        
+
         # Convert to Plan object
         steps = []
         for step_data in plan_data.get("steps", []):
@@ -357,15 +372,23 @@ class AgentPlanner:
                 parameters=step_data.get("parameters", {}),
                 depends_on=step_data.get("depends_on", []),
             ))
-        
+
         return Plan(
             plan_id=plan_id,
             goal=goal,
             steps=steps,
+            plan_error=plan_error,
         )
-    
-    async def _llm_generate_plan(self, goal: str, account: str) -> dict[str, Any]:
-        """Use LLM to generate a plan."""
+
+    async def _llm_generate_plan(
+        self, goal: str, account: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Use LLM to generate a plan.
+
+        Returns (plan_data, error). plan_data is None when the model path
+        failed — the caller picks the template fallback and records
+        plan_error explicitly. Never falls back silently.
+        """
         # Build prompt
         available_actions = list(self._action_handlers.keys())
         
@@ -401,29 +424,30 @@ Generate the plan:"""
         
         try:
             response = await self.llm.generate(prompt, max_tokens=2000)
-            
-            # Parse JSON from response
-            json_match = response.content.find("{")
-            if json_match >= 0:
-                json_str = response.content[json_match:]
-                # Find matching closing brace
-                depth = 0
-                for i, char in enumerate(json_str):
-                    if char == "{":
-                        depth += 1
-                    elif char == "}":
-                        depth -= 1
-                        if depth == 0:
-                            json_str = json_str[:i+1]
-                            break
-                
-                return json.loads(json_str)
         except Exception as e:
             _log.error(f"LLM plan generation failed: {e}")
-        
-        # Fallback to template
-        return self._template_generate_plan(goal, account)
-    
+            return None, f"LLM plan generation failed: {e}"
+
+        # Parse JSON from response
+        json_match = response.content.find("{")
+        if json_match < 0:
+            return None, "LLM plan generation failed: no JSON in reply"
+        json_str = response.content[json_match:]
+        # Find matching closing brace
+        depth = 0
+        for i, char in enumerate(json_str):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    json_str = json_str[:i+1]
+                    break
+        try:
+            return json.loads(json_str), ""
+        except Exception as e:
+            return None, f"LLM plan generation failed: bad JSON ({e})"
+
     def _template_generate_plan(self, goal: str, account: str) -> dict[str, Any]:
         """Template-based plan generation (fallback)."""
         goal_lower = goal.lower()
@@ -642,10 +666,16 @@ Generate the plan:"""
     ) -> str:
         """Generate human-readable summary of plan execution."""
         if not errors:
-            return f"✅ Successfully completed all {len(plan.steps)} steps!"
-        
-        completed = len(plan.steps) - len(errors)
-        return f"⚠️ Completed {completed}/{len(plan.steps)} steps. Errors: {'; '.join(errors[:3])}"
+            text = f"✅ Successfully completed all {len(plan.steps)} steps!"
+        else:
+            completed = len(plan.steps) - len(errors)
+            text = (f"⚠️ Completed {completed}/{len(plan.steps)} steps. "
+                    f"Errors: {'; '.join(errors[:3])}")
+        # a template plan is a degradation — say so in the summary, not just
+        # on the field, so nobody mistakes it for a model-made plan.
+        if plan.plan_error:
+            text = f"⚠️ template plan ({plan.plan_error}). {text}"
+        return text
     
     def get_status(self, task_id: str) -> Optional[Plan]:
         """Get status of an active task.

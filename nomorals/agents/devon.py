@@ -223,7 +223,8 @@ class DevonAgent:
         if not task:
             return DevonResult(task="", steps=[], digest="no task given — tell me what to check.",
                                planned_by="heuristic", model="", seconds=0.0, run_id=run_id,
-                               chat_key=chat_key)
+                               chat_key=chat_key,
+                               plan_error="no task given — nothing planned")
 
         memory = self._prior_memory()
         steps_plan, planned_by, model, plan_error = self._plan(task, memory)
@@ -310,7 +311,11 @@ class DevonAgent:
                 return rsteps, "reasoning", "reasoning-engine", err
         except Exception as exc:  # noqa: BLE001 - reasoning is best-effort
             err = err or f"reasoning unavailable: {exc}"
-        return self._heuristic_plan(task), "heuristic", "", err
+        # last resort: keyword heuristic. plan_error must ALWAYS be non-empty
+        # here — a heuristic plan is a degradation and must never look like a
+        # clean success.
+        return (self._heuristic_plan(task), "heuristic", "",
+                err or "model and reasoning engine both unavailable")
 
     def _reason_review_plan(
         self, task: str, steps: list[dict[str, Any]]
