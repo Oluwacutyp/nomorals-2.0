@@ -272,6 +272,52 @@ class WorkQueue:
     def stats_snapshot(self) -> dict[str, Any]:
         return {**self.stats, "pending": self.pending()}
 
+    # ── durability guards ────────────────────────────────────────────────────
+
+    def reconcile(self, receipts: list[str]) -> list[str]:
+        """Return receipt ids with no matching row in any status.
+
+        A producer keeps the ids :meth:`enqueue` returned; if a job was
+        dropped (row deleted or never written) it shows up here.  An empty
+        list means every enqueued job is accounted for.
+        """
+        missing: list[str] = []
+        for job_id in receipts:
+            row = self.db.query_one(
+                f"SELECT id FROM {self.TABLE} WHERE id = ?", (job_id,)
+            )
+            if row is None:
+                missing.append(job_id)
+        return missing
+
+    def detect_duplicates(self, topic: str | None = None) -> list[dict[str, Any]]:
+        """Find live duplicate deliveries: same topic+payload more than once.
+
+        Returns groups of ``{"topic": ..., "payload": ..., "ids": [...]}``
+        for jobs that are still ``ready``/``leased`` (terminal states are
+        the legitimate history of a retried job, not a duplicate).
+        """
+        clause = "status IN ('ready','leased')"
+        params: list[Any] = []
+        if topic:
+            clause += " AND topic = ?"
+            params.append(topic)
+        rows = self.db.query(
+            f"""
+            SELECT topic, payload, GROUP_CONCAT(id) AS ids, COUNT(*) AS n
+              FROM {self.TABLE}
+             WHERE {clause}
+             GROUP BY topic, payload
+            HAVING n > 1
+            """,
+            tuple(params),
+        )
+        return [
+            {"topic": r["topic"], "payload": r["payload"],
+             "ids": str(r["ids"]).split(",")}
+            for r in rows
+        ]
+
     # ── worker loop ──────────────────────────────────────────────────────────
     def run_worker(
         self,

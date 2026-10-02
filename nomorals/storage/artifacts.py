@@ -185,6 +185,25 @@ class ArtifactStore:
     def read_text(self, artifact_id: str) -> str:
         return self.read(artifact_id).decode("utf-8", errors="replace")
 
+    def verify(self, artifact_id: str) -> bool:
+        """Verify an artifact's blob against its recorded content hash.
+
+        Reads the blob back and compares its SHA-256 with the hash stored
+        at write time.  Returns False when the blob is missing, unreadable,
+        or corrupted after the write — i.e. a failed blob write is caught
+        here instead of silently serving bad bytes later.
+        """
+        import hashlib
+
+        art = self.get(artifact_id)
+        if art is None:
+            return False
+        try:
+            data = self.blobs.get_bytes(art.content_hash)
+        except Exception:  # noqa: BLE001 - missing/unreadable blob is a failure
+            return False
+        return hashlib.sha256(data).hexdigest() == art.content_hash
+
     def resolve(self, ref: str) -> Artifact | None:
         """Resolve ``artifact://<id>`` or a bare id to the artifact."""
         ref = (ref or "").strip()

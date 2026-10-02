@@ -252,6 +252,49 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--restore", default="")
     backup.add_argument("--push", action="store_true", help="push the latest backup to git")
 
+    snapshot = sub.add_parser("snapshot",
+                              help="point-in-time snapshots of live state")
+    snapshot.add_argument("snapshot_action",
+                          choices=["create", "list", "verify", "restore", "delete"],
+                          nargs="?", default="list")
+    snapshot.add_argument("snapshot_id", nargs="?", default="",
+                          help="snapshot id (prefix ok); default: latest")
+    snapshot.add_argument("--label", default="", help="label for create")
+    snapshot.add_argument("--force", action="store_true",
+                          help="restore over a running/dirty system")
+    snapshot.add_argument("--json", action="store_true")
+
+    recover = sub.add_parser("recover",
+                             help="recover from the last good snapshot")
+    recover.add_argument("snapshot_id", nargs="?", default="",
+                         help="restore this snapshot instead of the last good one")
+    recover.add_argument("--yes", action="store_true",
+                         help="non-interactive: assume yes to all prompts")
+    recover.add_argument("--json", action="store_true")
+
+    update = sub.add_parser("update",
+                            help="transactional self-update with auto-rollback")
+    update.add_argument("--no-pull", action="store_true",
+                        help="skip git pull (migrate + health-check only)")
+    update.add_argument("--check-only", action="store_true",
+                        help="run post-update health checks without updating")
+    update.add_argument("--repo", default="",
+                        help="repo dir override (default: auto-detected)")
+    update.add_argument("--yes", action="store_true",
+                        help="non-interactive: assume yes to all prompts")
+    update.add_argument("--json", action="store_true")
+
+    golden = sub.add_parser("golden",
+                            help="golden end-to-end mission drills")
+    golden.add_argument("golden_action",
+                        choices=["list", "run", "resume"],
+                        nargs="?", default="list")
+    golden.add_argument("target", nargs="?", default="",
+                        help="mission key (run) or mission id (resume)")
+    golden.add_argument("--long", action="store_true",
+                        help="real multi-minute drill instead of the unit version")
+    golden.add_argument("--json", action="store_true")
+
     missions = sub.add_parser("missions", aliases=CLI_ALIASES["missions"],
                               help="list, run, resume, or inspect missions")
     missions.add_argument("--start", default="", help="start a new mission with this goal")

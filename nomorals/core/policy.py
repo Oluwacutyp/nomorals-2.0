@@ -526,6 +526,32 @@ class Policy:
                 "audit_entries": len(self._audit),
             }
 
+    def verify_decision(self, decision: PolicyDecision) -> bool:
+        """Check a decision against the tamper-evident audit trail.
+
+        Every :meth:`check` records its verdict *before* returning, so a
+        decision whose ``allowed`` bit disagrees with its audit entry was
+        tampered with after evaluation (a flipped grant).  Returns True
+        when the decision is consistent with the audit record.
+        """
+        if not decision.audit_id:
+            return False
+        with self._lock:
+            entry = next(
+                (e for e in self._audit if e.get("audit_id") == decision.audit_id),
+                None,
+            )
+        if entry is None:
+            return False
+        kind = entry.get("kind")
+        if kind == AUDIT_ALLOW:
+            return bool(decision.allowed)
+        if kind == AUDIT_DENY:
+            return not decision.allowed
+        # AUDIT_CONFIRM: the verdict was "denied pending confirmation";
+        # a flipped bit would claim a grant that was never confirmed.
+        return not decision.allowed or decision.needs_confirmation
+
     # -- helpers -------------------------------------------------------------
     def grant_for_role(self, role: str) -> CapabilitySet:
         """Grant capabilities for a role preset, honoring ``default_grant`` as a ceiling.

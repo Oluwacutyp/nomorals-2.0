@@ -555,6 +555,40 @@ class TaskGraph:
         with self._lock:
             return {t.name: t.error for t in self.tasks.values() if t.state is TaskState.FAILED}
 
+    def audit(self) -> list[str]:
+        """Check the graph for silent corruption after a run.
+
+        Returns a list of problems (empty = the run's bookkeeping is
+        honest).  Catches: DONE tasks with no result, FAILED tasks with
+        no recorded error, and tasks that ran (or are queued to run)
+        despite a failed dependency — i.e. a task that died mid-run must
+        never have its dependents silently marked complete.
+        """
+        problems: list[str] = []
+        with self._lock:
+            tasks = dict(self.tasks)
+        for task in tasks.values():
+            if task.state is TaskState.DONE and task.result is None:
+                problems.append(f"{task.name}: DONE with no result")
+            if task.state is TaskState.FAILED and not task.error:
+                problems.append(f"{task.name}: FAILED with no recorded error")
+        failed_ids = {
+            t.id for t in tasks.values() if t.state is TaskState.FAILED
+        }
+        for task in tasks.values():
+            if not failed_ids:
+                break
+            if set(task.deps) & failed_ids and task.state not in (
+                TaskState.SKIPPED,
+                TaskState.CANCELLED,
+                TaskState.FAILED,
+                TaskState.PENDING,
+            ):
+                problems.append(
+                    f"{task.name}: state {task.state.value} despite failed dependency"
+                )
+        return problems
+
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             return {

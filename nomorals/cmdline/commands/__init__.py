@@ -42,6 +42,10 @@ from .security import _cmd_crack, _cmd_decode, _cmd_osint, _cmd_cipher, _cmd_mon
 from .serve import _cmd_serve
 from .skills import _cmd_skill_pkg
 from .status import _status_section, _cmd_status
+from .snapshot import _cmd_snapshot
+from .recover import _cmd_recover
+from .update import _cmd_update
+from .golden import _cmd_golden
 from .swarm import _cmd_swarm, _work_from_json, _critique_from_json
 from .timeline import _render_timeline_row, _cmd_timeline
 from .tools import _cmd_tools
@@ -141,6 +145,10 @@ __all__ = [
     "_cmd_skill_pkg",
     "_status_section",
     "_cmd_status",
+    "_cmd_snapshot",
+    "_cmd_recover",
+    "_cmd_update",
+    "_cmd_golden",
     "_cmd_swarm",
     "_work_from_json",
     "_critique_from_json",

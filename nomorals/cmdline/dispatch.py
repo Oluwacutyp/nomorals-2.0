@@ -34,6 +34,10 @@ from .commands.briefing import _cmd_briefing
 from .commands.inbox import _cmd_inbox
 from .commands.agent import _cmd_run, _cmd_ask
 from .commands.backup import _cmd_backup
+from .commands.snapshot import _cmd_snapshot
+from .commands.recover import _cmd_recover
+from .commands.update import _cmd_update
+from .commands.golden import _cmd_golden
 from .commands.missions import _cmd_missions
 from .commands.tui import _cmd_tui
 from .commands.serve import _cmd_serve
@@ -136,6 +140,16 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if args.command == "doctor":
         return _cmd_doctor(args, settings)
+    # Settings-only commands: they manage the live state itself (snapshots,
+    # recovery, self-update), so they must NOT hold the database open the
+    # way build_context would — restore's running/dirty detection and the
+    # transactional swap depend on seeing the system honestly.
+    if args.command == "snapshot":
+        return _cmd_snapshot(args, settings)
+    if args.command == "recover":
+        return _cmd_recover(args, settings)
+    if args.command == "update":
+        return _cmd_update(args, settings)
     if args.command == "config":
         _emit(args, settings.to_dict(), _render_config(settings))
         return 0
@@ -168,6 +182,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_ask(args, context)
         if args.command == "backup":
             return _cmd_backup(args, context)
+        if args.command == "golden":
+            return _cmd_golden(args, context)
         if args.command == "missions":
             return _cmd_missions(args, context)
         if args.command == "timeline":
