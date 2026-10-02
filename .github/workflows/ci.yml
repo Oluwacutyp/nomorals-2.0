@@ -40,10 +40,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # vendor/sentinel is a submodule; the trading/finance tests
-          # exercise the real bridge and fail without it.
-          submodules: recursive
+
+      # vendor/sentinel is a submodule; the trading/finance tests exercise
+      # the real bridge and fail without it. Done as an explicit step
+      # (rather than checkout's submodules: option) — same command verified
+      # against the runner's behavior.
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
 
       # NOTE: the `runner` context is NOT available in job-level `env`
       # (GitHub fails the whole run at evaluation time, 0s, no jobs), so
@@ -106,7 +109,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
 
       - name: Grep for committed secrets (advisory)
         run: |
