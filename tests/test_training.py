@@ -7,6 +7,7 @@ gets shipped whether or not it improved anything.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +128,7 @@ class TokenizerTests(unittest.TestCase):
     def test_save_and_load_preserve_behaviour(self):
         tokenizer = BPETokenizer.train(self.corpus, vocab_size=400)
         path = Path(tempfile.mkdtemp()) / "tok.json"
+        self.addCleanup(shutil.rmtree, path.parent, ignore_errors=True)
         tokenizer.save(path)
         restored = BPETokenizer.load(path)
         self.assertEqual(restored.vocab_size, tokenizer.vocab_size)
@@ -136,6 +138,7 @@ class TokenizerTests(unittest.TestCase):
         from nomorals.core.errors import ParseError
 
         path = Path(tempfile.mkdtemp()) / "bad.json"
+        self.addCleanup(shutil.rmtree, path.parent, ignore_errors=True)
         path.write_text("not json", encoding="utf-8")
         with self.assertRaises(ParseError):
             BPETokenizer.load(path)
@@ -249,6 +252,7 @@ class TrainerTests(unittest.TestCase):
             self.tokenizer, TrainConfig(hidden_size=8, context_window=8, epochs=1, batch_size=6)
         ).fit(self.train)
         directory = Path(tempfile.mkdtemp()) / "model"
+        self.addCleanup(shutil.rmtree, directory.parent, ignore_errors=True)
         model.save(directory)
         restored = TrainedModel.load(directory)
         self.assertEqual(restored.vocab_size, model.vocab_size)
@@ -260,6 +264,7 @@ class PromotionGateTests(unittest.TestCase):
 
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-gate-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = build_context(Settings(home=self.home))
         self.context.__enter__()
         self.runs = TrainingRegistry(self.context.db)
@@ -351,6 +356,7 @@ class PromotionGateTests(unittest.TestCase):
 class DatasetRegistryTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-ds-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = build_context(Settings(home=self.home))
         self.context.__enter__()
         self.registry = DatasetRegistry(self.context.db)

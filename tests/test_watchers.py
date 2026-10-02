@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -121,6 +122,7 @@ class _Ctx:
             self.db.close()
         except Exception:  # noqa: BLE001
             pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 def _allow_test_tools(test):
@@ -768,6 +770,7 @@ class CliTests(unittest.TestCase):
 
     def test_cli_add_and_list(self):
         home = tempfile.mkdtemp(prefix="nm-watch-cli-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         proc = self._run(home, "add", "tell me if BTC drops below $60000")
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         self.assertIn("BTC", proc.stdout)
@@ -778,6 +781,7 @@ class CliTests(unittest.TestCase):
 
     def test_cli_add_ambiguous_asks(self):
         home = tempfile.mkdtemp(prefix="nm-watch-cli-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         proc = self._run(home, "add", "watch the price of headphones")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("threshold", proc.stdout.lower())

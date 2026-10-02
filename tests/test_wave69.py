@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -142,6 +143,7 @@ class PersonaMixTest(unittest.TestCase):
 
     def _sources_dir(self) -> Path:
         tmp = Path(tempfile.mkdtemp(prefix="nm-w69-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         hermes = [
             {"conversations": [
                 {"from": "system", "value": "old sys"},
@@ -193,6 +195,7 @@ class PersonaMixTest(unittest.TestCase):
 
     def test_filters_drop_tiny_and_huge_rows(self) -> None:
         tmp = Path(tempfile.mkdtemp(prefix="nm-w69-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         rows = [
             {"conversations": [
                 {"from": "human", "value": "hi"},  # too short
@@ -268,6 +271,7 @@ class PersonaMixTest(unittest.TestCase):
 class ColabScriptTest(unittest.TestCase):
     def test_script_is_complete_and_sized_for_free_tier(self) -> None:
         tmp = Path(tempfile.mkdtemp(prefix="nm-w69-colab-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         (tmp / "data.jsonl").write_text(
             json.dumps({"messages": []}) + "\n", encoding="utf-8")
         path = write_colab_script(tmp / "mix",
@@ -286,6 +290,7 @@ class ColabScriptTest(unittest.TestCase):
 class PersonaGenerationTest(unittest.TestCase):
     def test_generates_persona_rows_in_language(self) -> None:
         out = Path(tempfile.mkdtemp()) / "yo.jsonl"
+        self.addCleanup(shutil.rmtree, out.parent, ignore_errors=True)
         result = generate_persona_samples(
             FakeRouter(), "You are CODE BEAST.",
             language="Yoruba (Yoruba)", n=12, per_call=5, out_path=out)
@@ -303,6 +308,7 @@ class PersonaGenerationTest(unittest.TestCase):
 
     def test_degrades_never_raises_on_garbage(self) -> None:
         out = Path(tempfile.mkdtemp()) / "yo2.jsonl"
+        self.addCleanup(shutil.rmtree, out.parent, ignore_errors=True)
         result = generate_persona_samples(
             FakeRouter(bad_first=True), "p",
             language="Yoruba (Yoruba)", n=12, per_call=5, out_path=out)
@@ -310,6 +316,7 @@ class PersonaGenerationTest(unittest.TestCase):
 
     def test_load_persona_file_wins(self) -> None:
         f = Path(tempfile.mkdtemp()) / "persona.txt"
+        self.addCleanup(shutil.rmtree, f.parent, ignore_errors=True)
         f.write_text("My own persona text.", encoding="utf-8")
         self.assertEqual(load_persona(str(f)), "My own persona text.")
         self.assertEqual(load_persona(""), DEFAULT_PERSONA)
@@ -323,6 +330,7 @@ class PersonaGenerationTest(unittest.TestCase):
 class DataCliE2ETest(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-w69-cli-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.data_dir = Path(self.home) / "data" / "training"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         _write_jsonl(self.data_dir / "open-hermes-25.jsonl", [

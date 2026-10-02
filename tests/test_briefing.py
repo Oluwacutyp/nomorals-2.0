@@ -10,6 +10,7 @@ registration, and engagement demotion/pinning.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -20,8 +21,10 @@ from nomorals.agents import morning_briefing as mb
 from nomorals.storage.db import Database
 
 
-def make_ctx(**settings_kw):
+def make_ctx(test=None, **settings_kw):
     tmp = tempfile.mkdtemp(prefix="briefing-test-")
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(os.path.join(tmp, "test.db"))
     db.migrate()
     settings = SimpleNamespace(workspace_dir=tmp, **settings_kw)
@@ -30,7 +33,7 @@ def make_ctx(**settings_kw):
 
 class ComposeTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_empty_world_still_composes(self):
         # no calendar, no topics, no symbols, no watchers — clean, no errors
@@ -92,7 +95,7 @@ class ComposeTests(unittest.TestCase):
 
 class LengthCapTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_200_news_items_capped_with_note(self):
         from nomorals.core.ids import new_id
@@ -111,7 +114,7 @@ class LengthCapTests(unittest.TestCase):
 
 class RunDeliverTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_run_stores_and_delivers(self):
         delivered = []
@@ -174,7 +177,7 @@ class RunDeliverTests(unittest.TestCase):
 
 class FollowupTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
         from nomorals.core.ids import new_id
         for i in range(4):
             self.ctx.db.execute(
@@ -211,7 +214,7 @@ class FollowupTests(unittest.TestCase):
 
 class EngagementTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
         from nomorals.core.ids import new_id
         for i in range(3):
             self.ctx.db.execute(
@@ -242,7 +245,7 @@ class EngagementTests(unittest.TestCase):
 
 class ScheduleTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_ensure_briefing_job_idempotent(self):
         r1 = mb.ensure_briefing_job(self.ctx)
@@ -288,7 +291,7 @@ class ScheduleTests(unittest.TestCase):
 
 class RepoSectionTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_repo_watcher_alerts_become_section(self):
         from nomorals.agents.watchers import WatcherStore, Watcher
@@ -311,7 +314,7 @@ class RepoSectionTests(unittest.TestCase):
 
 class RoomsSectionTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_dirty_room_appears_in_briefing(self):
         from nomorals.workspace.rooms import RoomManager
@@ -338,7 +341,7 @@ class MarketsProtocolTests(unittest.TestCase):
         self.assertIs(mb.MarketDataProvider, Shared)
 
     def test_coingecko_provider_implements_protocol(self):
-        ctx, _ = make_ctx()
+        ctx, _ = make_ctx(self)
         prov = mb.CoinGeckoMarketProvider(ctx)
         # structural: quote(symbol, market=...) + overnight_movers(...)
         import inspect
@@ -347,7 +350,7 @@ class MarketsProtocolTests(unittest.TestCase):
                       inspect.signature(prov.overnight_movers).parameters)
 
     def test_overnight_movers_sorts_by_abs_change(self):
-        ctx, _ = make_ctx()
+        ctx, _ = make_ctx(self)
         prov = mb.CoinGeckoMarketProvider(ctx)
         prov.quote = lambda s, market="crypto": {  # type: ignore[method-assign]
             "symbol": s, "price": 1.0,
@@ -358,7 +361,7 @@ class MarketsProtocolTests(unittest.TestCase):
 
 class ToolRegistrationTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
 
     def test_briefing_tool_config_action(self):
         from nomorals.core.policy import CapabilitySet

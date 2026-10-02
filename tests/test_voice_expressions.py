@@ -11,6 +11,7 @@ latent ``_load_backend`` KeyError fix for ``hf-endpoint``.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -324,8 +325,10 @@ class BackendPlumbingTest(unittest.TestCase):
 
         import nomorals.voice.tts as tts_mod
         from nomorals.voice.tts import HFEndpointBackend
+        voices_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, voices_dir, ignore_errors=True)
         engine = UniversalTTS(backend="hf-endpoint",
-                              voices_dir=tempfile.mkdtemp())
+                              voices_dir=voices_dir)
         with mock.patch.object(tts_mod, "_spec", return_value=True):
             backend = engine._load_backend()
         self.assertIsInstance(backend, HFEndpointBackend)
@@ -395,6 +398,7 @@ class MultiSampleCloningTest(unittest.TestCase):
 class VoiceLibrarySamplesTest(unittest.TestCase):
     def test_add_sample_and_transcript_roundtrip(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         lib = VoiceLibrary(tmp)
         src = os.path.join(tmp, "src.wav")
         write_wav(src, [0.0] * 240, 24000)
@@ -412,7 +416,9 @@ class VoiceLibrarySamplesTest(unittest.TestCase):
         self.assertEqual(len(profile.reference_audios), 2)
 
     def test_add_sample_unknown_voice(self):
-        lib = VoiceLibrary(tempfile.mkdtemp())
+        voices_tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, voices_tmp, ignore_errors=True)
+        lib = VoiceLibrary(voices_tmp)
         with self.assertRaises(KeyError):
             lib.add_sample("ghost", "/tmp/x.wav")
 
@@ -420,6 +426,7 @@ class VoiceLibrarySamplesTest(unittest.TestCase):
 class ProbeReferenceAudioTest(unittest.TestCase):
     def test_good_clip(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         path = os.path.join(tmp, "good.wav")
         write_wav(path, [0.1] * (24000 * 10), 24000)
         info = probe_reference_audio(path)
@@ -430,6 +437,7 @@ class ProbeReferenceAudioTest(unittest.TestCase):
 
     def test_short_clip_warns(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         path = os.path.join(tmp, "short.wav")
         write_wav(path, [0.1] * 24000, 24000)
         info = probe_reference_audio(path)

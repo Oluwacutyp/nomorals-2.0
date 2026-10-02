@@ -8,6 +8,7 @@ from the persisted checkpoint rather than starting over.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -115,6 +116,7 @@ class MissionModelTests(unittest.TestCase):
 class MissionStoreTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-ms-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = build_context(Settings(home=self.home))
         self.context.__enter__()
         self.store = MissionStore(self.context.db)
@@ -211,6 +213,7 @@ class MissionStoreTests(unittest.TestCase):
 class MissionRunnerTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-mr-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = build_context(Settings(home=self.home))
         self.context.__enter__()
         self.store = MissionStore(self.context.db)
@@ -341,6 +344,7 @@ class CrashRecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.home = tempfile.mkdtemp(prefix="nm-crash-")
+        cls.addClassCleanup(shutil.rmtree, cls.home, ignore_errors=True)
         cls.worker = Path(cls.home) / "worker.py"
         cls.worker.write_text(_KILL_WORKER, encoding="utf-8")
         cls.env = {
@@ -387,6 +391,7 @@ class CrashRecoveryTests(unittest.TestCase):
 
     def test_two_kills_in_a_row_still_converge(self):
         home = tempfile.mkdtemp(prefix="nm-crash2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         worker = Path(home) / "worker.py"
         worker.write_text(_KILL_WORKER, encoding="utf-8")
         env = {**os.environ, "NM_HOME": home, "PYTHONPATH": str(REPO_ROOT)}

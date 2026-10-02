@@ -12,6 +12,7 @@ path ("forget that"), and the `nm memory` CLI surface.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -36,6 +37,7 @@ def temp_dir():
 class PersonaTestBase(unittest.TestCase):
     def setUp(self):
         self.home = temp_dir()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         settings = Settings(home=self.home)
         self.context = build_context(settings)
         self.context.__enter__()

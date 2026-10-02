@@ -17,6 +17,7 @@ Covers the proactive push layer built on the Notifier:
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -62,8 +63,10 @@ def make_partner(**kw):
     return SimpleNamespace(**base)
 
 
-def make_ctx(partner=None, gateway=None, **kw):
+def make_ctx(test=None, partner=None, gateway=None, **kw):
     tmp = tempfile.mkdtemp(prefix="proactive-test-")
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(os.path.join(tmp, "test.db"))
     db.migrate()
     settings = SimpleNamespace(
@@ -76,18 +79,18 @@ def make_ctx(partner=None, gateway=None, **kw):
 class GatewayResolutionTests(unittest.TestCase):
     def test_resolves_from_extras(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         self.assertIs(gw, n.gateway)
 
     def test_explicit_gateway_wins(self):
         gw1, gw2 = FakeGateway(), FakeGateway()
-        ctx, _ = make_ctx(gateway=gw1)
+        ctx, _ = make_ctx(self, gateway=gw1)
         n = Notifier(ctx, gateway=gw2)
         self.assertIs(gw2, n.gateway)
 
     def test_none_without_gateway(self):
-        ctx, _ = make_ctx()
+        ctx, _ = make_ctx(self)
         n = Notifier(ctx)
         self.assertIsNone(n.gateway)
 
@@ -95,7 +98,7 @@ class GatewayResolutionTests(unittest.TestCase):
 class OwnerOnlyDeliveryTests(unittest.TestCase):
     def test_sends_only_to_owner_chats(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(owner_chats="telegram:111,whatsapp:222"),
             gateway=gw)
         n = Notifier(ctx)
@@ -109,7 +112,7 @@ class OwnerOnlyDeliveryTests(unittest.TestCase):
         # regression: even if a stranger's chat key somehow appears in a
         # message, delivery only iterates owner_chats
         gw = FakeGateway()
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(owner_chats="telegram:111"),
             gateway=gw)
         n = Notifier(ctx)
@@ -121,7 +124,7 @@ class OwnerOnlyDeliveryTests(unittest.TestCase):
 
     def test_dead_platform_not_counted(self):
         gw = FakeGateway(live_platforms=("telegram",))
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(owner_chats="telegram:111,whatsapp:222"),
             gateway=gw)
         n = Notifier(ctx)
@@ -132,14 +135,14 @@ class OwnerOnlyDeliveryTests(unittest.TestCase):
 
     def test_no_live_channel_is_failed_not_sent(self):
         gw = FakeGateway(live_platforms=())
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         res = n.publish("briefing", "t", "b")
         self.assertFalse(res["delivered"])
         self.assertEqual(res["delivery_state"], "failed")
 
     def test_no_gateway_is_pending(self):
-        ctx, _ = make_ctx()  # no gateway at all
+        ctx, _ = make_ctx(self)  # no gateway at all
         n = Notifier(ctx)
         res = n.publish("briefing", "t", "b")
         self.assertFalse(res["delivered"])
@@ -149,7 +152,7 @@ class OwnerOnlyDeliveryTests(unittest.TestCase):
 class ProactiveGateTests(unittest.TestCase):
     def test_master_off_disables_briefing(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("briefing", "morning", "hi")
@@ -159,7 +162,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_master_off_disables_watchers(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("watcher", "hit", "hi")
@@ -168,7 +171,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_kind_toggle_briefing_only(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_briefing=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_briefing=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("briefing", "morning", "hi")
@@ -179,7 +182,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_kind_toggle_watchers_only(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_watchers=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_watchers=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("watcher", "hit", "hi")
@@ -189,7 +192,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_non_proactive_kind_unaffected(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         # "news" is not a proactive kind — keeps historical behavior
@@ -198,7 +201,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_critical_bypasses_proactive_gate(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("watcher", "urgent", "hi", critical=True)
@@ -206,7 +209,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_force_still_respects_proactive_off(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         res = n.publish("briefing", "late one", "hi", force=True)
@@ -215,7 +218,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_dedupe_still_works(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         n.publish("briefing", "same title", "one")
         res = n.publish("briefing", "same title", "two")
@@ -224,7 +227,7 @@ class ProactiveGateTests(unittest.TestCase):
 
     def test_disabled_rows_not_resurrected_by_redeliver(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=gw)
         n = Notifier(ctx)
         n.publish("briefing", "morning", "hi")
@@ -232,7 +235,7 @@ class ProactiveGateTests(unittest.TestCase):
         self.assertEqual(gw.sent, [])
 
     def test_pending_redelivered_when_gateway_arrives(self):
-        ctx, _ = make_ctx()  # stored as pending: no gateway
+        ctx, _ = make_ctx(self)  # stored as pending: no gateway
         n = Notifier(ctx)
         n.publish("briefing", "morning", "hi")
         self.assertEqual(len(n.pending()), 1)
@@ -244,7 +247,7 @@ class ProactiveGateTests(unittest.TestCase):
 
 class QuietHoursPolicyTests(unittest.TestCase):
     def test_in_quiet_hours_now(self):
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(quiet_start=22, quiet_end=8,
                                  timezone="UTC"))
         real_dt = __import__("datetime").datetime
@@ -263,12 +266,12 @@ class QuietHoursPolicyTests(unittest.TestCase):
     def test_briefing_exempt_from_quiet_hours(self):
         # the scheduled briefing is an explicit send (like an alarm) —
         # it goes out even inside quiet hours
-        ctx, _ = make_ctx(partner=make_partner())
+        ctx, _ = make_ctx(self, partner=make_partner())
         self.assertIsNone(notmod.proactive_gate(ctx, "briefing"))
 
     def test_watcher_exempt_from_notifier_quiet_hours(self):
         # watchers carry their own per-watcher quiet-hours logic
-        ctx, _ = make_ctx(partner=make_partner())
+        ctx, _ = make_ctx(self, partner=make_partner())
         self.assertIsNone(notmod.proactive_gate(ctx, "watcher"))
 
 
@@ -276,7 +279,7 @@ class BriefingStatusTests(unittest.TestCase):
     def test_status_reports_switches_and_states(self):
         from nomorals.agents import morning_briefing as mb
         gw = FakeGateway()
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(proactive_briefing=False),
             gateway=gw)
         n = Notifier(ctx)
@@ -292,7 +295,7 @@ class BriefingStatusTests(unittest.TestCase):
     def test_run_briefing_returns_delivery_state(self):
         from nomorals.agents import morning_briefing as mb
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         res = mb.run_briefing(ctx)
         self.assertIn("delivery_state", res)
         self.assertEqual(res["delivery_state"], "sent")
@@ -302,7 +305,7 @@ class BriefingStatusTests(unittest.TestCase):
 class WatcherSendHonestyTests(unittest.TestCase):
     def test_send_audit_not_fake_sent_when_undelivered(self):
         from nomorals.agents.watchers import WatcherStore, AlertEngine, Watcher
-        ctx, _ = make_ctx()  # no gateway -> pending
+        ctx, _ = make_ctx(self)  # no gateway -> pending
         store = WatcherStore(ctx.db)
         w = Watcher(id="w1", name="btc", kind="price", severity="important",
                     cooldown_s=60)
@@ -317,7 +320,7 @@ class WatcherSendHonestyTests(unittest.TestCase):
     def test_send_audit_sent_when_delivered(self):
         from nomorals.agents.watchers import WatcherStore, AlertEngine, Watcher
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         store = WatcherStore(ctx.db)
         w = Watcher(id="w1", name="btc", kind="price", severity="important",
                     cooldown_s=60)
@@ -330,7 +333,7 @@ class WatcherSendHonestyTests(unittest.TestCase):
     def test_watcher_disabled_by_toggle(self):
         from nomorals.agents.watchers import WatcherStore, AlertEngine, Watcher
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(proactive_watchers=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_watchers=False),
                           gateway=gw)
         store = WatcherStore(ctx.db)
         w = Watcher(id="w1", name="btc", kind="price", severity="important",

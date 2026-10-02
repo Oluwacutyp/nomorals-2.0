@@ -9,6 +9,7 @@ time rather than just checking that results came back.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -358,6 +359,7 @@ class RoleTests(unittest.TestCase):
 class OrchestratorTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-orch-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = build_context(Settings(home=self.home))
         self.context.__enter__()
         self.orchestrator = MasterOrchestrator(self.context, max_steps=4)

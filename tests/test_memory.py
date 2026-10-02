@@ -6,6 +6,7 @@ fallback, so every assertion here is reproducible.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,6 +99,7 @@ class EmbedderTests(unittest.TestCase):
 class MemoryManagerTests(unittest.TestCase):
     def setUp(self):
         self.home = temp_dir()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         settings = Settings(home=self.home)
         self.context = build_context(settings)
         self.context.__enter__()

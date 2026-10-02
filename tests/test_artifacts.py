@@ -1,5 +1,6 @@
 """First-class artifacts: store, resolve, reference, provenance."""
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +15,10 @@ from nomorals.storage.blob import BlobStore
 from nomorals.storage.db import Database
 
 
-def make_store():
+def make_store(test=None):
     tmp = tempfile.mkdtemp()
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(":memory:")
     db.migrate()
     blobs = BlobStore(db, Path(tmp) / "blobs")
@@ -24,7 +27,7 @@ def make_store():
 
 class TestArtifacts(unittest.TestCase):
     def setUp(self):
-        self.store, self.db = make_store()
+        self.store, self.db = make_store(self)
 
     def tearDown(self):
         self.db.close()

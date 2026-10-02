@@ -10,6 +10,7 @@ takes four sleeps; fanned out it must take about one.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import time
 import unittest
@@ -131,6 +132,7 @@ class AdapterValidationTests(unittest.TestCase):
 class ManagerTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-social-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = _context(self.home)
         self.social = SocialManager(self.context)
         self.alpha = FakeAdapter("alpha")
@@ -282,6 +284,7 @@ class ManagerTests(unittest.TestCase):
 class RateLimitTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-rate-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = _context(self.home)
         self.social = SocialManager(self.context)
         self.adapter = FakeAdapter("alpha")
@@ -317,6 +320,7 @@ class RateLimitTests(unittest.TestCase):
 class SchedulingTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-sched-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = _context(self.home)
         self.social = SocialManager(self.context)
         self.adapter = FakeAdapter("alpha")
@@ -367,6 +371,7 @@ class BuiltinAdapterTests(unittest.TestCase):
 
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-adapters-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = _context(self.home)
 
     def tearDown(self):
@@ -428,6 +433,7 @@ class BuiltinAdapterTests(unittest.TestCase):
 class StatsTests(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="nm-stats-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.context = _context(self.home)
         self.social = SocialManager(self.context)
         self.social.register_adapter(FakeAdapter("alpha"))

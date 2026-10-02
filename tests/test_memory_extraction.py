@@ -13,6 +13,7 @@ Covers the contract the pipeline promises:
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from typing import Any
@@ -32,8 +33,11 @@ from nomorals.memory.manager import join_tags
 from nomorals.social.chat.control import parse_control
 
 
-def _make_context() -> Any:
-    settings = Settings(home=tempfile.mkdtemp(prefix="nm-memx-"))
+def _make_context(test=None) -> Any:
+    tmp = tempfile.mkdtemp(prefix="nm-memx-")
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    settings = Settings(home=tmp)
     ctx = build_context(settings)
     ctx.__enter__()
     return ctx
@@ -117,7 +121,7 @@ class DedupeTests(unittest.TestCase):
 
 class ExtractionPipelineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         self.memory = self.context.memory
 
     def tearDown(self) -> None:
@@ -206,7 +210,7 @@ class _FakeRouter:
 
 class ManagerV2Tests(unittest.TestCase):
     def setUp(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         self.memory = self.context.memory
 
     def tearDown(self) -> None:
@@ -271,7 +275,7 @@ class ControlCommandTests(unittest.TestCase):
         self.assertEqual(f.kind, "forget")
 
     def test_remember_with_kind_and_tags(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         self.memory = self.context.memory
         rt = _stub_runtime(self.memory)
         out = rt._control_remember("he likes espresso, not coffee latte preference tags:coffee,espresso",
@@ -285,18 +289,18 @@ class ControlCommandTests(unittest.TestCase):
         self.assertIn("espresso", record.tags)
 
     def test_remember_usage(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         rt = _stub_runtime(self.context.memory)
         self.assertIn("usage", rt._control_remember(""))
 
     def test_recall_empty_memory(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         rt = _stub_runtime(self.context.memory)
         out = rt._control_recall("anything at all")
         self.assertIn("nothing in memory", out)
 
     def test_forget_unknown_id(self) -> None:
-        self.context = _make_context()
+        self.context = _make_context(self)
         rt = _stub_runtime(self.context.memory)
         out = rt._control_forget("deadbeef0000")
         self.assertIn("no memory with id", out)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -135,6 +136,7 @@ class ToolDeniedTests(unittest.TestCase):
 
     def test_denial_logged_and_categorized(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         db = Database(os.path.join(tmp, "t.db"))
         db.migrate()
         agent, _ = self._critic(db=db)
@@ -476,6 +478,7 @@ class SpecBoundLegacyAgentTests(unittest.TestCase):
 
     def test_denial_recorded_in_ledger_from_legacy_path(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         db = Database(os.path.join(tmp, "t.db"))
         db.migrate()
         agent, _ = self._bound("research", "researcher", db=db)

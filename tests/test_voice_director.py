@@ -6,6 +6,7 @@ No model weights are downloaded — the ``cosyvoice`` and
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -133,6 +134,7 @@ class TestCosyVoiceBackend(unittest.TestCase):
         for mod in ["cosyvoice", "cosyvoice.cli",
                     "cosyvoice.cli.cosyvoice"]:
             sys.modules.pop(mod, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _backend(self):
         from nomorals.voice.tts import CosyVoiceBackend

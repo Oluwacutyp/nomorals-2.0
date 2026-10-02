@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -24,8 +25,10 @@ from nomorals.workspace.rooms import (
 )
 
 
-def make_ctx():
+def make_ctx(test=None):
     tmp = tempfile.mkdtemp(prefix="rooms-test-")
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     db_path = os.path.join(tmp, "test.db")
     db = Database(db_path)
     db.migrate()
@@ -47,7 +50,7 @@ class SlugTests(unittest.TestCase):
 
 class CreateTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
         self.mgr = RoomManager(self.tmp, db=self.ctx.db)
 
     def test_layout(self):
@@ -93,7 +96,7 @@ class CreateTests(unittest.TestCase):
 
 class RehydrationTests(unittest.TestCase):
     def test_fresh_manager_resumes_from_room_md(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Resume Me", kind="goal", linked_id="g9")
         with mgr.enter(r.slug) as c:
@@ -110,7 +113,7 @@ class RehydrationTests(unittest.TestCase):
             self.assertEqual(len(c2.room.decisions), 1)
 
     def test_rehydrate_from_disk_when_db_row_missing(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Orphan")
         with mgr.enter(r.slug) as c:
@@ -125,7 +128,7 @@ class RehydrationTests(unittest.TestCase):
 
 class SandboxTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
         self.mgr = RoomManager(self.tmp, db=self.ctx.db)
         self.room = self.mgr.create("Sandbox")
         self.c = self.mgr.enter(self.room.slug)
@@ -178,7 +181,7 @@ class SandboxTests(unittest.TestCase):
 
 class RedactionTests(unittest.TestCase):
     def test_secrets_redacted_in_logs_and_room_md(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Redact")
         secret = "api_key=sk-live-1234567890abcdef"
@@ -194,7 +197,7 @@ class RedactionTests(unittest.TestCase):
 
 class LinkSearchTests(unittest.TestCase):
     def setUp(self):
-        self.ctx, self.tmp = make_ctx()
+        self.ctx, self.tmp = make_ctx(self)
         self.mgr = RoomManager(self.tmp, db=self.ctx.db)
 
     def test_link(self):
@@ -228,7 +231,7 @@ class LinkSearchTests(unittest.TestCase):
 
 class DirtyTests(unittest.TestCase):
     def test_dirty_reconciled_not_resumed(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Crashy")
         ctx2 = mgr.enter(r.slug)
@@ -242,7 +245,7 @@ class DirtyTests(unittest.TestCase):
             self.assertIn("dirty_tail", c.room.state)
 
     def test_clean_exit_clears_dirty(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Clean")
         with mgr.enter(r.slug):
@@ -255,7 +258,7 @@ class DirtyTests(unittest.TestCase):
 
 class TickTests(unittest.TestCase):
     def test_tick_advances_bounded_and_skips_blocked(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         from nomorals.agents.goals import GoalSystem
         gs = GoalSystem(ctx)
         # disable auto-room for the fixture goal; we'll link manually
@@ -280,7 +283,7 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(out["skipped"]), 1)
 
     def test_stale_detection(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         mgr = RoomManager(tmp, db=ctx.db)
         r = mgr.create("Old Room")
         # backdate activity
@@ -296,7 +299,7 @@ class TickTests(unittest.TestCase):
 
 class GoalRoomIntegrationTests(unittest.TestCase):
     def test_goal_step_runs_in_room(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         from nomorals.agents.goals import GoalSystem
         gs = GoalSystem(ctx)
         goal = gs.create("Room Goal", plan=["do the thing"])
@@ -311,7 +314,7 @@ class GoalRoomIntegrationTests(unittest.TestCase):
         self.assertIn("do the thing", log)
 
     def test_roomless_goal_byte_identical(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         ctx.settings.rooms_auto_create = False
         from nomorals.agents.goals import GoalSystem
         gs = GoalSystem(ctx)
@@ -323,7 +326,7 @@ class GoalRoomIntegrationTests(unittest.TestCase):
         self.assertEqual(step.status, "done")
 
     def test_auto_create_off(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         ctx.settings.rooms_auto_create = False
         from nomorals.agents.goals import GoalSystem
         gs = GoalSystem(ctx)
@@ -334,7 +337,7 @@ class GoalRoomIntegrationTests(unittest.TestCase):
 
 class ProjectRoomIntegrationTests(unittest.TestCase):
     def test_project_step_runs_in_room(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         from nomorals.agents.projects import ProjectManager
         pm = ProjectManager(ctx)
         p = pm.create("Room Project", steps=["build it"])
@@ -349,7 +352,7 @@ class ProjectRoomIntegrationTests(unittest.TestCase):
         self.assertIn("build it", log)
 
     def test_roomless_project_unchanged(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         ctx.settings.rooms_auto_create = False
         from nomorals.agents.projects import ProjectManager
         pm = ProjectManager(ctx)
@@ -360,7 +363,7 @@ class ProjectRoomIntegrationTests(unittest.TestCase):
 
 class SchedulerTests(unittest.TestCase):
     def test_ensure_rooms_tick_job_idempotent(self):
-        ctx, tmp = make_ctx()
+        ctx, tmp = make_ctx(self)
         from nomorals.workspace.rooms import ensure_rooms_tick_job
         first = ensure_rooms_tick_job(ctx)
         second = ensure_rooms_tick_job(ctx)

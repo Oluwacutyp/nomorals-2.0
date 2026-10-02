@@ -6,6 +6,7 @@ Proxy, ProxyScraper, SourceRegistry, ProxyLab, plus tool registration.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import types
 import unittest
@@ -17,8 +18,10 @@ from nomorals.tools import proxy as PX
 from nomorals.tools import ssh_socks as SS
 
 
-def _ctx():
+def _ctx(test=None):
     home = tempfile.mkdtemp()
+    if test is not None:
+        test.addCleanup(shutil.rmtree, home, ignore_errors=True)
     return types.SimpleNamespace(
         settings=types.SimpleNamespace(home=home))
 
@@ -154,6 +157,7 @@ class ScraperTests(unittest.TestCase):
 class SourceRegistryTests(unittest.TestCase):
     def _reg(self):
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         return PS.SourceRegistry(Path(tmp) / "sources.json")
 
     def test_sources_lists_builtins(self):
@@ -267,7 +271,7 @@ class CatalogTests(unittest.TestCase):
 
 class ProxyLabTests(unittest.TestCase):
     def test_scrape_feeds_registry_health(self):
-        lab = PL.ProxyLab(_ctx())
+        lab = PL.ProxyLab(_ctx(self))
         lab._scraper = PL.ProxyScraper(
             fetcher=lambda url: b"1.2.3.4:8080\n",
             sources=[("s-ok", "http://ok/x.txt", "list")],

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -60,8 +61,10 @@ def make_partner(**kw):
     return SimpleNamespace(**base)
 
 
-def make_ctx(partner=None, gateway=None, **kw):
+def make_ctx(test=None, partner=None, gateway=None, **kw):
     tmp = tempfile.mkdtemp(prefix="wave-d-e-")
+    if test is not None:
+        test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
     db = Database(os.path.join(tmp, "test.db"))
     db.migrate()
     settings = SimpleNamespace(
@@ -76,7 +79,7 @@ def make_ctx(partner=None, gateway=None, **kw):
 class DedupeChokeTests(unittest.TestCase):
     def test_double_send_delivers_once(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         r1 = n.publish("watcher", "price hit: BTC", "body")
         r2 = n.publish("watcher", "price hit: BTC", "body")
@@ -88,7 +91,7 @@ class DedupeChokeTests(unittest.TestCase):
     def test_critical_still_dedupes(self):
         # critical bypasses the feature flag, NOT the dedupe window
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         r1 = n.publish("watcher", "urgent: disk full", "b", critical=True)
         r2 = n.publish("watcher", "urgent: disk full", "b", critical=True)
@@ -98,7 +101,7 @@ class DedupeChokeTests(unittest.TestCase):
 
     def test_force_is_the_escape_hatch(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         n.publish("briefing", "manual resend", "b", force=True)
         r = n.publish("briefing", "manual resend", "b", force=True)
@@ -107,7 +110,7 @@ class DedupeChokeTests(unittest.TestCase):
 
     def test_critical_bypasses_muted_flag_but_not_dedupe(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(partner=make_partner(), gateway=gw)
+        ctx, _ = make_ctx(self, partner=make_partner(), gateway=gw)
         n = Notifier(ctx)
         with patch("nomorals.agents.features.feature_enabled", return_value=False):
             r = n.publish("watcher", "urgent: disk full 2", "b",
@@ -120,7 +123,7 @@ class DedupeChokeTests(unittest.TestCase):
 
     def test_deduped_row_is_not_stored_twice(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         n.publish("news", "digest", "b")
         n.publish("news", "digest", "b")
@@ -134,7 +137,7 @@ class DedupeChokeTests(unittest.TestCase):
 class MetricsVisibilityTests(unittest.TestCase):
     def test_delivery_counts_aggregates_states(self):
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         n = Notifier(ctx)
         n.publish("watcher", "a1", "b")          # sent
         n.publish("watcher", "a1", "b")          # deduped (not stored)
@@ -151,7 +154,7 @@ class MetricsVisibilityTests(unittest.TestCase):
         from nomorals.agents.morning_briefing import proactive_status
 
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         Notifier(ctx).publish("briefing", "morning", "b")
         st = proactive_status(ctx)
         for key in ("settings", "recent", "counts", "health"):
@@ -164,7 +167,7 @@ class MetricsVisibilityTests(unittest.TestCase):
         from nomorals.agents.morning_briefing import proactive_status
 
         # no gateway at all: persist-only — must be said out loud
-        ctx, _ = make_ctx()
+        ctx, _ = make_ctx(self)
         st = proactive_status(ctx)
         self.assertFalse(st["health"]["ok"])
         self.assertTrue(any("no live gateway" in d
@@ -173,7 +176,7 @@ class MetricsVisibilityTests(unittest.TestCase):
     def test_proactive_status_names_missing_owner_chats(self):
         from nomorals.agents.morning_briefing import proactive_status
 
-        ctx, _ = make_ctx(partner=make_partner(owner_chats=""),
+        ctx, _ = make_ctx(self, partner=make_partner(owner_chats=""),
                           gateway=FakeGateway())
         st = proactive_status(ctx)
         self.assertFalse(st["health"]["ok"])
@@ -185,7 +188,7 @@ class MetricsVisibilityTests(unittest.TestCase):
 
 class QuietHoursTests(unittest.TestCase):
     def _ctx(self):
-        return make_ctx(partner=make_partner(timezone="UTC"),
+        return make_ctx(self, partner=make_partner(timezone="UTC"),
                         gateway=FakeGateway())
 
     def test_gate_holds_non_exempt_kind(self):
@@ -198,7 +201,7 @@ class QuietHoursTests(unittest.TestCase):
         self.assertEqual(gate, "held-quiet-hours")
 
     def test_gate_disabled_when_master_off(self):
-        ctx, _ = make_ctx(partner=make_partner(proactive_enabled=False),
+        ctx, _ = make_ctx(self, partner=make_partner(proactive_enabled=False),
                           gateway=FakeGateway())
         self.assertEqual(proactive_gate(ctx, "briefing"), "disabled")
 
@@ -226,7 +229,7 @@ class OwnerOnlyChokeTests(unittest.TestCase):
         from nomorals.agents.arena.core import Arena
 
         gw = FakeGateway()
-        ctx, _ = make_ctx(
+        ctx, _ = make_ctx(self, 
             partner=make_partner(owner_chats="telegram:111"), gateway=gw)
         arena = Arena(ctx)
         wrapped = arena._choked_review_push(lambda p: None)
@@ -248,7 +251,7 @@ class OwnerOnlyChokeTests(unittest.TestCase):
     def test_arena_loop_wrap_none_stays_none(self):
         from nomorals.agents.arena.core import Arena
 
-        ctx, _ = make_ctx()
+        ctx, _ = make_ctx(self)
         arena = Arena(ctx)
         self.assertIsNone(arena._choked_review_push(None))
 
@@ -259,7 +262,7 @@ class SchedulerSpamTests(unittest.TestCase):
     def _scheduler(self, gw):
         from nomorals.agents.scheduler import Scheduler
 
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         sched = Scheduler(ctx)
         sched.notifier = Notifier(ctx, gateway=gw)
         return sched, ctx
@@ -322,7 +325,7 @@ class SchedulerSpamTests(unittest.TestCase):
 
 class UpgradeQueueApprovalTests(unittest.TestCase):
     def _ctx(self):
-        return make_ctx()
+        return make_ctx(self)
 
     def test_evolve_plan_files_into_queue(self):
         from nomorals.agents.evolution import EvolutionAgent, EvolutionProposal
@@ -501,7 +504,7 @@ class ResearchDigestTightenTests(unittest.TestCase):
         from nomorals.agents.research_digest import ResearchPipeline
 
         gw = FakeGateway()
-        ctx, _ = make_ctx(gateway=gw)
+        ctx, _ = make_ctx(self, gateway=gw)
         report = SimpleNamespace(
             query="q", synthesis="synth", findings=[], conflicts=[],
             failed_angles=[], critique="",

@@ -1,6 +1,7 @@
 """Tests for the money-making opportunities hunter (no network)."""
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,6 +113,7 @@ class FinderTests(unittest.TestCase):
 class HunterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.hunter = O.OpportunityHunter()
         self.hunter._data_dir = Path(self.tmp)
 
