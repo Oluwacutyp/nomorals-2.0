@@ -84,6 +84,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "trade": ["td"],
     "trial": ["trl"],
     "tui": ["ui"],
+    "timeline": ["tl"],
     "vision": ["v"],
     "voice": ["vc"],
     "weather": ["wx"],
@@ -942,6 +943,22 @@ def _parser() -> argparse.ArgumentParser:
     b_followup.add_argument("n", type=int, help="1-based item number")
     b_followup.add_argument("--json", action="store_true",
                             help="Output as JSON")
+    timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],
+                              help="event timeline: what happened, newest first")
+    timeline.add_argument("--session", default="",
+                          help="filter by session id")
+    timeline.add_argument("--project", default="",
+                          help="filter by project id")
+    timeline.add_argument("--mission", default="",
+                          help="filter by mission id")
+    timeline.add_argument("--artifact", default="",
+                          help="filter by artifact id")
+    timeline.add_argument("--topic", default="",
+                          help="filter by topic (glob, e.g. 'mission.*')")
+    timeline.add_argument("--limit", type=int, default=50,
+                          help="max rows (default 50)")
+    timeline.add_argument("--json", action="store_true",
+                          help="Output as JSON")
     room_sub = room.add_subparsers(dest="room_action", required=True)
     r_new = room_sub.add_parser("new", help="create a room")
     r_new.add_argument("title", help="room title")
@@ -1531,6 +1548,93 @@ def _cmd_native(args, context) -> int:
     return 0
 
 
+def _render_timeline_row(row: dict) -> str:
+    """One human-readable timeline line: ts, topic, ids, key facts."""
+    import datetime as _dt
+
+    ts = _dt.datetime.fromtimestamp(row.get("ts") or 0,
+                                    tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    topic = str(row.get("topic") or "?")
+    ids = " ".join(f"{k}={row[k]}" for k in
+                   ("session_id", "project_id", "mission_id", "artifact_id")
+                   if row.get(k))
+    data = row.get("data") or {}
+    facts: list[str] = []
+    for key in ("from_state", "to_state", "verdict", "frontend", "principal",
+                "type", "creator"):
+        if data.get(key):
+            facts.append(f"{key}={data[key]}")
+    note = data.get("note") or data.get("details") or ""
+    detail = (" | " + " ".join(facts)) if facts else ""
+    if note:
+        detail += f" — {note}"
+    return f"{ts}  {topic:<28} {ids}{detail}".rstrip()
+
+
+def _cmd_timeline(args, context) -> int:
+    """Read the persisted event log (``nm timeline``). Never attaches to the
+    bus — it only reads what Timeline.attach() persisted earlier."""
+    from .os.timeline import Timeline
+
+    db_path = getattr(getattr(context, "db", None), "path", None)
+    tl = Timeline(db_path)
+    try:
+        rows = tl.query(
+            session_id=getattr(args, "session", "") or None,
+            project_id=getattr(args, "project", "") or None,
+            mission_id=getattr(args, "mission", "") or None,
+            artifact_id=getattr(args, "artifact", "") or None,
+            topic=getattr(args, "topic", "") or None,
+            limit=getattr(args, "limit", 50) or 50,
+        )
+    finally:
+        tl.close()
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2, default=str, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("no events recorded yet")
+        return 0
+    for row in rows:
+        print(_render_timeline_row(row))
+    return 0
+
+
+def _attach_cli_session(context: Any) -> None:
+    """Best-effort: create-or-reuse the CLI's os.Session and stash it.
+
+    Reuses the latest active ``cli``/``owner`` session when one exists,
+    otherwise creates a fresh one via
+    :class:`nomorals.os.session.SessionStore`. The session is stashed on
+    ``context.extras["os_session"]`` for commands to use. Never raises and
+    never changes any command's behavior — any failure here is logged at
+    debug and skipped.
+    """
+    try:
+        from .os.session import SessionStore
+
+        db = getattr(context, "db", None)
+        store = SessionStore(db=db) if db is not None else SessionStore()
+        session = None
+        try:
+            active = [s for s in store.list_active()
+                      if getattr(s, "frontend", "") == "cli"
+                      and getattr(s, "principal", "") == "owner"]
+            if active:
+                session = active[-1]
+        except Exception:  # noqa: BLE001 - reuse is optional; fall to create
+            _log.debug("listing active os sessions failed", exc_info=True)
+        if session is None:
+            session = store.create(frontend="cli", principal="owner")
+        extras = getattr(context, "extras", None)
+        if isinstance(extras, dict):
+            extras["os_session"] = session
+        else:  # exotic contexts without an extras dict
+            setattr(context, "os_session", session)
+    except Exception:  # noqa: BLE001 - session attach must never break the CLI
+        _log.debug("CLI os.Session attach skipped", exc_info=True)
+
+
 def _canonical_command(name: str) -> str:
     """Resolve a CLI alias to its canonical command name (``st`` → ``status``).
 
@@ -1562,6 +1666,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     from .agents.context import build_context
 
     with build_context(settings) as context:
+        _attach_cli_session(context)  # best-effort os.Session for this run
         if args.command == "models":
             return _cmd_models(args, context)
         if args.command == "data":
@@ -1582,6 +1687,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_backup(args, context)
         if args.command == "missions":
             return _cmd_missions(args, context)
+        if args.command == "timeline":
+            return _cmd_timeline(args, context)
         if args.command == "tui":
             return _cmd_tui(args, context)
         if args.command == "serve":
