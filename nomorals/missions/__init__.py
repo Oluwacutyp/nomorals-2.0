@@ -19,6 +19,16 @@ Public surface::
 from __future__ import annotations
 
 from .mission import Checkpoint, Mission, MissionStatus, MissionStore
+from .progress import (
+    STALL_AFTER_FAILURES,
+    MissionMilestones,
+    StallCode,
+    clear_stall,
+    estimate_eta,
+    fmt_duration,
+    record_stall,
+    render_status_text,
+)
 from .runner import MissionResult, MissionRunner, StepOutcome
 
 __all__ = [
@@ -28,5 +38,13 @@ __all__ = [
     "MissionRunner",
     "MissionStatus",
     "MissionStore",
+    "MissionMilestones",
+    "STALL_AFTER_FAILURES",
+    "StallCode",
     "StepOutcome",
+    "clear_stall",
+    "estimate_eta",
+    "fmt_duration",
+    "record_stall",
+    "render_status_text",
 ]

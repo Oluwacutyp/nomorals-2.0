@@ -23,9 +23,16 @@ from typing import Any, Callable, Iterable
 
 from ..agents.orchestrator import MasterOrchestrator
 from ..core.tasks import TaskKind
-from ..core.errors import BudgetExceeded, NoMoralsError, classify
+from ..core.errors import BudgetExceeded, NoMoralsError, ValidationError, classify
 from ..core.logging_setup import get_logger
 from ..missions.mission import Mission, MissionStatus, MissionStore
+from .progress import (
+    STALL_AFTER_FAILURES,
+    MissionMilestones,
+    StallCode,
+    clear_stall,
+    record_stall,
+)
 from ..storage.db import Database
 
 __all__ = ["StepOutcome", "MissionResult", "MissionRunner"]
@@ -104,6 +111,8 @@ class MissionRunner:
         checkpoint_every: int = 1,
         on_step: Callable[[Mission, StepOutcome], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        milestones: bool = True,
+        milestone_reporter: MissionMilestones | None = None,
     ) -> None:
         self.context = context
         self.store = store or MissionStore(context.db)
@@ -111,6 +120,16 @@ class MissionRunner:
         self.on_step = on_step
         self._clock = clock
         self._cancel = False
+        # Milestone pushes (started / step / stalled / done) go through the
+        # existing Notifier — never a parallel channel. ``milestones=False``
+        # disables them; ``milestone_reporter`` injects a pre-built one
+        # (tests use this for a fake clock + fake gateway).
+        if milestone_reporter is not None:
+            self.reporter: MissionMilestones | None = milestone_reporter
+        elif milestones:
+            self.reporter = MissionMilestones(context, store=self.store)
+        else:
+            self.reporter = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -118,6 +137,100 @@ class MissionRunner:
         """Cooperative cancellation, checked between steps."""
         self._cancel = True
         _log.info("mission cancellation requested: %s", reason)
+
+    # ── milestones & stalls ──────────────────────────────────────────────
+
+    def _report(self, method: str, *args: Any, **kwargs: Any) -> None:
+        """Fire a milestone event. Telemetry: never breaks a run."""
+        if self.reporter is None:
+            return
+        try:
+            getattr(self.reporter, method)(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - milestone pushes are best-effort
+            _log.debug("mission milestone %s failed", method, exc_info=True)
+
+    def mark_stalled(
+        self,
+        mission_id: str,
+        code: str,
+        message: str,
+        *,
+        step: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a concrete stall reason and push it to chat.
+
+        For the reasons only an operator knows: ``waiting_on_provider``
+        ("provider X is rate-limiting us"), ``blocked_on_approval``
+        ("needs your go-ahead on Y"), ``dependency_missing`` ("Z is not
+        installed"). The runner records ``retry_budget_exhausted`` and
+        ``budget_exhausted`` itself.
+        """
+        mission = self.store.get(mission_id)  # raises NotFound when unknown
+        if mission.terminal:
+            raise ValidationError(
+                f"mission {mission_id} is {mission.status}: "
+                "a terminal mission cannot stall")
+        changed = record_stall(mission, code, message, step=step, extra=extra)
+        self.store.save(mission)
+        if changed:
+            self._report("on_stalled", mission)
+        return {"mission_id": mission_id, "changed": changed,
+                "stall": mission.state.get("stall")}
+
+    def clear_stalled(self, mission_id: str) -> bool:
+        """Drop the stall record (progress resumed)."""
+        mission = self.store.get(mission_id)  # raises NotFound when unknown
+        cleared = clear_stall(mission)
+        if cleared:
+            self.store.save(mission)
+        return cleared
+
+    def _apply_step_result(
+        self, mission: Mission, outcome: StepOutcome, step_name: str
+    ) -> bool:
+        """Track consecutive failures; declare a stall when the retry
+        budget is spent. Returns True when a *new* stall was recorded
+        (the caller pushes it). Mutates the in-memory mission; the caller
+        saves.
+        """
+        if outcome.ok:
+            mission.state["consec_failures"] = 0
+            clear_stall(mission)  # progress resumed — the blocker is gone
+            return False
+        fails = int(mission.state.get("consec_failures") or 0) + 1
+        mission.state["consec_failures"] = fails
+        # The transition into stalled happens exactly once, at the budget
+        # boundary — later failures keep the original stall record (and its
+        # message) instead of manufacturing a "new" event per failure.
+        if fails == STALL_AFTER_FAILURES:
+            detail = (outcome.detail or "unknown error")[:160]
+            return record_stall(
+                mission,
+                StallCode.RETRY_BUDGET_EXHAUSTED,
+                f"{fails} consecutive step failures — last: {detail}",
+                step=step_name,
+            )
+        return False
+
+    def _record_budget_stall(self, mission: Mission) -> bool:
+        """Stall with the exact budget numbers. Saves + reports; returns
+        whether this is a new stall (duplicate pushes are suppressed)."""
+        wall = f"{mission.spent_wall:.0f}s"
+        if mission.budget_wall:
+            wall += f"/{mission.budget_wall:.0f}s"
+        tokens = f"{mission.spent_tokens}"
+        if mission.budget_tokens:
+            tokens += f"/{mission.budget_tokens}"
+        changed = record_stall(
+            mission,
+            StallCode.BUDGET_EXHAUSTED,
+            f"budget exhausted — wall {wall}, tokens {tokens}",
+        )
+        self.store.save(mission)
+        if changed:
+            self._report("on_stalled", mission)
+        return changed
 
     def start(
         self,
@@ -162,6 +275,7 @@ class MissionRunner:
 
         mission.status = MissionStatus.RUNNING
         self.store.save(mission)
+        self._report("on_started", mission)
 
         plan_steps = self._plan(mission)
         completed: set[str] = set(mission.state.get("completed_steps") or [])
@@ -176,6 +290,7 @@ class MissionRunner:
                 break
             if mission.budget_exhausted:
                 failure = "budget exhausted"
+                self._record_budget_stall(mission)
                 break
             if step.name in completed:
                 _log.debug("mission %s skipping completed step %s", mission.id, step.name)
@@ -194,11 +309,17 @@ class MissionRunner:
                 failure = outcome.detail or f"step {step.name} failed"
                 mission.state["last_error"] = failure
 
+            new_stall = self._apply_step_result(mission, outcome, step.name)
+
             self.store.save(mission)
             if index % self.checkpoint_every == 0:
                 self.store.checkpoint(mission, label=f"after:{step.name}")
             if self.on_step is not None:
                 self.on_step(mission, outcome)
+            if new_stall:
+                self._report("on_stalled", mission)
+            elif outcome.ok:
+                self._report("on_step", mission, outcome)
 
             if not outcome.ok and step.name in {"execute", "act", "run"}:
                 break
@@ -320,6 +441,7 @@ class MissionRunner:
 
         self.store.save(mission)
         self.store.checkpoint(mission, label=f"final:{status}")
+        self._report("on_terminal", mission, status, error=error)
         _log.info("mission %s finished: %s (success=%s)", mission.id, status, mission.success)
         return MissionResult(
             mission_id=mission.id,

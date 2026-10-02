@@ -176,6 +176,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
+    "mission": (0, None),    # /mission status [id|name] | list | stall <id> <code> <msg> | clear <id>
     "image": (1, 3),         # /image <path-or-url> — lookup
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
@@ -240,6 +241,7 @@ _HELP_TEXT = "\n".join(
         "  — she speaks first (owner DMs only, never anyone else) —",
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
+        "  /mission status [id|name]             mission progress, ETA, stall reasons",
         "  env: NM_PARTNER_PROACTIVE_ENABLED=0 silences all pushes;",
         "       NM_PARTNER_PROACTIVE_BRIEFING=0 / _WATCHERS=0 toggle each kind;",
         "       quiet hours NM_PARTNER_QUIET_START/_END (default 22–8)",
@@ -305,6 +307,7 @@ _HELP_TEXT = "\n".join(
         "  /bet bankroll [set <amt>] | backtest [n]  bankroll + walk-forward backtest",
         "  /task add <instruction> | /task run [id] | /task list",
         "  /notify [n]                             recent alerts",
+        "  /mission status [id|name]               mission progress, ETA, stall reasons",
         "  /image <path-or-url>                    look it up (hash, dims, seen?)",
         "  /lens <path-or-url>                     reverse image search",
         "  — devon (autonomous dev agent) —",
@@ -732,6 +735,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                   "usage": "/proactive",
                   "example": "/proactive",
                   "related": "/notify /watch"},
+    "mission": {"what": ("mission progress in chat: % complete, current step, "
+                         "an honest ETA, and — when stuck — the concrete "
+                         "stall reason. Milestones (started / step / stalled / "
+                         "done) also push proactively through the notifier."),
+                "usage": "/mission status [id|name] | /mission list | "
+                         "/mission stall <id> <code> <message> | /mission clear <id>",
+                "example": "/mission status",
+                "related": "/devon /notify"},
     "image": {"what": "look up an image: hash, dimensions, seen-before.",
               "usage": "/image <path-or-url>", "example": "/image /sdcard/pic.jpg",
               "related": "/lens /look"},
@@ -858,7 +869,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("media system", ["music", "play", "video", "hub", "podcast"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
-                            "macro", "file", "publish", "notify", "proactive"]),
+                            "macro", "file", "publish", "notify", "proactive", "mission"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -921,7 +932,10 @@ _TOPIC_PAGES: dict[str, str] = {
         "research (3 calls) at the same priority\n"
         "  * with a budget cap: 'nm mission plan' shows per goal what "
         "fits today (steps affordable) and the ETA in days\n"
-        "  * 'nm mission next' — what she will do at the next heartbeat"),
+        "  * 'nm mission next' — what she will do at the next heartbeat\n"
+        "  * /mission status [id|name] — chat-visible: % complete, current "
+        "step, ETA, and the concrete stall reason when stuck "
+        "(milestones also push proactively: started / step / stalled / done)"),
     "modes": (
         "modes — how autonomous she is\n"
         "  /mode off      asleep — only answers when you message\n"
@@ -1025,7 +1039,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "look", "image", "lens"]),
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
-      "publish", "notify", "proactive", "features", "decode", "cookies", "cipher",
+      "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
       "monitor", "bet", "finance", "weather", "tz"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
@@ -1145,6 +1159,7 @@ LIST_ONELINERS: dict[str, str] = {
     "publish": "md→pdf/html and send",
     "notify": "recent alerts",
     "proactive": "proactive push sends: switches + delivery states",
+    "mission": "mission progress + ETA + stall reasons",
     "features": "feature toggles (arena, vision, search, …)",
     "list": "this catalog — every executable command, categorized",
     "help": "the full help: catalog, per-command pages, topics",

@@ -24,6 +24,13 @@ from ..core.errors import NotFound, ValidationError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.repository import Repository
+from .progress import (
+    clear_stall as _clear_stall_entry,
+    estimate_eta,
+    real_plan_steps,
+    record_stall as _record_stall_entry,
+)
+from .progress import _step_name as _plan_step_name
 
 __all__ = ["MissionStatus", "Mission", "MissionStore", "Checkpoint"]
 
@@ -236,25 +243,92 @@ class MissionStore:
     def progress(self, mission_id: str) -> dict[str, Any]:
         """Step progress for the CLI: done / total / percent / current step.
 
-        Total comes from the persisted plan (``state["plan"]``); when no
+        Total comes from the persisted plan (``state["plan"]``), minus the
+        ``__plan_error__`` degradation marker which is not a step. When no
         plan was stored yet the mission simply has no measurable total.
+        Also carries the spend counters and last error so the chat status
+        command and the Devon agent's progress report read from one place.
         """
         mission = self.get(mission_id)  # raises NotFound when unknown
-        plan = mission.state.get("plan") or []
+        plan = real_plan_steps(mission.state.get("plan"))
         completed = set(mission.state.get("completed_steps") or [])
         total = len(plan)
         done = len([s for s in plan
-                    if (s.get("name") if isinstance(s, dict) else s)
-                    in completed]) if total else len(completed)
+                    if _plan_step_name(s) in completed]) if total else len(completed)
         current = ""
         for step in plan:
-            name = step.get("name", "") if isinstance(step, dict) else str(step)
+            name = _plan_step_name(step)
             if name and name not in completed:
                 current = name
                 break
         return {"steps_done": done, "total_steps": total,
                 "percent": (100.0 * done / total) if total else 0.0,
-                "current_step": current}
+                "current_step": current,
+                "spent_wall_seconds": mission.spent_wall,
+                "spent_tokens": mission.spent_tokens,
+                "last_error": str(mission.state.get("last_error") or "")}
+
+    def detail(self, mission_id: str) -> dict[str, Any]:
+        """Everything the chat status command needs in one call.
+
+        ``progress`` + an honest ETA + the stall record (if any) + recent
+        checkpoints + the milestone push log. Powers ``/mission status``
+        and the Devon agent's progress report.
+        """
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        eta_seconds, eta_note = estimate_eta(mission)
+        return {
+            "mission": mission.to_dict(),
+            "progress": self.progress(mission_id),
+            "eta_seconds": eta_seconds,
+            "eta_note": eta_note,
+            "stall": mission.state.get("stall"),
+            "recent_checkpoints": [
+                c.to_row() for c in self.checkpoint_history(mission_id, limit=5)
+            ],
+            "milestone_log": list(mission.state.get("milestones") or []),
+        }
+
+    # ── stall tracking ───────────────────────────────────────────────────────
+    #
+    # A stalled mission says WHY it is stalled: a StallCode plus a concrete
+    # message, the step it was on, and the timestamp. Never a bare
+    # "waiting". The runner records stalls automatically (consecutive
+    # failures, budget exhaustion); mark_stalled is the explicit operator
+    # API for "waiting on provider X" / "blocked on approval Y".
+
+    def mark_stalled(
+        self,
+        mission_id: str,
+        code: str,
+        message: str,
+        *,
+        step: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a concrete stall reason. Returns the entry + whether it
+        changed (a repeat of the identical stall is not a new event)."""
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        if mission.terminal:
+            raise ValidationError(
+                f"mission {mission_id} is {mission.status}: "
+                "a terminal mission cannot stall")
+        changed = _record_stall_entry(mission, code, message, step=step, extra=extra)
+        self.save(mission)
+        return {"mission_id": mission_id, "changed": changed,
+                "stall": mission.state.get("stall")}
+
+    def clear_stall(self, mission_id: str) -> bool:
+        """Drop the stall record. Returns True when one was present."""
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        cleared = _clear_stall_entry(mission)
+        if cleared:
+            self.save(mission)
+        return cleared
+
+    def stall(self, mission_id: str) -> dict[str, Any] | None:
+        """The current stall record, or None when the mission isn't stalled."""
+        return self.get(mission_id).state.get("stall")
 
     def set_status(self, mission_id: str, status: str, note: str = "") -> Mission:
         """Cross-process status flip (pause / cancel / resume-status).
