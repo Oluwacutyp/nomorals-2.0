@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import types
 import unittest
+import unittest.mock
 
 from nomorals.agents.coremind import (
     CoreMind,
@@ -455,6 +457,18 @@ class AmbiguousFallthroughTest(unittest.TestCase):
         self.assertIsNone(fast_path("how's it going"))
         intent = mind.decide("how's it going")
         self.assertEqual(intent.kind, "status")
+
+
+class FastPathTimezoneTest(unittest.TestCase):
+    def test_nm_timezone_overrides_server_clock(self):
+        with unittest.mock.patch.dict(os.environ, {"NM_TIMEZONE": "America/Denver"}):
+            reply, _ = fast_path("what time is it")
+        self.assertRegex(reply, r"MDT|MST")
+
+    def test_bad_nm_timezone_falls_back_to_server_local(self):
+        with unittest.mock.patch.dict(os.environ, {"NM_TIMEZONE": "Not/AZone"}):
+            reply, _ = fast_path("what time is it")
+        self.assertRegex(reply, r"it's \d{1,2}:\d{2} [AP]M \S+\.")
 
 
 if __name__ == "__main__":

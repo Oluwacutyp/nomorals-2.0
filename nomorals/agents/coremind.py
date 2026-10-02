@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -207,15 +208,34 @@ def _rotate(options: tuple[str, ...]) -> str:
         return options[_fp_idx % len(options)]
 
 
+def _fp_now() -> datetime:
+    """Local time for the fast-path clock.
+
+    Honors ``NM_TIMEZONE`` (IANA name, e.g. ``America/Denver``) so the
+    answer matches the owner's clock even when the server runs in UTC.
+    Falls back to server-local time; a bad value is ignored loudly in
+    the log, never silently.
+    """
+    tz_name = os.environ.get("NM_TIMEZONE", "").strip()
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tz_name))
+        except Exception as exc:  # noqa: BLE001 - bad NM_TIMEZONE value
+            _log.warning("NM_TIMEZONE=%r invalid, using server local time: %s",
+                         tz_name, exc)
+    return datetime.now().astimezone()
+
+
 def _fp_time() -> str:
-    now = datetime.now().astimezone()
+    now = _fp_now()
     hm = now.strftime("%I:%M %p").lstrip("0")
     tz = now.strftime("%Z") or "local time"
     return f"it's {hm} {tz}."
 
 
 def _fp_date() -> str:
-    now = datetime.now().astimezone()
+    now = _fp_now()
     return f"today is {now.strftime('%A, %B')} {now.day}, {now.year}."
 
 
@@ -1023,7 +1043,12 @@ class CoreMind:
                     text = (note if (ok and note)
                             else f"✅ done: {kind} {job_id}" if ok
                             else f"❌ that job failed: {note}")
-                    self.runtime._send_long(ref.platform, ref, text)
+                    sent = self.runtime._send_long(ref.platform, ref, text)
+                    if sent == 0 and text.strip():
+                        # The job finished but its report never reached the
+                        # chat — a silent drop would look like completion.
+                        _log.error("coremind notify %s: 0 chunks delivered to %s",
+                                   job_id, chat_key)
                 except Exception:  # noqa: BLE001
                     _log.exception("coremind notify failed")
         with self._lock:
