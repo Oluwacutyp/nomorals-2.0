@@ -233,6 +233,47 @@ class MissionStore:
         self.missions.update(mission.id, mission.to_row())
         return mission
 
+    def progress(self, mission_id: str) -> dict[str, Any]:
+        """Step progress for the CLI: done / total / percent / current step.
+
+        Total comes from the persisted plan (``state["plan"]``); when no
+        plan was stored yet the mission simply has no measurable total.
+        """
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        plan = mission.state.get("plan") or []
+        completed = set(mission.state.get("completed_steps") or [])
+        total = len(plan)
+        done = len([s for s in plan
+                    if (s.get("name") if isinstance(s, dict) else s)
+                    in completed]) if total else len(completed)
+        current = ""
+        for step in plan:
+            name = step.get("name", "") if isinstance(step, dict) else str(step)
+            if name and name not in completed:
+                current = name
+                break
+        return {"steps_done": done, "total_steps": total,
+                "percent": (100.0 * done / total) if total else 0.0,
+                "current_step": current}
+
+    def set_status(self, mission_id: str, status: str, note: str = "") -> Mission:
+        """Cross-process status flip (pause / cancel / resume-status).
+
+        Refuses to move a terminal mission back to a live state — resume
+        goes through ``MissionRunner.resume`` so checkpoints are honoured.
+        """
+        if status not in MissionStatus.ALL:
+            raise ValidationError(f"unknown mission status {status!r}")
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        if mission.terminal and status not in MissionStatus.TERMINAL:
+            raise ValidationError(
+                f"mission {mission_id} is {mission.status}: "
+                "terminal missions cannot be reactivated")
+        mission.status = status
+        if note:
+            mission.state["status_note"] = note
+        return self.save(mission)
+
     def list(
         self,
         *,

@@ -16,6 +16,36 @@ from .core.logging_setup import get_logger, setup_logging
 
 _log = get_logger(__name__)
 from .version import __version__
+from .core.errors import NoMoralsError
+
+
+# Canonical top-level command → short aliases. The single source of truth:
+# each add_parser() below consumes CLI_ALIASES[name], and `nm help cli`
+# renders this table. Aliases never collide with a canonical command name.
+CLI_ALIASES: dict[str, list[str]] = {
+    "status": ["st"],
+    "mind": ["m"],
+    "doctor": ["dr"],
+    "config": ["cfg"],
+    "models": ["mod"],
+    "memory": ["mem"],
+    "power": ["pw"],
+    "run": ["r"],
+    "ask": ["a"],
+    "backup": ["bak"],
+    "missions": ["ms"],
+    "mission": ["mi"],
+    "queue": ["q"],
+    "help": ["h"],
+    "monitor": ["mon"],
+    "watch": ["w"],
+    "osint": ["os"],
+    "finance": ["fin"],
+    "project": ["proj"],
+    "simulate": ["sim"],
+    "briefing": ["br"],
+    "train": ["tr"],
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,11 +58,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", help="show environment capabilities and health")
-    sub.add_parser("config", help="print the effective configuration")
+    sub.add_parser("doctor", aliases=CLI_ALIASES["doctor"],
+                   help="show environment capabilities and health")
+    sub.add_parser("config", aliases=CLI_ALIASES["config"],
+                   help="print the effective configuration")
     sub.add_parser("setup", help="guided model setup wizard")
 
-    models = sub.add_parser("models", help="inspect the model registry and catalog")
+    models = sub.add_parser("models", aliases=CLI_ALIASES["models"],
+                            help="inspect the model registry and catalog")
     models.add_argument("--catalog", action="store_true", help="list the curated catalog")
     models.add_argument("--search", default="")
     models.add_argument("--kind", default="")
@@ -65,7 +98,8 @@ def _parser() -> argparse.ArgumentParser:
     tools = sub.add_parser("tools", help="list available tools and their capabilities")
     tools.add_argument("--schema", action="store_true", help="emit full JSON schemas")
 
-    memory = sub.add_parser("memory", help="inspect and query memory")
+    memory = sub.add_parser("memory", aliases=CLI_ALIASES["memory"],
+                            help="inspect and query memory")
     memory.add_argument("--query", default="")
     memory.add_argument("--limit", type=int, default=8)
     memory.add_argument("--consolidate", action="store_true")
@@ -109,7 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     owner_sub.add_parser("whoami",
                          help="show the ingrained owner identities")
 
-    power = sub.add_parser("power", help="power mode")
+    power = sub.add_parser("power", aliases=CLI_ALIASES["power"], help="power mode")
     power_sub = power.add_subparsers(dest="power_action")
     power_sub.add_parser("unlock",
                          help="unlock power mode via owner seal "
@@ -117,26 +151,30 @@ def _parser() -> argparse.ArgumentParser:
     power_sub.add_parser("lock", help="lock power mode")
     power_sub.add_parser("status", help="power mode status")
 
-    agent = sub.add_parser("run", help="run a goal through the orchestrator")
+    agent = sub.add_parser("run", aliases=CLI_ALIASES["run"],
+                           help="run a goal through the orchestrator")
     agent.add_argument("goal", nargs="+")
     agent.add_argument("--max-steps", type=int, default=8)
     agent.add_argument("--no-reflect", action="store_true")
 
-    ask = sub.add_parser("ask", help="single-turn chat with the active model")
+    ask = sub.add_parser("ask", aliases=CLI_ALIASES["ask"],
+                         help="single-turn chat with the active model")
     ask.add_argument("prompt", nargs="+")
     ask.add_argument("--system", default="")
     ask.add_argument("--max-tokens", type=int, default=1024)
     ask.add_argument("--temperature", type=float, default=0.7)
     ask.add_argument("--model", default="", help="hot-swap to this provider for this call")
 
-    backup = sub.add_parser("backup", help="create, list, verify, or restore backups")
+    backup = sub.add_parser("backup", aliases=CLI_ALIASES["backup"],
+                            help="create, list, verify, or restore backups")
     backup.add_argument("--create", action="store_true")
     backup.add_argument("--list", action="store_true")
     backup.add_argument("--verify", action="store_true")
     backup.add_argument("--restore", default="")
     backup.add_argument("--push", action="store_true", help="push the latest backup to git")
 
-    missions = sub.add_parser("missions", help="list, run, resume, or inspect missions")
+    missions = sub.add_parser("missions", aliases=CLI_ALIASES["missions"],
+                              help="list, run, resume, or inspect missions")
     missions.add_argument("--start", default="", help="start a new mission with this goal")
     missions.add_argument("--resume", default="", help="resume a mission by id")
     missions.add_argument("--resume-all", action="store_true", help="resume every interrupted mission")
@@ -153,12 +191,41 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("serve", help="start the HTTP API server")
     sub.add_parser("tui", help="start the interactive terminal UI")
-    queue = sub.add_parser("queue", help="inspect the durable work queue")
+    queue = sub.add_parser("queue", aliases=CLI_ALIASES["queue"],
+                           help="inspect the durable work queue")
     queue.add_argument("--topic", default="")
     
     # Additional subcommands expected by tests
     commands = sub.add_parser("commands", help="list available commands")
     commands.add_argument("filter", nargs="?", default="")
+
+    status_p = sub.add_parser(
+        "status",
+        aliases=CLI_ALIASES["status"],
+        help="system health snapshot — real numbers, fast, honest gaps",
+        description=("nm status [--json]\n"
+                     "One screen: version/profile, database, queue, missions,\n"
+                     "memory, proactive delivery, power mode.\n"
+                     "Every section is a bounded local query; a subsystem that\n"
+                     "cannot be read prints 'unavailable' instead of fake zeros."),
+    )
+    status_p.add_argument("--json", action="store_true", help="Output as JSON")
+
+    mind_p = sub.add_parser(
+        "mind",
+        aliases=CLI_ALIASES["mind"],
+        help="the core mind: pending clarifications, recent jobs, router calls",
+        description=("nm mind [status] [--json]\n"
+                     "Inspect CoreMind's persisted state: open clarification\n"
+                     "questions, recent routed jobs with outcomes, the last\n"
+                     "objective. Router call counts and the last plan_error are\n"
+                     "per-process / in-memory only — the CLI reports them as\n"
+                     "unavailable rather than inventing numbers."),
+    )
+    mind_p.add_argument("action", nargs="?", default="status",
+                        choices=["status"],
+                        help="Action to perform")
+    mind_p.add_argument("--json", action="store_true", help="Output as JSON")
     
     zip_cmd = sub.add_parser("zip", help="create and manage zip archives")
     zip_cmd.add_argument("action", nargs="?", default="list")
@@ -202,18 +269,21 @@ def _parser() -> argparse.ArgumentParser:
     goal.add_argument("--limit", default="20", help="max rows to list")
     goal.add_argument("--json", action="store_true", help="Output as JSON")
     
-    mission = sub.add_parser("mission", help="Mission control and planning")
+    mission = sub.add_parser("mission", aliases=CLI_ALIASES["mission"],
+                             help="Mission control and planning")
     mission.add_argument("action", nargs="?", default="plan",
                         choices=["plan", "next", "status", "health"],
                         help="Action to perform")
     mission.add_argument("--json", action="store_true", help="Output as JSON")
     
-    skill = sub.add_parser("skill", help="Manage reusable skills")
+    skill = sub.add_parser("skill",
+                           help="Manage reusable skills (CLI not implemented yet)")
     skill.add_argument("action", nargs="?", default="list",
                       choices=["list", "create", "run", "delete"],
                       help="Action to perform")
     
-    project = sub.add_parser("project", help="Manage projects")
+    project = sub.add_parser("project", aliases=CLI_ALIASES["project"],
+                             help="Manage projects")
     project.add_argument("action", nargs="?", default="list",
                         choices=["list", "create", "get", "update", "delete",
                                  "heal", "replan", "status", "plan", "run", "advance"],
@@ -230,7 +300,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="Action to perform")
     kg.add_argument("--limit", default="10", help="rows to show (top/communities)")
     kg.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("simulate", help="Sandbox code execution")
+    sub.add_parser("simulate", aliases=CLI_ALIASES["simulate"],
+                   help="Sandbox code execution (CLI not implemented yet)")
     code = sub.add_parser(
         "code",
         help="Coding agent: run a task, review diffs, run tests",
@@ -694,6 +765,7 @@ def _parser() -> argparse.ArgumentParser:
 
     briefing = sub.add_parser(
         "briefing",
+        aliases=CLI_ALIASES["briefing"],
         help="Morning briefing: the overnight digest",
         description=("nm briefing now            generate + deliver immediately\n"
                      "nm briefing today           print the last stored briefing\n"
@@ -896,7 +968,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
     # Additional subcommands
-    book = sub.add_parser("book", help="AI-assisted book writing")
+    book = sub.add_parser("book", help="AI-assisted book writing (CLI not implemented yet)")
     book.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "run", "status", "build"],
                      help="Action to perform")
@@ -905,7 +977,7 @@ def _parser() -> argparse.ArgumentParser:
     book.add_argument("--words", type=int, default=2000, help="Words per chapter")
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
-    sub.add_parser("hub", help="Model hub operations")
+    sub.add_parser("hub", help="Model hub operations (CLI not implemented yet)")
     cipher = sub.add_parser("cipher",
                             help="nmc1 encryption: encrypt, decrypt, classic ciphers, hmac")
     cipher.add_argument("action", nargs="?", default="",
@@ -932,7 +1004,7 @@ def _parser() -> argparse.ArgumentParser:
     cipher.add_argument("--entry-pass", default="",
                         help="vault_export: passphrase of 'pass'-scheme entries")
     cipher.add_argument("--json", action="store_true", help="Output as JSON")
-    osint_p = sub.add_parser("osint",
+    osint_p = sub.add_parser("osint", aliases=CLI_ALIASES["osint"],
                              help="OSINT reports + the identity graph")
     osub = osint_p.add_subparsers(dest="subcommand")
     for _name, _help in (("report", "full read-only OSINT report for a target"),
@@ -971,15 +1043,16 @@ def _parser() -> argparse.ArgumentParser:
     structure_p.add_argument("--polish", action="store_true",
                              help="let the model rewrite the brief")
     structure_p.add_argument("--json", action="store_true", help="Output as JSON")
-    arena_parser = sub.add_parser("arena", help="Self-improvement arena")
+    arena_parser = sub.add_parser("arena", help="Self-improvement arena (CLI not implemented yet)")
     arena_sub = arena_parser.add_subparsers(dest="arena_command")
     arena_sub.add_parser("status", help="Show arena status")
     arena_sub.add_parser("approve", help="Approve arena actions")
-    trial_parser = sub.add_parser("trial", help="Single-account trial flow")
+    trial_parser = sub.add_parser("trial", help="Single-account trial flow (CLI not implemented yet)")
     trial_sub = trial_parser.add_subparsers(dest="trial_command")
     trial_sub.add_parser("save", help="Save trial data")
     trial_sub.add_parser("list", help="List trial data")
-    train = sub.add_parser("train", help="model training: backends, runs")
+    train = sub.add_parser("train", aliases=CLI_ALIASES["train"],
+                           help="model training: backends, runs")
     train.add_argument("--backends", action="store_true",
                        help="list training backends with honest machine availability")
     train.add_argument("--run", action="store_true",
@@ -989,7 +1062,8 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--base-model", default="",
                        help="HF base model id (required for external backends)")
     train.add_argument("--json", action="store_true", help="Output as JSON")
-    help_p = sub.add_parser("help", help="Show help")
+    help_p = sub.add_parser("help", aliases=CLI_ALIASES["help"],
+                            help="Show help (chat catalog, CLI command help, or topic page)")
     help_p.add_argument("topic", nargs="?", default="",
                         help="command or topic page (e.g. code, budget)")
     help_p.add_argument("--json", action="store_true", help="Output as JSON")
@@ -1001,7 +1075,8 @@ def _parser() -> argparse.ArgumentParser:
     cookies_p.add_argument("--json", action="store_true", help="Output as JSON")
     sub.add_parser("reason", help="Reasoning engine")
     sub.add_parser("workspace", help="Workspace management")
-    monitor = sub.add_parser("monitor", help="watch files/URLs for changes")
+    monitor = sub.add_parser("monitor", aliases=CLI_ALIASES["monitor"],
+                             help="watch files/URLs for changes")
     monitor.add_argument("action", nargs="?", default="status",
                          choices=["add", "list", "tick", "status", "remove",
                                   "enable", "disable", "alert", "webhook_test",
@@ -1017,7 +1092,8 @@ def _parser() -> argparse.ArgumentParser:
                          help="minimum seconds between alerts for this watch")
     monitor.add_argument("--watch", default="content", choices=["content", "size"])
     monitor.add_argument("--json", action="store_true", help="Output as JSON")
-    watch = sub.add_parser("watch", help="background watchers with smart alerts")
+    watch = sub.add_parser("watch", aliases=CLI_ALIASES["watch"],
+                           help="background watchers with smart alerts")
     watch.add_argument("action", nargs="?", default="list",
                        choices=["add", "list", "tick", "pause", "resume", "rm",
                                 "history", "alerts"])
@@ -1102,7 +1178,8 @@ def _parser() -> argparse.ArgumentParser:
     connectors.add_argument("--provider", help="Provider (mono, plaid, etc.)")
     
     # Finance commands
-    finance = sub.add_parser("finance", help="Bank account linking and transactions")
+    finance = sub.add_parser("finance", aliases=CLI_ALIASES["finance"],
+                             help="Bank account linking and transactions")
     finance.add_argument("action", nargs="?", default="status",
                         choices=["status", "link", "accounts", "transactions", "balance"],
                         help="Action to perform")
@@ -1303,10 +1380,23 @@ def _cmd_native(args, context) -> int:
     return 0
 
 
+def _canonical_command(name: str) -> str:
+    """Resolve a CLI alias to its canonical command name (``st`` → ``status``).
+
+    argparse leaves the typed alias in ``args.command``; dispatch works on
+    canonical names only, so this runs first inside ``_dispatch``.
+    """
+    for canonical, aliases in CLI_ALIASES.items():
+        if name == canonical or name in aliases:
+            return canonical
+    return name
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     from .core.config import load_settings
 
     settings = load_settings(args.config)
+    args.command = _canonical_command(args.command)
 
     if args.command == "doctor":
         return _cmd_doctor(args, settings)
@@ -1351,6 +1441,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_commands(args, context)
         if args.command == "zip":
             return _cmd_zip(args, context)
+        if args.command == "status":
+            return _cmd_status(args, context)
+        if args.command == "mind":
+            return _cmd_mind(args, context)
 
         if args.command == "book":
             return _cmd_stub(args, context, "book")
@@ -3546,6 +3640,24 @@ def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
                       "  (NM_PARTNER_PROACTIVE_WATCHERS)")
                 print(f"  quiet hours: {s['quiet_hours']} ({s['timezone']})")
                 print(f"  briefing time: {s['briefing_time']}")
+                counts = payload.get("counts") or {}
+                if counts:
+                    print("delivery counts (last 24h):")
+                    for state_name in ("sent", "failed", "pending",
+                                       "held-quiet-hours", "disabled",
+                                       "muted", "deduped"):
+                        n = counts.get(state_name, 0)
+                        if n:
+                            print(f"  {state_name}: {n}")
+                health = payload.get("health") or {}
+                degraded = health.get("degraded") or []
+                if degraded:
+                    print("health: DEGRADED")
+                    for reason in degraded:
+                        print(f"  ! {reason}")
+                elif health:
+                    live = ", ".join(health.get("live_channels") or []) or "none"
+                    print(f"health: ok (live channels: {live})")
                 recent = payload["recent"]
                 if not recent:
                     print("no proactive sends recorded yet")
@@ -3869,7 +3981,7 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
     if args.pause:
         try:
             mission = store.set_status(args.pause, "paused", "paused from the CLI")
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, NoMoralsError) as exc:
             print(f"missions: {exc}", file=sys.stderr)
             return 2
         _emit(args, mission.to_dict(), f"paused {mission.id} — {mission.name}")
@@ -3878,7 +3990,7 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
     if args.cancel:
         try:
             mission = store.set_status(args.cancel, "cancelled", "cancelled from the CLI")
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, NoMoralsError) as exc:
             print(f"missions: {exc}", file=sys.stderr)
             return 2
         _emit(args, mission.to_dict(), f"cancelled {mission.id} — {mission.name}")
@@ -3887,7 +3999,7 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
     if args.resume_status:
         try:
             mission = store.set_status(args.resume_status, "running", "")
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, NoMoralsError) as exc:
             print(f"missions: {exc}", file=sys.stderr)
             return 2
         p = store.progress(mission.id)
@@ -3918,19 +4030,34 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
         print(f"  spent:      {mission.spent_wall:.1f}s / {mission.spent_tokens} tokens")
         print(f"  completed:  {mission.state.get('completed_steps') or []}")
         print(f"  checkpoints: {[c.label for c in history]}")
+        if mission.status in ("running", "paused"):
+            print(f"  resumable: yes — `nm missions --resume {mission.id}`")
         return 0
 
     rows = store.list(status=args.status, limit=50)
-    payload = {"stats": store.stats(), "missions": [m.to_dict() for m in rows]}
+    resumable = store.resumable()
+    resumable_ids = {m.id for m in resumable}
+    payload = {"stats": store.stats(), "missions": [m.to_dict() for m in rows],
+               "resumable": sorted(resumable_ids)}
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
         return 0
     stats = store.stats()
     print(f"missions: {stats['total']} total, {stats['active']} active, "
-          f"{stats['checkpoints']} checkpoints")
+          f"{stats['checkpoints']} checkpoints, "
+          f"{len(resumable_ids)} interrupted (resumable)")
     for mission in rows:
-        print(f" {mission.id}  [{mission.status:<9}] it={mission.iterations} "
+        resume_mark = " ↺" if mission.id in resumable_ids else "  "
+        print(f"{resume_mark}{mission.id}  [{mission.status:<9}] "
+              f"it={mission.iterations} "
               f"success={mission.success}  {mission.goal[:50]}")
+    if resumable_ids and not args.status:
+        print("interrupted — resume with `nm missions --resume <id>` "
+              "or all at once with `nm missions --resume-all`:")
+        for mission in resumable:
+            point = store.latest_checkpoint(mission.id)
+            ckpt = f" (checkpoint: {point.label or point.id})" if point else ""
+            print(f"  ↺ {mission.id}{ckpt}")
     return 0
 
 
@@ -4042,6 +4169,229 @@ def _cmd_queue(args: argparse.Namespace, context: Any) -> int:
     queue = WorkQueue(context.db)
     payload = {"pending": queue.pending(args.topic or None), "topics": queue.topics()}
     _emit(args, payload, json.dumps(payload, indent=2, default=str))
+    return 0
+
+
+def _status_section(name: str, fn: Any) -> tuple[dict[str, Any], list[str]]:
+    """Run one status probe. A failing probe is reported as unavailable —
+    never as zeros that look measured."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - status must degrade, not crash
+        err = f"{type(exc).__name__}: {exc}"
+        return ({"available": False, "error": err},
+                [f"{name}: unavailable ({type(exc).__name__})"])
+
+
+def _cmd_status(args: argparse.Namespace, context: Any) -> int:
+    """`nm status` — system health snapshot with real numbers.
+
+    Every section is a bounded local query (no LLM calls, no network).
+    A subsystem that cannot be read is reported as unavailable.
+    """
+    import platform as _platform
+
+    sections: dict[str, dict[str, Any]] = {}
+    blocks: list[list[str]] = []
+
+    def _system() -> tuple[dict[str, Any], list[str]]:
+        data = {
+            "available": True,
+            "version": __version__,
+            "profile": context.settings.profile,
+            "platform": _platform.platform(),
+            "python": _platform.python_version(),
+            "cpu_count": __import__("os").cpu_count(),
+        }
+        text = [f"system:   NoMorals Core {data['version']}  "
+                f"profile={data['profile']}"]
+        text.append(f"          {data['platform']}  "
+                    f"py={data['python']}  cpus={data['cpu_count']}")
+        return data, text
+
+    def _database() -> tuple[dict[str, Any], list[str]]:
+        version = context.db.scalar(
+            "SELECT COALESCE(MAX(version),0) FROM schema_migrations")
+        tables = len(context.db.tables())
+        integrity = context.db.integrity_check()
+        data = {"available": True, "path": str(context.settings.db_path),
+                "schema_version": version, "tables": tables,
+                "integrity": integrity}
+        text = [f"database: {data['path']}",
+                f"          schema v{version}, {tables} tables, "
+                f"integrity {integrity}"]
+        return data, text
+
+    def _queue() -> tuple[dict[str, Any], list[str]]:
+        from .storage.queue import WorkQueue
+
+        queue = WorkQueue(context.db)
+        pending = int(queue.pending(None))
+        topics = queue.topics()
+        data = {"available": True, "pending": pending, "topics": topics}
+        text = [f"queue:    {pending} pending across {len(topics)} topic(s)"]
+        return data, text
+
+    def _missions() -> tuple[dict[str, Any], list[str]]:
+        from .missions import MissionStore
+
+        store = MissionStore(context.db)
+        stats = store.stats()
+        resumable = store.resumable()
+        data = {"available": True, "total": stats["total"],
+                "active": stats["active"],
+                "interrupted": len(resumable)}
+        text = [f"missions: {stats['total']} total, {stats['active']} active, "
+                f"{len(resumable)} interrupted (resumable)"]
+        return data, text
+
+    def _memory() -> tuple[dict[str, Any], list[str]]:
+        stats = context.memory.stats_snapshot()
+        data = {"available": True, "records": stats.get("records", 0),
+                "by_kind": stats.get("by_kind", {})}
+        text = [f"memory:   {data['records']} records"]
+        return data, text
+
+    def _proactive() -> tuple[dict[str, Any], list[str]]:
+        from .agents import morning_briefing as mb
+
+        payload = mb.proactive_status(context)
+        s = payload["settings"]
+        recent = payload.get("recent") or []
+        last = recent[0] if recent else None
+        health = payload.get("health") or {}
+        degraded = health.get("degraded") or []
+        data = {"available": True,
+                "master": bool(s.get("proactive_enabled")),
+                "briefing": bool(s.get("proactive_briefing")),
+                "watchers": bool(s.get("proactive_watchers")),
+                "counts_24h": payload.get("counts") or {},
+                "health_ok": not degraded,
+                "health_degraded": degraded,
+                "last_delivery_state": last.get("delivery_state") if last else None,
+                "last_title": (last.get("title") or "")[:80] if last else None}
+        text = [f"proactive: {'ON' if data['master'] else 'OFF'} "
+                f"(briefing={'ON' if data['briefing'] else 'OFF'}, "
+                f"watchers={'ON' if data['watchers'] else 'OFF'})"]
+        if degraded:
+            text.append(f"          health: DEGRADED — {degraded[0]}")
+        if last:
+            text.append(f"          last send: {last.get('delivery_state')} — "
+                        f"{(last.get('title') or '')[:60]}")
+        else:
+            text.append("          no proactive sends recorded yet")
+        return data, text
+
+    def _power() -> tuple[dict[str, Any], list[str]]:
+        from .agents.power import power_mode_for
+
+        s = power_mode_for(context).status()
+        data = {"available": True, "active": bool(s.get("active")),
+                "unlocked_by": s.get("unlocked_by")}
+        text = [f"power:    {'ACTIVE' if data['active'] else 'locked'}"
+                + (f" (unlocked by {data['unlocked_by']})" if data["active"] else "")]
+        return data, text
+
+    for name, fn in (("system", _system), ("database", _database),
+                     ("queue", _queue), ("missions", _missions),
+                     ("memory", _memory), ("proactive", _proactive),
+                     ("power", _power)):
+        data, text = _status_section(name, fn)
+        sections[name] = data
+        blocks.append(text)
+
+    payload = {"command": "status", "sections": sections}
+    rendered = "\n".join(line for block in blocks for line in block)
+    _emit(args, payload, rendered)
+    return 0
+
+
+def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
+    """`nm mind [status]` — inspect CoreMind's persisted state.
+
+    Shows pending clarification questions, recent routed jobs with
+    outcomes, and the last objective. Router call counts and the last
+    plan_error are per-process / in-memory only, so a fresh CLI process
+    reports them as unavailable instead of printing 0.
+    """
+    from .agents.coremind import CoreMind
+
+    mind = CoreMind(context)
+    state = mind._state  # persisted state.json: pending / jobs / last_objective
+    now = time.time()
+
+    def _age(ts: float) -> str:
+        secs = max(0.0, now - float(ts or 0))
+        if secs < 90:
+            return f"{secs:.0f}s ago"
+        if secs < 5400:
+            return f"{secs / 60:.0f}m ago"
+        if secs < 172800:
+            return f"{secs / 3600:.1f}h ago"
+        return f"{secs / 86400:.1f}d ago"
+
+    pending_raw: dict[str, Any] = state.get("pending") or {}
+    pending: list[dict[str, Any]] = []
+    for chat_key, p in pending_raw.items():
+        created = float(p.get("created", 0) or 0)
+        stale = (now - created) > CoreMind.PENDING_TTL
+        pending.append({"chat": chat_key, "kind": p.get("kind"),
+                        "question": p.get("question"), "age": _age(created),
+                        "stale": stale})
+
+    jobs_raw: list[dict[str, Any]] = list(mind._jobs)[-10:]
+    jobs = [{"id": j.get("id"), "kind": j.get("kind"),
+             "target": (j.get("target") or "")[:70],
+             "route": j.get("route"), "status": j.get("status"),
+             "note": (j.get("note") or "")[:90],
+             "age": _age(j.get("created", 0))}
+            for j in jobs_raw]
+    last_objective = state.get("last_objective")
+
+    payload = {
+        "command": "mind",
+        "pending_clarifications": pending,
+        "recent_jobs": jobs,
+        "last_objective": last_objective,
+        # Per-process / in-memory only: not persisted, so the CLI cannot
+        # measure them. Reported as unavailable, not zero.
+        "router_calls": {"available": False,
+                         "reason": "per-process counter; query the running "
+                                   "bot process for live counts"},
+        "last_plan_error": {"available": False,
+                            "reason": "plan_error lives on the in-memory "
+                                      "TaskResult of a running agent and is "
+                                      "not persisted"},
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+        return 0
+
+    print(f"coremind state: {mind.state_file or 'no state file'}")
+    print(f"pending clarifications: {len(pending)}")
+    for p in pending:
+        stale_mark = " (stale)" if p["stale"] else ""
+        print(f"  [{p['kind']}] {p['chat']}: {p['question']}{stale_mark} "
+              f"— {p['age']}")
+    if not pending:
+        print("  none")
+    print(f"recent jobs: {len(jobs_raw)} kept (showing {len(jobs)})")
+    for j in jobs:
+        print(f"  {j['id']} [{j['status']}] {j['kind']} → {j['route']}: "
+              f"{j['target']} — {j['age']}"
+              + (f" — {j['note']}" if j["note"] else ""))
+    if not jobs:
+        print("  none")
+    if last_objective:
+        print(f"last objective: {last_objective.get('text')} "
+              f"(route={last_objective.get('route')}, "
+              f"{_age(last_objective.get('created', 0))})")
+    else:
+        print("last objective: none")
+    print("router calls: unavailable (per-process counter — "
+          "query the running bot for live counts)")
+    print("last plan_error: unavailable (not persisted)")
     return 0
 
 
@@ -5643,12 +5993,80 @@ def _cmd_apps(args: argparse.Namespace, context: Any) -> int:
     return 0
 
 
+def _cli_subparsers() -> Any | None:
+    """The top-level subparsers action of a fresh parser (for help rendering)."""
+    parser = _parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    return None
+
+
+def _cli_command_help(topic: str) -> str | None:
+    """argparse help for one nm command (alias-aware). None if not a command."""
+    sub = _cli_subparsers()
+    if sub is None or not topic:
+        return None
+    target = sub.choices.get(topic)
+    if target is None:
+        return None
+    return target.format_help()
+
+
+def _cli_overview() -> str:
+    """Every top-level nm command with its aliases — generated, never stale."""
+    sub = _cli_subparsers()
+    rows: list[tuple[str, str, str]] = []
+    if sub is not None:
+        seen: set[int] = set()
+        for name, target in sub.choices.items():
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            canonical = target.prog.split()[-1]
+            aliases = sorted(k for k, v in sub.choices.items()
+                             if v is target and k != canonical)
+            alias_txt = f" [{', '.join(aliases)}]" if aliases else ""
+            help_txt = ""
+            for choice_action in sub._choices_actions:
+                if choice_action.dest.strip() == canonical:
+                    help_txt = choice_action.help or ""
+                    break
+            rows.append((canonical, alias_txt, help_txt))
+    rows.sort()
+    lines = ["nm — the command center. Top-level commands and their aliases:",
+             ""]
+    for name, alias_txt, help_txt in rows:
+        lines.append(f"  {name}{alias_txt}")
+        if help_txt:
+            lines.append(f"      {help_txt}")
+    lines += ["",
+              "detail for one command:  nm help <command>   (aliases work too)",
+              "chat command catalog:    nm help (no topic)"]
+    return "\n".join(lines)
+
+
 def _cmd_help(args: argparse.Namespace, context: Any) -> int:
-    """`nm help [topic]` — the same pages the chat /help renders."""
+    """`nm help [topic]` — CLI command help first, chat pages as fallback.
+
+    * no topic — the chat command catalog, plus a pointer to `nm help cli`.
+    * ``nm help cli`` — every nm command with its alias map (generated).
+    * ``nm help <command>`` — argparse help for that nm command
+      (aliases accepted, e.g. ``nm help st``).
+    * anything else — the same pages the chat /help renders.
+    """
     from .social.chat.control import detailed_help
 
-    topic = getattr(args, "topic", "") or ""
-    page = detailed_help(topic)
+    topic = (getattr(args, "topic", "") or "").strip().lstrip("/").lower()
+    if topic in ("cli", "nm"):
+        page = _cli_overview()
+    elif not topic:
+        page = (detailed_help("")
+                + "\n\n— command center —\n"
+                + "  `nm help cli` lists every nm command with its aliases;\n"
+                + "  `nm help <command>` shows one command's full help.")
+    else:
+        page = _cli_command_help(topic) or detailed_help(topic)
     _emit(args, {"help": page}, page)
     return 0
 
