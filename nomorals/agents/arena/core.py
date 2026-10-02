@@ -1,14 +1,24 @@
 """The self-improvement arena core.
 
 One cycle:
-  1. pick a random tech topic (never one already digested)
+  1. pick a topic with the adaptive sampler (interest profile x coverage
+     balance x difficulty target — never one already digested, never a
+     repeat inside the anti-repeat window)
   2. research it with the search engine (quick mode)
   3. digest the findings into durable knowledge (``arena_knowledge``)
   4. (power mode + arena.build) let the builder sub-agent propose ONE small
      self-contained candidate module, written to a sandbox dir and syntax-
      checked — never applied. It becomes a *proposal* the owner reviews.
-  5. every step is appended to ``arena_stream`` — the live stream that
+  5. score the run on verifiable axes (research usefulness, build
+     compiled, latency) into ``arena_scores`` — the sampler's feedback.
+  6. every step is appended to ``arena_stream`` — the live stream that
      later feeds the owner's own model.
+
+The ship gate (``arena/ship.py``) promotes a pending build into an
+``EvolutionProposal``: fast verification (compile + error_scan), then the
+owner approves → the evolution machinery applies it to the repo with the
+full test gate, or rejects it with a recorded reason. Nothing merges
+without the owner saying so.
 
 Candidate code lifecycle: ``pending`` → owner ``/arena approve <id>``
 (staged to ``~/.nomorals/arena/approved/<name>/``) or ``/arena deny <id>``.
@@ -515,6 +525,8 @@ class Arena:
                   seed: int | None = None) -> dict[str, Any]:
         started = time.time()
         anti_repeat = self._anti_repeat()
+        kind = "code"
+        verify = ""
         if topic:
             cat = category or "general"
         else:
@@ -527,10 +539,18 @@ class Arena:
                 cat, topic = surprise_topic(self.db, seed=seed,
                                             anti_repeat=anti_repeat)
             else:
-                cat, topic = sample_topic(
-                    self.db, category, profile=self._interest_profile(),
+                # Adaptive sampler: interest profile x coverage boost x
+                # difficulty target, composed over the classic sampler
+                # (anti-repeat window and knowledge skipping intact).
+                from . import sampling as _sampling
+                cat, topic, entry = _sampling.sample_challenge(
+                    self.db, category=category,
+                    profile=self._interest_profile(),
                     anti_repeat=anti_repeat)
-        self._stream("topic", {"topic": topic, "category": cat})
+                kind = str(entry.get("kind") or "code")
+                verify = str(entry.get("verify") or "")
+        self._stream("topic", {"topic": topic, "category": cat,
+                                 "kind": kind, "verify": verify[:200]})
         try:
             report = self._research(topic)
         except Exception as exc:  # noqa: BLE001
@@ -554,6 +574,7 @@ class Arena:
                                  "sources": sources[:8]})
         result: dict[str, Any] = {
             "ok": True, "topic": topic, "category": cat,
+            "kind": kind, "verify": verify,
             "digest": digest, "pages_read": report.get("pages_read", 0),
             "seconds": round(time.time() - started, 1),
         }
@@ -576,6 +597,20 @@ class Arena:
                     pass
             elif not notify:
                 result["review"] = packet
+        # Score the run on verifiable axes — the adaptive sampler reads
+        # these back to aim difficulty and balance coverage. Scoring is
+        # observability, never a gate: it must not break a cycle.
+        try:
+            from . import scoring as _scoring
+            _scoring.record_score(
+                self.db, topic=topic, category=cat, kind=kind,
+                research_usefulness=min(1.0, 0.3 + 0.7 * min(pages_n, 5) / 5),
+                build_compiled=(1 if (build and build.get("syntax") == "ok")
+                                else 0 if build else None),
+                latency_s=float(result.get("seconds", 0) or 0),
+                notes=verify[:200])
+        except Exception:  # noqa: BLE001 - scoring must never break a cycle
+            pass
         return result
 
     @staticmethod

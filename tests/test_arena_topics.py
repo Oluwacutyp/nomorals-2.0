@@ -82,7 +82,8 @@ class BankTests(unittest.TestCase):
 
     def test_category_stats_shape(self):
         stats = category_stats()
-        self.assertEqual(set(stats), set(CATEGORIES))
+        # the core categories are always present; challenge packs add more
+        self.assertLessEqual(set(CATEGORIES), set(stats))
         for cat, st in stats.items():
             self.assertEqual(st["topics"],
                              st["easy"] + st["medium"] + st["deep"], cat)
@@ -141,7 +142,7 @@ class SamplingTests(unittest.TestCase):
 
     def test_sample_without_db_never_raises(self):
         cat, topic = sample_topic()
-        self.assertIn(cat, CATEGORIES)
+        self.assertIn(cat, all_categories())
         self.assertTrue(topic)
 
 
@@ -327,7 +328,7 @@ class PackTests(unittest.TestCase):
         register_topic_pack("pack_b", {
             "packcat": [{"t": f"weighted pack topic {i}", "d": 2,
                          "tags": ()} for i in range(6)],
-        }, weights={"packcat": 40.0})
+        }, weights={"packcat": 400.0})
         cats = [sample_topic(rng=random.Random(n))[0] for n in range(40)]
         share = sum(1 for c in cats if c == "packcat") / 40
         self.assertGreater(share, 0.5)
