@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from .background import BackgroundFact, BackgroundPack, BackgroundSelector, GATE_MODES
 from .context import PLATFORM_NOTES, PartnerContextBuilder
+from .lexicon_feed import CATEGORIES as LEXICON_CATEGORIES
+from .lexicon_feed import LEXICON_MODULE, LexiconFeed, seed_partner_lexicon
 from .mood import DIMENSIONS, EVENT_TABLE, MOOD_LABELS, MoodEngine, MoodEvent, MoodState
 from .persona import DEFAULT_BASLINES, Persona, SpeechProfile, default_persona, persona_from_dict
 from .relationship import STAGES, Relationship
@@ -39,6 +41,9 @@ __all__ = [
     "FALLBACK_LINES",
     "GATE_MODES",
     "GuardVerdict",
+    "LEXICON_CATEGORIES",
+    "LEXICON_MODULE",
+    "LexiconFeed",
     "MOOD_LABELS",
     "PLATFORM_NOTES",
     "PartnerContextBuilder",
@@ -55,6 +60,7 @@ __all__ = [
     "length_budget",
     "parrot_check",
     "persona_from_dict",
+    "seed_partner_lexicon",
     "should_answer_short",
     "split_messages",
     "strip_robotic",

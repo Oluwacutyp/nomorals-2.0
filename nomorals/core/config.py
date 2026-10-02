@@ -381,6 +381,17 @@ class PartnerSettings:
     #: after this much silence mid-reply, send one "still thinking" line
     slow_reply_notice_seconds: float = 45.0
     part_delay_seconds: float = 0.5
+    #: Dynamic lexicon voice feed (nomorals/partner/lexicon_feed.py): blend
+    #: scored lexicon terms into her phrasing — catchphrases, pet names,
+    #: openers, transitions, acknowledgments, mood expressions, fallback
+    #: lines — on top of the owner's own persona/style settings, which
+    #: always win. Env: NM_PARTNER_LEXICON_VOICE=0 disables all dynamic
+    #: lexical influence (pure static banks).
+    lexicon_voice: bool = True
+    #: Seed starter vocab for the partner lexicon on first boot, through
+    #: the normal acquire -> score -> version pipeline (idempotent; never
+    #: re-adds owner-retired terms). Env: NM_PARTNER_LEXICON_SEED=0 to skip.
+    lexicon_seed: bool = True
 
 
 @dataclass
@@ -718,6 +729,8 @@ _ENV_MAP: dict[str, str] = {
     "NM_PARTNER_PROACTIVE_WATCHERS": "partner.proactive_watchers",
     "NM_PARTNER_QUIET_START": "partner.quiet_start",
     "NM_PARTNER_QUIET_END": "partner.quiet_end",
+    "NM_PARTNER_LEXICON_VOICE": "partner.lexicon_voice",
+    "NM_PARTNER_LEXICON_SEED": "partner.lexicon_seed",
     "NM_NET_ENABLED": "net.enabled",
     "NM_NET_PROXY": "net.proxy",
     "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",
