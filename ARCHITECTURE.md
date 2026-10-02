@@ -65,8 +65,9 @@ No-morals-ai/
 ├── ARCHITECTURE.md            ← this document
 ├── README.md
 ├── ROADMAP.md                 ← path to 100k+ lines, milestone by milestone
-├── pyproject.toml
-├── requirements.txt           ← OPTIONAL accelerators only (numpy, yt-dlp, torch…)
+├── pyproject.toml             ← dependencies + optional extras (fast, media,
+│                               media-edit, train, finetune, hub, dev, all);
+│                               e.g. pip install ".[fast,media,train]"
 ├── .env.example
 ├── Makefile
 ├── nomorals/                  ← the package
