@@ -48,6 +48,8 @@ AGENT_TOOL_MODULES = (
     "projects",
     "reasoning",
     "reflection",
+    "research_digest",
+    "research_lexicon",
     "research_swarm",
     "router_select",
     "search.engine",
@@ -58,6 +60,7 @@ AGENT_TOOL_MODULES = (
     "skills",
     "structuring",
     "toolmaker",
+    "upgrade_queue",
     "watchers",
     "memory.persona",
 )

@@ -3,9 +3,12 @@
 One question, N angles, run at once:
 
 * **angle decomposition** — the goal is split into 2-4 research angles
-  (core / practical / critical / recent). When a router is configured the
-  Reasoning Agent refines the angles; the deterministic templates are the
-  fallback so the swarm never depends on the model being up.
+  (core / practical / critical / recent). Pass ``specialists=[...]`` to
+  decompose along domain-specialist templates instead (systems, security,
+  product, ml, tooling, competitors); findings are tagged with their
+  domain. When a router is configured the Reasoning Agent refines the
+  angles; the deterministic templates are the fallback so the swarm never
+  depends on the model being up.
 * **specialized workers** — one researcher per angle, in parallel
   (profile-tuned worker count). Each worker searches its angle, annotates
   the results with source trust, and reads the most credible pages to pull
@@ -42,6 +45,92 @@ _log = get_logger(__name__)
 
 __all__ = ["SwarmFinding", "SwarmReport", "ResearchSwarm"]
 
+#: Specialist domains for angle decomposition: each entry holds 3-4
+#: domain-specific angle templates (``{q}`` is the query) plus the
+#: keywords that characterize the domain.  In domain order, the first
+#: ``workers`` templates become the swarm's angles, and every finding is
+#: tagged with the domain that produced it.
+SPECIALIST_DOMAINS: dict[str, dict[str, list[str]]] = {
+    "systems": {
+        "angles": [
+            "{q} distributed systems architecture design",
+            "{q} scalability reliability patterns",
+            "{q} performance latency throughput tuning",
+            "{q} fault tolerance failover consensus",
+        ],
+        "keywords": [
+            "distributed", "architecture", "scalability", "reliability",
+            "latency", "throughput", "fault-tolerance", "consensus",
+            "sharding", "caching", "load-balancing", "observability",
+        ],
+    },
+    "security": {
+        "angles": [
+            "{q} threat model vulnerabilities",
+            "{q} security best practices hardening",
+            "{q} CVE exploit mitigations",
+            "{q} authentication authorization access control",
+        ],
+        "keywords": [
+            "threat-model", "vulnerability", "CVE", "exploit",
+            "hardening", "authentication", "authorization", "encryption",
+            "zero-trust", "audit", "pentest", "sandboxing",
+        ],
+    },
+    "product": {
+        "angles": [
+            "{q} product market fit user research",
+            "{q} product strategy roadmap prioritization",
+            "{q} UX onboarding activation retention",
+            "{q} product metrics analytics growth",
+        ],
+        "keywords": [
+            "product-market-fit", "user-research", "roadmap", "UX",
+            "onboarding", "retention", "activation", "conversion",
+            "pricing", "positioning", "churn", "engagement",
+        ],
+    },
+    "ml": {
+        "angles": [
+            "{q} machine learning model architecture",
+            "{q} training fine-tuning hyperparameters",
+            "{q} ML evaluation benchmarks metrics",
+            "{q} model deployment inference optimization",
+        ],
+        "keywords": [
+            "neural-network", "transformer", "training", "fine-tuning",
+            "hyperparameters", "benchmark", "inference", "quantization",
+            "embedding", "dataset", "overfitting", "LLM",
+        ],
+    },
+    "tooling": {
+        "angles": [
+            "{q} developer tooling workflow automation",
+            "{q} CI/CD build pipeline tooling",
+            "{q} CLI developer experience tooling",
+            "{q} debugging observability tooling",
+        ],
+        "keywords": [
+            "CLI", "CI/CD", "build", "pipeline", "automation",
+            "debugging", "observability", "profiling", "linting",
+            "testing", "packaging", "DX",
+        ],
+    },
+    "competitors": {
+        "angles": [
+            "{q} competitor landscape comparison",
+            "{q} alternatives to {q}",
+            "{q} competitive pricing differentiation",
+            "{q} market leaders vs {q}",
+        ],
+        "keywords": [
+            "competitor", "alternative", "comparison", "pricing",
+            "market-share", "landscape", "benchmark", "differentiation",
+            "incumbent", "disruptor", "vendor", "open-source",
+        ],
+    },
+}
+
 _CONTENT_WORD = re.compile(r"[a-z][a-z0-9\-]{3,}")
 _NEGATION = re.compile(
     r"\b(not|no|never|cannot|can'?t|won'?t|false|wrong|disprove\w*|myth|"
@@ -68,6 +157,7 @@ class SwarmFinding:
     claim: str
     sources: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.3
+    domain: str = ""  # specialist domain that produced the finding ("" = unknown)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +165,7 @@ class SwarmFinding:
             "claim": self.claim,
             "sources": self.sources,
             "confidence": round(self.confidence, 2),
+            "domain": self.domain,
         }
 
 
@@ -138,11 +229,23 @@ class ResearchSwarm:
         timeout: float = 120.0,
         read_pages: bool = True,
         session_prefix: str = "swarm",
+        specialists: list[str] | None = None,
     ) -> None:
         self.context = context
         self.timeout = float(timeout)
         self.read_pages = bool(read_pages)
         self.session_prefix = session_prefix
+        if specialists is not None:
+            unknown = [s for s in specialists
+                       if s not in SPECIALIST_DOMAINS]
+            if unknown:
+                raise ValueError(
+                    f"unknown specialist domain(s): {', '.join(unknown)} "
+                    f"(choose from {', '.join(SPECIALIST_DOMAINS)})")
+            self.specialists: tuple[str, ...] = tuple(specialists)
+        else:
+            self.specialists = ()
+        self._angle_domains: list[str] = []  # parallel to the last angles_for
         # profile-tuned default: half the thread pool, 2..4, and never more
         # parallel than the profile's mission aggressiveness allows
         # (a phone gets 2 light web workers, a workstation 4).
@@ -156,26 +259,60 @@ class ResearchSwarm:
 
     # ── angle decomposition ────────────────────────────────────────────────
     def angles_for(self, query: str) -> list[str]:
-        """2-4 research angles for the goal (templates, model-refined when
-        a router is configured)."""
+        """2-4 research angles for the goal: specialist domain templates
+        when ``specialists`` is set (findings tagged per domain), the
+        generic core/practical/critical/recent templates otherwise.
+        Model-refined when a router is configured (domains unknown then,
+        tagged ``""`` — honest)."""
         q = (query or "").strip().rstrip("?")
         if not q:
             raise ValueError("swarm needs a query")
-        angles = [
-            q,
-            f"{q} best practices how to",
-            f"{q} criticism problems limitations",
-            f"{q} recent developments",
-        ]
-        angles = list(dict.fromkeys(angles))
+        if self.specialists:
+            angles, domains = self._specialist_angles(q)
+        else:
+            angles = [
+                q,
+                f"{q} best practices how to",
+                f"{q} criticism problems limitations",
+                f"{q} recent developments",
+            ]
+            angles = list(dict.fromkeys(angles))
+            domains = [""] * len(angles)
         if self._router_available():
             try:
                 refined = self._model_angles(q)
                 if refined:
                     angles = refined[: self.workers]
+                    # model-generated angles don't map to a known domain
+                    domains = [""] * len(angles)
             except Exception as exc:  # noqa: BLE001 - templates always work
                 _log.debug("model angle refinement failed: %s", exc)
-        return angles[: self.workers]
+        angles = angles[: self.workers]
+        self._angle_domains = (domains[: len(angles)]
+                               + [""] * max(0, len(angles) - len(domains)))
+        return angles
+
+    def _specialist_angles(self, q: str) -> tuple[list[str], list[str]]:
+        """Expand specialist templates in domain order, capped at the
+        worker count.  Returns (angles, parallel domain tags)."""
+        pairs: list[tuple[str, str]] = []
+        for domain in self.specialists:
+            for template in SPECIALIST_DOMAINS[domain]["angles"]:
+                pairs.append((template.format(q=q), domain))
+                if len(pairs) >= self.workers:
+                    break
+            if len(pairs) >= self.workers:
+                break
+        # de-dupe angles, keeping the first (domain-order) owner
+        seen: set[str] = set()
+        angles: list[str] = []
+        domains: list[str] = []
+        for angle, domain in pairs:
+            if angle not in seen:
+                seen.add(angle)
+                angles.append(angle)
+                domains.append(domain)
+        return angles, domains
 
     def _router_available(self) -> bool:
         router = getattr(self.context, "router", None)
@@ -205,7 +342,8 @@ class ResearchSwarm:
         return [a for a in out if 3 <= len(a) <= 80][: self.workers]
 
     # ── one worker ─────────────────────────────────────────────────────────
-    def _research_angle(self, angle: str, worker_index: int) -> dict[str, Any]:
+    def _research_angle(self, angle: str, worker_index: int,
+                        domain: str = "") -> dict[str, Any]:
         started = time.time()
         results = self.search_engine.search(angle, max_results=6)
         try:
@@ -227,7 +365,9 @@ class ResearchSwarm:
             # 1) the search snippet itself is always usable evidence
             claim = self._best_sentence(snippet, angle_words)
             if claim:
-                findings.append(self._finding(angle, claim, [(url, title, trust)], trust))
+                findings.append(
+                    self._finding(angle, claim, [(url, title, trust)], trust,
+                                  domain))
             # 2) read the most credible pages for deeper claims
             if self.read_pages and rank < 2 and pages_read < 2:
                 page_text = self._read_page(url, worker_index)
@@ -235,7 +375,8 @@ class ResearchSwarm:
                     pages_read += 1
                     for sentence in self._page_claims(page_text, angle_words, limit=3):
                         findings.append(
-                            self._finding(angle, sentence, [(url, title, trust)], trust))
+                            self._finding(angle, sentence, [(url, title, trust)],
+                                          trust, domain))
         # de-duplicate, keep the strongest source set per claim
         deduped = self._dedupe(findings)
         return {
@@ -308,7 +449,7 @@ class ResearchSwarm:
 
     @staticmethod
     def _finding(angle: str, claim: str, sources: list[tuple[str, str, float]],
-                 trust: float) -> SwarmFinding:
+                 trust: float, domain: str = "") -> SwarmFinding:
         support = min(3, len({s[0] for s in sources}))
         confidence = min(0.95, 0.25 + 0.15 * support + 0.25 * float(trust))
         return SwarmFinding(
@@ -316,6 +457,7 @@ class ResearchSwarm:
             claim=claim.strip(),
             sources=[{"url": u, "title": t, "trust": tr} for u, t, tr in sources[:4]],
             confidence=confidence,
+            domain=domain,
         )
 
     @staticmethod
@@ -427,6 +569,9 @@ class ResearchSwarm:
         if not query:
             raise ValueError("swarm needs a query")
         angle_list = list(angles) if angles else self.angles_for(query)
+        if angles:
+            # caller-supplied angles: no known domains
+            self._angle_domains = [""] * len(angle_list)
         report = SwarmReport(query=query, angles=angle_list, workers=self.workers)
         if not angle_list:
             report.synthesis = "no angles to research"
@@ -437,7 +582,10 @@ class ResearchSwarm:
         with ThreadPoolExecutor(max_workers=self.workers,
                                 thread_name_prefix="research-swarm") as pool:
             futures = {
-                pool.submit(self._research_angle, angle, i): (i, angle)
+                pool.submit(
+                    self._research_angle, angle, i,
+                    self._angle_domains[i]
+                    if i < len(self._angle_domains) else ""): (i, angle)
                 for i, angle in enumerate(angle_list)
             }
             for future, (i, angle) in futures.items():

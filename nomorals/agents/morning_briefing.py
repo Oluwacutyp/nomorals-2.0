@@ -609,6 +609,108 @@ class DevonSelfProvider(_Provider):
             source="devon", items=items, lines=lines)
 
 
+class ResearchProvider(_Provider):
+    """Upgrade-queue research: proposed upgrades awaiting the owner's
+    review, plus what was approved/denied in the last 24h.  Never raises —
+    a research hiccup must not sink the morning briefing."""
+    name = "research"
+    title = "Research upgrades"
+    priority = 70
+
+    _DECIDED_STATUSES = ("approved", "denied")
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — research is optional
+            _log.debug("research briefing provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            from .upgrade_queue import UpgradeQueue
+        except Exception:  # noqa: BLE001 — queue module may not exist yet
+            _log.debug("research provider: no upgrade_queue module")
+            return None
+        queue = self._open_queue(UpgradeQueue, ctx)
+        if queue is None:
+            return None
+        try:
+            proposed = list(queue.list(status="proposed", limit=5) or [])
+        except Exception:  # noqa: BLE001 — table may not exist yet
+            _log.debug("research provider: upgrade queue list failed")
+            return None
+        decided = self._recently_decided(queue)
+        if not proposed and not decided:
+            return None
+        items, lines = [], []
+        if proposed:
+            lines.append(f"• {len(proposed)} upgrade proposal(s) await your "
+                         f"review")
+            for p in proposed:
+                title = str(p.get("title") or p.get("id") or "(untitled)")
+                reason = str(p.get("rationale") or p.get("summary")
+                             or p.get("reason") or "")
+                items.append({"id": f"uq-{p.get('id', '')}",
+                              "title": title, "body": reason[:300]})
+                line = f"  - {title}"
+                if reason:
+                    line += f" — {reason[:90]}"
+                lines.append(line)
+        for status in self._DECIDED_STATUSES:
+            hits = decided.get(status, [])
+            if hits:
+                verb = "implementing" if status == "approved" else "rejected"
+                lines.append(f"• {status}: {len(hits)} ({verb})")
+                for p in hits[:2]:
+                    title = str(p.get("title") or p.get("id") or "")
+                    lines.append(f"  - {title[:90]}")
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="upgrade_queue", items=items, lines=lines)
+
+    @staticmethod
+    def _open_queue(UpgradeQueue: Any, ctx: Any) -> Any | None:
+        """Construct the queue without knowing its signature: prefer a
+        context-taking constructor, fall back to no-arg."""
+        try:
+            return UpgradeQueue(ctx)
+        except TypeError:
+            _log.debug("research provider: ctx-taking ctor rejected, "
+                       "trying no-arg")
+        except Exception:  # noqa: BLE001
+            _log.debug("research provider: queue construction failed")
+            return None
+        try:
+            return UpgradeQueue()
+        except Exception:  # noqa: BLE001
+            _log.debug("research provider: no-arg queue construction failed")
+            return None
+
+    def _recently_decided(self, queue: Any) -> dict[str, list[dict]]:
+        """proposals decided in the last 24h, per status (best-effort)."""
+        cutoff = time.time() - 86400
+        out: dict[str, list[dict]] = {}
+        for status in self._DECIDED_STATUSES:
+            try:
+                rows = list(queue.list(status=status, limit=50) or [])
+            except Exception:  # noqa: BLE001
+                continue
+            fresh = []
+            for r in rows:
+                ts = (r.get("decided_at") or r.get("updated_at")
+                      or r.get("approved_at") or r.get("denied_at") or 0)
+                try:
+                    ts = float(ts or 0)
+                except (TypeError, ValueError):
+                    ts = 0.0
+                if ts >= cutoff:
+                    fresh.append(r)
+            if fresh:
+                out[status] = fresh
+        return out
+
+
 # ── composer ───────────────────────────────────────────────────────────────
 
 class BriefingComposer:
@@ -633,6 +735,13 @@ class BriefingComposer:
             # weather slots between calendar and markets; USA after news.
             self.providers.insert(2, WeatherProvider())
             self.providers.append(USASituationsProvider())
+        except Exception:  # noqa: BLE001
+            pass
+        # Research (upgrade-queue) provider: local class, but constructed
+        # defensively anyway — a broken research section never sinks the
+        # briefing (collect() itself also swallows everything).
+        try:
+            self.providers.append(ResearchProvider())
         except Exception:  # noqa: BLE001
             pass
 
