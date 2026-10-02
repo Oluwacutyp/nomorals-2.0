@@ -31,6 +31,20 @@ __all__ = ["run_tests", "select_changed_tests", "format_test_result",
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
 _SUMMARY_COUNT = re.compile(r"(\d+)\s+(passed|failed|error)")
+
+
+def _parse_pytest_counts(out: str) -> dict[str, int]:
+    """Pass/fail/error counts from pytest's short summary line.
+
+    pytest prints e.g. ``2 passed``, ``1 failed, 2 passed``, ``1 error``.
+    Note: ``findall`` returns (number, word) pairs, so the dict must be
+    keyed by the word — ``dict(pairs)`` would key by the number and every
+    lookup would silently miss.
+    """
+    counts: dict[str, int] = {}
+    for num, word in _SUMMARY_COUNT.findall(out):
+        counts[word] = counts.get(word, 0) + int(num)
+    return counts
 _UNITTEST_FAIL = re.compile(r"^(FAIL|ERROR):\s+(\S+)", re.MULTILINE)
 _UNITTEST_COUNTS = re.compile(r"FAILED\s*\(([^)]*)\)")
 
@@ -154,10 +168,10 @@ def _run_pytest(root: Path, paths: list[str] | None,
                 "selected": targets, "runner": "pytest",
                 "note": f"timed out after {timeout}s"}
     out = (proc.stdout or "") + (proc.stderr or "")
-    counts = dict(_SUMMARY_COUNT.findall(out))
-    passed = int(counts.get("passed", 0))
-    n_failed = int(counts.get("failed", 0))
-    n_errors = int(counts.get("error", 0))
+    counts = _parse_pytest_counts(out)
+    passed = counts.get("passed", 0)
+    n_failed = counts.get("failed", 0)
+    n_errors = counts.get("error", 0)
     snippet = _failure_snippet(out)
     failed = []
     for m in _FAILED_LINE.finditer(out):
