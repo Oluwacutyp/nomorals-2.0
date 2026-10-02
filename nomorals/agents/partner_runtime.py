@@ -1841,10 +1841,14 @@ class PartnerRuntime:
             return self._control_file(command.tail or arg)
         if kind == "publish":
             return self._control_publish(command.tail or arg)
+        if kind == "deliver":
+            return self._control_deliver(command.tail or arg, chat_key)
         if kind == "data":
             return self._control_data(command.tail or arg)
         if kind == "evolve":
             return self._control_evolve(command.tail or arg, chat_key=chat_key)
+        if kind == "upgrade":
+            return self._control_upgrade(command.tail or arg)
         if kind == "speak":
             return self._control_speak(command.tail or arg, chat_key=chat_key)
         if kind == "voice":
@@ -1870,7 +1874,7 @@ class PartnerRuntime:
         if kind == "proactive":
             return self._control_proactive(arg)
         if kind == "mission":
-            return self._control_mission(command.tail or arg)
+            return self._control_mission(command.tail or arg, chat_key=chat_key)
         if kind == "image":
             return self._control_image(command.tail or arg)
         if kind == "lens":
@@ -5077,6 +5081,72 @@ class PartnerRuntime:
         return (f"📄 published {os.path.basename(v['path'])} "
                 f"({size // 1024} KB, {v['format']}){where}")
 
+    def _control_deliver(self, tail: str, chat_key: str) -> str:
+        """`/deliver report <topic> [--section "T::body"] [--to p:c] [--no-pdf]`.
+
+        Create-and-deliver: styled HTML report + real PDF → zip → the live
+        gateway's file-send path.  Default target is the chat the command
+        came from; `--to platform:chat` overrides.
+        """
+        import shlex
+
+        usage = ('usage: /deliver report <topic> --section "Title::body" '
+                 "[--to platform:chat] [--no-pdf]")
+        try:
+            tokens = shlex.split(tail or "")
+        except ValueError as exc:
+            return f"{usage} (could not parse: {exc})"
+        if not tokens or tokens[0].lower() != "report":
+            return usage
+        topic_parts: list[str] = []
+        sections: list[tuple[str, str]] = []
+        target = ""
+        include_pdf = True
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--section" and i + 1 < len(tokens):
+                raw = tokens[i + 1]
+                sec_title, sep, sec_body = raw.partition("::")
+                if not sep or not sec_title.strip():
+                    return f"{usage} (bad --section {raw!r}; use 'Title::body')"
+                sections.append((sec_title.strip(), sec_body.strip()))
+                i += 2
+            elif tok == "--to" and i + 1 < len(tokens):
+                target = tokens[i + 1].strip()
+                i += 2
+            elif tok == "--no-pdf":
+                include_pdf = False
+                i += 1
+            else:
+                topic_parts.append(tok)
+                i += 1
+        topic = " ".join(topic_parts).strip()
+        if not topic:
+            return usage + " — a topic is required"
+        if not sections:
+            return (f"{usage} — at least one section is required, e.g.\n"
+                    f'/deliver report "{topic}" '
+                    '--section "Overview::The key points…"')
+        ref = self._ref_from_key(chat_key)
+        platform, chat_id = ref.platform, ref.chat_id
+        if target:
+            if ":" in target:
+                platform, chat_id = (p.strip() for p in target.split(":", 1))
+            else:
+                chat_id = target
+        try:
+            from ..tools.deliver_report import deliver_report
+
+            out = deliver_report(self.context, topic, sections, platform,
+                                 chat_id, include_pdf=include_pdf)
+        except Exception as exc:  # noqa: BLE001 - the reply carries the failure
+            return f"deliver failed: {exc}"
+        name = out["zip_path"].rsplit("/", 1)[-1]
+        return (f"📄 delivered {name} → {platform}:{chat_id} "
+                f"({out['zip_bytes']} B, {len(out['sections'])} sections, "
+                f"message {out['message_id']})")
+
     def _control_evolve(self, tail: str, chat_key: str) -> str:
         from .evolution import EvolutionAgent
         from .power import power_mode_for
@@ -5253,6 +5323,112 @@ class PartnerRuntime:
                             self._ref_from_key(chat_key), "\n".join(lines))
         return ("usage: /evolve <instruction> | /evolve apply <id> [commit] "
                 "| /evolve list")
+
+    def _control_upgrade(self, tail: str, *,
+                         _pipeline: Any | None = None) -> str:
+        """The research → approve → evolve loop, from chat.
+
+        /upgrade list            pending proposals, one line each
+        /upgrade show <id>       full ticket: problem, patch plan, risk
+        /upgrade diff <id>       preview the actual patch before approving
+        /upgrade approve <id>    approve → test-gated apply → what-changed digest
+        /upgrade deny <id> <reason>
+        /upgrade applied         recently applied, with what-changed digests
+
+        Owner-only by construction: this is dispatched from handle_control,
+        which is only reachable for operator (_is_operator) chats — a slash
+        from anyone else falls through to ordinary conversation, never here.
+
+        ``_pipeline`` is a test seam (a mock pipeline); production always
+        uses the real UpgradePipeline.
+        """
+        import time
+
+        from ..core.errors import NoMoralsError
+        from .upgrade_chat import (
+            UPGRADE_USAGE,
+            render_applied_digest,
+            render_upgrade_diff,
+            render_upgrade_list,
+            render_upgrade_show,
+            resolve_proposal,
+        )
+        from .upgrade_queue import UpgradePipeline, UpgradeQueue
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = (parts[0] if parts else "list").lower()
+        rest = parts[1] if len(parts) > 1 else ""
+        queue = UpgradeQueue(self.context)
+        pipeline = (_pipeline if _pipeline is not None
+                    else UpgradePipeline(self.context))
+
+        if verb == "list":
+            return render_upgrade_list(queue.list(status="proposed"))
+
+        if verb in ("show", "diff"):
+            proposal, err = resolve_proposal(queue, rest)
+            if err:
+                return err
+            if verb == "show":
+                return render_upgrade_show(proposal)
+            evo = None
+            plan = proposal.get("patch_plan") or {}
+            evo_id = (plan.get("evolution_proposal_id")
+                      if isinstance(plan, dict) else "")
+            if evo_id:
+                # the ticket references a planned evolution proposal — load
+                # its real edits so the preview shows actual hunks. Any
+                # load problem falls back to the ticket text.
+                try:
+                    agent = getattr(pipeline, "evolution", None)
+                    evo = agent._load(str(evo_id)) if agent is not None else None
+                except Exception:  # noqa: BLE001 — fallback is fine
+                    evo = None
+            return render_upgrade_diff(proposal, evo_proposal=evo)
+
+        if verb == "approve":
+            proposal, err = resolve_proposal(queue, rest)
+            if err:
+                return err
+            if (proposal.get("status") or "") != "proposed":
+                return (f"{proposal.get('id')} is "
+                        f"'{proposal.get('status')}' — only 'proposed' "
+                        "tickets can be approved.")
+            started = time.time()
+            try:
+                done = pipeline.approve_and_implement(
+                    str(proposal.get("id")), by="owner")
+            except Exception as exc:  # noqa: BLE001 — already recorded failed
+                return (f"❌ apply failed and was recorded as failed: "
+                        f"{type(exc).__name__}: {exc}")
+            digest = render_applied_digest(done)
+            return f"{digest}\n  ⏱️ took {time.time() - started:.0f}s"
+
+        if verb == "deny":
+            sub = rest.split(None, 1)
+            if len(sub) < 2:
+                return "usage: /upgrade deny <id> <reason>"
+            ref, reason = sub
+            proposal, err = resolve_proposal(queue, ref)
+            if err:
+                return err
+            try:
+                denied = pipeline.deny_with_reason(
+                    str(proposal.get("id")), reason, by="owner")
+            except NoMoralsError as exc:
+                return f"deny failed: {exc}"
+            return (f"🚫 upgrade denied: {denied.get('title') or denied.get('id')}\n"
+                    f"reason: {reason.strip()}")
+
+        if verb == "applied":
+            rows = queue.list(status="implemented", limit=10)
+            if not rows:
+                return "no upgrades applied yet."
+            lines = [f"applied upgrades ({len(rows)}):"]
+            lines.extend(render_applied_digest(p) for p in rows)
+            return "\n\n".join(lines)
+
+        return UPGRADE_USAGE
 
     def _control_data(self, tail: str, chat_key: str) -> str:
         parts = (tail or "").split()
@@ -6173,21 +6349,41 @@ class PartnerRuntime:
         return "\n".join(lines)
 
     # ── missions: chat-visible progress ──────────────────────────────────────
-    def _control_mission(self, tail: str) -> str:
-        """Mission progress, ETA and stall reasons, from persisted state.
+    def _control_mission(self, tail: str, chat_key: str = "") -> str:
+        """Mission progress and control, from persisted state.
 
         /mission status [id|name] — % complete, current step, ETA, stall reason
         /mission list             — active missions at a glance
         /mission stall <id> <code> <message> — record a concrete blocker
         /mission clear <id>       — drop the stall record (progress resumed)
+        /mission pause <id>       — freeze it (status → paused)
+        /mission resume <id>      — continue it in the background
+        /mission cancel <id> [reason] — stop it for good (terminal)
+        /mission retry <id>       — fresh attempt: cancel + requeue the goal
+        /mission watch <id>       — this chat gets milestone updates
+        /mission unwatch <id>     — stop milestone updates in this chat
+        /mission new <template> <args> — create from a template
+            (research <topic> | build <what> | fix <target>)
         """
         from ..core.errors import NoMoralsError
-        from ..missions import MissionRunner, MissionStore, StallCode, render_status_text
+        from ..missions import (
+            MissionRunner,
+            MissionStatus,
+            MissionStore,
+            MissionWatchers,
+            StallCode,
+            render_status_text,
+        )
 
         store = MissionStore(self.context.db)
         usage = ("usage: /mission status [id|name] | /mission list | "
-                 "/mission stall <id> <code> <message> | /mission clear <id>\n"
-                 f"stall codes: {', '.join(sorted(StallCode.ALL))}")
+                 "/mission stall <id> <code> <message> | /mission clear <id> | "
+                 "/mission pause <id> | /mission resume <id> | "
+                 "/mission cancel <id> [reason] | /mission retry <id> | "
+                 "/mission watch <id> | /mission unwatch <id> | "
+                 "/mission new <template> <args>\n"
+                 f"stall codes: {', '.join(sorted(StallCode.ALL))}; "
+                 "templates: research <topic> | build <what> | fix <target>")
         parts = (tail or "").strip().split(None, 1)
         verb = (parts[0] if parts else "status").lower()
         rest = parts[1] if len(parts) > 1 else ""
@@ -6244,7 +6440,176 @@ class PartnerRuntime:
             return (f"{mission.name}: stall cleared — back in play."
                     if cleared else f"{mission.name}: no stall recorded.")
 
+        if verb == "pause":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            try:
+                store.set_status(mission.id, MissionStatus.PAUSED)
+            except (NoMoralsError, ValueError) as exc:
+                return f"couldn't pause: {exc}"
+            return (f"⏸ {mission.name}: paused — "
+                    f"/mission resume {mission.id} to continue.")
+
+        if verb == "resume":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            if mission.terminal:
+                return (f"{mission.name} is {mission.status} — terminal "
+                        "missions can't resume; /mission retry starts a "
+                        "fresh attempt.")
+            runner = MissionRunner(self.context, store=store)
+
+            def _resume_job() -> None:
+                try:
+                    runner.resume(mission.id)
+                except Exception:  # noqa: BLE001 - chat must stay alive
+                    _log.exception("mission resume %s failed", mission.id)
+
+            threading.Thread(target=_resume_job,
+                             name=f"mission-resume-{mission.id[:8]}",
+                             daemon=True).start()
+            return (f"▶ {mission.name}: resumed in the background — "
+                    f"/mission status {mission.id} for progress.")
+
+        if verb == "cancel":
+            sub = rest.split(None, 1)
+            ref = sub[0] if sub else ""
+            reason = sub[1].strip() if len(sub) > 1 else "cancelled by owner"
+            mission = self._find_mission(store, ref)
+            if mission is None:
+                return f"no mission matching {ref!r}."
+            try:
+                store.set_status(mission.id, MissionStatus.CANCELLED, note=reason)
+            except (NoMoralsError, ValueError) as exc:
+                return f"couldn't cancel: {exc}"
+            runner = MissionRunner(self.context, store=store)
+            runner.cancel(reason)  # cooperative: any in-flight runner stops
+            if runner.reporter is not None:
+                try:
+                    runner.reporter.on_terminal(
+                        mission, MissionStatus.CANCELLED, error=reason)
+                except Exception:  # noqa: BLE001 - telemetry, not chat
+                    _log.debug("cancel milestone push failed", exc_info=True)
+            return f"⏹ {mission.name}: cancelled ({reason})."
+
+        if verb == "retry":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            if mission.status == MissionStatus.RUNNING:
+                return (f"{mission.name} is still running — /mission cancel "
+                        "it first if you want to start over.")
+            # cancel + requeue: a fresh mission row keeps the goal, the plan
+            # skeleton, the name and the budgets; spend, errors, stalls and
+            # the milestone log start clean.
+            fresh_state: dict[str, Any] = {}
+            if mission.state.get("plan"):
+                fresh_state["plan"] = mission.state["plan"]
+            new = store.create_new(
+                mission.goal,
+                name=mission.name,
+                budget_wall=mission.budget_wall,
+                budget_tokens=mission.budget_tokens,
+                state=fresh_state,
+                metadata={**(mission.metadata or {}), "retry_of": mission.id},
+            )
+            try:
+                store.set_status(mission.id, MissionStatus.CANCELLED,
+                                 note=f"superseded by retry {new.id}")
+            except (NoMoralsError, ValueError) as exc:
+                _log.debug("retry: could not cancel old mission: %s", exc)
+            runner = MissionRunner(self.context, store=store)
+
+            def _retry_job() -> None:
+                try:
+                    runner.run(new, max_iterations=8)
+                except Exception:  # noqa: BLE001 - chat must stay alive
+                    _log.exception("mission retry %s failed", new.id)
+
+            threading.Thread(target=_retry_job,
+                             name=f"mission-retry-{new.id[:8]}",
+                             daemon=True).start()
+            return (f"🔁 retry of {mission.name} queued as {new.name} "
+                    f"[{new.id}] — running in the background.")
+
+        if verb == "watch":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            if not chat_key:
+                return "watch needs a chat context — run this from a chat."
+            added = MissionWatchers(self.context.db).subscribe(
+                mission.id, chat_key)
+            if added:
+                return (f"👀 watching {mission.name}: milestone updates "
+                        "will land in this chat.")
+            return f"already watching {mission.name} from this chat."
+
+        if verb == "unwatch":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            if not chat_key:
+                return "unwatch needs a chat context — run this from a chat."
+            removed = MissionWatchers(self.context.db).unsubscribe(
+                mission.id, chat_key)
+            return (f"stopped watching {mission.name} from this chat."
+                    if removed
+                    else f"{mission.name} isn't watched from this chat.")
+
+        if verb == "new":
+            sub = rest.split(None, 1)
+            template = sub[0] if sub else ""
+            targs = sub[1].strip() if len(sub) > 1 else ""
+            spec = self._mission_template_spec(template, targs)
+            if spec is None:
+                return ("usage: /mission new <template> <args>\n"
+                        "templates: research <topic> | build <what> | "
+                        "fix <target>")
+            mission = store.create_new(**spec)
+            return (f"🚀 mission created: {mission.name} [{mission.id}] — "
+                    f"{mission.goal}\n"
+                    f"/mission resume {mission.id} to start it.")
+
         return usage
+
+    @staticmethod
+    def _mission_template_spec(template: str, args: str) -> dict[str, Any] | None:
+        """Goal + plan skeleton for ``/mission new <template> <args>``.
+
+        Returns the kwargs for ``MissionStore.create_new``, or None when
+        the template is unknown.
+        """
+        t = (template or "").lower()
+        plans = {
+            "research": ["gather sources", "synthesize findings", "write report"],
+            "build": ["design", "implement", "verify with tests"],
+            "fix": ["reproduce", "root-cause", "patch", "verify"],
+        }
+        if t not in plans or not args.strip():
+            return None
+        arg = args.strip()
+        goals = {
+            "research": (f"Research {arg}: gather sources, synthesize "
+                         "findings, report with citations"),
+            "build": f"Build {arg}: design, implement, verify with tests",
+            "fix": (f"Fix {arg}: reproduce the issue, find the root cause, "
+                    "patch it, verify"),
+        }
+        return {
+            "goal": goals[t],
+            "name": f"{t} — {arg[:48]}",
+            "state": {
+                "plan": [
+                    {"name": s, "goal": s, "role": "execution",
+                     "kind": "io", "depends_on": []}
+                    for s in plans[t]
+                ]
+            },
+            "metadata": {"template": t, "template_args": arg[:200]},
+        }
 
     @staticmethod
     def _find_mission(store: Any, ref: str) -> Any | None:

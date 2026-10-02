@@ -169,8 +169,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "macro": (0, None),      # /macro [list] | /macro <name> [json overrides]
     "file": (1, None),       # /file <platform> <chat> <path> [caption]
     "publish": (1, None),    # /publish <platform> <chat> <md path> [format]
+    "deliver": (1, None),     # /deliver report <topic> [--section "T::body"] [--to p:c]
     "data": (0, None),       # /data mine [name] | /data list | /data fetch <ref> [rows]
     "evolve": (1, None),     # /evolve <instruction> | /evolve apply <id> | /evolve list
+    "upgrade": (0, None),    # /upgrade list|show|diff|approve|deny|applied — research→approve→evolve review loop
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -180,7 +182,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
-    "mission": (0, None),    # /mission status [id|name] | list | stall <id> <code> <msg> | clear <id>
+    "mission": (0, None),    # /mission status|list|stall|clear|pause|resume|cancel|retry|watch|unwatch|new
+                             #   /mission new <research|build|fix> <args>
     "image": (1, 3),         # /image <path-or-url> — lookup
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
@@ -246,6 +249,9 @@ _HELP_TEXT = "\n".join(
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
         "  /mission status [id|name]             mission progress, ETA, stall reasons",
+"  /mission pause|resume|cancel|retry  pause, resume, stop, or restart a mission",
+"  /mission watch|unwatch <id>          this chat gets milestone updates",
+"  /mission new <research|build|fix>…   create a mission from a template",
         "  env: NM_PARTNER_PROACTIVE_ENABLED=0 silences all pushes;",
         "       NM_PARTNER_PROACTIVE_BRIEFING=0 / _WATCHERS=0 toggle each kind;",
         "       quiet hours NM_PARTNER_QUIET_START/_END (default 22–8)",
@@ -254,6 +260,10 @@ _HELP_TEXT = "\n".join(
         "  /features <name> on|off                 arena|group_posts|proactive_dm|vision|search",
         "  /arena [status|run [topic]|topics|stream [n]|export [n]]",
         "  /arena approve <id> | /arena deny <id>  review its builds",
+        "  /upgrade list                         research findings awaiting your review",
+        "  /upgrade show <id> | /upgrade diff <id>  full ticket · preview the actual patch",
+        "  /upgrade approve <id>                 test-gated apply, then a what-changed digest",
+        "  /upgrade deny <id> <reason> | /upgrade applied",
         "  — trial accounts (one account, delivered to you) —",
         "  /trial start <platform>                 plan one real trial signup",
         "  /trial save <platform> <login> <pass>   store it encrypted",
@@ -301,6 +311,7 @@ _HELP_TEXT = "\n".join(
         "  /macro <name> [json]                    replay a recorded macro",
         "  /file <platform> <chat> <path> [caption] send a file to any live chat",
         "  /publish <platform> <chat> <md> [fmt]   make md→pdf/html/… and send it",
+        "  /deliver report <topic> [--section \"T::body\"]  styled report → zip → send here",
         "  /data mine [name] | list | fetch <name>  train data (mine/free HF sets)",
         "  /evolve <instruction> | apply <id> | list   self-improvement (tests-gated)",
         "  /evolve audit | research <t> | revert <id> | auto [n] | queue add <goal>",
@@ -312,6 +323,9 @@ _HELP_TEXT = "\n".join(
         "  /task add <instruction> | /task run [id] | /task list",
         "  /notify [n]                             recent alerts",
         "  /mission status [id|name]               mission progress, ETA, stall reasons",
+"  /mission pause|resume|cancel|retry    pause, resume, stop, or restart a mission",
+"  /mission watch|unwatch <id>            this chat gets milestone updates",
+"  /mission new <research|build|fix>…     create a mission from a template",
         "  /image <path-or-url>                    look it up (hash, dims, seen?)",
         "  /lens <path-or-url>                     reverse image search",
         "  — devon (autonomous dev agent) —",
@@ -694,7 +708,16 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "publish": {"what": "convert markdown to pdf/html and send it to a chat.",
                 "usage": "/publish <platform> <chat> <md> [fmt]",
                 "example": "/publish telegram 123 notes.md pdf",
-                "related": "/file"},
+                "related": "/file /deliver"},
+    "deliver": {"what": ("create-and-deliver: generate a styled report from a "
+                         "topic plus (title, markdown body) sections — HTML "
+                         "plus a real PDF — zip them, and send the archive to "
+                         "a chat. The send edge is the live gateway's "
+                         "file-send path."),
+                "usage": ('/deliver report <topic> --section "Title::markdown body" '
+                          "[--to platform:chat] [--no-pdf]  (default target: this chat)"),
+                "example": '/deliver report "Q3 markets" --section "Overview::The quarter was **volatile**"',
+                "related": "/publish /zip"},
     "data": {"what": "training data: mine conversations, list datasets, fetch rows from free HuggingFace sets.",
              "usage": "/data mine [name] | list | fetch <ref> [rows]",
              "example": "/data fetch openai/gsm8k 100",
@@ -743,10 +766,25 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                          "an honest ETA, and — when stuck — the concrete "
                          "stall reason. Milestones (started / step / stalled / "
                          "done) also push proactively through the notifier."),
-                "usage": "/mission status [id|name] | /mission list | "
-                         "/mission stall <id> <code> <message> | /mission clear <id>",
+                "usage": ("/mission status [id|name] | /mission list | "
+                         "/mission stall <id> <code> <message> | /mission clear <id> | "
+                         "/mission pause <id> | /mission resume <id> | "
+                         "/mission cancel <id> [reason] | /mission retry <id> | "
+                         "/mission watch <id> | /mission unwatch <id> | "
+                         "/mission new <research|build|fix> <args>"),
                 "example": "/mission status",
                 "related": "/devon /notify"},
+    "upgrade": {"what": ("the research→approve→evolve review loop in chat: "
+                         "research digest findings that clear the ticket "
+                         "gate land as upgrade proposals; you review the "
+                         "ticket, preview the actual patch, then approve "
+                         "(test-gated apply) or deny with a reason. "
+                         "Owner-only."),
+                "usage": "/upgrade list | /upgrade show <id> | /upgrade diff <id> | "
+                         "/upgrade approve <id> | /upgrade deny <id> <reason> | "
+                         "/upgrade applied",
+                "example": "/upgrade diff upg_9f2k",
+                "related": "/evolve /research /notify"},
     "image": {"what": "look up an image: hash, dimensions, seen-before.",
               "usage": "/image <path-or-url>", "example": "/image /sdcard/pic.jpg",
               "related": "/lens /look"},
@@ -875,7 +913,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor"]),
     ("media system", ["music", "play", "video", "hub", "podcast"]),
-    ("execution · archives · builders", ["exec", "zip", "apps", "fix"]),
+    ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission"]),
     ("platform control", ["start", "stop", "profile"]),
@@ -1037,7 +1075,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "news", "osint", "dns", "scan", "whois", "ports"]),
     ("building for real — code & missions",
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
-      "arena", "trial", "book", "exec", "apps", "fix", "structure"]),
+      "upgrade", "arena", "trial", "book", "exec", "apps", "fix", "structure"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
@@ -1128,6 +1166,7 @@ LIST_ONELINERS: dict[str, str] = {
     "gen": "generate a validated script of a kind",
     "data": "training data: mine / list / fetch HF sets",
     "evolve": "self-improvement, test-gated (propose|apply|revert|publish)",
+    "upgrade": "research→approve→evolve: review tickets, preview patches, approve/deny",
     "arena": "content arena: research, stream, review, approve builds",
     "trial": "ONE trial-account plan, stored encrypted",
     "remember": "store something in long-term memory",
@@ -1183,6 +1222,7 @@ LIST_ONELINERS: dict[str, str] = {
     "video": "find videos across the web (ranked, enriched) + download",
     "exec": "run code sandboxed: py/js/bash/c/… with real output",
     "zip": "archives: create/list/info/extract (safe against zip-slip)",
+    "deliver": "create-and-deliver: styled report → zip → send to chat",
     "apps": "scaffold + serve runnable apps: static|flask|fastapi|express|react|cli",
     "hub": "one-call media: song / video / podcast pipelines, end to end",
     "podcast": "find → download → transcribe → chapters, transcript saved",
