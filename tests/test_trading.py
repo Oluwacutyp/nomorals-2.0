@@ -33,6 +33,15 @@ from nomorals.ta.data import make_synthetic
 from nomorals.tools import trading as trading_tool
 
 
+# The Sentinel.py submodule is private; CI and external checkouts cannot
+# fetch it. Tests that need the real bridge skip gracefully when it is
+# absent — run `git submodule update --init vendor/sentinel` for full
+# coverage. Tests for the absent-submodule behavior itself always run.
+requires_sentinel = unittest.skipUnless(
+    bridge.sentinel_available(),
+    "vendor/sentinel not checked out (private submodule)")
+
+
 # ── fakes ────────────────────────────────────────────────────────────────────
 
 class _FakeRow(dict):
@@ -181,22 +190,26 @@ class BridgeTests(unittest.TestCase):
         text = rep.summary_text()
         self.assertIn("git submodule update --init", text)
 
+    @requires_sentinel
     def test_doctor_present_passes_on_synthetic(self):
         rep = bridge.doctor()
         self.assertTrue(rep.ok, rep.summary_text())
         self.assertTrue(rep.commit_matches)
         self.assertEqual(rep.commit, bridge.TESTED_COMMIT[:7])
 
+    @requires_sentinel
     def test_unknown_market_and_profile_rejected(self):
         with self.assertRaises(bridge.SentinelError):
             bridge.get_engine("nope")
         with self.assertRaises(bridge.SentinelError):
             bridge.get_engine("crypto", "yolo")
 
+    @requires_sentinel
     def test_list_strategies_nonempty(self):
         names = bridge.list_strategies()
         self.assertGreater(len(names), 50)
 
+    @requires_sentinel
     def test_load_data_csv_missing(self):
         with self.assertRaises(bridge.SentinelError):
             bridge.load_data("/nonexistent/data.csv", "crypto")
@@ -285,6 +298,7 @@ class PaperSessionTests(unittest.TestCase):
         p1.start(); p2.start()
         self.addCleanup(p1.stop); self.addCleanup(p2.stop)
 
+    @requires_sentinel
     def test_paper_lifecycle_survives_restart(self):
         self._fake_feed()
         started = trading_tool.paper_start(self.ctx, "BTC/USDT",
@@ -314,6 +328,7 @@ class PaperSessionTests(unittest.TestCase):
             "SELECT * FROM trade_journal WHERE kind='paper' AND side='stop'")
         self.assertIsNotNone(j)
 
+    @requires_sentinel
     def test_paper_start_idempotent(self):
         self._fake_feed()
         a = trading_tool.paper_start(self.ctx, "BTC/USDT")
@@ -453,6 +468,7 @@ class ToolRegistrationTests(unittest.TestCase):
         with self.assertRaises(bridge.SentinelError):
             reg.tools["trading"](action="moon")
 
+    @requires_sentinel
     def test_tool_strategies(self):
         ctx = _ctx()
         reg = _FakeRegistry(ctx)
@@ -462,6 +478,7 @@ class ToolRegistrationTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    @requires_sentinel
     def test_cmd_trade_doctor_json(self):
         from nomorals.cli import _cmd_trade
         ctx = _ctx()

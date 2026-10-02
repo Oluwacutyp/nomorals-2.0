@@ -36,6 +36,15 @@ def _expert():
     return fe.FinancialExpert(SimpleNamespace(db=None, settings=None))
 
 
+# The Sentinel.py submodule is private; CI and external checkouts cannot
+# fetch it. Tests that need the real bridge skip gracefully when it is
+# absent — run `git submodule update --init vendor/sentinel` for full
+# coverage. Tests for the absent-submodule behavior itself always run.
+requires_sentinel = unittest.skipUnless(
+    bridge.sentinel_available(),
+    "vendor/sentinel not checked out (private submodule)")
+
+
 class TradeIdeaTests(unittest.TestCase):
     def test_long_idea_math(self):
         df = _trend_bars()
@@ -191,6 +200,7 @@ class BridgeRoutingTests(unittest.TestCase):
         m.assert_called_once_with("BTC/USDT", market="crypto",
                                   timeframe="1h", bars=500)
 
+    @requires_sentinel
     def test_ccxt_path_needs_package(self):
         # ccxt is not installed in this env → helpful error, not ImportError.
         # (The real _ensure_path runs: vendor/sentinel is checked out.)
