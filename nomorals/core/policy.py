@@ -171,6 +171,10 @@ ROLE_PRESETS: dict[str, tuple[str, ...]] = {
         Capability.DB_WRITE,
     ),
     "orchestrator": tuple(Capability.ALL),
+    # Local operator. Unrestricted by construction ("*"), not by enumeration, so
+    # future extension capabilities are covered too. Policy.grant_for_role pins
+    # this role explicitly: a default_grant ceiling never narrows it.
+    "owner": ("*",),
     "critic": (Capability.MEM_READ, Capability.DB_READ, Capability.MODEL_CALL),
     "readonly": (Capability.FS_READ, Capability.MEM_READ, Capability.DB_READ),
 }
@@ -524,7 +528,35 @@ class Policy:
 
     # -- helpers -------------------------------------------------------------
     def grant_for_role(self, role: str) -> CapabilitySet:
-        return CapabilitySet.role(role).intersect(self.default_grant.union(CapabilitySet.all()))
+        """Grant capabilities for a role preset, honoring ``default_grant`` as a ceiling.
+
+        Semantics (Wave H3 audit — chosen deliberately):
+
+        * Unknown roles raise :exc:`KeyError` via :meth:`CapabilitySet.role`,
+          as before.
+        * The owner role — any preset containing the ``"*"`` wildcard — is the
+          operator's own unrestricted grant and is returned unchanged. A
+          ceiling exists to narrow *delegated* roles, never to clip the
+          operator's full power. The pin must be explicit: plain
+          ``preset.intersect(default_grant)`` would hand a wildcard left side
+          straight back as ``default_grant`` (see
+          :meth:`CapabilitySet.intersect`), silently demoting the owner.
+        * With no ceiling configured (``default_grant`` empty/unset, the
+          default), the preset passes through unchanged. This preserves the
+          method's historical observable behavior — ``default_grant`` was
+          previously dead code here (it was unioned with
+          ``CapabilitySet.all()``, whose ``"*"`` made ``intersect`` return the
+          role preset untouched) — so nothing silently tightens.
+        * With a non-empty ceiling configured, the result is
+          ``preset ∩ default_grant``: the ceiling actually narrows the role
+          grant, which is what the constructor parameter always promised.
+        """
+        preset = CapabilitySet.role(role)
+        if "*" in preset.patterns:
+            return preset
+        if not self.default_grant.patterns:
+            return preset
+        return preset.intersect(self.default_grant)
 
 
 class _DefaultClock:
