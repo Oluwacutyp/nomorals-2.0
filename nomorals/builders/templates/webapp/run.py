@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{PROJECT} listening on http://{args.host}:{server.server_port}", flush=True)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # noqa: E103, E106 - deliberate shutdown hook
         pass
     return 0
 

@@ -70,7 +70,8 @@ def _read_manifest(project_dir: Path) -> dict[str, Any]:
     if manifest.is_file():
         try:
             return json.loads(manifest.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            _log.debug("ignoring corrupt builders manifest %s: %s", manifest, e)
             pass
     return {}
 
@@ -166,12 +167,13 @@ class _Drainer(threading.Thread):
         try:
             for chunk in iter(self._pipe.readline, ""):
                 self.chunks.append(chunk)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            _log.debug("stderr drain ended: %s", e)
             pass
         finally:
             try:
                 self._pipe.close()
-            except OSError:
+            except OSError:  # noqa: E103 - best-effort close in finally; pipe may already be dead
                 pass
 
     def text(self) -> str:
@@ -214,14 +216,16 @@ class ServeHandle:
         if self._proc.poll() is None:
             try:
                 os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
-            except (OSError, ProcessLookupError):
+            except (OSError, ProcessLookupError) as e:
+                _log.debug("process already gone on SIGTERM: %s", e)
                 pass
             try:
                 self._proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
+                except (OSError, ProcessLookupError) as e:
+                    _log.debug("process already gone on SIGKILL: %s", e)
                     pass
                 self._proc.wait(timeout=timeout)
         self._stderr.join(timeout=2.0)

@@ -75,7 +75,7 @@ class ConsoleRunner:
         while True:
             try:
                 line = input("> ")
-            except (EOFError, KeyboardInterrupt):
+            except (EOFError, KeyboardInterrupt):  # noqa: E106 - deliberate REPL exit
                 print()
                 break
             if line.strip().lower() in ("/quit", "/exit"):
