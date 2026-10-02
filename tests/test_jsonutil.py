@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-
-import pytest
+import unittest
 
 from nomorals.core.jsonutil import extract_json
 
@@ -218,49 +217,60 @@ BATTERY = [
 ]
 
 
-@pytest.mark.parametrize("text,expected,div", BATTERY,
-                         ids=[f"case-{i}" for i in range(len(BATTERY))])
-def test_canonical_ground_truth(text, expected, div):
-    """The canonical implementation returns the documented result."""
-    assert extract_json(text) == expected
+class CanonicalGroundTruthTest(unittest.TestCase):
+    def test_all_cases(self):
+        """The canonical implementation returns the documented result."""
+        for i, (text, expected, _div) in enumerate(BATTERY):
+            with self.subTest(f"case-{i}"):
+                self.assertEqual(extract_json(text), expected)
 
 
-@pytest.mark.parametrize("name", sorted(OLD_IMPLS))
-@pytest.mark.parametrize("text,expected,div", BATTERY,
-                         ids=[f"case-{i}" for i in range(len(BATTERY))])
-def test_parity_with_old_implementation(name, text, expected, div):
-    """New behavior matches each old copy wherever the old copy was right,
-    and the documented divergences are exactly the enumerated ones."""
-    old = OLD_IMPLS[name]
-    if div.get(name) is _CRASH:
-        with pytest.raises(Exception):
-            old(text)
-        assert extract_json(text) == expected  # canonical is None-safe
-        return
-    got = old(text)
-    if name in div:
-        assert got == div[name], f"{name} fixture drifted on {text!r}"
-    else:
-        assert got == expected, f"{name} unexpectedly diverged on {text!r}"
-    assert extract_json(text) == expected
+class ParityTest(unittest.TestCase):
+    def test_parity_with_old_implementations(self):
+        """New behavior matches each old copy wherever the old copy was
+        right, and the documented divergences are exactly the enumerated
+        ones."""
+        for name in sorted(OLD_IMPLS):
+            old = OLD_IMPLS[name]
+            for i, (text, expected, div) in enumerate(BATTERY):
+                with self.subTest(f"{name}/case-{i}"):
+                    if div.get(name) is _CRASH:
+                        with self.assertRaises(Exception):
+                            old(text)
+                        # canonical is None-safe
+                        self.assertEqual(extract_json(text), expected)
+                        continue
+                    got = old(text)
+                    if name in div:
+                        self.assertEqual(got, div[name],
+                                         f"{name} fixture drifted on {text!r}")
+                    else:
+                        self.assertEqual(got, expected,
+                                         f"{name} unexpectedly diverged on {text!r}")
+                    self.assertEqual(extract_json(text), expected)
 
 
-def test_reasoning_alias_is_canonical():
-    """reasoning._extract_json is the canonical function itself (its old
-    module-level copy was the unification base), so its five external
-    importers (task_type, reflection, structuring, toolmaker, benchmark)
-    are unaffected."""
-    from nomorals.agents.reasoning import _extract_json
-    assert _extract_json is extract_json
+class AliasTest(unittest.TestCase):
+    def test_reasoning_alias_is_canonical(self):
+        """reasoning._extract_json is the canonical function itself (its old
+        module-level copy was the unification base), so its five external
+        importers (task_type, reflection, structuring, toolmaker, benchmark)
+        are unaffected."""
+        from nomorals.agents.reasoning import _extract_json
+        self.assertIs(_extract_json, extract_json)
+
+    def test_delegate_methods_call_canonical(self):
+        """The three former method copies now delegate to the shared function."""
+        from nomorals.agents.brief import BriefAgent
+        from nomorals.agents.devon import DevonAgent
+        from nomorals.agents.evolution import EvolutionAgent
+
+        for cls in (BriefAgent, DevonAgent, EvolutionAgent):
+            with self.subTest(cls.__name__):
+                self.assertEqual(cls._extract_json('{"ok": true}'), {"ok": True})
+                self.assertIsNone(cls._extract_json("nothing here"))
+                self.assertEqual(cls._extract_json('x {"k": "v}"} y'), {"k": "v}"})
 
 
-def test_delegate_methods_call_canonical():
-    """The three former method copies now delegate to the shared function."""
-    from nomorals.agents.brief import BriefAgent
-    from nomorals.agents.devon import DevonAgent
-    from nomorals.agents.evolution import EvolutionAgent
-
-    for cls in (BriefAgent, DevonAgent, EvolutionAgent):
-        assert cls._extract_json('{"ok": true}') == {"ok": True}
-        assert cls._extract_json("nothing here") is None
-        assert cls._extract_json('x {"k": "v}"} y') == {"k": "v}"}
+if __name__ == "__main__":
+    unittest.main()
