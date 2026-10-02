@@ -79,7 +79,11 @@ class AliasMapTests(unittest.TestCase):
         parser = _parser()
         # some commands require positionals; give them dummies
         dummy_args = {"run": ["dummy-goal"], "ask": ["dummy prompt"],
-                      "briefing": ["status"]}
+                      "briefing": ["status"],
+                      "simulate": ["risk", "echo hi"],
+                      "arena": ["status"], "trial": ["list"],
+                      "research-loop": ["status"], "hub": ["status"],
+                      "skill": ["list"], "book": ["list"]}
         for canonical, aliases in CLI_ALIASES.items():
             for alias in aliases:
                 argv = [alias] + dummy_args.get(canonical, [])
@@ -108,11 +112,15 @@ class HelpCompletenessTests(unittest.TestCase):
                          f"commands without help text: {missing}")
 
     def test_stub_commands_say_so(self):
+        # Wave E: the six former stubs are real now — their help must NOT
+        # claim "not implemented" anymore; each names its real module.
         sub = _cli_subparsers()
-        for name in ("book", "hub", "arena", "trial", "skill", "simulate"):
+        for name in ("book", "hub", "arena", "trial", "skill", "simulate",
+                     "research-loop"):
             text = _help_text_for(sub, name)
-            self.assertIn("not implemented", text.lower(),
-                          f"{name}: help should admit the CLI stub, got {text!r}")
+            self.assertNotIn("not implemented", text.lower(),
+                             f"{name}: help still claims a stub: {text!r}")
+            self.assertTrue(text.strip(), f"{name}: help text is empty")
 
     def test_help_cli_overview_lists_commands_and_aliases(self):
         page = _cli_overview()
@@ -224,9 +232,10 @@ class CommandCenterTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("pending clarifications", out)
         self.assertIn("recent jobs", out)
-        # per-process / in-memory only: unavailable, never a fake 0
-        self.assertIn("router calls: unavailable", out)
-        self.assertIn("last plan_error: unavailable", out)
+        # persisted router telemetry (migration 65): with no decisions
+        # recorded yet, nm mind says so — never a fake 0
+        self.assertIn("router calls: none recorded yet", out)
+        self.assertIn("last plan_error: none recorded", out)
 
     def test_mind_shows_seeded_clarifications_and_jobs(self):
         self._seed_coremind()
@@ -249,8 +258,11 @@ class CommandCenterTests(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertEqual(len(payload["pending_clarifications"]), 1)
         self.assertEqual(len(payload["recent_jobs"]), 2)
-        self.assertFalse(payload["router_calls"]["available"])
-        self.assertFalse(payload["last_plan_error"]["available"])
+        # router telemetry is persisted (migration 65), not per-process
+        self.assertIn("per_route", payload["router_calls"])
+        self.assertIn("total", payload["router_calls"])
+        self.assertIn("model_consults", payload["router_calls"])
+        self.assertIsNone(payload["last_plan_error"])
 
     # ── nm missions ───────────────────────────────────────────────────────
     def _mission_args(self, **kwargs):

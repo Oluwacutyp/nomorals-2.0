@@ -2082,6 +2082,79 @@ CREATE INDEX IF NOT EXISTS idx_arena_scores_ts ON arena_scores(ts);
 """
 
 
+_V63_BENCHMARK_RUNS = """
+-- K3 scoreboard: persisted benchmark runs (the "beat K3" scoreboard).
+-- One row per run; per-dimension detail lives in ``dimensions`` as JSON so
+-- the schema never has to change when suites are added. ``mode`` is either
+-- 'model-scored' (a live LLM was measured) or 'harness-self-test' (the
+-- harness verified its own mechanics with no model) — the two are never
+-- mixed in comparisons.
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    id          TEXT PRIMARY KEY,
+    ts          REAL NOT NULL,
+    scoreboard  TEXT NOT NULL DEFAULT 'k3',
+    suite       TEXT NOT NULL DEFAULT 'all',
+    mode        TEXT NOT NULL DEFAULT 'harness-self-test',
+    provider    TEXT NOT NULL DEFAULT '',
+    measurable  INTEGER NOT NULL DEFAULT 1,
+    overall     REAL,
+    passed      INTEGER NOT NULL DEFAULT 0,
+    total       INTEGER NOT NULL DEFAULT 0,
+    dimensions  TEXT NOT NULL DEFAULT '{}',
+    seconds     REAL NOT NULL DEFAULT 0,
+    notes       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_runs_ts ON benchmark_runs(ts);
+CREATE INDEX IF NOT EXISTS idx_benchmark_runs_suite ON benchmark_runs(suite);
+"""
+
+_V65_COREMIND_TELEMETRY = """
+-- Core Mind router telemetry (wave E): persisted across processes so
+-- ``nm mind`` can show live router behavior. One row per key:
+--   route:<kind>   — router decision counts (kind = intent route/organ,
+--                    e.g. 'research_swarm', 'coding', 'brain')
+--   model_consults — model-check calls (kept in addition to per-route counts)
+--   model_timeouts — model-check deadline hits
+--   last_plan_error — JSON {error, route, at} of the most recent plan failure
+CREATE TABLE IF NOT EXISTS coremind_telemetry (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL DEFAULT 0
+);
+"""
+
+
+def _apply_research_loop_tables(db: object) -> None:
+    """Wave E always-on research loop: per-cycle run history.
+
+    research_loop_runs — one row per cycle (tick or on-demand run):
+    gate-skip reason when deferred (quiet hours / feature off /
+    proactive master off), topics covered, findings/claims/proposal
+    counts, the queued proposal ids, whether the owner was notified.
+    The ``nm`` status surface reads the latest row.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS research_loop_runs (
+            id                  TEXT PRIMARY KEY,
+            started_at          REAL NOT NULL DEFAULT 0,
+            finished_at         REAL NOT NULL DEFAULT 0,
+            ok                  INTEGER NOT NULL DEFAULT 0,
+            skipped_reason      TEXT NOT NULL DEFAULT '',
+            topics              TEXT NOT NULL DEFAULT '[]',
+            findings_count      INTEGER NOT NULL DEFAULT 0,
+            claims_count        INTEGER NOT NULL DEFAULT 0,
+            proposals_created   INTEGER NOT NULL DEFAULT 0,
+            proposal_ids        TEXT NOT NULL DEFAULT '[]',
+            notified            INTEGER NOT NULL DEFAULT 0,
+            error               TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_loop_runs_started
+            ON research_loop_runs(started_at DESC);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -2151,6 +2224,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(60, "artifacts", sql=_V60_ARTIFACTS),
     Migration(61, "arena_scores", sql=_V61_ARENA_SCORES),
     Migration(62, "research_organs", fn=_apply_research_organs),
+    Migration(63, "benchmark_runs", sql=_V63_BENCHMARK_RUNS),
+    Migration(64, "research_loop_runs", fn=_apply_research_loop_tables),
+    Migration(65, "coremind_telemetry", sql=_V65_COREMIND_TELEMETRY),
 )
 
 

@@ -1180,11 +1180,14 @@ class PartnerRuntime:
             except Exception as exc:  # noqa: BLE001 - arena is optional
                 _log.warning("arena failed to start: %s", exc)
                 self._arena = None
-        # Research: always-on research & suggestions (opt-in setting; the
-        # per-cycle feature flag + daily cap still apply).
+        # Research: always-on research & suggestions (opt-in via the real
+        # `research` feature flag — /features or `nm features`; the
+        # per-cycle feature flag + daily cap still apply inside the agent).
+        # NOTE: there is no `settings.research` section — the flag lives in
+        # kv_store via FeatureRegistry (nomorals/agents/features.py).
         self._research: Any = None
-        if getattr(self.settings, "research", None) is not None \
-                and self.settings.research.enabled and not self.dry_run:
+        from .features import feature_enabled as _research_flag_on
+        if _research_flag_on(self.context, "research") and not self.dry_run:
             try:
                 from .notifier import Notifier
                 from .researcher import ResearchAgent
@@ -1287,6 +1290,17 @@ class PartnerRuntime:
                     check_catchup(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("briefing job not registered: %s", exc)
+                # Wave E: always-on research loop — one durable
+                # "research loop" job (every NM_RESEARCH_LOOP_HOURS,
+                # default 6h) ticking the Wave C organs (swarm -> digest
+                # -> upgrade queue). Idempotent; the loop itself
+                # re-checks the research feature flag, the proactive
+                # master switch, and quiet hours before running.
+                try:
+                    from .research_loop import ensure_research_job
+                    ensure_research_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("research loop job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on
@@ -5519,6 +5533,15 @@ class PartnerRuntime:
         # "planned by heuristic (model down)" beats a silent fallback.
         if result.planned_by == "heuristic" and result.plan_error:
             header += f" — {result.plan_error[:90]}"
+            # Persist the plan failure so `nm mind` shows the last
+            # plan_error with a timestamp (wave E router telemetry).
+            try:
+                from ..storage import router_telemetry
+                router_telemetry.record_plan_error(
+                    getattr(self.context, "db", None),
+                    result.plan_error, route="devon")
+            except Exception:  # noqa: BLE001 - telemetry never breaks a reply
+                pass
         text = f"{header}\n{result.digest}"
         if len(text) > 1800:
             chat = self._ref_from_key(chat_key)

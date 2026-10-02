@@ -447,6 +447,19 @@ class OsintSettings:
     request_timeout: float = 10.0
     crtsh_days: int = 90
 
+
+@dataclass
+class MindSettings:
+    #: Max background jobs the Core Mind may have in flight at once
+    #: (``_send_async``). A new send that cannot acquire a slot within
+    #: ``inflight_acquire_timeout_s`` is shed: logged, counted, and the
+    #: job is marked failed with an explicit note — never silently
+    #: queued, never blocking the chat thread. Env: NM_MIND_MAX_INFLIGHT.
+    max_inflight: int = 8
+    #: Seconds a new send waits for an in-flight slot before it is shed.
+    #: Env: NM_MIND_INFLIGHT_TIMEOUT.
+    inflight_acquire_timeout_s: float = 30.0
+
 @dataclass
 class AudioSettings:
     enabled: bool = False
@@ -552,6 +565,7 @@ class Settings:
     osint: "OsintSettings" = field(default_factory=lambda: OsintSettings())
     improvement: "ImprovementSettings" = field(default_factory=lambda: ImprovementSettings())
     trading: "TradingSettings" = field(default_factory=lambda: TradingSettings())
+    mind: "MindSettings" = field(default_factory=lambda: MindSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -731,6 +745,8 @@ _ENV_MAP: dict[str, str] = {
     "NM_PARTNER_QUIET_END": "partner.quiet_end",
     "NM_PARTNER_LEXICON_VOICE": "partner.lexicon_voice",
     "NM_PARTNER_LEXICON_SEED": "partner.lexicon_seed",
+    "NM_MIND_MAX_INFLIGHT": "mind.max_inflight",
+    "NM_MIND_INFLIGHT_TIMEOUT": "mind.inflight_acquire_timeout_s",
     "NM_NET_ENABLED": "net.enabled",
     "NM_NET_PROXY": "net.proxy",
     "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",

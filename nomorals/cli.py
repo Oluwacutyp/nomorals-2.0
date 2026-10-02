@@ -45,6 +45,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "simulate": ["sim"],
     "briefing": ["br"],
     "train": ["tr"],
+    "benchmark": ["bm"],
 }
 
 
@@ -150,6 +151,29 @@ def _parser() -> argparse.ArgumentParser:
                               "(prompts securely)")
     power_sub.add_parser("lock", help="lock power mode")
     power_sub.add_parser("status", help="power mode status")
+
+    bench = sub.add_parser("benchmark", aliases=CLI_ALIASES["benchmark"],
+                           help="K3 scoreboard: benchmark the agent system")
+    # not required: bare `nm benchmark` runs the whole scoreboard, and the
+    # alias-map test parses every alias with no action
+    bench_sub = bench.add_subparsers(dest="benchmark_action")
+    b_run = bench_sub.add_parser("run", help="run a suite or all suites")
+    b_run.add_argument("suite", nargs="?", default="all",
+                       help="suite name or 'all' (swe_coding, research, "
+                            "edits, builds, latency, reasoning, planning, "
+                            "tool_use, self_correction)")
+    b_run.add_argument("--limit", type=int, default=0,
+                       help="max tasks per suite (0 = suite default)")
+    b_run.add_argument("--export", default="",
+                       help="write the full run report to this JSON path")
+    b_list = bench_sub.add_parser("list", help="list saved benchmark runs")
+    b_list.add_argument("--limit", type=int, default=20)
+    b_list.add_argument("--suite", default="",
+                        help="only runs of this suite selection")
+    b_cmp = bench_sub.add_parser("compare",
+                                 help="compare two runs (delta of B vs A)")
+    b_cmp.add_argument("run_a", help="baseline run id")
+    b_cmp.add_argument("run_b", help="challenger run id")
 
     agent = sub.add_parser("run", aliases=CLI_ALIASES["run"],
                            help="run a goal through the orchestrator")
@@ -277,10 +301,24 @@ def _parser() -> argparse.ArgumentParser:
     mission.add_argument("--json", action="store_true", help="Output as JSON")
     
     skill = sub.add_parser("skill",
-                           help="Manage reusable skills (CLI not implemented yet)")
+                           help="Reusable skills library: list, create, show, delete, prune, restore")
     skill.add_argument("action", nargs="?", default="list",
-                      choices=["list", "create", "run", "delete"],
+                      choices=["list", "create", "show", "delete", "prune",
+                               "restore", "stats"],
                       help="Action to perform")
+    skill.add_argument("name", nargs="?", default="",
+                       help="skill name (create/show/delete/restore)")
+    skill.add_argument("--description", default="",
+                       help="create: one-line description")
+    skill.add_argument("--body", default="",
+                       help="create: skill body text (prefix with @ to read from a file)")
+    skill.add_argument("--kind", default="strategy",
+                       help="create: skill kind")
+    skill.add_argument("--tags", default="",
+                       help="create: comma-separated tags")
+    skill.add_argument("--pruned", action="store_true",
+                       help="list: include pruned (quarantined) skills")
+    skill.add_argument("--json", action="store_true", help="Output as JSON")
     
     project = sub.add_parser("project", aliases=CLI_ALIASES["project"],
                              help="Manage projects")
@@ -300,8 +338,37 @@ def _parser() -> argparse.ArgumentParser:
                     help="Action to perform")
     kg.add_argument("--limit", default="10", help="rows to show (top/communities)")
     kg.add_argument("--json", action="store_true", help="Output as JSON")
-    sub.add_parser("simulate", aliases=CLI_ALIASES["simulate"],
-                   help="Sandbox code execution (CLI not implemented yet)")
+    sim = sub.add_parser("simulate", aliases=CLI_ALIASES["simulate"],
+                         help="Sandbox simulator: dry-run, run, compare, risk-classify commands")
+    sim_sub = sim.add_subparsers(dest="simulate_action", required=True)
+    sim_dry = sim_sub.add_parser("dry-run", help="preview what a command would do (executes nothing)")
+    sim_dry.add_argument("cmd", help="shell command to preview")
+    sim_run = sim_sub.add_parser("run", help="execute a command in the sandbox")
+    sim_run.add_argument("cmd", help="shell command to run")
+    sim_run.add_argument("--confirm", action="store_true",
+                         help="allow high-risk commands")
+    sim_run.add_argument("--timeout", type=float, default=120.0,
+                         help="execution timeout in seconds")
+    sim_cmp = sim_sub.add_parser("compare", help="run two commands in separate sandboxes and compare")
+    sim_cmp.add_argument("command_a", help="first candidate command")
+    sim_cmp.add_argument("command_b", help="second candidate command")
+    sim_risk = sim_sub.add_parser("risk", help="classify a command's risk without running it")
+    sim_risk.add_argument("cmd", help="shell command to classify")
+    for _sp in (sim_dry, sim_run, sim_cmp, sim_risk):
+        _sp.add_argument("--json", action="store_true", help="Output as JSON")
+    rl = sub.add_parser("research-loop",
+                        help="always-on research loop: status, tick, topics")
+    rl.add_argument("action", nargs="?", default="status",
+                    choices=["status", "tick", "run", "ensure", "enable",
+                             "disable", "topics", "set_topics"],
+                    help="Action to perform")
+    rl.add_argument("topic", nargs="?", default="",
+                    help="run: single topic to research right now")
+    rl.add_argument("--topics", default="",
+                    help="set_topics: comma-separated topic list")
+    rl.add_argument("--max-topics", type=int, default=0,
+                    help="tick: max topics per cycle (default: loop default)")
+    rl.add_argument("--json", action="store_true", help="Output as JSON")
     code = sub.add_parser(
         "code",
         help="Coding agent: run a task, review diffs, run tests",
@@ -968,7 +1035,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
     # Additional subcommands
-    book = sub.add_parser("book", help="AI-assisted book writing (CLI not implemented yet)")
+    book = sub.add_parser("book", help="AI-assisted book writing: create, write, build")
     book.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "run", "status", "build"],
                      help="Action to perform")
@@ -977,7 +1044,17 @@ def _parser() -> argparse.ArgumentParser:
     book.add_argument("--words", type=int, default=2000, help="Words per chapter")
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
-    sub.add_parser("hub", help="Model hub operations (CLI not implemented yet)")
+    hub = sub.add_parser("hub", help="MediaHub: one-call media orchestrator (song/video/podcast)")
+    hub.add_argument("mode", nargs="?", default="status",
+                     choices=["song", "video", "podcast", "status", "styles"],
+                     help="what to run")
+    hub.add_argument("query", nargs="?", default="",
+                     help="song topic, or video/podcast search query")
+    hub.add_argument("--style", default="pop", help="song style")
+    hub.add_argument("--platform", default="", help="video/podcast platform filter")
+    hub.add_argument("--no-play", action="store_true",
+                     help="don't queue/play the result")
+    hub.add_argument("--json", action="store_true", help="Output as JSON")
     cipher = sub.add_parser("cipher",
                             help="nmc1 encryption: encrypt, decrypt, classic ciphers, hmac")
     cipher.add_argument("action", nargs="?", default="",
@@ -1043,14 +1120,19 @@ def _parser() -> argparse.ArgumentParser:
     structure_p.add_argument("--polish", action="store_true",
                              help="let the model rewrite the brief")
     structure_p.add_argument("--json", action="store_true", help="Output as JSON")
-    arena_parser = sub.add_parser("arena", help="Self-improvement arena (CLI not implemented yet)")
-    arena_sub = arena_parser.add_subparsers(dest="arena_command")
+    arena_parser = sub.add_parser("arena", help="Self-improvement arena: status + approve builds")
+    arena_sub = arena_parser.add_subparsers(dest="arena_command", required=True)
     arena_sub.add_parser("status", help="Show arena status")
-    arena_sub.add_parser("approve", help="Approve arena actions")
-    trial_parser = sub.add_parser("trial", help="Single-account trial flow (CLI not implemented yet)")
-    trial_sub = trial_parser.add_subparsers(dest="trial_command")
-    trial_sub.add_parser("save", help="Save trial data")
-    trial_sub.add_parser("list", help="List trial data")
+    arena_approve = arena_sub.add_parser("approve", help="Approve a pending arena build")
+    arena_approve.add_argument("build_id", help="arena build id to approve")
+    trial_parser = sub.add_parser("trial", help="Single-account trial flow: save/list credentials")
+    trial_sub = trial_parser.add_subparsers(dest="trial_command", required=True)
+    trial_save = trial_sub.add_parser("save", help="Save trial credentials to the encrypted vault")
+    trial_save.add_argument("platform", help="platform name")
+    trial_save.add_argument("login", help="account login / username")
+    trial_save.add_argument("password", help="account password (stored encrypted in the vault)")
+    trial_save.add_argument("--note", default="", help="optional note")
+    trial_sub.add_parser("list", help="List stored trial accounts")
     train = sub.add_parser("train", aliases=CLI_ALIASES["train"],
                            help="model training: backends, runs")
     train.add_argument("--backends", action="store_true",
@@ -1447,9 +1529,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_mind(args, context)
 
         if args.command == "book":
-            return _cmd_stub(args, context, "book")
+            return _cmd_book(args, context)
         if args.command == "hub":
-            return _cmd_stub(args, context, "hub")
+            return _cmd_hub(args, context)
         if args.command == "cipher":
             return _cmd_cipher(args, context)
         if args.command == "osint":
@@ -1459,19 +1541,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "money":
             return _cmd_money(args, context)
         if args.command == "arena":
-            if getattr(args, "arena_command", None) == "status":
-                return _cmd_stub(args, context, "arena status")
-            elif getattr(args, "arena_command", None) == "approve":
-                # approve requires arguments
-                _emit(args, {"error": "approve requires arguments"}, "arena approve: missing required arguments")
-                return 2
-            return _cmd_stub(args, context, "arena")
+            return _cmd_arena(args, context)
         if args.command == "trial":
-            if getattr(args, "trial_command", None) == "save":
-                # save requires arguments
-                _emit(args, {"error": "save requires arguments"}, "trial save: missing required arguments")
-                return 2
-            return _cmd_stub(args, context, "trial")
+            return _cmd_trial(args, context)
         if args.command == "train":
             return _cmd_train(args, context)
         if args.command == "help":
@@ -1515,7 +1587,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "goal":
             return _cmd_goal(args, context)
         if args.command == "skill":
-            return _cmd_stub(args, context, "skill")
+            return _cmd_skill(args, context)
         if args.command == "project":
             return _cmd_project(args, context)
         if args.command == "mission":
@@ -1523,7 +1595,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.command == "kg":
             return _cmd_kg(args, context)
         if args.command == "simulate":
-            return _cmd_stub(args, context, "simulate")
+            return _cmd_simulate(args, context)
+        if args.command == "research-loop":
+            return _cmd_research_loop(args, context)
         if args.command == "code":
             return _cmd_code(args, context)
         if args.command == "media":
@@ -1546,6 +1620,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_room(args, context)
         if args.command == "briefing":
             return _cmd_briefing(args, context)
+        if args.command == "benchmark":
+            return _cmd_benchmark(args, context)
     print(f"unknown command: {args.command}", file=sys.stderr)
     return 2
 
@@ -3617,6 +3693,165 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
     return 2
 
 
+class _BuildersBuildBackend:
+    """Real builders-backed build backend for the K3 scoreboard.
+
+    L7-only by construction (this module is the CLI layer): scaffold the
+    app, serve it when it is an HTTP app, smoke-test it, and report one
+    boolean per stage. Timeouts surface as ``timed_out`` and fail every
+    stage they touch — they are never reported as skips.
+    """
+
+    def run(self, kind: str, workdir: str) -> dict[str, Any]:
+        import shutil
+        import time as _time
+        import uuid as _uuid
+
+        from .builders.run import serve
+        from .builders.scaffold import scaffold
+        from .builders.smoke import smoke_test
+
+        started = _time.monotonic()
+        name = f"k3bench-{kind}-{_uuid.uuid4().hex[:8]}"
+        stages: dict[str, bool] = {}
+        detail = ""
+        timed_out = False
+        project_dir = None
+        try:
+            res = scaffold(kind, name, workdir)
+            project_dir = res.project_dir
+            stages["scaffold"] = True
+            if kind == "webapp":
+                handle = serve(project_dir, startup_timeout=15.0)
+                stages["serve"] = True
+                try:
+                    smoke = smoke_test(handle, timeout=10.0)
+                finally:
+                    handle.stop()
+            else:
+                smoke = smoke_test(project_dir, timeout=15.0)
+            stages["smoke"] = bool(smoke.ok)
+            detail = "; ".join(
+                f"{c.name}: {'ok' if c.ok else 'FAIL'}"
+                for c in smoke.checks)[:300]
+        except Exception as exc:  # noqa: BLE001 — a failed stage is data
+            msg = str(exc).lower()
+            timed_out = ("timed out" in msg or "timeout" in msg
+                         or "deadline" in msg)
+            detail = f"{type(exc).__name__}: {exc}"[:300]
+        finally:
+            if project_dir is not None:
+                shutil.rmtree(project_dir, ignore_errors=True)
+        return {
+            "scaffold": stages.get("scaffold", False),
+            "serve": stages.get("serve", False),
+            "smoke": stages.get("smoke", False),
+            "seconds": _time.monotonic() - started,
+            "detail": detail,
+            "timed_out": timed_out,
+        }
+
+
+def _cmd_benchmark(args: argparse.Namespace, context: Any) -> int:
+    """`nm benchmark run|list|compare` — the K3 scoreboard CLI."""
+    from .agents import benchmark as bench_mod
+
+    action = args.benchmark_action or "run"  # bare `nm benchmark` = run all
+    db = getattr(context, "db", None)
+
+    if action == "list":
+        rows = bench_mod.list_runs(
+            db, suite=getattr(args, "suite", "") or "",
+            limit=getattr(args, "limit", 20) or 20)
+        payload = {"runs": rows}
+        if not rows:
+            _emit(args, payload, "no benchmark runs recorded yet")
+            return 0
+        lines = ["id            ts                    suite  mode              "
+                 "overall  passed  secs",
+                 "-" * 88]
+        for r in rows:
+            ts = time.strftime("%Y-%m-%d %H:%M",
+                               time.localtime(r["ts"] or 0))
+            overall = (f"{r['overall']:.3f}" if r["overall"] is not None
+                       else "n/a")
+            lines.append(
+                f"{r['id'][:12]:<13} {ts}  {str(r['suite'])[:6]:<6} "
+                f"{str(r['mode'])[:17]:<17} {overall:<7} "
+                f"{r['passed']}/{r['total']:<6} {r['seconds']:.0f}")
+        _emit(args, payload, "\n".join(lines))
+        return 0
+
+    if action == "compare":
+        cmp = bench_mod.compare_runs(db, args.run_a, args.run_b)
+        if not cmp.get("ok"):
+            _emit(args, cmp, f"compare failed — {cmp.get('error')}")
+            return 2
+        lines = [f"compare {cmp['a']['id'][:12]} (A) vs "
+                 f"{cmp['b']['id'][:12]} (B) — mode {cmp['a']['mode']}"]
+        oa, ob = cmp["overall_a"], cmp["overall_b"]
+        oad = cmp["overall_delta"]
+        lines.append(
+            f"overall: {oa if oa is not None else 'n/a'} -> "
+            f"{ob if ob is not None else 'n/a'} "
+            f"({'+' if oad and oad > 0 else ''}{oad if oad is not None else 'n/a'})")
+        for name, d in cmp["dimensions"].items():
+            delta = d["delta"]
+            mark = ("+" if delta and delta > 0 else "") + str(delta)
+            lines.append(f"  {name:<14} {d['a_passed']:<9} -> "
+                         f"{d['b_passed']:<9}  delta {mark}")
+        _emit(args, cmp, "\n".join(lines))
+        return 0
+
+    # action == "run"
+    suite_arg = (getattr(args, "suite", None) or "all").strip().lower()
+    suites: list[str] | None = None
+    if suite_arg != "all":
+        suites = [s.strip() for s in suite_arg.split(",") if s.strip()]
+        unknown = [s for s in suites if s not in bench_mod.list_suites()]
+        if unknown:
+            _emit(args, {"error": "unknown suite", "unknown": unknown},
+                  f"unknown suite(s): {', '.join(unknown)} — available: "
+                  f"{', '.join(bench_mod.list_suites())}")
+            return 2
+    report = bench_mod.run_scoreboard(
+        context, suites=suites, limit=getattr(args, "limit", 0) or 0,
+        build_backend=_BuildersBuildBackend())
+    run_id = bench_mod.save_run(db, report)
+    payload = report.as_dict()
+    payload["saved_as"] = run_id
+    export = (getattr(args, "export", "") or "").strip()
+    if export:
+        try:
+            run = bench_mod.get_run(db, run_id) if run_id else None
+            Path(export).expanduser().write_text(
+                bench_mod.export_run_json(run or payload),
+                encoding="utf-8")
+        except OSError as exc:
+            _emit(args, payload, f"run {run_id or '(unsaved)'} done, but "
+                  f"export failed: {exc}")
+            return 2
+    lines = [
+        f"K3 scoreboard — run {run_id or '(not persisted)'}",
+        f"mode: {report.mode}   provider: {report.provider or '-'}   "
+        f"{report.seconds:.1f}s",
+    ]
+    if report.mode == bench_mod.MODE_SELF_TEST:
+        lines.append("note: no live LLM — harness self-test, NOT a model score")
+    for name, dim in report.scores.items():
+        score = "n/a" if dim.score is None else f"{dim.score:.3f}"
+        lines.append(f"  {name:<14} {score:<6} ({dim.passed}/{dim.total})")
+        for d in dim.details[:4]:
+            mark = "?" if d.get("pass") is None else (
+                "ok" if d.get("pass") else "FAIL")
+            lines.append(f"    [{mark}] {d.get('detail', '')[:100]}")
+    overall = (f"{report.overall:.3f}" if report.overall is not None
+               else "n/a")
+    lines.append(f"overall: {overall}")
+    _emit(args, payload, "\n".join(lines))
+    return 0
+
+
 def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
     """Route `nm briefing` to now / today / retry / config / status /
     topics / symbols / sections / followup."""
@@ -4292,10 +4527,29 @@ def _cmd_status(args: argparse.Namespace, context: Any) -> int:
                 + (f" (unlocked by {data['unlocked_by']})" if data["active"] else "")]
         return data, text
 
+    def _research_loop() -> tuple[dict[str, Any], list[str]]:
+        from .agents.research_loop import status as _rl_status
+
+        s = _rl_status(context)
+        job = s.get("job") or {}
+        gates = s.get("gates") or {}
+        data = {"available": True,
+                "scheduled": bool(job.get("scheduled")),
+                "enabled": bool(job.get("enabled")),
+                "feature_research": bool(gates.get("feature_research")),
+                "pending_proposals": s.get("pending_proposals", 0)}
+        text = [f"research: {'scheduled' if data['scheduled'] else 'not scheduled'}"
+                + (f" (every {job.get('interval_hours')}h"
+                   + ("" if data["enabled"] else ", disabled") + ")"
+                   if data["scheduled"] else "")
+                + f", feature={'on' if data['feature_research'] else 'off'}"
+                + f", {data['pending_proposals']} pending proposals"]
+        return data, text
+
     for name, fn in (("system", _system), ("database", _database),
                      ("queue", _queue), ("missions", _missions),
                      ("memory", _memory), ("proactive", _proactive),
-                     ("power", _power)):
+                     ("power", _power), ("research_loop", _research_loop)):
         data, text = _status_section(name, fn)
         sections[name] = data
         blocks.append(text)
@@ -4310,11 +4564,13 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
     """`nm mind [status]` — inspect CoreMind's persisted state.
 
     Shows pending clarification questions, recent routed jobs with
-    outcomes, and the last objective. Router call counts and the last
-    plan_error are per-process / in-memory only, so a fresh CLI process
-    reports them as unavailable instead of printing 0.
+    outcomes, the last objective, and the persisted router telemetry
+    (per-route decision counts, model-check counts, last plan_error —
+    written by the running bot via ``nomorals.storage.router_telemetry``,
+    migration 65).
     """
     from .agents.coremind import CoreMind
+    from .storage.router_telemetry import snapshot as telemetry_snapshot
 
     mind = CoreMind(context)
     state = mind._state  # persisted state.json: pending / jobs / last_objective
@@ -4347,21 +4603,24 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
              "age": _age(j.get("created", 0))}
             for j in jobs_raw]
     last_objective = state.get("last_objective")
+    telemetry = telemetry_snapshot(getattr(context, "db", None))
+    route_counts = telemetry.get("routes") or {}
+    last_plan_error = telemetry.get("last_plan_error") or {}
 
     payload = {
         "command": "mind",
         "pending_clarifications": pending,
         "recent_jobs": jobs,
         "last_objective": last_objective,
-        # Per-process / in-memory only: not persisted, so the CLI cannot
-        # measure them. Reported as unavailable, not zero.
-        "router_calls": {"available": False,
-                         "reason": "per-process counter; query the running "
-                                   "bot process for live counts"},
-        "last_plan_error": {"available": False,
-                            "reason": "plan_error lives on the in-memory "
-                                      "TaskResult of a running agent and is "
-                                      "not persisted"},
+        # Persisted router telemetry (migration 65) — written by the
+        # running bot on every route decision, readable from any process.
+        "router_calls": {
+            "per_route": route_counts,
+            "total": sum(route_counts.values()),
+            "model_consults": telemetry.get("model_consults", 0),
+            "model_timeouts": telemetry.get("model_timeouts", 0),
+        },
+        "last_plan_error": last_plan_error or None,
     }
 
     if getattr(args, "json", False):
@@ -4389,10 +4648,533 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
               f"{_age(last_objective.get('created', 0))})")
     else:
         print("last objective: none")
-    print("router calls: unavailable (per-process counter — "
-          "query the running bot for live counts)")
-    print("last plan_error: unavailable (not persisted)")
+    if route_counts:
+        top = sorted(route_counts.items(), key=lambda kv: -kv[1])[:8]
+        print(f"router calls: {sum(route_counts.values())} total "
+              f"(model consulted {telemetry.get('model_consults', 0)}×, "
+              f"timed out {telemetry.get('model_timeouts', 0)}×)")
+        for route, n in top:
+            print(f"  {route}: {n}×")
+    else:
+        print("router calls: none recorded yet")
+    if last_plan_error:
+        print(f"last plan_error ({_age(last_plan_error.get('at', 0))}, "
+              f"route={last_plan_error.get('route') or 'n/a'}): "
+              f"{last_plan_error.get('error')}")
+    else:
+        print("last plan_error: none recorded")
     return 0
+
+
+# ── wave E: real implementations for the former stub commands ────────────────
+
+
+def _cmd_hub(args: argparse.Namespace, context: Any) -> int:
+    """`nm hub <song|video|podcast|status|styles>` — the MediaHub console.
+
+    Same orchestrator the ``/hub`` chat command uses. Podcast transcripts
+    stay local in the CLI (``send_transcript=False``) — the chat path is
+    the one that delivers to live channels.
+    """
+    from .media import MediaHub
+
+    mode = (getattr(args, "mode", "status") or "status").strip().lower()
+
+    query = (getattr(args, "query", "") or "").strip()
+    if mode in ("song", "video", "podcast") and not query:
+        print(f"hub {mode} needs a topic/query — nm hub {mode} \"<topic>\"",
+              file=sys.stderr)
+        return 2
+
+    hub = MediaHub(context)
+
+    if mode == "status":
+        st = hub.status()
+        _emit(args, st, json.dumps(st, indent=2, default=str))
+        return 0
+
+    if mode == "styles":
+        styles = hub.styles()
+        lines = [f"  {k:<14} {v['label']} (tempo {v['tempo']}, {v['mode']}, energy {v['energy']})"
+                 for k, v in sorted(styles.items())]
+        _emit(args, {"styles": styles}, "song styles:\n" + "\n".join(lines))
+        return 0
+
+    try:
+        result = hub.run(
+            mode,
+            topic=query, query=query,
+            style=getattr(args, "style", "pop") or "pop",
+            platform=getattr(args, "platform", "") or "",
+            play=not getattr(args, "no_play", False),
+            send_transcript=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"hub {mode}: {exc}", file=sys.stderr)
+        return 1
+    if result.get("error"):
+        print(f"hub {mode}: {result['error']}", file=sys.stderr)
+        return 1
+    if mode == "song":
+        song = result.get("song") or {}
+        text = (f"composed “{song.get('title', query)}” "
+                f"({song.get('style')}, {len(song.get('sections', []))} sections) → "
+                f"{song.get('midi_path', '')}")
+    elif mode == "podcast":
+        text = (f"podcast saved: {result.get('transcript_path', '')} "
+                f"({len(result.get('chapters', []) or [])} chapters)")
+    else:
+        pick = result.get("pick") or {}
+        text = f"video: {pick.get('title', '')} → {result.get('download', {}).get('path', '')}"
+    _emit(args, result, text)
+    return 0
+
+
+def _cmd_book(args: argparse.Namespace, context: Any) -> int:
+    """`nm book <list|create|run|status|build>` — the BookForge CLI surface."""
+    from .books import BookForge
+    from .books.model import slugify
+
+    forge = BookForge(context)
+    action = getattr(args, "action", "list") or "list"
+
+    if action == "list":
+        books = forge.list_books()
+        lines = [f"  {b['slug']:<28} {b['title'][:50]:<52} "
+                 f"{b['written']}/{b['chapters']} ch · {b['words']}w · {b['status']}"
+                 for b in books]
+        _emit(args, {"books": books},
+              "books:\n" + "\n".join(lines) if lines else "no books yet — nm book create \"<topic>\"")
+        return 0
+
+    if action == "create":
+        topic = (getattr(args, "topic", "") or "").strip()
+        if not topic:
+            print("book create needs a topic — nm book create \"<topic>\"", file=sys.stderr)
+            return 2
+        book = forge.create(
+            topic,
+            chapters=int(getattr(args, "chapters", 5) or 5),
+            words_per_chapter=int(getattr(args, "words", 2000) or 2000),
+            research=not getattr(args, "no_research", False),
+        )
+        _emit(args, {"slug": book.slug, "title": book.display_title,
+                      "chapters": len(book.chapters)},
+              f"created {book.slug} — “{book.display_title}” "
+              f"({len(book.chapters)} chapters planned)")
+        return 0
+
+    if action == "run":
+        topic = (getattr(args, "topic", "") or "").strip()
+        if not topic:
+            print("book run needs a topic — nm book run \"<topic>\"", file=sys.stderr)
+            return 2
+
+        def _progress(result: dict[str, Any]) -> None:
+            if not getattr(args, "json", False):
+                print(f"  chapter {result.get('chapter')}: "
+                      f"{str(result.get('note') or result.get('status') or '')[:80]}")
+
+        result = forge.run(
+            topic,
+            chapters=int(getattr(args, "chapters", 5) or 5),
+            words_per_chapter=int(getattr(args, "words", 2000) or 2000),
+            research=not getattr(args, "no_research", False),
+            on_chapter=_progress,
+        )
+        _emit(args, result,
+              f"book built: {result.get('slug')} → {result.get('pdf', result.get('manuscript', ''))}")
+        return 0
+
+    # status / build need a slug
+    slug = (getattr(args, "slug", "") or "").strip()
+    if not slug:
+        topic = (getattr(args, "topic", "") or "").strip()
+        slug = slugify(topic) if topic else ""
+    if not slug:
+        print("book status/build needs --slug (or a topic) — nm book status --slug <slug>",
+              file=sys.stderr)
+        return 2
+    try:
+        book = forge.load(slug)
+    except Exception as exc:  # noqa: BLE001
+        print(f"book: {exc}", file=sys.stderr)
+        return 1
+
+    if action == "status":
+        payload = {"slug": book.slug, "title": book.display_title,
+                   "status": book.status, "chapters": len(book.chapters),
+                   "written": book.chapters_written, "words": book.total_words}
+        lines = [f"  chapter {c.number}: {c.title[:50]:<52} [{c.status}] {c.words}w"
+                 for c in book.chapters]
+        _emit(args, payload,
+              f"{book.slug} — “{book.display_title}” [{book.status}]\n"
+              f"chapters: {book.chapters_written}/{len(book.chapters)} written, "
+              f"{book.total_words} words\n" + "\n".join(lines))
+        return 0
+
+    if action == "build":
+        result = forge.build(slug)
+        _emit(args, result,
+              f"built {slug}: {result.get('pdf', result.get('manuscript', ''))}")
+        return 0
+
+    print(f"book: unknown action {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_arena(args: argparse.Namespace, context: Any) -> int:
+    """`nm arena status|approve <build_id>` — the self-improvement arena CLI."""
+    from .agents.arena import Arena
+
+    arena = Arena(context)
+    cmd = getattr(args, "arena_command", "") or "status"
+
+    if cmd == "status":
+        stats = arena.stats()
+        pending = arena.builds("pending")
+        payload = {"stats": stats,
+                   "pending_builds": [{"id": b.get("id"), "name": b.get("name"),
+                                       "created_at": b.get("created_at")}
+                                      for b in pending]}
+        lines = ["arena status:",
+                 f"  cycles: {stats.get('cycles')} · knowledge entries: {stats.get('knowledge')}"]
+        builds = stats.get("builds") or {}
+        lines.append("  builds: " + ", ".join(
+            f"{k}={builds.get(k, 0)}" for k in ("pending", "approved", "denied")))
+        for b in pending:
+            lines.append(f"  pending: {b.get('id')} — {b.get('name')}")
+        if not pending:
+            lines.append("  no pending builds")
+        _emit(args, payload, "\n".join(lines))
+        return 0
+
+    if cmd == "approve":
+        build_id = (getattr(args, "build_id", "") or "").strip()
+        if not build_id:
+            print("arena approve needs a build id — nm arena approve <build_id>",
+                  file=sys.stderr)
+            return 2
+        msg = arena.approve(build_id)
+        ok = msg.startswith("approved")
+        _emit(args, {"build_id": build_id, "approved": ok, "message": msg}, msg)
+        return 0 if ok else 1
+
+    print(f"arena: unknown command {cmd}", file=sys.stderr)
+    return 2
+
+
+def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
+    """`nm trial save|list` — the single-account trial flow CLI.
+
+    Saved credentials go straight into the encrypted vault; they are
+    never printed back by save (list shows platforms + logins only).
+    """
+    from .agents.trial import TrialFlow
+
+    flow = TrialFlow(context)
+    cmd = getattr(args, "trial_command", "") or "list"
+
+    if cmd == "list":
+        text = flow.list()
+        _emit(args, {"accounts": text}, text)
+        return 0
+
+    if cmd == "save":
+        platform = (getattr(args, "platform", "") or "").strip()
+        login = (getattr(args, "login", "") or "").strip()
+        password = getattr(args, "password", "") or ""
+        note = getattr(args, "note", "") or ""
+        if not (platform and login and password):
+            print("trial save needs platform, login and password — "
+                  "nm trial save <platform> <login> <password> [--note ...]",
+                  file=sys.stderr)
+            return 2
+        try:
+            result = flow.save(platform, login, password, note=note)
+        except Exception as exc:  # noqa: BLE001
+            print(f"trial save: {exc}", file=sys.stderr)
+            return 1
+        _emit(args, result,
+              f"saved trial account for {result.get('platform')} "
+              f"(login: {result.get('login')}) — stored encrypted in the vault")
+        return 0
+
+    print(f"trial: unknown command {cmd}", file=sys.stderr)
+    return 2
+
+
+def _cmd_skill(args: argparse.Namespace, context: Any) -> int:
+    """`nm skill <list|create|show|delete|prune|restore|stats>` — the
+    reusable-skills library CLI, over the real ``SkillLibrary``
+    (``nomorals/agents/skills.py``) that the reasoning engine, the
+    failure ledger, and ``nm improve skill`` all read from.
+
+    NOTE: the stub advertised list/create/run/delete, but ``run`` was
+    fictional — library skills are strategy/playbook texts, not
+    executables. The verbs here are the library's real ones.
+    """
+    from .agents.skills import SkillLibrary
+
+    lib = SkillLibrary(context.db)
+    action = getattr(args, "action", "list") or "list"
+
+    if action == "list":
+        skills = lib.list(limit=100,
+                          include_pruned=bool(getattr(args, "pruned", False)))
+        payload = [s.to_dict() for s in skills]
+        lines = [f"  {s['name']:<28} [{s['kind']:<10}] "
+                 f"uses={s['uses']} ok={s['success_rate']:.0%} "
+                 f"{s['description'][:50]}"
+                 + (" (pruned)" if s["pruned"] else "")
+                 for s in payload]
+        _emit(args, {"skills": payload},
+              "skills:\n" + "\n".join(lines) if lines else "no skills yet — nm skill create <name>")
+        return 0
+
+    if action == "stats":
+        stats = lib.stats()
+        _emit(args, stats,
+              f"skills: {stats['active']} active, {stats['pruned']} pruned, "
+              f"{stats['total']} total")
+        return 0
+
+    if action == "create":
+        name = (getattr(args, "name", "") or "").strip()
+        if not name:
+            print("skill create needs a name — nm skill create <name> --body \"...\"",
+                  file=sys.stderr)
+            return 2
+        body = getattr(args, "body", "") or ""
+        if body.startswith("@"):
+            path = body[1:]
+            try:
+                body = Path(path).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"skill create: cannot read {path}: {exc}", file=sys.stderr)
+                return 1
+        tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",")
+                if t.strip()]
+        skill = lib.save(name,
+                         kind=getattr(args, "kind", "strategy") or "strategy",
+                         body=body,
+                         description=getattr(args, "description", "") or "",
+                         tags=tags, source="cli")
+        _emit(args, skill.to_dict(),
+              f"saved skill {skill.name} ({skill.id})")
+        return 0
+
+    if action == "prune":
+        result = lib.prune()
+        _emit(args, result,
+              f"pruned {result['count']} skills: " + ", ".join(result["pruned"])
+              if result["pruned"] else "prune pass: nothing met the quarantine criteria")
+        return 0
+
+    # show / delete / restore need a skill
+    name = (getattr(args, "name", "") or "").strip()
+    if not name:
+        print(f"skill {action} needs a name — nm skill {action} <name>",
+              file=sys.stderr)
+        return 2
+    skill = lib.get_by_name(name)
+    if skill is None:
+        print(f"skill: no skill named {name!r}", file=sys.stderr)
+        return 1
+
+    if action == "show":
+        _emit(args, skill.to_dict(),
+              f"{skill.name} [{skill.kind}] v{skill.version} "
+              f"(uses={skill.uses}, ok={skill.success_rate:.0%}"
+              f"{', pruned' if skill.pruned else ''})\n"
+              f"{skill.description}\n---\n{skill.body[:2000]}")
+        return 0
+
+    if action == "delete":
+        ok = lib.delete(skill.id)
+        _emit(args, {"name": name, "deleted": ok},
+              f"deleted skill {name}" if ok else f"skill {name}: delete failed")
+        return 0 if ok else 1
+
+    if action == "restore":
+        restored = lib.restore(skill.id)
+        _emit(args, {"name": name, "restored": restored is not None},
+              f"restored skill {name}" if restored else f"skill {name}: restore failed")
+        return 0 if restored else 1
+
+    print(f"skill: unknown action {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_simulate(args: argparse.Namespace, context: Any) -> int:
+    """`nm simulate <dry-run|run|compare|risk>` — the sandbox simulator CLI."""
+    from .agents.simulation import SandboxSimulator, classify_risk
+
+    sim = SandboxSimulator(context)
+    action = getattr(args, "simulate_action", "") or ""
+
+    if action == "dry-run":
+        command = getattr(args, "cmd", "") or ""
+        result = sim.dry_run(command)
+        risk = result.get("risk") or {}
+        _emit(args, result,
+              f"dry-run: {command}\n"
+              f"  risk: {risk.get('level')} — {'; '.join(risk.get('reasons', [])) or 'no flags'}\n"
+              f"  would run in: {result.get('would_run_in')}"
+              + ("\n  ⚠️ high risk — would require --confirm to execute"
+                 if result.get("would_gate") else ""))
+        return 0
+
+    if action == "run":
+        command = getattr(args, "cmd", "") or ""
+        if not command.strip():
+            print("simulate run needs a command", file=sys.stderr)
+            return 2
+        result = sim.run(command,
+                         confirm=bool(getattr(args, "confirm", False)),
+                         timeout=float(getattr(args, "timeout", 120.0) or 120.0))
+        payload = result.to_dict()
+        out = (result.stdout or "") + (
+            f"\n[stderr]\n{result.stderr}" if result.stderr else "")
+        _emit(args, payload,
+              f"exit {result.exit_code} in {result.seconds:.1f}s "
+              f"(risk: {result.risk}, backend: {result.backend})\n{out[:4000]}")
+        return 0 if result.ok else 1
+
+    if action == "compare":
+        result = sim.compare(getattr(args, "command_a", "") or "",
+                             getattr(args, "command_b", "") or "")
+        _emit(args, result, f"verdict: {result.get('verdict')}")
+        return 0
+
+    if action == "risk":
+        report = classify_risk(getattr(args, "cmd", "") or "")
+        payload = report.to_dict()
+        _emit(args, payload,
+              f"risk: {payload['level']} — "
+              f"{'; '.join(payload['reasons']) or 'no flags'}")
+        return 0
+
+    print(f"simulate: unknown action {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_research_loop(args: argparse.Namespace, context: Any) -> int:
+    """`nm research-loop <action>` — the always-on research loop CLI.
+
+    Mirrors the ``research_loop`` tool's actions (tick|run|status|ensure|
+    enable|disable|topics|set_topics) against the real loop module, so the
+    console and the tool/agent surface stay in lockstep.
+    """
+    from .agents import research_loop as rlmod
+
+    action = (getattr(args, "action", "status") or "status").strip().lower()
+
+    if action == "status":
+        data = rlmod.status(context)
+        job = data.get("job") or {}
+        gates = data.get("gates") or {}
+        last = data.get("last_run") or {}
+        last_line = "never"
+        if last:
+            ts = last.get("started_at", 0) or 0
+            last_line = (f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))} "
+                         f"({'ok' if last.get('ok') else 'deferred: ' + str(last.get('skipped_reason') or last.get('error') or '')})"
+                         if ts else "recorded")
+        lines = [
+            "research loop:",
+            f"  job: {'scheduled' if job.get('scheduled') else 'not scheduled'}"
+            + (f", every {job.get('interval_hours')}h" if job.get("scheduled") else "")
+            + ("" if job.get("enabled", True) else " (disabled)"),
+            f"  gates: feature={'on' if gates.get('feature_research') else 'off'}, "
+            f"proactive={'on' if gates.get('proactive_master') else 'off'}, "
+            f"quiet_hours={'yes' if gates.get('quiet_hours') else 'no'}",
+            f"  last run: {last_line}",
+            f"  pending proposals: {data.get('pending_proposals', 0)}",
+            f"  topics: {', '.join(data.get('topics') or []) or 'none set'}",
+        ]
+        _emit(args, data, "\n".join(lines))
+        return 0
+
+    if action == "tick":
+        max_topics = int(getattr(args, "max_topics", 0) or 0)
+        loop = rlmod.ResearchLoop(
+            context, max_topics=max_topics or rlmod._MAX_TOPICS_PER_TICK)
+        result = loop.tick()
+        ok = bool(result.get("ok"))
+        topics = ", ".join(result.get("topics") or [])
+        text = (f"tick {'ok' if ok else 'deferred'}"
+                + (f" — {result.get('skipped_reason')}" if result.get("skipped_reason") else "")
+                + (f" — topics: {topics}" if topics else "")
+                + f" — findings {result.get('findings_count', 0)}, "
+                  f"proposals {result.get('proposals_created', 0)}")
+        _emit(args, result, text)
+        return 0
+
+    if action == "run":
+        topic = (getattr(args, "topic", "") or "").strip()
+        if not topic:
+            print("research-loop run needs a topic — nm research-loop run \"<topic>\"",
+                  file=sys.stderr)
+            return 2
+        try:
+            result = rlmod.run_topic(context, topic)
+        except Exception as exc:  # noqa: BLE001
+            print(f"research-loop run: {exc}", file=sys.stderr)
+            return 1
+        _emit(args, result,
+              f"run {'deferred' if result.get('deferred') else 'ok'}: {topic}"
+              + (f" — {result.get('skipped_reason')}" if result.get("skipped_reason") else "")
+              + f" — proposals {result.get('proposals_created', 0)}")
+        return 0
+
+    if action == "ensure":
+        result = rlmod.ensure_research_job(context)
+        _emit(args, result,
+              f"research loop job: {'already scheduled' if result.get('already_scheduled') else 'scheduled'} "
+              f"(every {result.get('interval_hours')}h)")
+        return 0
+
+    if action in ("enable", "disable"):
+        from .agents.scheduler import Scheduler
+
+        sched = Scheduler(context)
+        jobs = [j for j in sched.list_jobs()
+                if j.get("name") == rlmod.RESEARCH_LOOP_JOB]
+        if not jobs:
+            info = rlmod.ensure_research_job(context)
+            jobs = [j for j in sched.list_jobs()
+                    if j.get("name") == rlmod.RESEARCH_LOOP_JOB]
+            if not jobs:
+                print(f"research-loop {action}: job registration failed",
+                      file=sys.stderr)
+                return 1
+        row = sched.set_enabled(jobs[0]["id"], action == "enable")
+        _emit(args, {"enabled": action == "enable", "job": row},
+              f"research loop job {'enabled' if action == 'enable' else 'disabled'}")
+        return 0
+
+    if action == "topics":
+        topics = rlmod.owner_topics(context)
+        _emit(args, {"topics": topics},
+              "research topics:\n" + "\n".join(f"  · {t}" for t in topics)
+              if topics else "no research topics set — nm research-loop set_topics --topics \"a, b\"")
+        return 0
+
+    if action == "set_topics":
+        raw = (getattr(args, "topics", "") or "").strip()
+        topics = [t.strip() for t in raw.split(",") if t.strip()]
+        if not topics:
+            print("research-loop set_topics needs --topics \"a, b, c\"",
+                  file=sys.stderr)
+            return 2
+        saved = rlmod.set_owner_topics(context, topics)
+        _emit(args, {"topics": saved},
+              f"research topics set ({len(saved)}): " + ", ".join(saved))
+        return 0
+
+    print(f"research-loop: unknown action {action}", file=sys.stderr)
+    return 2
 
 
 # ── knowledge graph / cookies / structure CLI commands ─────────────────────
@@ -6332,11 +7114,6 @@ def _cmd_goal(args: argparse.Namespace, context: Any) -> int:
         return 0
     print(f"goal: unknown action {action}", file=sys.stderr)
     return 2
-
-def _cmd_stub(args: argparse.Namespace, context: Any, command: str) -> int:
-    """Stub handler for commands not yet fully implemented."""
-    _emit(args, {"command": command, "status": "stub"}, f"{command}: stub implementation")
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

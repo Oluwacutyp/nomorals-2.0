@@ -40,6 +40,7 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "LEXICON_MODULE",
     "CATEGORIES",
+    "CATEGORY_KEYWORDS",
     "LexiconFeed",
     "seed_partner_lexicon",
 ]
@@ -64,7 +65,7 @@ CATEGORIES: tuple[str, ...] = (
 
 #: Scoring keywords per category for the starter seed (see ``score_term``:
 #: relevance is the fraction of the term's content words that hit these).
-_SEED_KEYWORDS: dict[str, list[str]] = {
+CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "catchphrase": ["catchphrase", "phrase", "saying", "habit", "quip"],
     "pet_name": ["pet", "name", "nickname", "endearment", "call", "them"],
     "opener": ["opener", "open", "start", "begin", "lead"],
@@ -201,6 +202,16 @@ class LexiconFeed:
             info["available"] = False
         return info
 
+    def reload(self) -> dict[str, Any]:
+        """Explicit reload step of the acquire loop.
+
+        Term reads are uncached, so there is no stale copy to flush —
+        reload re-reads the module version and per-category counts from
+        the store and returns them, letting the loop (and ``nm`` tooling)
+        confirm newly acquired terms are live.
+        """
+        return self.status()
+
     def voice_note(self, persona: Any, label: str) -> tuple[str, int, list[str]]:
         """Build the dynamic voice note for the system prompt.
 
@@ -312,7 +323,7 @@ def seed_partner_lexicon(db: Any, *, source: str = "partner_seed") -> dict[str, 
                 category=category,
                 source=source,
                 threshold=_SEED_THRESHOLD,
-                category_keywords=_SEED_KEYWORDS.get(category),
+                category_keywords=CATEGORY_KEYWORDS.get(category),
             )
             added.extend(result["added"])
             skipped = [s for s in result["skipped"] if s["reason"] != "duplicate"]

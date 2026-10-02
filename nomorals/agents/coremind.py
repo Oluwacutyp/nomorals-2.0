@@ -49,10 +49,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..storage import router_telemetry
+
 _log = logging.getLogger("nomorals.coremind")
 
 __all__ = ["Intent", "CoreMind", "GAME_ALIASES", "game_names",
-           "MODEL_CHECK_TIMEOUT_S", "CODING_JOB_TIMEOUT_S"]
+           "MODEL_CHECK_TIMEOUT_S", "CODING_JOB_TIMEOUT_S",
+           "MAX_INFLIGHT_DEFAULT", "INFLIGHT_ACQUIRE_TIMEOUT_S"]
 
 # ── fast-path vs heavy-path budgets (explicit, not magic numbers) ───────────
 #: INTERACTIVE budget: max wall time the chat thread waits for the model in
@@ -64,6 +67,15 @@ MODEL_CHECK_TIMEOUT_S = 8.0
 #: always runs off the chat thread (``_send_async``), so a long budget here
 #: never blocks a reply.
 CODING_JOB_TIMEOUT_S = 300.0
+
+#: BACKGROUND concurrency: max jobs ``_send_async`` may run at once.
+#: Configurable via ``mind.max_inflight`` (env NM_MIND_MAX_INFLIGHT);
+#: ``CoreMind`` clamps non-positive values to this default.
+MAX_INFLIGHT_DEFAULT = 8
+
+#: How long a new send waits for an in-flight slot before it is shed
+#: (``mind.inflight_acquire_timeout_s``, env NM_MIND_INFLIGHT_TIMEOUT).
+INFLIGHT_ACQUIRE_TIMEOUT_S = 30.0
 
 # ── the game catalogue (the games organ owns the rules — here is the map) ──
 
@@ -429,6 +441,30 @@ class CoreMind:
         self._router_calls = 0  # observability: how often the model was consulted
         self._router_timeouts = 0  # how often _model_check hit its deadline
         self._model_check_note = ""  # last model-check degradation, surfaced in status()
+        # ── bounded background sends ──────────────────────────────────
+        # _send_async spawns one thread per heavy job; the semaphore caps
+        # how many may run at once (mind.max_inflight, default 8). When
+        # the bound is hit, new sends wait up to inflight_acquire_timeout_s
+        # and are then SHED: logged, counted, and the job is marked failed
+        # with an explicit note — never silently dropped, and the chat
+        # thread never blocks on the bound.
+        mind_cfg = getattr(getattr(self.context, "settings", None), "mind", None)
+        try:
+            max_inflight = int(getattr(mind_cfg, "max_inflight", 0) or 0)
+        except (TypeError, ValueError):
+            max_inflight = 0
+        self._max_inflight = max_inflight if max_inflight > 0 else MAX_INFLIGHT_DEFAULT
+        try:
+            self._inflight_timeout = float(
+                getattr(mind_cfg, "inflight_acquire_timeout_s", 0) or 0)
+        except (TypeError, ValueError):
+            self._inflight_timeout = 0.0
+        if self._inflight_timeout <= 0:
+            self._inflight_timeout = INFLIGHT_ACQUIRE_TIMEOUT_S
+        self._inflight = threading.Semaphore(self._max_inflight)
+        self._inflight_now = 0  # gauge: sends currently holding a slot
+        self._send_started = 0  # sends that took a slot
+        self._send_shed = 0  # sends rejected by the bound
 
     # ── continuity (state file + memory) ────────────────────────────────────
     def _load_state(self) -> dict[str, Any]:
@@ -582,12 +618,17 @@ class CoreMind:
                 box["exc"] = exc
 
         self._router_calls += 1
+        db = getattr(self.context, "db", None)
+        if db is not None:
+            router_telemetry.record_model_check(db)
         worker = threading.Thread(target=_call, name="mind-model-check",
                                   daemon=True)
         worker.start()
         worker.join(timeout=MODEL_CHECK_TIMEOUT_S)
         if worker.is_alive():
             self._router_timeouts += 1
+            if db is not None:
+                router_telemetry.record_model_check(db, timed_out=True)
             self._model_check_note = (
                 f"model check timed out after {MODEL_CHECK_TIMEOUT_S:.0f}s "
                 f"— kept deterministic “{best.kind}”")
@@ -626,6 +667,36 @@ class CoreMind:
 
     def decide(self, text: str, *, live_game: str | None = None,
                allow_model: bool = True) -> Intent:
+        """The decision, pure and inspectable.  ``chat`` = just talk.
+
+        Every decision is also counted in the persisted router telemetry
+        (per-route counts via ``nomorals.storage.router_telemetry``) so
+        ``nm mind`` shows live route behavior across processes. The write
+        is best-effort — it never changes or delays the decision.
+        """
+        intent = self._decide(text, live_game=live_game, allow_model=allow_model)
+        self._record_route(intent)
+        return intent
+
+    def _record_route(self, intent: Intent) -> None:
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return
+        router_telemetry.record_route(db, intent.route or intent.kind)
+
+    def record_plan_error(self, error: str, route: str = "") -> None:
+        """Persist the latest plan failure (with timestamp) for ``nm mind``.
+
+        Called by dispatch paths whose agent surfaced a ``plan_error``
+        (a model-made plan degraded to a template/heuristic). Never raises.
+        """
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return
+        router_telemetry.record_plan_error(db, error, route=route)
+
+    def _decide(self, text: str, *, live_game: str | None = None,
+                allow_model: bool = True) -> Intent:
         """The decision, pure and inspectable.  ``chat`` = just talk."""
         cands = understand(text, live_game=live_game)
         if not cands:
@@ -789,7 +860,28 @@ class CoreMind:
 
     def _send_async(self, chat_key: str, job: Callable[[], str | None],
                     job_id: str, started_note: str, kind: str = "job") -> str:
-        """Heavy organs run off the chat thread and report back here."""
+        """Heavy organs run off the chat thread and report back here.
+
+        BOUNDED: at most ``mind.max_inflight`` jobs run at once (default
+        8, env NM_MIND_MAX_INFLIGHT). A send that cannot take a slot
+        within ``mind.inflight_acquire_timeout_s`` (default 30s, env
+        NM_MIND_INFLIGHT_TIMEOUT) is SHED — a warning is logged, the
+        ``shed`` counter rises (visible in ``status()`` and ``nm mind``),
+        and the job is marked failed with an explicit "shed" note so the
+        owner sees it instead of silence. The chat thread never blocks on
+        the bound: ``Semaphore.acquire`` is given the timeout, not an
+        unbounded wait.
+        """
+        acquired = self._inflight.acquire(timeout=self._inflight_timeout)
+        if not acquired:
+            note = (f"shed: {self._max_inflight} background jobs already "
+                    f"in flight (no slot in {self._inflight_timeout:.0f}s)")
+            _log.warning("coremind shed %s %s — %s", kind, job_id, note)
+            with self._lock:
+                self._send_shed += 1
+            self._job_done(job_id, False, note)
+            return started_note + f"\n⚠️ {note}"
+
         def _run() -> None:
             note = ""
             ok = False
@@ -799,6 +891,10 @@ class CoreMind:
             except Exception as exc:  # noqa: BLE001
                 _log.exception("coremind job %s failed", job_id)
                 note = str(exc)[:300]
+            finally:
+                self._inflight.release()
+                with self._lock:
+                    self._inflight_now = max(0, self._inflight_now - 1)
             self._job_done(job_id, ok, note)
             if self.runtime is not None:
                 try:
@@ -809,6 +905,9 @@ class CoreMind:
                     self.runtime._send_long(ref.platform, ref, text)
                 except Exception:  # noqa: BLE001
                     _log.exception("coremind notify failed")
+        with self._lock:
+            self._send_started += 1
+            self._inflight_now += 1
         threading.Thread(target=_run, name=f"mind-{kind}-{job_id}",
                          daemon=True).start()
         return started_note
@@ -825,6 +924,24 @@ class CoreMind:
             report = ResearchSwarm(self.context, workers=workers).run(
                 intent.target, save_memory=True)
             text = report.to_text()
+            # Wave E: close the lexicon acquisition loop — scored findings
+            # feed candidate terms into the partner lexicon categories
+            # (scored, versioned, reloaded). Best-effort: a loop failure
+            # is a log line, never a broken research reply.
+            try:
+                from ..partner.lexicon_acquire import feed_partner_lexicon
+
+                loop = feed_partner_lexicon(
+                    self.context.db, report.findings,
+                    source="research_swarm")
+                if loop.get("added"):
+                    _log.info(
+                        "lexicon loop: %d terms from research %r "
+                        "(partner lexicon v%s)",
+                        len(loop["added"]), intent.target[:60],
+                        loop.get("version"))
+            except Exception:  # noqa: BLE001
+                _log.debug("lexicon acquisition loop failed", exc_info=True)
             return (f"🔎 research done — “{intent.target[:80]}”\n\n{text[:4000]}")
 
         return self._send_async(
@@ -1044,6 +1161,9 @@ class CoreMind:
                 pass
         lines.append(f"  model consulted {self._router_calls}× this session "
                      f"(timed out {self._router_timeouts}×) · profile: {env}")
+        lines.append(f"  background jobs: {self._inflight_now}/{self._max_inflight} "
+                     f"in flight · started {self._send_started} · "
+                     f"shed {self._send_shed} (bound: NM_MIND_MAX_INFLIGHT)")
         if self._model_check_note:
             lines.append(f"  last model check: {self._model_check_note}")
         return "\n".join(lines)

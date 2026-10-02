@@ -50,6 +50,7 @@ AGENT_TOOL_MODULES = (
     "reflection",
     "research_digest",
     "research_lexicon",
+    "research_loop",
     "research_swarm",
     "router_select",
     "search.engine",
