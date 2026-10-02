@@ -565,15 +565,17 @@ class MissionRunner:
 
 
 def _step_prompt(mission: Mission, step: Any) -> str:
-    """Build the prompt for one step, including what earlier steps produced."""
-    outputs = mission.state.get("outputs") or {}
-    prior = "\n".join(
-        f"- {name}: {str(value)[:300]}" for name, value in list(outputs.items())[-4:]
-    )
-    parts = [f"Mission goal: {mission.goal}", f"Current step: {step.goal or step.name}"]
-    if prior:
-        parts.append(f"Already produced:\n{prior}")
-    return "\n\n".join(parts)
+    """Build the prompt for one step, including what earlier steps produced.
+
+    Compatibility wrapper: assembly now runs through
+    :class:`nomorals.context.ContextEngine` (legacy-compatible mode), so
+    existing callers see byte-identical output.  New callers can ask the
+    engine for the full token-budgeted assembly via
+    ``ContextEngine().build_step_prompt(mission, step, rich=True)``.
+    """
+    from ..context import ContextEngine
+
+    return ContextEngine().build_step_prompt(mission, step)
 
 
 def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
