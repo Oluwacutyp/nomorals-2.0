@@ -39,6 +39,7 @@ from typing import Any, Callable
 from ..core.config import Settings
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
+from ..core.text import truncate
 from ..llm.base import Message, SamplingParams
 from ..partner.background import BackgroundSelector
 from ..partner.lexicon_feed import LexiconFeed, seed_partner_lexicon
@@ -2249,7 +2250,7 @@ class PartnerRuntime:
         out = best.get("output")
         text = v["explanation"]
         if isinstance(out, str) and out:
-            snippet = out if len(out) <= 800 else out[:800] + "…"
+            snippet = truncate(out, 800)
             text += f"\ndecoded:\n{snippet}"
         sent = ""
         if v.get("saved_to"):

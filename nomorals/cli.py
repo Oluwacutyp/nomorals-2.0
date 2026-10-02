@@ -3705,14 +3705,14 @@ class _BuildersBuildBackend:
     def run(self, kind: str, workdir: str) -> dict[str, Any]:
         import shutil
         import time as _time
-        import uuid as _uuid
+        from .core.ids import new_short_id
 
         from .builders.run import serve
         from .builders.scaffold import scaffold
         from .builders.smoke import smoke_test
 
         started = _time.monotonic()
-        name = f"k3bench-{kind}-{_uuid.uuid4().hex[:8]}"
+        name = f"k3bench-{kind}-{new_short_id(length=8)}"
         stages: dict[str, bool] = {}
         detail = ""
         timed_out = False

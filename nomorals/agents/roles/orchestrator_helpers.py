@@ -6,6 +6,13 @@ import json
 import re
 from typing import Any
 
+from ...core.text import truncate as _truncate
+
+
+def truncate(text: str, limit: int = 4000) -> str:
+    """Backward-compatible alias of :func:`nomorals.core.text.truncate`."""
+    return _truncate(text, limit)
+
 
 def parse_json_loose(text: str) -> Any:
     """Extract JSON from a model reply that may wrap it in prose or fences."""
@@ -27,7 +34,3 @@ def parse_json_loose(text: str) -> Any:
             except json.JSONDecodeError:
                 continue
     return None
-
-
-def truncate(text: str, limit: int = 4000) -> str:
-    return text if len(text) <= limit else text[:limit] + "…"

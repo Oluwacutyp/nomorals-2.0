@@ -13,10 +13,10 @@ and re-delivers it on request.
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Any, Callable
 
 from ...core.errors import ToolError
+from ...core.ids import new_short_id
 from .vault import TrialVault
 
 __all__ = ["TrialFlow", "active_delivery_platforms", "new_id"]
@@ -188,4 +188,4 @@ class TrialFlow:
 
 
 def new_id() -> str:
-    return uuid.uuid4().hex[:12]
+    return new_short_id(length=12)

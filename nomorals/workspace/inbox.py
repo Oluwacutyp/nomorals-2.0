@@ -47,6 +47,7 @@ from typing import Any, Callable, Protocol
 from ..agents.notifier import Notifier
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..core.text import truncate
 from ..storage.db import Database
 
 log = get_logger(__name__)
@@ -199,7 +200,7 @@ def extractive_summary(text: str, max_chars: int = 600) -> str:
         out.append(s)
         total += len(s) + 1
     summary = " ".join(out).strip()
-    return summary if len(summary) <= max_chars else summary[:max_chars] + "…"
+    return truncate(summary, max_chars)
 
 
 class _TextExtractor(HTMLParser):

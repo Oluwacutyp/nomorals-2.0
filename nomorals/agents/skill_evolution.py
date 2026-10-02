@@ -48,6 +48,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..core.diff import (
+    _FilePatch,
+    _apply_parsed_diff,
+    _parse_unified_diff,
+    DiffApplyError,
+)
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .failure import FailureAnalyzer
@@ -107,58 +113,62 @@ def count_changed_lines(diff_text: str) -> int:
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
+# Pseudo target for the single-text adapter below: the canonical engine is
+# file-oriented, while this contract applies every hunk to one text.
+_ADAPTER_TARGET = "skill_text"
+
+
+def _bare_hunks(diff_text: str) -> bool:
+    """True when the text carries ``@@`` hunks but no ``---``/``+++`` file
+    headers — the old hand-rolled parser accepted those bare-hunk diffs."""
+    has_hunk = False
+    for raw in (diff_text or "").splitlines():
+        if raw.startswith(("--- ", "+++ ")):
+            return False
+        if raw.startswith("@@") and _HUNK_RE.match(raw):
+            has_hunk = True
+    return has_hunk
+
 
 def apply_unified_diff(original: str, diff_text: str) -> str:
-    """Apply a unified diff to ``original`` text. Raises
-    ``SkillEvolutionError`` when a hunk does not apply cleanly."""
-    orig_lines = original.splitlines()
-    out: list[str] = []
-    pos = 0  # next unconsumed original line (0-based)
-    hunks = _parse_hunks(diff_text)
+    """Apply a unified diff to ``original`` text.
+
+    Thin adapter over the canonical engine in :mod:`nomorals.core.diff`
+    (differential-fuzzed 500/500 against GNU ``patch``: count-driven hunk
+    parsing, patch-style offset tolerance, ``\\ No newline`` handling).
+    The contract is unchanged: returns the patched text, raises
+    :class:`SkillEvolutionError` when no hunks are found or a hunk does
+    not apply cleanly.
+
+    Adapter semantics (kept from the previous hand-rolled parser):
+    file headers are validated but the target path is ignored — every
+    hunk in the diff is applied to ``original`` in order.  Bare ``@@``
+    hunks without ``---``/``+++`` headers are still accepted.
+
+    Two deliberate improvements from the canonical engine: a diff
+    ``\\ No newline at end of file`` marker is now authoritative for the
+    result's trailing newline (previously silently ignored), and hunks
+    apply with GNU patch offset semantics instead of failing on
+    overlaps.
+    """
+    text = diff_text or ""
+    try:
+        patches = _parse_unified_diff(text)
+        if not patches and _bare_hunks(text):
+            patches = _parse_unified_diff(
+                f"--- a/{_ADAPTER_TARGET}\n+++ b/{_ADAPTER_TARGET}\n{text}")
+    except DiffApplyError as exc:
+        raise SkillEvolutionError(str(exc)) from exc
+    hunks = [h for fp in patches for h in fp.hunks]
     if not hunks:
         raise SkillEvolutionError("no hunks found in diff")
-    for hunk in hunks:
-        old_start = hunk["old_start"] - 1  # to 0-based
-        if old_start < pos:
-            raise SkillEvolutionError("overlapping hunks in diff")
-        out.extend(orig_lines[pos:old_start])
-        cursor = old_start
-        for kind, text in hunk["lines"]:
-            if kind == " ":
-                if cursor >= len(orig_lines) or orig_lines[cursor] != text:
-                    raise SkillEvolutionError(
-                        f"context mismatch at original line {cursor + 1}")
-                out.append(orig_lines[cursor])
-                cursor += 1
-            elif kind == "-":
-                if cursor >= len(orig_lines) or orig_lines[cursor] != text:
-                    raise SkillEvolutionError(
-                        f"removal mismatch at original line {cursor + 1}")
-                cursor += 1
-            elif kind == "+":
-                out.append(text)
-            else:
-                raise SkillEvolutionError(f"bad diff line kind {kind!r}")
-        pos = cursor
-    out.extend(orig_lines[pos:])
-    trailing = "\n" if original.endswith("\n") else ""
-    return "\n".join(out) + trailing
-
-
-def _parse_hunks(diff_text: str) -> list[dict[str, Any]]:
-    hunks: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for raw in (diff_text or "").splitlines():
-        if raw.startswith("@@"):
-            m = _HUNK_RE.match(raw)
-            if not m:
-                raise SkillEvolutionError(f"bad hunk header: {raw[:60]}")
-            current = {"old_start": int(m.group(1)), "lines": []}
-            hunks.append(current)
-        elif current is not None and raw[:1] in (" ", "+", "-"):
-            current["lines"].append((raw[0], raw[1:]))
-        # ---/+++ headers and anything else are ignored
-    return hunks
+    pseudo = _FilePatch(old_path=_ADAPTER_TARGET, new_path=_ADAPTER_TARGET,
+                        hunks=hunks)
+    try:
+        result = _apply_parsed_diff([pseudo], {_ADAPTER_TARGET: original})
+    except DiffApplyError as exc:
+        raise SkillEvolutionError(str(exc)) from exc
+    return result[_ADAPTER_TARGET]
 
 
 def _sha(text: str) -> str:
@@ -1021,9 +1031,25 @@ def ensure_improvement_schedule(context: Any) -> list[dict[str, Any]]:
 
 
 def _reverse_diff(diff_text: str) -> str:
-    """Flip a unified diff so it undoes itself."""
+    """Flip a unified diff so it undoes itself.
+
+    The ``---``/``+++`` header pair is swapped (paths exchanged) so the
+    result stays a valid unified diff — ``---`` names the "before" file
+    and still comes first.  (The old marker-flip-only version emitted
+    ``+++`` before ``---``, which the lenient hand-rolled applier
+    tolerated but the canonical engine rightly rejects.)
+    """
     out: list[str] = []
-    for raw in (diff_text or "").splitlines():
+    lines = (diff_text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if (raw.startswith("--- ") and i + 1 < len(lines)
+                and lines[i + 1].startswith("+++ ")):
+            out.append("--- " + lines[i + 1][4:])
+            out.append("+++ " + raw[4:])
+            i += 2
+            continue
         if raw.startswith("--- "):
             out.append("+++ " + raw[4:])
         elif raw.startswith("+++ "):
@@ -1041,6 +1067,7 @@ def _reverse_diff(diff_text: str) -> str:
             out.append("+" + raw[1:])
         else:
             out.append(raw)
+        i += 1
     return "\n".join(out)
 
 

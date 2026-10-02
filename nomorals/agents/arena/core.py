@@ -36,11 +36,11 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from ..search.engine import SearchEngine
+from ...core.ids import new_short_id
 from . import activity
 from .topics import sample_topic, surprise_topic
 
@@ -48,7 +48,7 @@ __all__ = ["Arena", "run_cycle_safe"]
 
 
 def _new_id() -> str:
-    return uuid.uuid4().hex[:12]
+    return new_short_id(length=12)
 
 
 class Arena:

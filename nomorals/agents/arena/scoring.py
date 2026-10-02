@@ -24,9 +24,10 @@ raise — callers get safe defaults.
 from __future__ import annotations
 
 import logging
-import secrets
 import time
 from typing import Any
+
+from ...core.ids import new_short_id
 
 _log = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def record_score(db: Any, *, topic: str, category: str, kind: str = "code",
     kind = str(kind or "code").strip().lower()
     if kind not in ("code", "research", "build"):
         kind = "code"
-    score_id = secrets.token_hex(6)
+    score_id = new_short_id(length=12)
     row = (
         score_id,
         time.time(),
