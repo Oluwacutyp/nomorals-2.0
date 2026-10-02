@@ -97,7 +97,7 @@ class TestArtifacts(unittest.TestCase):
 
     def test_migration_60_applied(self):
         self.assertTrue(self.db.table_exists("artifacts"))
-        self.assertEqual(
+        self.assertGreaterEqual(
             self.db.scalar("SELECT MAX(version) FROM schema_migrations"), 60)
 
 

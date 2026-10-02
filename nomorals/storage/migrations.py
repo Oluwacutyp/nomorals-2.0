@@ -1696,6 +1696,64 @@ def _apply_game_relay_tables(db: object) -> None:
     )
 
 
+def _apply_research_organs(db: object) -> None:
+    """Wave C research organs: upgrade-proposal approval queue and the
+    dynamic lexicon store.
+
+    upgrade_proposals — research findings become concrete module-upgrade
+    proposals with patch plans. The owner approves or denies each one
+    explicitly (deny requires a reason); approval dispatches to the
+    evolution/coding stack, never straight to the tree.
+    lexicon_terms / lexicon_versions — scored vocabulary acquired from
+    research (personas, partner phrasing, domain terminology), versioned
+    per consuming module so updates are reviewable and reloadable
+    without a restart (the store is the database, not the code).
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        CREATE TABLE IF NOT EXISTS upgrade_proposals (
+            id                  TEXT PRIMARY KEY,
+            title               TEXT NOT NULL DEFAULT '',
+            rationale           TEXT NOT NULL DEFAULT '',
+            patch_plan          TEXT NOT NULL DEFAULT '{}',
+            files               TEXT NOT NULL DEFAULT '[]',
+            tests               TEXT NOT NULL DEFAULT '[]',
+            claim_ids           TEXT NOT NULL DEFAULT '[]',
+            status              TEXT NOT NULL DEFAULT 'proposed',
+            reason              TEXT NOT NULL DEFAULT '',
+            created_at          REAL NOT NULL DEFAULT 0,
+            decided_at          REAL NOT NULL DEFAULT 0,
+            decided_by          TEXT NOT NULL DEFAULT '',
+            evolution_proposal_id TEXT NOT NULL DEFAULT '',
+            applied_result      TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_upgrade_proposals_status
+            ON upgrade_proposals(status, created_at);
+        CREATE TABLE IF NOT EXISTS lexicon_terms (
+            id          TEXT PRIMARY KEY,
+            term        TEXT NOT NULL,
+            category    TEXT NOT NULL DEFAULT 'general',
+            module      TEXT NOT NULL DEFAULT '',
+            score       REAL NOT NULL DEFAULT 0,
+            source      TEXT NOT NULL DEFAULT '',
+            version     INTEGER NOT NULL DEFAULT 1,
+            status      TEXT NOT NULL DEFAULT 'active',
+            created_at  REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_lexicon_terms_module
+            ON lexicon_terms(module, category, status);
+        CREATE INDEX IF NOT EXISTS idx_lexicon_terms_term
+            ON lexicon_terms(term, module);
+        CREATE TABLE IF NOT EXISTS lexicon_versions (
+            module      TEXT PRIMARY KEY,
+            version     INTEGER NOT NULL DEFAULT 0,
+            term_count  INTEGER NOT NULL DEFAULT 0,
+            updated_at  REAL NOT NULL DEFAULT 0
+        );
+        """
+    )
+
+
 def _apply_room_tables(db: object) -> None:
     """Prompt 05 (project rooms): per-goal workspace index.
 
@@ -2092,6 +2150,7 @@ MIGRATIONS: tuple[Migration, ...] = (
                   "TEXT NOT NULL DEFAULT '';"),
     Migration(60, "artifacts", sql=_V60_ARTIFACTS),
     Migration(61, "arena_scores", sql=_V61_ARENA_SCORES),
+    Migration(62, "research_organs", fn=_apply_research_organs),
 )
 
 
