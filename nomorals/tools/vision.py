@@ -40,6 +40,8 @@ from ..core.policy import Capability
 __all__ = [
     "compare",
     "describe",
+    "extract",
+    "format_chat_summary",
     "image_metadata",
     "locate",
     "read_text",
@@ -77,6 +79,18 @@ _COMPARE_PROMPT = (
     "can see. If they look identical, say so plainly instead of inventing "
     "differences."
 )
+
+_EXTRACT_PROMPT = (
+    "Analyze this image for a chat summary and reply with ONLY a JSON "
+    'object, no other text:\n{"summary": "<one or two sentences: what this '
+    'image is about>", "key_text": "<the most important text visible, '
+    'verbatim; empty string if there is none>", "notable_elements": '
+    '["<element 1>", "<element 2>", ... up to 8 items], "scene_type": '
+    '"<photo|screenshot|document|chart|diagram|meme|other>"}'
+    "{extra}"
+)
+
+_EXTRACT_EXTRA = "\nPay special attention to: {prompt}"
 
 #: one-time "images leave the machine" notice, per process
 _NOTICE_EMITTED = False
@@ -317,6 +331,138 @@ def _downscale(data: bytes, max_dim: int) -> tuple[bytes, str]:
 
 
 # ── the four actions ─────────────────────────────────────────────────────────
+
+
+def _parse_json_loose(text: str) -> tuple[dict[str, Any] | None, bool]:
+    """Parse a model reply as JSON, tolerating fences and chatter.
+
+    Returns ``(obj, True)`` on success, ``(None, False)`` when the model did
+    not produce a JSON object — the caller must say so instead of inventing
+    structure.
+    """
+    cleaned = re.sub(r"```(?:json)?", "", text or "").strip()
+    if not cleaned:
+        return None, False
+    for candidate in (cleaned, cleaned[cleaned.find("{"):cleaned.rfind("}") + 1]):
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return obj, True
+    return None, False
+
+
+def extract(
+    context: Any,
+    data: bytes,
+    prompt: str = "",
+    *,
+    cache: dict[str, dict[str, Any]] | None = None,
+    source: str = "bytes",
+) -> dict[str, Any]:
+    """Chat-ready structured extraction: summary + key text + elements.
+
+    Unlike :func:`describe` (a free-form dump) and :func:`read_text` (a raw
+    OCR transcript), this returns a structured result the agent can paste
+    straight into chat — see :func:`format_chat_summary`.
+
+    The vision model is **required**: when no vision-capable provider is
+    configured this raises :class:`ModelError` with a plain explanation
+    instead of returning an empty "success". The model is asked for a JSON
+    object; when it does not produce one the result keeps the raw text as
+    the summary and says ``parsed: False`` instead of inventing structure.
+    """
+    router = getattr(context, "router", None) if context is not None else None
+    if router is None:
+        raise ModelError(
+            "vision extraction is unavailable: no vision-capable model "
+            "provider is configured on this context (no context.router). "
+            "Describe what you need differently, or configure a vision model."
+        )
+    instruction = _EXTRACT_PROMPT.replace(
+        "{extra}",
+        _EXTRACT_EXTRA.format(prompt=prompt) if (prompt or "").strip() else "",
+    )
+    result = _vision_call(
+        context, data, instruction, action="extract", source=source,
+        cache=cache, cache_extra=instruction, strict=True,
+    )
+    raw = result.get("description", "")
+    parsed, parsed_ok = _parse_json_loose(raw)
+
+    base = {k: v for k, v in result.items() if k != "description"}
+    structured: dict[str, Any] = {
+        **base,
+        "available": True,
+        "parsed": parsed_ok,
+        "raw_text": raw,
+    }
+    if parsed_ok and parsed is not None:
+        elements = parsed.get("notable_elements") or []
+        structured.update(
+            summary=str(parsed.get("summary") or "").strip(),
+            key_text=str(parsed.get("key_text") or "").strip(),
+            notable_elements=[str(e).strip() for e in elements
+                              if str(e).strip()][:8],
+            scene_type=str(parsed.get("scene_type") or "other").strip(),
+        )
+    else:
+        # honest degradation: raw text as the summary, nothing invented
+        structured.update(
+            summary=raw.strip()[:600],
+            key_text="",
+            notable_elements=[],
+            scene_type="unknown",
+            note=("the model did not return structured JSON — the raw reply "
+                  "is kept as the summary; structure was not invented"),
+        )
+    if not structured["summary"]:
+        structured["summary"] = "(the model returned no usable description)"
+    return structured
+
+
+def format_chat_summary(result: dict[str, Any]) -> str:
+    """Render an :func:`extract` result as a compact chat-friendly message.
+
+    Output shape::
+
+        🖼️ <summary>
+        • <element>
+        • <element>
+        📝 Text in image: <key text, truncated>
+        <format> <W>x<H> · via <provider>/<model> · <seconds>s
+
+    Sections with no content are omitted — the message never carries empty
+    headers.
+    """
+    lines = [f"🖼️ {(result.get('summary') or '').strip()}"]
+    for element in result.get("notable_elements") or []:
+        element = str(element).strip()
+        if element:
+            lines.append(f"• {element}")
+    key_text = str(result.get("key_text") or "").strip()
+    if key_text:
+        shown = key_text if len(key_text) <= 400 else key_text[:397] + "…"
+        lines.append(f"📝 Text in image: {shown}")
+    meta_bits: list[str] = []
+    fmt = result.get("format")
+    width, height = result.get("width"), result.get("height")
+    if fmt:
+        meta_bits.append(f"{fmt} {width}x{height}" if width and height else str(fmt))
+    provider = result.get("provider") or ""
+    model = result.get("model") or ""
+    if provider or model:
+        meta_bits.append(f"via {provider}/{model}".rstrip("/"))
+    seconds = result.get("seconds")
+    if seconds is not None:
+        meta_bits.append(f"{seconds}s")
+    scene = result.get("scene_type")
+    if scene and scene not in ("unknown", ""):
+        meta_bits.append(str(scene))
+    if meta_bits:
+        lines.append(" · ".join(meta_bits))
+    return "\n".join(line for line in lines if line.strip())
 
 
 def _vision_call(
@@ -658,6 +804,25 @@ def register(registry: Any) -> None:
         data_a, _ = _load(path_a, url_a)
         data_b, _ = _load(path_b, url_b)
         return compare(context, data_a, data_b, prompt, source="compare")
+
+    @registry.register(
+        "vision_extract",
+        description=(
+            "Structured, chat-ready image extraction: returns a summary, the "
+            "key visible text, and a list of notable elements (not a raw OCR "
+            "dump), plus a chat-friendly rendering. One source: path= "
+            "(workspace-relative), url=, or reference= (inbox:<id> / "
+            "room:<slug>:<path> / attachment:<n>). Raises a clear error when "
+            "no vision-capable model is configured — never an empty success."
+        ),
+        capability=Capability.MODEL_CALL,
+    )
+    def vision_extract(path: str = "", url: str = "", prompt: str = "",
+                       reference: str = "") -> dict[str, Any]:
+        data, source = _load(path, url, reference=reference)
+        result = extract(context, data, prompt, cache=cache, source=source)
+        result["chat_summary"] = format_chat_summary(result)
+        return result
 
     @registry.register(
         "vision_screenshot",

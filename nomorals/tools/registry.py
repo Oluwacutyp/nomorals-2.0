@@ -119,7 +119,7 @@ class ToolRegistry:
             "lint",
             "edit_loop",
             "error_scan",
-            "macros", "media", "media_edit", "metadata", "monitor",
+            "macros", "media", "media_edit", "media_pipeline", "metadata", "monitor",
             "network", "osint", "osint_graph", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "run_code", "sandbox_code", "scriptgen",
             "shell", "ssh_socks", "traindata", "vision", "web", "weather",
