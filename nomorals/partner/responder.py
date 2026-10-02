@@ -39,8 +39,10 @@ from .style import (
     humanize_emoji,
     identity_leak_check,
     length_budget,
+    lexicon_hits,
     normalize_formatting,
     parrot_check,
+    repair_echo,
     split_messages,
     should_answer_short,
     strip_robotic,
@@ -280,12 +282,22 @@ class ReplyBundle:
     #: claim of dynamic influence.
     lexicon_dynamic: bool = False
     lexicon_terms_used: int = 0
+    #: Anti-echo final guard: "" when the draft passed the parrot check,
+    #: "repaired" when the post-loop guard stripped echoed phrasing and the
+    #: result passed, "dropped" when the echo could not be repaired and an
+    #: in-character fallback line was served instead of shipping an echo.
+    echo_action: str = ""
     #: Provider degradation: True when the LLM chain failed over (a provider
     #: failed and a fallback served the reply). ``degraded_note`` names
     #: which provider failed and what served instead — the user-visible
     #: result must not hide the failover behind the final answer.
     degraded: bool = False
     degraded_note: str = ""
+    #: Measurability, second half: how many of the blended lexicon terms
+    #: visibly surface in the shipped reply (word-boundary match). The
+    #: prompt-blend count in ``lexicon_terms_used`` says what *influenced*
+    #: the reply; this says what actually landed in her vocabulary.
+    lexicon_terms_surfaced: int = 0
 
     @property
     def text(self) -> str:
@@ -302,6 +314,8 @@ class ReplyBundle:
             "latency_ms": round(self.latency_ms, 1),
             "lexicon_dynamic": self.lexicon_dynamic,
             "lexicon_terms_used": self.lexicon_terms_used,
+            "lexicon_terms_surfaced": self.lexicon_terms_surfaced,
+            "echo_action": self.echo_action,
             "degraded": self.degraded,
             "degraded_note": self.degraded_note,
         }
@@ -442,14 +456,35 @@ class PartnerResponder:
 
         restricted = is_restricted(gate_mode)
 
-        # Dynamic voice feed: blend lexicon terms into the prompt's voice
-        # note. Empty store / no DB -> the static banks carry it, visibly
-        # (debug log + bundle flags), never a pretend-dynamic note.
+        # Dynamic voice feed: lexicon terms blended into her phrasing.
+        # Catchphrases + pet names go straight into the persona's own
+        # speech block (one authoritative line — the owner's static banks
+        # stay the base, dynamic terms only add); the remaining categories
+        # ride the voice note. Empty store / no DB -> the static banks
+        # carry it, visibly (debug log + bundle flags), never a
+        # pretend-dynamic note.
         lexicon_terms_used = 0
         lexicon_note = ""
+        dyn_catchphrases: tuple[str, ...] = ()
+        dyn_pet_names: tuple[str, ...] = ()
+        voice_terms: list[str] = []
         if self.lexicon is not None:
-            lexicon_note, lexicon_terms_used, lexicon_fallback = self.lexicon.voice_note(
-                self.persona, label
+            dyn_catchphrases = self.lexicon.terms("catchphrase", limit=6)
+            dyn_pet_names = self.lexicon.terms("pet_name", limit=4)
+            lexicon_note, voice_used, lexicon_fallback = self.lexicon.voice_note(
+                self.persona, label, exclude=("catchphrase", "pet_name")
+            )
+            lexicon_terms_used = voice_used + len(dyn_catchphrases) + len(dyn_pet_names)
+            # The terms that could visibly surface in the reply: everything
+            # blended above, used by lexicon_hits on the final draft.
+            voice_terms = (
+                list(dyn_catchphrases)
+                + list(dyn_pet_names)
+                + list(self.lexicon.terms("opener", limit=5))
+                + list(self.lexicon.terms("transition", limit=4))
+                + list(self.lexicon.terms("acknowledgment", limit=4))
+                + list(self.lexicon.terms("mood_expression", limit=4))
+                + list(self.lexicon.terms(f"mood_expression:{label}", limit=4))
             )
             if lexicon_fallback:
                 _log.debug(
@@ -493,6 +528,8 @@ class PartnerResponder:
             + ([lexicon_note] if lexicon_note else []),
             gate_note=gate_block(gate_mode, platform=chat_platform) if restricted else "",
             relationship_override=relationship_block_for(gate_mode) if restricted else "",
+            dynamic_catchphrases=dyn_catchphrases,
+            dynamic_pet_names=dyn_pet_names,
         )
 
         # The character gate is on unless the persona is openly an AI. An
@@ -558,6 +595,45 @@ class PartnerResponder:
                 Message.user(self._REWRITE_NUDGE),
             ]
 
+        # Anti-echo final guard: the retry loop forces a rephrase per failed
+        # check, but the last attempt can still come back echoing the user.
+        # Try an in-place repair (strip the user's own phrasing out of the
+        # draft); when nothing repairable survives, serve an in-character
+        # fallback line instead of shipping an echo. Never silent:
+        # ``echo_action`` on the bundle records what happened.
+        echo_action = ""
+        if last_draft:
+            final_verdict = parrot_check(user_text, last_draft)
+            if not final_verdict.ok:
+                _log.info("anti-echo: final draft still echoes (%s) — repairing",
+                          final_verdict.reason)
+                repaired = repair_echo(user_text, last_draft)
+                if repaired and parrot_check(user_text, repaired).ok:
+                    last_draft = repaired
+                    echo_action = "repaired"
+                    _log.info("anti-echo: repaired draft passes parrot check")
+                else:
+                    echo_action = "dropped"
+                    _log.warning("anti-echo: echo unrepairable — serving fallback line")
+
+        if echo_action == "dropped":
+            parts, fb_dynamic = self._fallback_parts(label)
+            degraded, degraded_note = self._degradation(last_response)
+            return ReplyBundle(
+                parts=parts,
+                mood_events=[],
+                model="fallback",
+                retries=used_retries,
+                fallback=True,
+                gated=gated,
+                latency_ms=(_time.perf_counter() - started) * 1000,
+                lexicon_dynamic=lexicon_terms_used > 0 or fb_dynamic > 0,
+                lexicon_terms_used=lexicon_terms_used + fb_dynamic,
+                echo_action="dropped",
+                degraded=degraded,
+                degraded_note=degraded_note,
+            )
+
         if last_response is None or not last_response.ok or not last_draft:
             parts, fb_dynamic = self._fallback_parts(label)
             degraded, degraded_note = self._degradation(last_response)
@@ -618,6 +694,9 @@ class PartnerResponder:
         if degraded:
             _log.warning("reply served degraded: %s",
                          degraded_note or "(provider failover)")
+        # Second half of the dynamic-voice measurement: which of the
+        # blended lexicon terms visibly surfaced in the shipped reply.
+        surfaced = lexicon_hits(draft, voice_terms) if voice_terms else 0
         return ReplyBundle(
             parts=parts,
             mood_events=[],
@@ -628,6 +707,8 @@ class PartnerResponder:
             latency_ms=(_time.perf_counter() - started) * 1000,
             lexicon_dynamic=lexicon_terms_used > 0,
             lexicon_terms_used=lexicon_terms_used,
+            lexicon_terms_surfaced=surfaced,
+            echo_action=echo_action,
             degraded=degraded,
             degraded_note=degraded_note,
         )

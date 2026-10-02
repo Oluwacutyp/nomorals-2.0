@@ -32,7 +32,7 @@ one-time starter seed. Retired terms are never re-acquired by the seed.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Sequence
 
 from ..agents.research_lexicon import LexiconStore, dynamic_terms
 from ..core.logging_setup import get_logger
@@ -212,20 +212,33 @@ class LexiconFeed:
         """
         return self.status()
 
-    def voice_note(self, persona: Any, label: str) -> tuple[str, int, list[str]]:
+    def voice_note(
+        self,
+        persona: Any,
+        label: str,
+        *,
+        exclude: Sequence[str] = (),
+    ) -> tuple[str, int, list[str]]:
         """Build the dynamic voice note for the system prompt.
 
         Blends the lexicon's terms with the persona's own configured
         banks (owner-set values are the base; dynamic terms only add).
         Returns ``(note, dynamic_terms_used, fallback_categories)`` —
         ``note`` is "" when nothing dynamic exists for any category.
+
+        ``exclude`` skips categories (e.g. ``("catchphrase", "pet_name")``
+        when the caller already blended those into the persona's own
+        speech block) so no term is listed twice in the prompt.
         """
+        excluded = {str(c).strip().lower() for c in (exclude or ())}
         lines: list[str] = []
         used = 0
         fallback: list[str] = []
 
         def _dyn(category: str, limit: int) -> list[str]:
             nonlocal used
+            if category in excluded:
+                return []
             terms = list(self.terms(category, limit=limit))
             if terms:
                 used += len(terms)

@@ -45,7 +45,7 @@ from ..partner.background import BackgroundSelector
 from ..partner.lexicon_feed import LexiconFeed, seed_partner_lexicon
 from ..partner.mood import MoodEngine
 from ..partner.persona import Persona, default_persona
-from ..partner.gating import MODE_OWNER, classify_chat, is_restricted
+from ..partner.gating import gate_decision, is_owner_chat, is_restricted
 from ..partner.presence import Presence, decide_presence, human_typing_seconds
 from ..partner.relationship import Relationship
 from ..partner.responder import PartnerResponder, detect_signals
@@ -133,7 +133,14 @@ class PartnerBrain:
     # ── chat classification ──────────────────────────────────────────────────
     def _chat_flags(self, chat: ChatRef) -> dict[str, Any]:
         row = self.context.db.query_one("SELECT * FROM chats WHERE id = ?", (chat.key,)) or {}
-        is_owner = bool(row.get("is_owner")) or chat.key.endswith(":console")
+        # Single owner test (nomorals/partner/gating.py) — the gateway's
+        # inbound path uses the same function, so rate-limit exemption and
+        # reply gating can never disagree about who the owner is.
+        is_owner = is_owner_chat(
+            chat,
+            owner_chats=_key_set(self.settings.partner.owner_chats),
+            db_is_owner=bool(row.get("is_owner")),
+        )
         in_us = bool(row.get("in_us"))
         last_active = float(row.get("last_active") or 0.0)
         return {
@@ -403,11 +410,10 @@ class PartnerBrain:
         # context (shared memories, cross-platform continuity, romantic
         # background) kept OUT of the prompt, not merely covered by a
         # "don't tell them" instruction.
-        raw_mode = classify_chat(chat, is_owner=is_owner)
-        gate_mode = (
-            MODE_OWNER
-            if not self.settings.partner.gate_restricted_chats
-            else raw_mode
+        gate_mode = gate_decision(
+            chat,
+            is_owner=is_owner,
+            restricted_enabled=self.settings.partner.gate_restricted_chats,
         )
         restricted = is_restricted(gate_mode)
 
@@ -1537,8 +1543,9 @@ class PartnerRuntime:
 
     # ── control commands (live steering) ─────────────────────────────────────
     def _is_operator(self, message: ChatMessage) -> bool:
-        key = message.chat.key
-        return key.endswith(":console") or key in self._owner_chats
+        # Same single owner test as reply gating — a control command from a
+        # chat the gating layer doesn't call owner must not run.
+        return is_owner_chat(message.chat, owner_chats=self._owner_chats)
 
     def _build_adapter(self, name: str) -> Any:
         """Factory for hot starts. Returns the adapter, None for an unknown
@@ -1862,6 +1869,8 @@ class PartnerRuntime:
             return self._control_notify(arg)
         if kind == "proactive":
             return self._control_proactive(arg)
+        if kind == "mission":
+            return self._control_mission(command.tail or arg)
         if kind == "image":
             return self._control_image(command.tail or arg)
         if kind == "lens":
@@ -6162,6 +6171,105 @@ class PartnerRuntime:
                              f"{marks.get(state, '?')} {state} — "
                              f"{r.get('title', '')[:60]}")
         return "\n".join(lines)
+
+    # ── missions: chat-visible progress ──────────────────────────────────────
+    def _control_mission(self, tail: str) -> str:
+        """Mission progress, ETA and stall reasons, from persisted state.
+
+        /mission status [id|name] — % complete, current step, ETA, stall reason
+        /mission list             — active missions at a glance
+        /mission stall <id> <code> <message> — record a concrete blocker
+        /mission clear <id>       — drop the stall record (progress resumed)
+        """
+        from ..core.errors import NoMoralsError
+        from ..missions import MissionRunner, MissionStore, StallCode, render_status_text
+
+        store = MissionStore(self.context.db)
+        usage = ("usage: /mission status [id|name] | /mission list | "
+                 "/mission stall <id> <code> <message> | /mission clear <id>\n"
+                 f"stall codes: {', '.join(sorted(StallCode.ALL))}")
+        parts = (tail or "").strip().split(None, 1)
+        verb = (parts[0] if parts else "status").lower()
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if verb == "list":
+            rows = store.resumable()
+            if not rows:
+                return "no active missions."
+            lines = [f"missions ({len(rows)} active):"]
+            for m in rows[:15]:
+                p = store.progress(m.id)
+                stall = m.state.get("stall")
+                line = (f"  · {m.name} [{m.status}] — "
+                        f"{p['steps_done']}/{p['total_steps']} steps "
+                        f"({p['percent']:.0f}%)")
+                if stall:
+                    line += f" — ⚠️ stalled: {stall.get('code')}"
+                lines.append(line)
+            return "\n".join(lines)
+
+        if verb == "status":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
+            return render_status_text(store.detail(mission.id))
+
+        if verb == "stall":
+            sub = rest.split(None, 2)
+            if len(sub) < 3:
+                return ("usage: /mission stall <id|name> <code> <message>\n"
+                        f"codes: {', '.join(sorted(StallCode.ALL))}")
+            ref, code, message = sub
+            mission = self._find_mission(store, ref)
+            if mission is None:
+                return f"no mission matching {ref!r}."
+            if code not in StallCode.ALL:
+                return (f"unknown stall code {code!r} — one of: "
+                        f"{', '.join(sorted(StallCode.ALL))}")
+            try:
+                out = MissionRunner(self.context, store=store).mark_stalled(
+                    mission.id, code, message)
+            except (NoMoralsError, ValueError) as exc:
+                return f"couldn't mark stall: {exc}"
+            stall = out["stall"] or {}
+            return (f"⚠️ {mission.name} marked stalled: "
+                    f"{stall.get('code')} — {stall.get('message')}")
+
+        if verb == "clear":
+            mission = self._find_mission(store, rest)
+            if mission is None:
+                return f"no mission matching {rest!r}."
+            cleared = MissionRunner(self.context, store=store).clear_stalled(mission.id)
+            return (f"{mission.name}: stall cleared — back in play."
+                    if cleared else f"{mission.name}: no stall recorded.")
+
+        return usage
+
+    @staticmethod
+    def _find_mission(store: Any, ref: str) -> Any | None:
+        """Resolve an id, id prefix, or name/goal substring to a mission."""
+        from ..core.errors import NotFound
+
+        filt = (ref or "").strip().lower()
+        if not filt:
+            active = store.resumable()
+            if active:
+                return active[0]
+            rows = store.list(limit=1)
+            return rows[0] if rows else None
+        try:
+            return store.get(ref.strip())
+        except NotFound:
+            _log.debug("mission lookup: no exact id match for %r, trying prefix/name", ref)
+        rows = store.list(limit=100)
+        for m in rows:
+            if m.id.lower().startswith(filt):
+                return m
+        for m in rows:
+            if filt in m.name.lower() or filt in m.goal.lower():
+                return m
+        return None
 
     # ── image tools ──────────────────────────────────────────────────────────
     @staticmethod

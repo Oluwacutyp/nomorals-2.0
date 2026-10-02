@@ -46,8 +46,18 @@ class PartnerContextBuilder:
 
     # ── block renderers ──────────────────────────────────────────────────────
     @staticmethod
-    def _persona_block(persona: Persona, *, with_relationship: bool = True) -> str:
-        return persona.to_prompt(with_relationship=with_relationship)
+    def _persona_block(
+        persona: Persona,
+        *,
+        with_relationship: bool = True,
+        dynamic_catchphrases: Sequence[str] = (),
+        dynamic_pet_names: Sequence[str] = (),
+    ) -> str:
+        return persona.to_prompt(
+            with_relationship=with_relationship,
+            dynamic_catchphrases=dynamic_catchphrases,
+            dynamic_pet_names=dynamic_pet_names,
+        )
 
     @staticmethod
     def _mood_block(engine: MoodEngine) -> str:
@@ -136,6 +146,11 @@ class PartnerContextBuilder:
         extra_notes: Sequence[str] = (),
         gate_note: str = "",
         relationship_override: str = "",
+        #: Dynamic lexicon banks blended into the persona's own catchphrase
+        #: / pet-name line (owner's static banks stay the base). Empty by
+        #: default — the static prompt renders byte-identical.
+        dynamic_catchphrases: Sequence[str] = (),
+        dynamic_pet_names: Sequence[str] = (),
     ) -> Message:
         platform_note = PLATFORM_NOTES.get(platform, "")
         if extra_notes:
@@ -147,7 +162,12 @@ class PartnerContextBuilder:
             # swapped out too — "the person you're talking to" is NOT the
             # partner there, and leaving the paragraph in would argue with
             # the gate block.
-            ("persona", self._persona_block(persona, with_relationship=not relationship_override)),
+            ("persona", self._persona_block(
+                persona,
+                with_relationship=not relationship_override,
+                dynamic_catchphrases=dynamic_catchphrases,
+                dynamic_pet_names=dynamic_pet_names,
+            )),
             ("mood", self._mood_block(mood)),
             # Restricted chats (non-owner DM / group) swap the private
             # relationship block for a neutral line — the owner's stage,

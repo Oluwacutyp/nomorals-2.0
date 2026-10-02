@@ -37,11 +37,33 @@ __all__ = [
     "SendResult",
     "ChatAdapter",
     "IncomingHandler",
+    "is_owner_chat",
 ]
 
 _log = get_logger(__name__)
 
 IncomingHandler = Callable[["ChatMessage"], None]
+
+
+def is_owner_chat(chat: Any, *, owner_chats: Any = (), db_is_owner: bool = False) -> bool:
+    """One owner test for every surface — the single source of truth.
+
+    Lives at L4 (``social.chat``) so both the chat gateway (inbound
+    rate-limit exemption) and the partner runtime (gating, romantic
+    context, command authorization) can use it without a layering
+    violation. ``nomorals/partner/gating.py`` re-exports it next to
+    :func:`classify_chat`.
+
+    ``owner_chats`` is the configured ``partner.owner_chats`` key set;
+    ``db_is_owner`` is the chat registry row's stored flag. The
+    local/web console (``*:console``) is always the owner's own terminal.
+    """
+    key = str(getattr(chat, "key", "") or "")
+    if key and key in set(owner_chats or ()):
+        return True
+    if db_is_owner:
+        return True
+    return key.endswith(":console")
 
 
 class ChatKind:

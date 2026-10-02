@@ -37,6 +37,7 @@ from .base import (
     IncomingHandler,
     MediaRef,
     SendResult,
+    is_owner_chat,
 )
 
 __all__ = ["ChatGateway"]
@@ -258,7 +259,13 @@ class ChatGateway:
         self.touch(message.chat)
         # Owner messages are NEVER rate-limited: the cap exists to protect
         # the bot from group floods, not to drop the owner's own commands.
-        is_owner = bool(row.get("is_owner")) or message.chat.key in self.owner_chats
+        # Same single owner test the partner runtime uses for gating, so
+        # the two can never disagree.
+        is_owner = is_owner_chat(
+            message.chat,
+            owner_chats=self.owner_chats,
+            db_is_owner=bool(row.get("is_owner")),
+        )
         if not is_owner:
             with self._locks_guard:
                 window = self._windows.get(message.chat.key)

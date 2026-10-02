@@ -14,11 +14,32 @@ decides per-conversation what to surface (see ``background.py``).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..core.errors import ValidationError
 
 __all__ = ["DEFAULT_BASLINES", "SpeechProfile", "Persona", "default_persona", "persona_from_dict"]
+
+
+def _blend_bank(
+    static: Sequence[str], dynamic: Sequence[str], *, limit: int
+) -> tuple[str, ...]:
+    """Owner's static bank first, dynamic lexicon terms appended, deduped.
+
+    Case-insensitive dedupe so a term the owner already configured isn't
+    listed twice. Pure function — safe to call from prompt rendering.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for term in list(static) + list(dynamic):
+        key = (term or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append((term or "").strip())
+        if len(out) >= limit:
+            break
+    return tuple(out)
 
 #: Default mood baselines — where every dimension starts and decays back to.
 #: Ranges are 0..100. She is a person who generally has it together, which is
@@ -63,8 +84,27 @@ class SpeechProfile:
     #: She types like she talks: sentence case off, occasional lowercase run-on.
     lowercase_bias: float = 0.5
 
-    def to_prompt(self) -> str:
-        catch = ", ".join(f"{c!r}" for c in self.catchphrases)
+    def to_prompt(
+        self,
+        *,
+        dynamic_catchphrases: Sequence[str] = (),
+        dynamic_pet_names: Sequence[str] = (),
+    ) -> str:
+        """Render the texting-style block.
+
+        ``dynamic_catchphrases`` / ``dynamic_pet_names`` are lexicon terms
+        blended into the owner's own banks (static first — the owner's
+        configured values are the base, dynamic terms only add). Empty by
+        default, which renders byte-identical to the static prompt; the
+        lexicon kill-switch therefore keeps the prompt untouched.
+        """
+        blended_catch = _blend_bank(self.catchphrases, dynamic_catchphrases, limit=8)
+        catch = ", ".join(f"{c!r}" for c in blended_catch)
+        pet_line = ""
+        if dynamic_pet_names:
+            blended_pets = _blend_bank(self.pet_names, dynamic_pet_names, limit=6)
+            pets = ", ".join(f"{p!r}" for p in blended_pets)
+            pet_line = f"- What you call them, when a pet name fits: {pets}.\n"
         return (
             "How you text:\n"
             "- You write like a real person texts, not like support: short lines, no "
@@ -75,6 +115,7 @@ class SpeechProfile:
             "- No paragraphs unless something is actually going on. Two or three short "
             "messages beats one block of text.\n"
             f"- The only catchphrases you ever use, and rarely: {catch}.\n"
+            + pet_line +
             "- You don't repeat what they just said to you. You react to it.\n"
             "- Occasional typos are allowed. Perfect punctuation every time is not.\n"
         )
@@ -133,7 +174,13 @@ class Persona:
         return [f"- {name}: {descriptions.get(name, name)}" for name, _ in sorted(self.traits.items())]
 
     # ── prompt rendering ─────────────────────────────────────────────────────
-    def to_prompt(self, with_relationship: bool = True) -> str:
+    def to_prompt(
+        self,
+        with_relationship: bool = True,
+        *,
+        dynamic_catchphrases: Sequence[str] = (),
+        dynamic_pet_names: Sequence[str] = (),
+    ) -> str:
         interests = ", ".join(self.interests) if self.interests else "an open list"
         boundaries = "\n".join(f"  - {b}" for b in self.boundaries) or "  - (none configured)"
         disclosure = {
@@ -199,7 +246,10 @@ class Persona:
             "\n"
             + relationship_block +
             "\n"
-            + self.speech.to_prompt()
+            + self.speech.to_prompt(
+                dynamic_catchphrases=dynamic_catchphrases,
+                dynamic_pet_names=dynamic_pet_names,
+            )
             + f"Boundaries you do not cross:\n{boundaries}\n\n"
             f"{disclosure}\n"
         )

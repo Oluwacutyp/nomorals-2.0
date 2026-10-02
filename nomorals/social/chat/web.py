@@ -37,6 +37,11 @@ class WebAdapter(ChatAdapter):
         self._parts: dict[str, list[str]] = {}
         self._lock = threading.Lock()
         self._last_send: dict[str, float] = {}
+        #: Typing indicator state per chat key: unix timestamp until which
+        #: "she is typing…" should render. The browser poll loop reads it
+        #: via :meth:`typing_active`; ``typing()`` sets it for the full
+        #: requested (length-scaled) window.
+        self._typing_until: dict[str, float] = {}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -73,9 +78,26 @@ class WebAdapter(ChatAdapter):
             return None if ts is None else time.time() - ts
 
     def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
-        # The browser drives its own typing indicator from the poll loop;
-        # the server-side sleep inside _send_reply already paces the parts.
-        return False
+        # The web console has no push channel for a typing event — the
+        # browser renders "typing…" from the poll loop, which reads
+        # typing_active(key). Record the full length-scaled window so the
+        # indicator, when the frontend consumes it, lasts as long as the
+        # message takes to type.
+        if seconds <= 0:
+            return False
+        with self._lock:
+            self._typing_until[chat.key] = time.time() + float(seconds)
+        return True
+
+    def typing_active(self, key: str) -> bool:
+        """True while a typing indicator should render for this chat.
+
+        Consumed by the web console's poll loop. False when no typing
+        window is open or it has expired.
+        """
+        with self._lock:
+            until = self._typing_until.get(key, 0.0)
+        return time.time() < until
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
         text = f"[media: {media.path}]" + (f" — {caption}" if caption else "")

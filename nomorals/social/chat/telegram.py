@@ -1023,11 +1023,22 @@ class TelegramBotAdapter(ChatAdapter):
                               seconds=time.perf_counter() - started)
 
     def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
-        try:
-            self._api("sendChatAction", chat_id=int(chat.chat_id), action="typing")
-            return True
-        except Exception:  # noqa: BLE001 - best-effort
+        # The Bot API clears a typing indicator after ~5s server-side, so a
+        # requested duration longer than that is held by re-firing
+        # sendChatAction — the indicator stays up for the whole requested
+        # window, proportional to the outgoing message length.
+        if seconds <= 0:
             return False
+        deadline = time.time() + float(seconds)
+        sent = False
+        try:
+            while time.time() < deadline:
+                self._api("sendChatAction", chat_id=int(chat.chat_id), action="typing")
+                sent = True
+                time.sleep(min(4.0, max(0.1, deadline - time.time())))
+            return sent
+        except Exception:  # noqa: BLE001 - best-effort
+            return sent
 
     def health(self) -> dict[str, Any]:
         info = super().health()

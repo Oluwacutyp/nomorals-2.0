@@ -21,13 +21,15 @@ and control commands were already operator-gated at the runtime.
 
 from __future__ import annotations
 
-from ..social.chat.base import ChatKind
+from ..social.chat.base import ChatKind, is_owner_chat
 
 __all__ = [
     "MODE_OWNER",
     "MODE_PRIVATE",
     "MODE_GROUP",
     "classify_chat",
+    "is_owner_chat",  # re-exported from nomorals.social.chat.base (L4)
+    "gate_decision",
     "is_restricted",
     "gate_block",
     "relationship_block_for",
@@ -50,6 +52,19 @@ def classify_chat(chat, *, is_owner: bool) -> str:
     if chat.kind == ChatKind.DM:
         return MODE_PRIVATE
     return MODE_GROUP
+
+
+def gate_decision(chat, *, is_owner: bool, restricted_enabled: bool = True) -> str:
+    """One gating decision for every surface.
+
+    Wraps :func:`classify_chat` with the owner's kill-switch
+    (``settings.partner.gate_restricted_chats``): when restricted gating
+    is disabled everything is treated as owner mode. Every reply path
+    must go through this — never inline the kill-switch check — so DM /
+    group / stranger handling stays uniform across platforms.
+    """
+    raw_mode = classify_chat(chat, is_owner=is_owner)
+    return raw_mode if restricted_enabled else MODE_OWNER
 
 
 def is_restricted(mode: str) -> bool:

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..core.text import approx_token_count
 
@@ -39,8 +39,10 @@ __all__ = [
     "humanize_emoji",
     "identity_leak_check",
     "length_budget",
+    "lexicon_hits",
     "normalize_formatting",
     "parrot_check",
+    "repair_echo",
     "should_answer_short",
     "split_messages",
     "strip_robotic",
@@ -166,6 +168,62 @@ def parrot_check(user_text: str, draft: str) -> GuardVerdict:
     if overlap > threshold:
         return GuardVerdict(False, f"token overlap {overlap:.2f} exceeds {threshold}", overlap)
     return GuardVerdict(True, similarity=overlap)
+
+
+def repair_echo(user_text: str, draft: str, *, min_words: int = 3) -> str:
+    """Remove the user's own phrasing from an echoing draft, in place.
+
+    The responder's rewrite loop already forces a rephrase once; this is
+    the last line of defence for a draft that *still* echoes after every
+    retry. Verbatim runs of 3+ user words are deleted longest-first
+    (case-insensitive, word-boundary matched), then leftover whitespace is
+    collapsed. Returns "" when fewer than ``min_words`` survive — the
+    caller must not ship the wreckage; it falls back to an in-character
+    line instead. Never raises.
+    """
+    if not user_text or not draft:
+        return draft
+    try:
+        user_words = _tokens(user_text)
+        phrases: set[tuple[str, ...]] = set()
+        # n-grams of length 3..6, longest first so "i love you so much"
+        # is removed before "i love you" can fragment it.
+        for n in range(min(6, len(user_words)), 2, -1):
+            for i in range(len(user_words) - n + 1):
+                phrases.add(tuple(user_words[i : i + n]))
+        text = draft
+        for ngram in sorted(phrases, key=len, reverse=True):
+            phrase = " ".join(ngram)
+            text = re.sub(r"(?i)\b" + re.escape(phrase) + r"\b", "", text)
+        text = re.sub(r"\s+", " ", text).strip(" ,;:—–-")
+        if len(text.split()) < max(1, int(min_words)):
+            return ""
+        return text
+    except Exception:  # noqa: BLE001 - a guard must never break a reply
+        return ""
+
+
+def lexicon_hits(text: str, terms: Sequence[str]) -> int:
+    """Count how many lexicon terms visibly surface in ``text``.
+
+    Word-boundary, case-insensitive substring match per term. This is the
+    honest half of the "dynamic voice" claim: the responder counts terms
+    *blended into the prompt* separately; this counts terms that actually
+    appear in the shipped reply. Never raises.
+    """
+    if not text or not terms:
+        return 0
+    try:
+        hits = 0
+        for term in terms:
+            term = (term or "").strip()
+            if not term:
+                continue
+            if re.search(r"(?i)\b" + re.escape(term) + r"\b", text):
+                hits += 1
+        return hits
+    except Exception:  # noqa: BLE001 - measurement must never break a reply
+        return 0
 
 
 def strip_robotic(
