@@ -1410,10 +1410,20 @@ def _parser() -> argparse.ArgumentParser:
     # Connector commands
     connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")
     connectors.add_argument("action", nargs="?", default="list",
-                           choices=["list", "status", "connect", "disconnect"],
+                           choices=["list", "status", "connect", "disconnect",
+                                    "provision", "checkpoint"],
                            help="Action to perform")
     connectors.add_argument("--name", help="Connector name")
     connectors.add_argument("--provider", help="Provider (mono, plaid, etc.)")
+    connectors.add_argument("--kind", help="Provision kind (with 'provision' action)")
+    connectors.add_argument("--params-json", default="{}",
+                            help="JSON params for the provision kind")
+    connectors.add_argument("--cop", default="list",
+                            choices=["list", "resolve", "cancel"],
+                            help="Checkpoint operation (with 'checkpoint' action)")
+    connectors.add_argument("--id", help="Checkpoint id (with resolve/cancel)")
+    connectors.add_argument("--note", default="",
+                            help="Note recorded on resolve/cancel")
 
     # Finance commands
     finance = sub.add_parser("finance", aliases=CLI_ALIASES["finance"],

@@ -282,111 +282,182 @@ def _cmd_zip(args: argparse.Namespace, context: Any) -> int:
     return 0
 
 
+def _connector_vault(context: Any):
+    """The encrypted vault, unlocked via NM_VAULT_PASSPHRASE. Fail fast."""
+    import os
+
+    from ...accounts.vault import CredentialVault
+
+    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+    if not passphrase:
+        raise _ConnectorCliError(
+            "vault is locked: set the NM_VAULT_PASSPHRASE environment variable "
+            "to manage connector credentials"
+        )
+    return CredentialVault(context.db, master_passphrase=passphrase)
+
+
+class _ConnectorCliError(Exception):
+    """User-facing CLI error for the connectors command."""
+
+
 def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
-    """Manage external service connectors."""
-    from ...connectors.vault import CredentialVault
-    
-    action = getattr(args, "action", "list")
-    name = getattr(args, "name", "")
-    
+    """Manage external service connectors (connect, status, disconnect)."""
+    from ...connectors import create_connector, list_connectors
+    from ...connectors.base import ConnectorError
+
+    action = getattr(args, "action", "list") or "list"
+    name = getattr(args, "name", "") or ""
+
     if action == "list":
-        connectors = [
-            {"name": "mono", "description": "Nigerian banks via Mono"},
-            {"name": "plaid", "description": "US/EU banks via Plaid"},
-            {"name": "privacy_cards", "description": "Virtual cards via Privacy.com"},
-            {"name": "proxy_pool", "description": "Multi-source proxy pool"},
-            {"name": "naija_commerce", "description": "Nigerian marketplaces (Jumia, Konga, Jiji)"},
-        ]
-        _emit(args, {"connectors": connectors, "count": len(connectors)},
-              "\n".join(f"  {c['name']:20s} {c['description']}" for c in connectors))
-    
-    elif action == "status":
-        if not name:
-            _emit(args, {"error": "name required"}, "Usage: nm connectors status --name <connector>")
-            return 1
-        
-        vault = CredentialVault()
-        if name == "mono":
-            from ...connectors.finance import MonoConnector
-            connector = MonoConnector(vault=vault)
-        elif name == "plaid":
-            from ...connectors.finance import PlaidConnector
-            connector = PlaidConnector(vault=vault)
-        elif name == "privacy_cards":
-            from ...connectors.cards import PrivacyCardsConnector
-            connector = PrivacyCardsConnector(vault=vault)
-        elif name == "proxy_pool":
-            from ...connectors.proxies import ProxyPoolConnector
-            connector = ProxyPoolConnector(vault=vault)
-        elif name == "naija_commerce":
-            from ...connectors.commerce_ng import NaijaCommerceConnector
-            connector = NaijaCommerceConnector(vault=vault)
-        else:
-            _emit(args, {"error": f"unknown connector: {name}"}, f"Unknown connector: {name}")
-            return 1
-        
-        status = connector.status()
-        _emit(args, status.to_dict(), f"Status: {'connected' if status.connected else 'disconnected'}")
-    
-    elif action == "connect":
-        if not name:
-            _emit(args, {"error": "name required"}, "Usage: nm connectors connect --name <connector>")
-            return 1
-        
-        vault = CredentialVault()
-        if name == "mono":
-            from ...connectors.finance import MonoConnector
-            connector = MonoConnector(vault=vault)
-        elif name == "plaid":
-            from ...connectors.finance import PlaidConnector
-            connector = PlaidConnector(vault=vault)
-        elif name == "privacy_cards":
-            from ...connectors.cards import PrivacyCardsConnector
-            connector = PrivacyCardsConnector(vault=vault)
-        else:
-            _emit(args, {"error": f"connect not supported for: {name}"}, f"Connect not supported for: {name}")
-            return 1
-        
-        url = connector.connect_url()
-        if url:
-            _emit(args, {"connect_url": url}, f"Open this URL to connect:\n{url}")
-        else:
-            _emit(args, {"error": "no connect URL available"}, "No connect URL available")
-            return 1
-    
-    elif action == "disconnect":
-        if not name:
-            _emit(args, {"error": "name required"}, "Usage: nm connectors disconnect --name <connector>")
-            return 1
-        
-        vault = CredentialVault()
-        if name == "mono":
-            from ...connectors.finance import MonoConnector
-            connector = MonoConnector(vault=vault)
-        elif name == "plaid":
-            from ...connectors.finance import PlaidConnector
-            connector = PlaidConnector(vault=vault)
-        elif name == "privacy_cards":
-            from ...connectors.cards import PrivacyCardsConnector
-            connector = PrivacyCardsConnector(vault=vault)
-        elif name == "proxy_pool":
-            from ...connectors.proxies import ProxyPoolConnector
-            connector = ProxyPoolConnector(vault=vault)
-        elif name == "naija_commerce":
-            from ...connectors.commerce_ng import NaijaCommerceConnector
-            connector = NaijaCommerceConnector(vault=vault)
-        else:
-            _emit(args, {"error": f"unknown connector: {name}"}, f"Unknown connector: {name}")
-            return 1
-        
-        result = connector.disconnect()
-        _emit(args, result, f"Disconnected: {result.get('disconnected', False)}")
-    
-    else:
-        _emit(args, {"error": f"unknown action: {action}"}, f"Unknown action: {action}")
+        infos = list_connectors()
+        _emit(
+            args,
+            {"connectors": infos, "count": len(infos)},
+            "\n".join(
+                f"  {c['id']:20s} {c['description']}" for c in infos
+            )
+            or "no connectors registered",
+        )
+        return 0
+
+    if action not in ("status", "connect", "disconnect", "provision",
+                      "checkpoint"):
+        _emit(args, {"error": f"unknown action: {action}"},
+              f"Unknown action: {action} (list, status, connect, disconnect, provision, checkpoint)")
         return 1
-    
+    if not name and action != "checkpoint":
+        _emit(args, {"error": "name required"},
+              f"Usage: nm connectors {action} --name <connector>")
+        return 1
+
+    if action == "checkpoint":
+        return _cmd_connector_checkpoint(args, context)
+
+    try:
+        vault = _connector_vault(context)
+    except _ConnectorCliError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+    try:
+        connector = create_connector(name, vault)
+    except ConnectorError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+
+    try:
+        if action == "status":
+            st = connector.status()
+            _emit(
+                args,
+                st.to_dict(),
+                f"{connector.name}: "
+                f"{'connected' + (f' as {st.account}' if st.account else '') if st.connected else 'not connected'}"
+                + (f" — {st.detail}" if st.detail else ""),
+            )
+        elif action == "connect":
+            result = connector.connect()
+            _emit(args, result.to_dict(), result.message or
+                  (f"connected as {result.account}" if result.ok else "connect failed"))
+            return 0 if result.ok else 1
+        elif action == "disconnect":
+            connector.disconnect()
+            _emit(args, {"disconnected": True, "name": name},
+                  f"{connector.name}: disconnected")
+        elif action == "provision":
+            kind = getattr(args, "kind", "") or ""
+            if not kind:
+                _emit(args, {"error": "kind required"},
+                      "Usage: nm connectors provision --name <connector> --kind <kind> [--params-json '{...}']")
+                return 1
+            if not connector.can_provision(kind):
+                _emit(args, {"error": f"{name} cannot provision {kind!r}"},
+                      f"{connector.name} cannot provision {kind!r}")
+                return 1
+            import json as _json
+
+            raw = getattr(args, "params_json", "") or "{}"
+            try:
+                params = _json.loads(raw)
+            except ValueError as exc:
+                _emit(args, {"error": f"bad --params-json: {exc}"},
+                      f"bad --params-json: {exc}")
+                return 1
+            # Provisioning acts on the owner's explicit command here.
+            # db/context ride along for flows with human checkpoints.
+            out = connector.provision(kind, db=context.db, context=context,
+                                      **params)
+            _emit(args, {"provisioned": kind, "result": out},
+                  f"provisioned {kind}: {out}")
+    except ConnectorError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
     return 0
+
+
+def _cmd_connector_checkpoint(args: argparse.Namespace, context: Any) -> int:
+    """List, resolve, or cancel human-in-the-loop checkpoints."""
+    from ...connectors import create_connector
+    from ...connectors.base import ConnectorError
+    from ...connectors.checkpoints import (
+        CheckpointStore,
+        HumanCheckpointPending,
+    )
+    from ...core.errors import NoMoralsError
+
+    op = getattr(args, "cop", "list") or "list"
+    store = CheckpointStore(context.db)
+
+    if op == "list":
+        name = getattr(args, "name", "") or ""
+        cps = store.list_pending(name or None)
+        _emit(
+            args,
+            {"checkpoints": [c.to_dict() for c in cps], "count": len(cps)},
+            "\n".join(f"  {c.id}  {c.connector_id}  {c.kind.value}  {c.title}"
+                       for c in cps) or "no pending checkpoints",
+        )
+        return 0
+
+    cid = getattr(args, "id", "") or ""
+    if not cid:
+        _emit(args, {"error": "id required"},
+              f"Usage: nm connectors checkpoint --cop {op} --id <checkpoint-id>")
+        return 1
+    note = getattr(args, "note", "") or ""
+    try:
+        if op == "cancel":
+            cp = store.cancel(cid, note)
+            _emit(args, {"cancelled": cp.id}, f"cancelled {cp.id}")
+            return 0
+        if op != "resolve":
+            _emit(args, {"error": f"unknown checkpoint op: {op}"},
+                  f"Unknown checkpoint op: {op} (list, resolve, cancel)")
+            return 1
+        cp = store.resolve(cid, note or "resolved by owner")
+        # The owner's resolve IS the attestation for human-only steps.
+        # Hand the flow back to the connector to continue.
+        vault = _connector_vault(context)
+        connector = create_connector(cp.connector_id, vault)
+        try:
+            result = connector.resume_checkpoint(cp, db=context.db,
+                                                context=context)
+        except HumanCheckpointPending as pending:
+            nxt = pending.checkpoint
+            _emit(args, {
+                "resolved": cid,
+                "resumed": False,
+                "next_checkpoint": nxt.to_dict(),
+            }, f"resolved {cid}; next human step: {nxt.title} "
+               f"(id {nxt.id})")
+            return 0
+        _emit(args, {"resolved": cid, "resumed": True, "result": result},
+              f"resolved {cid}; flow continued: {result}")
+    except (ConnectorError, NoMoralsError) as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+    return 0
+
 
 
 def _cli_subparsers() -> Any | None:
