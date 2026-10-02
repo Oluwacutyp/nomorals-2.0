@@ -233,7 +233,10 @@ def repair_echo(
                 for i in range(len(corpus_words) - n + 1):
                     phrases.add(tuple(corpus_words[i : i + n]))
         text = draft
-        for ngram in sorted(phrases, key=len, reverse=True):
+        # Sort longest-first AND alphabetically within a length: set iteration
+        # order is hash-seed dependent, and removal order within one length
+        # changes which fragments survive. A guard must be deterministic.
+        for ngram in sorted(phrases, key=lambda ng: (-len(ng), ng)):
             phrase = " ".join(ngram)
             text = re.sub(r"(?i)\b" + re.escape(phrase) + r"\b", "", text)
         text = re.sub(r"\s+", " ", text).strip(" ,;:—–-")
