@@ -390,15 +390,25 @@ def transcode(src: str | os.PathLike[str], *,
     if vf:
         args += ["-vf", ",".join(vf)]
     args += ["-c:v", video_codec]
+    effective_crf: int | None = None
     if video_codec in ("libx264", "libx265"):
+        effective_crf = crf
         args += ["-preset", preset, "-crf", str(crf)]
     elif video_codec in ("libvpx-vp9", "libvpx"):
-        args += ["-b:v", "0", "-crf", str(min(63, crf + 7)), "-cpu-used", "4"]
+        # VP9's CRF scale differs from x264's — remap honestly and report it.
+        effective_crf = min(63, crf + 7)
+        args += ["-b:v", "0", "-crf", str(effective_crf), "-cpu-used", "4"]
     args += ["-c:a", audio_codec, str(out)]
     run = run_ffmpeg(args, timeout=timeout, progress_cb=progress_cb,
                      duration=info.get("duration"))
-    return {"input": str(p), "output": str(out), "bytes": out.stat().st_size,
-            "seconds": run["seconds"], "width": width, "height": height}
+    result: dict[str, Any] = {
+        "input": str(p), "output": str(out), "bytes": out.stat().st_size,
+        "seconds": run["seconds"], "width": width, "height": height,
+        "video_codec": video_codec, "audio_codec": audio_codec,
+    }
+    if effective_crf is not None:
+        result["crf"] = effective_crf
+    return result
 
 
 def extract_frames(src: str | os.PathLike[str], *,
@@ -494,8 +504,10 @@ def make_gif(src: str | os.PathLike[str], *,
     run = run_ffmpeg(["-ss", str(s), "-t", str(d), "-i", str(p),
                       "-vf", vf, str(out)],
                      timeout=timeout, duration=d)
+    # fps/width are the CLAMPED values actually used (20 max, 64..800),
+    # so the result never pretends a 60fps 4k gif was produced.
     return {"input": str(p), "output": str(out), "bytes": out.stat().st_size,
-            "seconds": run["seconds"]}
+            "seconds": run["seconds"], "fps": fps, "width": width}
 
 
 def burn_subtitles(src: str | os.PathLike[str],

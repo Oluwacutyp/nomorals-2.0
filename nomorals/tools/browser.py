@@ -261,8 +261,16 @@ class BrowserSession:
 
     # -- low-level fetch ------------------------------------------------------
     def _fetch(self, url: str, *, method: str = "GET",
-               form: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None
+               form: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None,
+               retry: bool = True,
                ) -> dict[str, Any]:
+        """Fetch one URL.
+
+        ``retry`` gates the transient-failure retry loop (timeouts, resets,
+        5xx with backoff). It must be False for non-idempotent requests —
+        retrying a POST that the server already processed would duplicate
+        the submission. GETs retry; form POSTs never do.
+        """
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ToolError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
@@ -281,10 +289,12 @@ class BrowserSession:
         if extra_headers:
             headers.update(extra_headers)
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        # wave 86: transient failures (timeout, reset, 5xx) are retried with
-        # backoff — a flaky first fetch should not cost the whole task.
+        # wave D: transient failures (timeout, reset, 5xx) are retried with
+        # backoff — but only for idempotent requests. A flaky GET gets a
+        # second chance; a POST is attempted exactly once.
+        attempts = self.retries + 1 if retry else 1
         last_exc: Exception | None = None
-        for attempt in range(self.retries + 1):
+        for attempt in range(attempts):
             try:
                 with self._opener.open(request, timeout=self.timeout) as response:
                     body = response.read(_MAX_BODY)
@@ -297,12 +307,15 @@ class BrowserSession:
                 final_url = url
                 status = exc.code
                 content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
-                if status < 500 or attempt >= self.retries:
+                if status < 500 or attempt >= attempts - 1:
                     break
                 last_exc = exc  # 5xx: retry — the server is having a moment
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                if attempt >= self.retries:
-                    raise ToolError(f"request failed: {classify(exc).message}") from exc
+                if attempt >= attempts - 1:
+                    raise ToolError(
+                        f"{method} {url} failed: {classify(exc).message}"
+                        + ("" if attempts == 1 else f" (after {attempts} attempts)")
+                    ) from exc
                 last_exc = exc
             time.sleep(0.5 * (2 ** attempt))
         else:  # pragma: no cover - the loop always breaks or raises
@@ -471,7 +484,13 @@ class BrowserSession:
         url = urllib.parse.urljoin(self.url, action)
         if method == "GET" and values:
             url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(values)
-        result = self._fetch(url, method=method, form=values if method == "POST" else None)
+        # wave D: a POST submit is attempted exactly once — the server may
+        # have processed it even when the response is lost, so retrying
+        # would risk a duplicate submission. GET submits are idempotent
+        # and keep the transient-failure retry.
+        result = self._fetch(url, method=method,
+                             form=values if method == "POST" else None,
+                             retry=(method == "GET"))
         self.url = result["url"]
         self._raw = result["text"]
         if self.url not in self._history[-20:]:
@@ -739,6 +758,13 @@ class BrowserSession:
         "open", "goto", "wait", "click", "fill", "submit", "extract",
         "text", "markdown", "links", "back", "stop",
     }
+    #: wave D: only IDEMPOTENT task steps auto-retry on failure.
+    #: fill/submit/click can mutate server state, so they run exactly once;
+    #: a failure there surfaces immediately instead of risking a duplicate
+    #: submission or a double click-through.
+    _TASK_IDEMPOTENT = frozenset({
+        "open", "text", "markdown", "links", "extract", "back", "wait",
+    })
 
     def task(self, steps: Any = None, stop_on_error: bool = True,
              max_steps: int = 0, **_: Any) -> dict[str, Any]:
@@ -759,10 +785,13 @@ class BrowserSession:
            {"act": "stop",    "note": "done"}]
 
         Supported acts: open/goto | wait | click | fill | submit |
-        extract | text | markdown | links | back | stop. Each step is
-        retried once on failure; a second failure halts the task (or
-        continues, with ``stop_on_error=False``) and the report says
-        exactly where. Capped at ``max_steps`` (or the session's
+        extract | text | markdown | links | back | stop. Each IDEMPOTENT
+        step (open/text/markdown/links/extract/back/wait) is retried once
+        on failure; fill/submit/click NEVER auto-retry (they can mutate
+        server state — a duplicate submit is worse than a failed one). A
+        second failure halts the task (or continues, with
+        ``stop_on_error=False``) and the report says exactly where and
+        after how many attempts. Capped at ``max_steps`` (or the session's
         profile-tuned cap) so a bad plan cannot loop the network.
         """
         if isinstance(steps, str):
@@ -793,21 +822,27 @@ class BrowserSession:
                 break
             data: Any = None
             error = ""
-            for attempt in (1, 2):  # one retry per step
+            attempts = 0
+            # wave D: idempotent steps get one retry; mutating steps
+            # (fill/submit/click) get exactly one attempt.
+            max_attempts = 2 if act in self._TASK_IDEMPOTENT else 1
+            for _attempt in range(max_attempts):
+                attempts += 1
                 try:
                     data = self._run_task_step(act, step)
                     error = ""
                     break
                 except ToolError as exc:
                     error = str(exc)
-                    if attempt == 2:
+                    if attempts >= max_attempts:
                         break
                 except Exception as exc:  # noqa: BLE001 - report, don't crash
                     error = f"{type(exc).__name__}: {exc}"
-                    if attempt == 2:
+                    if attempts >= max_attempts:
                         break
             ok = not error
-            entry = {"i": i, "act": act, "ok": ok}
+            entry: dict[str, Any] = {"i": i, "act": act, "ok": ok,
+                                     "attempts": attempts}
             if error:
                 entry["error"] = error[:300]
             else:
@@ -1077,8 +1112,9 @@ def register(registry: Any) -> None:
             "STRUCTURED views (headings/tables/forms/meta/nav), walk a "
             "trust-ranked multi-page research path, or run a multi-step task "
             "(a small program of open/fill/submit/extract/click/back steps); "
-            "cookies persist per session AND across restarts; flaky fetches "
-            "are retried with backoff"
+            "cookies persist per session AND across restarts; transient "
+            "failures on idempotent fetches are retried with backoff, "
+            "form submits and other mutating steps never auto-retry"
         ),
         capability=Capability.NET_BROWSER,
         parameters={

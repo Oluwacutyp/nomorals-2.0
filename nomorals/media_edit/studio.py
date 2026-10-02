@@ -699,7 +699,10 @@ def op_text_layer(img: Any, text: str, *,
         lx0, ly0 = max(0, -x), max(0, -y)
         lx1, ly1 = min(layer.width, out.width - x), min(layer.height, out.height - y)
         if lx1 <= lx0 or ly1 <= ly0:
-            return img  # fully off-canvas: no-op
+            # fully off-canvas: an honest no-op, not a silent one
+            _log.warning("text_layer %r is fully off-canvas; "
+                         "no text was drawn", text[:40])
+            return img
         layer = layer.crop((lx0, ly0, lx1, ly1))
         x, y = max(0, x), max(0, y)
     out.alpha_composite(layer, (x, y))
@@ -840,7 +843,7 @@ def composite_layers(base: Any, layers: list[dict[str, Any]]) -> Any:
      "radius": 0, "opacity": 0..1}
     """
     canvas = base.convert("RGBA")
-    for spec in layers:
+    for idx, spec in enumerate(layers):
         spec = dict(spec)
         ltype = spec.get("type", "image")
         blend = spec.get("blend", "normal")
@@ -869,7 +872,11 @@ def composite_layers(base: Any, layers: list[dict[str, Any]]) -> Any:
             lx1 = min(content.width, canvas.width - x)
             ly1 = min(content.height, canvas.height - y)
             if lx1 <= lx0 or ly1 <= ly0:
-                continue  # fully off-canvas
+                # fully off-canvas: warn so a "composite" that drew nothing
+                # can never be mistaken for a successful overlay
+                _log.warning("composite: layer %d (%s) is fully off-canvas; "
+                             "skipped", idx, ltype)
+                continue
             if lx0 or ly0 or lx1 != content.width or ly1 != content.height:
                 content = content.crop((lx0, ly0, lx1, ly1))
                 x, y = max(0, x), max(0, y)

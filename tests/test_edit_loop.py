@@ -728,6 +728,32 @@ class TestApplyPatchTool(unittest.TestCase):
         self.assertFalse(outcome)
         self.assertIn("did not touch", str(outcome.error))
 
+    def test_fallback_hunk_failure_names_hunk_and_why(self):
+        # wave D: a patch failure must say WHICH hunk and WHY, not "done".
+        write(self.tmp, "a.py", PY_SAMPLE)
+        diff = (
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " x = 1\n"
+            "-y = 2\n"
+            "+y = 20\n"
+            " z = 3\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line one\n"
+            "-WRONG\n"
+            "+right\n"
+            " line three\n"
+        )
+        with mock.patch("shutil.which", return_value=None):
+            outcome = self.reg.call("apply_patch", path="a.py", unified_diff=diff)
+        self.assertFalse(outcome)
+        msg = str(outcome.error)
+        self.assertIn("hunk 2", msg)  # which hunk
+        self.assertIn("a.py", msg)    # which file
+        # all-or-nothing: nothing was written
+        self.assertEqual((self.tmp / "a.py").read_text(), PY_SAMPLE)
+
     @unittest.skipIf(shutil.which("patch") is None, "`patch` binary not available")
     def test_fast_path_with_patch_binary(self):
         write(self.tmp, "a.py", PY_SAMPLE)
@@ -764,6 +790,62 @@ class TestApplyPatchTool(unittest.TestCase):
         result = outcome.unwrap()
         self.assertIn("+y = 22", result["diff"])
         self.assertEqual((self.tmp / "a.py").read_text(), "x = 1\ny = 22\nz = 3\n")
+
+
+class TestLLMPathHonesty(unittest.TestCase):
+    """Wave D: the LLM-driven edit path must fail honestly when the model
+    returns no code block — never write prose into the file, never claim
+    'no changes needed' for a response it couldn't parse."""
+
+    PROSE_ONLY = (
+        "Sure! The best approach here is to refactor the module. "
+        "You should consider renaming the variable and adding tests. "
+        "Let me know if you want the full diff."
+    )
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="editloop_llm_"))
+        write(self.tmp, "a.py", PY_SAMPLE)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _prose_agent(self):
+        return types.SimpleNamespace(
+            chat=lambda prompt: types.SimpleNamespace(content=self.PROSE_ONLY))
+
+    def _code_agent(self, code: str):
+        return types.SimpleNamespace(
+            chat=lambda prompt: types.SimpleNamespace(
+                content=f"Here you go:\n```python\n{code}\n```"))
+
+    def test_extract_code_returns_empty_without_fence(self):
+        loop = EditLoop(agent=None, project_root=str(self.tmp))
+        self.assertEqual(loop._extract_code(self.PROSE_ONLY), "")
+        self.assertEqual(
+            loop._extract_code("```python\nx = 1\n```"), "x = 1")
+
+    def test_edit_file_no_code_block_fails_honestly(self):
+        loop = EditLoop(agent=self._prose_agent(), project_root=str(self.tmp))
+        result = asyncio.run(loop.edit_file("a.py", "make it better"))
+        self.assertFalse(result.success)
+        self.assertIn("no fenced code block", result.error)
+        # the file is untouched — prose was NOT written into it
+        self.assertEqual((self.tmp / "a.py").read_text(), PY_SAMPLE)
+
+    def test_edit_file_code_block_still_applies(self):
+        loop = EditLoop(agent=self._code_agent("x = 10\ny = 2\nz = 3\n"),
+                        project_root=str(self.tmp))
+        result = asyncio.run(loop.edit_file("a.py", "bump x"))
+        self.assertTrue(result.success, result.error)
+        self.assertEqual((self.tmp / "a.py").read_text(),
+                         "x = 10\ny = 2\nz = 3")
+
+    def test_plan_edit_no_code_block_raises(self):
+        loop = EditLoop(agent=self._prose_agent(), project_root=str(self.tmp))
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(loop.plan_edit("a.py", "make it better"))
+        self.assertIn("no fenced code block", str(ctx.exception))
 
 
 if __name__ == "__main__":

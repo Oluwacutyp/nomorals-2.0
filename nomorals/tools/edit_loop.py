@@ -394,8 +394,20 @@ class EditLoop:
                 
                 # Extract code from response
                 modified = self._extract_code(response.content)
-                
-                if not modified or modified == current:
+
+                if not modified:
+                    # wave D: no fenced code block — say so, don't fake a
+                    # "no changes needed" success and don't write prose
+                    # into the file.
+                    return EditResult(
+                        success=False,
+                        file_path=file_path,
+                        iterations=iteration,
+                        error="model returned no fenced code block; edit not applied",
+                        backup_path=backup_path,
+                    )
+
+                if modified == current:
                     return EditResult(
                         success=True,
                         file_path=file_path,
@@ -519,8 +531,13 @@ class EditLoop:
         
         modified = self._extract_code(response.content)
         if not modified:
-            modified = original
-        
+            # wave D: a plan with no code block is a failure to report,
+            # not a no-op plan.
+            raise ValueError(
+                "model returned no fenced code block; cannot plan the edit")
+        if modified == original:
+            modified = original  # genuine no-op stays a no-op plan
+
         diff = self._generate_diff(original, modified, file_path)
         
         return EditPlan(
@@ -710,20 +727,25 @@ Return the COMPLETE modified file contents in a code block. Include ALL code, no
 """
     
     def _extract_code(self, response: str) -> str:
-        """Extract code block from LLM response."""
+        """Extract code block from LLM response.
+
+        Returns "" when the response contains no fenced code block — the
+        old fallback of "the whole response is code" wrote model prose
+        into the file and called it a success. Callers must treat "" as
+        an honest failure, never as a no-op edit.
+        """
         # Look for fenced code blocks
         patterns = [
             r"```(?:python|py|javascript|js|typescript|ts)?\n(.*?)```",
             r"```\n(.*?)```",
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, response, re.DOTALL)
             if match:
                 return match.group(1).strip()
-        
-        # No code block found - maybe the whole response is code
-        return response.strip()
+
+        return ""
     
     def surgical_replace(
         self,

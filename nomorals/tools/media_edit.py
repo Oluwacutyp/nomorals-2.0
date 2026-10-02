@@ -94,7 +94,8 @@ VIDEO_ACTIONS = {"trim", "concat", "transcode", "extract_frames",
 
 def _dispatch_video(action: dict[str, Any], src: Path,
                     progress_cb: Callable[[float], None] | None = None,
-                    out_dir: Path | None = None) -> dict[str, Any]:
+                    out_dir: Path | None = None,
+                    context: Any = None) -> dict[str, Any]:
     from ..media_edit import videos
     name = action.get("video_op")
     if name not in VIDEO_ACTIONS:
@@ -117,13 +118,16 @@ def _dispatch_video(action: dict[str, Any], src: Path,
         return videos.transcode(src, **kw)
     if name == "concat":
         sources = kw.pop("sources", None) or []
-        return videos.concat([src] + list(sources), **kw)
+        # wave D: every extra source goes through the sandbox too — an
+        # unsandboxed path here reached ffmpeg's concat demuxer raw.
+        others = [str(_sandbox(context, s)) for s in sources]
+        return videos.concat([src] + others, **kw)
     if name == "burn_subtitles":
         sub = kw.pop("subtitles", None)
         if not sub:
             from ..media_edit.images import MediaEditError
             raise MediaEditError("burn_subtitles needs a 'subtitles' file")
-        return videos.burn_subtitles(src, sub, **kw)
+        return videos.burn_subtitles(src, _sandbox(context, sub), **kw)
     raise AssertionError("unreachable")
 
 
@@ -197,7 +201,7 @@ def register(registry: Any) -> None:
         act = dict(plan.action)
 
         def _run(progress_cb: Callable[[float], None]) -> dict[str, Any]:
-            return _dispatch_video(act, src, progress_cb)
+            return _dispatch_video(act, src, progress_cb, context=context)
 
         job_id = manager.submit("video", plan.summary or "video edit",
                                 _run, input_ref=str(src))
@@ -263,7 +267,8 @@ def register(registry: Any) -> None:
 
             def _run(progress_cb: Callable[[float], None]) -> dict[str, Any]:
                 return _dispatch_video({"video_op": "transcode",
-                                        "ext": f".{fmt}"}, src, progress_cb)
+                                        "ext": f".{fmt}"}, src, progress_cb,
+                                       context=context)
 
             job_id = manager.submit("video", f"convert to {fmt}", _run,
                                     input_ref=str(src))
