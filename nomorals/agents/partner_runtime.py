@@ -3934,7 +3934,7 @@ class PartnerRuntime:
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.
 
-        The multi-player engine owns every game (36 and counting, every
+        The multi-player engine owns every game (39 and counting, every
         platform). Relay rooms (DM-to-DM multiplayer) are checked first.
         """
         try:

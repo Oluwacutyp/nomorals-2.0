@@ -138,8 +138,10 @@ class GameEngine:
         from .games.wild import WILD_GAMES
         from .games.arcade import ARCADE_GAMES
         from .games.casino import CASINO_GAMES
+        from .games.inbox import INBOX_GAMES
         for game in (*EASY_GAMES, *MEDIUM_GAMES, *AMBITIOUS_GAMES,
-                    *WILD_GAMES, *ARCADE_GAMES, *CASINO_GAMES):
+                     *WILD_GAMES, *ARCADE_GAMES, *CASINO_GAMES,
+                     *INBOX_GAMES):
             self.games[game.name] = game
 
     def register(self, game: MultiGame) -> None:
@@ -177,11 +179,16 @@ class GameEngine:
                 if room.status != "active":
                     continue
                 # idle expiry runs regardless of the per-turn clock —
-                # games with move_timeout=0 never time out otherwise
-                if now - room.last_activity > IDLE_ROOM_TTL:
+                # games with move_timeout=0 never time out otherwise.
+                # inbox games (one message per turn, days between moves)
+                # bring their own longer TTL.
+                game = self.games.get(room.game)
+                ttl = IDLE_ROOM_TTL
+                if game is not None and game.idle_ttl:
+                    ttl = game.idle_ttl
+                if now - room.last_activity > ttl:
                     idle.append(room)
                     continue
-                game = self.games.get(room.game)
                 if (game is None or game.move_timeout <= 0):
                     continue
                 cur = room.current
@@ -1010,13 +1017,16 @@ class GameEngine:
         from .games.wild import WILD_GAMES
         from .games.arcade import ARCADE_GAMES
         from .games.casino import CASINO_GAMES
+        from .games.inbox import INBOX_GAMES
         lines = ["games — start one with /game <name>:"]
         for label, group in (("easy", EASY_GAMES),
                              ("medium", MEDIUM_GAMES),
                              ("ambitious", AMBITIOUS_GAMES),
                              ("wild", WILD_GAMES),
                              ("arcade", ARCADE_GAMES),
-                             ("casino", CASINO_GAMES)):
+                             ("casino", CASINO_GAMES),
+                             ("inbox — async, one message per turn, "
+                              "no clock", INBOX_GAMES)):
             lines.append(f"  — {label} —")
             for g in group:
                 extra = " (group)" if g.needs_group else ""

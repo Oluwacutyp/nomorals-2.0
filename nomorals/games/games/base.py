@@ -178,7 +178,11 @@ class MultiGame:
     needs_group: bool = False   # refuse DM starts
     channel_mode: str = "house"  # house|block — channel play style
     turn_based: bool = True
-    move_timeout: float = 90.0  # seconds; 0 disables the timer
+    move_timeout: float = 90.0  # seconds; 0 disables the turn clock
+    #: how long a room may sit with no human move before the scheduler
+    #: closes it. None = the engine default (IDLE_ROOM_TTL). Inbox games
+    #: (one message per turn, days between moves) set this to days.
+    idle_ttl: float | None = None
     rules: str = ""             # shown by /help and in the intro
 
     def rng(self, room: Room) -> random.Random:

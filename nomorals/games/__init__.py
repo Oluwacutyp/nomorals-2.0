@@ -11,7 +11,7 @@ platform, with persistent players, a leaderboard, and an economy.
 See :mod:`nomorals.games.engine` for the engine,
 :mod:`nomorals.games.players` for profiles/leaderboard,
 :mod:`nomorals.games.economy` for the shop, and
-:mod:`nomorals.games.games` for the 19 games themselves.
+:mod:`nomorals.games.games` for the 39 games themselves.
 """
 from __future__ import annotations
 
