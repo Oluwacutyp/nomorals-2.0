@@ -41,12 +41,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # vendor/sentinel is a submodule; the trading/finance tests exercise
-      # the real bridge and fail without it. Done as an explicit step
-      # (rather than checkout's submodules: option) — same command verified
-      # against the runner's behavior.
-      - name: Checkout submodules
-        run: git submodule update --init --recursive
+      # vendor/sentinel is a submodule, but the runner's git cannot fetch
+      # submodules through the checkout action's credential setup (both the
+      # action's submodules option and an explicit submodule update fail at
+      # this step). Clone the pinned SHA directly instead — same content,
+      # no submodule machinery.
+      - name: Checkout vendor/sentinel
+        run: |
+          SHA=$(git ls-tree HEAD vendor/sentinel | awk '{print $3}')
+          rm -rf vendor/sentinel
+          git clone -q "https://github.com/Oluwacutyp/Sentinel.py" vendor/sentinel
+          git -C vendor/sentinel checkout -q "$SHA"
 
       # NOTE: the `runner` context is NOT available in job-level `env`
       # (GitHub fails the whole run at evaluation time, 0s, no jobs), so
@@ -110,8 +115,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout submodules
-        run: git submodule update --init --recursive
+      - name: Checkout vendor/sentinel
+        run: |
+          SHA=$(git ls-tree HEAD vendor/sentinel | awk '{print $3}')
+          rm -rf vendor/sentinel
+          git clone -q "https://github.com/Oluwacutyp/Sentinel.py" vendor/sentinel
+          git -C vendor/sentinel checkout -q "$SHA"
 
       - name: Grep for committed secrets (advisory)
         run: |
