@@ -140,8 +140,33 @@ def _tokens(text: str) -> list[str]:
     return _WORD.findall((text or "").lower())
 
 
-def parrot_check(user_text: str, draft: str) -> GuardVerdict:
-    """Detect a reply that echoes the user instead of answering them."""
+def _history_ngrams(history_texts: Sequence[str] | None, n: int) -> set[tuple[str, ...]]:
+    """Verbatim n-grams across earlier user turns, as one deduped set.
+
+    ``None`` / empty means "no history was given" — the caller keeps its
+    latest-turn-only behaviour byte-for-byte.
+    """
+    ngrams: set[tuple[str, ...]] = set()
+    for text in history_texts or ():
+        words = _tokens(text)
+        for i in range(len(words) - n + 1):
+            ngrams.add(tuple(words[i : i + n]))
+    return ngrams
+
+
+def parrot_check(
+    user_text: str, draft: str, *, history_texts: Sequence[str] | None = None
+) -> GuardVerdict:
+    """Detect a reply that echoes the user instead of answering them.
+
+    ``history_texts`` is the conversation's earlier user turns (oldest to
+    newest). A draft that repeats a verbatim 4-word run from ANY earlier
+    turn — not just the latest message — is still an echo: without this the
+    guard degrades as the thread grows, because a model that lifts a phrase
+    from turn 3 of a 60-turn thread passes a latest-turn-only check. The
+    token-overlap ratios stay computed against the latest turn only, so a
+    long thread cannot dilute the tuned thresholds.
+    """
     user_words = _tokens(user_text)
     draft_words = _tokens(draft)
     if not user_words or not draft_words:
@@ -155,10 +180,15 @@ def parrot_check(user_text: str, draft: str) -> GuardVerdict:
     user_ngrams: set[tuple[str, ...]] = set()
     for i in range(len(user_words) - 3):
         user_ngrams.add(tuple(user_words[i : i + 4]))
+    if history_texts:
+        # History-length-independent: the bank covers every earlier user
+        # turn the responder was given, not just the recent window.
+        user_ngrams |= _history_ngrams(history_texts, 4)
     for i in range(len(draft_words) - 3):
         ngram = tuple(draft_words[i : i + 4])
         if ngram in user_ngrams:
-            return GuardVerdict(False, "verbatim 4-word echo of the user", 1.0)
+            source = "an earlier user turn" if history_texts else "the user"
+            return GuardVerdict(False, f"verbatim 4-word echo of {source}", 1.0)
 
     # Draft that *opens* by repeating the user's opening.
     if len(user_words) >= 4 and draft_words[:4] == user_words[:4]:
@@ -170,27 +200,38 @@ def parrot_check(user_text: str, draft: str) -> GuardVerdict:
     return GuardVerdict(True, similarity=overlap)
 
 
-def repair_echo(user_text: str, draft: str, *, min_words: int = 3) -> str:
+def repair_echo(
+    user_text: str,
+    draft: str,
+    *,
+    min_words: int = 3,
+    history_texts: Sequence[str] | None = None,
+) -> str:
     """Remove the user's own phrasing from an echoing draft, in place.
 
     The responder's rewrite loop already forces a rephrase once; this is
     the last line of defence for a draft that *still* echoes after every
     retry. Verbatim runs of 3+ user words are deleted longest-first
     (case-insensitive, word-boundary matched), then leftover whitespace is
-    collapsed. Returns "" when fewer than ``min_words`` survive — the
-    caller must not ship the wreckage; it falls back to an in-character
-    line instead. Never raises.
+    collapsed. ``history_texts`` extends the strip bank to the
+    conversation's earlier user turns — a draft echoing a phrase from turn
+    3 of a 60-turn thread is repaired exactly like one echoing the latest
+    message, so the repair is history-length-independent. Returns "" when
+    fewer than ``min_words`` survive — the caller must not ship the
+    wreckage; it falls back to an in-character line instead. Never raises.
     """
     if not user_text or not draft:
         return draft
     try:
-        user_words = _tokens(user_text)
+        corpora = [user_text, *(t for t in (history_texts or ()) if t)]
         phrases: set[tuple[str, ...]] = set()
         # n-grams of length 3..6, longest first so "i love you so much"
         # is removed before "i love you" can fragment it.
-        for n in range(min(6, len(user_words)), 2, -1):
-            for i in range(len(user_words) - n + 1):
-                phrases.add(tuple(user_words[i : i + n]))
+        for corpus in corpora:
+            corpus_words = _tokens(corpus)
+            for n in range(min(6, len(corpus_words)), 2, -1):
+                for i in range(len(corpus_words) - n + 1):
+                    phrases.add(tuple(corpus_words[i : i + n]))
         text = draft
         for ngram in sorted(phrases, key=len, reverse=True):
             phrase = " ".join(ngram)

@@ -540,6 +540,16 @@ class PartnerResponder:
         # The system prompt is the whole of who she is in this chat —
         # it must actually be sent, or the persona/mood/gating above are
         # decoration.
+        # The anti-echo guard works on the whole visible conversation, not
+        # just the latest message: the earlier user turns ride along so a
+        # draft that lifts a phrase from turn 3 of a 60-turn thread is
+        # caught exactly like one echoing the latest turn. The rewrite
+        # nudges appended inside the loop below are not user turns — they
+        # are built from this fixed snapshot, never from `messages`.
+        history_user_texts = [
+            m.content for m in history
+            if getattr(m, "role", "") == "user" and (getattr(m, "content", "") or "").strip()
+        ]
         messages = [system] + list(history) + [user_turn(user_text, media_notes=list(media_notes))]
         last_response: LLMResponse | None = None
         last_draft = ""
@@ -585,7 +595,8 @@ class PartnerResponder:
                         Message.user(self._CHARACTER_NUDGE),
                     ]
                     continue
-            verdict = parrot_check(user_text, last_draft)
+            verdict = parrot_check(user_text, last_draft,
+                                   history_texts=history_user_texts)
             if verdict.ok:
                 break
             used_retries = attempt + 1
@@ -603,12 +614,15 @@ class PartnerResponder:
         # ``echo_action`` on the bundle records what happened.
         echo_action = ""
         if last_draft:
-            final_verdict = parrot_check(user_text, last_draft)
+            final_verdict = parrot_check(user_text, last_draft,
+                                           history_texts=history_user_texts)
             if not final_verdict.ok:
                 _log.info("anti-echo: final draft still echoes (%s) — repairing",
                           final_verdict.reason)
-                repaired = repair_echo(user_text, last_draft)
-                if repaired and parrot_check(user_text, repaired).ok:
+                repaired = repair_echo(user_text, last_draft,
+                                       history_texts=history_user_texts)
+                if repaired and parrot_check(user_text, repaired,
+                                             history_texts=history_user_texts).ok:
                     last_draft = repaired
                     echo_action = "repaired"
                     _log.info("anti-echo: repaired draft passes parrot check")
