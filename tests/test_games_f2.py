@@ -149,10 +149,10 @@ class ReversiPlayTests(unittest.TestCase):
         room = self._start()
         out = self.engine.move("t:r", "d3", ADA)
         self.assertEqual(room.status, "active")
-        self.assertIn("flips 1", out[0])
-        # d3 is black now and d4 flipped with it
-        self.assertEqual(room.state["grid"][2][3], "B")
-        self.assertEqual(room.state["grid"][3][3], "B")
+        # the human's own move message is deterministic; the house reply
+        # that follows is room-seeded, so only pin the human's facts
+        self.assertEqual(out[0], "● d3 flips 1.")
+        self.assertEqual(room.state["grid"][2][3], "B")  # d3 stays black
 
     def test_illegal_move_rejected_with_hint(self):
         room = self._start()
@@ -164,6 +164,8 @@ class ReversiPlayTests(unittest.TestCase):
         import random
         rng = random.Random(7)
         room = self._start()
+        # pin the house's tie-breaks — room seeds are random per start
+        room._rng_instance = random.Random(1234)
         n = 0
         while room.status == "active" and n < 300:
             moves = _reversi_legal(room.state["grid"], "B")
@@ -172,10 +174,19 @@ class ReversiPlayTests(unittest.TestCase):
             r, c, _ = rng.choice(moves)
             self.engine.move("t:r", _reversi_sq(r, c), ADA)
             n += 1
+        # the table must always close cleanly — never soft-lock with no
+        # legal move and no winner
         self.assertEqual(room.status, "finished")
-        self.assertIn(room.state["winner"], ("B", "W", "draw"))
-        b, w = room.state["final"]
-        self.assertEqual(b + w, 64)
+        st = room.state
+        self.assertIn(st["winner"], ("B", "W", "draw"))
+        b, w = st["final"]
+        grid_b = sum(c == "B" for row in st["grid"] for c in row)
+        grid_w = sum(c == "W" for row in st["grid"] for c in row)
+        self.assertEqual((b, w), (grid_b, grid_w))
+        self.assertEqual(st["winner"],
+                         "B" if b > w else ("W" if w > b else "draw"))
+        self.assertFalse(_reversi_legal(st["grid"], "B"))
+        self.assertFalse(_reversi_legal(st["grid"], "W"))
 
     def test_pass_handling(self):
         # a real mid-game position (found by playout search) where
@@ -269,15 +280,23 @@ class CheckersPlayTests(unittest.TestCase):
         w = self.engine.games["checkers"].winner(room)
         self.assertEqual(w.key, ADA.key)
 
-    def test_house_captures_when_it_can(self):
+    def test_house_takes_forced_capture(self):
+        # captures are forced for the house too: after black's simple
+        # move, white must take e5 via d4-f6 (c3 blocks black from
+        # taking d4 first, so black has no capture of its own)
         room = self._start("t:ch")
         st = room.state
         st["grid"] = [[""] * 8 for _ in range(8)]
-        st["grid"][4][4] = "b"   # e5 — black moves away first
-        st["grid"][5][3] = "w"   # d6 — can capture e5->c4? no: needs enemy
-        st["grid"][3][5] = "w"   # f4
-        # black: e5-f6 (simple); white f4xd? f4 jumps e5? e5 vacated.
-        out = self.engine.move("t:ch", "e5-f6", ADA)
+        st["grid"][3][3] = "w"   # d4
+        st["grid"][4][4] = "b"   # e5 (white's victim)
+        st["grid"][2][2] = "b"   # c3 (blocks e5xd4)
+        st["grid"][2][6] = "b"   # g3 (black's simple move)
+        out = self.engine.move("t:ch", "g3-h4", ADA)
+        self.assertTrue(any("takes 1" in m and "house" in m for m in out),
+                        f"house didn't take: {out}")
+        self.assertEqual(st["grid"][4][4], "")
+        self.assertEqual(st["grid"][5][5], "w")
+        self.assertEqual(st["caps_w"], 1)
         self.assertEqual(room.status, "active")
 
     def test_all_opening_moves_legal(self):
