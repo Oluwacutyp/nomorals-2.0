@@ -1080,8 +1080,14 @@ def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
     Delivery states: sent / failed / pending (no live channel yet) /
     held-quiet-hours / disabled (proactive switch off) / muted /
     deduped.
+
+    ``counts`` aggregates every delivery state over the last 24h — the
+    numbers, not vibes.  ``health`` names what is degraded instead of
+    silently not sending: no database (nothing is recorded), no live
+    gateway (sends can only persist), no live owner channels (sends
+    fail), quiet hours currently in force.
     """
-    from .notifier import Notifier
+    from .notifier import Notifier, resolve_gateway
     partner = getattr(getattr(context, "settings", None), "partner", None)
 
     def _b(name: str, default: bool = True) -> bool:
@@ -1097,12 +1103,53 @@ def proactive_status(context: Any, limit: int = 10) -> dict[str, Any]:
         "timezone": _owner_tz(context),
         "briefing_time": briefing_time(context),
     }
+    notifier = Notifier(context)
     try:
-        recent = Notifier(context).delivery_summary(
+        recent = notifier.delivery_summary(
             limit, kinds=("briefing", "watcher"))
     except Exception:  # noqa: BLE001 — status must not raise
         recent = []
-    return {"settings": settings, "recent": recent}
+    try:
+        counts = notifier.delivery_counts(
+            24.0, kinds=("briefing", "watcher"))
+    except Exception:  # noqa: BLE001 — status must not raise
+        counts = {}
+
+    # health: say what is degraded, out loud, instead of silently not
+    # sending.
+    health: dict[str, Any] = {"ok": True, "degraded": []}
+    db = getattr(context, "db", None)
+    if db is None:
+        health["degraded"].append("no database: nothing is recorded")
+    gateway = resolve_gateway(context)
+    owner_chats = str(getattr(partner, "owner_chats", "") or "") if partner else ""
+    live_channels: list[str] = []
+    if gateway is None:
+        health["degraded"].append(
+            "no live gateway: sends can only persist, nothing leaves the machine")
+    else:
+        try:
+            gstatus = gateway.status() or {}
+        except Exception:  # noqa: BLE001
+            gstatus = {}
+        for key in owner_chats.split(","):
+            plat, _, cid = key.strip().partition(":")
+            if plat and cid and gstatus.get(plat, {}).get("running_in_session"):
+                live_channels.append(plat)
+    if not owner_chats.strip():
+        health["degraded"].append("no owner_chats configured: nothing can be delivered")
+    elif gateway is not None and not live_channels:
+        health["degraded"].append(
+            "no live owner channel in this session: sends will persist as pending/failed")
+    health["live_channels"] = sorted(set(live_channels))
+    try:
+        from .notifier import _in_quiet_hours_now
+        health["in_quiet_hours"] = bool(_in_quiet_hours_now(context))
+    except Exception:  # noqa: BLE001
+        health["in_quiet_hours"] = False
+    health["ok"] = not health["degraded"]
+    return {"settings": settings, "recent": recent, "counts": counts,
+            "health": health}
 
 
 # ── tool registration ──────────────────────────────────────────────────────

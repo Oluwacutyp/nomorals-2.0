@@ -629,10 +629,45 @@ class Arena:
         )
 
     # ── background loop (power + flag gated) ─────────────────────────────────
+    def _choked_review_push(
+        self, notify: Callable[[str], None] | None
+    ) -> Callable[[str], None] | None:
+        """Route the loop's owner push through the Notifier dedupe choke.
+
+        The background loop's ``notify`` callback is a *proactive* send
+        (nobody asked for this build review in chat).  ``run_cycle``'s
+        direct calls are response-path and stay untouched — only the
+        loop gets the choke: the same packet text goes to the same owner
+        DMs, but now with the 10-minute (kind, title) dedupe, a durable
+        row, delivery states, and metrics instead of a raw gateway send.
+        """
+        if notify is None:
+            return None
+
+        def _wrapped(packet: str) -> None:
+            try:
+                from ..notifier import notify as _send
+
+                text = str(packet or "")
+                name = ""
+                for line in text.splitlines():
+                    if line.startswith("name:"):
+                        name = line.split(":", 1)[1].strip()[:60]
+                        break
+                _send(self.context, "arena_build",
+                      f"arena build review: {name}" if name
+                      else "arena build review",
+                      text)
+            except Exception:  # noqa: BLE001 - a push must never kill the loop
+                pass
+
+        return _wrapped
+
     def start_loop(self, notify: Callable[[str], None] | None = None) -> bool:
         if self._loop_thread is not None and self._loop_thread.is_alive():
             return False
         self._stop.clear()
+        notify = self._choked_review_push(notify)
 
         def _loop() -> None:
             from ..features import feature_enabled

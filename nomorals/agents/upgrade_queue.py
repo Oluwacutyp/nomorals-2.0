@@ -232,20 +232,43 @@ class UpgradePipeline:
     ) -> dict:
         """Approve a proposal and implement it via the EvolutionAgent.
 
+        When the proposal references an existing evolution proposal
+        (``patch_plan.evolution_proposal_id`` — filed by ``evolve_plan``)
+        it is applied directly instead of re-planning.  When it
+        references a staged skill edit (``patch_plan.skill_edit_id`` —
+        filed by the skill loop in approval mode) the staged edit is
+        committed.  Otherwise a fresh evolution plan is generated from
+        the ticket, as before.
+
         On any exception the proposal is recorded as ``failed`` with the
         error text, then the exception is re-raised so the owner sees the
         failure instead of a quiet log line.
         """
         queue = UpgradeQueue(self.context)
         approved = queue.approve(proposal_id, by=by)
-        instruction = _build_instruction(approved)
+        plan = approved.get("patch_plan") or {}
+        evo_id = plan.get("evolution_proposal_id") if isinstance(plan, dict) else ""
+        skill_edit_id = plan.get("skill_edit_id") if isinstance(plan, dict) else ""
         try:
+            if evo_id:
+                result = self.evolution.apply(str(evo_id), verify=verify,
+                                             commit=True)
+                result = dict(result or {})
+                result.setdefault("proposal_id", str(evo_id))
+                return queue.record_implemented(proposal_id, result)
+            if skill_edit_id:
+                from .skill_evolution import SkillEvolutionLoop
+
+                result = SkillEvolutionLoop(
+                    self.context).apply_staged_edit(str(skill_edit_id))
+                return queue.record_implemented(proposal_id, result)
+            instruction = _build_instruction(approved)
             evo_proposal = self.evolution.plan(instruction)
-            evo_id = getattr(evo_proposal, "id", None) or str(
+            evo_new_id = getattr(evo_proposal, "id", None) or str(
                 (evo_proposal or {}).get("id") or "")
-            result = self.evolution.apply(evo_id, verify=verify)
+            result = self.evolution.apply(evo_new_id, verify=verify)
             result = dict(result or {})
-            result.setdefault("proposal_id", evo_id)
+            result.setdefault("proposal_id", evo_new_id)
             return queue.record_implemented(proposal_id, result)
         except Exception as exc:  # noqa: BLE001 — recorded, then re-raised
             queue.record_implemented(
@@ -255,7 +278,31 @@ class UpgradePipeline:
 
     def deny_with_reason(self, proposal_id: str, reason: str,
                          by: str = "owner") -> dict:
-        return UpgradeQueue(self.context).deny(proposal_id, reason, by=by)
+        """Deny a proposal; when it references an evolution proposal or a
+        staged skill edit, mark that side rejected/denied too so nothing
+        lingers in a plannable/stageable limbo."""
+        queue = UpgradeQueue(self.context)
+        denied = queue.deny(proposal_id, reason, by=by)
+        plan = denied.get("patch_plan") or {}
+        if isinstance(plan, dict):
+            evo_id = plan.get("evolution_proposal_id")
+            if evo_id:
+                try:
+                    self.evolution.reject(str(evo_id))
+                except Exception:  # noqa: BLE001 - the deny itself stands
+                    _log.debug("could not reject evolution proposal %s",
+                               evo_id, exc_info=True)
+            skill_edit_id = plan.get("skill_edit_id")
+            if skill_edit_id:
+                try:
+                    from .skill_evolution import SkillEvolutionLoop
+
+                    SkillEvolutionLoop(
+                        self.context).deny_staged_edit(str(skill_edit_id))
+                except Exception:  # noqa: BLE001 - the deny itself stands
+                    _log.debug("could not deny staged skill edit %s",
+                               skill_edit_id, exc_info=True)
+        return denied
 
 
 def _build_instruction(proposal: dict) -> str:

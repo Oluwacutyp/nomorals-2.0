@@ -461,22 +461,33 @@ class ResearchDigest:
     """The three digest formats. Pure renderers — no I/O, no network."""
 
     @staticmethod
-    def operator_brief(report_or_claims: Any) -> str:
+    def operator_brief(report_or_claims: Any,
+                       min_confidence: float = 0.0) -> str:
         """Chat-ready brief, HARD-capped at 20 lines: synthesis, top
         findings, conflicts, gaps. Returns "" when there is nothing to say.
-        Accepts a ``SwarmReport`` or a list of claims/findings."""
+        Accepts a ``SwarmReport`` or a list of claims/findings.
+
+        ``min_confidence`` filters the findings: weak claims below the bar
+        are padding, not signal — the owner's channel is not the place for
+        them.
+        """
         if isinstance(report_or_claims, SwarmReport):
             report = report_or_claims
             query = report.query or ""
             synthesis = (report.synthesis or "").strip()
-            findings = sorted(report.findings,
-                              key=lambda f: -float(f.confidence or 0.0))
+            findings = sorted(
+                (f for f in report.findings
+                 if float(getattr(f, "confidence", 0.0) or 0.0)
+                 >= float(min_confidence)),
+                key=lambda f: -float(f.confidence or 0.0))
             conflicts = [str(c) for c in (report.conflicts or [])]
             failed = list(report.failed_angles or [])
         elif isinstance(report_or_claims, (list, tuple)):
             query, synthesis = "", ""
             findings = sorted(
-                list(report_or_claims),
+                (f for f in list(report_or_claims)
+                 if float(getattr(f, "confidence", 0.0) or 0.0)
+                 >= float(min_confidence)),
                 key=lambda f: -float(getattr(f, "confidence", 0.0) or 0.0))
             conflicts, failed = [], []
         else:
@@ -638,19 +649,21 @@ class ResearchPipeline:
                          "skipped_reason": ("no db on context" if db is None
                                             else "promote_claims=False")}
 
-        brief = ResearchDigest.operator_brief(report)
+        brief = ResearchDigest.operator_brief(report,
+                                              min_confidence=min_confidence)
         note = ResearchDigest.technical_note(report)
         tickets = [ResearchDigest.upgrade_ticket(c) for c in claims
                    if float(c.confidence or 0.0) >= float(min_confidence)]
 
         notified = False
-        if notify:
+        if notify and brief:
             try:
                 from .notifier import notify as _send
 
                 res = _send(context, "research",
                             f"Research done: {query[:60]}", brief)
-                notified = bool(isinstance(res, dict) and res.get("ok"))
+                notified = bool(isinstance(res, dict)
+                                and res.get("delivered"))
             except Exception as e:  # noqa: BLE001 - notify is best-effort
                 _log.warning("research pipeline notify failed: %s", e)
 

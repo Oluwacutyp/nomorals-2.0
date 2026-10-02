@@ -158,9 +158,11 @@ class Notifier:
     ) -> dict[str, Any]:
         """Persist an alert and best-effort deliver it. Never raises.
 
-        ``critical`` bypasses every gate: build failures and
-        security-relevant events must get through even when the owner has
-        the notifier muted.  ``force`` bypasses dedupe and the ``notifier``
+        ``critical`` bypasses the feature flag and the proactive gates:
+        build failures and security-relevant events must get through even
+        when the owner has the notifier muted.  It does NOT bypass dedupe
+        — the same critical alert re-firing inside the dedupe window is
+        spam, not signal.  ``force`` bypasses dedupe and the ``notifier``
         feature flag, but still respects the proactive master/kind
         switches — an explicit "don't push to me" always wins.
 
@@ -176,23 +178,31 @@ class Notifier:
         ``"disabled"`` / ``"held-quiet-hours"`` — so the owner can see
         what didn't go out and why.
         """
-        if self.db is not None and not critical:
+        if self.db is not None:
+            # DEDUPE CHOKE POINT — every proactive send funnels through
+            # here, including critical ones.  The same (kind, title) inside
+            # the window collapses to one alert: a re-firing urgent alert
+            # is spam, not signal.  ``force`` is the only escape hatch
+            # (explicit owner/manual sends).
             if not force and self._is_duplicate(kind, title):
                 # same alert already went out in the window — skip, don't re-spam
                 return {"id": "", "kind": kind, "title": title,
                         "delivered": False, "deduped": True,
                         "delivery_state": STATE_DEDUPED}
-            from .features import feature_enabled
+            if critical:
+                pass  # critical skips the feature flag + proactive gates
+            else:
+                from .features import feature_enabled
 
-            if not force and not feature_enabled(self.context, "notifier"):
-                # still record it — the owner can read the queue with /notify
-                return self._store(kind, title, body, delivered=0,
-                                   delivery_state=STATE_MUTED)
-            if proactive_check:
-                gate = proactive_gate(self.context, kind)
-                if gate is not None:
+                if not force and not feature_enabled(self.context, "notifier"):
+                    # still record it — the owner can read the queue with /notify
                     return self._store(kind, title, body, delivered=0,
-                                       delivery_state=gate)
+                                       delivery_state=STATE_MUTED)
+                if proactive_check:
+                    gate = proactive_gate(self.context, kind)
+                    if gate is not None:
+                        return self._store(kind, title, body, delivered=0,
+                                           delivery_state=gate)
         if self.gateway is None:
             return self._store(kind, title, body, delivered=0,
                                delivery_state=STATE_PENDING)
@@ -371,9 +381,79 @@ class Notifier:
         return out
 
 
+    def delivery_counts(self, hours: float = 24.0,
+                        kinds: tuple[str, ...] | None = None
+                        ) -> dict[str, int]:
+        """How many proactive sends landed in each delivery state over the
+        last ``hours`` — the numbers behind ``nm briefing status``.
+
+        Counts every stored state the choke point records (sent / failed /
+        pending / held-quiet-hours / disabled / muted).  Note: dedupe
+        suppressions are deliberately NOT stored (a suppressed repeat is
+        not an alert), so "deduped" never appears here — the dedupe
+        window doing its job is visible as the *absence* of repeats.
+        ``kinds`` restricts to e.g. ``("briefing", "watcher")``; ``None``
+        counts everything.  Never raises; pre-migration DBs (no
+        delivery_state column) fall back to delivered/undelivered counts.
+        """
+        if self.db is None:
+            return {}
+        cutoff = time.time() - max(1.0, float(hours or 24.0)) * 3600.0
+        try:
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                rows = self.db.query(
+                    "SELECT COALESCE(delivery_state, '') AS state, "
+                    "COUNT(*) AS n FROM notifications "
+                    "WHERE created_at > ? AND kind IN (%s) "
+                    "GROUP BY state" % placeholders,
+                    (cutoff, *kinds),
+                )
+            else:
+                rows = self.db.query(
+                    "SELECT COALESCE(delivery_state, '') AS state, "
+                    "COUNT(*) AS n FROM notifications "
+                    "WHERE created_at > ? GROUP BY state",
+                    (cutoff,),
+                )
+            out: dict[str, int] = {}
+            for row in rows:
+                state = str(row.get("state") or "")
+                if not state:
+                    continue
+                out[state] = out.get(state, 0) + int(row.get("n") or 0)
+            return out
+        except Exception:  # noqa: BLE001 — pre-migration: no delivery_state
+            try:
+                if kinds:
+                    placeholders = ",".join("?" for _ in kinds)
+                    rows = self.db.query(
+                        "SELECT delivered, COUNT(*) AS n FROM notifications "
+                        "WHERE created_at > ? AND kind IN (%s) "
+                        "GROUP BY delivered" % placeholders,
+                        (cutoff, *kinds),
+                    )
+                else:
+                    rows = self.db.query(
+                        "SELECT delivered, COUNT(*) AS n FROM notifications "
+                        "WHERE created_at > ? GROUP BY delivered",
+                        (cutoff,),
+                    )
+                out = {}
+                for row in rows:
+                    out["sent" if row.get("delivered") else "pending"] = int(
+                        row.get("n") or 0)
+                return out
+            except Exception:  # noqa: BLE001
+                return {}
+
+
 def notify(context: Any, kind: str, title: str, body: str = "", **kw: Any) -> dict[str, Any]:
     """One-call helper: ``notify(context, "news", "Headlines", digest)``.
 
-    Pass ``critical=True`` to bypass the feature gate and dedupe window.
+    Pass ``critical=True`` to bypass the feature gate.  Note: critical
+    no longer bypasses dedupe — the same (kind, title) inside the dedupe
+    window collapses to one alert; ``force=True`` is the explicit
+    escape hatch for that too.
     """
     return Notifier(context).publish(kind, title, body, **kw)

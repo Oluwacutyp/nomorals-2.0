@@ -315,6 +315,11 @@ class Scheduler:
             summary = f"job failed: {exc}"
             ok = False
         next_run, still_enabled = self._next_after_run(row, now)
+        # transition-only failure alerts: a job that keeps failing pages
+        # ONCE (on the first failure of the streak), not on every run.
+        # The previous result is read before the row is updated.
+        prev_result = str(row.get("last_result") or "")
+        prev_failed = prev_result.startswith("job failed")
         with self.db.transaction():
             self.db.execute(
                 "UPDATE schedule_jobs SET last_run = ?, last_result = ?, next_run = ?, "
@@ -322,16 +327,22 @@ class Scheduler:
                 (now, summary[:2000], next_run, 1 if still_enabled else 0,
                  time.time(), row["id"]),
             )
-        # alert the owner — durable + multi-channel via the notifier
-        try:
-            self.notifier.publish(
-                "schedule",
-                f"{'✅' if ok else '❌'} scheduled: {row['name']}",
-                summary[:1500],
-                force=not ok,
-            )
-        except Exception:  # noqa: BLE001
-            _log.debug("scheduler notification failed")
+        # alert the owner — durable + multi-channel via the notifier.
+        # Failures alert on the failure transition only (a stuck job must
+        # not page every run); successes still go through the notifier's
+        # dedupe choke point.
+        alert = True
+        if not ok and prev_failed:
+            alert = False  # still failing — the owner already knows
+        if alert:
+            try:
+                self.notifier.publish(
+                    "schedule",
+                    f"{'✅' if ok else '❌'} scheduled: {row['name']}",
+                    summary[:1500],
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("scheduler notification failed")
         return {
             "id": row["id"], "name": row["name"], "ok": ok,
             "result": summary[:2000], "seconds": round(time.time() - started, 2),

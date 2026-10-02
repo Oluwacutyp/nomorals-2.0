@@ -1365,6 +1365,58 @@ class EvolutionAgent:
         out["ok"] = out.get("ok", True) and ok
         return out
 
+    # ── upgrade-queue approval surface ──────────────────────────────────────
+    def submit_to_queue(self, proposal_id: str) -> str:
+        """File an evolution proposal into the owner's upgrade queue.
+
+        This is THE approve/deny path for proposed framework changes:
+        the queue notifies the owner, they approve or deny, and approval
+        dispatches back to :meth:`apply`.  Never raises — a proposal that
+        cannot be filed is still reviewable via ``evolve_plan``'s return
+        and ``EvolutionAgent.list``.
+        """
+        proposal = self._load(proposal_id)
+        if proposal is None:
+            raise ToolError(f"no evolution proposal {proposal_id!r}")
+        try:
+            from .upgrade_queue import UpgradeQueue
+
+            files = [str(e.get("path", "")) for e in (proposal.edits or [])
+                     if e.get("path")]
+            queue = UpgradeQueue(self.context)
+            return queue.propose(
+                title=f"evolution: {proposal.instruction[:90]}",
+                rationale=(proposal.rationale or proposal.instruction)[:500],
+                patch_plan={
+                    "source": "evolution",
+                    "evolution_proposal_id": proposal.id,
+                    "instruction": proposal.instruction[:500],
+                    "edit_paths": files,
+                },
+                files=files,
+                tests=["full evolve gate: test suite + benchmark regression"],
+                source="evolution",
+            )
+        except Exception as exc:  # noqa: BLE001 - filing is best-effort
+            _log.warning("could not file evolution proposal %s to the "
+                         "upgrade queue: %s", proposal_id, exc)
+            return ""
+
+    def reject(self, proposal_id: str) -> dict[str, Any]:
+        """Mark a proposal rejected (the owner denied it in the upgrade
+        queue).  It stays in the record — reverted/failed paths are how
+        the next cycle learns — but it can never be applied afterwards."""
+        proposal = self._load(proposal_id)
+        if proposal is None:
+            raise ToolError(f"no evolution proposal {proposal_id!r}")
+        if proposal.status in {"applied", "reverted"}:
+            raise ToolError(
+                f"proposal {proposal_id} is {proposal.status!r} — "
+                "revert it instead of rejecting")
+        proposal.status = "rejected"
+        self._save(proposal)
+        return {"proposal": proposal_id, "status": "rejected"}
+
     # ── goal queue ──────────────────────────────────────────────────────────
     def queue(self, action: str = "list", instruction: str = "") -> list[str]:
         """Owner-queued improvement goals (consumed by autopilot)."""
@@ -1620,9 +1672,16 @@ def register(registry: Any) -> None:
     )
     def evolve_plan(instruction: str, *, research_id: str = "",
                     focus: str = "") -> dict[str, Any]:
-        proposal = EvolutionAgent(context).plan(
+        agent = EvolutionAgent(context)
+        proposal = agent.plan(
             instruction, research_id=research_id, focus=focus)
-        return proposal.to_dict()
+        out = proposal.to_dict()
+        # the upgrade queue is the owner approve/deny surface for proposed
+        # changes — file it there so approval dispatches to evolve_apply
+        # and denial marks the proposal rejected.  (Power-mode autopilot
+        # calls plan()+apply() directly and never goes through this tool.)
+        out["upgrade_proposal_id"] = agent.submit_to_queue(proposal.id)
+        return out
 
     @registry.register(
         "evolve_research",

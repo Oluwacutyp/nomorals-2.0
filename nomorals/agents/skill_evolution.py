@@ -567,9 +567,13 @@ class SkillEvolutionLoop:
             return rec
 
         if mode == "approval":
-            # stage the diff; the owner applies it explicitly
+            # stage the diff, then file it into the owner's upgrade queue
+            # — the queue (not this table) is the approve/deny surface.
             rec.status = "staged"
             rec.decided_at = time.time()
+            self._store(rec)
+            rec.gate_results["upgrade_proposal_id"] = self._file_for_approval(
+                proposal, rec)
             self._store(rec)
             return rec
 
@@ -597,6 +601,45 @@ class SkillEvolutionLoop:
         rec.decided_at = time.time()
         self._store(rec)
         return rec
+
+    def _file_for_approval(self, proposal: dict[str, Any],
+                           rec: SkillEditRecord) -> str:
+        """File a staged skill edit into the owner's upgrade queue.
+
+        Returns the queue proposal id, or "" when the queue is
+        unavailable (the staged row is still reviewable via
+        ``skill_evolve history``).  Never raises.
+        """
+        try:
+            from .upgrade_queue import UpgradeQueue
+
+            failures = "; ".join(
+                str(f.get("summary") or f.get("error") or "")[:80]
+                for f in (proposal.get("failures") or [])[:3])
+            queue = UpgradeQueue(self.context)
+            return queue.propose(
+                title=f"skill edit: {rec.skill_name}",
+                rationale=(
+                    f"Skill '{rec.skill_name}' implicated in repeated "
+                    f"failures; proposed surgical fix ({rec.fingerprint}). "
+                    f"Triggering failures: {failures or 'n/a'}"[:500]),
+                patch_plan={
+                    "source": "skill_evolution",
+                    "skill_edit_id": rec.id,
+                    "skill_name": rec.skill_name,
+                    "target_kind": rec.target_kind,
+                    "target_ref": rec.target_ref,
+                    "changed_lines": proposal.get("changed_lines", 0),
+                },
+                files=[rec.target_ref] if rec.target_kind == "file" else [],
+                tests=[f"skill tests for {rec.skill_name}",
+                       "benchmark no-regression check"],
+                source="skill_evolution",
+            )
+        except Exception as exc:  # noqa: BLE001 - filing is best-effort
+            _log.warning("could not file skill edit %s to the upgrade "
+                         "queue: %s", rec.id, exc)
+            return ""
 
     def _commit(self, proposal: dict[str, Any]) -> None:
         if proposal["target_kind"] == "file":
@@ -775,6 +818,78 @@ class SkillEvolutionLoop:
             "UPDATE skill_edits SET status='reverted', decided_at=? "
             "WHERE id=?", (time.time(), edit_id))
         return {"ok": True, "edit": edit_id}
+
+    def apply_staged_edit(self, edit_id: str) -> dict[str, Any]:
+        """Commit a staged (approval-mode) edit: re-run the gate, then
+        commit exactly like the autonomous path.  Called by the upgrade
+        queue when the owner approves the filed proposal."""
+        row = self.db.query_one("SELECT * FROM skill_edits WHERE id=?",
+                                (edit_id,))
+        if not row:
+            return {"ok": False, "error": "no such edit"}
+        rec = SkillEditRecord.from_row(row)
+        if rec.status != "staged":
+            return {"ok": False,
+                    "error": f"edit is {rec.status}, not staged"}
+        target = self.resolve_target(rec.skill_name)
+        if target is None:
+            return {"ok": False, "error": "skill target vanished"}
+        try:
+            new_text = apply_unified_diff(target.text, rec.diff)
+        except SkillEvolutionError as exc:
+            return {"ok": False, "edit": edit_id,
+                    "error": f"stale diff, no longer applies: {exc}"}
+        proposal = {
+            "skill_name": rec.skill_name,
+            "target_kind": rec.target_kind,
+            "target_ref": rec.target_ref,
+            "diff": rec.diff,
+            "new_text": new_text,
+            "failures": rec.triggering_failures,
+        }
+        passed, results = self.gate(proposal)
+        if not passed:
+            self.db.execute(
+                "UPDATE skill_edits SET status='reverted', "
+                "gate_results=?, decided_at=? WHERE id=?",
+                (json.dumps(results, default=str), time.time(), edit_id))
+            return {"ok": False, "edit": edit_id,
+                    "error": "gate failed on re-check", "gate": results}
+        try:
+            self._commit(proposal)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "edit": edit_id,
+                    "error": f"commit failed: {exc}"}
+        verify = self._verify_no_regression(proposal, results)
+        if not verify.get("ok", True):
+            self._restore(proposal)
+            self.db.execute(
+                "UPDATE skill_edits SET status='regressed', decided_at=? "
+                "WHERE id=?", (time.time(), edit_id))
+            return {"ok": False, "edit": edit_id,
+                    "error": "benchmark regressed — reverted",
+                    "verify": verify}
+        self.db.execute(
+            "UPDATE skill_edits SET status='applied', decided_at=? "
+            "WHERE id=?", (time.time(), edit_id))
+        return {"ok": True, "edit": edit_id, "status": "applied"}
+
+    def deny_staged_edit(self, edit_id: str) -> dict[str, Any]:
+        """Mark a staged edit denied (owner denied it in the upgrade
+        queue).  Nothing is written to the skill; the fingerprint is
+        kept so the loop never re-proposes the same edit."""
+        row = self.db.query_one("SELECT * FROM skill_edits WHERE id=?",
+                                (edit_id,))
+        if not row:
+            return {"ok": False, "error": "no such edit"}
+        rec = SkillEditRecord.from_row(row)
+        if rec.status not in {"staged", "proposed"}:
+            return {"ok": False,
+                    "error": f"edit is {rec.status}, not pending"}
+        self.db.execute(
+            "UPDATE skill_edits SET status='denied', decided_at=? "
+            "WHERE id=?", (time.time(), edit_id))
+        return {"ok": True, "edit": edit_id, "status": "denied"}
 
     # ── records ─────────────────────────────────────────────────────────────
     def _store(self, rec: SkillEditRecord) -> None:
