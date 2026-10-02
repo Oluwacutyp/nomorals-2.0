@@ -397,6 +397,14 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             registered.add("ocr")
         except Exception as exc:  # noqa: BLE001 — the floor itself may be absent
             _log.warning("could not register ocr fallback: %s", exc)
+    # Wave J: feed live serving outcomes into the trajectory store and
+    # benchmark DB so the broker ranks on evidence instead of priors.
+    # Best-effort — learning must never break boot or routing.
+    try:
+        from ..llm.learning import attach_learning
+        attach_learning(router, db=db)
+    except Exception:  # noqa: BLE001
+        _log.warning("learning attach failed; continuing without it", exc_info=True)
     return router
 
 

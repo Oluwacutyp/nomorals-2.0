@@ -112,6 +112,12 @@ class LLMRouter:
         # Optional capability broker (nomorals.llm.broker.ModelBroker).  When
         # unset the router keeps its original name-based behaviour exactly.
         self._broker: Any = None
+        # Optional learning hook (nomorals.llm.learning.attach_learning).
+        # Duck-typed on purpose: the router never imports the learning
+        # module, so a broken or missing learning stack cannot break
+        # routing.  While unset the dispatch path below is exactly the
+        # pre-learning code.
+        self._learning: Any = None
 
     # ── registration ─────────────────────────────────────────────────────────
     def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> "LLMRouter":
@@ -206,6 +212,49 @@ class LLMRouter:
         with self._lock:
             return self._broker
 
+    # ── learning hook ────────────────────────────────────────────────────
+    def set_learning(self, hook: Any | None) -> "LLMRouter":
+        """Attach/detach the learning hook.
+
+        ``hook`` is called once per provider *attempt* as
+        ``hook(operation=..., provider_name=..., success=..., latency_s=...,
+        error=...)``.  It must never block the caller — the learning module
+        enqueues and returns.  Any exception it raises is swallowed here:
+        learning is advisory and must never break routing.  Pass ``None``
+        to detach.
+        """
+        with self._lock:
+            self._learning = hook
+        return self
+
+    @property
+    def learning(self) -> Any | None:
+        with self._lock:
+            return self._learning
+
+    def _note_learning(
+        self,
+        operation: str,
+        provider_name: str,
+        *,
+        success: bool,
+        latency_s: float,
+        error: str = "",
+    ) -> None:
+        hook = self._learning
+        if hook is None:
+            return
+        try:
+            hook(
+                operation=operation,
+                provider_name=provider_name,
+                success=success,
+                latency_s=latency_s,
+                error=error,
+            )
+        except Exception:  # noqa: BLE001 — learning must never break routing
+            _log.debug("learning hook raised; ignoring", exc_info=True)
+
     # ── calling ──────────────────────────────────────────────────────────────
     def _chain(self) -> list[LLMProvider]:
         with self._lock:
@@ -288,11 +337,15 @@ class LLMRouter:
         attempted = 0
         failed: list[tuple[str, str]] = []  # (provider name, error) in attempt order
         last = LLMResponse(text="", error="no attempt made")
+        learning = self._learning  # read once; a detach mid-dispatch is harmless
         for index, provider in enumerate(chain):
             health = self._health[provider.name]
             if not health.available(self._clock()):
                 continue
             attempted += 1
+            # Time the attempt only when something is listening — zero cost
+            # otherwise, so the hook is free when learning is off.
+            attempt_start = self._clock() if learning is not None else 0.0
             try:
                 response = call(provider)
             except Exception as exc:  # noqa: BLE001 - never let a provider crash the router
@@ -306,9 +359,19 @@ class LLMRouter:
                     provider=provider.name,
                     error=note,
                 )
+                if learning is not None:
+                    self._note_learning(
+                        operation, provider.name, success=False,
+                        latency_s=self._clock() - attempt_start, error=note,
+                    )
                 continue
             if response.ok:
                 self._note_success(provider.name)
+                if learning is not None:
+                    self._note_learning(
+                        operation, provider.name, success=True,
+                        latency_s=self._clock() - attempt_start,
+                    )
                 if failed:
                     # A failover happened: the response must say WHICH
                     # provider failed and WHAT fallback served it — the
@@ -329,6 +392,12 @@ class LLMRouter:
             self._note_failure(provider.name, response.error)
             failed.append((provider.name, response.error or "unknown error"))
             last = response
+            if learning is not None:
+                self._note_learning(
+                    operation, provider.name, success=False,
+                    latency_s=self._clock() - attempt_start,
+                    error=response.error or "unknown error",
+                )
 
         self.stats["failures"] += 1
         if attempted == 0:
