@@ -115,7 +115,7 @@ def _parser() -> argparse.ArgumentParser:
                              "on top of the base model (comma-separated)")
     # Broker actions (nomorals.cmdline.commands.models).  Positional and
     # optional so every pre-existing flag above keeps working unchanged.
-    models.add_argument("model_action", nargs="?", default="",
+    models.add_argument("model_action", nargs="?", default=None,
                         choices=["list", "add", "remove", "benchmark", "use", "select"],
                         help="broker action: list/add/remove/benchmark/use/select")
     models.add_argument("model_target", nargs="?", default="",

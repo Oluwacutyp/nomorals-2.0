@@ -109,6 +109,9 @@ class LLMRouter:
         self.repair_cooldown_seconds = cooldown_seconds
         self._last_repair_time: dict[str, float] = {}
         self.stats = {"calls": 0, "failovers": 0, "failures": 0, "repairs": 0}
+        # Optional capability broker (nomorals.llm.broker.ModelBroker).  When
+        # unset the router keeps its original name-based behaviour exactly.
+        self._broker: Any = None
 
     # ── registration ─────────────────────────────────────────────────────────
     def add(self, provider: LLMProvider, *, primary: bool = False, name: str = "") -> "LLMRouter":
@@ -184,6 +187,25 @@ class LLMRouter:
             self._providers = ordered + rest
             self._active = self._providers[0].name
 
+    # ── capability broker ────────────────────────────────────────────────────
+    def set_broker(self, broker: Any | None) -> "LLMRouter":
+        """Attach a :class:`nomorals.llm.broker.ModelBroker`.
+
+        While attached, every :meth:`chat`/:meth:`complete`/:meth:`describe_image`
+        first asks the broker which provider should serve the operation and
+        moves the active provider there.  The broker is best-effort: if it
+        has no candidate (or errors), the router falls back to its existing
+        name-based chain unchanged.  Pass ``None`` to detach.
+        """
+        with self._lock:
+            self._broker = broker
+        return self
+
+    @property
+    def broker(self) -> Any | None:
+        with self._lock:
+            return self._broker
+
     # ── calling ──────────────────────────────────────────────────────────────
     def _chain(self) -> list[LLMProvider]:
         with self._lock:
@@ -241,6 +263,15 @@ class LLMRouter:
         *,
         require: str | None = None,
     ) -> LLMResponse:
+        # Broker consult (opt-in): let the capability broker pick the starting
+        # provider for this operation.  Best-effort — on any failure the
+        # original name-based chain below is used untouched.
+        if self._broker is not None:
+            try:
+                self._broker.consult(self, operation)
+            except Exception:  # noqa: BLE001 — broker must never break routing
+                _log.debug("broker consult raised; using name-based chain",
+                           exc_info=True)
         chain = self._chain()
         if require is not None:
             capable = [p for p in chain if require in p.capabilities]
