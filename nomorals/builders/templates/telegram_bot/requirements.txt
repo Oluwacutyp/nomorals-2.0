@@ -1,0 +1,2 @@
+# $PROJECT_NAME -- no third-party dependencies.
+# Python standard library only; talks to the raw Telegram Bot HTTP API with urllib.

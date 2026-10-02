@@ -40,6 +40,16 @@ def sample_ticket(**overrides):
         patch_plan={"edits": ["wrap fetch in retry loop"]},
         suggested_files=["nomorals/integrations/market_data.py"],
         test_plan=["retry succeeds after two transient failures"],
+        expected_tests=[
+            "test_market_data_retry_backoff_succeeds",
+            "test_market_data_retry_backoff_exhausts",
+        ],
+        acceptance_criteria=[
+            "nomorals/integrations/market_data.py read before editing",
+            "retry test fails before, passes after",
+            "module suite green before and after",
+        ],
+        domain="integrations",
         claim_ids=["c1"],
         confidence=0.8,
     )

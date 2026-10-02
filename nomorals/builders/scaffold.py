@@ -23,7 +23,7 @@ _log = get_logger(__name__)
 __all__ = ["KINDS", "ScaffoldResult", "scaffold", "template_dir"]
 
 #: The template kinds this package ships.
-KINDS = ("webapp", "bot", "cli_tool")
+KINDS = ("webapp", "bot", "cli_tool", "rest_api", "telegram_bot", "dashboard")
 
 _TEMPLATES_ROOT = Path(__file__).resolve().parent / "templates"
 

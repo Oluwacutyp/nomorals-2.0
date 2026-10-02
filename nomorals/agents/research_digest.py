@@ -28,6 +28,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..core.ids import new_id
@@ -48,7 +49,11 @@ __all__ = [
     "classify_domain",
     "claim_from_finding",
     "check_conflicts",
+    "promotion_gate",
     "promote",
+    "repo_root",
+    "verify_ticket_files",
+    "gate_ticket",
     "ResearchDigest",
     "ResearchPipeline",
     "register",
@@ -317,16 +322,69 @@ def check_conflicts(claims: list[ResearchClaim],
     return out
 
 
+# ── promotion gate ─────────────────────────────────────────────────────────
+
+#: Minimum content words (length >= 4, stop-word stripped) for a claim to
+#: be worth a graph node. Below this the "claim" is a slogan, not a fact.
+_MIN_CLAIM_WORDS = 4
+
+
+def promotion_gate(claim: ResearchClaim, *, min_confidence: float = 0.5,
+                   min_sources: int = 1,
+                   min_claim_words: int = _MIN_CLAIM_WORDS
+                   ) -> tuple[bool, list[str]]:
+    """Quality gate for KG promotion. Returns (ok, reasons).
+
+    A claim is promoted only when it clears ALL of:
+    * confidence >= ``min_confidence`` (noisy single-source findings)
+    * at least ``min_sources`` cited URLs (verifiable evidence)
+    * at least ``min_claim_words`` content words (not a slogan)
+
+    Contradiction against existing knowledge is checked separately by
+    ``check_conflicts`` inside ``promote``: a new claim that contradicts a
+    *stronger* active claim is still stored but marked status
+    "contradicted" (flagged, never silently merged) — see ``promote``.
+    Weak claims that fail this gate stay in the digest (brief/note) and
+    are never promoted; every rejection is logged by the caller with its
+    reasons.
+    """
+    reasons: list[str] = []
+    try:
+        confidence = float(claim.confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < float(min_confidence):
+        reasons.append(
+            f"confidence {confidence:.2f} < minimum {float(min_confidence):.2f}")
+    urls = [str(s.get("url") or "").strip() for s in (claim.sources or [])
+            if isinstance(s, dict) and str(s.get("url") or "").strip()]
+    if len(urls) < int(min_sources):
+        reasons.append(
+            f"only {len(urls)} cited URL(s), need {int(min_sources)} "
+            f"(no verifiable evidence)")
+    words = _content_words(str(claim.claim or ""))
+    if len(words) < int(min_claim_words):
+        reasons.append(
+            f"claim has only {len(words)} content word(s), need "
+            f"{int(min_claim_words)} (too thin to be a fact)")
+    return (not reasons), reasons
+
+
 # ── promotion into the knowledge graph ─────────────────────────────────────
 
 def promote(claims: list[ResearchClaim], db: Any, *,
             min_confidence: float = 0.5) -> dict[str, Any]:
     """Durably promote claims into the knowledge graph.
 
-    * claims below ``min_confidence`` are skipped (counted, reported).
-    * each claim becomes a ``claim:<id>`` node (type "claim") carrying the
-      full provenance: claim text, domain, angle, confidence, fetched_at,
-      originating query, source URLs, version, status.
+    Every claim first passes ``promotion_gate`` (minimum confidence,
+    minimum cited evidence, minimum substance). Rejected claims are NOT
+    promoted — they stay in the digest (brief/note) — and are returned in
+    ``rejected`` as {"claim_id", "reasons"} and logged with the reasons.
+
+    * each promoted claim becomes a ``claim:<id>`` node (type "claim")
+      carrying the full provenance: claim text, domain, angle,
+      confidence, fetched_at, originating query, source URLs, version,
+      status.
     * ``domain:<name>`` node (type "domain"), linked claim -> domain
       "about" (weight 1.5).
     * one ``source:<url>`` node (type "source") per cited URL, linked
@@ -336,22 +394,30 @@ def promote(claims: list[ResearchClaim], db: Any, *,
       status="superseded" (+ ``superseded_by`` = new claim id) and a
       new -> old "supersedes" edge is added. Nodes are never deleted.
     * when a new claim contradicts a *stronger* active claim, the new node
-      is still stored but marked status="contradicted" (+ ``contradicts``).
+      is still stored but marked status="contradicted" (+ ``contradicts``)
+      and a warning is logged — flagged, never silently merged.
 
     Returns {"promoted", "skipped_low_confidence", "superseded",
-    "conflicts" (from check_conflicts)}.
+    "rejected", "conflicts" (from check_conflicts)}.
     """
     kg = KnowledgeGraph(db)
     result: dict[str, Any] = {"promoted": 0, "skipped_low_confidence": 0,
-                              "superseded": 0, "conflicts": []}
+                              "superseded": 0, "rejected": [],
+                              "conflicts": []}
     for claim in claims or []:
+        ok, reasons = promotion_gate(claim, min_confidence=min_confidence)
+        if not ok:
+            if any(r.startswith("confidence") for r in reasons):
+                result["skipped_low_confidence"] += 1
+            result["rejected"].append({"claim_id": claim.id,
+                                       "reasons": reasons})
+            _log.warning("promotion gate rejected claim %s: %s",
+                         claim.id, "; ".join(reasons))
+            continue
         try:
             confidence = float(claim.confidence)
         except (TypeError, ValueError):
             confidence = 0.0
-        if confidence < float(min_confidence):
-            result["skipped_low_confidence"] += 1
-            continue
         conflicts = check_conflicts([claim], kg)
         result["conflicts"].extend(conflicts)
 
@@ -377,6 +443,12 @@ def promote(claims: list[ResearchClaim], db: Any, *,
             result["superseded"] += len(superseded_ids)
         if contradicted_by and not superseded_ids:
             claim.status = "contradicted"
+            _log.warning("claim %s contradicts stronger existing claim %s "
+                         "(confidence %.2f < %.2f) — stored flagged, not "
+                         "merged",
+                         claim.id, contradicted_by, confidence,
+                         float(conflicts[0].get("existing_confidence", 0.0)
+                               or 0.0) if conflicts else 0.0)
 
         props = {
             "claim_id": claim.id,
@@ -455,6 +527,74 @@ _DOMAIN_TEST_HINTS: dict[str, str] = {
     "competitors": "the comparison matrix staying current and sourced",
     "general": "the happy path plus one realistic failure mode",
 }
+
+
+# ── ticket concreteness ────────────────────────────────────────────────────
+
+def repo_root() -> Path:
+    """The checkout root: the ancestor directory that contains this
+    module at ``nomorals/agents/research_digest.py``. Walked up from the
+    file itself, so it works no matter what the process cwd is."""
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        if (parent / "nomorals" / "agents" / "research_digest.py").exists():
+            return parent
+    return Path.cwd()
+
+
+def verify_ticket_files(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Split ticket file paths into (existing, missing) against the repo
+    root. Every suggested file must resolve to something real on disk —
+    a ticket that names a file nobody can open is not actionable."""
+    root = repo_root()
+    existing: list[str] = []
+    missing: list[str] = []
+    for p in paths or []:
+        if p and (root / p).exists():
+            existing.append(p)
+        else:
+            missing.append(p)
+    return existing, missing
+
+
+def _claim_test_slug(claim_text: str) -> str:
+    """Stable short slug from a claim's content words, for concrete test
+    names: 'Redis is the fastest in-memory cache' ->
+    'redis_fastest_memory_cache'."""
+    words = [w for w in _content_words(claim_text or "") if len(w) >= 4][:4]
+    slug = "_".join(words) or "claim"
+    return re.sub(r"[^a-z0-9_]", "", slug)[:40]
+
+
+def gate_ticket(ticket: dict[str, Any]) -> list[str]:
+    """Block vague tickets: returns the list of blocking problems (empty
+    when the ticket is concrete). A ticket must name real repo files that
+    exist on disk, propose specific test names, and define acceptance
+    criteria — anything less never reaches the upgrade queue."""
+    problems: list[str] = []
+    t = ticket or {}
+    if len(str(t.get("title") or "").strip()) < 8:
+        problems.append("title too short/vague (< 8 chars)")
+    if len(str(t.get("rationale") or "").strip()) < 20:
+        problems.append("rationale too short (< 20 chars)")
+    if not str(t.get("domain") or "").strip():
+        problems.append("no domain")
+    files = [f for f in (t.get("suggested_files") or []) if f]
+    if not files:
+        problems.append("no suggested files")
+    else:
+        _existing, missing = verify_ticket_files(files)
+        if missing:
+            problems.append(
+                "suggested file(s) do not exist on disk: "
+                + ", ".join(missing[:4]))
+    if not [x for x in (t.get("expected_tests") or []) if x]:
+        problems.append("no expected_tests (concrete test names)")
+    if not [x for x in (t.get("acceptance_criteria") or []) if x]:
+        problems.append("no acceptance_criteria (done-definition)")
+    if not [x for x in (t.get("claim_ids") or []) if x]:
+        problems.append("no claim_ids (provenance)")
+    return problems
 
 
 class ResearchDigest:
@@ -575,16 +715,55 @@ class ResearchDigest:
     def upgrade_ticket(claim: ResearchClaim) -> dict[str, Any]:
         """Build an actionable upgrade ticket from a claim.
 
-        ``suggested_files`` is a heuristic domain -> repo-area map, labeled
-        as suggestions (see ``suggested_files_basis``) — verify the owning
-        module before editing; it is not certainty.
+        Every ticket is concrete or it is not built at all (ValueError):
+        * ``suggested_files`` names real repo paths — split into
+          ``verified_files`` (exist on disk) and ``unverified_files``;
+          the ticket is rejected when nothing verifies.
+        * ``expected_tests`` are specific test names derived from the
+          claim, not vague descriptions.
+        * ``acceptance_criteria`` is a done-definition: each criterion
+          is checkable, including a failing-before/passing-after test,
+          a green module suite, and a 0-error ``error_scan``.
+
+        ``suggested_files_basis`` stays an honest heuristic label —
+        verify the owning module before editing; it is not certainty.
         """
+        text = (claim.claim or "").strip()
+        if not text:
+            raise ValueError("cannot build a ticket from an empty claim")
         domain = claim.domain if claim.domain in _SUGGESTED_FILES else "general"
-        short = claim.claim[:90].rstrip()
-        if len(claim.claim) > 90:
+        short = text[:90].rstrip()
+        if len(text) > 90:
             short += "..."
         hint = _DOMAIN_TEST_HINTS.get(domain, _DOMAIN_TEST_HINTS["general"])
-        return {
+        files = list(_SUGGESTED_FILES[domain])
+        verified, unverified = verify_ticket_files(files)
+        if not verified:
+            raise ValueError(
+                f"cannot build a concrete ticket: none of the suggested "
+                f"files for domain {domain!r} exist on disk "
+                f"({', '.join(files)})")
+        slug = _claim_test_slug(text)
+        expected_tests = [
+            f"test_claim_{slug}_asserts_behavior",
+            f"test_claim_{slug}_rejects_contradiction",
+            f"test_{domain}_{slug}_edge_cases",
+        ]
+        acceptance_criteria = [
+            "The owning module is confirmed from verified_files (read it; "
+            "do not assume the heuristic is right) before any edit.",
+            f"{expected_tests[0]} fails on the current tree and passes "
+            "after the change (TDD).",
+            f"{expected_tests[1]} passes — the contradicting case stays "
+            "rejected.",
+            f"{expected_tests[2]} covers the domain edge cases: {hint}.",
+            "The owning module's existing test suite is green before and "
+            "after the change.",
+            "error_scan on every touched file reports 0 errors.",
+            "The outcome is promoted back to the KG (research_digest "
+            "promote) with the new confidence.",
+        ]
+        ticket = {
             "title": f"[{domain}] {short}",
             "rationale": (
                 f"Research finding from query {claim.query!r} "
@@ -592,10 +771,14 @@ class ResearchDigest:
                 f"confidence {float(claim.confidence or 0.0):.0%}): "
                 f"{claim.claim}"),
             "domain": domain,
-            "suggested_files": list(_SUGGESTED_FILES[domain]),
+            "suggested_files": files,
+            "verified_files": verified,
+            "unverified_files": unverified,
             "suggested_files_basis": (
                 "heuristic: keyword-mapped domain -> repo area; verify the "
                 "owning module before editing — suggestions, not certainty"),
+            "expected_tests": expected_tests,
+            "acceptance_criteria": acceptance_criteria,
             "test_plan": [
                 f"Encode the claim as a test: assert the behavior '{short}'.",
                 "Add a negative test for the contradicting case (check the "
@@ -615,6 +798,12 @@ class ResearchDigest:
             "claim_ids": [claim.id],
             "confidence": round(float(claim.confidence or 0.0), 3),
         }
+        problems = gate_ticket(ticket)
+        if problems:
+            raise ValueError(
+                "built ticket failed the concreteness gate: "
+                + "; ".join(problems))
+        return ticket
 
 
 # ── the thin pipeline ──────────────────────────────────────────────────────
@@ -652,8 +841,12 @@ class ResearchPipeline:
         brief = ResearchDigest.operator_brief(report,
                                               min_confidence=min_confidence)
         note = ResearchDigest.technical_note(report)
-        tickets = [ResearchDigest.upgrade_ticket(c) for c in claims
-                   if float(c.confidence or 0.0) >= float(min_confidence)]
+        tickets: list[dict[str, Any]] = []
+        for c in claims:
+            ok, _reasons = promotion_gate(c, min_confidence=min_confidence)
+            if not ok:
+                continue  # weak claims stay in the digest, never promoted
+            tickets.append(ResearchDigest.upgrade_ticket(c))
 
         notified = False
         if notify and brief:

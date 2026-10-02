@@ -20,6 +20,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from .evolution import EvolutionAgent
 from .notifier import notify
+from .research_digest import gate_ticket
 
 _log = get_logger(__name__)
 
@@ -200,8 +201,12 @@ class UpgradePipeline:
     def propose_from_ticket(self, ticket: dict, *, source: str = "research") -> str:
         """Turn a digest-stream ticket into a queued proposal.
 
-        Returns the proposal id, or ``""`` when the ticket's confidence is
-        too low to bother the owner with (a warning is logged).
+        Returns the proposal id, or ``""`` when the ticket is too weak or
+        too vague to bother the owner with (a warning is logged in both
+        cases):
+        * confidence below ``_MIN_TICKET_CONFIDENCE`` — weak finding.
+        * ``gate_ticket`` finds blocking problems — vague ticket (no real
+          files, no concrete test names, no acceptance criteria).
         """
         ticket = ticket or {}
         confidence = float(ticket.get("confidence") or 0.0)
@@ -210,6 +215,12 @@ class UpgradePipeline:
                 "upgrade ticket rejected: confidence %.2f < %.2f (%s)",
                 confidence, _MIN_TICKET_CONFIDENCE,
                 ticket.get("title") or "<untitled>")
+            return ""
+        problems = gate_ticket(ticket)
+        if problems:
+            _log.warning(
+                "upgrade ticket rejected as vague (%s): %s",
+                "; ".join(problems), ticket.get("title") or "<untitled>")
             return ""
         queue = UpgradeQueue(self.context)
         raw_plan = ticket.get("patch_plan") or {}

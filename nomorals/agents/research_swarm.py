@@ -17,6 +17,10 @@ One question, N angles, run at once:
   opposed statements are flagged as conflicts instead of being silently
   averaged away; the synthesis (model-written when available,
   deterministic otherwise) states where sources disagree.
+* **cross-specialist dedup** — when two angles/specialists surface the
+  same claim, ``dedupe_findings`` merges them into one finding with the
+  union of sources (every URL kept), the union of domains/angles, and
+  the max confidence; affirmations are never merged with negations.
 * **supervision** — when the Reasoning Agent is reachable, the finished
   synthesis gets an adversarial critique that lands in the report.
 * **feeds** — the report can be filed into memory (``to_memory``), run as
@@ -29,6 +33,7 @@ failure and the rest of the report stands.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
@@ -149,6 +154,55 @@ def _content_words(text: str) -> set[str]:
     return {w for w in _CONTENT_WORD.findall((text or "").lower()) if w not in _STOP}
 
 
+def _stem(word: str) -> str:
+    """Crude normalizer so near-duplicate detection sees past inflections:
+    'sessions'/'session', 'reduces'/'reducing'. Only ever shortens to a
+    stem of length >= 4 — never invents a root."""
+    w = word
+    for suffix in ("ing", "ies", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
+            w = w[: -len(suffix)] + ("y" if suffix == "ies" else "")
+            break
+    return w
+
+
+def _stemmed_words(text: str) -> set[str]:
+    return {_stem(w) for w in _content_words(text)}
+
+
+def _same_claim(a: str, b: str) -> bool:
+    """Near-duplicate test for cross-specialist dedup: the same claim in
+    different words. Never true across an affirmation/negation boundary —
+    that is a conflict for ``_detect_conflicts``, not a duplicate."""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return False
+    if a.lower() == b.lower():
+        return True
+    if bool(_NEGATION.search(a)) != bool(_NEGATION.search(b)):
+        return False
+    wa, wb = _stemmed_words(a), _stemmed_words(b)
+    if not wa or not wb:
+        return False
+    inter = wa & wb
+    if len(inter) >= 4 and (inter == wa or inter == wb):
+        return True  # one claim's substance sits inside the other
+    if len(inter) >= 6:
+        return True  # six shared topic words is the same claim
+    union = wa | wb
+    return len(inter) / len(union) >= 0.45 if union else False
+
+
+def _union_tag(cur: str, add: str) -> str:
+    """Merge domain/angle tags without duplication: 'ml' + 'systems' ->
+    'ml+systems'."""
+    parts = [p for p in str(cur or "").split("+") if p]
+    for p in str(add or "").split("+"):
+        if p and p not in parts:
+            parts.append(p)
+    return "+".join(parts)
+
+
 @dataclass
 class SwarmFinding:
     """One concrete claim, backed by named sources."""
@@ -167,6 +221,16 @@ class SwarmFinding:
             "confidence": round(self.confidence, 2),
             "domain": self.domain,
         }
+
+    def evidence_urls(self) -> list[str]:
+        """The finding's cited URLs, in order — its evidence."""
+        urls: list[str] = []
+        for s in self.sources or []:
+            if isinstance(s, dict):
+                url = str(s.get("url") or "").strip()
+                if url and url not in urls:
+                    urls.append(url)
+        return urls
 
 
 @dataclass
@@ -470,6 +534,41 @@ class ResearchSwarm:
                 seen[key] = f
         return list(seen.values())[:10]
 
+    @staticmethod
+    def dedupe_findings(findings: list[SwarmFinding]) -> list[SwarmFinding]:
+        """Merge near-duplicate findings across angles/specialists.
+
+        Two specialists reporting the same finding become ONE finding: the
+        union of sources (deduped by URL — every source kept), the union
+        of domains/angles, and the max confidence. Strongest first so the
+        surviving record is the best-evidenced one. Affirmations are never
+        merged with their negations.
+        """
+        merged: list[SwarmFinding] = []
+        ordered = sorted(findings,
+                         key=lambda x: -float(getattr(x, "confidence", 0.0)
+                                              or 0.0))
+        for f in ordered:
+            placed = False
+            for m in merged:
+                if not _same_claim(f.claim, m.claim):
+                    continue
+                seen_urls = {s.get("url") for s in m.sources
+                             if isinstance(s, dict)}
+                for s in f.sources or []:
+                    if isinstance(s, dict) and s.get("url") not in seen_urls:
+                        m.sources.append(s)
+                        seen_urls.add(s.get("url"))
+                m.confidence = max(float(m.confidence or 0.0),
+                                   float(f.confidence or 0.0))
+                m.angle = _union_tag(m.angle, f.angle)
+                m.domain = _union_tag(m.domain, f.domain)
+                placed = True
+                break
+            if not placed:
+                merged.append(copy.copy(f))
+        return merged
+
     # ── conflict detection ─────────────────────────────────────────────────
     @staticmethod
     def _detect_conflicts(findings: list[SwarmFinding]) -> list[str]:
@@ -615,6 +714,9 @@ class ResearchSwarm:
                 seen.add(key)
                 unique_sources.append(s)
         report.sources = unique_sources[:40]
+        # cross-specialist dedup: one merged finding per distinct claim,
+        # every source kept — before conflicts and synthesis see them
+        report.findings = self.dedupe_findings(report.findings)
         report.conflicts = self._detect_conflicts(report.findings)
         report.synthesis = self._synthesize(query, report)
         report.critique = self._supervise(query, report)
