@@ -46,6 +46,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "briefing": ["br"],
     "train": ["tr"],
     "benchmark": ["bm"],
+    "deliver": ["dlv"],
 }
 
 
@@ -255,6 +256,28 @@ def _parser() -> argparse.ArgumentParser:
     zip_cmd.add_argument("action", nargs="?", default="list")
     zip_cmd.add_argument("path", nargs="?", default="")
     zip_cmd.add_argument("--dest", default="")
+
+    deliver_cmd = sub.add_parser("deliver", aliases=CLI_ALIASES["deliver"],
+                                 help="create-and-deliver flows: generate → zip → send")
+    dsub = deliver_cmd.add_subparsers(dest="deliver_action")
+    d_report = dsub.add_parser(
+        "report",
+        help="generate a styled report, zip it, optionally send it to a chat")
+    d_report.add_argument("topic", help="what the report is about")
+    d_report.add_argument(
+        "--section", action="append", default=[], metavar="TITLE::BODY",
+        help="one report section as 'Title::markdown body' (repeatable)")
+    d_report.add_argument("--title", default="",
+                          help="report title (defaults to the topic)")
+    d_report.add_argument(
+        "--to", default="", metavar="platform:chat",
+        help="send the zip to this chat, e.g. telegram:123456 "
+             "(omit to only build the report)")
+    d_report.add_argument("--platform", default="",
+                          help="platform when --to is a bare chat id")
+    d_report.add_argument("--no-pdf", action="store_true",
+                          help="skip the PDF artifact (HTML only)")
+    d_report.add_argument("--json", action="store_true", help="Output as JSON")
     
 
     # Agent-tool subcommands
@@ -1523,6 +1546,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_commands(args, context)
         if args.command == "zip":
             return _cmd_zip(args, context)
+        if args.command == "deliver":
+            return _cmd_deliver(args, context)
         if args.command == "status":
             return _cmd_status(args, context)
         if args.command == "mind":
@@ -6275,6 +6300,79 @@ def _cmd_commands(args: argparse.Namespace, context: Any) -> int:
         lines = [f"no commands match {flt!r} — `nm commands` for the catalog"]
     _emit(args, payload, "\n".join(lines))
     return 0
+
+
+def _cmd_deliver(args: argparse.Namespace, context: Any) -> int:
+    """`nm deliver report <topic>` — create-and-deliver: generate → zip → send."""
+    from .core.errors import ToolError
+    from .tools.deliver_report import deliver_report, generate_report
+
+    action = getattr(args, "deliver_action", "") or ""
+    if action != "report":
+        _emit(args, {"error": "unknown deliver action"},
+              "usage: nm deliver report <topic> --section 'Title::markdown body' "
+              "[--to platform:chat] [--title T] [--no-pdf]")
+        return 2
+    topic = (getattr(args, "topic", "") or "").strip()
+    if not topic:
+        _emit(args, {"error": "topic required"},
+              "usage: nm deliver report <topic> --section 'Title::markdown body' …")
+        return 2
+    sections: list[tuple[str, str]] = []
+    for raw in getattr(args, "section", []) or []:
+        sec_title, sep, sec_body = raw.partition("::")
+        if not sep or not sec_title.strip():
+            _emit(args, {"error": f"bad --section {raw!r}"},
+                  f"deliver: bad --section {raw!r} — "
+                  "use 'Title::markdown body'")
+            return 2
+        sections.append((sec_title.strip(), sec_body.strip()))
+    if not sections:
+        _emit(args, {"error": "sections required"},
+              "deliver: at least one --section 'Title::markdown body' "
+              "is required — e.g.\n"
+              "  nm deliver report \"Q3 markets\" "
+              "--section \"Overview::The quarter was **volatile**…\" "
+              "--section \"Risks::- rate hikes\\n- liquidity\"")
+        return 2
+    title = (getattr(args, "title", "") or "").strip()
+    include_pdf = not getattr(args, "no_pdf", False)
+    to = (getattr(args, "to", "") or "").strip()
+    platform = (getattr(args, "platform", "") or "").strip()
+    chat = to
+    if to and ":" in to:
+        platform, chat = to.split(":", 1)
+        platform, chat = platform.strip(), chat.strip()
+
+    try:
+        if to:
+            if not platform:
+                _emit(args, {"error": "platform required"},
+                      "deliver: --to needs platform:chat "
+                      "(e.g. --to telegram:123456) or --platform <name>")
+                return 2
+            out = deliver_report(
+                context, topic, sections, platform, chat, title=title,
+                include_pdf=include_pdf)
+            name = out["zip_path"].rsplit("/", 1)[-1]
+            _emit(args, out,
+                  f"📄 delivered {name} → {platform}:{chat} "
+                  f"({out['zip_bytes']} B, message {out['message_id']})")
+        else:
+            bundle = generate_report(context, topic, sections, title=title,
+                                     include_pdf=include_pdf)
+            out = bundle.to_dict()
+            files = ", ".join(
+                p.rsplit("/", 1)[-1] for p in
+                ([out["html_path"]] + ([out["pdf_path"]] if out["pdf_path"] else [])))
+            _emit(args, out,
+                  f"📄 report built: {files} → {out['zip_path']} "
+                  f"({out['zip_bytes']} B, {len(out['sections'])} sections)\n"
+                  f"add --to platform:chat to send it")
+        return 0
+    except ToolError as exc:
+        _emit(args, {"error": str(exc)}, f"deliver: {exc}")
+        return 1
 
 
 def _cmd_zip(args: argparse.Namespace, context: Any) -> int:
