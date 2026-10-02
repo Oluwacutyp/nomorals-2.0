@@ -190,6 +190,7 @@ class CheckpointStore:
         return cp
 
     def get(self, checkpoint_id: str) -> HumanCheckpoint:
+        self.expire_stale()
         row = self.db.query_one(
             "SELECT * FROM connector_checkpoints WHERE id = ?",
             (checkpoint_id,),
@@ -201,6 +202,7 @@ class CheckpointStore:
     def list_pending(
         self, connector_id: str | None = None
     ) -> list[HumanCheckpoint]:
+        self.expire_stale()
         if connector_id:
             rows = self.db.query(
                 "SELECT * FROM connector_checkpoints WHERE state = 'pending' "
