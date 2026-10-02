@@ -11,6 +11,9 @@ router writes on every decision:
   deadline hits;
 * ``last_plan_error`` — JSON ``{error, route, at}`` of the most recent
   plan failure, so ``nm mind`` can show it with an age.
+* ``last_reevaluation`` — JSON ``{action, reason, goal, at}`` of the most
+  recent mid-flight plan re-evaluation (wave F2), so ``nm mind`` shows
+  when the orchestrator revised, trimmed, or aborted a plan.
 
 Backed by the ``coremind_telemetry`` table (migration 65). Everything
 here is best-effort: a failed write is a debug log, never an exception,
@@ -28,10 +31,12 @@ from ..core.logging_setup import get_logger
 
 __all__ = [
     "KEY_LAST_PLAN_ERROR",
+    "KEY_LAST_REEVALUATION",
     "KEY_MODEL_CONSULTS",
     "KEY_MODEL_TIMEOUTS",
     "record_model_check",
     "record_plan_error",
+    "record_reevaluation",
     "record_route",
     "snapshot",
 ]
@@ -42,6 +47,7 @@ _log = get_logger(__name__)
 KEY_MODEL_CONSULTS = "model_consults"
 KEY_MODEL_TIMEOUTS = "model_timeouts"
 KEY_LAST_PLAN_ERROR = "last_plan_error"
+KEY_LAST_REEVALUATION = "last_reevaluation"
 
 #: Hard cap on the error text we persist (full tracebacks stay in logs).
 _MAX_ERROR_LEN = 500
@@ -108,6 +114,22 @@ def record_plan_error(db: Any, error: str, *, route: str = "") -> None:
         _log.debug("router telemetry plan-error write failed: %s", exc)
 
 
+def record_reevaluation(db: Any, action: str, reason: str, *,
+                        goal: str = "") -> None:
+    """Persist the latest mid-flight plan re-evaluation. Never raises."""
+    try:
+        payload = json.dumps(
+            {"action": (action or "continue").strip(),
+             "reason": (reason or "").strip()[:_MAX_ERROR_LEN],
+             "goal": (goal or "").strip()[:200],
+             "at": _now()},
+            ensure_ascii=False,
+        )
+        _set(db, KEY_LAST_REEVALUATION, payload)
+    except Exception as exc:  # noqa: BLE001 - telemetry must not break routing
+        _log.debug("router telemetry re-evaluation write failed: %s", exc)
+
+
 def snapshot(db: Any) -> dict[str, Any]:
     """Read the persisted telemetry. Never raises; empty on any failure."""
     out: dict[str, Any] = {
@@ -115,6 +137,7 @@ def snapshot(db: Any) -> dict[str, Any]:
         "model_consults": 0,
         "model_timeouts": 0,
         "last_plan_error": None,
+        "last_reevaluation": None,
     }
     if db is None:
         return out
@@ -131,6 +154,12 @@ def snapshot(db: Any) -> dict[str, Any]:
                 out["last_plan_error"] = json.loads(val)
             except Exception:  # noqa: BLE001
                 out["last_plan_error"] = {"error": val, "route": "", "at": 0}
+        elif key == KEY_LAST_REEVALUATION:
+            try:
+                out["last_reevaluation"] = json.loads(val)
+            except Exception:  # noqa: BLE001
+                out["last_reevaluation"] = {
+                    "action": val, "reason": "", "goal": "", "at": 0}
         elif key == KEY_MODEL_CONSULTS:
             out["model_consults"] = _to_int(val)
         elif key == KEY_MODEL_TIMEOUTS:

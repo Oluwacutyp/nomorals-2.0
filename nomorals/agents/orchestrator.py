@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -28,7 +29,8 @@ from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
 from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
-__all__ = ["MasterOrchestrator", "Plan", "PlanStep", "OrchestrationResult"]
+__all__ = ["MasterOrchestrator", "Plan", "PlanStep", "OrchestrationResult",
+           "Reevaluation"]
 
 _log = get_logger(__name__)
 
@@ -94,6 +96,38 @@ class Plan:
 
 
 @dataclass
+class Reevaluation:
+    """One mid-flight plan checkpoint decision.
+
+    ``action`` is one of:
+
+    * ``continue`` — the plan is still valid; nothing changed.
+    * ``trim``     — remaining step(s) were superseded (an identical goal
+                     already completed) and marked skipped.
+    * ``revise``   — a settled task's result carried an explicit
+                     ``revise_plan`` directive; the named remaining steps
+                     were dropped.
+    * ``abort``    — the plan's assumptions are invalid (failure cascade
+                     or an explicit stop signal); remaining work cancelled.
+    """
+
+    action: str
+    reason: str
+    affected: list[str] = field(default_factory=list)
+    at_task: str = ""
+    seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "affected": list(self.affected),
+            "at_task": self.at_task,
+            "seconds": round(self.seconds, 3),
+        }
+
+
+@dataclass
 class OrchestrationResult:
     goal: str
     plan: Plan
@@ -102,6 +136,8 @@ class OrchestrationResult:
     lessons: list[str] = field(default_factory=list)
     score: float = 0.0
     seconds: float = 0.0
+    #: every mid-flight checkpoint decision, in order (``continue`` included)
+    reevaluations: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -115,13 +151,21 @@ class OrchestrationResult:
             "lessons": self.lessons,
             "score": self.score,
             "seconds": round(self.seconds, 3),
+            "reevaluations": self.reevaluations,
             "plan": self.plan.to_dict(),
             "report": self.report.to_dict(),
         }
 
 
 class MasterOrchestrator:
-    """Plans, fans out, aggregates, and reflects."""
+    """Plans, fans out, aggregates, and reflects.
+
+    Mid-flight checkpoints: every ``checkpoint_every`` settled tasks (and
+    always on a task failure) the remaining plan is re-evaluated against
+    current state via :meth:`reevaluate`.  The plan can be revised, trimmed,
+    or aborted with a recorded reason — long runs never blindly continue a
+    plan the evidence has already invalidated.
+    """
 
     def __init__(
         self,
@@ -133,6 +177,7 @@ class MasterOrchestrator:
         max_steps: int = 12,
         planner_prompt: str = "",
         roles: RoleRegistry | None = None,
+        checkpoint_every: int = 1,
     ) -> None:
         self.context = context
         self.executor = executor or (context.executor if context is not None else None)
@@ -152,6 +197,12 @@ class MasterOrchestrator:
         self.history: list[OrchestrationResult] = []
         # Prompt 02: per-role telemetry — tasks, ok/failed, seconds, denials.
         self._role_stats: dict[str, dict[str, Any]] = {}
+        # Wave F2: mid-flight plan checkpoints.  Every checkpoint_every
+        # settled tasks (and always on failure) the remaining plan is
+        # re-evaluated; decisions land here (bounded) and on each run's
+        # result.reevaluations.
+        self.checkpoint_every = max(1, int(checkpoint_every))
+        self.reevaluation_log: deque[Reevaluation] = deque(maxlen=64)
 
     # ── planning ─────────────────────────────────────────────────────────────
     def plan(self, goal: str, *, context_hint: str = "") -> Plan:
@@ -306,11 +357,23 @@ class MasterOrchestrator:
         fail_fast: bool = False,
         reflect: bool = True,
     ) -> OrchestrationResult:
-        """Execute a goal end to end."""
+        """Execute a goal end to end.
+
+        Mid-flight checkpoints: the executor calls back after every
+        settled task; every ``checkpoint_every`` tasks (and always on a
+        failure) the remaining plan is re-evaluated and can be revised,
+        trimmed, or aborted with a recorded reason.  A checkpoint never
+        raises and never blocks the run.
+        """
         started = time.perf_counter()
         plan = plan or self.plan(goal)
         graph = plan.as_task_graph(name=goal[:48])
         self.supervisor.budget = budget
+        # Wave F2 checkpoint state (per run).
+        self._settled = 0
+        self._run_reevaluations: list[Reevaluation] = []
+        self._run_goal = goal
+        self._run_graph = graph
 
         handler = default_handler or self._default_handler
         role_handlers = handlers or {}
@@ -343,7 +406,8 @@ class MasterOrchestrator:
 
         if self.executor is None:
             raise RuntimeError("orchestrator has no executor")
-        report = self.executor.run(graph, fail_fast=fail_fast)
+        report = self.executor.run(
+            graph, fail_fast=fail_fast, on_task_done=self._checkpoint)
 
         # Give failed tasks one supervised retry before declaring the mission done.
         if report.failed and not fail_fast:
@@ -364,6 +428,7 @@ class MasterOrchestrator:
             lessons=lessons,
             score=score,
             seconds=time.perf_counter() - started,
+            reevaluations=[ev.to_dict() for ev in self._run_reevaluations],
         )
         self.history.append(result)
         if self.context is not None:
@@ -382,6 +447,205 @@ class MasterOrchestrator:
         report.results = graph.results()
         report.failures = graph.failures()
         return report
+
+    # ── mid-flight plan re-evaluation (wave F2) ─────────────────────────────
+    def _checkpoint(self, task: Task) -> None:
+        """Executor ``on_task_done`` hook: reassess the remaining plan.
+
+        Runs every ``checkpoint_every`` settled tasks, and always on a
+        task failure.  The decision is recorded on the run's result and
+        in the bounded :attr:`reevaluation_log`; non-``continue``
+        decisions are logged, emitted on the event bus, and persisted to
+        the router telemetry so ``nm mind`` can show them.  Never raises.
+        """
+        try:
+            self._settled += 1
+            graph = getattr(self, "_run_graph", None)
+            if graph is None:
+                return
+            failed = task.state is TaskState.FAILED
+            if not failed and self._settled % self.checkpoint_every:
+                return
+            evaluation = self.reevaluate(self._run_goal, graph, trigger=task)
+        except Exception as exc:  # noqa: BLE001 — a checkpoint must not kill the run
+            _log.warning("plan checkpoint failed: %s", exc)
+            return
+        self._run_reevaluations.append(evaluation)
+        self.reevaluation_log.append(evaluation)
+        if evaluation.action == "continue":
+            _log.debug("plan checkpoint @%s: %s",
+                       evaluation.at_task, evaluation.reason)
+            return
+        _log.info("plan %s @%s: %s (affected: %s)",
+                  evaluation.action, evaluation.at_task, evaluation.reason,
+                  ",".join(evaluation.affected) or "-")
+        self._emit_reevaluation(evaluation)
+
+    def reevaluate(self, goal: str, graph: TaskGraph, *,
+                   trigger: Task | None = None) -> Reevaluation:
+        """Reassess the remaining plan against current state.
+
+        Rules, in order of severity:
+
+        1. **abort** — failure cascade: at least 2 failures and at least
+           half of the settled steps failed.  The plan's assumptions look
+           invalid, so every non-terminal step is cancelled (the executor
+           sees the cancelled graph and exits promptly).
+        2. **revise** — a settled task's result carried an explicit
+           ``revise_plan`` directive
+           (``{"drop": [...step names...], "note": "..."}`` or
+           ``{"abort": "reason"}``); the named remaining steps are
+           dropped, or the run aborted.
+        3. **abort** — the reasoning layer's ``course_correct`` returned a
+           ``stop: ...`` pivot for the failed trigger task.
+        4. **trim** — a remaining step's goal is identical (normalized)
+           to an already-completed step's goal: it is superseded and
+           marked skipped.
+
+        Rules 2 and 4 can both apply in one pass; the returned action is
+        the more severe one (``revise`` over ``trim``).  Otherwise the
+        plan is still valid and ``continue`` is recorded with the
+        evidence.  Applies real graph mutations — never advisory-only.
+        """
+        started = time.perf_counter()
+        at = trigger.name if trigger is not None else ""
+        settled = [t for t in graph.tasks.values()
+                   if t.state in (TaskState.DONE, TaskState.FAILED)]
+        failed = [t for t in settled if t.state is TaskState.FAILED]
+        remaining = [t for t in graph.tasks.values() if not t.is_terminal]
+
+        def _finish(action: str, reason: str,
+                    affected: list[str]) -> Reevaluation:
+            return Reevaluation(
+                action=action, reason=reason, affected=affected, at_task=at,
+                seconds=time.perf_counter() - started)
+
+        # 1) failure cascade → abort
+        if len(failed) >= 2 and len(failed) / max(1, len(settled)) >= 0.5:
+            names = [t.name for t in remaining]
+            reason = (f"{len(failed)} of {len(settled)} settled steps failed "
+                      f"— the plan's assumptions look invalid")
+            cancelled = graph.cancel(reason)
+            return _finish(
+                "abort",
+                f"{reason}; cancelled {cancelled} remaining step(s)", names)
+
+        # 2) explicit handler directives → revise (or abort)
+        revised: list[str] = []
+        revised_note = ""
+        for task in settled:
+            directive = _revise_directive(getattr(task, "result", None))
+            if not directive:
+                continue
+            if directive.get("abort"):
+                why = str(directive["abort"])[:300] or "handler signalled abort"
+                names = [t.name for t in remaining]
+                graph.cancel(why)
+                return _finish(
+                    "abort",
+                    f"step {task.name!r} signalled abort: {why}", names)
+            drops = directive.get("drop") or []
+            if isinstance(drops, str):
+                drops = [drops]
+            note = str(directive.get("note") or "").strip()[:300]
+            for name in drops:
+                candidate = graph.get(str(name))
+                if candidate is not None and not candidate.is_terminal:
+                    candidate.state = TaskState.SKIPPED
+                    candidate.error = (
+                        f"plan revised mid-flight by {task.name!r}"
+                        + (f": {note}" if note else ""))
+                    candidate.finished_at = time.time()
+                    revised.append(candidate.name)
+            if revised:
+                revised_note = note
+
+        # 3) reasoning-layer stop signal → abort
+        if trigger is not None and trigger.state is TaskState.FAILED:
+            pivot = self._course_correct_pivot(trigger)
+            if pivot is not None:
+                names = [t.name for t in remaining]
+                graph.cancel(pivot)
+                return _finish(
+                    "abort",
+                    f"reasoning course-correct stop after {trigger.name!r} "
+                    f"failed: {pivot}", names)
+
+        # 4) superseded steps → trim
+        done_goals = {_norm_goal(t.payload.get("goal", ""))
+                      for t in settled if _step_succeeded(t)}
+        done_goals.discard("")
+        trimmed: list[str] = []
+        for task in remaining:
+            if task.state is not TaskState.PENDING:
+                continue
+            if _norm_goal(task.payload.get("goal", "")) in done_goals:
+                task.state = TaskState.SKIPPED
+                task.error = ("superseded: an identical goal already "
+                              "completed earlier in this run")
+                task.finished_at = time.time()
+                trimmed.append(task.name)
+
+        if revised:
+            return _finish(
+                "revise",
+                f"step(s) {', '.join(revised)} dropped mid-flight"
+                + (f": {revised_note}" if revised_note else ""),
+                revised)
+        if trimmed:
+            return _finish(
+                "trim",
+                f"{len(trimmed)} remaining step(s) superseded — an identical "
+                f"goal already completed", trimmed)
+        return _finish(
+            "continue",
+            f"plan still valid: {len(remaining)} step(s) remaining, "
+            f"{len(failed)} failed of {len(settled)} settled", [])
+
+    def _course_correct_pivot(self, task: Task) -> str | None:
+        """Ask the reasoning layer whether the approach itself is wrong.
+
+        Returns the ``stop: ...`` pivot text when ``course_correct``
+        says the current approach should stop, else None.  Never raises;
+        the deterministic signals work with no model at all.
+        """
+        try:
+            from .reasoning import ReasoningAgent
+
+            verdict = ReasoningAgent(self.context).course_correct(
+                task.error or task.name, attempts=max(1, task.attempts))
+        except Exception as exc:  # noqa: BLE001 — advisory, never fatal
+            _log.debug("course-correct consult failed: %s", exc)
+            return None
+        if not isinstance(verdict, dict) or not verdict.get("should_pivot"):
+            return None
+        pivot = str(verdict.get("pivot") or "").strip()
+        if pivot.lower().startswith("stop"):
+            return pivot[:300]
+        return None
+
+    def _emit_reevaluation(self, evaluation: Reevaluation) -> None:
+        """Make a non-``continue`` decision visible: event bus + telemetry.
+
+        Never raises — observability must not break the run.
+        """
+        if self.context is None:
+            return
+        try:
+            self.context.emit(
+                "plan.reevaluated", action=evaluation.action,
+                reason=evaluation.reason, affected=evaluation.affected,
+                at_task=evaluation.at_task, goal=self._run_goal)
+        except Exception:  # noqa: BLE001 - telemetry never breaks a run
+            pass
+        try:
+            from ..storage import router_telemetry
+
+            router_telemetry.record_reevaluation(
+                getattr(self.context, "db", None), evaluation.action,
+                evaluation.reason, goal=self._run_goal)
+        except Exception:  # noqa: BLE001 - telemetry never breaks a run
+            _log.debug("reevaluation telemetry write failed", exc_info=True)
 
     def _default_handler(self, task: Task) -> Any:
         """Delegate to the agent registered for this task's role.
@@ -525,6 +789,7 @@ class MasterOrchestrator:
             "supervisor": self.supervisor.snapshot(),
             "roles": roles,
             "tool_denials": sum(e["denials"] for e in self._role_stats.values()),
+            "reevaluations": _reevaluation_summary(self.reevaluation_log),
         }
 
 
@@ -539,6 +804,47 @@ def _result_denials(result: Any) -> int:
         value = result.get("denials", 0)
         return int(value) if isinstance(value, (int, float)) else 0
     return 0
+
+
+def _norm_goal(text: Any) -> str:
+    """Normalize a step goal for duplicate detection."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
+
+
+def _step_succeeded(task: Task) -> bool:
+    """A DONE task whose result carries no error evidence."""
+    if task.state is not TaskState.DONE:
+        return False
+    result = getattr(task, "result", None)
+    return not (isinstance(result, dict) and result.get("error"))
+
+
+def _revise_directive(result: Any) -> dict[str, Any] | None:
+    """Extract a handler's explicit mid-flight plan directive.
+
+    A task handler may return ``{"revise_plan": {"drop": [...],
+    "note": "..."}}`` to drop remaining steps, or
+    ``{"revise_plan": {"abort": "reason"}}`` to stop the run.  Anything
+    else (including non-dict results) is not a directive.
+    """
+    if isinstance(result, dict):
+        directive = result.get("revise_plan")
+        if isinstance(directive, dict):
+            return directive
+    return None
+
+
+def _reevaluation_summary(log: deque[Reevaluation]) -> dict[str, Any]:
+    """Aggregate the bounded re-evaluation log for stats()."""
+    entries = list(log)
+    last = entries[-1].to_dict() if entries else None
+    return {
+        "total": len(entries),
+        "aborts": sum(1 for e in entries if e.action == "abort"),
+        "revises": sum(1 for e in entries if e.action == "revise"),
+        "trims": sum(1 for e in entries if e.action == "trim"),
+        "last": last,
+    }
 
 
 def _stringify(value: Any) -> str:

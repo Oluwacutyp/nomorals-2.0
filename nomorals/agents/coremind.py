@@ -129,6 +129,42 @@ GAME_ALIASES: dict[str, str] = {
     "20q": "20q",
     "rock paper scissors": "rps",
     "rps": "rps",
+    "digit memory": "digits",
+    "digits": "digits",
+    # wild table
+    "poker": "poker",
+    "texas holdem": "poker",
+    "texas hold'em": "poker",
+    "tic tac toe": "ttt",
+    "tic-tac-toe": "ttt",
+    "ttt": "ttt",
+    "bulls and cows": "bulls",
+    "bulls": "bulls",
+    "craps": "craps",
+    "concentration": "memory",
+    "memory game": "memory",
+    "minesweeper": "mines",
+    "mines": "mines",
+    "wordle": "wordle",
+    # arcade
+    "2048": "2048",
+    "snake": "snake",
+    "connect 4": "connect4",
+    "connect4": "connect4",
+    "battleship": "battleship",
+    "sea battle": "battleship",
+    # casino
+    "blackjack": "blackjack",
+    "roulette": "roulette",
+    "slots": "slots",
+    "slot machine": "slots",
+    # inbox (wave F2): async, one message per turn
+    "gomoku": "gomoku",
+    "five in a row": "gomoku",
+    "reversi": "reversi",
+    "othello": "reversi",
+    "checkers": "checkers",
+    "draughts": "checkers",
 }
 
 #: names the /<name> chat commands can start (``arena`` is already taken
@@ -137,6 +173,12 @@ COMMAND_STARTABLE = [
     "wordchain", "hangman", "numberguess", "two_truths", "wyrr", "spy",
     "auction", "trivia", "mafia", "king", "story", "rpg", "shop", "duel",
     "case", "world", "escape", "political",
+    # wild / arcade / casino / inbox — every engine game is NL-startable
+    # in the owner's DM (wave F2)
+    "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
+    "2048", "snake", "connect4", "battleship",
+    "blackjack", "roulette", "slots",
+    "gomoku", "reversi", "checkers",
 ]
 
 
@@ -956,7 +998,7 @@ class CoreMind:
     def _question_for(self, intent: Intent) -> str:
         if intent.kind == "game":
             names = ", ".join(["hangman", "mafia", "wordchain", "rpg", "trivia", "spy"])
-            return (f"which one — {names}? (or /game list for all 19, "
+            return (f"which one — {names}? (or /game list for all 39, "
                     f"and I'll start it)")
         if intent.kind == "research":
             return "research what exactly? give me the topic and I'll fan out."
@@ -1231,21 +1273,19 @@ class CoreMind:
 
     def _dispatch_multi(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:
-        """Two-plus strong intents → the nervous system runs them as a plan."""
+        """Two-plus strong intents → the nervous system runs them as a plan.
+
+        Exactly one primary execution path: a single MasterOrchestrator
+        run.  The parallelism lives inside that run (the task graph), not
+        in a pileup of separate agents.
+        """
 
         def job() -> str:
-            from .orchestrator import Orchestrator
+            from .orchestrator import MasterOrchestrator
 
-            orch = Orchestrator(self.context)
+            orch = MasterOrchestrator(self.context)
             result = orch.run(intent.target, reflect=False)
-            steps = result.steps if hasattr(result, "steps") else []
-            lines = [f"orchestrator: {getattr(result, 'status', 'done')} "
-                     f"({len(steps)} steps)"]
-            for step in steps[-8:]:
-                name = getattr(step, "name", getattr(step, "kind", "?"))
-                ok = getattr(step, "ok", True)
-                lines.append(f"  [{'✓' if ok else '✗'}] {name}")
-            return "\n".join(lines)[:2500]
+            return _summarize_orchestration(result)
 
         return self._send_async(
             chat_key, job, job_id,
@@ -1365,6 +1405,33 @@ def run_goal(context: Any, goal: str, *, json_out: bool = False) -> str:
     return json.dumps({"intent": intent.to_dict(), "reply": reply}) if json_out else out
 
 
+def _summarize_orchestration(result: Any, *, max_steps: int = 8) -> str:
+    """Render one orchestrator run: the multi-intent route's single
+    primary execution path.
+
+    Reads the ``MasterOrchestrator`` result shape (``plan.steps``,
+    ``report.results``/``report.failures``, ``ok``) so per-step success
+    is grounded in the execution report, not assumed.
+    """
+    plan = getattr(result, "plan", None)
+    steps = list(getattr(plan, "steps", None) or [])
+    report = getattr(result, "report", None)
+    results = getattr(report, "results", None) or {}
+    failures = getattr(report, "failures", None) or {}
+    if getattr(result, "ok", False):
+        status = "done"
+    elif failures:
+        status = f"{len(failures)} failed"
+    else:
+        status = "done with issues"
+    lines = [f"orchestrator: {status} ({len(steps)} steps)"]
+    for step in steps[-max_steps:]:
+        name = getattr(step, "name", getattr(step, "kind", "?"))
+        ok = name in results and name not in failures
+        lines.append(f"  [{'✓' if ok else '✗'}] {name}")
+    return "\n".join(lines)[:2500]
+
+
 def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) -> str:
     """Execute a dispatch job's inner work on the calling thread."""
     if intent.kind == "mission":
@@ -1420,17 +1487,11 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
         mind._job_done(job_id, True)
         return f"💾 saved {result.get('title') or intent.target[:60]} at {result.get('path')}"
     if intent.kind == "multi":
-        from .orchestrator import Orchestrator
+        from .orchestrator import MasterOrchestrator
 
-        result = Orchestrator(mind.context).run(intent.target, reflect=False)
-        mind._job_done(job_id, True)
-        steps = getattr(result, "steps", []) or []
-        lines = [f"orchestrator: {getattr(result, 'status', 'done')} ({len(steps)} steps)"]
-        for step in steps[-8:]:
-            name = getattr(step, "name", getattr(step, "kind", "?"))
-            ok = getattr(step, "ok", True)
-            lines.append(f"  [{'✓' if ok else '✗'}] {name}")
-        return "\n".join(lines)[:2500]
+        result = MasterOrchestrator(mind.context).run(intent.target, reflect=False)
+        mind._job_done(job_id, result.ok)
+        return _summarize_orchestration(result)
     if intent.kind == "status":
         mind._job_done(job_id, True)
         return mind.status()

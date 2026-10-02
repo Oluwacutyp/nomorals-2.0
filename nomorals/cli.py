@@ -4606,6 +4606,7 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
     telemetry = telemetry_snapshot(getattr(context, "db", None))
     route_counts = telemetry.get("routes") or {}
     last_plan_error = telemetry.get("last_plan_error") or {}
+    last_reeval = telemetry.get("last_reevaluation") or {}
 
     payload = {
         "command": "mind",
@@ -4621,6 +4622,7 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
             "model_timeouts": telemetry.get("model_timeouts", 0),
         },
         "last_plan_error": last_plan_error or None,
+        "last_reevaluation": last_reeval or None,
     }
 
     if getattr(args, "json", False):
@@ -4663,6 +4665,11 @@ def _cmd_mind(args: argparse.Namespace, context: Any) -> int:
               f"{last_plan_error.get('error')}")
     else:
         print("last plan_error: none recorded")
+    if last_reeval:
+        print(f"last re-evaluation ({_age(last_reeval.get('at', 0))}): "
+              f"{last_reeval.get('action')} — {last_reeval.get('reason')}")
+    else:
+        print("last re-evaluation: none recorded")
     return 0
 
 
