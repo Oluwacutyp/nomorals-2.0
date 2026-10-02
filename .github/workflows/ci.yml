@@ -104,6 +104,8 @@ jobs:
       # can be read without Actions log access. Remove once green.
       - name: Report failures to commit comment
         if: failure()
+        permissions:
+          contents: write
         uses: actions/github-script@v7
         with:
           script: |
