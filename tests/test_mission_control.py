@@ -149,7 +149,7 @@ class ControlVerbTests(unittest.TestCase):
         m = make_mission(self.store)
         self.store.set_status(m.id, MissionStatus.PAUSED)
         with patch("nomorals.missions.MissionRunner") as mr, \
-                patch("nomorals.agents.partner_runtime.threading.Thread",
+                patch("nomorals.agents.partner.runtime.threading.Thread",
                       _SyncThread):
             out = self.call(f"resume {m.id}")
         self.assertIn("background", out)
@@ -193,7 +193,7 @@ class ControlVerbTests(unittest.TestCase):
         m = make_mission(self.store, name="build widget")
         self.store.set_status(m.id, MissionStatus.FAILED)
         with patch("nomorals.missions.MissionRunner") as mr, \
-                patch("nomorals.agents.partner_runtime.threading.Thread",
+                patch("nomorals.agents.partner.runtime.threading.Thread",
                       _SyncThread):
             out = self.call(f"retry {m.id}")
         self.assertIn("retry", out)

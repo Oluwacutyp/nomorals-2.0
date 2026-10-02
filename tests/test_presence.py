@@ -218,7 +218,7 @@ class BrainPresenceTest(unittest.TestCase):
     def test_busy_decision_defers_generation(self) -> None:
         brain, router = _make_brain(self.tmp.name)
         with mock.patch(
-            "nomorals.agents.partner_runtime.decide_presence",
+            "nomorals.agents.partner.brain.decide_presence",
             return_value=Presence(reply=True, delay_seconds=420.0, reason="busy / distracted"),
         ):
             outcome = brain.handle_message(self._message("are we still on for dinner?"))
@@ -234,7 +234,7 @@ class BrainPresenceTest(unittest.TestCase):
     def test_read_and_left_sends_nothing_and_calls_no_model(self) -> None:
         brain, router = _make_brain(self.tmp.name)
         with mock.patch(
-            "nomorals.agents.partner_runtime.decide_presence",
+            "nomorals.agents.partner.brain.decide_presence",
             return_value=Presence(reply=False, reason="read, left — low stakes"),
         ):
             outcome = brain.handle_message(self._message("k"))
@@ -247,7 +247,7 @@ class BrainPresenceTest(unittest.TestCase):
         # Pre-seed the mood so a fight signal is pending in the text:
         # deliver_reply must NOT re-detect it (no second escalation).
         with mock.patch(
-            "nomorals.agents.partner_runtime.decide_presence",
+            "nomorals.agents.partner.brain.decide_presence",
             return_value=Presence(reply=True, delay_seconds=1.0, reason="busy / distracted"),
         ):
             brain.handle_message(self._message("i'm so angry, you never listen"))
@@ -340,7 +340,7 @@ class RuntimePresenceE2E(unittest.TestCase):
         self.assertTrue(self.adapter.wait_started())
 
         with mock.patch(
-            "nomorals.agents.partner_runtime.decide_presence",
+            "nomorals.agents.partner.brain.decide_presence",
             return_value=Presence(reply=True, delay_seconds=0.4, reason="busy / distracted"),
         ):
             self.runtime.on_message(ChatMessage(chat=self.chat, incoming=True,

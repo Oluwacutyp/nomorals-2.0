@@ -57,6 +57,10 @@ LAYERS: dict[str, int] = {
     # builders/ is a package (templates, run/serve/smoke, install, export):
     # the whole subtree sits at L7 like the other entry-point organs.
     "builders": 7,
+    # cmdline/ is the ``nm`` CLI implementation package (Wave H3 split of
+    # cli.py): an entry point like cli itself, so L7 — it may import
+    # anything, and nothing in the layer stack may import it.
+    "cmdline": 7,
 }
 
 #: Modules that sit outside the layer stack and may be imported by anything.
@@ -105,7 +109,7 @@ MODULE_PINS: dict[str, int] = {
 #: a foundation half (L4) and an agent-composition half (L5).
 #: Added 2026-10-01 during the layering-map completion.
 KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
-    ("nomorals.agents.partner_runtime", "nomorals.builders"),
+    ("nomorals.agents.partner.runtime_media", "nomorals.builders"),
     ("nomorals.tools.agents", "nomorals.agents.coding"),
     ("nomorals.tools.code_executor", "nomorals.agents.coding"),
     ("nomorals.tools.edit_loop", "nomorals.agents.coding"),

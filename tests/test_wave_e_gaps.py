@@ -702,9 +702,11 @@ class ResearchFeatureFlagTest(unittest.TestCase):
     def test_boot_block_uses_feature_flag_not_settings(self):
         import inspect
 
-        from nomorals.agents import partner_runtime
+        # Wave H3: PartnerRuntime.start() lives in the partner subpackage now;
+        # the facade (nomorals.agents.partner_runtime) only re-exports it.
+        from nomorals.agents.partner import runtime as partner_runtime_mod
 
-        src = inspect.getsource(partner_runtime)
+        src = inspect.getsource(partner_runtime_mod)
         self.assertNotIn('getattr(self.settings, "research", None)', src)
         self.assertIn('feature_enabled', src)
 

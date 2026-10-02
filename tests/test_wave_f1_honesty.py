@@ -428,7 +428,8 @@ def _group_chat():
 class SendHonestyTest(unittest.TestCase):
     def test_send_long_returns_zero_and_does_not_raise_on_failure(self):
         rt = _runtime(_FailGateway())
-        with self.assertLogs("nomorals.agents.partner_runtime",
+        # Wave H3: _send_long lives in nomorals.agents.partner.runtime now.
+        with self.assertLogs("nomorals.agents.partner.runtime",
                              level="WARNING") as logs:
             sent = rt._send_long("telegram", _group_chat(), "hello " * 1000)
         self.assertEqual(sent, 0)
