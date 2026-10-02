@@ -59,6 +59,9 @@ LAYERS: dict[str, int] = {
     # for ingest/search and documents/ for parsing. Reaches only downward.
     "wisdom": 5,
     "integrations": 5,
+    # connectors: service adapters (GitHub first; finance/cards/proxies/
+    # commerce queued). Peers of integrations; own their auth + vault creds.
+    "connectors": 5,
     "workspace": 5,
     # missions sits *with* agents, not above: the dependency is genuinely
     # bidirectional (the runner needs agents; Devon needs the runner), so a
