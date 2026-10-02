@@ -49,6 +49,10 @@ LAYERS: dict[str, int] = {
     # each other; the test still forbids either from reaching above L5.
     "missions": 5,
     "tui": 6,
+    # os is the control plane (may import L1-L6; imported by L7 entry points
+    # cli/api; LOWER layers must NEVER import os — integration is via
+    # callbacks/events, never upward imports).
+    "os": 6,
     "api": 7,
     # builders/ is a package (templates, run/serve/smoke, install, export):
     # the whole subtree sits at L7 like the other entry-point organs.
