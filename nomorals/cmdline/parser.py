@@ -79,6 +79,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "zip": ["z"],
     "deliver": ["dlv"],
     "doc": ["docs"],
+    "wisdom": ["wis"],
     "browse": ["brw"],
     "repo": ["rp"],
 }
@@ -1486,6 +1487,28 @@ def _parser() -> argparse.ArgumentParser:
     repo.add_argument("--yes", action="store_true",
                       help="patch apply: write files (default is dry-run)")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
+
+    wisdom = sub.add_parser("wisdom", aliases=CLI_ALIASES["wisdom"],
+        help="wisdom keeper: corpus, history, practice sessions",
+        description=("nm wisdom status [--json]\n"
+                     "nm wisdom ask <query> [--limit N] [--json]\n"
+                     "nm wisdom ingest <slug> | --all\n"
+                     "nm wisdom search <query> [--limit N] [--json]\n"
+                     "nm wisdom timeline [--tradition T] [--from Y] [--to Y] [--json]\n"
+                     "nm wisdom compare <topic> [--json]\n"
+                     "nm wisdom practice list [--json]\n"
+                     "nm wisdom practice <session-id> [--rounds N]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    wisdom.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    wisdom.add_argument("--limit", type=int, default=0, help="max results")
+    wisdom.add_argument("--rounds", type=int, default=0, help="practice: repeat")
+    wisdom.add_argument("--tradition", default="", help="timeline: filter tradition")
+    wisdom.add_argument("--start", type=int, default=-3000,
+                        help="timeline: start year")
+    wisdom.add_argument("--end", type=int, default=2100,
+                        help="timeline: end year")
+    wisdom.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
 

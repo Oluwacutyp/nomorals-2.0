@@ -54,6 +54,10 @@ LAYERS: dict[str, int] = {
     "partner": 5,
     "games": 5,
     "books": 5,
+    # wisdom/ is the WisdomKeeper esoteric-study organ (corpus/history/
+    # practice): an L5 organ beside books/agents, wrapping books.Library
+    # for ingest/search and documents/ for parsing. Reaches only downward.
+    "wisdom": 5,
     "integrations": 5,
     "workspace": 5,
     # missions sits *with* agents, not above: the dependency is genuinely
