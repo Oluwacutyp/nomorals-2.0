@@ -29,6 +29,12 @@ Trigger rules (wave 87 spec — implemented structurally, not by politeness):
   boring", "football game", "I played a game last night" → conversation.
 * Ambiguous owner intent → one short clarification question, persisted so
   it survives a restart — never a forced launch.
+* Fast path (wave F1 stream 2): trivial chat — greetings, time/date,
+  simple chitchat, thanks, farewells, bare acknowledgements — gets a
+  deterministic reply from ``fast_path()`` with ZERO model calls and
+  zero heavy-organ activations.  The patterns are whole-message
+  anchored, so explicit invocations always fall through to the organs;
+  ambiguity fails OPEN toward the heavy path, never toward cheapness.
 * Every decision carries a one-line ``why`` (provenance) so routing is
   inspectable: ``/mind status``, ``/mind <goal>``, ``nm goal``.
 
@@ -44,11 +50,12 @@ import logging
 import re
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.ids import new_short_id
 from ..storage import router_telemetry
 
 _log = logging.getLogger("nomorals.coremind")
@@ -142,6 +149,104 @@ _ALIAS_RE = {
     for alias in _ALIAS_SORTED
 }
 
+# ── fast-path responder (wave F1 stream 2): trivial chat, zero model ─────────
+# Simple chat NEVER wakes the router model, the swarms, research loops, or
+# any heavy organ: these whole-message-anchored patterns match ONLY the
+# entire message, so an explicit organ invocation ("research what time the
+# market opens", "build me a clock app", "hi, download the report") can
+# never fast-path — it falls through to understand() → the heavy path.
+# Anything ambiguous returns None and also falls through: fail-open toward
+# capability, never toward cheapness.  The one deliberate exception is
+# "how's it going" / "how's things": _RE_STATUS claims those as a system
+# status intent, so they stay OUT of the chitchat pattern — the fast path
+# must never preempt an existing organ intent.
+_RE_FP_GREET = re.compile(
+    r"(hi+|hello+|hey+|yo+|hiya+|howdy|greetings?|"
+    r"good\s*(morning|afternoon|evening|day)|sup|what'?s\s+up)"
+    r"\s*[!.,\u2026]*", re.I)
+_RE_FP_TIME = re.compile(
+    r"(what('?s| is) the time|what time is it(\s+now)?|current time|"
+    r"tell me the time|the time(\s+please)?|got the time)"
+    r"\s*\??\s*[!.,]*", re.I)
+_RE_FP_DATE = re.compile(
+    r"(what('?s| is) (today'?s )?date|what('?s| is) the date(\s+today)?|"
+    r"what day is it|which day is it|today'?s date|current date)"
+    r"\s*\??\s*[!.,]*", re.I)
+_RE_FP_HOWRU = re.compile(
+    r"(how (are|r) (you|u|ya)(\s+doing)?|how'?re (you|u|ya)|"
+    r"how do you feel)\s*\??\s*[!.,]*", re.I)
+_RE_FP_THANKS = re.compile(
+    r"(thanks?|thank\s+you(\s+(very|so)\s+much)?|thx|ty(vm)?|"
+    r"much\s+appreciated|appreciated)\s*[!.,]*", re.I)
+_RE_FP_BYE = re.compile(
+    r"(bye+|good\s*bye|good\s*night|see\s+(you|ya|u)"
+    r"(\s+(later|tomorrow|soon))?|later[sz]?|ttyl|cya|farewell)"
+    r"\s*[!.,]*", re.I)
+_RE_FP_ACK = re.compile(
+    r"(ok(ay)?|k|cool|nice|sweet|great|awesome|perfect|sure|yep|yeah|"
+    r"lol|lmao|haha+|roger|got\s+it|understood|alright|all\s+right|"
+    r"\U0001f44d|\U0001f64f|\U0001f602|\u2764\ufe0f?|\u2665)"
+    r"\s*[!.,\u2026]*", re.I)
+
+_FP_GREETINGS = ("hey!", "hey — what's on your mind?", "hi there.")
+_FP_HOWRU = ("doing great — you?", "running smooth. what's up?",
+             "all good here — what are we doing?")
+_FP_THANKS = ("anytime.", "you got it.", "of course.")
+_FP_BYE = ("later!", "see you soon.", "bye for now.")
+_FP_ACK = ("\U0001f44d", "got it.", "cool.")
+
+_fp_lock = threading.Lock()
+_fp_idx = 0
+
+
+def _rotate(options: tuple[str, ...]) -> str:
+    """Deterministic variety: cycle the canned replies, thread-safe."""
+    global _fp_idx
+    with _fp_lock:
+        _fp_idx += 1
+        return options[_fp_idx % len(options)]
+
+
+def _fp_time() -> str:
+    now = datetime.now().astimezone()
+    hm = now.strftime("%I:%M %p").lstrip("0")
+    tz = now.strftime("%Z") or "local time"
+    return f"it's {hm} {tz}."
+
+
+def _fp_date() -> str:
+    now = datetime.now().astimezone()
+    return f"today is {now.strftime('%A, %B')} {now.day}, {now.year}."
+
+
+def fast_path(text: str) -> tuple[str, str] | None:
+    """Zero-model fast-path reply for trivial chat.
+
+    Returns ``(reply, why)`` when the WHOLE message is a greeting, a
+    time/date question, simple chitchat, thanks, a farewell, or a bare
+    acknowledgement — no router model, no swarms, no research loops, no
+    heavy organs, no brain call.  Returns ``None`` for everything else:
+    the caller falls through to the normal heavy path (fail-open toward
+    capability).
+    """
+    t = text.strip()
+    if _RE_FP_GREET.fullmatch(t):
+        return _rotate(_FP_GREETINGS), "fast-path: greeting (no model)"
+    if _RE_FP_TIME.fullmatch(t):
+        return _fp_time(), "fast-path: time (no model)"
+    if _RE_FP_DATE.fullmatch(t):
+        return _fp_date(), "fast-path: date (no model)"
+    if _RE_FP_HOWRU.fullmatch(t):
+        return _rotate(_FP_HOWRU), "fast-path: chitchat (no model)"
+    if _RE_FP_THANKS.fullmatch(t):
+        return _rotate(_FP_THANKS), "fast-path: thanks (no model)"
+    if _RE_FP_BYE.fullmatch(t):
+        return _rotate(_FP_BYE), "fast-path: farewell (no model)"
+    if _RE_FP_ACK.fullmatch(t):
+        return _rotate(_FP_ACK), "fast-path: acknowledgement (no model)"
+    return None
+
+
 # ── intent verbs (word-boundary, case-insensitive) ──────────────────────────
 
 _RE_PLAY = re.compile(r"\b(let'?s|play|start|begin|open|kick off|fire up)\b", re.I)
@@ -201,7 +306,7 @@ def _clean_topic(text: str, verb: re.Pattern) -> str:
 class Intent:
     """One Core Mind decision.  ``why`` is the inspectable provenance."""
 
-    kind: str                      # chat|research|build|browse|download|mission|game|status|multi
+    kind: str                      # chat|research|build|browse|download|mission|game|status|multi|fastchat
     confidence: float              # 0..1
     target: str = ""               # topic / url / goal payload
     action: str = ""               # game: start|resume|board|economy|ask
@@ -530,7 +635,7 @@ class CoreMind:
 
     # ── job registry (inspectable progress + recovery) ──────────────────────
     def _new_job(self, intent: Intent) -> str:
-        job_id = uuid.uuid4().hex[:8]
+        job_id = new_short_id(length=8)
         self._jobs.append({"id": job_id, "kind": intent.kind,
                            "target": intent.target[:200], "route": intent.route,
                            "status": "active", "created": time.time(),
@@ -769,6 +874,22 @@ class CoreMind:
             self._clear_pending(chat_key)
 
         live_game = self._live_game(chat_key)
+        # wave F1 stream 2: the fast path sits ABOVE the heavy path.
+        # Trivial chat (greetings, time/date, chitchat, thanks, farewells,
+        # bare acks) gets a deterministic reply right here — no router
+        # model call, no swarms, no research loops, no heavy organs, and
+        # no brain call either.  The patterns are whole-message anchored,
+        # so explicit organ invocations and multi-intent inputs can never
+        # match; anything ambiguous returns None and falls through below
+        # (fail-open toward capability, never toward cheapness).
+        fast = fast_path(text)
+        if fast is not None:
+            reply, why = fast
+            self._record_route(Intent("fastchat", 1.0, route="fastchat",
+                                     why=why))
+            _log.info("core mind fast path in %s: %s", chat_key, why)
+            return reply
+
         intent = self.decide(text, live_game=live_game, allow_model=True)
         if intent.kind == "chat":
             return None

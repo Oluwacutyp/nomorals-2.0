@@ -18,6 +18,7 @@ import unittest
 
 from nomorals.agents.coremind import (
     CoreMind,
+    fast_path,
     CODING_JOB_TIMEOUT_S,
     MODEL_CHECK_TIMEOUT_S,
 )
@@ -119,11 +120,17 @@ class FastPathTest(unittest.TestCase):
         self.assertEqual(mind._router_calls, 0)
 
     def test_chat_falls_through_fast(self):
-        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        # wave F1 stream 2: trivial chat no longer falls through to the
+        # brain — the fast path answers it deterministically, with zero
+        # model calls and zero heavy-path activations.
+        router = SpyRouter()
+        mind = CoreMind(FakeContext(router=router), runtime=None)
         t0 = time.perf_counter()
         reply = mind.handle("hello", message=owner_dm(), chat_key="x:console")
         dt = time.perf_counter() - t0
-        self.assertIsNone(reply)  # chat -> normal conversation flow
+        self.assertIsNotNone(reply)  # fast path answers trivial chat
+        self.assertEqual(router.calls, 0)
+        self.assertEqual(mind._router_calls, 0)
         self.assertLess(dt, 1.0)
 
 
@@ -247,6 +254,207 @@ class DevonPlanErrorTest(unittest.TestCase):
         if result.planned_by == "heuristic":
             self.assertTrue(result.plan_error,
                             "silent heuristic success is forbidden")
+
+
+# ── wave F1 stream 2: the zero-model fast path ─────────────────────────────
+
+TRIVIAL = [
+    "hello", "hi", "hey", "yo", "good morning", "good evening", "sup",
+    "what's up", "hello!", "hi",
+    "what time is it", "what's the time", "current time", "tell me the time",
+    "what time is it?", "what day is it", "today's date", "what's the date",
+    "current date", "how are you", "how're you", "how do you feel",
+    "thanks", "thank you", "thx", "bye", "good night", "see you later",
+    "ok", "cool", "lol", "\U0001f44d",
+]
+
+# Ambiguous or organ-flavored: must NEVER fast-path (fail-open toward
+# capability — these fall through to understand()/the brain).
+MUST_FALL_THROUGH = [
+    "what time is the meeting tomorrow",   # time words, but a real question
+    "hello, research volcanoes",           # greeting + organ invocation
+    "research what time the market opens", # organ verb wins over time words
+    "build me a clock app",                # organ verb wins
+    "hi, download the report",             # greeting + download verb
+    "what's the weather like",
+    "game",                                # the word alone never launches
+    "this game is boring",
+    "how's it going",                      # _RE_STATUS owns this (status organ)
+    "how's things",
+    "hello there",                         # not the whole message
+]
+
+
+def _group_msg():
+    chat = types.SimpleNamespace(key="group:123", kind="group")
+    return types.SimpleNamespace(chat=chat)
+
+
+class FastPathResponderTest(unittest.TestCase):
+    """Trivial chat gets a deterministic reply: zero model calls, zero
+    heavy-path activations (no router, no decide, no swarms, no organs)."""
+
+    def _mind(self, router=None):
+        mind = CoreMind(FakeContext(router=router or SpyRouter()), runtime=None)
+        def _boom(*a, **k):
+            raise AssertionError("fast path must not reach decide()")
+        mind.decide = _boom  # type: ignore[method-assign]
+        return mind
+
+    def test_trivial_inputs_answered_with_zero_heavy_activations(self):
+        router = SpyRouter()
+        mind = self._mind(router)
+        for text in TRIVIAL:
+            t0 = time.perf_counter()
+            reply = mind.handle(text, message=owner_dm(), chat_key="x:console")
+            dt = time.perf_counter() - t0
+            self.assertIsNotNone(reply, f"{text!r} should fast-path")
+            self.assertTrue(str(reply).strip(), f"{text!r} reply is empty")
+            self.assertLess(dt, 1.0, f"{text!r} took {dt:.2f}s")
+        self.assertEqual(router.calls, 0,
+                         "fast path must never call the router model")
+        self.assertEqual(mind._router_calls, 0)
+
+    def test_time_reply_is_real_clock_time(self):
+        mind = self._mind()
+        reply = mind.handle("what time is it", message=owner_dm(),
+                            chat_key="x:console")
+        self.assertRegex(str(reply), r"^it's \d{1,2}:\d{2} [AP]M \S+\.$")
+
+    def test_date_reply_is_real_calendar_date(self):
+        mind = self._mind()
+        reply = mind.handle("what day is it", message=owner_dm(),
+                            chat_key="x:console")
+        self.assertRegex(str(reply),
+                         r"^today is \w+, \w+ \d{1,2}, \d{4}\.$")
+
+    def test_fast_path_pure_function_never_swallows_ambiguity(self):
+        for text in TRIVIAL:
+            got = fast_path(text)
+            self.assertIsNotNone(got, f"fast_path missed {text!r}")
+            self.assertEqual(len(got), 2)  # (reply, why)
+        for text in MUST_FALL_THROUGH:
+            self.assertIsNone(fast_path(text),
+                              f"fast_path swallowed {text!r}")
+
+    def test_fast_path_structural_gate_intact(self):
+        # not the owner's DM → no fast-path reply, no launch path
+        mind = self._mind()
+        self.assertIsNone(mind.handle("hello", message=_group_msg(),
+                                      chat_key="group:123"))
+
+    def test_fast_path_records_route_telemetry(self):
+        import sqlite3
+
+        class SqliteDB:
+            def __init__(self):
+                self.con = sqlite3.connect(":memory:")
+                self.con.execute(
+                    "CREATE TABLE coremind_telemetry "
+                    "(key TEXT PRIMARY KEY, value TEXT, updated_at REAL)")
+
+            def execute(self, sql, params=()):
+                return self.con.execute(sql, params)
+
+        class Ctx(FakeContext):
+            def __init__(self):
+                super().__init__()
+                self.db = SqliteDB()
+
+        mind = CoreMind(Ctx(), runtime=None)
+        mind.handle("hello", message=owner_dm(), chat_key="x:console")
+        row = mind.context.db.con.execute(
+            "SELECT value FROM coremind_telemetry WHERE key='route:fastchat'"
+        ).fetchone()
+        self.assertIsNotNone(row, "fastchat route must be counted")
+        self.assertEqual(row[0], "1")
+
+
+class ExplicitDemandTest(unittest.TestCase):
+    """Every organ stays reachable by direct invocation — the fast path
+    must never eat an explicit demand."""
+
+    def test_decide_routes_every_organ(self):
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        cases = {
+            "research fusion reactors": ("research", "research_swarm"),
+            "build me a todo app": ("build", "coding"),
+            "open https://example.com": ("browse", "browser"),
+            "download the file at https://example.com/x.pdf": ("download", "media"),
+            "mission: water the plants": ("mission", "directives"),
+            "let's play hangman": ("game", "games"),
+            "status": ("status", "mind"),
+            "research fusion and build a dashboard": ("multi", "orchestrator"),
+        }
+        for text, (kind, route) in cases.items():
+            intent = mind.decide(text)
+            self.assertEqual(intent.kind, kind, text)
+            self.assertEqual(intent.route, route, text)
+
+    def test_handle_dispatches_every_organ(self):
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        cases = {
+            "research fusion reactors": "on it — researching",
+            "build me a todo app": "building —",
+            "open https://example.com": "opening https://example.com",
+            "download the file at https://example.com/x.pdf": "downloading",
+            "mission: water the plants": "mission queued",
+            "let's play hangman": "games live in the chat",
+            "status": "core mind",
+            "research fusion and build a dashboard": "multi-part goal",
+        }
+        for text, marker in cases.items():
+            reply = mind.handle(text, message=owner_dm(), chat_key="x:console")
+            self.assertIsNotNone(reply, f"{text!r} produced no reply")
+            self.assertIn(marker, str(reply), text)
+
+    def test_explicit_demand_needs_no_model(self):
+        # high-confidence deterministic intents skip the router model
+        router = SpyRouter()
+        mind = CoreMind(FakeContext(router=router), runtime=None)
+        reply = mind.handle("research fusion reactors", message=owner_dm(),
+                            chat_key="x:console")
+        self.assertIn("researching", str(reply))
+        self.assertEqual(router.calls, 0)
+
+
+class AmbiguousFallthroughTest(unittest.TestCase):
+    """Ambiguous input fails OPEN toward the heavy path: handle() returns
+    None so the message reaches the normal conversation flow (the brain),
+    and decide() still sees the organ signals."""
+
+    def test_ambiguous_returns_none_from_handle(self):
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        for text in ["what time is the meeting tomorrow",
+                     "hi, download the report",
+                     "what's the weather like",
+                     "game",
+                     "this game is boring",
+                     "hello there"]:
+            reply = mind.handle(text, message=owner_dm(), chat_key="x:console")
+            self.assertIsNone(reply, f"{text!r} should fall through")
+
+    def test_organ_verbs_beat_time_words(self):
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        intent = mind.decide("research what time the market opens")
+        self.assertEqual(intent.kind, "research")
+        self.assertEqual(intent.route, "research_swarm")
+        intent = mind.decide("build me a clock app")
+        self.assertEqual(intent.kind, "build")
+        self.assertEqual(intent.route, "coding")
+
+    def test_greeting_plus_intent_routes_the_intent(self):
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        intent = mind.decide("hello, research volcanoes")
+        self.assertEqual(intent.kind, "research")
+
+    def test_hows_it_going_stays_status_not_chitchat(self):
+        # _RE_STATUS owns "how's it going" — the fast path must not
+        # preempt an existing organ intent.
+        mind = CoreMind(FakeContext(router=SpyRouter()), runtime=None)
+        self.assertIsNone(fast_path("how's it going"))
+        intent = mind.decide("how's it going")
+        self.assertEqual(intent.kind, "status")
 
 
 if __name__ == "__main__":
