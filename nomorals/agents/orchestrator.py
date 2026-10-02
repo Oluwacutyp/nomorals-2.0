@@ -203,7 +203,7 @@ class MasterOrchestrator:
                 plan.model = response.model
             if not plan.steps:
                 reason = (
-                    f"model call failed ({response.error or 'unknown error'})"
+                    f"model call failed ({getattr(response, 'error', '') or 'unknown error'})"
                     if not response.ok
                     else "model returned no usable plan"
                 )
