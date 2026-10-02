@@ -42,7 +42,7 @@ operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
 | L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
 | L7 Surface | CLI · HTTP API · TUI | ✅ tested |
 
-**~3,400 tests.** `python3 -m unittest discover -s tests -t .` — the suite runs offline by default (network calls are mocked); see `tests/taxonomy.py` for the unit/integration/live tier map and the `NM_RUN_INTEGRATION=1` gate for live tests.
+**~4,000 tests.** `python3 -m unittest discover -s tests -t .` — the suite runs offline by default (network calls are mocked); see `tests/taxonomy.py` for the unit/integration/live tier map and the `NM_RUN_INTEGRATION=1` gate for live tests.
 
 ## Architecture
 
@@ -159,7 +159,7 @@ backups.
 ## Honest status
 
 This is a working, tested system — past the 100,000-line target it was designed
-around. Roughly 187,000 lines of Python across 470+ modules, with ~3,400 tests.
+around. Roughly 187,000 lines of Python across 470+ modules, with ~4,000 tests.
 The count is reported as measured (blank lines and comments included); no filler
 was ever added to hit a number — the tree grew because the feature list did:
 agent swarm, self-improvement engine, watchers, project rooms, morning briefing,
