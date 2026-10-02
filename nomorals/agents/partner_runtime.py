@@ -461,6 +461,28 @@ class PartnerBrain:
         self._maybe_extract(message, chat.key, is_owner)
         return parts
 
+    def note_fast_turn(self, message: "ChatMessage", reply_text: str) -> None:
+        """Record a Core-Mind fast-path turn without any model call.
+
+        The fast path answers trivially ("hey", "what time is it") with zero
+        LLM latency, but the turn must still be persisted and run the
+        downstream hooks (training pairs, curator, memory extraction) —
+        otherwise history, training data, and the curator silently lose
+        turns. Persistence must never break the reply.
+        """
+        try:
+            chat = message.chat
+            is_owner = self._chat_flags(chat)["is_owner"]
+            self._persist_inbound(message)
+            self._persist_outbound(chat, [reply_text], "fast-path")
+            self._log_training_pair(chat, message.text, reply_text, "fast-path",
+                                    self.mood.current().label)
+            self.relationship.save(self.context.db)
+            self._maybe_curate(chat.key, is_owner)
+            self._maybe_extract(message, chat.key, is_owner)
+        except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
+            _log.warning("fast turn persist failed: %s", exc)
+
     def _maybe_extract(self, message: "ChatMessage", chat_key: str, is_owner: bool) -> None:
         """Mine the turn for durable memories — off-thread, never fatal."""
         try:
@@ -1048,6 +1070,13 @@ class PartnerRuntime:
                 self.stats["controls"] += 1
                 _log.info("core mind routed %r in %s",
                           message.text[:40], message.chat.key)
+                # The fast path skips the brain (zero model calls) — but the
+                # turn still counts: persist it and run the downstream hooks
+                # (curator, training pairs) so history never silently gaps.
+                try:
+                    self.brain.note_fast_turn(message, mind_reply)
+                except Exception as exc:  # noqa: BLE001 - never eat the chat
+                    _log.warning("fast turn hook failed: %s", exc)
                 try:
                     self._typing_for(message.chat, mind_reply)
                     self.gateway.send(message.chat.platform, message.chat,

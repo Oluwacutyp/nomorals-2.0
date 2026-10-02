@@ -119,7 +119,7 @@ class RuntimeEndToEndTest(unittest.TestCase):
     def tearDown(self) -> None:
         try:
             self.runtime.stop()
-        except Exception:
+        except Exception:  # noqa: E103 - best-effort teardown; must never fail the suite
             pass
         self.context.close()
         self.tmp.cleanup()
@@ -196,6 +196,28 @@ class RuntimeEndToEndTest(unittest.TestCase):
             m["text"] == "first time they celebrated something together"
             for m in self.brain.relationship.milestones
         ))
+
+    def test_fast_path_turn_still_persists(self) -> None:
+        # Regression: the Core-Mind fast path must not silently drop turns —
+        # "hey" is answered with zero model calls, but both sides of the
+        # turn are persisted like any other reply.
+        self.runtime.start()
+        self.assertTrue(self.adapter.wait_started())
+        self.runtime.on_message(ChatMessage(chat=self.chat, incoming=True,
+                                            text="hey", sender="you"))
+        self.assertTrue(_wait(lambda: len(self.adapter.sent) >= 1), "no fast reply sent")
+        self.assertTrue(
+            _wait(lambda: self.context.db.scalar(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+                (self.chat.key,), default=0) >= 1,
+                timeout=10.0),
+            "fast-path inbound message was not persisted",
+        )
+        rows = self.context.db.query(
+            "SELECT role FROM messages WHERE conversation_id = ?", (self.chat.key,))
+        roles = sorted(r["role"] for r in rows)
+        self.assertIn("user", roles)
+        self.assertIn("assistant", roles)
 
 
 class PartnerAskCliTest(unittest.TestCase):
