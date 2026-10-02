@@ -352,10 +352,11 @@ def build_agent(role: str, **kwargs: Any) -> Agent:
 
 
 def _slug(text: str, limit: int = 32) -> str:
-    import re
+    from ...core.text import slugify
 
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:limit] or "task"
+    # canonical: nomorals.core.text.slugify (old impl crashed on None;
+    # the shared one returns the fallback instead)
+    return slugify(text, limit=limit, fallback="task")
 
 
 def _extension(language: str) -> str:

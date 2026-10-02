@@ -1615,37 +1615,9 @@ class EvolutionAgent:
     # ── LLM JSON helper (same discipline as devon's) ────────────────────────
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
-        text = (text or "").strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        start = text.find("{")
-        if start < 0:
-            return None
-        depth = 0
-        in_string = False
-        escaped = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+        from ..core.jsonutil import extract_json
+
+        return extract_json(text)
 
 
 # ── tool registration ───────────────────────────────────────────────────────

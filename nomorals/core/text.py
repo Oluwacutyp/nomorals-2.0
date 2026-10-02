@@ -29,7 +29,9 @@ __all__ = [
     "sentences",
     "shingle",
     "similarity",
+    "slugify",
     "tokenize_bpe_bytes",
+    "truncate",
     "truncate_to_tokens",
     "word_frequencies",
 ]
@@ -55,6 +57,17 @@ def normalize_text(text: str, *, fold_unicode: bool = True, lower: bool = False)
 
 def compact_whitespace(text: str) -> str:
     return _WS_RE.sub(" ", text).strip()
+
+
+def truncate(text: str, limit: int, *, suffix: str = "…") -> str:
+    """Trim ``text`` to ``limit`` characters, appending ``suffix`` when cut.
+
+    Canonical char-based truncation for the whole system: text at or under
+    the limit is returned unchanged, longer text is cut at exactly
+    ``limit`` chars plus the suffix.  (For token-budget trimming use
+    :func:`truncate_to_tokens`.)
+    """
+    return text if len(text) <= limit else text[:limit] + suffix
 
 
 # ── Tokenization ───────────────────────────────────────────────────────────────
@@ -520,3 +533,50 @@ def summarize(text: str, *, max_sentences: int = 3) -> str:
     ranked = sorted(scores, key=lambda s: (-s[0], s[1]))[:max_sentences]
     chosen = sorted(position for _, position in ranked)
     return " ".join(parts[i] for i in chosen)
+
+
+# ── Slugs ──────────────────────────────────────────────────────────────────
+
+
+def slugify(
+    text: str | None,
+    *,
+    limit: int | None = None,
+    fallback: str = "",
+    separator: str = "-",
+    keep_case: bool = False,
+    extra: str = "",
+    strip: str | None = None,
+    strip_after_limit: bool = False,
+) -> str:
+    """Turn free text into a URL/filename-safe slug.
+
+    Runs of non-word characters collapse to ``separator``; leading/trailing
+    separators are stripped; the result is truncated to ``limit`` and falls
+    back to ``fallback`` when empty.
+
+    Canonical unification of the six ``_slug``/``_slugify`` copies across
+    agents, media, tools, and builders.  Parameters cover every old variant:
+
+    - ``limit`` — max length (``None`` = unlimited, like app_builder).
+    - ``fallback`` — returned when the slug is empty.
+    - ``separator`` — ``"-"`` everywhere except fanout, which used ``"_"``.
+    - ``keep_case`` / ``extra`` — filesend kept case and allowed ``._-``.
+    - ``strip`` — chars stripped from both ends (default: the separator);
+      filesend stripped ``"-."``.
+    - ``strip_after_limit`` — reflection stripped a trailing separator left
+      behind by truncation.
+    """
+    raw = text or ""
+    if not keep_case:
+        raw = raw.lower()
+    if keep_case:
+        pattern = r"[^A-Za-z0-9" + re.escape(extra) + r"]+"
+    else:
+        pattern = r"[^a-z0-9" + re.escape(extra) + r"]+"
+    slug = re.sub(pattern, separator, raw).strip(strip if strip is not None else separator)
+    if limit is not None:
+        slug = slug[:limit]
+        if strip_after_limit:
+            slug = slug.strip(strip if strip is not None else separator)
+    return slug or fallback

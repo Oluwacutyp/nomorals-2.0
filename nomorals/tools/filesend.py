@@ -39,13 +39,14 @@ _FORMATS = {
     "pdf": "pdf",
 }
 
-_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
-
-
 def _slug(name: str, fallback: str) -> str:
-    name = (name or "").strip()
-    name = _SLUG.sub("-", name).strip("-.")
-    return name[:80] or f"{fallback}-{int(time.time())}"
+    from ..core.text import slugify
+
+    # canonical: nomorals.core.text.slugify (case kept, "._-" allowed through,
+    # "-." stripped; timestamped fallback preserved exactly)
+    return slugify(
+        name, limit=80, keep_case=True, extra="._-", strip="-."
+    ) or f"{fallback}-{int(time.time())}"
 
 
 # ── markdown helpers (small, honest, no external parser) ────────────────────

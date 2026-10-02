@@ -47,8 +47,10 @@ _SKILL_KINDS = {"strategy", "prevention", "solution", "code", "prompt"}
 
 
 def _slug(text: str, limit: int = 40) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
-    return s[:limit].strip("-") or "goal"
+    from ..core.text import slugify
+
+    # canonical: nomorals.core.text.slugify
+    return slugify(text, limit=limit, fallback="goal", strip_after_limit=True)
 
 
 def _tags(text: str, limit: int = 5) -> list[str]:

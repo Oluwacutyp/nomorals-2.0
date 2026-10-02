@@ -452,26 +452,9 @@ class DevonAgent:
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
         """Pull the first balanced JSON object out of an LLM reply."""
-        text = (text or "").strip()
-        # Strip common code fences, then find the first {...} block.
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        start = text.find("{")
-        if start < 0:
-            return None
-        depth = 0
-        for i in range(start, len(text)):
-            ch = text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+        from ..core.jsonutil import extract_json
+
+        return extract_json(text)
 
     def _heuristic_plan(self, task: str) -> list[dict[str, Any]]:
         """No model (or a model that didn't parse) — route by keywords.

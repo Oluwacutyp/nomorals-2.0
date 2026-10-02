@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from ..core.errors import classify
+from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..core.result import Ok, Err
 from .base import Budget
@@ -184,18 +185,35 @@ class MasterOrchestrator:
 
         plan = Plan(goal=goal)
         router = getattr(self.context, "router", None) if self.context is not None else None
-        if router is not None:
+        plan_error = ""
+        if router is None:
+            # No model to ask: the template plan below is a degradation and
+            # must carry the reason — a silent fallback would look like a
+            # clean model-made plan.
+            plan_error = "no LLM router configured — using template plan"
+        else:
             from ..llm.base import Message, SamplingParams
 
             response = router.chat(
                 [Message.user(prompt)],
                 SamplingParams(temperature=0.2, max_tokens=2048, json_mode=True),
             )
-            plan.model = response.model
             if response.ok:
                 plan = self._parse_plan(goal, response.text) or plan
+                plan.model = response.model
+            if not plan.steps:
+                reason = (
+                    f"model call failed ({response.error or 'unknown error'})"
+                    if not response.ok
+                    else "model returned no usable plan"
+                )
+                plan_error = f"{reason} — using template plan"
         if not plan.steps:
             plan = self._fallback_plan(goal)
+        # plan_error is "" on the clean model path; non-empty whenever the
+        # template fallback ran, so callers (mission runner, telemetry) can
+        # tell a degraded plan from a model-made one.
+        plan.plan_error = plan_error
         return self._repair(plan)
 
     def _parse_plan(self, goal: str, text: str) -> Plan | None:
@@ -521,26 +539,6 @@ def _result_denials(result: Any) -> int:
         value = result.get("denials", 0)
         return int(value) if isinstance(value, (int, float)) else 0
     return 0
-
-
-def _extract_json(text: str) -> Any:
-    """Pull the first JSON object out of a model reply, tolerating prose around it."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:  # noqa: E103 - falls through to brace-extraction fallback
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
 
 
 def _stringify(value: Any) -> str:

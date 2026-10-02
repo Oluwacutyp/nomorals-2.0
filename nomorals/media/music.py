@@ -293,8 +293,10 @@ _HOOK_TEMPLATES = (
 
 
 def _slugify(text: str, limit: int = 48) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
-    return s[:limit] or "untitled"
+    from ..core.text import slugify
+
+    # canonical: nomorals.core.text.slugify
+    return slugify(text, limit=limit, fallback="untitled")
 
 
 @dataclass

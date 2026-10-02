@@ -20,7 +20,6 @@ Design rules:
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -180,25 +179,9 @@ class BriefAgent:
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
-        text = (text or "").strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        start = text.find("{")
-        if start < 0:
-            return None
-        depth = 0
-        for i in range(start, len(text)):
-            ch = text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+        from ..core.jsonutil import extract_json
+
+        return extract_json(text)
 
     # ── heuristic path ─────────────────────────────────────────────────────
     @staticmethod

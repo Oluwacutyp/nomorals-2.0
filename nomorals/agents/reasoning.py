@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ..core.errors import ToolError
+from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..llm.base import Message, SamplingParams
@@ -145,75 +146,6 @@ class _Budget:
     def exhausted(self) -> bool:
         return (self.calls >= self.max_calls
                 or time.monotonic() - self.started > self.max_seconds)
-
-
-def _extract_json(text: str) -> Optional[Any]:
-    """Pull the first balanced JSON object/array out of a model reply.
-
-    Handles raw JSON, ```json fences, and JSON embedded in prose.
-    Returns None when nothing parseable is there.
-    """
-    if not text:
-        return None
-    candidates: list[str] = []
-    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
-    if fence:
-        candidates.append(fence.group(1).strip())
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = 0
-        while True:
-            start = text.find(opener, start)
-            if start == -1:
-                break
-            end = _balanced_end(text, start, opener, closer)
-            if end is None:
-                break
-            candidates.append(text[start:end + 1])
-            # keep scanning past this candidate so a malformed one does
-            # not hide a valid JSON blob later in the same reply
-            start = end + 1
-    for cand in candidates:
-        try:
-            return json.loads(cand)
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return None
-
-
-def _balanced_end(text: str, start: int, opener: str, closer: str) -> int | None:
-    """Index of the closer matching text[start], or None if unbalanced.
-
-    String-aware: braces inside quoted values do not count.
-    """
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(text)):
-        c = text[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == opener:
-                depth += 1
-            elif c == closer:
-                depth -= 1
-                if depth == 0:
-                    return i
-    return None
-
-
-def _confidence(raw: Any, default: float = 0.5) -> float:
-    try:
-        return max(0.0, min(1.0, float(raw)))
-    except (TypeError, ValueError):
-        return default
 
 
 # ── the engine ───────────────────────────────────────────────────────────────

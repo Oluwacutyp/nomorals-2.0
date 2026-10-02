@@ -38,7 +38,6 @@ from __future__ import annotations
 import json
 import os
 import py_compile
-import re
 import shutil
 import subprocess
 import time
@@ -58,8 +57,10 @@ STACKS = ("static", "flask", "fastapi", "express", "react-vite",
 
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
-    return s or "app"
+    from ..core.text import slugify
+
+    # canonical: nomorals.core.text.slugify
+    return slugify(name, fallback="app")
 
 
 def _html_escape(s: str) -> str:

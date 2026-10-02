@@ -85,7 +85,10 @@ class MapReduceResult:
 
 
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:40] or "angle"
+    from ..core.text import slugify
+
+    # canonical: nomorals.core.text.slugify (underscore separator preserved)
+    return slugify(text, limit=40, fallback="angle", separator="_")
 
 
 def fan_out(

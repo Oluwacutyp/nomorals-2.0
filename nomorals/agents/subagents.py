@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.ids import new_short_id
+from ..core.jsonutil import extract_json as _extract_json
 from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
 from ..tools.edit_loop import EditConflictError, EditLoop
@@ -106,52 +107,6 @@ _SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 
 
 # ── shared helpers ─────────────────────────────────────────────────────────
-
-
-def _extract_json(text: str) -> Any | None:
-    """Pull a JSON object out of model text.
-
-    Tries a fenced ```json block, then the whole text, then a balanced-brace
-    scan (string-aware). Returns None when nothing parses.
-    """
-    if not text:
-        return None
-    match = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
-    candidate = match.group(1) if match else text
-    candidate = candidate.strip()
-    try:
-        parsed = json.loads(candidate)
-    except ValueError:
-        parsed = None  # fall through to the balanced-brace scan below
-    if parsed is not None:
-        return parsed
-    start = candidate.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    escaped = False
-    for i in range(start, len(candidate)):
-        ch = candidate[i]
-        if in_str:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_str = False
-        elif ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(candidate[start:i + 1])
-                except ValueError:
-                    return None
-    return None
 
 
 def _safe_rel(root: Path, rel: str) -> str:
