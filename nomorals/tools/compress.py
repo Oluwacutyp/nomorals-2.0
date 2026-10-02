@@ -32,15 +32,16 @@ def _ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _compress_video(src: Path, dest: Path) -> bool:
+def _compress_video(src: Path, dest: Path, *, crf: int = 28,
+                    preset: str = "veryfast", audio_bitrate: str = "96k") -> bool:
     if not _ffmpeg_available():
         return False
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(src),
-        "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+        "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
         "-vf", "scale='min(1280,iw)':'-2'",
-        "-c:a", "aac", "-b:a", "96k",
+        "-c:a", "aac", "-b:a", audio_bitrate,
         "-movflags", "+faststart",
         str(dest),
     ]
@@ -62,21 +63,32 @@ def _compress_zip(src: Path, dest: Path) -> bool:
         return False
 
 
-def compress_file(path: str | Path) -> dict[str, Any]:
+def compress_file(path: str | Path, *, video_crf: int = 28,
+                  video_preset: str = "veryfast",
+                  audio_bitrate: str = "96k") -> dict[str, Any]:
     """Compress one file. Returns a report; ``ok`` False means 'don't send
     the original either if you can avoid it' is the caller's call — the
-    report always includes the original size for the decision."""
+    report always includes the original size for the decision.
+
+    Video knobs (ffmpeg): ``video_crf`` (default 28), ``video_preset``
+    (default "veryfast", capped at 1280px wide), ``audio_bitrate``
+    (default "96k" for the video's audio track).
+    """
     src = Path(path)
     if not src.exists():
         return {"ok": False, "error": f"no such file: {src}", "path": str(src)}
     original = src.stat().st_size
     ext = src.suffix.lower()
-    dest = src.with_name(src.stem + (".compressed" if ext not in VIDEO_EXTS else "") + ext)
+    # NOTE: the compressed copy must never share the source path — ffmpeg
+    # reads and writes concurrently, so an in-place "re-encode" would
+    # truncate the input mid-read and destroy it.
+    dest = src.with_name(src.stem + ".compressed" + ext)
 
     method = ""
     ok = False
     if ext in VIDEO_EXTS:
-        ok = _compress_video(src, dest)
+        ok = _compress_video(src, dest, crf=video_crf, preset=video_preset,
+                             audio_bitrate=audio_bitrate)
         method = "ffmpeg" if ok else ""
     if not ok:
         if ext in {".jpg", ".jpeg", ".png", ".zip", ".gz", ".7z", ".webp", ".mp3", ".mp4"}:

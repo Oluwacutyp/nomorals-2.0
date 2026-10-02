@@ -7,7 +7,11 @@ Tools:
 * ``zip_extract`` — unzip an archive back into the workspace. Extraction
   is guarded: zip-slip traversal (``../`` / absolute entries) is rejected
   outright, and a total-uncompressed-size cap plus a file-count cap keep a
-  zip bomb from filling the disk.
+  zip bomb from filling the disk (``NM_ARCHIVE_MAX_EXTRACT_MB``, default
+  2048; ``NM_ARCHIVE_MAX_EXTRACT_FILES``, default 10000 — both also
+  monkeypatchable module constants for tests). Entries stream out in 1MB
+  chunks, never read() whole into memory, and the byte budget is enforced
+  live while writing since zip header sizes can be lies.
 * ``zip_send`` — zip then send the archive to a chat in one call
   (``zip → send`` works from a single chat command).
 * ``unzip_send`` — extract an archive, then send each resulting file to a
@@ -21,6 +25,7 @@ rest of the bot uses, with its auto-compression for large files.
 
 from __future__ import annotations
 
+import os
 import time
 import zipfile
 from pathlib import Path
@@ -41,10 +46,22 @@ __all__ = [
     "register",
 ]
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 #: refuse to extract archives whose total uncompressed size exceeds this
-MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+#: (env-overridable; also enforced live while writing, since the declared
+#: per-entry sizes in a zip header can be lies)
+MAX_EXTRACT_BYTES = _env_int("NM_ARCHIVE_MAX_EXTRACT_MB", 2048) * 1024 * 1024
 #: refuse archives with more entries than this (zip-bomb guard)
-MAX_EXTRACT_FILES = 10_000
+MAX_EXTRACT_FILES = _env_int("NM_ARCHIVE_MAX_EXTRACT_FILES", 10_000)
+#: stream extraction in chunks this size — never read() a whole entry
+COPY_CHUNK = 1024 * 1024
 #: how many extracted files one unzip_send call will forward
 DEFAULT_MAX_SEND_FILES = 10
 
@@ -58,7 +75,7 @@ def _workspace_root(context: Any) -> Path:
 def _collect_sources(context: Any, sources: list[str]) -> list[Path]:
     """Resolve ``sources`` inside the workspace; expand directories."""
     if not sources:
-        raise ToolError("zip_create needs at least one source path")
+        raise ToolError("zip: needs at least one source path")
     resolved: list[Path] = []
     seen: set[Path] = set()
     for raw in sources:
@@ -73,9 +90,9 @@ def _collect_sources(context: Any, sources: list[str]) -> list[Path]:
                 seen.add(target)
                 resolved.append(target)
         else:
-            raise ToolError(f"cannot zip {raw!r}: not a file or directory")
+            raise ToolError(f"zip: cannot zip {raw!r}: not a file or directory")
     if not resolved:
-        raise ToolError("zip_create found no files to zip")
+        raise ToolError("zip: found no files to zip")
     return resolved
 
 
@@ -124,25 +141,25 @@ def _guard_entries(archive: Path) -> list[zipfile.ZipInfo]:
     zip-bomb shapes. Returns the validated entry list.
     """
     if not zipfile.is_zipfile(archive):
-        raise ToolError(f"{archive.name} is not a zip archive")
+        raise ToolError(f"unzip: {archive.name} is not a zip archive")
     with zipfile.ZipFile(archive, "r") as zf:
         infos = zf.infolist()
     if len(infos) > MAX_EXTRACT_FILES:
         raise ToolError(
-            f"archive has {len(infos)} entries — over the "
-            f"{MAX_EXTRACT_FILES} file cap; refusing to extract")
+            f"unzip: archive has {len(infos)} entries — over the "
+            f"{MAX_EXTRACT_FILES} file cap (zip-bomb guard); refusing to extract")
     total = sum(info.file_size for info in infos)
     if total > MAX_EXTRACT_BYTES:
         raise ToolError(
-            f"archive would extract {total} bytes — over the "
-            f"{MAX_EXTRACT_BYTES}-byte cap; refusing to extract")
+            f"unzip: archive would extract {total} bytes — over the "
+            f"{MAX_EXTRACT_BYTES}-byte cap (zip-bomb guard); refusing to extract")
     for info in infos:
         name = info.filename
         if not name or name.startswith("/") or name.startswith("\\"):
-            raise ToolError(f"refusing zip-slip entry: {name!r}")
+            raise ToolError(f"unzip: refusing zip-slip entry: {name!r}")
         parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
         if any(p == ".." for p in parts):
-            raise ToolError(f"refusing zip-slip entry: {name!r}")
+            raise ToolError(f"unzip: refusing zip-slip entry: {name!r}")
     return infos
 
 
@@ -155,7 +172,7 @@ def zip_extract(context: Any, archive: str, *, destination: str = "") -> dict[st
     started = time.perf_counter()
     src = safe_path(context, archive, must_exist=True)
     if src.is_dir():
-        raise ToolError(f"{archive!r} is a directory, not a zip archive")
+        raise ToolError(f"unzip: {archive!r} is a directory, not a zip archive")
     infos = _guard_entries(src)
 
     dest_name = destination or f"extracted/{src.stem}"
@@ -164,6 +181,7 @@ def zip_extract(context: Any, archive: str, *, destination: str = "") -> dict[st
     dest_resolved = dest_dir.resolve()
 
     written: list[str] = []
+    total_written = 0
     with zipfile.ZipFile(src, "r") as zf:
         for info in infos:
             parts = [p for p in info.filename.replace("\\", "/").split("/")
@@ -173,13 +191,29 @@ def zip_extract(context: Any, archive: str, *, destination: str = "") -> dict[st
                 target.relative_to(dest_resolved)
             except ValueError as exc:
                 raise ToolError(
-                    f"refusing zip-slip entry: {info.filename!r}") from exc
+                    f"unzip: refusing zip-slip entry: {info.filename!r}") from exc
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Stream in chunks: never read() a whole entry into memory, and
+            # enforce the byte budget live — the declared per-entry sizes in
+            # a zip header can be lies, so the pre-extraction total is not
+            # enough to stop a zip bomb.
             with zf.open(info, "r") as src_f, target.open("wb") as dst_f:
-                dst_f.write(src_f.read())
+                while True:
+                    chunk = src_f.read(COPY_CHUNK)
+                    if not chunk:
+                        break
+                    dst_f.write(chunk)
+                    total_written += len(chunk)
+                    if total_written > MAX_EXTRACT_BYTES:
+                        dst_f.close()
+                        target.unlink(missing_ok=True)
+                        raise ToolError(
+                            f"unzip: extracted bytes exceeded the "
+                            f"{MAX_EXTRACT_BYTES}-byte cap (zip-bomb guard); "
+                            f"refusing to extract {src.name} further")
             written.append(str(target.relative_to(dest_resolved)))
     _log.info("zip extracted: %s → %s (%d files)",
               src.name, dest_dir, len(written))
@@ -206,18 +240,18 @@ def zip_send(
     from .filesend import send_file
 
     if not (platform or "").strip():
-        raise ToolError("zip_send needs a platform (telegram | whatsapp | …)")
+        raise ToolError("zip: send needs a platform (telegram | whatsapp | …)")
     if not (chat_id or "").strip():
-        raise ToolError("zip_send needs a chat_id")
+        raise ToolError("zip: send needs a chat_id")
     created = zip_create(context, sources, name=name)
     try:
         sent = send_file(context, platform, chat_id, created["path"],
                          caption=caption or f"🗜 {Path(created['path']).name}")
     except Exception as exc:  # noqa: BLE001
-        raise ToolError(f"zip created but send failed: {exc}") from exc
+        raise ToolError(f"zip_send: archive created but send failed: {exc}") from exc
     if not getattr(sent, "get", lambda k, d=None: None)("sent", False) \
             and isinstance(sent, dict) and sent.get("sent") is False:
-        raise ToolError(f"zip created but send reported failure: {sent}")
+        raise ToolError(f"zip_send: archive created but send reported failure: {sent}")
     out = dict(created)
     out.update(sent if isinstance(sent, dict) else {})
     out["ok"] = True
@@ -242,11 +276,11 @@ def unzip_send(
     from .filesend import send_file
 
     if not (platform or "").strip():
-        raise ToolError("unzip_send needs a platform (telegram | whatsapp | …)")
+        raise ToolError("unzip: send needs a platform (telegram | whatsapp | …)")
     if not (chat_id or "").strip():
-        raise ToolError("unzip_send needs a chat_id")
+        raise ToolError("unzip: send needs a chat_id")
     if max_files < 1:
-        raise ToolError("max_files must be ≥ 1")
+        raise ToolError("unzip: max_files must be ≥ 1")
     extracted = zip_extract(context, archive, destination=destination)
     dest_dir = Path(extracted["destination"])
     files = sorted(p for p in dest_dir.rglob("*") if p.is_file())
@@ -278,8 +312,8 @@ def unzip_send(
     }
     if failed and not sent:
         raise ToolError(
-            f"extracted {extracted['files']} files but every send failed: "
-            f"{failed[0]['error']}")
+            f"unzip_send: extracted {extracted['files']} files but every send "
+            f"failed: {failed[0]['error']}")
     return report
 
 
