@@ -449,26 +449,31 @@ class StructuralGateTests(unittest.TestCase):
                 self.assertEqual(parsed.kind, cmd)
                 self.assertIn(cmd, GAME_COMMANDS)
 
+    # Games deliberately reachable ONLY via "/game <name>": their bare
+    # "/<name>" form is a reserved system command.  ("arena" is the
+    # self-improvement arena — the arena game is /game arena.)
+    GAME_ONLY_VIA_SLASH_GAME = frozenset({"arena"})
+
     def test_control_commands_cover_every_game(self):
         # every engine game is triggerable outside the owner's DM: either
         # a direct /<name> command, or the universal /game <name> command.
-        # (20q/rps/digits predate direct commands — Telegram commands must
-        # start with a letter — so they stay /game-only.)
+        # ("/2048" proved digit-leading command names parse and route, so
+        # 20q gets a direct command too.)
         engine, _db, _sent = make_engine()
         try:
             for game in engine.games:
                 with self.subTest(game=game):
-                    if game in ("20q", "rps", "digits"):
+                    if game in self.GAME_ONLY_VIA_SLASH_GAME:
                         parsed = parse_control("/game " + game)
                         self.assertIsNotNone(parsed)
                         self.assertEqual(parsed.kind, "game")
-                    else:
-                        self.assertIn(game, GAME_COMMANDS,
-                                      f"/{game} not a direct command — no "
-                                      "command-only trigger outside owner DMs")
-                        parsed = parse_control("/" + game)
-                        self.assertIsNotNone(parsed)
-                        self.assertEqual(parsed.kind, game)
+                        continue
+                    self.assertIn(game, GAME_COMMANDS,
+                                  f"/{game} not a direct command — no "
+                                  "command-only trigger outside owner DMs")
+                    parsed = parse_control("/" + game)
+                    self.assertIsNotNone(parsed)
+                    self.assertEqual(parsed.kind, game)
         finally:
             engine.shutdown()
 

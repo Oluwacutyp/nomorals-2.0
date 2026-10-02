@@ -62,10 +62,12 @@ GAME_COMMANDS = (
     # easy
     "wordchain", "hangman", "numberguess", "two_truths", "wyrr", "spy",
     "auction", "trivia",
+    # easy (wave G1): engine games that predated direct commands
+    "20q", "rps", "digits",
     # medium
     "mafia", "king", "story", "rpg", "shop", "duel", "case",
     # ambitious
-    "world", "escape", "political", "arena",
+    "world", "escape", "political",
     # wild (wave 95)
     "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
     # arcade (wave 97)
@@ -127,6 +129,12 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
     "trivia": (0, 0),
+    # easy (wave G1): 20 questions / rock-paper-scissors / digit memory —
+    # engine games, now directly startable like every other game. "/2048"
+    # (wave 97) already proved digit-leading command names parse and
+    # route: parse_control is a plain dict lookup, and Telegram bot
+    # commands may contain digits.
+    "20q": (0, 0), "rps": (0, 0), "digits": (0, 0),
     # medium
     "mafia": (0, 0), "king": (0, 0), "story": (0, 0),
     "rpg": (0, 0), "shop": (0, 0), "duel": (0, 0), "case": (0, 0),
@@ -919,7 +927,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots",
-      "gomoku", "reversi", "checkers"]),
+      "gomoku", "reversi", "checkers", "20q", "rps", "digits"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
@@ -1026,6 +1034,9 @@ _GAME_HELP: dict[str, str] = {
     "gomoku": "gomoku — five in a row on 15×15, async, no clock.",
     "reversi": "reversi (othello) — outflank and flip, most discs wins.",
     "checkers": "english draughts — forced jumps, kings, async.",
+    "20q": "20 questions — she thinks of something, you ask yes/no (20 max).",
+    "rps": "rock paper scissors — best of five vs the house.",
+    "digits": "digit memory — repeat the digits back, they grow every round.",
 }
 for _kind in CONTROL_COMMANDS:
     if _kind not in COMMAND_DETAILS:
@@ -1099,7 +1110,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots",
-      "gomoku", "reversi", "checkers"]),
+      "gomoku", "reversi", "checkers", "20q", "rps", "digits"]),
     ("voice & vision",
      ["tts", "speak", "stt", "look", "image", "lens"]),
     ("tools & automation",
