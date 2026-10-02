@@ -20,6 +20,7 @@ __all__ = [
     "available",
     "feature_report",
     "load_optional",
+    "native_section",
     "report_as_text",
     "require",
     "which",
@@ -165,7 +166,60 @@ def report_as_text(report: dict[str, Any]) -> str:
         mark = "yes" if b["path"] else " no"
         path = b["path"] or "-"
         lines.append(f"  [{mark}] {b['name']:<14} {path:<28} {b['purpose']}")
+    nat = report.get("native")
+    if nat:
+        lines += ["", "native accelerators:"]
+        for name, status in (nat.get("kernels") or {}).items():
+            mark = "yes" if status == "native" else " no"
+            lines.append(f"  [{mark}] {name:<14} {status:<11} backend: "
+                         f"{'native-cpp' if status == 'native' else 'pure-python'}")
+        overall = nat.get("overall", "unknown")
+        if overall != "native":
+            lines.append("          fallback: pure-python (correctness identical, "
+                         "slower)")
+            compiler = nat.get("compiler")
+            if compiler:
+                lines.append(f"          build:    nm native --build  "
+                             f"(compiler: {compiler})")
+            else:
+                lines.append("          build:    no C++ compiler on PATH — "
+                             "pure-python fallback is the supported path")
+        else:
+            lines.append("          all kernels on native-cpp"
+                         + (f" ({nat.get('version')})" if nat.get("version") else ""))
     return "\n".join(lines)
+
+
+def native_section(info: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``report['native']`` block from ``nomorals.native.info()``.
+
+    Takes the info dict instead of importing the native package: this module
+    is L0 and must not import the L2 native package (see test_layering).
+    Callers that may import native (e.g. the ``nm doctor`` command) call
+    ``native.info()`` and pass the result here.
+
+    Per-kernel status: ``native`` (built+loaded), ``stale-arch`` (.so exists
+    but would not load — wrong arch or corrupt), ``missing`` (not built).
+    """
+    kernels: dict[str, str] = {}
+    vec = {"built": info.get("built", False), "loaded": info.get("loaded", False)}
+    for name, block in (("vecsim", vec), ("mlptrain", info.get("mlp") or {}),
+                        ("bpe", info.get("bpe") or {}),
+                        ("memextract", info.get("mem") or {})):
+        built = bool(block.get("built"))
+        loaded = bool(block.get("loaded"))
+        kernels[name] = ("native" if loaded
+                         else "stale-arch" if built else "missing")
+    loaded_count = sum(1 for s in kernels.values() if s == "native")
+    overall = ("native" if loaded_count == len(kernels)
+               else "partial" if loaded_count else "pure-python")
+    return {
+        "overall": overall,
+        "kernels": kernels,
+        "compiler": info.get("compiler"),
+        "version": info.get("version"),
+        "fallback": "pure-python",
+    }
 
 
 def feature_report() -> dict[str, Any]:
@@ -178,6 +232,9 @@ def feature_report() -> dict[str, Any]:
         "machine": platform.machine(),
         "features": [],
         "binaries": [],
+        # Filled in by callers that may import the native package (L2):
+        # see compat.native_section().  None keeps the schema stable.
+        "native": None,
     }
     for feature in FEATURES:
         report["features"].append(

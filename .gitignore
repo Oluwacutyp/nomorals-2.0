@@ -53,3 +53,8 @@ Thumbs.db
 bridge/node_modules/
 bridge/.creds/
 bridge/media/
+
+# Native accelerator binaries — compiled locally via `nm native --build`;
+# the .cpp sources are committed, the built libraries are not
+nomorals/native/*.so
+nomorals/native/*.dylib

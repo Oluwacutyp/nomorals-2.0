@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .compat import feature_report, report_as_text
+from .compat import feature_report, native_section, report_as_text
 from .core.logging_setup import get_logger, setup_logging
 
 _log = get_logger(__name__)
@@ -103,8 +103,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("doctor", aliases=CLI_ALIASES["doctor"],
-                   help="show environment capabilities and health")
+    doctor = sub.add_parser("doctor", aliases=CLI_ALIASES["doctor"],
+                            help="show environment capabilities and health")
+    doctor.add_argument("--build-native", action="store_true",
+                        help="compile the native C++ accelerators before "
+                             "reporting (same as: nm native --build)")
     sub.add_parser("config", aliases=CLI_ALIASES["config"],
                    help="print the effective configuration")
     sub.add_parser("setup", aliases=CLI_ALIASES["setup"], help="guided model setup wizard")
@@ -1698,7 +1701,22 @@ def _dispatch(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
+    if getattr(args, "build_native", False):
+        from . import native as _native
+        ok, msg = _native.build()
+        print(f"native build: {'OK' if ok else 'FAILED'} — {msg}")
+        print()
     report = feature_report()
+    # Native accelerator status: built/missing/stale-arch per kernel.  The
+    # import lives here (cli may import L2 native) rather than in compat
+    # (L0) — see test_layering.  Never let a broken native package break
+    # doctor: fall back to an honest "unknown".
+    try:
+        from . import native as _native
+        report["native"] = native_section(_native.info())
+    except Exception:  # noqa: BLE001 - doctor must always report
+        report["native"] = {"overall": "unknown", "kernels": {},
+                            "compiler": None, "fallback": "pure-python"}
     from .storage.db import Database
 
     db = Database(settings.db_path)

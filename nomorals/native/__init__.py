@@ -155,6 +155,11 @@ def build(force: bool = False) -> tuple[bool, str]:
             results.append(f"compiler reported success but {target.name} is missing")
             continue
         results.append(f"built {target.name} with {compiler} in {time.time() - started:.1f}s")
+    if all_ok:
+        # A probe that ran before this build may have cached "absent";
+        # the next load() must re-probe the freshly built libraries.
+        for slot in _LIBS:
+            _LIBS[slot] = _NOT_GIVEN
     return all_ok, "; ".join(results)
 
 
