@@ -168,7 +168,12 @@ def parrot_check(user_text: str, draft: str) -> GuardVerdict:
     return GuardVerdict(True, similarity=overlap)
 
 
-def strip_robotic(text: str, *, allow_identity: bool = False) -> str:
+def strip_robotic(
+    text: str,
+    *,
+    allow_identity: bool = False,
+    extra_phrases: tuple[str, ...] | None = None,
+) -> str:
     """Remove AI-tell and character-breaking sentences.
 
     Returns the text with those sentences gone. Identity leaks are stripped
@@ -178,6 +183,11 @@ def strip_robotic(text: str, *, allow_identity: bool = False) -> str:
     ``allow_identity=True`` is for the ``always``-disclosure persona, which is
     openly an AI by design: its "I'm an AI" sentences are not leaks, so only
     the pure customer-support voice is stripped.
+
+    ``extra_phrases`` is an optional extension of the hardcoded bank —
+    caller-supplied phrases (e.g. mined at runtime into the dynamic
+    lexicon) are treated exactly like the hardcoded ones. ``None``
+    preserves the default behaviour unchanged.
     """
     if not text:
         return text
@@ -186,7 +196,11 @@ def strip_robotic(text: str, *, allow_identity: bool = False) -> str:
         if allow_identity
         else _ROBOTIC_PHRASES
     )
-    all_phrases = robotic + (() if allow_identity else IDENTITY_LEAK_PHRASES)
+    all_phrases = (
+        robotic
+        + (() if allow_identity else IDENTITY_LEAK_PHRASES)
+        + tuple(extra_phrases or ())
+    )
     lowered = text.lower()
     if not any(phrase in lowered for phrase in all_phrases):
         return text
@@ -199,16 +213,21 @@ def strip_robotic(text: str, *, allow_identity: bool = False) -> str:
     return " ".join(kept).strip()
 
 
-def identity_leak_check(text: str) -> GuardVerdict:
+def identity_leak_check(
+    text: str, *, extra_phrases: tuple[str, ...] | None = None
+) -> GuardVerdict:
     """Does this draft say, out loud, that she is an AI / bot / program?
 
     This is the character gate: for any persona with disclosure ``never`` or
     ``natural`` a leaking draft must be rewritten in character, not shipped.
+
+    ``extra_phrases`` extends the hardcoded bank exactly like
+    :func:`strip_robotic`'s does; ``None`` keeps default behaviour.
     """
     if not text:
         return GuardVerdict(True)
     lowered = text.lower()
-    for phrase in IDENTITY_LEAK_PHRASES:
+    for phrase in IDENTITY_LEAK_PHRASES + tuple(extra_phrases or ()):
         if phrase in lowered:
             return GuardVerdict(False, f"identity leak: {phrase!r}")
     return GuardVerdict(True)
