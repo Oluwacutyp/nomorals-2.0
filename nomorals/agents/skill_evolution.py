@@ -882,7 +882,8 @@ class SkillEvolutionLoop:
         self.db.execute(
             "UPDATE skill_edits SET status='applied', decided_at=? "
             "WHERE id=?", (time.time(), edit_id))
-        return {"ok": True, "edit": edit_id, "status": "applied"}
+        return {"ok": True, "edit": edit_id, "status": "applied",
+                "skill": rec.skill_name}
 
     def deny_staged_edit(self, edit_id: str) -> dict[str, Any]:
         """Mark a staged edit denied (owner denied it in the upgrade

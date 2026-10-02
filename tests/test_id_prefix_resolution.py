@@ -186,7 +186,10 @@ class TestUpgradeProposalPrefix(unittest.TestCase):
 
         rt = PartnerRuntime.__new__(PartnerRuntime)
         rt.context = self.ctx
-        out = rt._control_upgrade("approve upg_AAAX", _pipeline=Pipe(self.ctx))
+        rt._owner_chats = {"telegram:1"}
+        owner_chat = SimpleNamespace(key="telegram:1")
+        out = rt._control_upgrade("approve upg_AAAX", _chat=owner_chat,
+                                  _pipeline=Pipe(self.ctx))
         self.assertIn("ambiguous", out)
         self.assertEqual(approved, [])
         # both proposals are still pending — nothing was attached anywhere

@@ -2155,6 +2155,30 @@ def _apply_research_loop_tables(db: object) -> None:
     )
 
 
+def _apply_research_loop_g2(db: object) -> None:
+    """Wave G2: rate-limit noise + honest usefulness signals.
+
+    ``research_loop_runs`` gains per-cycle counters — ``proposals_deduped``
+    (tickets dropped as cross-cycle duplicates), ``proposals_capped``
+    (qualifying tickets dropped by the per-cycle proposal cap) — and a
+    ``signals`` JSON snapshot of the aggregate usefulness counts
+    (proposed/approved/denied/ignored/applied/tests_passed) taken when the
+    cycle finished. The live aggregate is recomputed from
+    ``upgrade_proposals`` by ``usefulness_signals()``; the snapshot is
+    history.
+    """
+    db.execute_statements(  # type: ignore[attr-defined]
+        """
+        ALTER TABLE research_loop_runs
+            ADD COLUMN proposals_deduped INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE research_loop_runs
+            ADD COLUMN proposals_capped INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE research_loop_runs
+            ADD COLUMN signals TEXT NOT NULL DEFAULT '{}';
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -2227,6 +2251,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(63, "benchmark_runs", sql=_V63_BENCHMARK_RUNS),
     Migration(64, "research_loop_runs", fn=_apply_research_loop_tables),
     Migration(65, "coremind_telemetry", sql=_V65_COREMIND_TELEMETRY),
+    Migration(66, "research_loop_g2", fn=_apply_research_loop_g2),
 )
 
 

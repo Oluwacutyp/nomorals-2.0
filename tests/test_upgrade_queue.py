@@ -52,6 +52,30 @@ def sample_ticket(**overrides):
         domain="integrations",
         claim_ids=["c1"],
         confidence=0.8,
+        # G2 ticket quality: substantive problem/approach/risk/verify_steps
+        problem=("Binance/Kraken/Coinbase quote fetches in "
+                 "nomorals/integrations/market_data.py fail transiently "
+                 "under load and there is no retry: a single dropped "
+                 "response during a volatility spike becomes a failed "
+                 "quote for the owner."),
+        proposed_change=("Approach: wrap the exchange fetch chain in a "
+                         "retry loop with exponential backoff and jitter "
+                         "in nomorals/integrations/market_data.py, keeping "
+                         "per-exchange attempt budgets so one slow "
+                         "exchange cannot stall the chain; TDD the backoff "
+                         "timing first."),
+        risk=("Blast radius: quote path only — retries add latency to "
+              "failed fetches but never change successful responses; "
+              "fully reversible by reverting the commit. Watch for retry "
+              "storms if the attempt budgets are misconfigured."),
+        verify_steps=[
+            "Run pytest -k test_market_data_retry_backoff_succeeds — "
+            "passes after the change.",
+            "Run pytest -k test_market_data_retry_backoff_exhausts — "
+            "raises once the attempt budget is exhausted.",
+            "Run the integrations module test suite green before and "
+            "after the change.",
+        ],
     )
     t.update(overrides)
     return t
@@ -127,7 +151,17 @@ class QueueBasicsTest(unittest.TestCase):
 
     def test_list_newest_first_and_status_filter(self):
         first = self.q.propose(**sample_kwargs(title="First proposal title here"))
-        second = self.q.propose(**sample_kwargs(title="Second proposal title here"))
+        # NOTE (Wave G2 dedup): propose-time dedup merges near-duplicates,
+        # so the second filing must be a genuinely different proposal —
+        # different files and a different problem — for this ordering test.
+        second = self.q.propose(**sample_kwargs(
+            title="Second proposal title here",
+            rationale="The scheduler drops ticks under heavy load; a bounded "
+                      "worker pool with backpressure keeps cadence stable "
+                      "during long overnight research sessions.",
+            files=["nomorals/scheduler/worker.py"],
+            tests=["ticks keep cadence under heavy load"],
+        ))
         self.assertEqual([r["id"] for r in self.q.list()], [second, first])
         self.q.approve(first)
         self.assertEqual(self.q.list(status="approved")[0]["id"], first)

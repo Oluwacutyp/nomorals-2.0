@@ -61,6 +61,11 @@ __all__ = [
     "set_owner_topics",
     "pick_topics",
     "research_hours",
+    "research_max_proposals",
+    "research_dedupe_days",
+    "research_ignore_days",
+    "usefulness_signals",
+    "signals_summary",
     "status",
     "register",
 ]
@@ -79,6 +84,24 @@ _MAX_TOPICS_PER_TICK = 2
 
 #: Default interval between cycles (hours). Env: NM_RESEARCH_LOOP_HOURS.
 _DEFAULT_HOURS = 6.0
+
+#: Default max new upgrade-queue proposals filed per cycle.
+#: Env: NM_RESEARCH_LOOP_MAX_PROPOSALS.
+_DEFAULT_MAX_PROPOSALS = 5
+
+#: How far back (days) the dedupe check looks for an already-filed
+#: proposal of the same finding. Env: NM_RESEARCH_LOOP_DEDUPE_DAYS.
+_DEFAULT_DEDUPE_DAYS = 14
+
+#: A filed proposal still undecided after this many days counts as
+#: "ignored" in the usefulness signals (the owner saw it and passed).
+#: Env: NM_RESEARCH_LOOP_IGNORE_DAYS.
+_DEFAULT_IGNORE_DAYS = 7
+
+#: Title token overlap that marks two proposals as the same finding.
+_TITLE_DUP_JACCARD = 0.65
+#: Same files targeted + this token overlap also marks a duplicate.
+_TITLE_FILE_DUP_JACCARD = 0.40
 
 #: Fallback seeds when the owner set no topics. Product-relevant, evergreen,
 #: and deliberately phrased to surface actionable upgrade findings.
@@ -104,6 +127,47 @@ def research_hours() -> float:
                      raw, _DEFAULT_HOURS)
         hours = _DEFAULT_HOURS
     return min(48.0, max(1.0, hours))
+
+
+def research_max_proposals() -> int:
+    """Max new upgrade-queue proposals filed per cycle. Env
+    ``NM_RESEARCH_LOOP_MAX_PROPOSALS`` (default 5), clamped to [1, 50].
+    Read per cycle so the owner can retune noise without a restart."""
+    raw = os.environ.get("NM_RESEARCH_LOOP_MAX_PROPOSALS", "")
+    try:
+        n = int(raw) if raw.strip() else _DEFAULT_MAX_PROPOSALS
+    except (TypeError, ValueError):
+        _log.warning("NM_RESEARCH_LOOP_MAX_PROPOSALS=%r not a number — "
+                     "using %d", raw, _DEFAULT_MAX_PROPOSALS)
+        n = _DEFAULT_MAX_PROPOSALS
+    return min(50, max(1, n))
+
+
+def research_dedupe_days() -> int:
+    """Dedupe lookback window (days) for cross-cycle proposal dedup.
+    Env ``NM_RESEARCH_LOOP_DEDUPE_DAYS`` (default 14), clamped [1, 90]."""
+    raw = os.environ.get("NM_RESEARCH_LOOP_DEDUPE_DAYS", "")
+    try:
+        n = int(raw) if raw.strip() else _DEFAULT_DEDUPE_DAYS
+    except (TypeError, ValueError):
+        _log.warning("NM_RESEARCH_LOOP_DEDUPE_DAYS=%r not a number — "
+                     "using %d", raw, _DEFAULT_DEDUPE_DAYS)
+        n = _DEFAULT_DEDUPE_DAYS
+    return min(90, max(1, n))
+
+
+def research_ignore_days() -> int:
+    """Days a filed proposal may sit undecided before it counts as
+    ``ignored`` in the usefulness signals. Env
+    ``NM_RESEARCH_LOOP_IGNORE_DAYS`` (default 7), clamped [1, 365]."""
+    raw = os.environ.get("NM_RESEARCH_LOOP_IGNORE_DAYS", "")
+    try:
+        n = int(raw) if raw.strip() else _DEFAULT_IGNORE_DAYS
+    except (TypeError, ValueError):
+        _log.warning("NM_RESEARCH_LOOP_IGNORE_DAYS=%r not a number — "
+                     "using %d", raw, _DEFAULT_IGNORE_DAYS)
+        n = _DEFAULT_IGNORE_DAYS
+    return min(365, max(1, n))
 
 
 # ── owner gates (existing systems only) ──────────────────────────────────────
@@ -246,6 +310,165 @@ def pick_topics(context: Any, limit: int = _MAX_TOPICS_PER_TICK) -> list[str]:
     return candidates
 
 
+# ── cross-cycle proposal dedupe ────────────────────────────────────────────
+
+def _norm_title(title: str) -> str:
+    """Lowercased, whitespace-collapsed title for exact-match dedup."""
+    return " ".join(str(title or "").lower().split())
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Alphanumeric tokens (len>=3) — the similarity vocabulary."""
+    import re
+
+    return set(re.findall(r"[a-z0-9]{3,}", str(title or "").lower()))
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _fingerprints_duplicate(a: tuple, b: tuple) -> bool:
+    """Two (norm_title, tokens, frozenset(files)) fingerprints describe the
+    same finding when the titles are identical, the titles are near-copies,
+    or the tickets target the same files with clearly related titles."""
+    if a[0] and a[0] == b[0]:
+        return True
+    if _jaccard(a[1], b[1]) >= _TITLE_DUP_JACCARD:
+        return True
+    if a[2] and b[2] and (a[2] & b[2]) and \
+            _jaccard(a[1], b[1]) >= _TITLE_FILE_DUP_JACCARD:
+        return True
+    return False
+
+
+def _ticket_fingerprint(title: str, files: list[str]) -> tuple:
+    tokens = _title_tokens(title)
+    return (_norm_title(title), tokens,
+            frozenset(str(f).strip() for f in (files or []) if f))
+
+
+def _recent_research_proposals(context: Any, days: int) -> list[tuple]:
+    """Fingerprints of proposals filed by this loop in the last ``days``
+    days, newest first. The ``source`` marker is stashed inside
+    ``patch_plan`` at write time (no dedicated column); the comparison is
+    done in Python so it never depends on SQLite JSON functions."""
+    db = getattr(context, "db", None)
+    if db is None:
+        return []
+    cutoff = time.time() - float(days) * 86400.0
+    try:
+        rows = db.query(
+            "SELECT title, files, patch_plan FROM upgrade_proposals "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT 500",
+            (cutoff,))
+    except Exception:  # noqa: BLE001 - table may not exist yet
+        return []
+    out: list[tuple] = []
+    for row in rows or []:
+        try:
+            plan = json.loads(row.get("patch_plan") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(plan, dict) or plan.get("source") != "research_loop":
+            continue
+        try:
+            files = json.loads(row.get("files") or "[]")
+        except (TypeError, ValueError):
+            files = []
+        out.append(_ticket_fingerprint(str(row.get("title") or ""),
+                                      list(files or [])))
+    return out
+
+
+def is_duplicate_proposal(context: Any, title: str, files: list[str],
+                          days: int | None = None,
+                          extra: list[tuple] | None = None) -> bool:
+    """True when a proposal with this title/files was already filed by the
+    loop in the last ``days`` days (default ``research_dedupe_days()``).
+    Pass ``extra`` fingerprints to also check ones seen earlier in the
+    current cycle (the caller appends newly filed ones as it goes)."""
+    fps = list(_recent_research_proposals(
+        context, research_dedupe_days() if days is None else days))
+    if extra:
+        fps.extend(extra)
+    mine = _ticket_fingerprint(title, files)
+    return any(_fingerprints_duplicate(mine, fp) for fp in fps)
+
+
+# ── usefulness signals (raw counts only — no synthesized score) ──────────────
+
+def usefulness_signals(context: Any) -> dict[str, int]:
+    """Honest raw counts over every proposal this loop ever filed
+    (``patch_plan.source == "research_loop"``):
+
+    * ``proposed`` — total filed.
+    * ``approved`` — owner said yes (approved, implemented, or failed).
+    * ``denied`` — owner said no.
+    * ``ignored`` — still ``proposed`` after ``research_ignore_days()``
+      days with no owner decision.
+    * ``pending`` — still ``proposed`` but inside the ignore window.
+    * ``applied`` — reached implementation (implemented + failed).
+    * ``tests_passed`` / ``tests_failed`` — implementation outcomes from
+      ``record_implemented`` results (``ok`` true vs false).
+
+    All zeros when there is no data — never a guess, never a score."""
+    sig = {"proposed": 0, "approved": 0, "denied": 0, "ignored": 0,
+           "pending": 0, "applied": 0, "tests_passed": 0, "tests_failed": 0}
+    db = getattr(context, "db", None)
+    if db is None:
+        return sig
+    try:
+        rows = db.query(
+            "SELECT status, created_at, applied_result, patch_plan "
+            "FROM upgrade_proposals")
+    except Exception:  # noqa: BLE001 - table may not exist yet
+        return sig
+    cutoff = time.time() - float(research_ignore_days()) * 86400.0
+    for row in rows or []:
+        try:
+            plan = json.loads(row.get("patch_plan") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(plan, dict) or plan.get("source") != "research_loop":
+            continue
+        sig["proposed"] += 1
+        st = str(row.get("status") or "")
+        if st == "denied":
+            sig["denied"] += 1
+        elif st in ("approved", "implemented", "failed"):
+            sig["approved"] += 1
+            if st == "implemented":
+                sig["applied"] += 1
+                sig["tests_passed"] += 1
+            elif st == "failed":
+                sig["applied"] += 1
+                sig["tests_failed"] += 1
+        elif st == "proposed":
+            if float(row.get("created_at") or 0.0) < cutoff:
+                sig["ignored"] += 1
+            else:
+                sig["pending"] += 1
+    return sig
+
+
+def signals_summary(signals: dict[str, int] | None) -> str:
+    """One-line owner-facing summary, e.g.
+    ``12 proposed · 3 approved · 2 denied · 7 ignored · applied 3/3 tests
+    passed``. Honest zeros when there is no data."""
+    s = signals or {}
+    p = int(s.get("proposed", 0) or 0)
+    a = int(s.get("approved", 0) or 0)
+    d = int(s.get("denied", 0) or 0)
+    ig = int(s.get("ignored", 0) or 0)
+    ap = int(s.get("applied", 0) or 0)
+    tp = int(s.get("tests_passed", 0) or 0)
+    return (f"{p} proposed · {a} approved · {d} denied · {ig} ignored "
+            f"· applied {tp}/{ap} tests passed")
+
+
 # ── run history ──────────────────────────────────────────────────────────────
 
 def record_run(context: Any, record: dict[str, Any]) -> str:
@@ -259,8 +482,8 @@ def record_run(context: Any, record: dict[str, Any]) -> str:
             "INSERT INTO research_loop_runs "
             "(id, started_at, finished_at, ok, skipped_reason, topics, "
             "findings_count, claims_count, proposals_created, proposal_ids, "
-            "notified, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "notified, error, proposals_deduped, proposals_capped, signals) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid,
              float(record.get("started_at", 0.0) or 0.0),
              float(record.get("finished_at", 0.0) or 0.0),
@@ -272,7 +495,10 @@ def record_run(context: Any, record: dict[str, Any]) -> str:
              int(record.get("proposals_created", 0) or 0),
              json.dumps(list(record.get("proposal_ids") or [])),
              1 if record.get("notified") else 0,
-             str(record.get("error", "") or "")),
+             str(record.get("error", "") or ""),
+             int(record.get("proposals_deduped", 0) or 0),
+             int(record.get("proposals_capped", 0) or 0),
+             json.dumps(record.get("signals") or {})),
         )
     except Exception as exc:  # noqa: BLE001 - history is bookkeeping, not the mission
         _log.warning("could not record research loop run: %s", exc)
@@ -297,6 +523,10 @@ def last_run(context: Any) -> dict[str, Any] | None:
             out[key] = json.loads(out.get(key) or "[]")
         except (TypeError, ValueError):
             out[key] = []
+    try:
+        out["signals"] = json.loads(out.get("signals") or "{}")
+    except (TypeError, ValueError):
+        out["signals"] = {}
     return out
 
 
@@ -308,11 +538,17 @@ class ResearchLoop:
     def __init__(self, context: Any, *,
                  max_topics: int = _MAX_TOPICS_PER_TICK,
                  min_confidence: float = 0.5,
-                 specialists: list[str] | None = None) -> None:
+                 specialists: list[str] | None = None,
+                 max_proposals: int | None = None) -> None:
         self.context = context
         self.max_topics = max(1, int(max_topics))
         self.min_confidence = min_confidence
         self.specialists = specialists
+        # Per-cycle proposal cap (rate-limit the noise). None = the env
+        # default NM_RESEARCH_LOOP_MAX_PROPOSALS.
+        self.max_proposals = (max(1, int(max_proposals))
+                              if max_proposals
+                              else max(1, research_max_proposals()))
 
     def tick(self) -> dict[str, Any]:
         """Run one cycle: gates -> topics -> pipeline -> upgrade queue ->
@@ -323,6 +559,8 @@ class ResearchLoop:
             "ok": False, "skipped_reason": "", "topics": [],
             "findings_count": 0, "claims_count": 0,
             "proposals_created": 0, "proposal_ids": [],
+            "proposals_deduped": 0, "proposals_capped": 0,
+            "signals": {},
             "notified": False, "error": "",
         }
         try:
@@ -350,6 +588,13 @@ class ResearchLoop:
         briefs: list[str] = []
         proposal_ids: list[str] = []
         topics_done: list[str] = []
+        # Cross-cycle dedupe fingerprints: proposals this loop already
+        # filed (plus ones filed earlier in this cycle) so the same
+        # finding never spawns a second ticket.
+        fingerprints = _recent_research_proposals(self.context,
+                                                 research_dedupe_days())
+        deduped = 0
+        capped = 0
         for topic in topics:
             try:
                 result = ResearchPipeline.run(
@@ -366,6 +611,22 @@ class ResearchLoop:
             record["claims_count"] += len(result.get("claims") or [])
             pipeline = UpgradePipeline(self.context)
             for ticket in result.get("tickets") or []:
+                title = str(ticket.get("title") or "")
+                files = [str(f) for f in
+                         (ticket.get("suggested_files") or []) if f]
+                fp = _ticket_fingerprint(title, files)
+                if any(_fingerprints_duplicate(fp, seen)
+                       for seen in fingerprints):
+                    deduped += 1
+                    _log.info("research loop deduped ticket %r "
+                              "(already proposed recently)", title[:80])
+                    continue
+                if len(proposal_ids) >= self.max_proposals:
+                    capped += 1
+                    _log.info("research loop dropped ticket %r: per-cycle "
+                              "proposal cap (%d) reached", title[:80],
+                              self.max_proposals)
+                    continue
                 try:
                     pid = pipeline.propose_from_ticket(
                         ticket, source="research_loop")
@@ -374,26 +635,35 @@ class ResearchLoop:
                     continue
                 if pid:
                     proposal_ids.append(pid)
+                    fingerprints.append(fp)
             brief = str(result.get("brief") or "").strip()
             if brief:
                 briefs.append(brief)
         record["topics"] = topics_done
         record["proposals_created"] = len(proposal_ids)
         record["proposal_ids"] = proposal_ids
+        record["proposals_deduped"] = deduped
+        record["proposals_capped"] = capped
         record["ok"] = bool(topics_done)
         if briefs:
             record["notified"] = self._notify(briefs, record)
         return record
 
     def _notify(self, briefs: list[str], record: dict[str, Any]) -> bool:
-        """Send the cycle's digest briefs to the owner. The notifier
-        applies dedupe, the notifier feature flag, and delivery-state
-        tracking; it returns delivery info (never raises)."""
+        """Send the cycle's digest briefs to the owner — exactly ONE digest
+        publish per cycle (the notification cap), never one per finding.
+        A one-line usefulness-signals summary is appended so the owner sees
+        what the loop's proposals have earned so far. The notifier applies
+        dedupe, the notifier feature flag, and delivery-state tracking; it
+        returns delivery info (never raises)."""
         try:
             title = ("research loop: %d finding(s), %d proposal(s)"
                      % (record["findings_count"],
                         record["proposals_created"]))
             body = "\n\n".join(briefs)[:3000]
+            summary = signals_summary(record.get("signals") or
+                                      usefulness_signals(self.context))
+            body = f"{body}\n\nsignals: {summary}"[:3200]
             res = Notifier(self.context).publish("research", title, body)
             return bool(isinstance(res, dict)
                         and res.get("delivered") not in (False, 0)
@@ -404,6 +674,14 @@ class ResearchLoop:
 
     def _finish(self, record: dict[str, Any]) -> dict[str, Any]:
         record["finished_at"] = time.time()
+        # Snapshot the usefulness signals into the run record so the
+        # owner can see what the loop's track record looked like when
+        # this cycle finished.
+        try:
+            record["signals"] = usefulness_signals(self.context)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping, not the mission
+            _log.warning("research loop signals snapshot failed: %s", exc)
+            record["signals"] = {}
         rid = record_run(self.context, record)
         out = {
             "ok": record["ok"],
@@ -414,6 +692,9 @@ class ResearchLoop:
             "claims_count": record["claims_count"],
             "proposals_created": record["proposals_created"],
             "proposal_ids": record["proposal_ids"],
+            "proposals_deduped": record.get("proposals_deduped", 0),
+            "proposals_capped": record.get("proposals_capped", 0),
+            "signals": record.get("signals", {}),
             "notified": record["notified"],
             "error": record["error"],
             "seconds": round(record["finished_at"] - record["started_at"], 2),
@@ -502,6 +783,7 @@ def status(context: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     out["topics"] = owner_topics(context)
+    out["signals"] = usefulness_signals(context)
     return out
 
 
@@ -523,6 +805,8 @@ def run_topic(context: Any, topic: str) -> dict[str, Any]:
         "ok": False, "skipped_reason": "", "topics": [q],
         "findings_count": 0, "claims_count": 0,
         "proposals_created": 0, "proposal_ids": [],
+        "proposals_deduped": 0, "proposals_capped": 0,
+        "signals": {},
         "notified": False, "error": "",
     }
     ok, reason = loop_gates(context)
@@ -534,6 +818,10 @@ def run_topic(context: Any, topic: str) -> dict[str, Any]:
                 "skipped_reason": reason, "topic": q}
     outcome = loop._run_cycle(record, [q])
     outcome["finished_at"] = time.time()
+    try:
+        outcome["signals"] = usefulness_signals(context)
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        outcome["signals"] = {}
     rid = record_run(context, outcome)
     out = dict(outcome)
     out["run_id"] = rid

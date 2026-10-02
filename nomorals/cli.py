@@ -5153,6 +5153,7 @@ def _cmd_research_loop(args: argparse.Namespace, context: Any) -> int:
             f"quiet_hours={'yes' if gates.get('quiet_hours') else 'no'}",
             f"  last run: {last_line}",
             f"  pending proposals: {data.get('pending_proposals', 0)}",
+            f"  signals: {rlmod.signals_summary(data.get('signals') or {})}",
             f"  topics: {', '.join(data.get('topics') or []) or 'none set'}",
         ]
         _emit(args, data, "\n".join(lines))

@@ -11,6 +11,7 @@ States: ``proposed -> approved|denied`` ; approved proposals become
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any
@@ -21,12 +22,18 @@ from ..core.logging_setup import get_logger
 from .evolution import EvolutionAgent
 from .notifier import notify
 from .research_digest import gate_ticket
+from .research_swarm import _NEGATION, _content_words, _same_claim
 
 _log = get_logger(__name__)
 
 __all__ = ["UpgradeQueue", "UpgradePipeline", "register"]
 
 _JSON_COLUMNS = ("patch_plan", "files", "tests", "claim_ids", "applied_result")
+
+# Bookkeeping stashed inside the patch_plan JSON payload (same trick as
+# ``source``): dedup merge records and conflict notes travel with the
+# proposal row and are lifted back out by _decode.
+_BOOKKEEPING_KEYS = ("merged_duplicates", "conflict_notes")
 
 # Ticket confidence below this never reaches the queue — weak findings
 # would just spam the owner.  This is explicit (a warning is logged).
@@ -46,13 +53,93 @@ def _decode(row: dict[str, Any]) -> dict[str, Any]:
         elif raw is None:
             data[col] = {} if col in ("patch_plan", "applied_result") else []
     # ``source`` has no dedicated column: it is stashed inside patch_plan
-    # at write time and lifted back out here.
+    # at write time and lifted back out here.  The same goes for the
+    # dedup/conflict bookkeeping (``_BOOKKEEPING_KEYS``).
     plan = data.get("patch_plan")
     if isinstance(plan, dict):
         data["source"] = plan.pop("source", "")
+        for key in _BOOKKEEPING_KEYS:
+            val = plan.pop(key, [])
+            data[key] = list(val) if isinstance(val, list) else []
     else:
         data["source"] = ""
+        for key in _BOOKKEEPING_KEYS:
+            data[key] = []
     return data
+
+
+def _norm_file(path: str) -> str:
+    """Normalize a suggested file path for overlap comparison."""
+    p = (path or "").strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _files_overlap(a: list[str], b: list[str]) -> list[str]:
+    """Normalized suggested-file overlap between two proposals."""
+    sa = {_norm_file(f) for f in (a or []) if _norm_file(f)}
+    sb = {_norm_file(f) for f in (b or []) if _norm_file(f)}
+    return sorted(sa & sb)
+
+
+def _proposal_text(p: dict[str, Any]) -> str:
+    return f"{p.get('title') or ''} {p.get('rationale') or ''}".strip()
+
+
+def _proposal_fingerprint(title: str, rationale: str,
+                          files: list[str], tests: list[str]) -> str:
+    """Stable fingerprint of a proposal's substance (for idempotency:
+    refiling the exact same proposal is a no-op)."""
+    h = hashlib.sha256()
+    h.update(title.strip().lower().encode("utf-8"))
+    h.update(b"\x00")
+    h.update(rationale.strip().lower().encode("utf-8"))
+    h.update(b"\x00")
+    h.update("\x00".join(sorted(_norm_file(f) for f in (files or []))
+                          ).encode("utf-8"))
+    h.update(b"\x00")
+    h.update("\x00".join(sorted((t or "").strip().lower()
+                                for t in (tests or []))).encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+def _is_near_duplicate(new: dict[str, Any],
+                       existing: dict[str, Any]) -> bool:
+    """Near-duplicate test for propose-time dedup — the same philosophy
+    as ``research_swarm.dedupe_findings``: the same claim in different
+    words (``_same_claim``, which never fires across an
+    affirmation/negation boundary), plus overlapping suggested files."""
+    if not _same_claim(_proposal_text(new), _proposal_text(existing)):
+        return False
+    return bool(_files_overlap(new.get("files") or [],
+                               existing.get("files") or []))
+
+
+def _is_conflict(new: dict[str, Any], existing: dict[str, Any]) -> bool:
+    """Genuine-conflict test — the same guard logic as
+    ``research_swarm._detect_conflicts``: the SAME subject (two shared
+    content words, >= 4 letters) over overlapping suggested files, with
+    exactly one side negating. Affirmations never conflict with
+    affirmations; those are duplicates or unrelated."""
+    tn, te = _proposal_text(new), _proposal_text(existing)
+    shared = {w for w in (_content_words(tn) & _content_words(te))
+              if len(w) >= 4}
+    if len(shared) < 2:
+        return False
+    if not _files_overlap(new.get("files") or [],
+                          existing.get("files") or []):
+        return False
+    return bool(_NEGATION.search(tn)) != bool(_NEGATION.search(te))
+
+
+def _conflict_point(title_a: str, title_b: str,
+                    shared_files: list[str]) -> str:
+    files_txt = ", ".join(shared_files[:4])
+    if len(shared_files) > 4:
+        files_txt += f" (+{len(shared_files) - 4} more)"
+    return (f"contradictory proposals touching the same files "
+            f"({files_txt}): {title_a[:80]!r} vs {title_b[:80]!r}")
 
 
 class UpgradeQueue:
@@ -79,6 +166,17 @@ class UpgradeQueue:
 
         Fail-fast validation: short titles/rationales raise ValueError so
         the queue never accumulates junk.
+
+        Dedup/conflict handling (automatic, propose-time):
+        * near-duplicate of an open proposal (same claim in different
+          words + overlapping suggested files) — merged into the
+          original: the new filing is attached as a merged duplicate with
+          full provenance, extra files/tests are unioned in, and the
+          ORIGINAL id is returned. Nothing is silently dropped.
+        * genuine conflict with an open proposal (same subject + same
+          files, exactly one side negating) — never merged, never
+          last-write-wins: an explicit ``conflict_notes`` entry is
+          attached to BOTH items and both stay open for the owner.
         """
         title = (title or "").strip()
         rationale = (rationale or "").strip()
@@ -90,25 +188,177 @@ class UpgradeQueue:
             raise ValueError("patch_plan must be a dict")
         files = [f for f in (files or []) if f]
         tests = [t for t in (tests or []) if t]
+        claim_ids = [c for c in (claim_ids or []) if c]
+
+        new = {"title": title, "rationale": rationale, "files": files,
+               "tests": tests, "claim_ids": claim_ids, "source": source}
+        pid = new_id("upg")
+        fingerprint = _proposal_fingerprint(title, rationale, files, tests)
+        now = time.time()
+
+        open_props = sorted(
+            self.list(status="proposed", limit=500),
+            key=lambda p: p.get("created_at") or 0)
+        target = None
+        for existing in open_props:
+            if _is_near_duplicate(new, existing):
+                if _proposal_fingerprint(
+                        existing.get("title") or "",
+                        existing.get("rationale") or "",
+                        existing.get("files") or [],
+                        existing.get("tests") or []) == fingerprint:
+                    return existing["id"]  # exact re-file: no-op
+                if any(d.get("fingerprint") == fingerprint
+                       for d in existing.get("merged_duplicates") or []):
+                    return existing["id"]  # already merged: no double-merge
+                target = existing
+                break
+        conflicts = [e for e in open_props if _is_conflict(new, e)]
+
+        if target is not None:
+            self._merge_duplicate(target, pid=pid, new=new,
+                                  fingerprint=fingerprint, now=now,
+                                  conflicts=conflicts)
+            return target["id"]
 
         plan = dict(patch_plan)
         if source:
             plan["source"] = source
-        pid = new_id("upg")
+        note_list = [
+            self._make_conflict_note(e, other_id=e["id"],
+                                     other_title=e.get("title") or "",
+                                     now=now,
+                                     shared_files=_files_overlap(
+                                         files, e.get("files") or []))
+            for e in conflicts
+        ]
+        if note_list:
+            plan["conflict_notes"] = note_list
         self.db.execute(
             "INSERT INTO upgrade_proposals "
             "(id, title, rationale, patch_plan, files, tests, claim_ids, "
             "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?)",
             (pid, title, rationale, json.dumps(plan),
              json.dumps(files), json.dumps(tests),
-             json.dumps(claim_ids or []), time.time()),
+             json.dumps(claim_ids), now),
         )
+        for e in conflicts:
+            self._attach_conflict_note(e["id"], other_id=pid,
+                                       other_title=title, now=now)
         body = rationale[:400]
         if source:
             body = f"[source: {source}]\n{body}"
+        if conflicts:
+            names = ", ".join(
+                f"{c['id']}: {str(c.get('title') or '')[:60]}"
+                for c in conflicts[:4])
+            body = f"{body}\n\nconflicts with: {names}"
         notify(self.context, "upgrade_proposal",
                f"new upgrade proposal: {title}", body)
         return pid
+
+    # --------------------------------------------- dedup / conflict internals
+
+    def _merge_duplicate(self, target: dict[str, Any], *, pid: str,
+                         new: dict[str, Any], fingerprint: str,
+                         now: float, conflicts: list[dict]) -> None:
+        """Fold a near-duplicate filing into the original open proposal:
+        provenance record appended, files/tests/claim_ids unioned, and
+        conflict notes attached both ways (the survivor is still open,
+        so its conflicts stay visible)."""
+        merged = list(target.get("merged_duplicates") or [])
+        merged.append({
+            "id": pid,
+            "title": new["title"],
+            "rationale": new["rationale"],
+            "source": new["source"],
+            "merged_at": now,
+            "files": list(new["files"]),
+            "tests": list(new["tests"]),
+            "claim_ids": list(new["claim_ids"]),
+            "fingerprint": fingerprint,
+        })
+        files = list(target.get("files") or [])
+        for f in new["files"]:
+            if _norm_file(f) and all(
+                    _norm_file(e) != _norm_file(f) for e in files):
+                files.append(f)
+        tests = list(target.get("tests") or [])
+        for t in new["tests"]:
+            if t and all((e or "").strip() != t.strip() for e in tests):
+                tests.append(t)
+        claim_ids = list(target.get("claim_ids") or [])
+        for c in new["claim_ids"]:
+            if c and c not in claim_ids:
+                claim_ids.append(c)
+        plan = dict(target.get("patch_plan") or {})
+        plan["source"] = target.get("source") or ""
+        plan["merged_duplicates"] = merged
+        if target.get("conflict_notes"):
+            plan["conflict_notes"] = list(target["conflict_notes"])
+        self.db.execute(
+            "UPDATE upgrade_proposals SET files = ?, tests = ?, "
+            "claim_ids = ?, patch_plan = ? WHERE id = ?",
+            (json.dumps(files), json.dumps(tests), json.dumps(claim_ids),
+             json.dumps(plan), target["id"]),
+        )
+        for e in conflicts:
+            self._attach_conflict_note(target["id"], other_id=e["id"],
+                                       other_title=e.get("title") or "",
+                                       now=now)
+            self._attach_conflict_note(e["id"], other_id=target["id"],
+                                       other_title=target.get("title") or "",
+                                       now=now)
+        _log.info("upgrade proposal %s merged into %s", pid, target["id"])
+        notify(self.context, "upgrade_proposal",
+               f"upgrade proposal merged: {new['title']}",
+               f"filed as {pid}; near-duplicate of open proposal "
+               f"{target['id']} — merged in with provenance instead of a "
+               "new queue entry.")
+
+    def _make_conflict_note(self, existing: dict[str, Any], *,
+                            other_id: str, other_title: str,
+                            now: float,
+                            shared_files: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "proposal_id": other_id,
+            "title": other_title,
+            "point": _conflict_point(other_title,
+                                     existing.get("title") or "",
+                                     shared_files or []),
+            "noted_at": now,
+        }
+
+    def _attach_conflict_note(self, proposal_id: str, *,
+                              other_id: str, other_title: str,
+                              now: float) -> None:
+        """Append a conflict note to one side of a conflicting pair."""
+        row = self.get(proposal_id)
+        if row is None:
+            return
+        if any(n.get("proposal_id") == other_id
+               for n in row.get("conflict_notes") or []):
+            return  # already noted: idempotent
+        other = self.get(other_id)
+        shared = _files_overlap(row.get("files") or [],
+                                (other or {}).get("files") or [])
+        notes = list(row.get("conflict_notes") or [])
+        notes.append({
+            "proposal_id": other_id,
+            "title": other_title,
+            "point": _conflict_point(other_title, row.get("title") or "",
+                                     shared),
+            "noted_at": now,
+        })
+        plan = dict(row.get("patch_plan") or {})
+        plan["source"] = row.get("source") or ""
+        plan["conflict_notes"] = notes
+        if row.get("merged_duplicates"):
+            plan["merged_duplicates"] = list(row["merged_duplicates"])
+        self.db.execute(
+            "UPDATE upgrade_proposals SET patch_plan = ? WHERE id = ?",
+            (json.dumps(plan), proposal_id),
+        )
 
     def list(self, status: str = "proposed", limit: int = 50) -> list[dict]:
         rows = self.db.query(

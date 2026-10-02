@@ -85,7 +85,13 @@ def make_runtime(ctx):
     from nomorals.agents.partner_runtime import PartnerRuntime
     rt = PartnerRuntime.__new__(PartnerRuntime)
     rt.context = ctx
+    rt._owner_chats = {"telegram:1"}
     return rt
+
+
+#: the owner chat every dispatch test below runs as — _control_upgrade
+#: denies non-owner chats fail-closed, so the owner chat is explicit.
+OWNER_CHAT = SimpleNamespace(key="telegram:1")
 
 
 class TestResolveProposal(unittest.TestCase):
@@ -275,6 +281,11 @@ class TestControlUpgrade(unittest.TestCase):
         self.rt = make_runtime(self.ctx)
         self.pipe = FakePipeline(self.ctx)
         self.p1 = propose_sample(self.ctx)
+        # these tests exercise dispatch/render as the owner: inject the
+        # owner chat (non-owner gating is proven in test_upgrade_gating_g2).
+        _up = self.rt._control_upgrade
+        self.rt._control_upgrade = (
+            lambda tail, **kw: _up(tail, _chat=OWNER_CHAT, **kw))
 
     def test_list(self):
         out = self.rt._control_upgrade("list")

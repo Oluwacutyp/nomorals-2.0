@@ -566,16 +566,114 @@ def _claim_test_slug(claim_text: str) -> str:
     return re.sub(r"[^a-z0-9_]", "", slug)[:40]
 
 
+# ── ticket quality: substantive content, no boilerplate ───────────────────
+
+#: Banned filler phrases: when a long-form ticket field contains one of
+#: these, the field is boilerplate rather than substance. Matched
+#: case-insensitively on word boundaries. "unknown" is deliberately NOT on
+#: the list — an honest "blast radius: unknown, needs human review" is
+#: substance, not filler.
+_FILLER_PHRASES = (
+    "improve code quality",
+    "enhance functionality",
+    "increase efficiency",
+    "add tests",
+    "write tests",
+    "better performance",
+    "improve performance",
+    "refactor code",
+    "misc improvements",
+    "various improvements",
+    "some improvements",
+    "general improvements",
+    "as described above",
+    "as mentioned above",
+    "to be determined",
+    "fill me in",
+    "make it better",
+    "do better",
+    "best practices",
+    "tbd",
+    "todo",
+    "n/a",
+)
+
+
+def _filler_hits(text: str) -> list[str]:
+    """Banned filler phrases found in *text* (deduped, definition order)."""
+    lowered = str(text or "")
+    return [p for p in _FILLER_PHRASES
+            if re.search(r"\b%s\b" % re.escape(p), lowered, re.IGNORECASE)]
+
+
+#: Minimum distinct content words (stopwords stripped) a long-form ticket
+#: field must carry, and minimum *novel* content words not already present
+#: in title+rationale — a field that only restates the title is not
+#: substance.
+_MIN_FIELD_CONTENT_WORDS = 5
+_MIN_NOVEL_CONTENT_WORDS = 3
+
+
+def _substance_reasons(field: str, text: str,
+                       baseline: set[str] | None = None, *,
+                       min_content: int = _MIN_FIELD_CONTENT_WORDS,
+                       min_novel: int = _MIN_NOVEL_CONTENT_WORDS
+                       ) -> list[str]:
+    """Reject boilerplate in a long-form ticket field.
+
+    Returns blocking reasons when the field (a) carries too few distinct
+    content words to say anything real, (b) merely restates the
+    title/rationale with no novel content words of its own, or (c)
+    contains a banned filler phrase ("improve code quality",
+    "add tests", ...). Empty list means the field has substance.
+    """
+    reasons: list[str] = []
+    words = _content_words(text or "")
+    if len(words) < min_content:
+        return [f"{field} too vague: only {len(words)} distinct content "
+                f"word(s) (needs >= {min_content})"]
+    novel = words - (baseline or set())
+    if len(novel) < min_novel:
+        reasons.append(
+            f"{field} restates the title/rationale without new substance "
+            f"(only {len(novel)} novel content word(s), needs "
+            f">= {min_novel})")
+    hits = _filler_hits(text)
+    if hits:
+        reasons.append(
+            f"{field} looks like boilerplate (filler phrase: {hits[0]!r})")
+    return reasons
+
+
 def gate_ticket(ticket: dict[str, Any]) -> list[str]:
     """Block vague tickets: returns the list of blocking problems (empty
     when the ticket is concrete). A ticket must name real repo files that
-    exist on disk, propose specific test names, and define acceptance
-    criteria — anything less never reaches the upgrade queue."""
+    exist on disk, propose specific test names, define acceptance
+    criteria — and now also:
+
+    * ``problem`` — a concrete problem statement with evidence, not just
+      a title rephrased (>= 30 chars, substantive, not boilerplate).
+    * ``proposed_change`` — the approach, naming at least one suggested
+      file (>= 40 chars, substantive, not a file list alone).
+    * ``risk`` — blast radius, what could break, reversibility
+      (>= 30 chars, substantive; an honest "unknown — needs human
+      review" beats invented specifics).
+    * ``verify_steps`` — concrete tests/commands that prove the fix
+      worked, distinct from acceptance_criteria (the done-definition).
+
+    Long-form fields are checked for boilerplate: too few distinct
+    content words, fields that only restate the title/rationale, and
+    banned filler phrases ("improve code quality", "add tests", ...)
+    are all rejected with specific reasons. Anything failing never
+    reaches the upgrade queue.
+    """
     problems: list[str] = []
     t = ticket or {}
-    if len(str(t.get("title") or "").strip()) < 8:
+    title = str(t.get("title") or "").strip()
+    rationale = str(t.get("rationale") or "").strip()
+    if len(title) < 8:
         problems.append("title too short/vague (< 8 chars)")
-    if len(str(t.get("rationale") or "").strip()) < 20:
+    if len(rationale) < 20:
         problems.append("rationale too short (< 20 chars)")
     if not str(t.get("domain") or "").strip():
         problems.append("no domain")
@@ -594,6 +692,59 @@ def gate_ticket(ticket: dict[str, Any]) -> list[str]:
         problems.append("no acceptance_criteria (done-definition)")
     if not [x for x in (t.get("claim_ids") or []) if x]:
         problems.append("no claim_ids (provenance)")
+
+    # ── the G2 quality bar: problem, approach, risk, verify steps —
+    # each with substance, not boilerplate.
+    baseline = _content_words(title + " " + rationale)
+
+    problem = str(t.get("problem") or "").strip()
+    if len(problem) < 30:
+        problems.append("problem statement too vague (< 30 chars)")
+    else:
+        problems.extend(_substance_reasons("problem", problem, baseline))
+
+    proposed = t.get("proposed_change")
+    if isinstance(proposed, (list, tuple)):
+        proposed = "; ".join(str(x) for x in proposed if str(x).strip())
+    proposed = str(proposed or "").strip()
+    if len(proposed) < 40:
+        problems.append("no proposed approach (< 40 chars)")
+    else:
+        problems.extend(
+            _substance_reasons("proposed_change", proposed, baseline))
+        if files and not any(
+                f in proposed or Path(f).stem in proposed for f in files):
+            problems.append(
+                "proposed change names no suggested file — the approach "
+                "must tie to concrete files, not just words")
+
+    risk = str(t.get("risk") or "").strip()
+    if len(risk) < 30:
+        problems.append("no risk assessment (< 30 chars)")
+    else:
+        problems.extend(_substance_reasons("risk", risk, baseline))
+
+    raw_steps = t.get("verify_steps")
+    if isinstance(raw_steps, str):
+        raw_steps = [raw_steps]
+    steps = [str(s).strip() for s in (raw_steps or [])
+             if str(s).strip()]
+    if not steps:
+        problems.append("no verify steps "
+                        "(concrete tests/commands proving the fix)")
+    else:
+        for s in steps:
+            if len(s) < 12:
+                problems.append(
+                    f"verify step too vague: {s[:48]!r} (< 12 chars)")
+        joined_steps = " ".join(steps)
+        problems.extend(
+            _substance_reasons("verify steps", joined_steps, baseline,
+                               min_content=8))
+        if not re.search(r"test_[a-z0-9_]+|pytest|error_scan|python3\s+-m",
+                         joined_steps, re.IGNORECASE):
+            problems.append("verify steps name no concrete test/command "
+                            "(a test_ name, pytest, or error_scan)")
     return problems
 
 
@@ -724,6 +875,16 @@ class ResearchDigest:
         * ``acceptance_criteria`` is a done-definition: each criterion
           is checkable, including a failing-before/passing-after test,
           a green module suite, and a 0-error ``error_scan``.
+        * ``problem`` states what's wrong with evidence (claim, query,
+          angle, confidence, sources, current repo state) — not a title
+          rephrase.
+        * ``proposed_change`` names the approach AND ties it to the
+          suggested files (TDD first, smallest diff, heuristic caveat).
+        * ``risk`` is an honest blast-radius/reversibility assessment —
+          "unknown, needs human review" where nothing is verified, never
+          invented specifics.
+        * ``verify_steps`` are concrete tests/commands proving the fix
+          (distinct from acceptance_criteria, the done-definition).
 
         ``suggested_files_basis`` stays an honest heuristic label —
         verify the owning module before editing; it is not certainty.
@@ -748,6 +909,52 @@ class ResearchDigest:
             f"test_claim_{slug}_asserts_behavior",
             f"test_claim_{slug}_rejects_contradiction",
             f"test_{domain}_{slug}_edge_cases",
+        ]
+        verified_txt = ", ".join(verified)
+        # evidence for the problem statement: what the claim rests on
+        source_bits = []
+        for s in (claim.sources or [])[:3]:
+            if isinstance(s, dict):
+                label = str(s.get("title") or s.get("url") or "").strip()
+                if label:
+                    source_bits.append(label)
+        evidence = (f"{len(claim.sources or [])} source(s)"
+                    + (f" — {', '.join(source_bits)}" if source_bits
+                       else " (no recorded sources)"))
+        problem = (
+            f"Research finding from query {claim.query!r} "
+            f"(angle: {claim.angle or 'unspecified'}, "
+            f"confidence {float(claim.confidence or 0.0):.0%}): {text} "
+            f"Evidence: {evidence}. "
+            f"The claim is not encoded anywhere in the repo — nothing in "
+            f"{verified_txt} asserts it, so the behavior it describes is "
+            f"untested and the contradicting case is unguarded. "
+            f"(The domain→repo file map is heuristic: verify the owning "
+            f"module by reading it before editing.)")
+        proposed_change = (
+            f"Approach: encode the claim as a failing test first (TDD — "
+            f"{expected_tests[0]}), then implement the smallest change in "
+            f"the owning module that makes it pass, keeping the diff local "
+            f"to {verified_txt}. Confirm the owning module by reading it "
+            f"first — the domain→repo map is a heuristic, not certainty. "
+            f"Re-run the module's test suite plus error_scan, then "
+            f"promote the outcome back to the KG (research_digest "
+            f"promote).")
+        risk = (
+            f"Blast radius: unknown — the suggested files are a "
+            f"keyword→domain heuristic, not a verified owning module, so "
+            f"edits could land in the wrong module and regress unrelated "
+            f"behavior ({verified_txt}). Reversibility: full — revert the "
+            f"commit; the TDD-first plan keeps the diff minimal and "
+            f"test-covered. Honest status: needs human review of the "
+            f"owning module before any edit.")
+        verify_steps = [
+            f"Run pytest -k {expected_tests[0]} — fails on the current "
+            "tree, passes after the change (TDD).",
+            "Run the owning module's existing test suite — green before "
+            "and after the change.",
+            "Run python3 -m nomorals.tools.error_scan on every touched "
+            "file — 0 errors.",
         ]
         acceptance_criteria = [
             "The owning module is confirmed from verified_files (read it; "
@@ -779,6 +986,10 @@ class ResearchDigest:
                 "owning module before editing — suggestions, not certainty"),
             "expected_tests": expected_tests,
             "acceptance_criteria": acceptance_criteria,
+            "problem": problem,
+            "proposed_change": proposed_change,
+            "risk": risk,
+            "verify_steps": verify_steps,
             "test_plan": [
                 f"Encode the claim as a test: assert the behavior '{short}'.",
                 "Add a negative test for the contradicting case (check the "

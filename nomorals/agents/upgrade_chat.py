@@ -6,14 +6,17 @@ tickets that cleared the confidence/vagueness gate and were filed by
 ``nomorals.agents.partner_runtime._control_upgrade``; these functions do
 the formatting so they stay unit-testable without a runtime.
 
-All upgrade commands are owner-only by construction: ``handle_control``
+All upgrade commands are owner-only, enforced twice: ``handle_control``
 is only reachable from operator chats (the ``_is_operator`` gate in
 ``on_message`` — a slash from anyone else falls through to ordinary
-conversation), so no per-command owner check is needed here.
+conversation), and ``_control_upgrade`` re-checks ``is_owner_chat``
+itself before touching the queue, so a direct call can never bypass
+the gate either.
 """
 from __future__ import annotations
 
 import difflib
+import time
 from typing import Any
 
 from ..core.ids import min_unique_prefix_len, resolve_id_prefix
@@ -98,14 +101,23 @@ def resolve_proposal(queue: Any, ref: str) -> tuple[dict | None, str]:
 
 
 def render_upgrade_list(proposals: list[dict[str, Any]]) -> str:
-    """One line per pending proposal: id, title, source."""
+    """One line per pending proposal: id, title, source (+merged/conflict flags)."""
     if not proposals:
         return ("no pending upgrade proposals — research findings that "
                 "clear the ticket gate land here for your review.")
     lines = [f"pending upgrades ({len(proposals)}):"]
     for p in proposals[:25]:
         src = p.get("source") or "?"
-        lines.append(f"  · {p.get('id')} [{src}] {str(p.get('title') or '')[:80]}")
+        flags: list[str] = []
+        merged = p.get("merged_duplicates") or []
+        if merged:
+            flags.append(f"+{len(merged)} merged")
+        conflicts = p.get("conflict_notes") or []
+        if conflicts:
+            flags.append(f"⚠ {len(conflicts)} conflict(s)")
+        flag_txt = f" ({', '.join(flags)})" if flags else ""
+        lines.append(f"  · {p.get('id')} [{src}] "
+                     f"{str(p.get('title') or '')[:80]}{flag_txt}")
     if len(proposals) > 25:
         lines.append(f"  … +{len(proposals) - 25} more")
     lines.append("review: /upgrade show <id> · preview edits: /upgrade diff <id>")
@@ -162,10 +174,46 @@ def render_upgrade_show(proposal: dict[str, Any]) -> str:
     src = proposal.get("source")
     if src:
         lines.append(f"source: {src}")
+    merged = [d for d in (proposal.get("merged_duplicates") or [])
+              if isinstance(d, dict)]
+    if merged:
+        lines.append("")
+        lines.append(f"merged duplicates ({len(merged)}):")
+        for d in merged[:8]:
+            when = _stamp(d.get("merged_at"))
+            ds = d.get("source") or "?"
+            lines.append(f"  · {d.get('id')} [{ds}]{' ' + when if when else ''} "
+                         f"{str(d.get('title') or '')[:70]}")
+            dfiles = [f for f in (d.get("files") or []) if f]
+            if dfiles:
+                lines.append(f"    files: {', '.join(dfiles[:6])}")
+        if len(merged) > 8:
+            lines.append(f"    … +{len(merged) - 8} more")
+    conflicts = [c for c in (proposal.get("conflict_notes") or [])
+                 if isinstance(c, dict)]
+    if conflicts:
+        lines.append("")
+        lines.append(f"conflict notes ({len(conflicts)}) — not merged, "
+                     "both stay open for your call:")
+        for c in conflicts[:6]:
+            lines.append(f"  ⚠ {c.get('proposal_id')} — "
+                         f"{str(c.get('title') or '')[:60]}")
+            if c.get("point"):
+                lines.append(f"    {str(c['point'])[:170]}")
+        if len(conflicts) > 6:
+            lines.append(f"    … +{len(conflicts) - 6} more")
     lines.append("")
     lines.append(f"preview the edits: /upgrade diff {pid} · "
                  f"run it: /upgrade approve {pid}")
     return "\n".join(lines)
+
+
+def _stamp(ts: Any) -> str:
+    """Short local timestamp for merged-duplicate provenance."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
 def render_upgrade_diff(proposal: dict[str, Any],
@@ -264,9 +312,17 @@ def _render_hunk(edit: dict[str, Any]) -> list[str]:
 def render_applied_digest(proposal: dict[str, Any]) -> str:
     """Short what-changed summary from ``record_implemented``'s result.
 
+    Shows files touched, the captured hunks (recorded by the evolution
+    apply path, since pre-apply content is gone afterwards), the test
+    gate, the commit — and how to roll back: ``/evolve revert <evo-id>``
+    for evolution applies, the exact ``git revert`` when only a commit
+    hash is recorded, or an honest "no rollback" line when the apply
+    path has no revert.
+
     ``applied_result`` is whatever the apply path returned:
     * evolution path — ``{"applied": bool, "edits": [...],
-      "verified": bool, "commit": ..., "reason"/"report": ...}``
+      "hunks": [...], "verified": bool, "commit": ..., "proposal_id": ...,
+      "reason"/"report": ...}``
     * staged skill-edit path — ``{"ok": bool, "edit": id, ...}``
     * exception path — ``{"ok": False, "error": ...}``
     """
@@ -294,7 +350,24 @@ def render_applied_digest(proposal: dict[str, Any]) -> str:
             if len(edits) > 12:
                 lines.append(f"  … +{len(edits) - 12} more")
         elif edit_id:
-            lines.append(f"  staged skill edit {edit_id} committed")
+            skill = res.get("skill")
+            lines.append("  staged skill edit "
+                         f"{edit_id} committed"
+                         + (f" ({skill})" if skill else ""))
+        hunks = res.get("hunks") or []
+        if hunks:
+            lines.append("  changes:")
+            for h in hunks[:4]:
+                if not isinstance(h, dict):
+                    continue
+                lines.append(f"    📄 {h.get('path') or '?'}")
+                diff = h.get("diff") or []
+                for dl in diff[:10]:
+                    lines.append(f"      {dl}")
+                if len(diff) > 10:
+                    lines.append(f"      … +{len(diff) - 10} more")
+            if len(hunks) > 4:
+                lines.append(f"    … +{len(hunks) - 4} more files")
         if "verified" in res:
             gate = ("passed" if res.get("verified")
                     else "FAILED (reverted)")
@@ -309,6 +382,7 @@ def render_applied_digest(proposal: dict[str, Any]) -> str:
         tag = res.get("tag")
         if tag:
             lines.append(f"  tag: {tag}")
+        lines.append(f"  {_rollback_line(proposal, res)}")
         return "\n".join(lines)
 
     # failure paths
@@ -324,6 +398,31 @@ def render_applied_digest(proposal: dict[str, Any]) -> str:
     if status == "failed":
         lines.append("  recorded as failed — the tree was left untouched")
     return "\n".join(lines)
+
+
+def _rollback_line(proposal: dict[str, Any], res: dict[str, Any]) -> str:
+    """How to undo this apply — the real path, or an honest admission.
+
+    Evolution applies always carry their evolution proposal id (the apply
+    path records it, and ``record_implemented`` also stores it on the
+    row), so ``/evolve revert <id>`` works whether the apply was
+    committed (git revert) or left on disk (file-level checkout) — and it
+    re-verifies the test gate afterwards.  A bare commit hash without a
+    proposal id falls back to the exact ``git revert`` command.  The
+    staged skill-edit path has no chat-accessible revert, so the digest
+    says so instead of inventing one.
+    """
+    evo_id = (res.get("proposal_id") or res.get("proposal")
+              or proposal.get("evolution_proposal_id") or "")
+    if evo_id:
+        return f"↩️ rollback: /evolve revert {evo_id}"
+    commit = res.get("commit")
+    if commit:
+        return f"↩️ rollback: git revert {commit}"
+    if res.get("edit"):
+        return ("↩️ rollback: no rollback available — staged skill edits "
+                "have no chat revert")
+    return "↩️ rollback: no rollback available — applied without a recorded commit"
 
 
 def _short(val: Any, limit: int = 160) -> str:

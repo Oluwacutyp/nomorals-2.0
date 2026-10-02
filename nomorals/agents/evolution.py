@@ -46,6 +46,7 @@ internals, and the safety-contract test suite itself.  Everything else
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import subprocess
@@ -120,6 +121,38 @@ class EvolutionProposal:
             verify_result=str(data.get("verify_result") or ""),
             commit=str(data.get("commit") or ""),
         )
+
+
+def _compact_hunks(edits: list[dict[str, Any]], *, max_edits: int = 6,
+                   max_lines: int = 12) -> list[dict[str, Any]]:
+    """Chat-sized unified diffs for the applied-result record.
+
+    Captured at apply time because the pre-apply file content is gone
+    afterwards.  Hard-capped: this record is stored as JSON in the state
+    DB and rendered into chat, so it must stay small.
+    """
+    hunks: list[dict[str, Any]] = []
+    for edit in edits[:max_edits]:
+        if not isinstance(edit, dict):
+            continue
+        path = str(edit.get("path") or "?")
+        old = str(edit.get("old") or "")
+        new = str(edit.get("new") or "")
+        if not old and new:
+            body = new.splitlines()
+            diff = [f"+ {ln}" for ln in body[:max_lines]]
+            if len(body) > max_lines:
+                diff.append(f"… +{len(body) - max_lines} more added lines")
+        else:
+            full = list(difflib.unified_diff(
+                old.splitlines(), new.splitlines(), lineterm="", n=2))
+            body = full[2:]  # drop the ---/+++ file headers
+            diff = body[:max_lines]
+            if len(body) > max_lines:
+                diff.append(f"… +{len(body) - max_lines} more diff lines")
+        hunks.append({"path": path,
+                      "diff": diff if diff else ["(no visible change)"]})
+    return hunks
 
 
 class EvolutionGitController:
@@ -1276,6 +1309,10 @@ class EvolutionAgent:
             "status": proposal.status,
             "proposal": proposal.id,
             "edits": [e["path"] for e in proposal.edits],
+            # the pre-apply file content is gone after this point, so the
+            # apply path records chat-sized hunks now — the upgrade digest
+            # renders them later from the stored result.
+            "hunks": _compact_hunks(proposal.edits),
             "verified": not skip_verify,
         }
         if commit:

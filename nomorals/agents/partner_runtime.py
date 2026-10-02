@@ -1848,7 +1848,11 @@ class PartnerRuntime:
         if kind == "evolve":
             return self._control_evolve(command.tail or arg, chat_key=chat_key)
         if kind == "upgrade":
-            return self._control_upgrade(command.tail or arg)
+            # the originating chat rides along so _control_upgrade can
+            # re-check the owner gate itself (defense in depth — a direct
+            # call with a non-owner chat is denied, fail-closed).
+            chat = getattr(message, "chat", None) if message is not None else None
+            return self._control_upgrade(command.tail or arg, _chat=chat)
         if kind == "speak":
             return self._control_speak(command.tail or arg, chat_key=chat_key)
         if kind == "voice":
@@ -5329,6 +5333,7 @@ class PartnerRuntime:
                 "| /evolve list")
 
     def _control_upgrade(self, tail: str, *,
+                         _chat: Any | None = None,
                          _pipeline: Any | None = None) -> str:
         """The research → approve → evolve loop, from chat.
 
@@ -5339,13 +5344,21 @@ class PartnerRuntime:
         /upgrade deny <id> <reason>
         /upgrade applied         recently applied, with what-changed digests
 
-        Owner-only by construction: this is dispatched from handle_control,
-        which is only reachable for operator (_is_operator) chats — a slash
-        from anyone else falls through to ordinary conversation, never here.
+        Owner-only, enforced at two layers: ``on_message`` only routes
+        slash commands into ``handle_control`` for operator chats (the
+        ``_is_operator`` gate), and this method re-checks
+        :func:`is_owner_chat` itself before touching the queue — a direct
+        call from a non-owner chat is denied, fail-closed.  ``_chat`` is
+        the originating chat (``message.chat``); ``None`` means no chat
+        was proven and is denied.
 
         ``_pipeline`` is a test seam (a mock pipeline); production always
         uses the real UpgradePipeline.
         """
+        if not is_owner_chat(_chat,
+                             owner_chats=getattr(self, "_owner_chats", ())):
+            return "owner-only: /upgrade is not available in this chat."
+
         import time
 
         from ..core.errors import NoMoralsError
