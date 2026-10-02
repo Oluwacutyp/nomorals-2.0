@@ -36,11 +36,15 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
-    env:
-      TMPDIR: ${{ runner.temp }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # NOTE: the `runner` context is NOT available in job-level `env`
+      # (GitHub fails the whole run at evaluation time, 0s, no jobs), so
+      # TMPDIR is exported here via $GITHUB_ENV instead of a job-level env:.
+      - name: Point TMPDIR at the runner temp dir
+        run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
