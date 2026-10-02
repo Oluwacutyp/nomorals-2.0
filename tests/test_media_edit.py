@@ -32,6 +32,11 @@ from nomorals.media_edit import videos
 from nomorals.tools.registry import ToolRegistry
 
 
+# Absolute repo root (tests/ lives one level below it). Used as subprocess
+# cwd / PYTHONPATH so the suite works from any checkout location.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+
 def _make_image(path, size=(1600, 1200), color=(60, 120, 200)):
     img = Image.new("RGB", size, color)
     img.save(path, quality=90)
@@ -451,13 +456,13 @@ class CLITests(unittest.TestCase):
         _make_image(ws / "photo.jpg")
         _make_clip(ws / "clip.mp4", duration=6)
         self.env = dict(os.environ, HOME=str(self.home),
-                        PYTHONPATH="/home/hatch/workspace/devon")
+                        PYTHONPATH=REPO_ROOT)
 
     def _nm(self, *args):
         proc = subprocess.run(
             [sys.executable, "-m", "nomorals", "media", *args],
             capture_output=True, text=True, timeout=180,
-            cwd="/home/hatch/workspace/devon", env=self.env)
+            cwd=REPO_ROOT, env=self.env)
         return proc
 
     def test_cli_probe_image(self):

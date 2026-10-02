@@ -41,6 +41,11 @@ from nomorals.media_edit import generate as generate_mod
 from nomorals.tools.registry import ToolRegistry
 
 
+# Absolute repo root (tests/ lives one level below it). Used as subprocess
+# cwd / PYTHONPATH so the suite works from any checkout location.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
@@ -783,13 +788,13 @@ class StudioCLITests(unittest.TestCase):
         ws.mkdir(parents=True)
         _make_image(ws / "photo.jpg")
         self.env = dict(os.environ, HOME=str(self.home),
-                        PYTHONPATH="/home/hatch/workspace/devon")
+                        PYTHONPATH=REPO_ROOT)
 
     def _nm(self, *args):
         return subprocess.run(
             [sys.executable, "-m", "nomorals", "studio", *args],
             capture_output=True, text=True, timeout=180,
-            cwd="/home/hatch/workspace/devon", env=self.env)
+            cwd=REPO_ROOT, env=self.env)
 
     def test_cli_presets(self):
         proc = self._nm("presets")
@@ -815,7 +820,7 @@ class StudioCLITests(unittest.TestCase):
             [sys.executable, "-m", "nomorals", "studio", "ai", "photo.jpg",
              "make it sunset"],
             capture_output=True, text=True, timeout=180,
-            cwd="/home/hatch/workspace/devon", env=env)
+            cwd=REPO_ROOT, env=env)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("MEDIA_GEN_BACKEND", proc.stderr)
 

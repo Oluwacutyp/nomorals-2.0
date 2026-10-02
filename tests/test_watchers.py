@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,6 +35,11 @@ from nomorals.agents.watchers import (
     parse_condition,
 )
 from nomorals.storage.db import Database
+
+
+# Absolute repo root (tests/ lives one level below it). Used as subprocess
+# cwd / PYTHONPATH so the suite works from any checkout location.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -764,7 +770,7 @@ class CliTests(unittest.TestCase):
         env["TMPDIR"] = home
         proc = subprocess.run(
             [sys.executable, "-m", "nomorals.cli", "watch", *argv],
-            cwd="/home/hatch/workspace/devon", env=env,
+            cwd=REPO_ROOT, env=env,
             capture_output=True, text=True, timeout=120)
         return proc
 

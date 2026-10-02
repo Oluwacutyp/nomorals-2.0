@@ -37,6 +37,11 @@ except ImportError:
     PILLOW = False
 
 
+# Absolute repo root (tests/ lives one level below it). Used as subprocess
+# cwd / PYTHONPATH so the suite works from any checkout location.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+
 # ── fakes ────────────────────────────────────────────────────────────────────
 
 class FakeNotifier:
@@ -408,13 +413,13 @@ class CLIInboxTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".nomorals" / "workspace").mkdir(parents=True)
         self.env = dict(os.environ, HOME=str(self.home),
-                        PYTHONPATH="/home/hatch/workspace/devon")
+                        PYTHONPATH=REPO_ROOT)
 
     def _nm(self, *args):
         return subprocess.run(
             [sys.executable, "-m", "nomorals", "inbox", *args],
             capture_output=True, text=True, timeout=180,
-            cwd="/home/hatch/workspace/devon", env=self.env)
+            cwd=REPO_ROOT, env=self.env)
 
     def test_cli_add_link_and_list(self):
         proc = self._nm("add-link", "https://example.com/x",

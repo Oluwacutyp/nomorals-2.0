@@ -31,6 +31,11 @@ from nomorals.agents.skill_synthesis import (
     SkillSynthesizer, detect_patterns, smoke_test_skill)
 
 
+# Absolute repo root (tests/ lives one level below it). Used as subprocess
+# cwd / PYTHONPATH so the suite works from any checkout location.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+
 def _ctx(mode="approval"):
     db = Database(":memory:")
     db.migrate()  # Database() does not auto-migrate; the real CLI calls it
@@ -637,13 +642,13 @@ class CLIImproveTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".nomorals" / "workspace").mkdir(parents=True)
         self.env = dict(os.environ, HOME=str(self.home),
-                        PYTHONPATH="/home/hatch/workspace/devon")
+                        PYTHONPATH=REPO_ROOT)
 
     def _nm(self, *args):
         return subprocess.run(
             [sys.executable, "-m", "nomorals", "improve", *args],
             capture_output=True, text=True, timeout=180,
-            cwd="/home/hatch/workspace/devon", env=self.env)
+            cwd=REPO_ROOT, env=self.env)
 
     def test_cli_status(self):
         proc = self._nm("status")
