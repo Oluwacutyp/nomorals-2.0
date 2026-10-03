@@ -27,9 +27,11 @@ FFMPEG_TIMEOUT = 600.0  # 10 minutes default per spec
 MAX_VIDEO_BYTES = 500 * 1024 * 1024  # 500 MB default cap
 
 _FFMPEG_HINT = (
-    "ffmpeg is not installed on this machine. "
-    "Install it (e.g. `apt install ffmpeg`) to enable video editing; "
-    "image tools are unaffected."
+    "ffmpeg is not installed on this machine. Install it to enable video "
+    "editing — Debian/Ubuntu: `sudo apt install ffmpeg`; macOS: "
+    "`brew install ffmpeg`; Windows: `winget install ffmpeg`; "
+    "or download a static build from https://ffmpeg.org/download.html. "
+    "Image tools are unaffected."
 )
 
 
@@ -1067,3 +1069,128 @@ def media_probe_any(path: str | os.PathLike[str]) -> dict[str, Any]:
         return image_probe(path)
     except MediaEditError:
         return video_probe(path)
+
+
+# ---------------------------------------------------------------------------
+# Frame-accurate thumbnails / preview grids (multi-backend)
+#
+# Imported lazily so the ffmpeg paths in this module never require OpenCV.
+# Backend "auto" picks the best available: OpenCV for exact decoded frames,
+# ffmpeg as fallback (keyframe-approximate seeks / tile filter).
+# ---------------------------------------------------------------------------
+
+def frame_accurate_thumbnail(src: str | os.PathLike[str], *,
+                             timestamp: str | float | int = 0,
+                             width: int = 640,
+                             out_dir: str | os.PathLike[str] | None = None,
+                             suffix: str = "thumb",
+                             ext: str = ".jpg",
+                             backend: str = "auto") -> dict[str, Any]:
+    """Save the frame at ``timestamp`` as an image.
+
+    Backend: OpenCV primary — decodes by frame index, so the thumbnail is
+    the EXACT frame (subtitle timing, defect inspection, cut-point
+    matching). ffmpeg fallback seeks with ``-ss`` (nearest keyframe:
+    fast but approximate); the result flags ``"exact": False`` then.
+    """
+    from . import cv_video
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    chosen = cv_video._resolve_backend(backend, ("opencv", "ffmpeg"))
+    if chosen == "ffmpeg":
+        t = parse_time(timestamp)
+        out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+        run_ffmpeg(["-ss", str(t), "-i", str(p), "-frames:v", "1",
+                    "-vf", f"scale={width}:-2", str(out)],
+                   timeout=min(FFMPEG_TIMEOUT, 120))
+        return {"input": str(p), "output": str(out),
+                "requested_t": timestamp, "actual_t": round(t, 3),
+                "bytes": out.stat().st_size, "backend": "ffmpeg",
+                "exact": False}
+    cv2 = cv_video._cv2()
+    frame, actual = cv_video.grab_frame_at(src, timestamp)
+    frame = cv_video._resize_keep_aspect(cv2, frame, width)
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    if not cv2.imwrite(str(out), frame):
+        raise MediaEditError(f"could not write thumbnail {out}")
+    return {"input": str(p), "output": str(out),
+            "requested_t": timestamp, "actual_t": round(actual, 3),
+            "bytes": out.stat().st_size, "backend": "opencv", "exact": True}
+
+
+def make_preview_grid(src: str | os.PathLike[str], *,
+                      cols: int = 4, rows: int = 3,
+                      cell_width: int = 320,
+                      out_dir: str | os.PathLike[str] | None = None,
+                      suffix: str = "preview",
+                      ext: str = ".jpg",
+                      backend: str = "auto") -> dict[str, Any]:
+    """Build a contact-sheet preview: ``cols`` x ``rows`` evenly spaced
+    frames tiled into one image.
+
+    Backend: OpenCV primary — exact decoded frames, each cell labeled
+    with its timestamp. ffmpeg fallback — a single-pass
+    ``fps`` + ``scale`` + ``tile`` filter graph (fast, no labels);
+    the result flags ``"labeled": False`` then.
+    """
+    if cols < 1 or rows < 1:
+        raise MediaEditError("cols and rows must be >= 1")
+    if cell_width < 32:
+        raise MediaEditError("cell_width must be >= 32")
+    from . import cv_video
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    chosen = cv_video._resolve_backend(backend, ("opencv", "ffmpeg"))
+    if chosen == "ffmpeg":
+        n = cols * rows
+        info = video_probe(p)
+        duration = info.get("duration") or 0
+        fps = (n / duration) if duration > 0 else 1.0
+        out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+        run_ffmpeg(["-i", str(p), "-vf",
+                    f"fps={fps:.4f},scale={cell_width}:-2,"
+                    f"tile={cols}x{rows}",
+                    "-frames:v", "1", str(out)],
+                   timeout=FFMPEG_TIMEOUT, duration=duration or None)
+        return {"input": str(p), "output": str(out), "cols": cols,
+                "rows": rows, "cells": n, "bytes": out.stat().st_size,
+                "backend": "ffmpeg", "labeled": False}
+    cv2, np = cv_video._cv2(), cv_video._np()
+    n = cols * rows
+    res = cv_video.extract_frames(
+        src, count=n, width=cell_width, fmt="jpg", backend="opencv",
+        out_dir=str(Path(tempfile.mkdtemp(prefix="preview-grid-"))))
+    try:
+        cells = []
+        for f in res["frames"]:
+            img = cv2.imread(f)
+            if img is None:
+                raise MediaEditError(f"could not read extracted frame {f}")
+            cells.append(img)
+        if not cells:
+            raise MediaEditError(f"no frames extracted from {src}")
+        ch, cw = cells[0].shape[:2]
+        # timestamp labels come from the frame filenames (t<secs>s)
+        labels = []
+        for f in res["frames"]:
+            m = re.search(r"t(\d+\.\d+)s", Path(f).name)
+            labels.append(f"{float(m.group(1)):.1f}s" if m else "")
+        sheet = np.zeros((ch * rows, cw * cols, 3), dtype=np.uint8)
+        for i, (img, label) in enumerate(zip(cells, labels)):
+            r, c = divmod(i, cols)
+            sheet[r * ch:(r + 1) * ch, c * cw:(c + 1) * cw] = img
+            if label:
+                cv2.putText(sheet, label, (c * cw + 8, r * ch + 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255),
+                            2, cv2.LINE_AA)
+        out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+        if not cv2.imwrite(str(out), sheet):
+            raise MediaEditError(f"could not write preview grid {out}")
+        return {"input": str(p), "output": str(out), "cols": cols,
+                "rows": rows, "cells": len(cells),
+                "bytes": out.stat().st_size, "backend": "opencv",
+                "labeled": True}
+    finally:
+        shutil.rmtree(res["frames_dir"], ignore_errors=True)

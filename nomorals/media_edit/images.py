@@ -649,6 +649,15 @@ def apply_chain(img: Any, ops: list[dict[str, Any]]) -> Any:
                       for p in others]
             extra_images.extend(loaded)
             out = _OP_FUNCS[name]([out] + loaded, **params)
+        elif name == "panorama":
+            # panorama(img, images=[...]): img is the first frame
+            others = params.pop("images", [])
+            if not isinstance(others, list):
+                raise MediaEditError("panorama needs an 'images' list")
+            loaded = [load_image(p) if isinstance(p, (str, Path)) else p
+                      for p in others]
+            extra_images.extend(loaded)
+            out = _OP_FUNCS[name](out, images=loaded, **params)
         else:
             out = _OP_FUNCS[name](out, **params)
     for extra in extra_images:

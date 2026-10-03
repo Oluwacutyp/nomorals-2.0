@@ -344,6 +344,29 @@ def _resolve_studio_paths(context: Any,
             op["layers"] = layers
         elif name == "generative_edit" and isinstance(op.get("mask"), str):
             op["mask"] = str(_sandbox(context, op["mask"]))
+        elif name == "inpaint_cv" and isinstance(op.get("mask"), str):
+            from ..media_edit.cv_ops import parse_box  # noqa: PLC0415
+            if parse_box(op["mask"]) is None:  # box strings need no sandbox
+                op["mask"] = str(_sandbox(context, op["mask"]))
+        elif name == "seamless_clone":
+            if isinstance(op.get("background"), str):
+                op["background"] = str(_sandbox(context, op["background"]))
+            if isinstance(op.get("mask"), str):
+                op["mask"] = str(_sandbox(context, op["mask"]))
+        elif name == "match_histogram" and isinstance(op.get("reference"),
+                                                      str):
+            op["reference"] = str(_sandbox(context, op["reference"]))
+        elif name == "color_transfer" and isinstance(op.get("reference"),
+                                                     str):
+            op["reference"] = str(_sandbox(context, op["reference"]))
+        elif name == "panorama" and op.get("images"):
+            op["images"] = [str(_sandbox(context, p))
+                            for p in op["images"]]
+        elif name == "cube_lut" and isinstance(op.get("lut"), str):
+            op["lut"] = str(_sandbox(context, op["lut"]))
+        elif name == "replace_background":
+            if isinstance(op.get("background"), str):
+                op["background"] = str(_sandbox(context, op["background"]))
         resolved.append(op)
     return resolved
 
