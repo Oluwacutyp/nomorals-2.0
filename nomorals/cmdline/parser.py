@@ -82,6 +82,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "wisdom": ["wis"],
     "browse": ["brw"],
     "repo": ["rp"],
+    "search": ["s"],
 }
 
 
@@ -1522,6 +1523,30 @@ def _parser() -> argparse.ArgumentParser:
     wisdom.add_argument("--end", type=int, default=2100,
                         help="timeline: end year")
     wisdom.add_argument("--json", action="store_true", help="Output as JSON")
+
+    search = sub.add_parser("search", aliases=CLI_ALIASES["search"],
+        help="universal federated search across memory, books, wisdom, docs, code, timeline",
+        description=("nm search <query> [--source NAME]... [--type TYPE]...\n"
+                     "            [--since DATE] [--before DATE] [--limit N]\n"
+                     "            [--dir DIR] [--json]\n"
+                     "sources: memory wisdom books docs code timeline\n"
+                     "types:   memory passage book doc code event\n"
+                     "dates: ISO-8601 or epoch seconds"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    search.add_argument("task", nargs="*", default=[], help="the search query")
+    search.add_argument("--source", action="append", default=[],
+                        help="source to search (repeatable; default: all)")
+    search.add_argument("--type", action="append", default=[],
+                        help="result type filter (repeatable)")
+    search.add_argument("--since", default=None,
+                        help="only hits on/after this date")
+    search.add_argument("--before", default=None,
+                        help="only hits on/before this date")
+    search.add_argument("--limit", type=int, default=10, help="max hits")
+    search.add_argument("--dir", default="",
+                        help="docs: build an ad-hoc index from this directory")
+    search.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
 

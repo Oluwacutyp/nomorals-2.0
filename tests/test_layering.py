@@ -58,6 +58,11 @@ LAYERS: dict[str, int] = {
     # practice): an L5 organ beside books/agents, wrapping books.Library
     # for ingest/search and documents/ for parsing. Reaches only downward.
     "wisdom": 5,
+    # search/ is the Wave L1 universal federated search (one query across
+    # memory/wisdom/books/docs/code/timeline): an L5 organ beside books and
+    # wisdom. It reaches only downward — the timeline adapter takes an
+    # injected os.Timeline (L6) rather than importing it.
+    "search": 5,
     "integrations": 5,
     # connectors: service adapters (GitHub first; finance/cards/proxies/
     # commerce queued). Peers of integrations; own their auth + vault creds.

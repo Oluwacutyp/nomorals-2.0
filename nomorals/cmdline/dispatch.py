@@ -58,6 +58,7 @@ from .commands.security import (
     _cmd_osint,
     _cmd_watch,
 )
+from .commands.search import _cmd_search
 from .commands.serve import _cmd_serve
 from .commands.skills import _cmd_skill_pkg
 from .commands.snapshot import _cmd_snapshot
@@ -332,6 +333,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_doc(args, context)
         if args.command == "wisdom":
             return _cmd_wisdom(args, context)
+        if args.command == "search":
+            return _cmd_search(args, context)
         if args.command == "browse":
             return _cmd_browse(args, context)
         if args.command == "repo":
