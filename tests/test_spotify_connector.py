@@ -574,5 +574,71 @@ class ResumeCheckpointTests(unittest.TestCase):
             conn.resume_checkpoint(cp, db=object())
 
 
+class TrackLookupTests(unittest.TestCase):
+    TRACK = {
+        "id": "t1", "uri": "spotify:track:t1", "name": "Song",
+        "artists": [{"name": "Artist"}],
+        "album": {"name": "Album"}, "duration_ms": 210000,
+        "external_urls": {"spotify": "https://open.spotify.com/track/t1"},
+        "explicit": False,
+    }
+
+    def test_normalize_uri_passthrough(self) -> None:
+        self.assertEqual(
+            SpotifyConnector.normalize_uri("spotify:track:abc123"),
+            "spotify:track:abc123")
+        self.assertEqual(
+            SpotifyConnector.normalize_uri("spotify:playlist:pl1"),
+            "spotify:playlist:pl1")
+
+    def test_normalize_open_spotify_link(self) -> None:
+        self.assertEqual(
+            SpotifyConnector.normalize_uri(
+                "https://open.spotify.com/track/abc123?si=xyz"),
+            "spotify:track:abc123")
+        self.assertEqual(
+            SpotifyConnector.normalize_uri(
+                "https://open.spotify.com/intl-de/album/def456"),
+            "spotify:album:def456")
+
+    def test_normalize_rejects_garbage(self) -> None:
+        for bad in ("", "not a uri", "spotify:track:",
+                    "https://example.com/track/abc",
+                    "spotify:bogus:abc"):
+            with self.assertRaises(SpotifyError, msg=bad):
+                SpotifyConnector.normalize_uri(bad)
+
+    def test_get_track(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/v1/tracks/t1",
+                   FakeResponse(200, self.TRACK))
+        info = conn.get_track("spotify:track:t1")
+        self.assertEqual(info["name"], "Song")
+        self.assertEqual(info["artists"], ["Artist"])
+        self.assertEqual(info["album"], "Album")
+        self.assertEqual(info["uri"], "spotify:track:t1")
+
+    def test_get_track_accepts_link(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/v1/tracks/t1",
+                   FakeResponse(200, self.TRACK))
+        info = conn.get_track("https://open.spotify.com/track/t1")
+        self.assertEqual(info["id"], "t1")
+
+    def test_get_track_rejects_non_track(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(SpotifyError):
+            conn.get_track("spotify:album:abc")
+
+    def test_get_track_not_found(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/v1/tracks/nope",
+                   FakeResponse(404, {"error": {"message": "not found",
+                                               "reason": "NOT_FOUND"}}))
+        with self.assertRaises(SpotifyError) as ctx:
+            conn.get_track("spotify:track:nope")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

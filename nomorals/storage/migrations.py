@@ -1257,6 +1257,54 @@ ALTER TABLE improvement_runs ADD COLUMN proposal_id TEXT NOT NULL DEFAULT '';
 """
 
 
+_V67_PLAYER_LIBRARY = """
+-- Player library: named playlists, play history, favorites.
+CREATE TABLE IF NOT EXISTS media_playlists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS media_playlist_items (
+    id TEXT PRIMARY KEY,
+    playlist_id TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'file',
+    position INTEGER NOT NULL DEFAULT 0,
+    added_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_items_pl
+    ON media_playlist_items(playlist_id, position);
+CREATE TABLE IF NOT EXISTS media_history (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    played_at REAL NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_media_history_played
+    ON media_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_media_history_path
+    ON media_history(path);
+CREATE TABLE IF NOT EXISTS media_favorites (
+    path TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    liked_at REAL NOT NULL DEFAULT 0
+);
+"""
+
+
 _V34_MORE_MISSING_COLUMNS_V2 = """
 -- Add missing columns to improvement_runs
 ALTER TABLE improvement_runs ADD COLUMN action TEXT NOT NULL DEFAULT '';
@@ -2252,6 +2300,10 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(64, "research_loop_runs", fn=_apply_research_loop_tables),
     Migration(65, "coremind_telemetry", sql=_V65_COREMIND_TELEMETRY),
     Migration(66, "research_loop_g2", fn=_apply_research_loop_g2),
+    Migration(67, "player_library", sql=_V67_PLAYER_LIBRARY),
+    Migration(68, "media_queue_album_column",
+              sql="ALTER TABLE media_queue ADD COLUMN album "
+                  "TEXT NOT NULL DEFAULT '';"),
 )
 
 

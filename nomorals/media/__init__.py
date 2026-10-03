@@ -3,7 +3,11 @@
 Three engines, one façade:
 
 * :class:`.playback.PlaybackEngine` — durable queue + detached-player
-  transport (mpv IPC when available; graceful console fallback).
+  transport (mpv IPC when available; graceful console fallback), with
+  shuffle/repeat/reorder and rich now-playing.
+* :class:`.library.MusicLibrary` — named playlists, play history with
+  play counts, favorites, search, and library stats; audio metadata via
+  mutagen → ffprobe → filename fallback.
 * :class:`.music.MusicCreator` — style-aware lyrics + structure + chord
   plan + real playable MIDI (pure-Python SMF writer).
 * :class:`.video.VideoFinder` — cross-web video search, ranked + enriched
@@ -16,8 +20,8 @@ Three engines, one façade:
     hits = m.find_video("amapiano tutorials", max_results=5)
 
 Every capability is also registered as its own tool (``player``,
-``music_writer``, ``video_finder``) so the main AI and sub-agents can call
-them directly.
+``music_library``, ``music_writer``, ``video_finder``) so the main AI and
+sub-agents can call them directly.
 """
 
 from __future__ import annotations
@@ -30,12 +34,14 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.policy import Capability
 from .music import STYLES, MusicCreator, Song, StyleSpec
+from .library import MusicLibrary, read_metadata
 from .playback import Backend, PlaybackEngine, detect_backend
 from .video import VideoFinder
 
 __all__ = [
     "MediaHub", "MusicCreator", "Song", "StyleSpec", "STYLES",
     "PlaybackEngine", "Backend", "detect_backend",
+    "MusicLibrary", "read_metadata",
     "VideoFinder",
 ]
 
@@ -46,6 +52,7 @@ class MediaHub:
     def __init__(self, context: Any) -> None:
         self.context = context
         self.playback = PlaybackEngine(context)
+        self.library = MusicLibrary(context)
         self.music = MusicCreator(context)
         self.video = VideoFinder(context)
 
@@ -82,6 +89,25 @@ class MediaHub:
 
     def remove(self, index: int) -> dict[str, Any]:
         return self.playback.remove(index)
+
+    def move(self, index: int, to: int) -> dict[str, Any]:
+        return self.playback.move(index, to)
+
+    def shuffle(self, on: bool | None = None) -> dict[str, Any]:
+        return self.playback.shuffle(on)
+
+    def repeat(self, mode: str | None = None) -> dict[str, Any]:
+        return self.playback.repeat(mode)
+
+    def now(self) -> dict[str, Any]:
+        return self.playback.now()
+
+    def load_playlist(self, name: str, *, autoplay: bool = True
+                      ) -> dict[str, Any]:
+        return self.playback.load_playlist(name, autoplay=autoplay)
+
+    def save_playlist(self, name: str) -> dict[str, Any]:
+        return self.playback.save_playlist(name)
 
     def clear(self) -> dict[str, Any]:
         return self.playback.clear()
