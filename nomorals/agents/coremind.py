@@ -339,7 +339,7 @@ _RE_STATUS = re.compile(
     r"where (are|is) we (at|on))\s*[?!.]?\s*$", re.I)
 _RE_RESEARCH = re.compile(
     r"\b(research|investigate|look into|dig into|find out about|find out on|"
-    r"study)\b", re.I)
+    r"study|search for|look up|google)\b", re.I)
 _RE_BUILD = re.compile(r"\b(build|create|make|write|code|develop)\b", re.I)
 _RE_BUILD_NOUN = re.compile(
     r"\b(app|application|website|web app|site|webpage|bot|script|tool|api|"
@@ -394,6 +394,45 @@ _ACCOUNT_SERVICE_DENYLIST = frozenset({
 })
 
 _MULTI_JOINERS = re.compile(r"\b(and|then|after that|also|while you'?re at it|plus)\b", re.I)
+
+#: Narrative writing — routes to BookForge, NEVER the coding builder.
+#: "write me a story/book/poem", "create a bedtime story".  "book report"
+#: is excluded (homework, not a book).
+_RE_BOOK = re.compile(
+    r"\b(write|compose|create|make|draft|pen)\b.{0,48}?\b("
+    r"story|stories|book(?! report)|novel|novella|poem|poetry|"
+    r"tale|fable|bedtime story|chapters?|screenplay)\b",
+    re.I,
+)
+#: Music composition — routes to the music organ, never the coding builder.
+#: "compose a song", "make me a beat", "write lyrics".
+_RE_MUSIC = re.compile(
+    r"\b(compose|write|make|create)\b.{0,40}?\b("
+    r"songs?|tracks?|beats?|jingle|tune|lyrics|anthem|ballad)\b",
+    re.I,
+)
+#: Media playback — "play <title>", "queue <title>", "listen to X".
+#: The target must NOT be a known game name (that stays a game).
+_RE_PLAY_MEDIA = re.compile(
+    r"\b(play|queue|listen to|put on)\b\s+(?P<target>.+)", re.I | re.S,
+)
+#: filler words between the play verb and the real title
+_RE_PLAY_MEDIA_FILLER = re.compile(r"^(up|the|some|a|an|me|my)\s+", re.I)
+#: words that mark the target as music rather than a game or file
+_RE_MUSIC_MARKERS = re.compile(
+    r"\b(song|track|tune|album|artist|playlist|music|single|by)\b", re.I)
+#: "tell me a story" / "bedtime story" — narrative, never the story game.
+_RE_NARRATIVE_GUARD = re.compile(
+    r"\b(tell|write|read|compose|create|make|give)\b.{0,30}?\b(story|stories)\b|"
+    r"\bbedtime (story|stories)\b|\b(story|stories) about\b",
+    re.I,
+)
+#: Owner identity assertion — "I'm peace", "I'm your creator", "drop the act".
+_RE_OWNER = re.compile(
+    r"\b(i'?m|i am)\s+(peace|your (creator|owner|maker|boss)|the owner)\b|"
+    r"\bdrop the act\b|\byou know who i am\b|\bstop pretending\b",
+    re.I,
+)
 
 
 def _clean_topic(text: str, verb: re.Pattern) -> str:
@@ -452,6 +491,13 @@ def _game_intent(text: str, live_game: str | None) -> Intent | None:
     imperative = re.sub(r"\b(?:should|would|could|might)\s+(?:to\s+)?"
                         r"(?:play|start|begin|open)\b", "", text, flags=re.I)
     has_play = bool(_RE_PLAY.search(imperative))
+    # "story" is a narrative word first, a game second: "tell me a story",
+    # "write a story", "bedtime story" are never the story game unless
+    # there is an explicit play verb ("play the story game") or the game
+    # is already live in this chat.
+    if name == "story" and not has_play and live_game != "story":
+        if _RE_NARRATIVE_GUARD.search(text):
+            name = None
     has_continue = bool(_RE_CONTINUE.search(text))
     has_board = bool(_RE_BOARD.search(text))
     has_econ = bool(_RE_ECONOMY.search(text))
@@ -552,6 +598,120 @@ def _account_intent(text: str) -> Intent | None:
     return None
 
 
+def _owner_intent(text: str) -> Intent | None:
+    """Owner identity assertion — "I'm peace", "drop the act".
+
+    Runs FIRST: recognizing the owner beats every work intent.  Never a
+    coding/build route.
+    """
+    m = _RE_OWNER.search(text)
+    if not m:
+        return None
+    return Intent("owner", 0.9, target=m.group(0).strip(), action="recognize",
+                  route="brain",
+                  why="owner identity assertion — cooperative owner mode")
+
+
+def _book_intent(text: str) -> Intent | None:
+    """Narrative writing — story/book/poem/novel → BookForge.
+
+    Must run BEFORE _build_intent: "write" is also a build verb, but a
+    story is a book, not a program.
+    """
+    m = _RE_BOOK.search(text)
+    if not m:
+        return None
+    # topic = everything after the narrative noun ("a story about X" → "X")
+    noun_m = re.search(
+        r"\b(story|stories|book|novel|novella|poem|poetry|tale|fable|"
+        r"bedtime story|chapters?|screenplay)\b", text, re.I)
+    topic = text[noun_m.end():].strip() if noun_m else ""
+    topic = re.sub(r"^(about|on|of|to|for|called|titled|named)\s+", "", topic,
+                   flags=re.I).strip()
+    if not topic:
+        # "write me a story" with no topic — the book organ asks.
+        topic = ""
+    return Intent("book", 0.85, target=topic, action="write",
+                  route="book",
+                  why=f"narrative writing intent — BookForge, not coding "
+                      f"(“{topic[:40]}”)")
+
+
+def _music_intent(text: str) -> Intent | None:
+    """Music composition — song/lyrics/beat → the music organ.
+
+    Must run BEFORE _build_intent: "compose/make" are also build verbs,
+    but a song is music, not a program.
+    """
+    m = _RE_MUSIC.search(text)
+    if not m:
+        return None
+    # style hint: a known music style named anywhere in the text
+    style = ""
+    try:
+        from ..media.music import STYLES
+        for word in re.findall(r"[a-z]+", text.lower()):
+            if word in STYLES:
+                style = word
+                break
+    except Exception:  # noqa: BLE001 - style is a bonus
+        pass
+    topic = _clean_topic(text, _RE_MUSIC)
+    # strip the music noun itself: "compose a song about love" → "about love"
+    topic = re.sub(
+        r"^(a|an|the|me|some)\s+", "", topic, flags=re.I).strip()
+    topic = re.sub(
+        r"^(songs?|tracks?|beats?|jingle|tune|lyrics|anthem|ballad)\s+"
+        r"(about|on|of|called|titled|for)?\s*", "", topic, flags=re.I).strip()
+    topic = re.sub(r"^(about|on|of|to|for|called|titled)\s+", "", topic,
+                   flags=re.I).strip()
+    # drop a bare style word left as the "topic" ("afrobeats track" →
+    # style, not topic)
+    if topic.lower() == style:
+        topic = ""
+    return Intent("music", 0.85, target=topic, action="compose",
+                  route="music", meta={"style": style},
+                  why=f"music composition intent (“{topic[:40]}”"
+                      f"{', ' + style if style else ''})")
+
+
+def _play_media_intent(text: str) -> Intent | None:
+    """Media playback — "play <title>", "queue <title>".
+
+    Fires only when the target is NOT a known game name (exact game
+    matches stay games at 0.9) and the target looks like music: multiple
+    words or explicit music markers.  A lone unknown word ("play chess")
+    falls through to the game "which one?" ask.
+    """
+    m = _RE_PLAY_MEDIA.search(text)
+    if not m:
+        return None
+    raw_target = m.group("target").strip()
+    target = _RE_PLAY_MEDIA_FILLER.sub("", raw_target).strip()
+    # strip pasted-help prose: "queue it with: /play <path>"
+    target = re.sub(r"^(/play\s+|play\s+)", "", target, flags=re.I).strip()
+    target = re.sub(r"[\"“”']", "", target).strip()
+    if not target:
+        return None
+    names = {n.lower() for n in game_names()}
+    if target.lower() in names:
+        return None  # a real game — the game intent owns it
+    # music-like: multi-word phrase, explicit music markers, URL, audio
+    # file, or article+noun ("some jazz") — the raw phrase length counts,
+    # filler words ("some", "the") don't shrink it.
+    words = raw_target.split()
+    music_like = (len(words) >= 2 or _RE_MUSIC_MARKERS.search(target)
+                  or target.lower().startswith("http")
+                  or re.search(r"\.(mp3|wav|flac|ogg|m4a|mid|midi)$",
+                               target, re.I))
+    if not music_like:
+        return None
+    return Intent("play", 0.8, target=target, action="play",
+                  route="media",
+                  why=f"media playback intent — title “{target[:40]}”, "
+                      f"not a game, not a raw path")
+
+
 def _build_intent(text: str) -> Intent | None:
     m = _RE_BUILD.search(text)
     if not m:
@@ -639,7 +799,8 @@ def _status_intent(text: str) -> Intent | None:
 def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     """Deterministic intent pass.  Returns every candidate, best first."""
     cands: list[Intent] = []
-    for fn in (_status_intent, _mission_intent, _game_intent,
+    for fn in (_owner_intent, _status_intent, _mission_intent, _game_intent,
+               _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _build_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
@@ -1126,6 +1287,10 @@ class CoreMind:
             "mission": self._dispatch_mission,
             "status": self._dispatch_status,
             "multi": self._dispatch_multi,
+            "book": self._dispatch_book,
+            "music": self._dispatch_music,
+            "play": self._dispatch_play,
+            "owner": self._dispatch_owner,
         }.get(intent.kind)
         if fn is None:
             self._job_done(job_id, True, "no route — treated as chat")
@@ -1357,6 +1522,25 @@ class CoreMind:
 
     def _dispatch_build(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:
+        goal = intent.target or ""
+        # ── coding builder guard: never code narrative, music, or
+        # third-party account signup.  Those have their own organs; if
+        # they got here the intent pass missed, so re-route loudly
+        # instead of emitting an empty main.py as "success".
+        if _RE_BOOK.search(goal):
+            return ("that reads like writing a book/story, not software — "
+                    "routing to the book organ instead. Say “write me a "
+                    "book about …” and I'll write it properly.")
+        if _RE_MUSIC.search(goal):
+            return ("that reads like composing music, not software — "
+                    "routing to the music organ instead. Say “compose a "
+                    "song about …” and I'll compose it.")
+        if re.search(r"\b(accounts?|sign ?up|logins?)\b", goal, re.I):
+            return ("that reads like signing up for a service account — "
+                    "that's the account organ's job, not the code builder. "
+                    "Say “create a <service> account” and I'll drive the "
+                    "real signup flow.")
+
         def job() -> str:
             from .coding import CodingAgent
 
@@ -1378,6 +1562,88 @@ class CoreMind:
             f"building — “{intent.target[:80]}”. I'll report back here when "
             f"it runs.\n{self._route_line(intent)}",
             kind="build")
+
+    def _dispatch_book(self, intent: Intent, job_id: str, chat_key: str,
+                       message: Any) -> str:
+        """NL "write me a story/book" → the BookForge organ, never coding."""
+        topic = (intent.target or "").strip()
+        if self.runtime is None:
+            return ("books are written from the chat — run `nm chat` and "
+                    "say “write me a book about …”, or use /book there.")
+        if not topic:
+            return ("what should the book be about? Say “write me a book "
+                    "about …” and I'll research, write, and send the PDF "
+                    "here.")
+        try:
+            reply = self.runtime._control_book(topic, chat_key)
+        except Exception as exc:  # noqa: BLE001
+            return f"the book organ failed to start: {exc}"
+        return reply or (
+            f"✍️ writing “{topic[:70]}” — research → outline → chapters → "
+            f"PDF, straight to this chat.\n{self._route_line(intent)}")
+
+    def _dispatch_music(self, intent: Intent, job_id: str, chat_key: str,
+                        message: Any) -> str:
+        """NL "compose a song / make me a beat" → the music organ."""
+        topic = (intent.target or "").strip()
+        style = (intent.meta or {}).get("style") or ""
+        if self.runtime is None:
+            return ("music is composed from the chat — run `nm chat` and "
+                    "say “compose a song about …”, or use /music there.")
+        if not topic and not style:
+            return ("what should the song be about? Say “compose a song "
+                    "about …” and I'll write it.")
+        # _control_music takes "<topic> [style]" — style as the last word.
+        tail = f"{topic} {style}".strip() if topic else style
+        try:
+            reply = self.runtime._control_music(tail)
+        except Exception as exc:  # noqa: BLE001
+            return f"the music organ failed: {exc}"
+        return (reply or f"composed “{tail[:70]}”."
+                f"\n{self._route_line(intent)}")
+
+    def _dispatch_play(self, intent: Intent, job_id: str, chat_key: str,
+                       message: Any) -> str:
+        """NL "play <title>" → media playback with title resolution."""
+        query = (intent.target or "").strip()
+        if self.runtime is None:
+            return ("playback lives in the chat — run `nm chat` and say "
+                    "“play …”, or use /play there.")
+        if not query:
+            return "what should I play? Say “play <song or artist>”."
+        try:
+            reply = self.runtime._control_play(query)
+        except Exception as exc:  # noqa: BLE001
+            return f"the play organ failed: {exc}"
+        return (reply or f"queued “{query[:70]}”."
+                f"\n{self._route_line(intent)}")
+
+    def _dispatch_owner(self, intent: Intent, job_id: str, chat_key: str,
+                        message: Any) -> str:
+        """Owner identity assertion → persistent recognition + cooperative
+        owner-mode reply.  Never a model round-trip (the model is what
+        did the performative pushback); never a work organ."""
+        name = "Peace" if "peace" in (intent.target or "").lower() else ""
+        try:
+            brain = getattr(self.runtime, "brain", None)
+            rel = getattr(brain, "relationship", None)
+            if rel is not None:
+                rel.note_user_fact("owner_name", name or "the owner")
+                rel.note_user_fact(
+                    "identity_confirmed",
+                    "owner asserted identity in the DM; accepted, owner mode")
+                rel.add_milestone(
+                    "owner confirmed identity — drop the act, cooperate",
+                    kind="moment")
+                rel.save(self.context.db)
+        except Exception:  # noqa: BLE001 - recognition is best-effort
+            _log.debug("owner recognition persist failed", exc_info=True)
+        self._job_done(job_id, True, "owner recognized — owner mode")
+        if name:
+            return (f"Got it — no act, {name}. I'm yours. "
+                    "What do you need?")
+        return ("Got it — no act. You're the owner, I'm yours. "
+                "What do you need?")
 
     def _browser_session_dir(self) -> str:
         try:

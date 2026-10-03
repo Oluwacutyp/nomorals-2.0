@@ -81,16 +81,25 @@ class RuntimeMediaMixin:
         return text
 
     def _control_play(self, tail: str) -> str:
-        """/play <paths…> | status | queue | pause | … (transport)."""
+        """Play transport.  <query> is ONE thing — a path, a URL, or a
+        song title — never whitespace-split into word-paths.
+
+        /play <workspace path to audio/midi>
+        /play <song title>   → resolved via workspace scan, then SoundCloud
+        /play queue|status|pause|…   (transport actions)
+        """
         from ...media.playback import PlaybackEngine
 
         tail = (tail or "").strip()
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
                    "next", "prev", "queue", "remove", "clear", "status"}
-        words = tail.split()
-        action = words[0].lower() if words and words[0].lower() in actions \
-            else "play"
-        rest = words[1:] if action != "play" else words
+        parts = tail.split(None, 1)
+        first = parts[0].lower() if parts else ""
+        if first in actions:
+            action, rest = first, (parts[1] if len(parts) > 1 else "")
+        else:
+            action, rest = "play", tail
+        rest = (rest or "").strip()
         try:
             engine = PlaybackEngine(self.context)
             if action in ("play", "add"):
@@ -98,12 +107,19 @@ class RuntimeMediaMixin:
                     st = engine.status()
                     return (f"queue ({st['queue']}): "
                             + (f"now {st['current']}" if st["queue"] else "empty")
-                            + "\n/play <path-or-url…> to queue and play")
-                added = []
-                for ref in rest:
-                    res = engine.add(ref)
-                    added.extend(res.get("added", []))
+                            + "\n/play <song title, path, or url> to queue and play")
+                query = self._play_query(self.context, rest)
+                try:
+                    res = engine.add(query)
+                except Exception as exc:  # noqa: BLE001 - the player's
+                    # own error contract, surfaced not swallowed
+                    return f"can't play {rest[:80]!r}: {exc}"
+                added = res.get("added", [])
                 queue_len = len(engine.queue())
+                if not added:
+                    return (f"couldn't find {rest[:80]!r} — not a file, "
+                            f"not on SoundCloud. /play <path-or-url> plays "
+                            f"directly.")
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
@@ -117,11 +133,11 @@ class RuntimeMediaMixin:
                                 f"{st.get('error') or st.get('hint', '')}")
                 return out
             if action == "seek" and rest:
-                return f"seeked to {rest[0]}s: {engine.seek(float(rest[0]))}"
+                return f"seeked to {rest.split()[0]}s: {engine.seek(float(rest.split()[0]))}"
             if action == "volume" and rest:
-                return f"volume: {engine.volume(int(rest[0]))}"
+                return f"volume: {engine.volume(int(rest.split()[0]))}"
             if action == "remove" and rest:
-                return f"removed: {engine.remove(int(rest[0]))}"
+                return f"removed: {engine.remove(int(rest.split()[0]))}"
             if action == "queue":
                 items = engine.queue()
                 return (f"queue ({len(items)}):\n"
@@ -138,6 +154,101 @@ class RuntimeMediaMixin:
                     f"volume: {st['volume']}")
         except Exception as exc:  # noqa: BLE001
             return f"play error: {exc}"
+
+    @staticmethod
+    def _play_query(context: Any, raw: str) -> str:
+        """One query from a possibly-messy tail.
+
+        Pasted help prose ("queue it with: /play <path>", multi-line
+        text) collapses to the actual query: the last non-empty line,
+        stripped of quotes and a leading /play.  URLs and existing paths
+        pass through untouched; bare titles go to workspace/SoundCloud
+        resolution in :func:`_resolve_play_title`.
+        """
+        import re
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        # drop pure-prose lines ("queue it with:", "here's the song:")
+        query_lines = [ln for ln in lines
+                       if not re.match(r"^[a-z ]{1,40}:$", ln, re.I)]
+        text = query_lines[-1] if query_lines else raw.strip()
+        text = re.sub(r"^/play\s+", "", text, flags=re.I).strip()
+        text = text.strip("\"“”'").strip()
+        if not text:
+            return ""
+        lowered = text.lower()
+        if lowered.startswith(("http://", "https://", "spotify:")):
+            return text
+        # an existing path (workspace-relative or absolute) passes through
+        if re.search(r"\.(mp3|wav|flac|ogg|m4a|mid|midi)$", text, re.I) \
+                and ("/" in text or "\\" in text):
+            return text
+        return _resolve_play_title(context, text)
+
+    # ── end _control_play ────────────────────────────────────────────────
+
+
+def _resolve_play_title(context: Any, title: str) -> str:
+    """Resolve a bare song title to something playable.
+
+    1. workspace scan — audio files whose filename matches the title
+    2. SoundCloud search (keyless) — top track's permalink URL
+    3. the raw title (the player will fail loudly, not silently)
+    """
+    import os
+    import re
+    from difflib import SequenceMatcher
+
+    query = title.strip()
+    if not query:
+        return ""
+    # 1. workspace scan
+    try:
+        settings = getattr(context, "settings", None)
+        root = (str(getattr(settings, "workspace_dir", "")) or "").strip()
+        if root and os.path.isdir(root):
+            exts = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mid", ".midi")
+            best: tuple[float, str] | None = None
+            words = [w for w in re.findall(r"[a-z0-9]+", query.lower())
+                     if len(w) > 2]
+            for dirpath, _dirnames, filenames in os.walk(root):
+                # skip noise dirs
+                if "/." in dirpath or "__pycache__" in dirpath:
+                    continue
+                for fn in filenames:
+                    if not fn.lower().endswith(exts):
+                        continue
+                    stem = os.path.splitext(fn)[0].lower()
+                    score = 0.0
+                    if words:
+                        hits = sum(1 for w in words if w in stem)
+                        score = hits / len(words)
+                    else:
+                        score = SequenceMatcher(
+                            None, query.lower(), stem).ratio() * 0.9
+                    if score >= 0.5 and (
+                            best is None or score > best[0]):
+                        best = (score, os.path.join(dirpath, fn))
+            if best is not None:
+                return best[1]
+    except Exception:  # noqa: BLE001 - scan is best-effort
+        pass
+    # 2. SoundCloud search (keyless, auto client_id)
+    try:
+        from ...connectors import create_connector
+        from ...accounts.vault import CredentialVault
+        vault = CredentialVault(
+            getattr(context, "db", None),
+            master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""))
+        sc = create_connector("soundcloud", vault)
+        tracks = sc.search_tracks(query, limit=3)
+        for t in tracks or []:
+            url = (t.get("permalink_url") or t.get("url") or "").strip()
+            if url:
+                return url
+    except Exception:  # noqa: BLE001 - search is best-effort
+        pass
+    # 3. give up honestly — the player reports the failure
+    return query
 
     def _control_video(self, tail: str) -> str:
         """/video <query> [platform] | /video download <url> [audio] | platforms."""

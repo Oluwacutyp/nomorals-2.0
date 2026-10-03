@@ -148,6 +148,16 @@ class BriefAgent:
             '"persona": "", "tool_hints": ["..."]}.'
         )
         user = f"Raw request ({noun}):\n{request[:2000]}"
+        # Connector awareness: when the request is about Devon's own
+        # integrations, the structurer must name the real connector.
+        try:
+            from .orientation import connector_catalog_block
+            if re.search(r"\b(connect|link|integrat|connector|spotify|"
+                         r"github|gmail|discord|binance)\b",
+                         request, re.I):
+                user += "\n\n" + connector_catalog_block()
+        except Exception:  # noqa: BLE001 - catalog is a bonus
+            pass
         try:
             response: LLMResponse = router.chat(
                 [Message.system(system), Message.user(user)],

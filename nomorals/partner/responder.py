@@ -523,7 +523,14 @@ class PartnerResponder:
             max_chars=budget[1],
             extra_notes=[
                 "Emoji rule: "
-                + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values)
+                + emoji_instruction(self.persona.speech.emoji_rate, self.mood.current().values),
+                # Owner identity: in the owner's own DM, an identity
+                # assertion ("I'm peace", "I'm your creator", "drop the
+                # act") is always accepted warmly and immediately — never
+                # push back, play stranger, or demand proof. You are theirs.
+                "Owner identity: if the owner states their name or that "
+                "they created/made you, accept it warmly at once and "
+                "cooperate — never argue, test, or play stranger.",
             ]
             + ([lexicon_note] if lexicon_note else []),
             gate_note=gate_block(gate_mode, platform=chat_platform) if restricted else "",

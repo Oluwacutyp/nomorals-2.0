@@ -228,6 +228,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
 _HELP_TEXT = "\n".join(
     [
         "control commands (you, the owner — start a message with /):",
+        "you don't need to memorize these — just say what you want in plain words:",
+        "  “write me a book about X” → book   “play X” → play   “research Y” → search",
+        "  “compose a song about Z” → music   “create a spotify account” → account",
+        "  “build a todo app” → code   “let's play chess” → games",
         "  /status /platforms /help",
         "  /start telegram | /stop telegram        hot start/stop a platform",
         "  /mood [label | dim=0..100 …] | /mood reset",

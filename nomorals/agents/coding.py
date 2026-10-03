@@ -172,6 +172,36 @@ def _workdir_has_tests(workdir: Any) -> bool:
     return False
 
 
+def _substantive_lines(path: Any) -> int:
+    """Non-blank, non-comment, non-docstring lines in a file."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return 0
+    count = 0
+    in_docstring = False
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith('"""') or s.startswith("'''"):
+            # single-line docstring
+            if len(s) > 6 and s.endswith(('"""', "'''")):
+                continue
+            in_docstring = not in_docstring
+            continue
+        if in_docstring:
+            continue
+        if s.startswith("#"):
+            continue
+        count += 1
+    return count
+
+
+#: minimum substantive lines across changed files to count as an artifact
+_MIN_ARTIFACT_LINES = 5
+
+
 def _unified_diff(before: str, after: str, rel: str) -> str:
     """Unified diff of two file texts ("" when identical)."""
     if before == after:
@@ -259,6 +289,22 @@ class CodingAgent:
                 raise ValueError(f"path {rel!r} escapes project root {self._root}") from exc
             return candidate
         return safe_path(self.context, rel)
+
+    def _substantive_artifact(self, rels: list[str], workdir: Any) -> bool:
+        """Did the run leave a real artifact?  Counts non-blank,
+        non-comment lines across the changed files — an empty main.py
+        (or a few comment lines) is NOT an artifact."""
+        from pathlib import Path
+        root = Path(str(workdir))
+        total = 0
+        for rel in rels or []:
+            try:
+                p = (root / rel) if not str(rel).startswith("/") else Path(rel)
+                if p.is_file():
+                    total += _substantive_lines(p)
+            except Exception:  # noqa: BLE001 - one bad path never hides
+                continue
+        return total >= _MIN_ARTIFACT_LINES
 
     def _git(self, *args: str, cwd: Path | None = None,
              timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -689,13 +735,30 @@ class CodingAgent:
                 verify_err = "" if green else verify_out
             else:
                 raw = self._run(accept, workdir, timeout)
-                green = raw["exit_code"] == 0 and not raw["timed_out"]
+                out_text = (raw.get("stdout") or "").strip()
+                # Real acceptance: exit 0 AND (meaningful stdout OR a
+                # substantive artifact).  An empty main.py that exits 0
+                # with no output is FAILURE, not green — never report
+                # "0 tests, empty file" as success.
+                ran_something = bool(out_text)
+                made_artifact = self._substantive_artifact(
+                    changed or [filename], workdir)
+                green = (raw["exit_code"] == 0 and not raw["timed_out"]
+                         and (ran_something or made_artifact))
                 verify_out = (raw.get("stdout") or "")[-4000:]
                 verify_err = ((raw.get("stderr") or raw.get("stdout")
                                or "non-zero exit"))[-4000:]
                 if not green:
-                    verify_out = (f"accept command failed "
-                                  f"(exit {raw.get('exit_code')}):\n{verify_err}")
+                    if raw["exit_code"] == 0 and not raw["timed_out"]:
+                        verify_err = (
+                            "accept command exited 0 but produced no "
+                            "output and no substantive artifact "
+                            "(empty/trivial files) — not accepted as "
+                            "success")
+                        verify_out = (f"empty success rejected:\n{verify_err}")
+                    else:
+                        verify_out = (f"accept command failed "
+                                      f"(exit {raw.get('exit_code')}):\n{verify_err}")
             vresult = {"exit_code": 0 if green else 1, "timed_out": False,
                        "stdout": verify_out, "stderr": verify_err}
             for rel in touched:

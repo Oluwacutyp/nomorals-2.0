@@ -108,7 +108,9 @@ class FixtureRepo:
 
 
 FAIL_ACCEPT = (f'"{sys.executable}" -c "import sys; sys.exit(1)"')
-OK_ACCEPT = (f'"{sys.executable}" -c "import sys; sys.exit(0)"')
+# OK_ACCEPT must produce real output: exit-0-with-silence is no longer
+# accepted as success (ownerdm-1.0: "empty main.py" is FAILURE).
+OK_ACCEPT = (f'"{sys.executable}" -c "print(\'accept ok\')"')
 
 
 def _plan_response(*paths):
