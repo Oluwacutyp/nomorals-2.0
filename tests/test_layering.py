@@ -45,6 +45,12 @@ LAYERS: dict[str, int] = {
     # browser/ is the Wave K browser service (sessions/tabs/downloads/
     # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
     "browser": 4,
+    # triggers/ is the event-condition-action automation organ (Wave L):
+    # schedule/file/price/message/webhook sources, notify/message/
+    # command/mission actions.  An L5 organ beside scheduler/missions —
+    # it wraps the scheduler for time-based triggers and reaches only
+    # downward/sideways.
+    "triggers": 5,
     "agents": 5,
     # codews/ is the Wave K code workspace object (repo/branch/worktree/
     # patch/test/build): an L5 organ beside agents/missions, reusing

@@ -240,6 +240,18 @@ class PartnerRuntime(
                 message = dataclasses.replace(message, text=spoken)
                 _log.info("voice note in %s transcribed to command %r",
                           message.chat.key, spoken[:40])
+        # Trigger engine hook (nomorals/triggers): message-source triggers
+        # evaluate the final inbound text here.  One call, no fork of the
+        # dispatch path below; a no-op when no engine is attached, and a
+        # trigger failure here never breaks message intake.
+        if message.incoming:
+            try:
+                from ...triggers.engine import message_hook
+                message_hook(self.context, message.text, message.chat.key,
+                             platform=message.chat.platform,
+                             sender=getattr(message, "sender", ""))
+            except Exception:  # noqa: BLE001 - triggers must never break intake
+                _log.exception("trigger message hook failed")
         # Games: while a game is live in this chat, the room owns the
         # conversation — plain messages are moves and the in-game commands
         # (/status /pass /shop /leave …) work for every participant.

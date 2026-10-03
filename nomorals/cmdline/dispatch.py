@@ -68,6 +68,7 @@ from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
 from .commands.trade import _cmd_trade
 from .commands.train import _cmd_train
+from .commands.trigger import _cmd_trigger
 from .commands.tui import _cmd_tui
 from .commands.update import _cmd_update
 from .commands.vision import _cmd_vision
@@ -333,6 +334,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_doc(args, context)
         if args.command == "wisdom":
             return _cmd_wisdom(args, context)
+        if args.command == "trigger":
+            return _cmd_trigger(args, context)
         if args.command == "search":
             return _cmd_search(args, context)
         if args.command == "browse":

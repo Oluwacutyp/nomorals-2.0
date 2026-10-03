@@ -329,6 +329,16 @@ class APIServer:
         def tools(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             return {"tools": context.tools.register_builtins().schemas()}
 
+        # Trigger webhooks (nomorals/triggers): POST /triggers/webhook.
+        # The server (L7) imports triggers (L5) — downward, layering-safe.
+        # Guarded so a triggers problem never breaks the API server.
+        try:
+            from ..triggers.webhook import register_trigger_routes
+
+            register_trigger_routes(self, context)
+        except Exception:  # noqa: BLE001 - webhook routes are additive
+            _log.warning("trigger webhook routes not registered", exc_info=True)
+
         @self.route("POST", "/tools/call")
         def call_tool(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             principal = server._current_principal()
