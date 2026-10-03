@@ -63,8 +63,15 @@ from .linkedin import LinkedInConnector, LinkedInError
 from .slack import SlackConnector, SlackError
 from .twilio import TwilioConnector, TwilioError
 
+from .aws import AWSConnector, AWSError
+from .dropbox import DropboxConnector, DropboxError
+from .spotify import SpotifyConnector, SpotifyError
+from .youtube import YouTubeConnector, YouTubeError
+
 __all__ = [
     "AuthMethod",
+    "AWSConnector",
+    "AWSError",
     "BinanceConnector",
     "BinanceError",
     "CheckpointKind",
@@ -78,6 +85,8 @@ __all__ = [
     "ConnectResult",
     "DiscordConnector",
     "DiscordError",
+    "DropboxConnector",
+    "DropboxError",
     "DriveConnector",
     "DriveError",
     "GCalendarConnector",
@@ -106,6 +115,8 @@ __all__ = [
     "ProxyPoolConnector",
     "SlackConnector",
     "SlackError",
+    "SpotifyConnector",
+    "SpotifyError",
     "TelegramConnector",
     "TelegramError",
     "TrelloConnector",
@@ -115,6 +126,8 @@ __all__ = [
     "VirtualCardsConnector",
     "WiseConnector",
     "WiseError",
+    "YouTubeConnector",
+    "YouTubeError",
     "XConnector",
     "XError",
     "create_connector",
