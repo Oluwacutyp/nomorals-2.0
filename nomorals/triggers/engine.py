@@ -1,0 +1,468 @@
+"""The trigger engine: evaluates sources, fires actions, records history.
+
+Design notes:
+
+* **Schedule sources are not polled.**  They are wired into the existing
+  :class:`nomorals.scheduler.scheduler.Scheduler` as real cron/one-time
+  jobs whose action is ``__trigger_fire__``; the engine registers that
+  action handler.  Reuse, not a parallel scheduler.
+* **File/price sources are polled** by the engine's own thread (or by
+  calling :meth:`tick` directly — tests and simple deployments do this).
+* **Message sources are event-driven**: :meth:`on_message` is called by
+  the partner runtime's dispatch path (one hook call, no fork) and by
+  anything else that wants to feed messages in.
+* **Webhook sources are event-driven** via :meth:`fire_webhook`, served
+  by ``triggers.webhook.register_trigger_routes`` on the API server.
+* Resilience: one trigger's failing action is logged with the trigger
+  id and recorded — it never kills the engine or other triggers.
+  Disabled triggers never fire; the check happens at fire time, so a
+  disable wins even against an already-queued scheduler job.
+* No silent drops: every evaluation outcome (fired / no_match /
+  skipped / error) is recorded in ``trigger_history``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from typing import Any, Callable
+
+from ..core.logging_setup import get_logger
+from ..storage.db import Database
+from . import actions as _actions
+from .models import (
+    OUTCOME_ERROR,
+    OUTCOME_FIRED,
+    OUTCOME_NO_MATCH,
+    OUTCOME_SKIPPED,
+    SOURCE_FILE,
+    SOURCE_MESSAGE,
+    SOURCE_PRICE,
+    SOURCE_SCHEDULE,
+    SOURCE_WEBHOOK,
+    Trigger,
+    TriggerError,
+    new_trigger_id,
+    validate_definition,
+)
+from .sources import (
+    SCHEDULER_ACTION,
+    evaluate_file,
+    evaluate_price,
+    match_message,
+    schedule_plan,
+)
+from .store import TriggerStore
+
+_log = get_logger(__name__)
+
+#: context.extras key under which a live engine is published for the
+#: partner runtime's message hook.
+ENGINE_KEY = "trigger_engine"
+
+_POLL_SOURCES = (SOURCE_FILE, SOURCE_PRICE)
+
+
+def _await(coro: Any) -> Any:
+    """Run a scheduler coroutine from sync code.
+
+    The scheduler's mutating API is async; the engine (like the
+    scheduler's own worker) drives it with ``asyncio.run``.  Fail fast
+    if a loop is already running — silently nesting loops is how
+    deadlocks are born.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise TriggerError(
+        "trigger schedule wiring cannot run inside a running event loop")
+
+
+class TriggerEngine:
+    """Evaluates triggers and fires their actions."""
+
+    def __init__(
+        self,
+        db: Database,
+        context: Any = None,
+        *,
+        scheduler: Any = None,
+        send_message: Callable[[str, str], Any] | None = None,
+        notify_fn: Callable[..., Any] | None = None,
+        run_command: Callable[[list[str], float], dict[str, Any]] | None = None,
+        start_mission: Callable[[str, int, Any], dict[str, Any]] | None = None,
+        poll_interval: float = 30.0,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.db = db
+        self.context = context
+        self.store = TriggerStore(db)
+        self._scheduler = scheduler
+        self.send_message = send_message
+        self.notify_fn = notify_fn
+        self.run_command = run_command
+        self.start_mission = start_mission
+        self.poll_interval = max(1.0, float(poll_interval))
+        self._clock = clock
+        #: per-trigger source memory (file baselines, last prices)
+        self._source_state: dict[str, dict[str, Any]] = {}
+        self._running = False
+        self._poll_thread: threading.Thread | None = None
+        _log.info("TriggerEngine initialized")
+
+    # ── scheduler ────────────────────────────────────────────────────────
+
+    def _ensure_scheduler(self) -> Any:
+        if self._scheduler is None:
+            from ..scheduler.scheduler import Scheduler
+
+            self._scheduler = Scheduler(self.db)
+        return self._scheduler
+
+    @staticmethod
+    def _job_id(trigger_id: str) -> str:
+        return f"trigger:{trigger_id}"
+
+    def _clear_scheduler_job(self, job_id: str) -> None:
+        """Delete any scheduler rows for this job id (idempotent re-wire)."""
+        with self.db.transaction():
+            self.db.execute(
+                "DELETE FROM cron_jobs WHERE task_id = ?", (job_id,))
+            self.db.execute(
+                "DELETE FROM reminders WHERE task_id = ?", (job_id,))
+            self.db.execute(
+                "DELETE FROM event_hooks WHERE task_id = ?", (job_id,))
+            self.db.execute(
+                "DELETE FROM scheduled_tasks WHERE task_id = ?", (job_id,))
+
+    def _wire_schedule(self, trigger: Trigger) -> None:
+        """Wire a schedule trigger into the existing scheduler."""
+        sch = self._ensure_scheduler()
+        sch.register_action(SCHEDULER_ACTION, self._on_scheduler_fire)
+        job_id = self._job_id(trigger.id)
+        self._clear_scheduler_job(job_id)
+        kind, plan = schedule_plan(trigger.condition)
+        params = {"trigger_id": trigger.id}
+        if kind == "cron":
+            _await(sch.schedule_cron(
+                job_id, plan["cron_expr"], SCHEDULER_ACTION, params))
+        else:
+            _await(sch.schedule_once(
+                job_id, plan["run_at"], SCHEDULER_ACTION, params))
+        _log.info("wired schedule trigger %s (%s %s)",
+                  trigger.id, kind, plan)
+
+    def _unwire_schedule(self, trigger_id: str) -> None:
+        sch = self._ensure_scheduler()
+        self._clear_scheduler_job(self._job_id(trigger_id))
+        _log.info("unwired schedule trigger %s", trigger_id)
+
+    async def _on_scheduler_fire(self, trigger_id: str) -> None:
+        """The ``__trigger_fire__`` scheduler action handler."""
+        self._fire_by_id(trigger_id, {"source": "schedule",
+                                      "via": "scheduler"})
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Start the scheduler worker and the poll thread."""
+        if self._running:
+            return
+        if getattr(self.db, "path", None) is None:
+            raise TriggerError(
+                "TriggerEngine.start() needs a file-backed Database — "
+                "worker threads cannot share a :memory: database. Use "
+                "tick() directly with :memory: instead.")
+        sch = self._ensure_scheduler()
+        sch.register_action(SCHEDULER_ACTION, self._on_scheduler_fire)
+        sch.start()
+        self._running = True
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="trigger-poll")
+        self._poll_thread.start()
+        _log.info("TriggerEngine started")
+
+    def stop(self) -> None:
+        """Stop the poll thread and the scheduler worker."""
+        self._running = False
+        if self._scheduler is not None:
+            try:
+                self._scheduler.stop()
+            except Exception:  # noqa: BLE001 - stop must not raise
+                _log.exception("scheduler stop failed")
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=5)
+            self._poll_thread = None
+        _log.info("TriggerEngine stopped")
+
+    def _poll_loop(self) -> None:
+        while self._running:
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001 - one bad tick never kills the loop
+                _log.exception("trigger poll tick failed")
+            deadline = self._clock() + self.poll_interval
+            while self._running and self._clock() < deadline:
+                time.sleep(min(1.0, deadline - self._clock()))
+
+    # ── CRUD ─────────────────────────────────────────────────────────────
+
+    def add(
+        self,
+        name: str,
+        source: str,
+        condition: dict[str, Any] | None,
+        action: str,
+        action_params: dict[str, Any] | None = None,
+        *,
+        cooldown_s: float = 0.0,
+        enabled: bool = True,
+    ) -> Trigger:
+        """Validate (fail fast), persist, and wire a new trigger."""
+        if not str(name or "").strip():
+            raise TriggerError("trigger needs a name")
+        condition, params, cooldown = validate_definition(
+            source, condition, action, action_params, cooldown_s=cooldown_s)
+        trigger = Trigger(
+            id=new_trigger_id(), name=str(name).strip(), enabled=enabled,
+            source=source, condition=condition, action=action,
+            action_params=params, cooldown_s=cooldown)
+        self.store.save(trigger)
+        if enabled and source == SOURCE_SCHEDULE:
+            try:
+                self._wire_schedule(trigger)
+            except Exception:
+                # never leave a half-wired trigger behind
+                self.store.delete(trigger.id)
+                raise
+        _log.info("added trigger %s (%s -> %s)", trigger.id, source, action)
+        return trigger
+
+    def remove(self, trigger_id: str) -> bool:
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            return False
+        if trigger.source == SOURCE_SCHEDULE:
+            try:
+                self._unwire_schedule(trigger_id)
+            except Exception:  # noqa: BLE001 - keep removing anyway
+                _log.exception("unwire failed for %s", trigger_id)
+        self._source_state.pop(trigger_id, None)
+        return self.store.delete(trigger_id)
+
+    def set_enabled(self, trigger_id: str, enabled: bool) -> Trigger:
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            raise TriggerError(f"unknown trigger {trigger_id!r}")
+        self.store.set_enabled(trigger_id, enabled)
+        trigger.enabled = enabled
+        if trigger.source == SOURCE_SCHEDULE:
+            if enabled:
+                self._wire_schedule(trigger)
+            else:
+                self._unwire_schedule(trigger_id)
+        return trigger
+
+    def get(self, trigger_id: str) -> Trigger | None:
+        return self.store.get(trigger_id)
+
+    def list(self, *, enabled_only: bool = False,
+             source: str | None = None) -> list[Trigger]:
+        return self.store.list(enabled_only=enabled_only, source=source)
+
+    def history(self, trigger_id: str | None = None,
+                *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.store.history(trigger_id, limit=limit)
+
+    # ── evaluation: poll sources ──────────────────────────────────────────
+
+    def tick(self) -> dict[str, int]:
+        """Evaluate every enabled file/price trigger once."""
+        summary = {"evaluated": 0, "fired": 0, "errors": 0}
+        for trigger in self.store.list(enabled_only=True):
+            if trigger.source == SOURCE_FILE:
+                fn = evaluate_file
+            elif trigger.source == SOURCE_PRICE:
+                fn = evaluate_price
+            else:
+                continue
+            summary["evaluated"] += 1
+            state = self._source_state.setdefault(trigger.id, {})
+            try:
+                fired, evidence = fn(trigger, state)
+            except Exception as exc:  # noqa: BLE001 - per-trigger isolation
+                _log.exception("trigger %s evaluation failed", trigger.id)
+                self.store.record(
+                    trigger.id, OUTCOME_ERROR, {"source": trigger.source},
+                    error=f"{type(exc).__name__}: {exc}")
+                summary["errors"] += 1
+                continue
+            if fired:
+                result = self._fire(
+                    trigger, {"source": trigger.source, **evidence})
+                if result["fired"]:
+                    summary["fired"] += 1
+                elif result["outcome"] == OUTCOME_ERROR:
+                    summary["errors"] += 1
+            else:
+                self.store.record(
+                    trigger.id, OUTCOME_NO_MATCH,
+                    {"source": trigger.source, **evidence})
+        try:
+            self.store.purge_old()
+        except Exception:  # noqa: BLE001 - purge is housekeeping, never fatal
+            _log.exception("trigger history purge failed")
+        return summary
+
+    # ── evaluation: message source ─────────────────────────────────────────
+
+    def on_message(self, text: str, chat_key: str, *,
+                   platform: str = "", sender: str = "") -> list[str]:
+        """Feed one inbound message to every enabled message trigger."""
+        fired: list[str] = []
+        for trigger in self.store.list(enabled_only=True,
+                                       source=SOURCE_MESSAGE):
+            try:
+                hit, evidence = match_message(trigger, text, chat_key, sender)
+            except Exception as exc:  # noqa: BLE001 - per-trigger isolation
+                _log.exception("trigger %s message match failed", trigger.id)
+                self.store.record(
+                    trigger.id, OUTCOME_ERROR, {"source": "message"},
+                    error=f"{type(exc).__name__}: {exc}")
+                continue
+            if hit:
+                result = self._fire(
+                    trigger, {"source": "message", "chat": chat_key,
+                              "platform": platform, "sender": sender,
+                              **evidence})
+                if result["fired"]:
+                    fired.append(trigger.id)
+            else:
+                self.store.record(
+                    trigger.id, OUTCOME_NO_MATCH,
+                    {"source": "message", "chat": chat_key, **evidence})
+        return fired
+
+    # ── evaluation: webhook source ─────────────────────────────────────────
+
+    def fire_webhook(self, trigger_id: str, *,
+                     payload: dict[str, Any] | None = None,
+                     secret: str | None = None) -> dict[str, Any]:
+        """Fire a webhook trigger.  Fail fast on unknown id, wrong source,
+        bad secret, or a disabled trigger — never silently drop."""
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            raise TriggerError(f"unknown trigger {trigger_id!r}")
+        if trigger.source != SOURCE_WEBHOOK:
+            raise TriggerError(
+                f"trigger {trigger_id!r} is not a webhook trigger "
+                f"(source={trigger.source!r})")
+        expected = trigger.condition.get("secret")
+        if expected and secret != expected:
+            raise TriggerError("bad webhook secret")
+        if not trigger.enabled:
+            raise TriggerError(f"trigger {trigger_id!r} is disabled")
+        return self._fire(trigger, {"source": "webhook",
+                                    "payload": dict(payload or {})})
+
+    def manual_fire(self, trigger_id: str) -> dict[str, Any]:
+        """Fire a trigger on demand (``nm trigger run``)."""
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            raise TriggerError(f"unknown trigger {trigger_id!r}")
+        if not trigger.enabled:
+            raise TriggerError(f"trigger {trigger_id!r} is disabled")
+        return self._fire(trigger, {"source": "manual"})
+
+    # ── firing ─────────────────────────────────────────────────────────────
+
+    def _fire_by_id(self, trigger_id: str,
+                    evidence: dict[str, Any]) -> dict[str, Any]:
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            _log.warning("scheduler fired unknown trigger %s", trigger_id)
+            return {"fired": False, "outcome": "unknown_trigger"}
+        return self._fire(trigger, evidence)
+
+    def _fire(self, trigger: Trigger,
+              evidence: dict[str, Any]) -> dict[str, Any]:
+        """Fire one trigger: checks, action, history.  Never raises for
+        action failures — they are logged (with the trigger id) and
+        recorded; other triggers are unaffected."""
+        now = self._clock()
+        if not trigger.enabled:
+            self.store.record(trigger.id, OUTCOME_SKIPPED,
+                              {"reason": "disabled", **evidence})
+            _log.info("trigger %s skipped (disabled)", trigger.id)
+            return {"fired": False, "outcome": OUTCOME_SKIPPED,
+                    "reason": "disabled"}
+        if (trigger.cooldown_s > 0 and trigger.last_fired
+                and now - trigger.last_fired < trigger.cooldown_s):
+            self.store.record(trigger.id, OUTCOME_SKIPPED,
+                              {"reason": "cooldown",
+                               "cooldown_s": trigger.cooldown_s, **evidence})
+            return {"fired": False, "outcome": OUTCOME_SKIPPED,
+                    "reason": "cooldown"}
+        handler = _actions.ACTION_HANDLERS.get(trigger.action)
+        if handler is None:  # pragma: no cover - validated at add time
+            raise TriggerError(f"unknown action {trigger.action!r}")
+        try:
+            result = handler(trigger, self)
+        except Exception as exc:  # noqa: BLE001 - engine resilience
+            _log.exception("trigger %s (%s) action %s failed",
+                           trigger.id, trigger.name, trigger.action)
+            self.store.record(trigger.id, OUTCOME_ERROR, dict(evidence),
+                              error=f"{type(exc).__name__}: {exc}")
+            return {"fired": False, "outcome": OUTCOME_ERROR,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        self.store.record(trigger.id, OUTCOME_FIRED,
+                          {"evidence": dict(evidence),
+                           "result": _jsonable(result)},
+                          fired=True)
+        _log.info("trigger %s (%s) fired action %s",
+                  trigger.id, trigger.name, trigger.action)
+        return {"fired": True, "outcome": OUTCOME_FIRED, "result": result}
+
+
+def _jsonable(value: Any) -> Any:
+    """Best-effort JSON-safe projection for history detail blobs."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return str(value)[:500]
+
+
+# ── runtime integration ──────────────────────────────────────────────────
+
+def attach(engine: TriggerEngine, context: Any) -> TriggerEngine:
+    """Publish a live engine on the context for the message hook."""
+    extras = getattr(context, "extras", None)
+    if isinstance(extras, dict):
+        extras[ENGINE_KEY] = engine
+    else:  # exotic contexts without an extras dict
+        setattr(context, ENGINE_KEY, engine)
+    return engine
+
+
+def message_hook(context: Any, text: str, chat_key: str, *,
+                 platform: str = "", sender: str = "") -> list[str]:
+    """Entry point for the partner runtime's dispatch path.
+
+    Returns the ids of triggers that fired (empty when no engine is
+    attached — a no-op, never an error).  The runtime calls this with a
+    lazy import so ``triggers`` stays out of its import graph.
+    """
+    engine = None
+    extras = getattr(context, "extras", None)
+    if isinstance(extras, dict):
+        engine = extras.get(ENGINE_KEY)
+    if engine is None:
+        engine = getattr(context, ENGINE_KEY, None)
+    if engine is None:
+        return []
+    return engine.on_message(text, chat_key, platform=platform, sender=sender)

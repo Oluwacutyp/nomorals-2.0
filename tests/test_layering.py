@@ -45,6 +45,12 @@ LAYERS: dict[str, int] = {
     # browser/ is the Wave K browser service (sessions/tabs/downloads/
     # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
     "browser": 4,
+    # triggers/ is the event-condition-action automation organ (Wave L):
+    # schedule/file/price/message/webhook sources, notify/message/
+    # command/mission actions.  An L5 organ beside scheduler/missions —
+    # it wraps the scheduler for time-based triggers and reaches only
+    # downward/sideways.
+    "triggers": 5,
     "agents": 5,
     # codews/ is the Wave K code workspace object (repo/branch/worktree/
     # patch/test/build): an L5 organ beside agents/missions, reusing
@@ -58,6 +64,11 @@ LAYERS: dict[str, int] = {
     # practice): an L5 organ beside books/agents, wrapping books.Library
     # for ingest/search and documents/ for parsing. Reaches only downward.
     "wisdom": 5,
+    # search/ is the Wave L1 universal federated search (one query across
+    # memory/wisdom/books/docs/code/timeline): an L5 organ beside books and
+    # wisdom. It reaches only downward — the timeline adapter takes an
+    # injected os.Timeline (L6) rather than importing it.
+    "search": 5,
     "integrations": 5,
     # connectors: service adapters (GitHub first; finance/cards/proxies/
     # commerce queued). Peers of integrations; own their auth + vault creds.

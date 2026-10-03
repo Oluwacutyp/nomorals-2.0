@@ -83,10 +83,13 @@ CLI_ALIASES: dict[str, list[str]] = {
     "deliver": ["dlv"],
     "doc": ["docs"],
     "wisdom": ["wis"],
+    "trigger": ["trig"],
     "browse": ["brw"],
     "repo": ["rp"],
     "mesh": ["msh"],
     "sync": ["sy"],
+
+    "search": ["s"],
 }
 
 
@@ -1606,6 +1609,97 @@ def _parser() -> argparse.ArgumentParser:
     sync.add_argument("task", nargs="*", default=[], help="verb and arguments")
     sync.add_argument("--json", action="store_true", help="Output as JSON")
     sync.add_argument("--peer-db", default="", help="peer database path")
+
+    search = sub.add_parser("search", aliases=CLI_ALIASES["search"],
+        help="universal federated search across memory, books, wisdom, docs, code, timeline",
+        description=("nm search <query> [--source NAME]... [--type TYPE]...\n"
+                     "            [--since DATE] [--before DATE] [--limit N]\n"
+                     "            [--dir DIR] [--json]\n"
+                     "sources: memory wisdom books docs code timeline\n"
+                     "types:   memory passage book doc code event\n"
+                     "dates: ISO-8601 or epoch seconds"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    search.add_argument("task", nargs="*", default=[], help="the search query")
+    search.add_argument("--source", action="append", default=[],
+                        help="source to search (repeatable; default: all)")
+    search.add_argument("--type", action="append", default=[],
+                        help="result type filter (repeatable)")
+    search.add_argument("--since", default=None,
+                        help="only hits on/after this date")
+    search.add_argument("--before", default=None,
+                        help="only hits on/before this date")
+    search.add_argument("--limit", type=int, default=10, help="max hits")
+    search.add_argument("--dir", default="",
+                        help="docs: build an ad-hoc index from this directory")
+    search.add_argument("--json", action="store_true", help="Output as JSON")
+
+
+    trigger = sub.add_parser("trigger", aliases=CLI_ALIASES["trigger"],
+        help="event-condition-action automation: triggers",
+        description=("nm trigger add --name NAME --source SRC --action ACT [...]\n"
+                     "nm trigger list [--json]\n"
+                     "nm trigger remove <id>\n"
+                     "nm trigger enable|disable <id>\n"
+                     "nm trigger history [<id>] [--limit N] [--json]\n"
+                     "nm trigger run <id>\n"
+                     "sources: schedule|file|price|message|webhook\n"
+                     "actions: notify|message|command|mission"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trigger.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    trigger.add_argument("--name", default="", help="add: trigger name")
+    trigger.add_argument("--source", default="", help="add: trigger source")
+    trigger.add_argument("--action", default="", help="add: trigger action")
+    trigger.add_argument("--condition", default="",
+                         help="add: condition as JSON")
+    trigger.add_argument("--params", default="",
+                         help="add: action params as JSON")
+    trigger.add_argument("--cooldown", type=float, default=0.0,
+                         help="add: minimum seconds between fires")
+    trigger.add_argument("--cron", default="",
+                         help="schedule: cron expression")
+    trigger.add_argument("--interval", default="",
+                         help="schedule: interval like 30m, 2h, 1d")
+    trigger.add_argument("--daily", default="",
+                         help="schedule: daily time HH:MM")
+    trigger.add_argument("--weekly", default="",
+                         help="schedule: weekly 'DAY HH:MM'")
+    trigger.add_argument("--once", default="",
+                         help="schedule: one-time ISO datetime or epoch")
+    trigger.add_argument("--path", default="", help="file: path to watch")
+    trigger.add_argument("--on", default="",
+                         help="file: change|create|delete")
+    trigger.add_argument("--symbol", default="", help="price: symbol e.g. BTC")
+    trigger.add_argument("--market", default="",
+                         help="price: crypto|stocks|forex")
+    trigger.add_argument("--op", default="",
+                         help="price: lt|lte|gt|gte|eq|ne|changed|changed_by_pct")
+    trigger.add_argument("--value", default="",
+                         help="price: threshold value")
+    trigger.add_argument("--pattern", default="",
+                         help="message: regex pattern")
+    trigger.add_argument("--chat", default="",
+                         help="message source: only this chat key; "
+                              "message action: destination chat key")
+    trigger.add_argument("--sender", default="",
+                         help="message: only this sender")
+    trigger.add_argument("--secret", default="",
+                         help="webhook: shared secret")
+    trigger.add_argument("--title", default="", help="notify: title")
+    trigger.add_argument("--body", default="", help="notify: body")
+    trigger.add_argument("--text", default="", help="message action: text")
+    trigger.add_argument("--command", dest="command_text", default="",
+                         help="command action: nm command string")
+    trigger.add_argument("--argv", nargs="*", default=None,
+                         help="command action: nm argv words")
+    trigger.add_argument("--goal", default="", help="mission action: goal")
+    trigger.add_argument("--max-iterations", type=int, default=0,
+                         help="mission action: max iterations")
+    trigger.add_argument("--limit", type=int, default=0,
+                         help="history: max rows")
+    trigger.add_argument("--json", action="store_true", help="Output as JSON")
+
     return parser
 
     # Wave K commands: document engine, browser service, code workspace.
