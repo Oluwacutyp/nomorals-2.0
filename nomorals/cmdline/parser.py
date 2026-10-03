@@ -39,6 +39,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "autonomy": ["auto"],
     "bet": ["bt"],
     "book": ["bk"],
+    "build": ["bld"],
     "captcha": ["cap"],
     "cards": ["cd"],
     "cipher": ["cip"],
@@ -318,6 +319,16 @@ def _parser() -> argparse.ArgumentParser:
     missions.add_argument("--budget-wall", type=float, default=0.0)
     missions.add_argument("--budget-tokens", type=int, default=0)
     missions.add_argument("--no-reflect", action="store_true")
+    missions.add_argument("--accept", default="",
+                          help="acceptance criteria as JSON for --start, e.g. "
+                               "'{\"criteria\": [{\"name\": \"quality\", \"spec\": "
+                               "{\"metric\": \"quality\", \"gte\": 0.8}}]}' — the "
+                               "mission is verified through VERIFYING before it "
+                               "may complete")
+    missions.add_argument("--require-artifact", action="append", default=[],
+                          metavar="TYPE",
+                          help="require an artifact TYPE at acceptance "
+                               "(repeatable; --start only)")
     missions.add_argument("--pause", default="", help="pause a mission by id (cross-process)")
     missions.add_argument("--cancel", default="", help="cancel a mission by id (terminal)")
     missions.add_argument("--resume-status", default="",
@@ -1429,7 +1440,50 @@ def _parser() -> argparse.ArgumentParser:
     apps.add_argument("--features", default="", help="comma-separated feature list")
     apps.add_argument("--title", default="")
     apps.add_argument("--port", default="")
+    apps.add_argument("--verify", dest="verify", action="store_true",
+                      default=True,
+                      help="runtime-verify the built app (default)")
+    apps.add_argument("--no-verify", dest="verify", action="store_false",
+                      help="skip runtime verification")
     apps.add_argument("--json", action="store_true", help="Output as JSON")
+
+    build_cmd = sub.add_parser("build", aliases=CLI_ALIASES["build"],
+                               help="scaffold -> verify (-> deliver) a builder template project")
+    bsub = build_cmd.add_subparsers(dest="build_action")
+    bsub.add_parser("kinds", help="list scaffold template kinds")
+    b_verify = bsub.add_parser(
+        "verify",
+        help="scaffold a template and run the full verify lifecycle "
+             "(install, tests, serve+smoke, export)")
+    b_verify.add_argument("kind", help="template kind (see: nm build kinds)")
+    b_verify.add_argument("name", help="project name")
+    b_verify.add_argument("--dest", default=".",
+                          help="directory to scaffold into (default: .)")
+    b_verify.add_argument("--export-dir", default="",
+                          help="where the export archive lands")
+    b_verify.add_argument("--startup-timeout", type=float, default=10.0,
+                          help="seconds to wait for the served app")
+    b_verify.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    b_deliver = bsub.add_parser(
+        "deliver",
+        help="scaffold, verify, zip, and deliver a project to a chat")
+    b_deliver.add_argument("kind", help="template kind (see: nm build kinds)")
+    b_deliver.add_argument("name", help="project name")
+    b_deliver.add_argument("--dest", default=".",
+                           help="directory to scaffold into (default: .)")
+    b_deliver.add_argument("--to", default="", metavar="platform:chat",
+                           help="send the zip to this chat, e.g. telegram:123456")
+    b_deliver.add_argument("--platform", default="",
+                           help="platform when --to is a bare chat id")
+    b_deliver.add_argument("--caption", default="",
+                           help="caption for the sent archive")
+    b_deliver.add_argument("--export-dir", default="",
+                           help="where the zip archive lands")
+    b_deliver.add_argument("--startup-timeout", type=float, default=10.0,
+                           help="seconds to wait for the served app")
+    b_deliver.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     # Connector commands
     connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")
@@ -1510,17 +1564,23 @@ def _parser() -> argparse.ArgumentParser:
 
     repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
         help="code workspace: branches, worktrees, patches, test/build",
-        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
-                     "nm repo branch <name> | nm repo switch <name>\n"
-                     "nm repo worktree <add|list|remove> [path] [branch]\n"
-                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
-                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\\n"
+                     "nm repo branch <name> | nm repo switch <name>\\n"
+                     "nm repo worktree <add|list|remove> [path] [branch] [--force]\\n"
+                     "nm repo patch review|apply|preview|record <file> [path] [--root DIR]\\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]\\n"
+                     "nm repo commit -m \"msg\" [paths...] | nm repo push|pull|fetch [remote] [branch]\\n"
+                     "nm repo stash <push|pop|list> [-m \"msg\"]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
     repo.add_argument("--root", default=".", help="repository root")
     repo.add_argument("--yes", action="store_true",
                       help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--force", action="store_true",
+                      help="worktree remove: discard dirty state")
+    repo.add_argument("--message", "-m", default="",
+                      help="commit message / stash message")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
 
     wisdom = sub.add_parser("wisdom", aliases=CLI_ALIASES["wisdom"],
@@ -1736,16 +1796,22 @@ def _parser() -> argparse.ArgumentParser:
 
     repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
         help="code workspace: branches, worktrees, patches, test/build",
-        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
-                     "nm repo branch <name> | nm repo switch <name>\n"
-                     "nm repo worktree <add|list|remove> [path] [branch]\n"
-                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
-                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\\n"
+                     "nm repo branch <name> | nm repo switch <name>\\n"
+                     "nm repo worktree <add|list|remove> [path] [branch] [--force]\\n"
+                     "nm repo patch review|apply|preview|record <file> [path] [--root DIR]\\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]\\n"
+                     "nm repo commit -m \"msg\" [paths...] | nm repo push|pull|fetch [remote] [branch]\\n"
+                     "nm repo stash <push|pop|list> [-m \"msg\"]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
     repo.add_argument("--root", default=".", help="repository root")
     repo.add_argument("--yes", action="store_true",
                       help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--force", action="store_true",
+                      help="worktree remove: discard dirty state")
+    repo.add_argument("--message", "-m", default="",
+                      help="commit message / stash message")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
 

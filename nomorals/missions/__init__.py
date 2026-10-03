@@ -1,4 +1,4 @@
-"""L6 — missions: long-running autonomous goals that survive process death.
+"""L5 — missions: long-running autonomous goals that survive process death.
 
 A mission is the unit of work that outlives a single agent run. It persists its
 plan, its progress, and its budget to SQLite, so ``kill -9`` in the middle of an
@@ -6,10 +6,10 @@ eight-hour task costs one step rather than the whole goal.
 
 Public surface::
 
-    from nomorals.missions import MissionRunner, MissionStore
+    from nomorals.missions import MissionRunner, MissionStore, wired_runner
 
     store = MissionStore(db)
-    runner = MissionRunner(context)
+    runner = wired_runner(context)  # runner + os state-machine hook attached
     result = runner.start("research X and write a report", budget_wall=3600)
 
     # after a crash, on startup:
@@ -37,7 +37,15 @@ from .idempotency import (
     mission_idempotency_key,
     step_idempotency_key,
 )
-from .mission import Checkpoint, Mission, MissionStatus, MissionStore
+from .mission import (
+    ACCEPTANCE_STATE_KEY,
+    Checkpoint,
+    Mission,
+    MissionStatus,
+    MissionStore,
+    mission_liveness,
+    normalize_acceptance,
+)
 from .progress import (
     STALL_AFTER_FAILURES,
     MissionMilestones,
@@ -50,8 +58,10 @@ from .progress import (
     render_status_text,
 )
 from .runner import MissionResult, MissionRunner, StepOutcome
+from .wiring import mission_acceptance, set_acceptance, wired_runner
 
 __all__ = [
+    "ACCEPTANCE_STATE_KEY",
     "Checkpoint",
     "DedupResult",
     "DedupeTimeout",
@@ -75,8 +85,13 @@ __all__ = [
     "estimate_eta",
     "fmt_duration",
     "idempotency_key",
+    "mission_acceptance",
     "mission_idempotency_key",
+    "mission_liveness",
+    "normalize_acceptance",
     "record_stall",
     "render_status_text",
+    "set_acceptance",
     "step_idempotency_key",
+    "wired_runner",
 ]

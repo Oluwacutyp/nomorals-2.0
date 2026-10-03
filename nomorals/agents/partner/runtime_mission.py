@@ -31,12 +31,12 @@ class RuntimeMissionMixin:
         """
         from ...core.errors import AmbiguousRef, NoMoralsError
         from ...missions import (
-            MissionRunner,
             MissionStatus,
             MissionStore,
             MissionWatchers,
             StallCode,
             render_status_text,
+            wired_runner,
         )
 
         store = MissionStore(self.context.db)
@@ -117,7 +117,7 @@ class RuntimeMissionMixin:
                 return (f"unknown stall code {code!r} — one of: "
                         f"{', '.join(sorted(StallCode.ALL))}")
             try:
-                out = MissionRunner(self.context, store=store).mark_stalled(
+                out = wired_runner(self.context, store=store).mark_stalled(
                     mission.id, code, message)
             except (NoMoralsError, ValueError) as exc:
                 return f"couldn't mark stall: {exc}"
@@ -137,7 +137,7 @@ class RuntimeMissionMixin:
                 return _amb
             if mission is None:
                 return f"no mission matching {rest!r}."
-            cleared = MissionRunner(self.context, store=store).clear_stalled(mission.id)
+            cleared = wired_runner(self.context, store=store).clear_stalled(mission.id)
             return (f"{mission.name}: stall cleared — back in play."
                     if cleared else f"{mission.name}: no stall recorded.")
 
@@ -182,7 +182,7 @@ class RuntimeMissionMixin:
             if mission.status == MissionStatus.RUNNING:
                 return (f"▶ {mission.name}: already running — no change; "
                         f"/mission status {mission.id} for progress.")
-            runner = MissionRunner(self.context, store=store)
+            runner = wired_runner(self.context, store=store)
 
             def _resume_job() -> None:
                 try:
@@ -214,13 +214,17 @@ class RuntimeMissionMixin:
                 return (f"⏹ {mission.name}: already {mission.status} — "
                         "nothing to cancel.")
             try:
-                store.set_status(mission.id, MissionStatus.CANCELLED, note=reason)
+                mission = store.set_status(mission.id, MissionStatus.CANCELLED,
+                                           note=reason)
             except (NoMoralsError, ValueError) as exc:
                 return f"couldn't cancel: {exc}"
-            runner = MissionRunner(self.context, store=store)
+            runner = wired_runner(self.context, store=store)
             runner.cancel(reason)  # cooperative: any in-flight runner stops
             if runner.reporter is not None:
                 try:
+                    # NOTE: mission is the fresh post-set_status row — passing
+                    # the pre-cancel copy would let the milestone _mark save
+                    # the stale status back over "cancelled".
                     runner.reporter.on_terminal(
                         mission, MissionStatus.CANCELLED, error=reason)
                 except Exception:  # noqa: BLE001 - telemetry, not chat
@@ -262,7 +266,7 @@ class RuntimeMissionMixin:
                 except (NoMoralsError, ValueError) as exc:
                     _log.debug("retry: could not cancel old mission: %s", exc)
                 old_note = "the previous attempt was cancelled"
-            runner = MissionRunner(self.context, store=store)
+            runner = wired_runner(self.context, store=store)
 
             def _retry_job() -> None:
                 try:

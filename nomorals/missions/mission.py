@@ -24,6 +24,7 @@ from typing import Any
 from ..core.errors import NotFound, ValidationError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..core.tasks import AcceptanceCriterion
 from ..storage.repository import Repository
 from .progress import (
     clear_stall as _clear_stall_entry,
@@ -34,9 +35,24 @@ from .progress import (
 )
 from .progress import _step_name as _plan_step_name
 
-__all__ = ["MissionStatus", "Mission", "MissionStore", "Checkpoint"]
+__all__ = [
+    "MissionStatus",
+    "Mission",
+    "MissionStore",
+    "Checkpoint",
+    "ACCEPTANCE_STATE_KEY",
+    "normalize_acceptance",
+    "mission_liveness",
+]
 
 _log = get_logger(__name__)
+
+#: State key under which a mission's acceptance criteria live. Criteria are
+#: stored as plain JSON (``MissionAcceptance.to_dict()`` shape) so no storage
+#: migration is needed — the runner verifies against them at finish time and
+#: transitions RUNNING -> VERIFYING -> COMPLETED/FAILED instead of completing
+#: blind. Missions without this key keep the historical direct path.
+ACCEPTANCE_STATE_KEY = "acceptance"
 
 #: How long a mission may claim "running" without a runner heartbeat
 #: before ``MissionStore.reconcile`` treats the runner as dead (seconds).
@@ -66,6 +82,93 @@ def _process_alive(pid: int) -> bool:
     except (OSError, ValueError, TypeError):
         return False
     return True
+
+
+def mission_liveness(mission: "Mission",
+                     *, stale_after: float | None = None) -> dict[str, Any]:
+    """Heartbeat/process liveness probe for one mission.
+
+    The single source of truth shared by ``MissionStore.reconcile`` and
+    ``MissionRunner.self_heal``: a worker counts as alive when its process
+    is alive *or* its heartbeat is fresh. Returns ``{"alive",
+    "heartbeat_age_s", "process_alive"}``. Never raises.
+    """
+    limit = stale_after if stale_after is not None else _stale_heartbeat_after()
+    hb = (mission.state or {}).get("heartbeat") or {}
+    try:
+        age = max(0.0, time.time() - float(hb.get("at") or 0.0))
+    except (TypeError, ValueError):
+        age = float("inf")
+    pid = hb.get("pid")
+    process_alive = _process_alive(pid) if isinstance(pid, int) and pid > 0 else False
+    return {
+        "alive": bool(process_alive or age <= limit),
+        "heartbeat_age_s": round(age, 1),
+        "process_alive": process_alive,
+    }
+
+
+def normalize_acceptance(acceptance: Any) -> dict[str, Any]:
+    """Validate + canonicalize acceptance criteria into the persisted shape.
+
+    Accepts a plain dict in ``MissionAcceptance.to_dict()`` shape (or any
+    object with a ``to_dict()`` of that shape — duck-typed so missions/L5
+    never imports ``nomorals.os.mission_state``/L6). Criteria are
+    canonicalized through ``AcceptanceCriterion`` (L1). Raises
+    :class:`ValidationError` on any bad shape — fail fast at creation, not
+    at verification time. An empty criteria set is rejected: a mission with
+    nothing to verify must not pay the VERIFYING detour.
+    """
+    to_dict = getattr(acceptance, "to_dict", None)
+    data = to_dict() if callable(to_dict) else acceptance
+    if not isinstance(data, dict):
+        raise ValidationError(
+            f"acceptance must be a dict, got {type(acceptance).__name__}",
+            field="acceptance",
+        )
+    raw_criteria = data.get("criteria") or []
+    if not isinstance(raw_criteria, list):
+        raise ValidationError("acceptance.criteria must be a list",
+                              field="acceptance")
+
+    criteria: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_criteria):
+        if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
+            raise ValidationError(
+                f"acceptance.criteria[{index}] needs a name",
+                field="acceptance",
+            )
+        try:
+            spec = raw.get("spec")
+            if spec is not None and not isinstance(spec, dict):
+                raise ValidationError(
+                    f"acceptance.criteria[{index}].spec must be a dict",
+                    field="acceptance",
+                )
+            criteria.append(AcceptanceCriterion.from_dict(raw).to_dict())
+        except ValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize or reject
+            raise ValidationError(
+                f"acceptance.criteria[{index}] is malformed: {exc}",
+                field="acceptance",
+            ) from exc
+    required_types = data.get("required_artifact_types") or []
+    if (not isinstance(required_types, (list, tuple))
+            or any(not str(t or "").strip() for t in required_types)):
+        raise ValidationError(
+            "acceptance.required_artifact_types must be a list of non-empty strings",
+            field="acceptance",
+        )
+    if not criteria and not required_types:
+        raise ValidationError(
+            "acceptance needs at least one criterion or required artifact type",
+            field="acceptance",
+        )
+    return {
+        "criteria": criteria,
+        "required_artifact_types": [str(t) for t in required_types],
+    }
 
 
 class MissionStatus:
@@ -108,6 +211,13 @@ class Mission:
     @property
     def terminal(self) -> bool:
         return self.status in MissionStatus.TERMINAL
+
+    @property
+    def acceptance(self) -> dict[str, Any] | None:
+        """Persisted acceptance criteria (``MissionAcceptance`` dict shape),
+        or None when the mission completes without verification."""
+        data = (self.state or {}).get(ACCEPTANCE_STATE_KEY)
+        return dict(data) if isinstance(data, dict) else None
 
     @property
     def budget_exhausted(self) -> bool:
@@ -245,14 +355,25 @@ class MissionStore:
         budget_tokens: int = 0,
         state: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        acceptance: dict[str, Any] | Any | None = None,
     ) -> Mission:
+        """Create + persist a mission.
+
+        ``acceptance`` (optional) is validated up front by
+        :func:`normalize_acceptance` and stored under
+        ``state["acceptance"]`` — the runner then verifies the mission
+        through VERIFYING before it may complete.
+        """
+        state = dict(state or {})
+        if acceptance is not None:
+            state[ACCEPTANCE_STATE_KEY] = normalize_acceptance(acceptance)
         return self.create(
             Mission(
                 goal=goal,
                 name=name,
                 budget_wall=budget_wall,
                 budget_tokens=budget_tokens,
-                state=state or {},
+                state=state,
                 metadata=metadata or {},
             )
         )
@@ -401,21 +522,15 @@ class MissionStore:
         if mission.status != MissionStatus.RUNNING:
             return {"mission_id": mission_id, "changed": False,
                     "status": mission.status, "reason": ""}
-        limit = stale_after if stale_after is not None else _stale_heartbeat_after()
-        hb = mission.state.get("heartbeat") or {}
-        try:
-            age = max(0.0, time.time() - float(hb.get("at") or 0.0))
-        except (TypeError, ValueError):
-            age = float("inf")
-        pid = hb.get("pid")
-        alive = _process_alive(pid) if isinstance(pid, int) and pid > 0 else False
-        if alive or age <= limit:
+        live = mission_liveness(mission, stale_after=stale_after)
+        if live["alive"]:
             return {"mission_id": mission_id, "changed": False,
                     "status": MissionStatus.RUNNING,
-                    "heartbeat_age_s": round(age, 1),
-                    "process_alive": alive, "reason": ""}
+                    "heartbeat_age_s": live["heartbeat_age_s"],
+                    "process_alive": live["process_alive"], "reason": ""}
+        pid = ((mission.state or {}).get("heartbeat") or {}).get("pid")
         reason = (
-            f"runner died — no heartbeat for {fmt_duration(age)}"
+            f"runner died — no heartbeat for {fmt_duration(live['heartbeat_age_s'])}"
             + (f" (pid {pid} is gone)" if pid else " (no heartbeat ever recorded)")
         )
         mission.status = MissionStatus.FAILED

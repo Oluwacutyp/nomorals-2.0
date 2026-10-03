@@ -6,8 +6,9 @@ the same exclusions as :mod:`nomorals.builders.export` (``.git``,
 zips and then sends the archive through a chat gateway's ``send_file``
 path (e.g. :meth:`nomorals.social.chat.gateway.ChatGateway.send_file`).
 :func:`build_zip_and_deliver` runs the whole pipeline end to end --
-scaffold, tests, smoke, zip, deliver -- capturing every step in a
-:class:`DeliveryReport` instead of raising.
+the :func:`nomorals.builders.verify.build_and_verify` lifecycle
+(scaffold, install, tests, smoke, export), then zip, then deliver --
+capturing every step in a :class:`DeliveryReport` instead of raising.
 
 The gateway is duck-typed (only ``send_file`` is used) so this module
 never imports the social layer.  Pass the gateway explicitly, or pass an
@@ -26,10 +27,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from .export import EXCLUDE_DIRS
-from .run import ServeError, run_config, serve
-from .scaffold import scaffold
-from .smoke import SmokeResult, smoke_test
-from .verify import BuildStep, run_project_tests
+from .verify import BuildStep, build_and_verify
 
 _log = get_logger(__name__)
 
@@ -242,81 +240,42 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
                           caption: str = "",
                           max_send_mb: float = 0.0,
                           export_dir: str | Path | None = None,
-                          startup_timeout: float = 10.0) -> DeliveryReport:
-    """Scaffold, test, smoke, zip, and deliver -- the full pipeline.
+                          startup_timeout: float = 10.0,
+                          policy: Any = None,
+                          confirmation: str | None = None) -> DeliveryReport:
+    """Scaffold, verify, zip, and deliver -- the full pipeline.
 
-    Steps: scaffold -> run project tests -> serve + smoke (HTTP kinds)
-    or --help smoke (CLI/console kinds) -> zip -> deliver.  Every step's
-    outcome lands in the report; nothing raises.
+    The build/verify portion (scaffold -> install_deps -> project tests
+    -> serve + smoke -> export + verify_export) is delegated to
+    :func:`nomorals.builders.verify.build_and_verify` -- the canonical
+    "after each coding mission verify and report" primitive -- so the
+    delivery pipeline and the verify module can never drift apart.
+    Then the verified project is zipped and delivered to chat.
+
+    Steps: scaffold -> install_deps -> tests -> serve+smoke/smoke ->
+    export -> zip -> deliver.  Every step's outcome lands in the report;
+    nothing raises.
     """
     started = time.monotonic()
-    report = DeliveryReport(kind=kind, name=name)
-    dest = Path(dest).expanduser()
-
-    # 1. scaffold
-    step_started = time.monotonic()
-    try:
-        result = scaffold(kind, name, dest)
-    except Exception as exc:  # noqa: BLE001 -- captured into the report
-        report.steps.append(BuildStep("scaffold", False, f"{type(exc).__name__}: {exc}",
-                                      time.monotonic() - step_started))
+    verified = build_and_verify(
+        kind, name, dest, policy=policy, confirmation=confirmation,
+        export_dir=export_dir, startup_timeout=startup_timeout)
+    report = DeliveryReport(kind=kind, name=name,
+                            project_dir=verified.project_dir,
+                            steps=list(verified.steps))
+    if not verified.ok or verified.project_dir is None:
+        # Verification failed -- the project is NOT zipped or delivered.
+        # The report names the broken step(s); nothing raises.
         report.elapsed = time.monotonic() - started
+        _log.info("\n%s", report.summary())
         return report
-    report.project_dir = result.project_dir
-    report.steps.append(BuildStep(
-        "scaffold", True,
-        f"{len(result.files)} files -> {result.project_dir}",
-        time.monotonic() - step_started))
 
-    # 2. project tests
-    report.steps.append(run_project_tests(result))
-
-    # 3. serve + smoke (HTTP) or --help smoke (CLI/console)
-    step_started = time.monotonic()
-    try:
-        config = run_config(result.project_dir)
-    except Exception as exc:  # noqa: BLE001
-        report.steps.append(BuildStep("smoke", False, f"run_config: {exc}",
-                                      time.monotonic() - step_started))
-        config = None
-    if config is not None:
-        if config.kind == "http":
-            try:
-                with serve(result.project_dir, port=0,
-                           startup_timeout=startup_timeout) as handle:
-                    smoke: SmokeResult = smoke_test(handle, timeout=startup_timeout)
-                detail = "; ".join(
-                    f"{c.name}: {'ok' if c.ok else 'FAIL'} {c.detail}".strip()
-                    for c in smoke.checks)
-                report.steps.append(BuildStep("serve+smoke", smoke.ok, detail,
-                                              time.monotonic() - step_started))
-            except ServeError as exc:
-                report.steps.append(BuildStep("serve+smoke", False,
-                                              f"{exc}\nstderr:\n{exc.stderr}",
-                                              time.monotonic() - step_started))
-            except Exception as exc:  # noqa: BLE001
-                report.steps.append(BuildStep("serve+smoke", False,
-                                              f"{type(exc).__name__}: {exc}",
-                                              time.monotonic() - step_started))
-        else:
-            try:
-                smoke = smoke_test(result.project_dir, timeout=30.0)
-                detail = "; ".join(
-                    f"{c.name}: {'ok' if c.ok else 'FAIL'} {c.detail}".strip()
-                    for c in smoke.checks)
-                report.steps.append(BuildStep("smoke", smoke.ok, detail,
-                                              time.monotonic() - step_started))
-            except Exception as exc:  # noqa: BLE001
-                report.steps.append(BuildStep("smoke", False,
-                                              f"{type(exc).__name__}: {exc}",
-                                              time.monotonic() - step_started))
-
-    # 4. zip
+    # zip the verified project (reuse its dir -- never re-scaffold)
     step_started = time.monotonic()
     zipped: ZipResult | None = None
     try:
-        zipped = zip_project(result.project_dir,
-                             dest=export_dir or result.project_dir.parent)
+        zipped = zip_project(verified.project_dir,
+                             dest=export_dir or verified.project_dir.parent)
         report.zip_path = zipped.archive
         report.steps.append(BuildStep(
             "zip", True,
@@ -330,7 +289,7 @@ def build_zip_and_deliver(kind: str, name: str, dest: str | Path, *,
         report.elapsed = time.monotonic() - started
         return report
 
-    # 5. deliver (reuse the zip from step 4 -- never re-zip)
+    # deliver (reuse the zip from the zip step -- never re-zip)
     step_started = time.monotonic()
     try:
         gw = _resolve_gateway(gateway=gateway, context=context)

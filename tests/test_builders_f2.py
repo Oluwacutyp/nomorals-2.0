@@ -307,9 +307,9 @@ class F2EndToEndTest(unittest.TestCase):
                 self.assertTrue(report.ok, report.summary())
                 self.assertEqual(
                     [s.name for s in report.steps],
-                    ["scaffold", "tests",
+                    ["scaffold", "install_deps", "tests",
                      "serve+smoke" if kind in HTTP_KINDS else "smoke",
-                     "zip", "deliver"])
+                     "export", "zip", "deliver"])
                 self.assertTrue(all(s.ok for s in report.steps))
                 self.assertTrue(report.zip_path.is_file())
                 self.assertEqual(report.message_id, f"mid-{kind}")

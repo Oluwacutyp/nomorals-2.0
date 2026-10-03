@@ -126,7 +126,7 @@ def _wait(predicate, timeout=5.0):
 
 
 def _stubbed():
-    return patch("nomorals.missions.MissionRunner", RunnerStub)
+    return patch("nomorals.missions.wired_runner", RunnerStub)
 
 
 # ── 1. reconcile ─────────────────────────────────────────────────────────────

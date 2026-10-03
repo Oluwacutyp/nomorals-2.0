@@ -13,6 +13,7 @@ and parse ``porcelain=v1`` (no ahead/behind), while the workspace needs
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -220,6 +221,84 @@ class CodeWorkspace:
             raise WorkspaceError(
                 f"git worktree remove failed: {proc.stderr.strip()}")
         return {"path": str(path), "removed": True}
+
+    # ── commit / sync ─────────────────────────────────────────────────
+    def commit(self, message: str, paths: list[str] | None = None) -> dict[str, Any]:
+        """Stage and commit. ``paths`` limits the commit; default stages
+        everything (``git add -A``).  Fail fast on an empty message or a
+        git error (e.g. nothing to commit)."""
+        if not message or not message.strip():
+            raise WorkspaceError("commit message must not be empty")
+        self._ensure_git()
+        if paths:
+            proc = self._run(["add", "--", *paths])
+            if proc.returncode != 0:
+                raise WorkspaceError(f"git add failed: {proc.stderr.strip()}")
+        else:
+            proc = self._run(["add", "-A"])
+            if proc.returncode != 0:
+                raise WorkspaceError(f"git add -A failed: {proc.stderr.strip()}")
+        proc = self._run(["commit", "-m", message.strip()])
+        if proc.returncode != 0:
+            raise WorkspaceError(f"git commit failed: {proc.stderr.strip()}")
+        sha = self._run(["rev-parse", "HEAD"]).stdout.strip()
+        return {"sha": sha, "message": message.strip(), "committed": True}
+
+    def push(self, remote: str = "origin", branch: str = "") -> dict[str, Any]:
+        """Push to ``remote`` (default ``origin``); ``branch`` pins the
+        refspec when given."""
+        if not remote or not remote.strip():
+            raise WorkspaceError("remote name must not be empty")
+        args = ["push", remote.strip()]
+        if branch and branch.strip():
+            args.append(branch.strip())
+        proc = self._checked(args, f"git push {remote.strip()}")
+        return {"remote": remote.strip(), "branch": branch.strip(),
+                "pushed": True, "output": proc.stderr.strip()}
+
+    def pull(self, remote: str = "origin", branch: str = "") -> dict[str, Any]:
+        """Pull from ``remote`` (default ``origin``).  Merge conflicts
+        surface as a WorkspaceError with git's own message."""
+        if not remote or not remote.strip():
+            raise WorkspaceError("remote name must not be empty")
+        args = ["pull", remote.strip()]
+        if branch and branch.strip():
+            args.append(branch.strip())
+        proc = self._checked(args, f"git pull {remote.strip()}")
+        return {"remote": remote.strip(), "branch": branch.strip(),
+                "pulled": True, "output": proc.stdout.strip()}
+
+    def fetch(self, remote: str = "origin") -> dict[str, Any]:
+        """Fetch from ``remote`` (default ``origin``) without merging."""
+        if not remote or not remote.strip():
+            raise WorkspaceError("remote name must not be empty")
+        self._checked(["fetch", remote.strip()], f"git fetch {remote.strip()}")
+        return {"remote": remote.strip(), "fetched": True}
+
+    # ── stash ─────────────────────────────────────────────────────────
+    def stash_push(self, message: str = "") -> dict[str, Any]:
+        """Stash working-tree changes (including untracked files)."""
+        args = ["stash", "push", "--include-untracked"]
+        if message and message.strip():
+            args += ["-m", message.strip()]
+        proc = self._checked(args, "git stash push")
+        return {"stashed": True, "message": message.strip(),
+                "output": proc.stdout.strip()}
+
+    def stash_pop(self) -> dict[str, Any]:
+        """Restore the most recent stash entry."""
+        proc = self._checked(["stash", "pop"], "git stash pop")
+        return {"popped": True, "output": proc.stdout.strip()}
+
+    def stash_list(self) -> list[dict[str, str]]:
+        """Stash entries: index, message."""
+        proc = self._checked(["stash", "list"], "git stash list")
+        out = []
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^stash@\{(\d+)\}:\s*(.*)$", line)
+            if m:
+                out.append({"index": m.group(1), "message": m.group(2)})
+        return out
 
     # ── diff / log ──────────────────────────────────────────────────────
     def diff(self, ref: str = "") -> str:

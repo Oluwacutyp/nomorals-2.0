@@ -83,9 +83,9 @@ def _cmd_mission(args: argparse.Namespace, context: Any) -> int:
     if action == "health":
         # live-mission watchdog: a RUNNING mission whose newest checkpoint
         # went stale lost its worker — flag it for restart or cancel
-        from ...missions.runner import MissionRunner
+        from ...missions.wiring import wired_runner
 
-        h = MissionRunner(context).health()
+        h = wired_runner(context).health()
         lines = [f"mission health — {len(h['active'])} active, "
                  f"{len(h['stuck'])} stuck "
                  f"(stale after {int(h['stuck_after_seconds'])}s)"]

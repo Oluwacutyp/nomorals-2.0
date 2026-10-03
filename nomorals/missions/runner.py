@@ -17,7 +17,9 @@ Two consequences worth stating:
 
 from __future__ import annotations
 
+import importlib
 import os
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -27,7 +29,12 @@ from ..agents.orchestrator import MasterOrchestrator
 from ..core.errors import NoMoralsError, ValidationError, classify
 from ..core.logging_setup import get_logger
 from ..core.tasks import TaskKind
-from ..missions.mission import Mission, MissionStatus, MissionStore
+from .mission import (
+    Mission,
+    MissionStatus,
+    MissionStore,
+    mission_liveness,
+)
 from .idempotency import IdempotencyStore, dedupe, step_idempotency_key
 from .progress import (
     STALL_AFTER_FAILURES,
@@ -40,6 +47,10 @@ from .progress import (
 __all__ = ["StepOutcome", "MissionResult", "MissionRunner"]
 
 _log = get_logger(__name__)
+
+#: Health-watchdog default: a live mission with no fresh checkpoint *and* no
+#: fresh heartbeat for this long counts as stuck (see ``MissionRunner.health``).
+STUCK_AFTER_SECONDS = 1800.0
 
 
 @dataclass
@@ -131,6 +142,7 @@ class MissionRunner:
         milestones: bool = True,
         milestone_reporter: MissionMilestones | None = None,
         idempotency: IdempotencyStore | None = None,
+        artifact_store: Any | None = None,
     ) -> None:
         self.context = context
         self.store = store or MissionStore(context.db)
@@ -146,6 +158,10 @@ class MissionRunner:
         # but reported ok=False is recorded as *failed* and may retry.
         # ``None`` (the default) keeps the historical always-execute path.
         self.idempotency = idempotency
+        # Artifact store for acceptance verification (see _verify_acceptance).
+        # Injected in tests; otherwise built lazily from the context db so
+        # merely constructing a runner never touches the filesystem.
+        self.artifact_store = artifact_store
         # OS control-plane hooks (Wave H2). Plain optional callables — the
         # runner never imports nomorals.os (L6); whoever wires them provides
         # the callables (see nomorals.os.mission_state.attach_runner and
@@ -325,13 +341,20 @@ class MissionRunner:
         budget_tokens: int = 0,
         max_iterations: int = 8,
         reflect: bool = True,
+        acceptance: dict[str, Any] | Any | None = None,
     ) -> MissionResult:
-        """Create a mission and run it immediately."""
+        """Create a mission and run it immediately.
+
+        ``acceptance`` (optional) sets the mission's acceptance criteria at
+        creation — the runner then verifies the finished mission through
+        VERIFYING before it may complete (see :meth:`_verify_acceptance`).
+        """
         # Reset here, not in run(): run() is also the resume path, and clearing the
         # flag there silently discards a cancel() requested from another thread.
         self._cancel = False
         mission = self.store.create_new(
-            goal, name=name, budget_wall=budget_wall, budget_tokens=budget_tokens
+            goal, name=name, budget_wall=budget_wall, budget_tokens=budget_tokens,
+            acceptance=acceptance,
         )
         # Refresh from the store: the hook persists its own copy, and the
         # stale in-memory mission must not clobber it on the next save.
@@ -435,6 +458,117 @@ class MissionRunner:
             except NoMoralsError as exc:
                 _log.error("could not resume mission %s: %s", mission.id, classify(exc).message)
         return results
+
+    # ── watchdog ─────────────────────────────────────────────────────────────
+
+    def health(self, *, limit: int = 50,
+               stuck_after_seconds: float | None = None) -> dict[str, Any]:
+        """Live-mission watchdog snapshot.
+
+        A mission counts as *stuck* when it is live (running/paused) but has
+        neither a fresh checkpoint nor a fresh heartbeat for longer than
+        ``stuck_after_seconds`` — i.e. no sign of a worker at all. A mission
+        on a long step keeps a fresh heartbeat and is *not* stuck.
+
+        Returns ``{"active", "stuck", "stuck_after_seconds"}``; each active
+        entry carries ``id``/``mission_id``, ``name``, ``status``,
+        ``checkpoint_age_seconds`` (None when never checkpointed),
+        ``heartbeat_age_seconds``, ``stuck`` and the ``stall`` record.
+        Read-only: never mutates a mission.
+        """
+        threshold = (STUCK_AFTER_SECONDS if stuck_after_seconds is None
+                     else max(1.0, float(stuck_after_seconds)))
+        now = time.time()
+        active: list[dict[str, Any]] = []
+        stuck: list[str] = []
+        for mission in self.store.resumable():
+            if len(active) >= max(1, limit):
+                break
+            point = self.store.latest_checkpoint(mission.id)
+            cp_age = (now - point.created_at) if point is not None else None
+            hb_age = mission_liveness(mission)["heartbeat_age_s"]
+            hb_fresh = hb_age <= threshold
+            cp_fresh = cp_age is not None and cp_age <= threshold
+            is_stuck = (
+                mission.status in (MissionStatus.RUNNING, MissionStatus.PAUSED)
+                and not hb_fresh and not cp_fresh
+            )
+            active.append({
+                "id": mission.id,
+                "mission_id": mission.id,
+                "name": mission.name,
+                "status": mission.status,
+                "checkpoint_age_seconds": cp_age,
+                "heartbeat_age_seconds": hb_age,
+                "stuck": is_stuck,
+                "stall": (mission.state or {}).get("stall"),
+            })
+            if is_stuck:
+                stuck.append(mission.id)
+        return {"active": active, "stuck": stuck,
+                "stuck_after_seconds": threshold}
+
+    def self_heal(self, mission_id: str, *, background: bool = True,
+                  max_iterations: int = 8) -> dict[str, Any]:
+        """One best-effort heal attempt for a stuck mission. Never raises.
+
+        - unknown/terminal mission: not attempted (history is not rewritten);
+        - worker provably dead (no live process *and* stale heartbeat, the
+          same probe ``MissionStore.reconcile`` uses): the stale heartbeat is
+          dropped and the mission is resumed so its remaining steps re-drive;
+        - worker alive: not attempted — the watchdog cried wolf on a long step.
+
+        The heal is recorded on the mission row (``state["self_heal"]``);
+        callers gate repeat attempts themselves. Returns
+        ``{"attempted": bool, "mission_id", ...}``.
+        """
+        try:
+            mission = self.store.get(mission_id)  # raises NotFound when unknown
+        except Exception as exc:  # noqa: BLE001 - healing never raises
+            return {"attempted": False, "mission_id": mission_id,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        if mission.terminal:
+            return {"attempted": False, "mission_id": mission_id,
+                    "reason": f"mission is {mission.status}"}
+        try:
+            if mission_liveness(mission)["alive"]:
+                return {"attempted": False, "mission_id": mission_id,
+                        "reason": "worker appears alive"}
+            # The worker is dead: drop the stale heartbeat and re-drive the
+            # remaining steps. Status stays live (running/paused), so the os
+            # state machine needs no repair — run() re-fires RUNNING, which
+            # is an idempotent no-op on the transition hook.
+            mission.state.pop("heartbeat", None)
+            mission.state["self_heal"] = {"at": time.time(),
+                                         "reason": "worker dead; resumed remaining steps"}
+            self.store.save(mission)
+            _log.warning("self-healing mission %s (dead worker)", mission_id)
+            if background:
+                thread = threading.Thread(
+                    target=self._self_heal_job,
+                    args=(mission_id, max_iterations),
+                    name=f"mission-selfheal-{mission_id[:8]}",
+                    daemon=True,
+                )
+                thread.start()
+                return {"attempted": True, "mission_id": mission_id,
+                        "background": True}
+            result = self.resume(mission_id, max_iterations=max_iterations)
+            return {"attempted": True, "mission_id": mission_id,
+                    "background": False, "status": result.status,
+                    "ok": result.ok}
+        except Exception as exc:  # noqa: BLE001 - healing never raises
+            _log.warning("self-heal for mission %s failed: %s", mission_id, exc)
+            return {"attempted": False, "mission_id": mission_id,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+    def _self_heal_job(self, mission_id: str, max_iterations: int) -> None:
+        """Background half of :meth:`self_heal` — exceptions stay in the log."""
+        try:
+            self.resume(mission_id, max_iterations=max_iterations)
+        except Exception:  # noqa: BLE001 - chat/watchdog must stay alive
+            _log.exception("background self-heal failed for mission %s",
+                           mission_id)
 
     # ── internals ────────────────────────────────────────────────────────────
 
@@ -551,6 +685,12 @@ class MissionRunner:
         reflect: bool = True,
     ) -> MissionResult:
         lessons: list[str] = []
+        if status == MissionStatus.DONE:
+            # Acceptance gate: a mission that finished its steps but carries
+            # acceptance criteria must pass VERIFYING before it may COMPLETE.
+            # A failed verification becomes a real FAILED — never a silent
+            # success.
+            mission, status, error = self._verify_acceptance(mission, error)
         mission.status = status
         final_state = {
             MissionStatus.DONE: "COMPLETED",
@@ -589,6 +729,88 @@ class MissionRunner:
             seconds=self._clock() - started,
             error=error,
         )
+
+    def _verify_acceptance(
+        self, mission: Mission, error: str
+    ) -> tuple[Mission, str, str]:
+        """VERIFYING gate before a mission may COMPLETE.
+
+        When the mission carries acceptance criteria
+        (``state["acceptance"]``), transition RUNNING -> VERIFYING and run
+        ``nomorals.os.mission_state.evaluate_acceptance`` against the
+        mission's artifacts + persisted evidence. Returns
+        ``(mission, status, error)``: DONE when verification passes, FAILED
+        with a concrete reason when it does not — a failed verification is
+        never a silent success. Missions without criteria keep the
+        historical direct path (no VERIFYING detour).
+
+        The os import is lazy and dynamic (``importlib``): missions (L5)
+        must not import os (L6) statically — see
+        ``nomorals.missions.wiring`` for the sanctioned pattern.
+        """
+        acceptance = mission.acceptance
+        if not acceptance:
+            return mission, MissionStatus.DONE, error
+        updated = self._os_transition(mission.id, "VERIFYING",
+                                      "acceptance verification")
+        if updated is not None:
+            mission = updated
+        try:
+            mission_state = importlib.import_module("nomorals.os.mission_state")
+            acceptance_obj = mission_state.MissionAcceptance.from_dict(acceptance)
+            passed, details = mission_state.evaluate_acceptance(
+                mission, self._artifact_store(), acceptance_obj)
+        except Exception as exc:  # noqa: BLE001 - a broken verifier fails the mission, never the runner
+            passed = False
+            details = {"passed": False,
+                       "error": f"{type(exc).__name__}: {exc}",
+                       "criteria": [],
+                       "required_criteria_failed": [],
+                       "artifact_types": {"required": [], "present": [],
+                                          "missing": []}}
+            _log.warning("mission %s acceptance evaluation failed: %s",
+                         mission.id, exc)
+        mission.state["verification"] = details
+        self.store.save(mission)
+        if passed:
+            _log.info("mission %s acceptance verified", mission.id)
+            return mission, MissionStatus.DONE, error
+        parts: list[str] = []
+        failed = details.get("required_criteria_failed") or []
+        if failed:
+            parts.append("failed criteria: " + ", ".join(str(n) for n in failed))
+        missing = (details.get("artifact_types") or {}).get("missing") or []
+        if missing:
+            parts.append("missing artifact types: " + ", ".join(str(t) for t in missing))
+        detail = "; ".join(parts) or "acceptance criteria not met"
+        if details.get("error"):
+            detail += f" ({details['error']})"
+        verr = f"acceptance verification failed — {detail}"
+        _log.warning("mission %s %s", mission.id, verr)
+        return mission, MissionStatus.FAILED, verr
+
+    def _artifact_store(self) -> Any:
+        """ArtifactStore for acceptance evaluation.
+
+        Injected via the constructor in tests; otherwise built lazily from
+        the context db (same layout ``nm mission redrive`` uses) and
+        memoized, so constructing a runner never touches the filesystem.
+        """
+        if self.artifact_store is not None:
+            return self.artifact_store
+        from pathlib import Path
+
+        from ..storage.artifacts import ArtifactStore
+        from ..storage.blob import BlobStore
+
+        db = getattr(self.context, "db", None)
+        if db is None:
+            raise ValidationError(
+                "acceptance verification needs a context with a db")
+        db_path = getattr(db, "path", None)
+        blob_dir = Path(db_path).parent / "blobs" if db_path else Path("data/blobs")
+        self.artifact_store = ArtifactStore(db, BlobStore(db, blob_dir))
+        return self.artifact_store
 
     def _reflect(
         self, mission: Mission, steps: list[StepOutcome], status: str
