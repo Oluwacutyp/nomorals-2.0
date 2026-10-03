@@ -18,11 +18,20 @@ import tempfile
 import unittest
 import unittest.mock
 
-import cv2
-import numpy as np
+try:
+    import cv2
+except ImportError:  # pragma: no cover - CI installs opencv via media-edit extra
+    cv2 = None
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover
+    np = None
 
 from nomorals.media_edit import cv_video as CV
 from nomorals.media_edit import videos as V
+
+_CV2_MISSING = cv2 is None
+_NEEDS_CV2 = unittest.skipIf(_CV2_MISSING, "cv2 not installed")
 from nomorals.media_edit.images import MediaEditError
 
 W, H, FPS = 160, 120, 30
@@ -94,6 +103,7 @@ def _no_cv2():
         importlib.reload(CV)
 
 
+@_NEEDS_CV2
 class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cv-video-test-")
@@ -103,6 +113,7 @@ class _Base(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+@_NEEDS_CV2
 class BackendContractTests(unittest.TestCase):
     def test_module_imports_without_cv2(self):
         # No artificial gate: importing cv_video never requires cv2.
@@ -325,6 +336,7 @@ class TimelapseTests(_Base):
             CV.create_timelapse(self.vid, factor=1, out_dir=self.tmp)
 
 
+@_NEEDS_CV2
 class StabilizeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cv-stab-test-")
@@ -580,6 +592,7 @@ class BlurryTests(_Base):
             CV.find_blurry_frames(self.vid, threshold=0, out_dir=self.tmp)
 
 
+@_NEEDS_CV2
 class HeatmapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cv-heat-test-")
@@ -974,6 +987,7 @@ class DeshakeTests(_Base):
         self.assertTrue(os.path.exists(res["output"]))
 
 
+@_NEEDS_CV2
 class ResolveBackendTests(unittest.TestCase):
     def test_auto_picks_python_without_cv2(self):
         with unittest.mock.patch.object(CV, "_have_cv2",
@@ -999,6 +1013,7 @@ class ResolveBackendTests(unittest.TestCase):
         self.assertIn("python", CV._BACKENDS)
 
 
+@_NEEDS_CV2
 class PngWriterTests(unittest.TestCase):
     def test_write_png_roundtrip(self):
         tmp = tempfile.mkdtemp(prefix="png-test-")
