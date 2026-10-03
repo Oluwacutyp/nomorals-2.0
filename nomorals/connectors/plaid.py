@@ -1,9 +1,10 @@
-"""Plaid connector — US/EU bank data.
+"""Plaid connector — US/EU bank data + money movement.
 
 Plaid (https://plaid.com, docs: https://plaid.com/docs/api) aggregates bank
-accounts, transactions, liabilities, and investments behind one API. Auth is
-a ``client_id`` + ``secret`` pair sent in every JSON request body, plus one
-``access_token`` per linked bank item.
+accounts, transactions, liabilities, and investments behind one API, and —
+with the Transfer and Payment Initiation products — moves money too.
+Auth is a ``client_id`` + ``secret`` pair sent in every JSON request body,
+plus one ``access_token`` per linked bank item.
 
 Linking a bank is a human-in-the-loop flow: Devon mints a Plaid Link token
 (``POST /link/token/create``), the owner completes Plaid Link in their own
@@ -11,9 +12,13 @@ browser (entering their own bank credentials there — Devon never sees
 them), Link hands back a ``public_token``, and Devon exchanges it for a
 long-lived ``access_token`` (``POST /item/public_token/exchange``).
 
-READ-ONLY. Plaid's API does not move money and neither does this
-connector: there is no payment, transfer, or account-opening call here.
-Use the owner's bank directly for anything that changes balances.
+FULL FUNCTIONALITY. This connector reads bank data AND moves money:
+US ACH transfers via the Transfer API (``/transfer/...``) and UK/EU
+payments via Payment Initiation (``/payment_initiation/...``). Every
+money-moving call takes ``confirm=True`` to pause at a human checkpoint
+so the owner approves the exact amount, currency, and destination before
+anything moves — the owner confirms, Devon never blocks. All movements
+are idempotency-keyed and written to a JSONL audit log.
 
 Rules honored from the Plaid playbook:
 * never expose full account or routing numbers — Plaid only returns masked
@@ -21,8 +26,7 @@ Rules honored from the Plaid playbook:
 * plain-English summaries: no command names, field names, cursors, or
   internal ids in owner-facing output;
 * Plaid data can lag the bank — summaries say so instead of asserting
-  completeness;
-* read-only reference, not financial advice.
+  completeness.
 """
 
 from __future__ import annotations
@@ -78,6 +82,11 @@ _ERROR_GUIDANCE = {
     "INSTITUTION_DOWN": "the bank's Plaid integration is down — retry later",
     "INVALID_API_KEYS": "client_id/secret rejected — check the pair in the "
                         "Plaid dashboard",
+    "TRANSFER_NOT_ENABLED": "Plaid Transfer is not enabled on this account "
+                            "— enable the Transfer product in the Plaid "
+                            "dashboard first",
+    "PRODUCT_NOT_ENABLED": "that Plaid product is not enabled on this "
+                           "account — enable it in the Plaid dashboard",
 }
 
 
@@ -100,17 +109,24 @@ class PlaidError(ConnectorError):
 
 @register_connector
 class PlaidConnector(Connector):
-    """Devon's Plaid adapter: bank accounts, transactions, liabilities,
-    investments. Read-only."""
+    """Devon's Plaid adapter: bank data, US ACH transfers, UK/EU payments.
+
+    Reads accounts, transactions, liabilities, and investments; moves
+    money via the Transfer API (US ACH) and Payment Initiation (UK/EU).
+    Money-moving calls take ``confirm=True`` to pause at a human
+    checkpoint for owner approval.
+    """
 
     id = "plaid"
     name = "Plaid"
     description = (
-        "US/EU bank data through Plaid: accounts and balances, transaction "
-        "history and sync, recurring streams, liabilities, and investment "
-        "holdings/transactions. Authenticates with a client_id + secret "
-        "pair and one access token per linked bank. Read-only — Plaid "
-        "cannot move money."
+        "US/EU bank data through Plaid plus money movement: accounts and "
+        "balances, transaction history and sync, recurring streams, "
+        "liabilities, investment holdings/transactions, US ACH transfers "
+        "via the Transfer API, and UK/EU payments via Payment Initiation. "
+        "Authenticates with a client_id + secret pair and one access token "
+        "per linked bank. Transfers and payments take confirm=True for "
+        "owner approval before money moves."
     )
     auth_methods = (AuthMethod.API_KEY,)
 
@@ -484,26 +500,62 @@ document.getElementById('link-btn').onclick = () => handler.open();
         db: Any,
         context: Any = None,
     ) -> dict[str, Any]:
-        """Continue linking after the owner resolved the human checkpoint."""
+        """Continue after the owner resolved a human checkpoint.
+
+        Dispatches on the checkpoint's ``resume_state``: the Plaid Link
+        flow (``stage == "link_bank"``) or a money-movement approval
+        (``intent`` of ``create_transfer`` / ``cancel_transfer`` /
+        ``create_payment`` / ``reverse_payment``).
+        """
         from .checkpoints import CheckpointState
 
         if checkpoint.state != CheckpointState.RESOLVED:
             raise ConnectorError(
                 f"checkpoint {checkpoint.id} is {checkpoint.state.value}, "
-                "not resolved — the owner must finish Plaid Link first"
+                "not resolved — the owner must act first"
             )
-        if (checkpoint.resume_state or {}).get("stage") != "link_bank":
-            raise ConnectorError(
-                "plaid cannot resume checkpoint stage "
-                f"{(checkpoint.resume_state or {}).get('stage')!r}"
+        state = checkpoint.resume_state or {}
+        if state.get("stage") == "link_bank":
+            public_token = self._token_from_note(checkpoint.result_note or "")
+            if not public_token:
+                raise ConnectorError(
+                    "the resolved checkpoint has no public_token — resolve "
+                    "it again with note 'public_token=<token from the page>'"
+                )
+            return self.link_bank(public_token)
+        intent = state.get("intent", "")
+        if intent == "create_transfer":
+            return self.create_transfer(
+                access_token=state["access_token"],
+                account_id=state["account_id"],
+                authorization_id=state["authorization_id"],
+                type=state["type"],
+                network=state.get("network", "ach"),
+                amount=state["amount"],
+                description=state.get("description", ""),
+                ach_class=state.get("ach_class", "ppd"),
+                legal_name=state.get("legal_name", ""),
+                idempotency_key=state.get("idempotency_key"),
             )
-        public_token = self._token_from_note(checkpoint.result_note or "")
-        if not public_token:
-            raise ConnectorError(
-                "the resolved checkpoint has no public_token — resolve it "
-                "again with note 'public_token=<token from the page>'"
+        if intent == "cancel_transfer":
+            return self.cancel_transfer(
+                state["transfer_id"],
+                access_token=state["access_token"],
             )
-        return self.link_bank(public_token)
+        if intent == "create_payment":
+            return self.create_payment(
+                state["recipient_id"],
+                state["reference"],
+                state["amount"],
+                currency=state.get("currency", "GBP"),
+                idempotency_key=state.get("idempotency_key"),
+            )
+        if intent == "reverse_payment":
+            return self.reverse_payment(state["payment_id"])
+        raise ConnectorError(
+            "plaid cannot resume checkpoint "
+            f"{checkpoint.id}: unknown intent {intent!r}"
+        )
 
     # ── reads ────────────────────────────────────────────────────
 
@@ -730,6 +782,491 @@ document.getElementById('link-btn').onclick = () => handler.open();
                 "total": total,
             })
         return out
+
+    # ── transfers (US ACH) ───────────────────────────────────────
+
+    def create_transfer_authorization(
+        self,
+        *,
+        access_token: str | None = None,
+        account_id: str = "",
+        type: str = "debit",
+        network: str = "ach",
+        amount: str = "",
+        ach_class: str = "ppd",
+        legal_name: str = "",
+    ) -> dict[str, Any]:
+        """Authorize a transfer (``POST /transfer/authorization/create``).
+
+        Returns an ``authorization_id`` — pass it to :meth:`create_transfer`.
+        The authorization_id doubles as Plaid's idempotency key: creating
+        twice with the same id returns the same transfer, never a duplicate.
+        ``amount`` is the MAXIMUM as a decimal string (``"25.00"``);
+        ``type`` is ``"debit"`` (pull from the account) or ``"credit"``
+        (push to it). Raises a clear error if Transfer isn't enabled on
+        the Plaid account.
+        """
+        item = self._single_item(access_token)
+        if type not in ("debit", "credit"):
+            raise ConnectorError(
+                f"invalid transfer type {type!r}: use 'debit' or 'credit'"
+            )
+        self._check_amount_str(amount, "transfer authorization")
+        body: dict[str, Any] = {
+            "access_token": item["access_token"],
+            "account_id": account_id,
+            "type": type,
+            "network": network,
+            "amount": amount,
+            "ach_class": ach_class,
+            "user": {"legal_name": legal_name or "Devon Owner"},
+        }
+        try:
+            resp = self._authed(item, "/transfer/authorization/create", body)
+        except PlaidError as exc:
+            raise self._transfer_not_enabled(exc) from exc
+        return {
+            "authorization_id": resp.get("authorization_id", ""),
+            "account_id": account_id,
+            "type": type,
+            "amount": amount,
+        }
+
+    def create_transfer(
+        self,
+        *,
+        access_token: str | None = None,
+        account_id: str = "",
+        authorization_id: str = "",
+        type: str = "debit",
+        network: str = "ach",
+        amount: str = "",
+        description: str = "",
+        ach_class: str = "ppd",
+        legal_name: str = "",
+        confirm: bool = False,
+        db: Any = None,
+        context: Any = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a US ACH transfer (``POST /transfer/create``).
+
+        ``confirm=True`` (with ``db=``) pauses at a human checkpoint showing
+        the exact amount, direction, and account — the owner approves before
+        money moves. Without ``confirm`` the transfer executes immediately
+        (for callers that already secured approval).
+
+        Idempotency: ``idempotency_key`` (generated if omitted) is checked
+        against the audit log first — a replayed key returns the original
+        result without a new API call. Plaid's own idempotency rides on the
+        ``authorization_id``.
+        """
+        item = self._single_item(access_token)
+        if type not in ("debit", "credit"):
+            raise ConnectorError(
+                f"invalid transfer type {type!r}: use 'debit' or 'credit'"
+            )
+        self._check_amount_str(amount, "transfer")
+        if not authorization_id.strip():
+            raise ConnectorError(
+                "authorization_id is required — call "
+                "create_transfer_authorization first"
+            )
+        key = idempotency_key or self._new_idempotency_key()
+        prior = self._audit_find(key)
+        if prior is not None:
+            return {
+                "transfer_id": prior.get("transfer_id", ""),
+                "status": prior.get("status", ""),
+                "idempotent_replay": True,
+                "idempotency_key": key,
+            }
+        direction = "from" if type == "debit" else "to"
+        if confirm:
+            if db is None:
+                raise ConnectorError(
+                    "transfer confirmation needs a database for "
+                    "checkpoints (pass db=)"
+                )
+            from .checkpoints import CheckpointKind
+
+            cp = self.request_human(
+                CheckpointKind.MANUAL_STEP,
+                f"Approve ACH transfer — {amount} USD {direction} account",
+                "\n".join([
+                    "Devon is about to move real money via Plaid Transfer:",
+                    f"  direction: {type} ({direction} the linked account)",
+                    f"  amount:    USD {amount}",
+                    f"  account:   {account_id}",
+                    f"  reference: {description or '(none)'}",
+                    "Nothing moves until you approve.",
+                ]),
+                db=db,
+                context=context,
+                resume_state={
+                    "intent": "create_transfer",
+                    "access_token": item["access_token"],
+                    "account_id": account_id,
+                    "authorization_id": authorization_id,
+                    "type": type,
+                    "network": network,
+                    "amount": amount,
+                    "description": description,
+                    "ach_class": ach_class,
+                    "legal_name": legal_name,
+                    "idempotency_key": key,
+                },
+            )
+            return self.resume_checkpoint(cp, db=db, context=context)
+        body: dict[str, Any] = {
+            "access_token": item["access_token"],
+            "account_id": account_id,
+            "authorization_id": authorization_id,
+            "type": type,
+            "network": network,
+            "amount": amount,
+            "description": (description or "Devon transfer")[:10],
+            "ach_class": ach_class,
+            "user": {"legal_name": legal_name or "Devon Owner"},
+        }
+        try:
+            resp = self._authed(item, "/transfer/create", body)
+        except PlaidError as exc:
+            raise self._transfer_not_enabled(exc) from exc
+        transfer_id = str(resp.get("transfer_id", ""))
+        result = {
+            "transfer_id": transfer_id,
+            "status": resp.get("status", ""),
+            "idempotency_key": key,
+        }
+        self._audit("transfer_create", {
+            "idempotency_key": key,
+            "transfer_id": transfer_id,
+            "status": result["status"],
+            "type": type,
+            "amount": amount,
+            "currency": "USD",
+            "account_id": account_id,
+            "description": description,
+        })
+        _log.info("plaid transfer created: %s (%s USD %s)",
+                  transfer_id, amount, type)
+        return result
+
+    def get_transfer(
+        self, transfer_id: str, *, access_token: str | None = None
+    ) -> dict[str, Any]:
+        """Transfer status and detail (``POST /transfer/get``)."""
+        item = self._single_item(access_token)
+        if not transfer_id.strip():
+            raise ConnectorError("transfer_id is required")
+        resp = self._authed(
+            item, "/transfer/get", {"transfer_id": transfer_id})
+        return resp.get("transfer", resp)
+
+    def list_transfers(
+        self,
+        *,
+        access_token: str | None = None,
+        count: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Recent transfers (``POST /transfer/list``)."""
+        item = self._single_item(access_token)
+        resp = self._authed(
+            item, "/transfer/list", {"count": max(1, min(count, 100))})
+        return resp.get("transfers", [])
+
+    def cancel_transfer(
+        self,
+        transfer_id: str,
+        *,
+        access_token: str | None = None,
+        confirm: bool = False,
+        db: Any = None,
+        context: Any = None,
+    ) -> dict[str, Any]:
+        """Cancel a pending transfer (``POST /transfer/cancel``).
+
+        Only pending transfers can be cancelled. ``confirm=True`` pauses
+        at a human checkpoint first.
+        """
+        item = self._single_item(access_token)
+        if not transfer_id.strip():
+            raise ConnectorError("transfer_id is required")
+        if confirm:
+            if db is None:
+                raise ConnectorError(
+                    "cancel confirmation needs a database for "
+                    "checkpoints (pass db=)"
+                )
+            from .checkpoints import CheckpointKind
+
+            cp = self.request_human(
+                CheckpointKind.MANUAL_STEP,
+                f"Approve transfer cancellation — {transfer_id}",
+                "\n".join([
+                    "Devon is about to cancel this Plaid transfer:",
+                    f"  transfer_id: {transfer_id}",
+                    "Only pending transfers can be cancelled.",
+                ]),
+                db=db,
+                context=context,
+                resume_state={
+                    "intent": "cancel_transfer",
+                    "access_token": item["access_token"],
+                    "transfer_id": transfer_id,
+                },
+            )
+            return self.resume_checkpoint(cp, db=db, context=context)
+        resp = self._authed(
+            item, "/transfer/cancel", {"transfer_id": transfer_id})
+        self._audit("transfer_cancel", {"transfer_id": transfer_id})
+        return {"cancelled": True, "transfer_id": transfer_id,
+                "status": resp.get("status", "")}
+
+    def list_transfer_events(
+        self,
+        *,
+        access_token: str | None = None,
+        transfer_id: str = "",
+        count: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Transfer lifecycle events (``POST /transfer/event/list``).
+
+        Posted/settled/returned/failed transitions land here — poll this
+        (or wire the TRANSFER_EVENTS_UPDATE webhook) to track a transfer.
+        """
+        item = self._single_item(access_token)
+        body: dict[str, Any] = {"count": max(1, min(count, 100))}
+        if transfer_id.strip():
+            body["transfer_id"] = transfer_id
+        resp = self._authed(item, "/transfer/event/list", body)
+        return resp.get("transfer_events", [])
+
+    # ── payment initiation (UK/EU) ───────────────────────────────
+
+    def create_payment_recipient(
+        self,
+        name: str,
+        *,
+        iban: str = "",
+        bacs_account: str = "",
+        bacs_sort_code: str = "",
+        address: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a payment recipient
+        (``POST /payment_initiation/recipient/create``).
+
+        UK: pass ``bacs_account`` + ``bacs_sort_code`` (iban/address not
+        needed). EU: pass ``iban`` + ``address`` (street/city/postal_code/
+        country). Returns a ``recipient_id`` for :meth:`create_payment`.
+        """
+        self._require_client()
+        if not name.strip():
+            raise ConnectorError("recipient name is required")
+        body: dict[str, Any] = {"name": name.strip()}
+        if bacs_account and bacs_sort_code:
+            body["bacs"] = {"account": bacs_account,
+                            "sort_code": bacs_sort_code}
+        elif iban.strip():
+            body["iban"] = iban.strip()
+            if address:
+                body["address"] = dict(address)
+        else:
+            raise ConnectorError(
+                "recipient needs bacs (UK) or iban (EU) details"
+            )
+        resp = self._client_api("/payment_initiation/recipient/create", body)
+        return {
+            "recipient_id": resp.get("recipient_id", ""),
+            "request_id": resp.get("request_id", ""),
+        }
+
+    def get_payment_recipient(
+        self, recipient_id: str
+    ) -> dict[str, Any]:
+        """Fetch a recipient (``POST /payment_initiation/recipient/get``)."""
+        self._require_client()
+        if not recipient_id.strip():
+            raise ConnectorError("recipient_id is required")
+        return self._client_api(
+            "/payment_initiation/recipient/get",
+            {"recipient_id": recipient_id},
+        )
+
+    def list_payment_recipients(self) -> list[dict[str, Any]]:
+        """All recipients (``POST /payment_initiation/recipient/list``)."""
+        self._require_client()
+        resp = self._client_api(
+            "/payment_initiation/recipient/list", {})
+        return resp.get("recipients", [])
+
+    def create_payment(
+        self,
+        recipient_id: str,
+        reference: str,
+        amount: float,
+        *,
+        currency: str = "GBP",
+        confirm: bool = False,
+        db: Any = None,
+        context: Any = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a UK/EU payment (``POST /payment_initiation/payment/create``).
+
+        Returns ``payment_id`` + ``status``. The owner then authorizes the
+        payment in Plaid Link (mint a link token with
+        ``products=["payment_initiation"]`` and the payment_id).
+
+        ``confirm=True`` (with ``db=``) pauses at a human checkpoint showing
+        the exact amount, currency, and recipient — the owner approves
+        before the payment is created. Idempotency-keyed and audit-logged
+        like transfers.
+        """
+        self._require_client()
+        if not recipient_id.strip():
+            raise ConnectorError("recipient_id is required")
+        if not reference.strip():
+            raise ConnectorError("payment reference is required")
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            raise ConnectorError(
+                f"invalid payment amount {amount!r}: must be positive"
+            )
+        currency = (currency or "GBP").upper()
+        key = idempotency_key or self._new_idempotency_key()
+        prior = self._audit_find(key)
+        if prior is not None:
+            return {
+                "payment_id": prior.get("payment_id", ""),
+                "status": prior.get("status", ""),
+                "idempotent_replay": True,
+                "idempotency_key": key,
+            }
+        if confirm:
+            if db is None:
+                raise ConnectorError(
+                    "payment confirmation needs a database for "
+                    "checkpoints (pass db=)"
+                )
+            from .checkpoints import CheckpointKind
+
+            cp = self.request_human(
+                CheckpointKind.MANUAL_STEP,
+                f"Approve payment — {currency} {amount:.2f} to recipient",
+                "\n".join([
+                    "Devon is about to create a Plaid payment:",
+                    f"  amount:    {currency} {amount:.2f}",
+                    f"  recipient: {recipient_id}",
+                    f"  reference: {reference}",
+                    "You will then authorize it in Plaid Link.",
+                    "Nothing moves until you approve.",
+                ]),
+                db=db,
+                context=context,
+                resume_state={
+                    "intent": "create_payment",
+                    "recipient_id": recipient_id,
+                    "reference": reference,
+                    "amount": amount,
+                    "currency": currency,
+                    "idempotency_key": key,
+                },
+            )
+            return self.resume_checkpoint(cp, db=db, context=context)
+        resp = self._client_api(
+            "/payment_initiation/payment/create",
+            {
+                "recipient_id": recipient_id,
+                "reference": reference,
+                "amount": {"currency": currency, "value": amount},
+            },
+        )
+        payment_id = str(resp.get("payment_id", ""))
+        result = {
+            "payment_id": payment_id,
+            "status": resp.get("status", ""),
+            "idempotency_key": key,
+        }
+        self._audit("payment_create", {
+            "idempotency_key": key,
+            "payment_id": payment_id,
+            "status": result["status"],
+            "amount": amount,
+            "currency": currency,
+            "recipient_id": recipient_id,
+            "reference": reference,
+        })
+        _log.info("plaid payment created: %s (%s %.2f)",
+                  payment_id, currency, amount)
+        return result
+
+    def get_payment(self, payment_id: str) -> dict[str, Any]:
+        """Payment status (``POST /payment_initiation/payment/get``)."""
+        self._require_client()
+        if not payment_id.strip():
+            raise ConnectorError("payment_id is required")
+        return self._client_api(
+            "/payment_initiation/payment/get",
+            {"payment_id": payment_id},
+        )
+
+    def list_payments(self, count: int = 25) -> list[dict[str, Any]]:
+        """Recent payments (``POST /payment_initiation/payment/list``)."""
+        self._require_client()
+        resp = self._client_api(
+            "/payment_initiation/payment/list",
+            {"count": max(1, min(count, 100))},
+        )
+        return resp.get("payments", [])
+
+    def reverse_payment(
+        self,
+        payment_id: str,
+        *,
+        confirm: bool = False,
+        db: Any = None,
+        context: Any = None,
+    ) -> dict[str, Any]:
+        """Refund a payment from a virtual account
+        (``POST /payment_initiation/payment/reverse``).
+
+        ``confirm=True`` pauses at a human checkpoint first.
+        """
+        self._require_client()
+        if not payment_id.strip():
+            raise ConnectorError("payment_id is required")
+        if confirm:
+            if db is None:
+                raise ConnectorError(
+                    "reversal confirmation needs a database for "
+                    "checkpoints (pass db=)"
+                )
+            from .checkpoints import CheckpointKind
+
+            cp = self.request_human(
+                CheckpointKind.MANUAL_STEP,
+                f"Approve payment reversal — {payment_id}",
+                "\n".join([
+                    "Devon is about to reverse this Plaid payment:",
+                    f"  payment_id: {payment_id}",
+                    "Nothing moves until you approve.",
+                ]),
+                db=db,
+                context=context,
+                resume_state={
+                    "intent": "reverse_payment",
+                    "payment_id": payment_id,
+                },
+            )
+            return self.resume_checkpoint(cp, db=db, context=context)
+        resp = self._client_api(
+            "/payment_initiation/payment/reverse",
+            {"payment_id": payment_id},
+        )
+        self._audit("payment_reverse", {"payment_id": payment_id})
+        return {"reversed": True, "payment_id": payment_id,
+                "status": resp.get("status", "")}
 
     def sandbox_public_token(
         self, institution_id: str = "ins_109508"
@@ -1042,6 +1579,131 @@ document.getElementById('link-btn').onclick = () => handler.open();
             return str((resp.get("institution") or {}).get("name", ""))
         except PlaidError:
             return ""
+
+    # ── money-movement helpers ─────────────────────────────────
+
+    def _single_item(self, access_token: str | None) -> dict[str, Any]:
+        """One linked bank item for money movement.
+
+        Transfers need a concrete account, so unlike the read methods
+        (which fan out across banks), money movement requires exactly one
+        item: pass ``access_token`` explicitly or have exactly one bank
+        linked.
+        """
+        items = self._items(access_token=access_token)
+        if len(items) > 1 and access_token is None:
+            raise ConnectorError(
+                f"{len(items)} banks linked — pass access_token to pick "
+                "which account the money moves through"
+            )
+        return items[0]
+
+    def _client_api(
+        self, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Plaid call with client credentials only (no access token).
+
+        Used by Payment Initiation, which is client-scoped.
+        """
+        client = self._require_client()
+        env = (client.metadata or {}).get("env", "sandbox")
+        cid, sec = self._client_pair(client)
+        return self._api(BASE_URLS[env], path, payload, cid=cid, secret=sec)
+
+    @staticmethod
+    def _check_amount_str(amount: str, label: str) -> None:
+        """Validate a Plaid decimal-string amount like ``"25.00"``."""
+        if not re.match(r"^\d+\.\d{2}$", (amount or "").strip()):
+            raise ConnectorError(
+                f"invalid {label} amount {amount!r}: use a decimal string "
+                'like "25.00"'
+            )
+        if float(amount) <= 0:
+            raise ConnectorError(
+                f"invalid {label} amount {amount!r}: must be positive"
+            )
+
+    @staticmethod
+    def _transfer_not_enabled(exc: PlaidError) -> PlaidError:
+        """Give a clear error when Transfer isn't enabled on the account."""
+        code = (exc.error_code or "").upper()
+        if code in ("TRANSFER_NOT_ENABLED", "PRODUCT_NOT_ENABLED",
+                    "INVALID_PRODUCT"):
+            return PlaidError(
+                "Plaid Transfer is not enabled on this account — enable it "
+                "in the Plaid dashboard (Transfer product) before creating "
+                f"transfers (plaid said: {exc.error_code})",
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                error_type=exc.error_type,
+            )
+        return exc
+
+    @staticmethod
+    def _new_idempotency_key() -> str:
+        import uuid
+
+        return f"devon-{uuid.uuid4().hex[:16]}"
+
+    def _audit_path(self) -> Path:
+        """JSONL audit log for every money movement."""
+        base = Path(os.environ.get(
+            "DEVON_AUDIT_DIR",
+            str(Path.home() / ".devon" / "audit"),
+        ))
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "plaid-money.jsonl"
+
+    def _audit(self, action: str, details: dict[str, Any]) -> None:
+        """Append one money-movement record to the audit log."""
+        record = {
+            "ts": time.time(),
+            "action": action,
+            **details,
+        }
+        path = self._audit_path()
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def _audit_find(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Find a prior money movement by idempotency key, if any."""
+        path = self._audit_path()
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if record.get("idempotency_key") == idempotency_key:
+                        return record
+        except OSError:
+            return None
+        return None
+
+    def audit_log(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent money movements from the audit log (newest last)."""
+        path = self._audit_path()
+        if not path.exists():
+            return []
+        records = []
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except ValueError:
+                            continue
+        except OSError:
+            return []
+        return records[-max(1, limit):]
 
     # ── misc helpers ─────────────────────────────────────────────
 
