@@ -19,6 +19,7 @@ import unittest
 from typing import Any
 from unittest import mock
 
+import nomorals.connectors.jiji as jiji_module
 from nomorals.accounts.vault import CredentialVault
 from nomorals.connectors import (
     AuthMethod,
@@ -43,8 +44,6 @@ from nomorals.connectors.jiji import (
     parse_price_ngn,
 )
 from nomorals.storage.db import Database
-
-import nomorals.connectors.jiji as jiji_module
 
 
 def _vault() -> CredentialVault:
@@ -631,7 +630,8 @@ class JijiRegistryTests(unittest.TestCase):
         self.assertEqual(JijiConnector.auth_methods, (AuthMethod.NONE,))
 
     def test_imports_from_package(self) -> None:
-        from nomorals.connectors import JijiConnector as C2, JijiError as E2
+        from nomorals.connectors import JijiConnector as C2
+        from nomorals.connectors import JijiError as E2
         self.assertIs(C2, JijiConnector)
         self.assertIs(E2, JijiError)
 

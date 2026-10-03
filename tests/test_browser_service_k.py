@@ -393,16 +393,21 @@ class _FakeChromium:
 
 
 class _FakeSyncPlaywright:
+    """Plays both roles the real API splits: the context manager (start/
+    __exit__) and the Playwright object start() returns (carries .chromium)."""
+
     def __init__(self, chromium):
         self.chromium = chromium
         self.started = False
-        self.stopped = False
+        self.exited = False
 
     def start(self):
         self.started = True
+        return self
 
-    def stop(self):
-        self.stopped = True
+    def __exit__(self, *args):
+        self.exited = True
+        return False
 
 
 @contextlib.contextmanager
@@ -435,9 +440,9 @@ class TestRenderedTabs(unittest.TestCase):
         self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
 
     def test_open_rendered_tab_fail_fast_without_playwright(self):
-        with mock.patch("importlib.util.find_spec", return_value=None):
-            with self.assertRaises(BrowserError) as ctx:
-                self.svc.open_rendered_tab("s", "https://example.com/")
+        with mock.patch("importlib.util.find_spec", return_value=None), \
+                self.assertRaises(BrowserError) as ctx:
+            self.svc.open_rendered_tab("s", "https://example.com/")
         self.assertIn("pip install playwright", str(ctx.exception))
 
     def test_open_rendered_tab_empty_session_name_raises(self):
@@ -497,17 +502,62 @@ class TestRenderedTabs(unittest.TestCase):
             self.svc.close_rendered_tab(tab.tab_id)
             # closing persists storage_state into the session's cookie dir
             self.assertEqual(context.saved_path, expected)
-            self.assertTrue(instances[0].stopped)
             self.assertTrue(browser.closed)
-            # second open of the same session loads the persisted state
+            # a NEW service (fresh driver, same data dir) loads the persisted
+            # state into its session context
             Path(expected).parent.mkdir(parents=True, exist_ok=True)
             Path(expected).write_text('{"cookies": []}')
+        svc2 = BrowserService(data_dir=os.path.join(self.tmp, "data"))
         with _mocked_playwright(_FakePage()) as (i2, context2, browser2, c2):
-            tab2 = self.svc.open_rendered_tab("sessA")
+            tab2 = svc2.open_rendered_tab("sessA")
             tab2.navigate("https://example.com/")
             self.assertEqual(browser2.context_kwargs.get("storage_state"),
                              expected)
-            self.svc.close_rendered_tab(tab2.tab_id)
+            svc2.close_rendered_tab(tab2.tab_id)
+
+    def test_driver_started_once_and_shared(self):
+        with _mocked_playwright(_FakePage()) as (instances, context, browser, chromium):
+            t1 = self.svc.open_rendered_tab("s", "https://example.com/")
+            t2 = self.svc.open_rendered_tab("s", "https://example.com/")
+            # one driver for the service, one browser per tab
+            self.assertEqual(len(instances), 1)
+            self.assertIs(t1._playwright, t2._playwright)
+            self.svc.close_rendered_tab(t1.tab_id)
+            self.svc.close_rendered_tab(t2.tab_id)
+
+    def test_shutdown_closes_tabs_and_stops_driver(self):
+        with _mocked_playwright(_FakePage()) as (instances, context, browser, chromium):
+            self.svc.open_rendered_tab("s", "https://example.com/")
+            self.svc.shutdown()
+            self.assertTrue(browser.closed)
+            self.assertTrue(instances[0].exited)
+            self.assertEqual(self.svc.list_rendered_tabs(), [])
+            # shutdown is idempotent
+            self.svc.shutdown()
+
+    def test_open_after_shutdown_fails_fast(self):
+        # the real sync API cannot restart in one thread; the service must
+        # surface that as BrowserError, not a half-working tab.
+        calls = []
+
+        def factory():
+            calls.append(1)
+            if len(calls) > 1:
+                raise RuntimeError("Sync API inside the asyncio loop")
+            return _FakeSyncPlaywright(_FakeChromium(
+                _FakeBrowser(_FakeContext(_FakePage()))))
+
+        sync_api = mock.MagicMock()
+        sync_api.sync_playwright = factory
+        with mock.patch.dict(sys.modules, {"playwright": mock.MagicMock(),
+                                           "playwright.sync_api": sync_api}), \
+                mock.patch("importlib.util.find_spec", return_value=object()):
+            tab = self.svc.open_rendered_tab("s", "https://example.com/")
+            self.svc.close_rendered_tab(tab.tab_id)
+            self.svc.shutdown()
+            with self.assertRaises(BrowserError) as ctx:
+                self.svc.open_rendered_tab("s", "https://example.com/")
+            self.assertIn("playwright", str(ctx.exception))
 
     def test_open_rendered_tab_navigate_failure_cleans_up(self):
         page = _FakePage()

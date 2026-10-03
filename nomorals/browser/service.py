@@ -229,8 +229,12 @@ class RenderedTab:
     cookies via playwright's ``storage_state``, persisted to the session's
     cookie directory so logins survive restarts.
 
-    The browser launches lazily on the first ``navigate()`` — constructing
-    the tab is cheap and never needs playwright until then.
+    The tab does NOT own the playwright driver: it receives the started
+    driver object from :meth:`BrowserService.open_rendered_tab` and
+    launches one browser per tab on the first ``navigate()``. The driver
+    itself lives as long as the service — playwright's sync API cannot
+    be stopped and restarted in one thread, so the service starts it once
+    and only tears it down in :meth:`BrowserService.shutdown`.
     """
 
     def __init__(
@@ -238,6 +242,7 @@ class RenderedTab:
         tab_id: str,
         session_name: str,
         storage_state_path: str | os.PathLike[str],
+        playwright: Any,
     ) -> None:
         self.tab_id = tab_id
         self.session_name = session_name
@@ -247,25 +252,19 @@ class RenderedTab:
         #: last load failure (set by navigate); empty when the tab is clean.
         self.error: str = ""
         self._storage_state_path = Path(storage_state_path)
-        self._playwright: Any = None
+        #: started driver object (owns .chromium); owned by the service.
+        self._playwright = playwright
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
 
     # -- browser lifecycle ---------------------------------------------------
     def _ensure_page(self) -> Any:
-        """Launch Chromium (once) and return the page. Fail fast: a missing
-        playwright package or chromium build raises BrowserError with the
-        install command; a launch failure raises BrowserError, never None."""
+        """Launch this tab's browser (once) and return the page. Fail fast:
+        a launch failure raises BrowserError, never None."""
         if self._page is not None:
             return self._page
-        sync_playwright = _require_playwright_sync()
         try:
-            self._playwright = sync_playwright()
-            # sync_playwright() is a context manager: start() brings the
-            # driver up (equivalent to ``with sync_playwright() as p``);
-            # stop() in teardown brings it back down.
-            self._playwright.start()
             self._browser = self._playwright.chromium.launch(headless=True)
             state = str(self._storage_state_path)
             if self._storage_state_path.is_file():
@@ -273,9 +272,6 @@ class RenderedTab:
             else:
                 self._context = self._browser.new_context()
             self._page = self._context.new_page()
-        except BrowserError:
-            self._teardown_quiet()
-            raise
         except Exception as exc:  # noqa: BLE001 - launch errors are opaque
             self._teardown_quiet()
             raise BrowserError(
@@ -285,19 +281,17 @@ class RenderedTab:
         return self._page
 
     def _teardown_quiet(self) -> None:
-        for attr in ("_page", "_context", "_browser", "_playwright"):
+        for attr in ("_page", "_context", "_browser"):
             obj = getattr(self, attr)
             setattr(self, attr, None)
             if obj is None:
                 continue
-            for meth in ("close", "stop"):
-                close = getattr(obj, meth, None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:  # noqa: BLE001 - teardown best effort
-                        _log.debug("rendered tab teardown %s failed", meth)
-                    break
+            close = getattr(obj, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - teardown best effort
+                    _log.debug("rendered tab teardown %s.close failed", attr)
 
     # -- navigation ----------------------------------------------------------
     def navigate(self, url: str) -> dict[str, Any]:
@@ -512,6 +506,11 @@ class BrowserService:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, SessionHandle] = {}
         self._rendered_tabs: dict[str, RenderedTab] = {}
+        #: playwright driver for rendered tabs: started once, lazily, and
+        #: kept for the service's lifetime — the sync API cannot be
+        #: stopped and restarted in one thread.
+        self._pw_cm: Any = None
+        self._playwright: Any = None
         self._artifact_store = artifact_store
         self._mission_id = mission_id or ""
 
@@ -553,6 +552,49 @@ class BrowserService:
     def _rendered_state_path(self, session_name: str) -> Path:
         return Path(self._cookie_dir(session_name)) / "playwright-storage.json"
 
+    def _driver(self) -> Any:
+        """The started playwright driver object, created once and kept for
+        the service's lifetime. Fail fast with the install hint when
+        playwright is missing or the driver won't start."""
+        if self._playwright is not None:
+            return self._playwright
+        sync_playwright = _require_playwright_sync()  # fail fast first
+        try:
+            # NOTE: sync_playwright() returns a context manager; .chromium
+            # only exists on the object start() returns (what ``with``
+            # binds as ``p``). Teardown is __exit__ — there is no stop().
+            self._pw_cm = sync_playwright()
+            self._playwright = self._pw_cm.start()
+        except Exception as exc:  # noqa: BLE001 - driver errors are opaque
+            self._pw_cm = None
+            self._playwright = None
+            raise BrowserError(
+                f"rendered tabs could not start the playwright driver: "
+                f"{exc}. {_PLAYWRIGHT_HINT}"
+            ) from exc
+        return self._playwright
+
+    def shutdown(self) -> None:
+        """Close all rendered tabs and stop the playwright driver.
+
+        Idempotent. After this, rendered tabs cannot be opened again on
+        this service (the sync API cannot restart in one thread) — only
+        call it when the service is truly done.
+        """
+        for tab_id in list(self._rendered_tabs):
+            try:
+                self.close_rendered_tab(tab_id)
+            except Exception as exc:  # noqa: BLE001 - shutdown must complete
+                _log.warning("shutdown: closing rendered tab %s failed: %s",
+                             tab_id, exc)
+        cm, self._pw_cm = self._pw_cm, None
+        self._playwright = None
+        if cm is not None:
+            try:
+                cm.__exit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 - shutdown best effort
+                _log.warning("browser service shutdown failed: %s", exc)
+
     def open_rendered_tab(self, session_name: str, url: str = "") -> RenderedTab:
         """Open a playwright-backed tab in ``session_name``'s cookie space.
 
@@ -564,12 +606,13 @@ class BrowserService:
         session_name = (session_name or "").strip()
         if not session_name:
             raise BrowserError("session name must not be empty")
-        _require_playwright_sync()  # fail fast before touching anything
+        playwright = self._driver()  # fail fast before touching anything
         tab_id = ulid_now()
         tab = RenderedTab(
             tab_id=tab_id,
             session_name=session_name,
             storage_state_path=self._rendered_state_path(session_name),
+            playwright=playwright,
         )
         self._rendered_tabs[tab_id] = tab
         try:
