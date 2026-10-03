@@ -50,6 +50,7 @@ EXPECTED_MRO = [
     "RuntimeMediaMixin",
     "RuntimeIntelMixin",
     "RuntimeSearchMixin",
+    "RuntimeWisdomMixin",
     "object",
 ]
 
@@ -68,6 +69,7 @@ MIXIN_PROBES = {
     "nomorals.agents.partner.runtime_mission": ("RuntimeMissionMixin", "_control_mission"),
     "nomorals.agents.partner.runtime_meta": ("RuntimeMetaMixin", "_control_status"),
     "nomorals.agents.partner.runtime_live": ("RuntimeLiveMixin", "_control_weather"),
+    "nomorals.agents.partner.runtime_wisdom": ("RuntimeWisdomMixin", "_control_wisdom"),
 }
 
 
