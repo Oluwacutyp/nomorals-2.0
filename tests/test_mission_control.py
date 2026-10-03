@@ -148,7 +148,7 @@ class ControlVerbTests(unittest.TestCase):
     def test_resume_runs_via_runner_in_background(self):
         m = make_mission(self.store)
         self.store.set_status(m.id, MissionStatus.PAUSED)
-        with patch("nomorals.missions.MissionRunner") as mr, \
+        with patch("nomorals.missions.wired_runner") as mr, \
                 patch("nomorals.agents.partner.runtime.threading.Thread",
                       _SyncThread):
             out = self.call(f"resume {m.id}")
@@ -158,7 +158,7 @@ class ControlVerbTests(unittest.TestCase):
     def test_resume_terminal_refused(self):
         m = make_mission(self.store)
         self.store.set_status(m.id, MissionStatus.FAILED)
-        with patch("nomorals.missions.MissionRunner") as mr:
+        with patch("nomorals.missions.wired_runner") as mr:
             out = self.call(f"resume {m.id}")
         self.assertIn("can't resume", out)
         mr.assert_not_called()
@@ -167,7 +167,7 @@ class ControlVerbTests(unittest.TestCase):
 
     def test_cancel_sets_terminal_and_reason(self):
         m = make_mission(self.store)
-        with patch("nomorals.missions.MissionRunner") as mr:
+        with patch("nomorals.missions.wired_runner") as mr:
             out = self.call(f"cancel {m.id} provider keeps timing out")
         self.assertIn("cancelled", out)
         self.assertEqual(self.store.get(m.id).status, MissionStatus.CANCELLED)
@@ -179,7 +179,7 @@ class ControlVerbTests(unittest.TestCase):
 
     def test_cancel_default_reason(self):
         m = make_mission(self.store)
-        with patch("nomorals.missions.MissionRunner"):
+        with patch("nomorals.missions.wired_runner"):
             self.call(f"cancel {m.id}")
         self.assertEqual(self.store.get(m.id).status, MissionStatus.CANCELLED)
 
@@ -192,7 +192,7 @@ class ControlVerbTests(unittest.TestCase):
     def test_retry_creates_fresh_mission_and_keeps_terminal_old(self):
         m = make_mission(self.store, name="build widget")
         self.store.set_status(m.id, MissionStatus.FAILED)
-        with patch("nomorals.missions.MissionRunner") as mr, \
+        with patch("nomorals.missions.wired_runner") as mr, \
                 patch("nomorals.agents.partner.runtime.threading.Thread",
                       _SyncThread):
             out = self.call(f"retry {m.id}")
@@ -211,7 +211,7 @@ class ControlVerbTests(unittest.TestCase):
     def test_retry_refuses_running_mission(self):
         m = make_mission(self.store)
         self.store.set_status(m.id, MissionStatus.RUNNING)
-        with patch("nomorals.missions.MissionRunner") as mr:
+        with patch("nomorals.missions.wired_runner") as mr:
             out = self.call(f"retry {m.id}")
         self.assertIn("still running", out)
         mr.assert_not_called()

@@ -58,8 +58,8 @@ def _stuck_findings(context: Any, *, escalate: bool,
     """Stuck-mission findings.  With ``escalate=True`` a stuck mission
     gets one self-heal attempt (recorded per mission) before it is
     reported; already-healed missions report immediately."""
-    from ..missions import MissionRunner
-    runner = MissionRunner(context)
+    from ..missions import wired_runner
+    runner = wired_runner(context)
     db = getattr(context, "db", None)
     findings: list[dict[str, Any]] = []
     for entry in runner.health(limit=50).get("active", []):
