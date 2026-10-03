@@ -20,9 +20,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from .errors import AlreadyInstalled, ManifestError, NotInstalled
 from .manifest import MANIFEST_FILENAME, PluginManifest, load_manifest_file
+
+_log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break plugin management (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 __all__ = ["PluginRegistry", "PLUGIN_PACKAGES_DDL", "InstalledPlugin"]
 
@@ -125,6 +138,12 @@ class PluginRegistry:
              int(enabled), now, now),
         )
         _log.info("installed plugin %s %s", manifest.name, manifest.version)
+        _emit("plugin.installed", {
+            "name": manifest.name,
+            "version": manifest.version,
+            "enabled": bool(enabled),
+            "path": str(dest),
+        })
         return self._get(manifest.name, manifest.version)  # type: ignore[return-value]
 
     def _download(self, url: str) -> Path:
@@ -185,6 +204,8 @@ class PluginRegistry:
             "WHERE name=? AND version=?",
             (time.time(), plugin.name, plugin.version))
         plugin.enabled = True
+        _emit("plugin.enabled", {"name": plugin.name,
+                                 "version": plugin.version})
         return plugin
 
     def disable(self, name: str, version: str = "") -> InstalledPlugin:
@@ -194,6 +215,8 @@ class PluginRegistry:
             "WHERE name=? AND version=?",
             (time.time(), plugin.name, plugin.version))
         plugin.enabled = False
+        _emit("plugin.disabled", {"name": plugin.name,
+                                  "version": plugin.version})
         return plugin
 
     def remove(self, name: str, version: str = "") -> None:
@@ -205,3 +228,5 @@ class PluginRegistry:
         if path.exists() and path.is_relative_to(self.home):
             shutil.rmtree(path, ignore_errors=True)
         _log.info("removed plugin %s %s", plugin.name, plugin.version)
+        _emit("plugin.removed", {"name": plugin.name,
+                                 "version": plugin.version})

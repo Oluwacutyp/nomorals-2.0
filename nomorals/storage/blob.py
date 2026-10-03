@@ -204,20 +204,33 @@ class BlobStore:
                 digest.update(chunk)
                 size += len(chunk)
                 tmp.write(chunk)
-        sha256 = digest.hexdigest()
-        existing = self.info(sha256)
-        if existing is not None:
+        try:
+            sha256 = digest.hexdigest()
+            existing = self.info(sha256)
+            if existing is not None:
+                tmp_path.unlink(missing_ok=True)
+                self._bump_refcount(sha256, refcount)
+                self.stats["dedup_hits"] += 1
+                return self.info(sha256) or existing
+            guessed = mime or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            should_compress = size >= self.compress_above and self._is_compressible(guessed)
+            target = self.path_for(sha256, should_compress)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if should_compress:
+                with tmp_path.open("rb") as src, gzip.open(target, "wb", compresslevel=6) as dst:
+                    shutil.copyfileobj(src, dst, CHUNK)
+                tmp_path.unlink()
+            else:
+                shutil.move(str(tmp_path), target)
+            stored = target.stat().st_size
+            self._record(sha256, size, guessed, should_compress, stored, refcount)
+            self.stats["puts"] += 1
+            self.stats["bytes_written"] += stored
+            return self.info(sha256) or BlobInfo(
+                sha256, size, guessed, should_compress, stored, refcount, time.time())
+        except Exception:
             tmp_path.unlink(missing_ok=True)
-            self._bump_refcount(sha256, refcount)
-            self.stats["dedup_hits"] += 1
-            return self.info(sha256) or existing
-        guessed = mime or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        target = self.path_for(sha256, False)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(tmp_path), target)
-        self._record(sha256, size, guessed, False, size, refcount)
-        self.stats["puts"] += 1
-        return self.info(sha256) or BlobInfo(sha256, size, guessed, False, size, refcount, time.time())
+            raise
 
     # ── reads ────────────────────────────────────────────────────────────────
     def get_bytes(self, sha256: str) -> bytes:

@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .errors import InvalidDateError, SearchError, UnknownSourceError, UnknownTypeError
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
 from .model import (
     SearchResponse,
     SearchResult,
@@ -45,6 +47,17 @@ from .sources import (
 )
 
 __all__ = ["federated_search", "parse_date", "list_sources"]
+
+_log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break a search (fail-open telemetry, fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 
 def parse_date(value: Any) -> float | None:
@@ -173,4 +186,11 @@ def federated_search(
         kept = [h for h in kept if h.timestamp is None or h.timestamp <= before_ts]
 
     response.hits = rank_results(kept, valid_source_names())[:limit]
+    _emit("search.performed", {
+        "query": query,
+        "sources": list(response.sources_searched),
+        "sources_skipped": dict(response.sources_skipped),
+        "result_count": len(response.hits),
+        "deduped": response.deduped,
+    })
     return response

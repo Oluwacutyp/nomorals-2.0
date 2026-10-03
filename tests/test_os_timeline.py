@@ -67,7 +67,9 @@ class TimelineRecordTests(unittest.TestCase):
         self.assertEqual(
             set(TIMELINE_PATTERNS),
             {"mission.*", "artifact.*", "session.*", "task.*",
-             "document.*", "browser.*", "codews.*"})
+             "document.*", "browser.*", "codews.*",
+             "wisdom.*", "connector.*", "datasci.*", "plugin.*", "mesh.*",
+             "sync.*", "power.*", "stream.*", "search.*", "trigger.*"})
 
     def test_newest_first_ordering(self):
         self._attach_and_seed()

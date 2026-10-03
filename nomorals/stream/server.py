@@ -18,12 +18,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from ..version import __version__
 
 __all__ = ["StreamServer", "serve"]
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break the stream server (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 HEARTBEAT_INTERVAL = 15.0  # seconds between :ping comments
 POLL_INTERVAL = 1.0        # seconds between Timeline polls
@@ -139,6 +150,12 @@ class StreamServer:
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         # Resolve the real port when port=0 was requested.
         self.port = self._server.server_address[1]
+        _emit("stream.started", {
+            "host": self.host,
+            "port": self.port,
+            "url": self.url,
+            "background": background,
+        })
         if background:
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
@@ -152,6 +169,7 @@ class StreamServer:
             self._server.serve_forever()
 
     def stop(self) -> None:
+        was_running = self._server is not None or self._thread is not None
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -159,6 +177,12 @@ class StreamServer:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if was_running:
+            _emit("stream.stopped", {
+                "host": self.host,
+                "port": self.port,
+                "url": self.url,
+            })
 
     @property
     def url(self) -> str:

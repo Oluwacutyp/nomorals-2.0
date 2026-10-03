@@ -22,13 +22,15 @@ the minimum.
 from __future__ import annotations
 
 import contextlib
+import functools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
 from ..accounts.vault import Credential, CredentialVault
 from ..core.errors import NoMoralsError, NotFound
+from ..core.events import Event, global_bus
 from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
 
@@ -41,6 +43,50 @@ __all__ = [
 ]
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break a connector flow (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
+
+
+def _emitting_lifecycle(
+    fn: Callable[..., Any], topic: str
+) -> Callable[..., Any]:
+    """Wrap a subclass ``connect``/``disconnect`` so it emits a bus event.
+
+    Emission is fail-open: it runs after the wrapped method returns
+    successfully and can never raise into the caller. A failed
+    ``connect()`` (raised exception, or ``ConnectResult.ok`` False)
+    emits ``connector.connect_failed`` instead of ``connector.connected``.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self: "Connector", *args: Any, **kwargs: Any) -> Any:
+        if topic == "connector.connected":
+            try:
+                result = fn(self, *args, **kwargs)
+            except Exception:
+                _emit("connector.connect_failed", {
+                    "connector_id": self.id, "name": self.name})
+                raise
+            ok = bool(getattr(result, "ok", False))
+            _emit(topic if ok else "connector.connect_failed", {
+                "connector_id": self.id,
+                "name": self.name,
+                "ok": ok,
+                "account": getattr(result, "account", "") or "",
+            })
+            return result
+        fn(self, *args, **kwargs)
+        _emit(topic, {"connector_id": self.id, "name": self.name})
+
+    return wrapper
 
 
 class ConnectorError(NoMoralsError):
@@ -110,6 +156,23 @@ class Connector(ABC):
     name: str = ""
     description: str = ""
     auth_methods: tuple[AuthMethod, ...] = ()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Wrap every concrete connect/disconnect with fail-open bus
+        # telemetry. The wrap happens at class-creation time so all
+        # subclasses emit without touching their implementations; only
+        # methods defined on the subclass itself are wrapped (never the
+        # base's abstract stubs, never an inherited wrapper twice).
+        super().__init_subclass__(**kwargs)
+        for method_name, topic in (
+            ("connect", "connector.connected"),
+            ("disconnect", "connector.disconnected"),
+        ):
+            fn = cls.__dict__.get(method_name)
+            if fn is not None and not getattr(fn, "_bus_wrapped", False):
+                wrapped = _emitting_lifecycle(fn, topic)
+                wrapped._bus_wrapped = True  # type: ignore[attr-defined]
+                setattr(cls, method_name, wrapped)
 
     #: kinds this connector can provision via the service API, e.g.
     #: ("repo", "webhook", "deploy_key"). Empty means no provisioning.

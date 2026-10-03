@@ -11,7 +11,9 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
 from .store import SyncRecord, SyncStore
@@ -19,6 +21,16 @@ from .store import SyncRecord, SyncStore
 __all__ = ["SyncPeer", "LocalPeer", "SyncEngine", "SyncResult"]
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break a sync run (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 PROGRESS_TABLE = "sync_progress"
 
@@ -146,6 +158,13 @@ class SyncEngine:
             "sync with %s: pushed=%d pulled=%d conflicts=%d",
             peer_id, pushed, pulled, conflicts,
         )
+        _emit("sync.completed", {
+            "peer_id": peer_id,
+            "pushed": pushed,
+            "pulled": pulled,
+            "conflicts_resolved": conflicts,
+            "duration_s": result.duration_s,
+        })
         return result
 
     def status(self, peer_id: str = "hub") -> dict:

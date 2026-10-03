@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
 from ..storage.queue import Job, WorkQueue
@@ -18,6 +19,16 @@ from ..storage.queue import Job, WorkQueue
 __all__ = ["MeshTask", "MeshTasks"]
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break mesh task handling (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 BROADCAST_TOPIC = "mesh:broadcast"
 
@@ -89,6 +100,12 @@ class MeshTasks:
             "mesh task %s dispatched: %s -> %s",
             job_id, origin_node, target_node or "broadcast",
         )
+        _emit("mesh.task.dispatched", {
+            "job_id": job_id,
+            "task_type": task_type,
+            "origin_node": origin_node,
+            "target_node": target_node,
+        })
         return job_id
 
     def poll(
@@ -119,9 +136,12 @@ class MeshTasks:
 
     def complete(self, job_id: str, result: Any = None) -> None:
         self.queue.complete(job_id, result=result)
+        _emit("mesh.task.completed", {"job_id": job_id})
 
     def fail(self, job_id: str, error: str = "", *, retry: bool = True) -> None:
         self.queue.fail(job_id, error=error, retry=retry)
+        _emit("mesh.task.failed", {"job_id": job_id, "error": error,
+                                   "retry": retry})
 
     def pending_count(self, node_id: str | None = None) -> int:
         """Count ready tasks: one node's topics, or all mesh topics."""

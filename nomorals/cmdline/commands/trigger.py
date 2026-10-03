@@ -26,7 +26,8 @@ from typing import Any
 
 def _engine(context: Any):
     from ...triggers import TriggerEngine
-    return TriggerEngine(context.db, context)
+    from ...os.resources import default_manager
+    return TriggerEngine(context.db, context, resources=default_manager())
 
 
 def _cmd_trigger(args: Any, context: Any) -> int:
