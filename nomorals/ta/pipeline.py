@@ -22,11 +22,67 @@ from .meta import MetaGate, labeled_matrix, sklearn_available
 from .regime import RegimeDetector
 from .risk import PROFILES, RiskManager
 from .signals import fuse_all
-from .strategies import list_strategies, rank_strategies, run_zoo
+from .strategies import (STRATEGIES, list_strategies, rank_strategies,
+                         run_zoo)
 
 _log = get_logger(__name__)
 
-__all__ = ["analyze", "committee_position", "PROFILES"]
+__all__ = ["analyze", "committee_position", "PROFILES",
+           "regime_kind_weights", "regime_vote_alignment"]
+
+
+def regime_kind_weights(regime: dict) -> dict:
+    """Per-kind committee weights adapted to the detected regime.
+
+    Trend/momentum strategies earn their weight in trends, mean-reversion
+    and reversal strategies in ranges, breakout/squeeze strategies when
+    volatility is compressing. ``fuse_all`` normalizes these, so only the
+    ratios matter. Keeps a floor on every kind — regimes are probabilistic
+    and the committee should never go fully deaf to dissent.
+    """
+    p_trend = float(regime.get("p_trend", 0.0))
+    p_range = float(regime.get("p_range", 0.0))
+    p_squeeze = float(regime.get("p_squeeze", 0.0))
+    return {
+        "trend": 0.4 + 1.6 * p_trend,
+        "momentum": 0.4 + 1.4 * p_trend,
+        "breakout": 0.4 + 0.8 * p_trend + 1.2 * p_squeeze,
+        "squeeze": 0.4 + 1.4 * p_squeeze,
+        "meanrev": 0.4 + 1.6 * p_range,
+        "reversal": 0.4 + 1.2 * p_range,
+        "confluence": 1.0,
+    }
+
+
+_STRATEGY_KIND_LOOKUP = {name: cls.kind for name, cls in STRATEGIES.items()}
+
+
+def regime_vote_alignment(frames: dict, regime_label: str,
+                          p_trend: float) -> dict:
+    """Discount counter-regime vote directions in strong trends.
+
+    Returns adjusted frames (copies): in a ``TREND_UP``/``TREND_DOWN``
+    regime, votes pointing against the trend have their confidence scaled
+    by ``max(0.2, 1 - p_trend)`` — trends persist, so counter-trend
+    signals (pullback flips, early fades, mid-trend divergences) should
+    whisper, not shout. Range/squeeze/panic regimes are untouched: there
+    the committee votes at full weight. Signals of 0 (abstain) are never
+    touched.
+    """
+    direction = {"TREND_UP": 1.0, "TREND_DOWN": -1.0}.get(
+        (regime_label or "").upper())
+    if direction is None:
+        return frames
+    factor = max(0.2, 1.0 - float(p_trend))
+    out = {}
+    for name, frame in frames.items():
+        d = np.sign(frame["signal"].to_numpy(dtype=float))
+        scale = np.where(d == 0.0, 1.0,
+                         np.where(d == direction, 1.0, factor))
+        adj = frame.copy()
+        adj["confidence"] = frame["confidence"] * scale
+        out[name] = adj
+    return out
 
 
 def committee_position(df: pd.DataFrame, names: list[str] | None = None,
@@ -100,6 +156,8 @@ def analyze(df: pd.DataFrame, profile: str = "default",
 
     names = strategies or list_strategies()
     frames = run_zoo(names, df)
+    frames = regime_vote_alignment(frames, regime_label,
+                                   float(last["p_trend"]))
     close = df["close"].astype(float)
     a = atr(df, 14)
     atr_last = float(a.iloc[-1])
@@ -122,7 +180,9 @@ def analyze(df: pd.DataFrame, profile: str = "default",
 
     fused = fuse_all(frames, cost_bps=float(cfg["cost_bps"]),
                      atr_pct=atr_pct,
-                     min_agreement=float(cfg["min_agreement"]))
+                     min_agreement=float(cfg["min_agreement"]),
+                     kind_weights=regime_kind_weights(regime),
+                     lookup=_STRATEGY_KIND_LOOKUP)
     blend = fused["blend"]
     vote = blend["vote"]
     agreement = blend["agreement"]

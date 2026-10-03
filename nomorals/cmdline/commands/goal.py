@@ -65,6 +65,28 @@ def _cmd_goal(args: argparse.Namespace, context: Any) -> int:
             return 0
         _emit(args, {"goal": g.to_dict()}, f"next: {g.id} — {g.title}")
         return 0
+    if action == "update":
+        prio_arg = getattr(args, "priority", "")
+        g = gs.update(
+            goal_id,
+            title=getattr(args, "title", "") or None,
+            description=getattr(args, "description", "") or None,
+            priority=_int(prio_arg) if prio_arg not in ("", None) else None,
+        )
+        _emit(args, {"goal": g.to_dict() if g else None},
+              f"updated: {goal_id}" if g else f"goal not found: {goal_id}")
+        return 0 if g else 1
+    if action == "delete":
+        ok = gs.delete(goal_id)
+        _emit(args, {"deleted": ok, "goal_id": goal_id},
+              f"deleted: {goal_id}" if ok else f"goal not found: {goal_id}")
+        return 0 if ok else 1
+    if action == "replan":
+        g = gs.replan(goal_id, reason=getattr(args, "reason", "") or "")
+        _emit(args, {"goal": g.to_dict() if g else None},
+              f"replanned: {goal_id}" if g
+              else f"goal not found: {goal_id}")
+        return 0 if g else 1
     if action == "priority":
         g = gs.set_priority(goal_id, _int(arg2))
         _emit(args, {"goal": g.to_dict() if g else None},

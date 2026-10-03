@@ -29,7 +29,8 @@ __all__ = [
     "fuse_all",
 ]
 
-KINDS = ("trend", "meanrev", "breakout", "momentum", "squeeze", "confluence")
+KINDS = ("trend", "meanrev", "breakout", "momentum", "squeeze", "reversal",
+         "confluence")
 
 
 def fuse_equal(frames: dict) -> pd.DataFrame:

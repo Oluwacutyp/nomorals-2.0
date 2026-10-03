@@ -29,6 +29,7 @@ from .commands.exec import _cmd_apps, _cmd_exec
 from .commands.finance import _cmd_finance
 from .commands.games import _cmd_arena, _cmd_simulate, _cmd_skill, _cmd_trial
 from .commands.goal import _cmd_goal
+from .commands.idea import _cmd_idea
 from .commands.golden import _cmd_golden
 from .commands.hub import _cmd_hub
 from .commands.improve import _cmd_improve
@@ -313,6 +314,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_autonomy(args, context)
         if args.command == "goal":
             return _cmd_goal(args, context)
+        if args.command == "idea":
+            return _cmd_idea(args, context)
         if args.command == "skill":
             # New executable-skill verbs go to the skills package; the
             # legacy knowledge-library verbs stay on the games handler.

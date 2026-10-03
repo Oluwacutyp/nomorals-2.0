@@ -9,12 +9,27 @@ The bot can:
 - Handle OAuth tokens, API keys, session cookies
 - Rotate credentials and manage expiry
 - Support multiple identity profiles
+
+Account creation follows the human-in-the-loop checkpoint discipline:
+one account per service, the owner's own identity, and human
+verification steps (CAPTCHA, email/phone checks) pause on a persisted
+checkpoint instead of being bypassed.
 """
 
 from .vault import CredentialVault, Credential, AccountProfile
 from .manager import AccountManager
-from .creator import AccountCreator
-from .sessions import SessionManager
+from .creator import (
+    AccountCreator,
+    CreatedAccount,
+    AccountCheckpoint,
+    AccountCheckpointPending,
+    AccountExistsError,
+    MissingOwnerIdentity,
+    CheckpointKind,
+    CheckpointState,
+    CheckpointStore,
+)
+from .sessions import SessionManager, Session, OAuthToken, SessionInvalid
 
 __all__ = [
     "CredentialVault",
@@ -22,5 +37,16 @@ __all__ = [
     "AccountProfile",
     "AccountManager",
     "AccountCreator",
+    "CreatedAccount",
+    "AccountCheckpoint",
+    "AccountCheckpointPending",
+    "AccountExistsError",
+    "MissingOwnerIdentity",
+    "CheckpointKind",
+    "CheckpointState",
+    "CheckpointStore",
     "SessionManager",
+    "Session",
+    "OAuthToken",
+    "SessionInvalid",
 ]

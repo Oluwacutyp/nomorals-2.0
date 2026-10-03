@@ -53,6 +53,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "decode": ["dec"],
     "exec": ["e"],
     "goal": ["g"],
+    "idea": ["ideas"],
     "plugin": ["plug"],
     "hub": ["hb"],
     "improve": ["imp"],
@@ -480,6 +481,27 @@ def _parser() -> argparse.ArgumentParser:
                       help="filter list by status")
     goal.add_argument("--limit", default="20", help="max rows to list")
     goal.add_argument("--json", action="store_true", help="Output as JSON")
+
+    idea = sub.add_parser("idea", aliases=CLI_ALIASES["idea"],
+                          help="Capture and manage ideas")
+    idea.add_argument("action", nargs="?", default="list",
+                      choices=["list", "create", "get", "update", "dismiss",
+                               "promote", "delete", "search", "stats"],
+                      help="Action to perform")
+    idea.add_argument("arg", nargs="?", default="",
+                      help="idea title (create), idea id (most actions), query (search)")
+    idea.add_argument("--id", default="", help="Idea ID (alternative to positional)")
+    idea.add_argument("--title", default="", help="Idea title")
+    idea.add_argument("--description", default="", help="Idea description")
+    idea.add_argument("--tags", default="",
+                      help="Comma-separated tags (create/update, or filter for list)")
+    idea.add_argument("--source", default="", help="Where the idea came from")
+    idea.add_argument("--reason", default="", help="why to dismiss (dismiss action)")
+    idea.add_argument("--status", dest="filter_status", default="",
+                      help="filter list by status")
+    idea.add_argument("--limit", default="20", help="max rows to list")
+    idea.add_argument("--user", default="owner", help="user id for idea storage")
+    idea.add_argument("--json", action="store_true", help="Output as JSON")
 
     mission = sub.add_parser("mission", aliases=CLI_ALIASES["mission"],
                              help="Mission control and planning")

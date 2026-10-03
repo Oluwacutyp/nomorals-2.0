@@ -31,6 +31,9 @@ __all__ = ["AccountManager", "AccountInfo"]
 
 _log = get_logger(__name__)
 
+#: Service-name prefix the connector framework uses in the vault.
+CONNECTOR_SERVICE_PREFIX = "connector:"
+
 
 @dataclass
 class AccountInfo:
@@ -253,3 +256,161 @@ class AccountManager:
                 })
         
         return issues
+
+
+    # ── connector-vault integration ──────────────────────────────
+    # Connectors store their credentials in this same vault under the
+    # service name "connector:<id>" (see nomorals/connectors/base.py).
+    # These helpers let account tooling manage connector credentials
+    # without reaching into connector internals.
+
+    @staticmethod
+    def connector_service_name(connector_id: str) -> str:
+        """Vault service name for a connector's credentials."""
+        return f"{CONNECTOR_SERVICE_PREFIX}{connector_id}"
+
+    def register_connector_credential(
+        self,
+        connector_id: str,
+        username: str,
+        secret: str,
+        *,
+        credential_type: str = "api_key",
+        scopes: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: float | None = None,
+    ) -> Credential:
+        """Store a connector's credential in the vault.
+
+        Args:
+            connector_id: Connector id (e.g. "github", "mono")
+            username: Credential identifier (key id, login, ...)
+            secret: The secret itself (encrypted at rest)
+            credential_type: Credential kind (api_key, oauth_token, ...)
+            scopes: OAuth scopes, recorded in metadata when given
+            metadata: Extra metadata
+            expires_at: Optional expiry timestamp
+
+        Returns:
+            The stored Credential
+        """
+        meta = dict(metadata or {})
+        if scopes:
+            meta["scopes"] = list(scopes)
+        cred = self.vault.store(
+            service=self.connector_service_name(connector_id),
+            username=username,
+            password=secret,
+            credential_type=credential_type,
+            tags=["connector", connector_id],
+            metadata=meta,
+            expires_at=expires_at,
+        )
+        _log.info("registered connector credential: %s/%s",
+                  connector_id, username)
+        return cred
+
+    def connector_credential(
+        self,
+        connector_id: str,
+        *,
+        username: str | None = None,
+    ) -> Credential | None:
+        """Fetch a connector's stored credential (decrypted).
+
+        Args:
+            connector_id: Connector id
+            username: Pin to one username; otherwise the first active,
+                non-expired credential wins
+
+        Returns:
+            Credential or None when the connector has nothing stored
+        """
+        service = self.connector_service_name(connector_id)
+        creds = self.vault.list_all(service=service, active_only=True)
+        if username is not None:
+            creds = [c for c in creds if c.username == username]
+        for summary in creds:
+            try:
+                cred = self.vault.get(service, summary.username)
+            except Exception as e:  # pragma: no cover - defensive
+                _log.warning("cannot decrypt %s/%s: %s",
+                             service, summary.username, e)
+                continue
+            if not cred.is_expired():
+                return cred
+        return None
+
+    def list_connector_credentials(
+        self,
+        *,
+        connector_id: str | None = None,
+        active_only: bool = True,
+    ) -> list[AccountInfo]:
+        """List credentials owned by connectors.
+
+        Args:
+            connector_id: Restrict to one connector
+            active_only: Only active credentials
+
+        Returns:
+            List of AccountInfo for connector:* services
+        """
+        service = (self.connector_service_name(connector_id)
+                   if connector_id else None)
+        creds = self.vault.list_all(service=service, active_only=active_only)
+        return [
+            AccountInfo(
+                service=c.service,
+                username=c.username,
+                credential_type=c.credential_type,
+                is_active=c.is_active,
+                is_expired=c.is_expired(),
+                last_used=c.last_used,
+                use_count=c.use_count,
+                tags=c.tags,
+            )
+            for c in creds
+            if c.service.startswith(CONNECTOR_SERVICE_PREFIX)
+        ]
+
+    def revoke_connector_credentials(self, connector_id: str) -> int:
+        """Delete every stored credential for a connector.
+
+        Returns:
+            Number of credentials removed
+        """
+        service = self.connector_service_name(connector_id)
+        creds = self.vault.list_all(service=service, active_only=False)
+        for cred in creds:
+            self.vault.delete(service, cred.username)
+        _log.info("revoked %d credential(s) for connector %s",
+                  len(creds), connector_id)
+        return len(creds)
+
+    def connector_summary(self) -> dict[str, dict[str, Any]]:
+        """Per-connector credential status.
+
+        Returns:
+            Mapping connector_id -> {service, usernames, active, expired,
+            credential_types}
+        """
+        summary: dict[str, dict[str, Any]] = {}
+        for info in self.list_connector_credentials(active_only=False):
+            cid = info.service[len(CONNECTOR_SERVICE_PREFIX):]
+            entry = summary.setdefault(cid, {
+                "service": info.service,
+                "usernames": [],
+                "active": 0,
+                "expired": 0,
+                "credential_types": set(),
+            })
+            entry["usernames"].append(info.username)
+            if info.is_active:
+                entry["active"] += 1
+            if info.is_expired:
+                entry["expired"] += 1
+            entry["credential_types"].add(info.credential_type)
+        for entry in summary.values():
+            entry["credential_types"] = sorted(entry["credential_types"])
+        return summary
