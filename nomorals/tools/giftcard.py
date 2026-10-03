@@ -376,8 +376,10 @@ def register(registry: Any) -> None:
             "(known=). verify: Luhn + check digit on a full number. "
             "encode: render a number to modules. "
         ),
-        capability=Capability.FS_READ,
+        capability=Capability.NET_OUT,
     )
+    # Note: giftcard also uses FS_READ (file inputs) and MODEL_CALL (vision
+    # for photo action). NET_OUT is declared as the highest-privilege need.
     def _giftcard(action: str = "analyze", *,
                   data: str = "", number: str = "", known: str = "",
                   unknown_start: int = -1, unknown_end: int = -1,

@@ -311,7 +311,7 @@ class Attacker:
         self.out_file = out_file or ""
         self.quiet = quiet
         self._ssh_connect = ssh_connect or _ssh_check
-        self._gate = _PaceGate(self.rate, 0.0, 0.0, quiet=True)
+        self._gate = _PaceGate(self.rate, self.delay, self.jitter, quiet=True)
         self._queue: list[tuple[str, str]] = []
         for u in self.usernames:
             for p in self.passwords:

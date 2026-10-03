@@ -73,7 +73,7 @@ USERNAME_SITES: tuple[Site, ...] = (
     Site("codeberg", "https://codeberg.org/{u}"),
     Site("npm", "https://www.npmjs.com/~{u}"),
     Site("pypi", "https://pypi.org/user/{u}/"),
-    Site("mastodon", "https://{u}.mastodon@toots.adorable.tools", reliable=False),
+    Site("mastodon", "https://mastodon.social/@{u}", reliable=False),
     Site("telegram", "https://t.me/{u}", absent="tgme_page_extra"),
     Site("twitter_x", "https://x.com/{u}", reliable=False),
     Site("instagram", "https://www.instagram.com/{u}/", reliable=False),
@@ -214,7 +214,7 @@ def email_investigate(context: Any, email: str) -> dict[str, Any]:
     try:
         domain_info = osint_domain(context, domain)
         out["domain_registration"] = domain_info.get("registration")
-        out["domain_nameservers"] = None
+        out["domain_nameservers"] = domain_info.get("nameservers")
     except ToolError as e:
         _log.debug("domain enrichment failed for %s: %s", domain, e)
     out["breaches"] = breach_check(context, email)

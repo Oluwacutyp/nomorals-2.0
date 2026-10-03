@@ -199,7 +199,7 @@ def register(registry: Any) -> None:
     @registry.register(
         "proxy_status",
         description="Current outbound routing: active proxy, known list, SOCKS5 support.",
-        capability=Capability.NET_OUT,
+        capability=Capability.DB_READ,
     )
     def proxy_status() -> dict[str, Any]:
         return ProxyManager(context).status()
@@ -207,7 +207,7 @@ def register(registry: Any) -> None:
     @registry.register(
         "proxy_list",
         description="List all known candidate proxies (settings + environment + active).",
-        capability=Capability.NET_OUT,
+        capability=Capability.DB_READ,
     )
     def proxy_list() -> dict[str, Any]:
         manager = ProxyManager(context)
