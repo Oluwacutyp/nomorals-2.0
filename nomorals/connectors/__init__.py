@@ -51,6 +51,11 @@ from .drive import DriveConnector, DriveError
 from .gmail import GmailConnector, GmailError
 from .paystack import PaystackConnector, PaystackError
 from .telegram import TelegramConnector, TelegramError
+from .x import XConnector, XError
+from .instagram import InstagramConnector, InstagramError
+from .linkedin import LinkedInConnector, LinkedInError
+from .slack import SlackConnector, SlackError
+from .twilio import TwilioConnector, TwilioError
 
 __all__ = [
     "AuthMethod",
@@ -73,19 +78,29 @@ __all__ = [
     "GmailError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
+    "InstagramConnector",
+    "InstagramError",
     "JijiConnector",
     "JijiError",
     "JumiaConnector",
     "KongaConnector",
     "KongaError",
+    "LinkedInConnector",
+    "LinkedInError",
     "MonoConnector",
     "PaystackConnector",
     "PaystackError",
     "PlaidConnector",
     "ProxyPoolConnector",
+    "SlackConnector",
+    "SlackError",
     "TelegramConnector",
     "TelegramError",
+    "TwilioConnector",
+    "TwilioError",
     "VirtualCardsConnector",
+    "XConnector",
+    "XError",
     "create_connector",
     "device_flow_token",
     "get_connector",
