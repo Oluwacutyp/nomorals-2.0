@@ -815,14 +815,14 @@ class TelegramBotAdapter(ChatAdapter):
     # ── HTTP ────────────────────────────────────────────────────────────────
     def _sess(self) -> Any:
         if self._session is None:
-            import requests
+            from ...core.http import HttpClient
 
-            self._session = requests.Session()
+            self._session = HttpClient()
         return self._session
 
     def _api(self, method: str, **params: Any) -> Any:
         url = _BOT_API.format(token=self.token, method=method)
-        resp = self._sess().post(url, json=params, timeout=self.poll_timeout + 10)
+        resp = self._sess().post_json(url, params, timeout=self.poll_timeout + 10)
         try:
             data = resp.json()
         except ValueError:
