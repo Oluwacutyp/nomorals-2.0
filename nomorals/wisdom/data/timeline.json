@@ -1,0 +1,626 @@
+[
+  {
+    "end": -1200,
+    "region": "South Asia",
+    "sources": [
+      "britannica.com",
+      "sacred-texts.com"
+    ],
+    "start": -1500,
+    "summary": "The Rigveda, the oldest layer of Sanskrit literature, takes shape in the northwest of the Indian subcontinent.",
+    "title": "Vedic hymns compiled (Rigveda)",
+    "tradition": "hinduism"
+  },
+  {
+    "end": -500,
+    "region": "South Asia",
+    "sources": [
+      "stanford.edu",
+      "sacred-texts.com"
+    ],
+    "start": -800,
+    "summary": "The early Upanishads articulate atman and brahman — the inner self and ultimate reality — seeding Vedanta and Indian metaphysics.",
+    "title": "Principal Upanishads composed",
+    "tradition": "hinduism"
+  },
+  {
+    "end": -400,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "sacred-texts.com"
+    ],
+    "start": -600,
+    "summary": "Traditionally ascribed to Laozi in the 6th century BCE (modern scholarship favors a 4th–3rd century BCE compilation); the Daodejing founds philosophical Taoism.",
+    "title": "Tao Te Ching — traditional dating",
+    "tradition": "taoism"
+  },
+  {
+    "end": -483,
+    "region": "South Asia",
+    "sources": [
+      "britannica.com",
+      "accesstoinsight.org"
+    ],
+    "start": -563,
+    "summary": "The Buddha's teaching career establishes the Four Noble Truths and the Eightfold Path; dates follow the traditional long chronology.",
+    "title": "Siddhartha Gautama, the Buddha",
+    "tradition": "buddhism"
+  },
+  {
+    "end": -527,
+    "region": "South Asia",
+    "sources": [
+      "britannica.com",
+      "sacred-texts.com"
+    ],
+    "start": -599,
+    "summary": "Mahavira, the 24th Tirthankara, systematizes Jain doctrine: ahimsa and the path to liberation from karma.",
+    "title": "Mahavira and early Jainism",
+    "tradition": "jainism"
+  },
+  {
+    "end": -479,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": -551,
+    "summary": "Confucius teaches ren and li; his sayings, later compiled as the Analects, shape Chinese ethics and statecraft for two millennia.",
+    "title": "Confucius",
+    "tradition": "confucianism"
+  },
+  {
+    "end": -286,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "sacred-texts.com"
+    ],
+    "start": -369,
+    "summary": "Zhuangzi's writings develop Taoist spontaneity and relativism through parables, including the famous butterfly dream.",
+    "title": "Zhuangzi",
+    "tradition": "taoism"
+  },
+  {
+    "end": -100,
+    "region": "Judea",
+    "sources": [
+      "earlyjewishwritings.com",
+      "sacred-texts.com"
+    ],
+    "start": -300,
+    "summary": "The Enochic corpus, including the Book of the Watchers, expands Genesis angelology; it survives whole only in the Ethiopian canon.",
+    "title": "Book of Enoch (1 Enoch) composed",
+    "tradition": "judaism"
+  },
+  {
+    "end": 70,
+    "region": "Jerusalem",
+    "sources": [
+      "britannica.com",
+      "jewishvirtuallibrary.org"
+    ],
+    "start": -516,
+    "summary": "The rebuilt Temple anchors Jewish worship; the era produces apocalyptic literature and the sectarian movements of the late Second Temple.",
+    "title": "Second Temple period",
+    "tradition": "judaism"
+  },
+  {
+    "end": 100,
+    "region": "South Asia",
+    "sources": [
+      "sacred-texts.com",
+      "britannica.com"
+    ],
+    "start": -200,
+    "summary": "Krishna's dialogue with Arjuna on the Kurukshetra field synthesizes the paths of karma, bhakti, and jnana yoga within the Mahabharata.",
+    "title": "Bhagavad Gita composed",
+    "tradition": "hinduism"
+  },
+  {
+    "end": 68,
+    "region": "Qumran",
+    "sources": [
+      "loc.gov",
+      "britannica.com"
+    ],
+    "start": -150,
+    "summary": "A sectarian community near the Dead Sea copies and stores hundreds of scrolls — biblical, apocryphal, and its own rule books.",
+    "title": "Qumran community and the Dead Sea Scrolls",
+    "tradition": "judaism"
+  },
+  {
+    "end": 200,
+    "region": "South Asia",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": -100,
+    "summary": "Prajnaparamita and other Mahayana sutras appear, introducing emptiness (shunyata) and the bodhisattva ideal.",
+    "title": "Mahayana sutras emerge",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 30,
+    "region": "Galilee and Judea",
+    "sources": [
+      "britannica.com",
+      "newadvent.org"
+    ],
+    "start": -4,
+    "summary": "Jesus preaches the Kingdom of God; his crucifixion under Pontius Pilate becomes the founding event of Christianity.",
+    "title": "Jesus of Nazareth",
+    "tradition": "christianity"
+  },
+  {
+    "end": 150,
+    "region": "Syria",
+    "sources": [
+      "gnosis.org",
+      "earlychristianwritings.com"
+    ],
+    "start": 50,
+    "summary": "A sayings gospel of 114 logia attributed to Thomas, preserved in the Nag Hammadi codices; composition estimates range from c. 50 to c. 150 CE.",
+    "title": "Gospel of Thomas composed",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 65,
+    "region": "Eastern Mediterranean",
+    "sources": [
+      "britannica.com",
+      "newadvent.org"
+    ],
+    "start": 50,
+    "summary": "Paul's epistles, the earliest surviving Christian writings, spread the Jesus movement across the Roman Empire.",
+    "title": "Pauline letters",
+    "tradition": "christianity"
+  },
+  {
+    "end": 300,
+    "region": "Alexandria",
+    "sources": [
+      "gnosis.org",
+      "sacred-texts.com"
+    ],
+    "start": 100,
+    "summary": "Greek dialogues attributed to Hermes Trismegistus blend Platonism, Stoicism, and Egyptian religion; they become the core of Western hermeticism.",
+    "title": "Corpus Hermeticum compiled",
+    "tradition": "hermeticism"
+  },
+  {
+    "end": 165,
+    "region": "Rome",
+    "sources": [
+      "gnosis.org",
+      "earlychristianwritings.com"
+    ],
+    "start": 136,
+    "summary": "The most influential Gnostic teacher develops a sophisticated emanation cosmology; his work survives in fragments quoted by his critics.",
+    "title": "Valentinus teaches in Rome",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 142,
+    "region": "China",
+    "sources": [
+      "britannica.com",
+      "stanford.edu"
+    ],
+    "start": 142,
+    "summary": "Zhang Daoling founds the first organized Taoist church in Sichuan, beginning institutional religious Taoism.",
+    "title": "Celestial Masters (Tianshi Dao) founded",
+    "tradition": "taoism"
+  },
+  {
+    "end": 200,
+    "region": "South Asia",
+    "sources": [
+      "sacred-texts.com",
+      "britannica.com"
+    ],
+    "start": 150,
+    "summary": "Patanjali compiles 196 aphorisms systematizing raja yoga — the eight-limbed path from yama to samadhi.",
+    "title": "Patanjali's Yoga Sutras",
+    "tradition": "hinduism"
+  },
+  {
+    "end": 250,
+    "region": "South Asia",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 150,
+    "summary": "Nagarjuna's Mulamadhyamakakarika founds the Middle Way school, the philosophical core of Mahayana Buddhism.",
+    "title": "Nagarjuna and Madhyamaka",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 220,
+    "region": "Galilee",
+    "sources": [
+      "britannica.com",
+      "jewishvirtuallibrary.org"
+    ],
+    "start": 200,
+    "summary": "Judah ha-Nasi redacts the Oral Torah into the Mishnah, the foundation of rabbinic Judaism after the Temple's fall.",
+    "title": "Mishnah compiled",
+    "tradition": "judaism"
+  },
+  {
+    "end": 300,
+    "region": "Egypt",
+    "sources": [
+      "gnosis.org",
+      "sacred-texts.com"
+    ],
+    "start": 250,
+    "summary": "A lengthy Gnostic dialogue in which the risen Jesus instructs his disciples on the soul's ascent through the aeons.",
+    "title": "Pistis Sophia composed",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 350,
+    "region": "Upper Egypt",
+    "sources": [
+      "gnosis.org",
+      "britannica.com"
+    ],
+    "start": 300,
+    "summary": "Thirteen Coptic codices are copied in Upper Egypt, preserving 52 tractates including the Gospels of Thomas and Philip and the Apocryphon of John.",
+    "title": "Nag Hammadi codices composed",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 500,
+    "region": "Egypt",
+    "sources": [
+      "britannica.com",
+      "newadvent.org"
+    ],
+    "start": 300,
+    "summary": "Hermits such as Anthony the Great pioneer Christian monasticism in the Egyptian desert.",
+    "title": "Desert Fathers",
+    "tradition": "christianity"
+  },
+  {
+    "end": 325,
+    "region": "Nicaea",
+    "sources": [
+      "newadvent.org",
+      "britannica.com"
+    ],
+    "start": 325,
+    "summary": "Constantine convenes the first ecumenical council; it produces the Nicene Creed and condemns Arianism.",
+    "title": "First Council of Nicaea",
+    "tradition": "christianity"
+  },
+  {
+    "end": 430,
+    "region": "North Africa",
+    "sources": [
+      "newadvent.org",
+      "stanford.edu"
+    ],
+    "start": 354,
+    "summary": "Augustine's Confessions and City of God shape Western Christian theology of grace, sin, and history.",
+    "title": "Augustine of Hippo",
+    "tradition": "christianity"
+  },
+  {
+    "end": 370,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 364,
+    "summary": "Yang Xi receives the Shangqing (Highest Clarity) revelations, giving Taoism its great meditation and visualization scriptures.",
+    "title": "Shangqing revelations",
+    "tradition": "taoism"
+  },
+  {
+    "end": 367,
+    "region": "Alexandria",
+    "sources": [
+      "newadvent.org",
+      "earlychristianwritings.com"
+    ],
+    "start": 367,
+    "summary": "Bishop Athanasius lists the 27 books of the New Testament canon — the first surviving list matching the modern canon.",
+    "title": "Athanasius' 39th Festal Letter",
+    "tradition": "christianity"
+  },
+  {
+    "end": 400,
+    "region": "Upper Egypt",
+    "sources": [
+      "gnosis.org",
+      "britannica.com"
+    ],
+    "start": 367,
+    "summary": "Likely hidden after Athanasius' canon list delegitimized non-canonical texts, the jarred codices sleep for some 1,500 years.",
+    "title": "Nag Hammadi codices buried",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 381,
+    "region": "Constantinople",
+    "sources": [
+      "newadvent.org",
+      "britannica.com"
+    ],
+    "start": 381,
+    "summary": "The second ecumenical council confirms Nicaea and finalizes the Nicene-Constantinopolitan Creed.",
+    "title": "First Council of Constantinople",
+    "tradition": "christianity"
+  },
+  {
+    "end": 425,
+    "region": "South Asia",
+    "sources": [
+      "britannica.com",
+      "metmuseum.org"
+    ],
+    "start": 425,
+    "summary": "The great Buddhist university becomes the intellectual hub of Mahayana and Vajrayana for seven centuries.",
+    "title": "Nalanda Mahavihara founded",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 451,
+    "region": "Ephesus and Chalcedon",
+    "sources": [
+      "newadvent.org",
+      "britannica.com"
+    ],
+    "start": 431,
+    "summary": "The third and fourth ecumenical councils define Christ's two natures, splitting Eastern and Oriental churches.",
+    "title": "Councils of Ephesus and Chalcedon",
+    "tradition": "christianity"
+  },
+  {
+    "end": 520,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 520,
+    "summary": "The legendary Indian monk brings dhyana meditation to China, founding the Chan (Zen) lineage.",
+    "title": "Bodhidharma and Chan",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 632,
+    "region": "Arabia",
+    "sources": [
+      "britannica.com",
+      "metmuseum.org"
+    ],
+    "start": 610,
+    "summary": "Muhammad receives the Quranic revelations; the text is standardized under the early caliphate.",
+    "title": "Quran revealed and compiled",
+    "tradition": "islam"
+  },
+  {
+    "end": 713,
+    "region": "China",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 638,
+    "summary": "Huineng's Platform Sutra proclaims sudden enlightenment, defining Southern Chan and later Zen.",
+    "title": "Huineng, Sixth Patriarch of Chan",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 787,
+    "region": "Nicaea",
+    "sources": [
+      "newadvent.org",
+      "britannica.com"
+    ],
+    "start": 787,
+    "summary": "The seventh ecumenical council restores the veneration of icons, closing the Byzantine iconoclast controversy.",
+    "title": "Second Council of Nicaea",
+    "tradition": "christianity"
+  },
+  {
+    "end": 820,
+    "region": "South Asia",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 788,
+    "summary": "Shankara's commentaries establish non-dual Vedanta — atman is brahman — and he founds four monastic centers.",
+    "title": "Adi Shankara and Advaita Vedanta",
+    "tradition": "vedanta"
+  },
+  {
+    "end": 850,
+    "region": "Middle East",
+    "sources": [
+      "gnosis.org",
+      "britannica.com"
+    ],
+    "start": 800,
+    "summary": "Hermetic texts flourish in Arabic translation; the Emerald Tablet's 'as above, so below' becomes alchemy's motto.",
+    "title": "Arabic Hermetica and the Emerald Tablet",
+    "tradition": "hermeticism"
+  },
+  {
+    "end": 1054,
+    "region": "Tibet",
+    "sources": [
+      "britannica.com",
+      "stanford.edu"
+    ],
+    "start": 982,
+    "summary": "Atisha's journey to Tibet sparks the second diffusion of Buddhism there and the Kadampa reform movement.",
+    "title": "Atisha and the later transmission",
+    "tradition": "buddhism"
+  },
+  {
+    "end": 1137,
+    "region": "South Asia",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 1017,
+    "summary": "Ramanuja's qualified non-dualism centers Vedanta on loving devotion (bhakti) to a personal God.",
+    "title": "Ramanuja and Vishishtadvaita",
+    "tradition": "vedanta"
+  },
+  {
+    "end": 1111,
+    "region": "Middle East",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 1058,
+    "summary": "Al-Ghazali reconciles Sufi mysticism with orthodox theology in the Revival of the Religious Sciences.",
+    "title": "Al-Ghazali",
+    "tradition": "sufism"
+  },
+  {
+    "end": 1240,
+    "region": "al-Andalus",
+    "sources": [
+      "stanford.edu",
+      "ibnarabisociety.org"
+    ],
+    "start": 1165,
+    "summary": "The 'Greatest Master' expounds wahdat al-wujud, the unity of being, in the Meccan Revelations.",
+    "title": "Ibn Arabi",
+    "tradition": "sufism"
+  },
+  {
+    "end": 1273,
+    "region": "Anatolia",
+    "sources": [
+      "britannica.com",
+      "poetryfoundation.org"
+    ],
+    "start": 1207,
+    "summary": "Rumi's Masnavi and Divan make divine love the center of Sufi poetry; his followers found the whirling dervishes.",
+    "title": "Rumi and the Mevlevi order",
+    "tradition": "sufism"
+  },
+  {
+    "end": 1290,
+    "region": "Spain",
+    "sources": [
+      "jewishvirtuallibrary.org",
+      "britannica.com"
+    ],
+    "start": 1280,
+    "summary": "Moses de León circulates the Zohar, the central text of Kabbalah, ascribed to the 2nd-century Simeon bar Yochai.",
+    "title": "Zohar circulated",
+    "tradition": "judaism"
+  },
+  {
+    "end": 1450,
+    "region": "South Asia",
+    "sources": [
+      "sacred-texts.com",
+      "britannica.com"
+    ],
+    "start": 1450,
+    "summary": "Svatmarama's manual codifies hatha yoga — asana, pranayama, mudras, and the awakening of kundalini.",
+    "title": "Hatha Yoga Pradipika",
+    "tradition": "hinduism"
+  },
+  {
+    "end": 1463,
+    "region": "Florence",
+    "sources": [
+      "gnosis.org",
+      "britannica.com"
+    ],
+    "start": 1463,
+    "summary": "Marsilio Ficino's Latin Pimander ignites the Renaissance Hermetic revival under Medici patronage.",
+    "title": "Ficino translates the Corpus Hermeticum",
+    "tradition": "hermeticism"
+  },
+  {
+    "end": 1486,
+    "region": "Rome",
+    "sources": [
+      "stanford.edu",
+      "britannica.com"
+    ],
+    "start": 1486,
+    "summary": "Pico della Mirandola fuses Hermeticism, Kabbalah, and Platonism, proclaiming humanity's self-fashioning power.",
+    "title": "Pico's Oration on the Dignity of Man",
+    "tradition": "hermeticism"
+  },
+  {
+    "end": 1875,
+    "region": "New York",
+    "sources": [
+      "theosophy.org",
+      "britannica.com"
+    ],
+    "start": 1875,
+    "summary": "Blavatsky, Olcott, and Judge found the Society to revive ancient wisdom and investigate the unexplained.",
+    "title": "Theosophical Society founded",
+    "tradition": "theosophy"
+  },
+  {
+    "end": 1888,
+    "region": "London",
+    "sources": [
+      "theosophy.org",
+      "sacred-texts.com"
+    ],
+    "start": 1888,
+    "summary": "The Secret Doctrine synthesizes science, religion, and philosophy into a cosmic evolutionary scheme of root races.",
+    "title": "Blavatsky's Secret Doctrine published",
+    "tradition": "theosophy"
+  },
+  {
+    "end": 1893,
+    "region": "Chicago",
+    "sources": [
+      "parliamentofreligions.org",
+      "britannica.com"
+    ],
+    "start": 1893,
+    "summary": "The 1893 Parliament introduces Vivekananda's Vedanta and Asian religions to the American public.",
+    "title": "Parliament of the World's Religions",
+    "tradition": "interfaith"
+  },
+  {
+    "end": 1945,
+    "region": "Upper Egypt",
+    "sources": [
+      "gnosis.org",
+      "britannica.com"
+    ],
+    "start": 1945,
+    "summary": "Farmers find the sealed jar of codices near Jabal al-Tarif, revolutionizing the study of early Christian diversity.",
+    "title": "Nag Hammadi library discovered",
+    "tradition": "christian-gnostic"
+  },
+  {
+    "end": 1947,
+    "region": "Qumran",
+    "sources": [
+      "loc.gov",
+      "britannica.com"
+    ],
+    "start": 1947,
+    "summary": "Bedouin shepherds find the first scrolls in Cave 1, opening a window onto Second Temple Judaism.",
+    "title": "Dead Sea Scrolls discovered",
+    "tradition": "judaism"
+  }
+]

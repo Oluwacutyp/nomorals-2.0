@@ -1,42 +1,148 @@
-"""Full-text search over parsed documents: a small inverted index.
+"""Full-text search over parsed documents, ranked with BM25.
 
-Tokenizes on lowercased word tokens, scores with raw term frequency, and
-returns a ~120-character snippet around the first query-term hit.  Persists
-as JSON via :meth:`DocumentIndex.save` / :meth:`DocumentIndex.load`.
+The index stores documents in a small SQLite database (``:memory:`` by
+default) and ranks with the existing :class:`nomorals.storage.fts.FTSIndex`
+(SQLite FTS5 ``bm25()``) instead of duplicating ranking logic here.
+
+Result shape is unchanged: ``search()`` returns ``{doc_id, title, score,
+snippet}`` dicts, but ``score`` is now a BM25 float (higher is better)
+rather than an integer term-frequency count.  Snippets keep the old
+~120-character window around the first query-term hit.
+
+Persistence: :meth:`DocumentIndex.save` writes a version-2 SQLite file.
+:meth:`DocumentIndex.load` reads version-2 files and transparently
+migrates legacy version-1 JSON indexes (written before the BM25 move) by
+rebuilding them on the new backend.
+
+If the SQLite build lacks FTS5 the index fails fast with
+:class:`DocumentError` at construction time — it never silently returns
+empty results.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
+from typing import Any
 
+from ..core.errors import StorageError
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
+from ..storage.db import Database
+from ..storage.fts import FTSIndex
 from .errors import DocumentError
 from .model import Document, Section, full_text
 
 __all__ = ["DocumentIndex"]
 
+_log = get_logger(__name__)
+
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _SNIPPET_RADIUS_BEFORE = 40
 _SNIPPET_RADIUS_AFTER = 80
+
+#: Persistence format written by :meth:`DocumentIndex.save`.
+_INDEX_VERSION = 2
+#: Legacy JSON format written before the BM25 migration; :meth:`load` rebuilds it.
+_LEGACY_JSON_VERSION = 1
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+_FTS_TABLE = "documents_fts"
+_META_TABLE = "documents_meta"
+_VERSION_TABLE = "index_meta"
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break indexing (fail-open telemetry, fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 
 def _tokenize(text: str) -> list[str]:
     return [tok for tok in _TOKEN_RE.findall(text.lower()) if len(tok) >= 2]
 
 
-class DocumentIndex:
-    """In-memory inverted index over :class:`Document` full text."""
+_fts5_probe_result: bool | None = None
 
-    def __init__(self) -> None:
-        # doc_id -> {"title": str, "text": str}
-        self._docs: dict[str, dict[str, str]] = {}
-        # term -> {doc_id: term frequency}
-        self._index: dict[str, dict[str, int]] = {}
+
+def _fts5_available() -> bool:
+    """Probe whether this SQLite build ships the FTS5 module (cached)."""
+    global _fts5_probe_result
+    if _fts5_probe_result is None:
+        try:
+            conn = sqlite3.connect(":memory:")
+            try:
+                conn.execute('CREATE VIRTUAL TABLE "_fts5_probe" USING fts5("x")')
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            _fts5_probe_result = False
+        else:
+            _fts5_probe_result = True
+    return _fts5_probe_result
+
+
+def _ensure_schema(db: Database) -> None:
+    db.execute(
+        f'CREATE TABLE IF NOT EXISTS "{_META_TABLE}" ('
+        '"doc_id" TEXT PRIMARY KEY, '
+        '"title" TEXT NOT NULL, '
+        '"text" TEXT NOT NULL)'
+    )
+    db.execute(
+        f'CREATE TABLE IF NOT EXISTS "{_VERSION_TABLE}" ('
+        '"key" TEXT PRIMARY KEY, '
+        '"value" TEXT NOT NULL)'
+    )
+    # The CREATE VIRTUAL TABLE is what actually requires FTS5; the probe in
+    # __init__ guarantees we never reach this on a build without it.
+    db.execute(
+        f'CREATE VIRTUAL TABLE IF NOT EXISTS "{_FTS_TABLE}" '
+        'USING fts5("title", "text")'
+    )
+
+
+class DocumentIndex:
+    """BM25-ranked full-text index over :class:`Document` full text.
+
+    Backed by :class:`nomorals.storage.fts.FTSIndex` (SQLite FTS5) over an
+    in-memory database by default.  Pass ``db`` to share a file-backed
+    :class:`~nomorals.storage.db.Database` instead.
+    """
+
+    def __init__(self, db: Database | None = None) -> None:
+        if not _fts5_available():
+            raise DocumentError(
+                "FTS5 is not available in this SQLite build; DocumentIndex "
+                "requires FTS5-backed BM25 ranking and refuses to degrade to "
+                "silent empty results"
+            )
+        self._db = db if db is not None else Database(":memory:")
+        _ensure_schema(self._db)
+        self._fts = FTSIndex(self._db, _FTS_TABLE, columns=["title", "text"])
+        if not self._fts.available:
+            # Defensive: construction probes FTS5 above, so reaching here
+            # means the table vanished under us.
+            raise DocumentError(
+                f"FTS table {_FTS_TABLE!r} is unavailable; refusing to serve "
+                "unranked (empty) search results"
+            )
 
     def __len__(self) -> int:
-        return len(self._docs)
+        return int(
+            self._db.scalar(f'SELECT COUNT(*) FROM "{_META_TABLE}"', default=0)
+        )
 
+    def close(self) -> None:
+        """Release the backing database connections."""
+        self._db.close()
+
+    # ── writes ───────────────────────────────────────────────────────────────
     def add(self, doc: Document) -> None:
         """Index ``doc``.  Re-adding an existing id replaces the entry."""
         if not doc.id:
@@ -45,24 +151,25 @@ class DocumentIndex:
         if not text.strip():
             raise DocumentError(f"document {doc.id} has no indexable text")
         self.remove(doc.id)
-        self._docs[doc.id] = {"title": doc.title, "text": text}
-        counts: dict[str, int] = {}
-        for token in _tokenize(f"{doc.title} {text}"):
-            counts[token] = counts.get(token, 0) + 1
-        for token, freq in counts.items():
-            self._index.setdefault(token, {})[doc.id] = freq
+        rowid = self._db.insert(
+            _META_TABLE,
+            {"doc_id": doc.id, "title": doc.title, "text": text},
+        )
+        self._fts.put(rowid, [doc.title, text])
+        _emit("document.indexed", {"doc_id": doc.id, "title": doc.title})
 
     def remove(self, doc_id: str) -> bool:
         """Drop ``doc_id`` from the index.  Returns True when it was present."""
-        if doc_id not in self._docs:
+        row = self._db.query_one(
+            f'SELECT rowid FROM "{_META_TABLE}" WHERE "doc_id" = ?', (doc_id,)
+        )
+        if row is None:
             return False
-        del self._docs[doc_id]
-        for postings in self._index.values():
-            postings.pop(doc_id, None)
-        # prune terms that no longer point anywhere
-        self._index = {t: p for t, p in self._index.items() if p}
+        self._fts.delete(int(row["rowid"]))
+        self._db.delete(_META_TABLE, '"doc_id" = ?', (doc_id,))
         return True
 
+    # ── reads ────────────────────────────────────────────────────────────────
     def _snippet(self, text: str, terms: list[str]) -> str:
         lowered = text.lower()
         hit = -1
@@ -85,63 +192,193 @@ class DocumentIndex:
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Search the index; each hit is {doc_id, title, score, snippet}.
 
-        Score is the sum of query-term frequencies in the document (raw TF).
-        Ties break on doc id so ordering is deterministic.
+        Score is the FTS5 ``bm25()`` rank (negated so higher is better) — a
+        float, not the old integer term-frequency count.  A document matches
+        when it contains any query term (OR semantics, as before); ties break
+        on doc id so ordering is deterministic.
         """
         terms = _tokenize(query or "")
         if not terms:
             raise DocumentError("search query has no indexable terms")
         if limit <= 0:
             raise DocumentError(f"limit must be positive, got {limit}")
-        scores: dict[str, int] = {}
-        for term in terms:
-            for doc_id, freq in self._index.get(term, {}).items():
-                scores[doc_id] = scores.get(doc_id, 0) + freq
-        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+        if not self._fts.available:
+            raise DocumentError(
+                "FTS backend became unavailable; refusing to return empty results"
+            )
+        hits = self._fts.search(
+            " ".join(terms), limit=limit, prefix=False, operator="OR"
+        )
+        if not hits:
+            return []
+        rows = {
+            int(r["rowid"]): r
+            for r in self._db.query(
+                f'SELECT rowid, "doc_id", "title", "text" FROM "{_META_TABLE}" '
+                f'WHERE "rowid" IN ({", ".join("?" * len(hits))})',
+                [h.rowid for h in hits],
+            )
+        }
+        ordered = sorted(
+            (h for h in hits if h.rowid in rows),
+            key=lambda h: (-h.score, rows[h.rowid]["doc_id"]),
+        )
         results = []
-        for doc_id, score in ranked[:limit]:
-            record = self._docs[doc_id]
+        for hit in ordered:
+            record = rows[hit.rowid]
             results.append({
-                "doc_id": doc_id,
+                "doc_id": record["doc_id"],
                 "title": record["title"],
-                "score": score,
+                "score": float(hit.score),
                 "snippet": self._snippet(record["text"], terms),
             })
         return results
 
+    # ── persistence ──────────────────────────────────────────────────────────
     def save(self, path: str | Path) -> Path:
-        """Persist the index as JSON (documents' id/title/text; index rebuilt)."""
+        """Persist the index as a version-2 SQLite file.
+
+        Replaces any existing file at ``path``.  Legacy version-1 JSON files
+        are not written anymore — see :meth:`load` for the migration path.
+        """
         file_path = Path(path)
-        payload = {
-            "version": 1,
-            "docs": [
-                {"id": doc_id, "title": rec["title"], "text": rec["text"]}
-                for doc_id, rec in self._docs.items()
-            ],
-        }
+        if file_path.is_dir():
+            raise DocumentError(f"cannot write index to {file_path}: is a directory")
+        if (
+            self._db.path is not None
+            and file_path.resolve() == self._db.path.resolve()
+        ):
+            # Already file-backed at this exact path: stamp the version and
+            # compact; the data is already there.
+            self._write_version(self._db)
+            self._fts.optimize()
+            return file_path
         try:
-            file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+            if file_path.exists():
+                file_path.unlink()
         except OSError as exc:
-            raise DocumentError(f"cannot write index to {file_path}: {exc}") from exc
+            raise DocumentError(
+                f"cannot write index to {file_path}: {exc}") from exc
+        try:
+            dest = Database(file_path)
+        except (OSError, sqlite3.Error) as exc:
+            raise DocumentError(
+                f"cannot write index to {file_path}: {exc}") from exc
+        try:
+            _ensure_schema(dest)
+            self._write_version(dest)
+            fts = FTSIndex(dest, _FTS_TABLE, columns=["title", "text"])
+            for row in self._db.query(
+                f'SELECT "doc_id", "title", "text" FROM "{_META_TABLE}"'
+            ):
+                rowid = dest.insert(
+                    _META_TABLE,
+                    {
+                        "doc_id": row["doc_id"],
+                        "title": row["title"],
+                        "text": row["text"],
+                    },
+                )
+                fts.put(rowid, [row["title"], row["text"]])
+            fts.optimize()
+        finally:
+            dest.close()
         return file_path
+
+    @staticmethod
+    def _write_version(db: Database) -> None:
+        db.execute(
+            f'INSERT INTO "{_VERSION_TABLE}" ("key", "value") VALUES (?, ?) '
+            'ON CONFLICT("key") DO UPDATE SET "value" = excluded."value"',
+            ("version", str(_INDEX_VERSION)),
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> DocumentIndex:
-        """Load an index saved with :meth:`save`."""
+        """Load an index saved with :meth:`save`.
+
+        Accepts version-2 SQLite files and transparently migrates legacy
+        version-1 JSON files (rebuilt on the BM25 backend).  The returned
+        index is always in-memory; call :meth:`save` to persist changes.
+        """
         file_path = Path(path)
+        if not file_path.is_file():
+            raise DocumentError(f"cannot load index from {file_path}: no such file")
+        try:
+            with open(file_path, "rb") as handle:
+                magic = handle.read(len(_SQLITE_MAGIC))
+        except OSError as exc:
+            raise DocumentError(
+                f"cannot load index from {file_path}: {exc}") from exc
+        if magic == _SQLITE_MAGIC:
+            return cls._load_sqlite(file_path)
+        return cls._load_legacy_json(file_path)
+
+    @classmethod
+    def _load_sqlite(cls, file_path: Path) -> DocumentIndex:
+        try:
+            source = Database(file_path)
+        except (OSError, sqlite3.Error) as exc:
+            raise DocumentError(
+                f"cannot load index from {file_path}: {exc}") from exc
+        try:
+            try:
+                has_schema = source.table_exists(_VERSION_TABLE) and \
+                    source.table_exists(_META_TABLE)
+            except StorageError as exc:
+                raise DocumentError(
+                    f"cannot load index from {file_path}: {exc}") from exc
+            if not has_schema:
+                raise DocumentError(
+                    f"not a document index file: {file_path}")
+            try:
+                version = source.scalar(
+                    f'SELECT "value" FROM "{_VERSION_TABLE}" '
+                    'WHERE "key" = \'version\'',
+                    default=None,
+                )
+            except StorageError as exc:
+                raise DocumentError(
+                    f"cannot load index from {file_path}: {exc}") from exc
+            if str(version) != str(_INDEX_VERSION):
+                raise DocumentError(
+                    f"unsupported document index version {version!r} in "
+                    f"{file_path} (expected {_INDEX_VERSION})")
+            try:
+                rows = source.query(
+                    f'SELECT "doc_id", "title", "text" FROM "{_META_TABLE}"'
+                )
+            except StorageError as exc:
+                raise DocumentError(
+                    f"cannot load index from {file_path}: {exc}") from exc
+        finally:
+            source.close()
+        index = cls()
+        for row in rows:
+            doc = Document(id=str(row["doc_id"]), title=str(row["title"]))
+            # Rebuild via add() so meta + FTS rows stay consistent; the stored
+            # text is injected as a single section because only text persisted.
+            doc.sections = [Section(level=1, heading="", text=str(row["text"]))]
+            index.add(doc)
+        return index
+
+    @classmethod
+    def _load_legacy_json(cls, file_path: Path) -> DocumentIndex:
+        """Migrate a version-1 JSON index (pre-BM25) onto the new backend."""
         try:
             payload = json.loads(file_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise DocumentError(f"cannot load index from {file_path}: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise DocumentError(
+                f"cannot load index from {file_path}: {exc}") from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _LEGACY_JSON_VERSION
+        ):
             raise DocumentError(f"not a document index file: {file_path}")
         index = cls()
         for entry in payload.get("docs", []):
             doc = Document(id=str(entry.get("id", "")),
                            title=str(entry.get("title", "")))
-            # Rebuild via add() so postings stay consistent; the stored text
-            # is injected as a single section because only text was persisted.
             doc.sections = [Section(level=1, heading="", text=str(entry.get("text", "")))]
             index.add(doc)
         return index

@@ -50,6 +50,7 @@ EXPECTED_MRO = [
     "RuntimeMediaMixin",
     "RuntimeIntelMixin",
     "RuntimeSearchMixin",
+    "RuntimeWisdomMixin",
     "object",
 ]
 

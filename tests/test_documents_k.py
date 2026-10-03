@@ -412,19 +412,57 @@ class TestIndex(unittest.TestCase):
         self.assertEqual(index.search("quantum"), [])
 
     def test_save_load_round_trip(self) -> None:
+        # NOTE (BM25 migration): save() now writes a version-2 SQLite file
+        # (the FTS5 index itself is persisted) instead of version-1 JSON.
+        # The format change is intentional; load() still migrates legacy v1
+        # JSON — see test_load_legacy_json_v1_migrates.
         quantum, carpentry = self._docs()
         index = DocumentIndex()
         index.add(quantum)
         index.add(carpentry)
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "index.json"
+            path = Path(tmp) / "index.db"
             index.save(path)
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(len(payload["docs"]), 2)
+            self.assertEqual(path.read_bytes()[:16], b"SQLite format 3\x00")
             loaded = DocumentIndex.load(path)
+        self.assertEqual(len(loaded), 2)
         hits = loaded.search("carpentry")
         self.assertEqual(hits[0]["doc_id"], carpentry.id)
         self.assertIn("carpentry", hits[0]["snippet"].lower())
+
+    def test_load_legacy_json_v1_migrates(self) -> None:
+        # A version-1 JSON index (written before the BM25 migration) loads
+        # and searches on the new backend with no manual migration step.
+        quantum, _ = self._docs()
+        payload = {
+            "version": 1,
+            "docs": [{
+                "id": quantum.id,
+                "title": "Quantum",
+                "text": full_text(quantum),
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = DocumentIndex.load(path)
+        (hit,) = loaded.search("quantum")
+        self.assertEqual(hit["doc_id"], quantum.id)
+        self.assertIsInstance(hit["score"], float)
+
+    def test_load_foreign_sqlite_raises(self) -> None:
+        # A SQLite file that is not a document index must fail fast with
+        # DocumentError, not leak storage-layer errors or return empty.
+        import sqlite3 as _sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "other.db"
+            conn = _sqlite3.connect(str(path))
+            conn.execute("CREATE TABLE stuff (a TEXT)")
+            conn.commit()
+            conn.close()
+            with self.assertRaises(DocumentError):
+                DocumentIndex.load(path)
 
     def test_load_missing_file_raises(self) -> None:
         with self.assertRaises(DocumentError):

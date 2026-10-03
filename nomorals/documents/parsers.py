@@ -15,14 +15,28 @@ import re
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
 from ..core.pdf import PdfError, read_pdf_text
 from ..tools.browser import node_to_markdown, parse_html
 from .errors import DocumentError
 from .model import Document, Section, Table, new_document
 
 __all__ = ["parse_bytes", "parse_path"]
+
+_log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break parsing (fail-open telemetry, fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGIC = b"PK\x03\x04"
@@ -484,9 +498,18 @@ def parse_bytes(data: bytes, *, filename: str = "", mime: str = "") -> Document:
     doc = new_document(format=fmt, title=_stem(filename),
                        source=filename or mime or "")
     if fmt in ("csv", "tsv"):
-        return _parse_delimited(data, doc, "\t" if fmt == "tsv" else ",", fmt)
-    parser = _PARSERS[fmt]
-    return parser(data, doc)
+        doc = _parse_delimited(data, doc, "\t" if fmt == "tsv" else ",", fmt)
+    else:
+        doc = _PARSERS[fmt](data, doc)
+    _emit("document.parsed", {
+        "doc_id": doc.id,
+        "format": doc.format,
+        "title": doc.title,
+        "sections": len(doc.sections),
+        "tables": len(doc.tables),
+        "source": doc.source,
+    })
+    return doc
 
 
 def parse_path(path: str | Path) -> Document:

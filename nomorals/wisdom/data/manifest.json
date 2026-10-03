@@ -1,0 +1,430 @@
+{
+  "entries": [
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "bible-kjv",
+      "source_url": "https://www.gutenberg.org/cache/epub/10/pg10.txt",
+      "title": "King James Bible",
+      "tradition": "christianity",
+      "translator": "King James translators (1611)"
+    },
+    {
+      "canon_status": "apocrypha",
+      "license": "public-domain",
+      "slug": "bible-apocrypha",
+      "source_url": "https://archive.org/download/apocryphaornonca0000unse_f3x6/apocryphaornonca0000unse_f3x6_djvu.txt",
+      "title": "The Apocrypha (King James Version)",
+      "tradition": "christianity",
+      "translator": "King James translators (1611)"
+    },
+    {
+      "canon_status": "pseudepigrapha",
+      "license": "public-domain",
+      "slug": "book-of-enoch",
+      "source_url": "https://archive.org/download/cu31924014590545/cu31924014590545_djvu.txt",
+      "title": "The Book of Enoch",
+      "tradition": "judaism",
+      "translator": "R.H. Charles (1917)"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "gospel-of-thomas",
+      "source_url": "https://archive.org/download/isbn_9781976464881/isbn_9781976464881_djvu.txt",
+      "title": "The Gospel of Thomas",
+      "tradition": "christian-gnostic",
+      "translator": "M. C. Ingraham"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "pistis-sophia",
+      "source_url": "https://archive.org/download/pistissophia003016mbp/pistissophia003016mbp_djvu.txt",
+      "title": "Pistis Sophia",
+      "tradition": "christian-gnostic",
+      "translator": "G.R.S. Mead"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "apocryphon-of-john",
+      "source_url": "https://archive.org/download/the-apocryphon-of-john/The%20Apocryphon%20of%20John_djvu.txt",
+      "title": "The Apocryphon of John",
+      "tradition": "christian-gnostic",
+      "translator": "Harris Kakoulides (comp.)"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "gospel-of-philip",
+      "source_url": "https://www.gnosis.org/naghamm/gop.htm",
+      "title": "The Gospel of Philip",
+      "tradition": "christian-gnostic",
+      "translator": "Wesley W. Isenberg",
+      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network, archive.org copies are lending-restricted; kept original URL for retry"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "gospel-of-truth",
+      "source_url": "https://archive.org/download/bim_early-english-books-1641-1700_the-gospel-of-truth-_theodore-nicholas_1967_ia40331216-22/bim_early-english-books-1641-1700_the-gospel-of-truth-_theodore-nicholas_1967_ia40331216-22_djvu.txt",
+      "title": "The Gospel of Truth",
+      "tradition": "christian-gnostic",
+      "translator": "Theodore N. Thalassinos"
+    },
+    {
+      "canon_status": "gnostic",
+      "license": "fair-use",
+      "slug": "hypostasis-of-the-archons",
+      "source_url": "https://archive.org/download/the-hypostasis-of-the-archons-the-coptic-text-roger-aubrey-bullard-author-martin/The%20Hypostasis%20of%20the%20Archons_%20The%20Coptic%20Text%20%20%5BRoger%20Aubrey%20Bullard%20%28Author%29%2C%20Martin%20Krause%20%28Contributor%29_Berserker%20Books%5DFINAL_djvu.txt",
+      "title": "The Hypostasis of the Archons",
+      "tradition": "christian-gnostic",
+      "translator": "Roger A. Bullard (Berserker Books ed.)"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "corpus-hermeticum",
+      "source_url": "https://archive.org/download/corpushermeticum0000grsm/corpushermeticum0000grsm_djvu.txt",
+      "title": "The Corpus Hermeticum",
+      "tradition": "hermeticism",
+      "translator": "G.R.S. Mead"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "emerald-tablet",
+      "source_url": "https://archive.org/download/the-emerald-tablet-of-hermes/The%20Emerald%20Tablet%20of%20Hermes_djvu.txt",
+      "title": "The Emerald Tablet of Hermes",
+      "tradition": "hermeticism",
+      "translator": "various"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "kybalion",
+      "source_url": "https://archive.org/download/1908kybalion_201911/1908kybalion_djvu.txt",
+      "title": "The Kybalion",
+      "tradition": "hermeticism",
+      "translator": "Three Initiates (1912)"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "tao-te-ching",
+      "source_url": "https://www.gutenberg.org/cache/epub/216/pg216.txt",
+      "title": "Tao Te Ching",
+      "tradition": "taoism",
+      "translator": "James Legge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "chuang-tzu",
+      "source_url": "https://archive.org/download/legge-1891-zhuangzi/Legge_1891_Zhuangzi_djvu.txt",
+      "title": "The Writings of Chuang Tzu",
+      "tradition": "taoism",
+      "translator": "James Legge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "i-ching",
+      "source_url": "https://archive.org/download/wg916/bwb_C0-BIZ-500_djvu.txt",
+      "title": "I Ching (Yi King)",
+      "tradition": "taoism",
+      "translator": "James Legge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "upanishads",
+      "source_url": "https://archive.org/download/sacredbooksofeas0001fmax_w2g2/sacredbooksofeas0001fmax_w2g2_djvu.txt",
+      "title": "The Upanishads, Part 1",
+      "tradition": "hinduism",
+      "translator": "Max Muller"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "upanishads-2",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.22552/2015.22552.The-Upanishads--Part-2_djvu.txt",
+      "title": "The Upanishads, Part 2",
+      "tradition": "hinduism",
+      "translator": "Max Muller"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "bhagavad-gita",
+      "source_url": "https://archive.org/download/the-bhagavad-gita_202304/bwb_Y0-CHF-488_djvu.txt",
+      "title": "The Bhagavad Gita",
+      "tradition": "hinduism",
+      "translator": "E. Arnold"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "dhammapada",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.223782/2015.223782.The-Dhammapada_djvu.txt",
+      "title": "The Dhammapada",
+      "tradition": "buddhism",
+      "translator": "Max Muller"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "sutta-nipata",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.282381/2015.282381.The-Sutta_djvu.txt",
+      "title": "The Sutta Nipata (selections)",
+      "tradition": "buddhism",
+      "translator": "V. Fausboll"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "heart-sutra",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.48239/THE%20LOTUS%20SUTRA%2C%20Grand%20Bible%20Excerpt%2C%20p.7044%2C%20Lord%20Henfield%202022_djvu.txt",
+      "title": "Buddhist Mahayana Sutras (Heart Sutra et al.)",
+      "tradition": "buddhism",
+      "translator": "E.B. Cowell"
+    },
+    {
+      "canon_status": "canon",
+      "license": "fair-use",
+      "slug": "platform-sutra",
+      "source_url": "https://archive.org/download/the-sutra-of-hui-neng-grand-master-of-zen-with_commentry_on_the_diamond_sutra/The%20Sutra%20of%20Hui%20neng%20Grnd%20Master%20of%20Zen%20_djvu.txt",
+      "title": "The Platform Sutra of Hui Neng (in Buddhist texts)",
+      "tradition": "buddhism",
+      "translator": "Thomas Cleary"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "analects",
+      "source_url": "https://archive.org/download/bwb_S0-CBZ-187/bwb_S0-CBZ-187_djvu.txt",
+      "title": "The Analects of Confucius",
+      "tradition": "confucianism",
+      "translator": "James Legge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "mencius",
+      "source_url": "https://archive.org/download/thelifeandworkso00meniuoft/thelifeandworkso00meniuoft_djvu.txt",
+      "title": "The Works of Mencius",
+      "tradition": "confucianism",
+      "translator": "James Legge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "quran-pickthall",
+      "source_url": "https://archive.org/download/THEHOLYQURAN_201703/THE%20HOLY%20QURAN_djvu.txt",
+      "title": "The Holy Quran",
+      "tradition": "islam",
+      "translator": "M. Pickthall"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "masnavi-rumi",
+      "source_url": "https://archive.org/download/cu31924026910251/cu31924026910251_djvu.txt",
+      "title": "The Masnavi of Rumi (abridged)",
+      "tradition": "sufism",
+      "translator": "E.H. Whinfield"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "bezels-ibn-arabi",
+      "source_url": "https://www.sacred-texts.com/isl/bez/index.htm",
+      "title": "The Bezels of Wisdom (Fusus al-Hikam)",
+      "tradition": "sufism",
+      "translator": "R.W.J. Austin"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "zohar-selections",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.220627/2015.220627.The-Zohar_djvu.txt",
+      "title": "The Zohar (selections)",
+      "tradition": "judaism",
+      "translator": "Denison Ross"
+    },
+    {
+      "canon_status": "canon",
+      "license": "fair-use",
+      "slug": "sefer-yetzirah",
+      "source_url": "https://archive.org/download/seferyetzirah00arye/seferyetzirah00arye_djvu.txt",
+      "title": "Sefer Yetzirah (The Book of Creation)",
+      "tradition": "judaism",
+      "translator": "Aryeh Kaplan"
+    },
+    {
+      "canon_status": "dss",
+      "license": "public-domain",
+      "slug": "dead-sea-scrolls-manual",
+      "source_url": "https://archive.org/download/B-001-001-920/deadseascrollsqu0000verm_f5x9_djvu.txt",
+      "title": "The Dead Sea Scrolls (Manual of Discipline et al.)",
+      "tradition": "judaism",
+      "translator": "F. Garcia Martinez"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "egyptian-book-of-the-dead",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.200659/egyptianbookofde0000read_djvu.txt",
+      "title": "The Egyptian Book of the Dead",
+      "tradition": "egyptian",
+      "translator": "E.A. Wallis Budge"
+    },
+    {
+      "canon_status": "canon",
+      "license": "fair-use",
+      "slug": "popol-vuh",
+      "source_url": "https://archive.org/download/delia-goetz-adrian-recinos-popol-vuh-university-of-oklahoma-press-1950/534660_djvu.txt",
+      "title": "The Popol Vuh",
+      "tradition": "mesoamerican",
+      "translator": "Goetz & Morley (after A. Recinos)"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "hatha-yoga-pradipika",
+      "source_url": "https://archive.org/download/HathaYogaPradipika_201509/Hatha%20Yoga%20Pradipika_djvu.txt",
+      "title": "Hatha Yoga Pradipika",
+      "tradition": "hinduism",
+      "translator": "Srinivasa Iyangar"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "yoga-sutras-patanjali",
+      "source_url": "https://archive.org/download/in.ernet.dli.2015.553697/2015.553697.The-Sacred_djvu.txt",
+      "title": "The Yoga Sutras of Patanjali",
+      "tradition": "hinduism",
+      "translator": "B.D. Basu (ed.)"
+    },
+    {
+      "canon_status": "secondary",
+      "license": "public-domain",
+      "slug": "secret-doctrine-blavatsky",
+      "source_url": "https://archive.org/download/secretdoctrine0002hpbl/secretdoctrine0002hpbl_djvu.txt",
+      "title": "The Secret Doctrine (selections)",
+      "tradition": "theosophy",
+      "translator": "H.P. Blavatsky"
+    },
+    {
+      "canon_status": "secondary",
+      "license": "public-domain",
+      "slug": "isis-unveiled",
+      "source_url": "https://archive.org/download/isisunveiled0001hpbl/isisunveiled0001hpbl_djvu.txt",
+      "title": "Isis Unveiled (selections)",
+      "tradition": "theosophy",
+      "translator": "H.P. Blavatsky"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "philokalia-selections",
+      "source_url": "https://archive.org/download/philokaliacompl00gehp/philokaliacompl00gehp_djvu.txt",
+      "title": "The Philokalia (selections)",
+      "tradition": "christianity",
+      "translator": "Palmer, Sherrard & Ware"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "cloud-of-unknowing",
+      "source_url": "https://archive.org/download/gtu_32400001021355/gtu_32400001021355_djvu.txt",
+      "title": "The Cloud of Unknowing",
+      "tradition": "christianity",
+      "translator": "Evelyn Underhill"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "meditations-marcus-aurelius",
+      "source_url": "https://archive.org/download/meditationsofmar0000geor_l7s6/meditationsofmar0000geor_l7s6_djvu.txt",
+      "title": "The Meditations of Marcus Aurelius",
+      "tradition": "stoicism",
+      "translator": "George Long"
+    },
+    {
+      "canon_status": "canon",
+      "license": "public-domain",
+      "slug": "enchiridion-epictetus",
+      "source_url": "https://archive.org/download/enchiridionofepi0000epic/enchiridionofepi0000epic_djvu.txt",
+      "title": "The Enchiridion of Epictetus",
+      "tradition": "stoicism",
+      "translator": "Elizabeth Carter"
+    },
+    {
+      "canon_status": "pseudepigrapha",
+      "license": "public-domain",
+      "slug": "book-of-jubilees",
+      "source_url": "https://archive.org/download/bookofjubilees0000revg/bookofjubilees0000revg_djvu.txt",
+      "title": "The Book of Jubilees",
+      "tradition": "judaism",
+      "translator": "George H. Schodde"
+    },
+    {
+      "canon_status": "pseudepigrapha",
+      "license": "public-domain",
+      "slug": "testaments-twelve-patriarchs",
+      "source_url": "https://archive.org/download/testaments-of-the-twelve-patriarchs-the/Testaments%20of%20the%20Twelve%20Patriarchs%2C%20The_djvu.txt",
+      "title": "The Testaments of the Twelve Patriarchs",
+      "tradition": "judaism",
+      "translator": "R.H. Charles"
+    },
+    {
+      "canon_status": "apocrypha",
+      "license": "public-domain",
+      "slug": "gospel-of-mary",
+      "source_url": "https://www.gnosis.org/library/marygosp.htm",
+      "title": "The Gospel of Mary",
+      "tradition": "christian-gnostic",
+      "translator": "Karen L. King",
+      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network, archive.org copies are lending-restricted; kept original URL for retry"
+    },
+    {
+      "canon_status": "eastern",
+      "license": "public-domain",
+      "slug": "tibetan-book-of-the-dead",
+      "source_url": "https://archive.org/download/tibetanbookofdea0000vari/tibetanbookofdea0000vari_djvu.txt",
+      "title": "The Tibetan Book of the Dead",
+      "tradition": "buddhism",
+      "translator": "W.Y. Evans-Wentz"
+    },
+    {
+      "canon_status": "eastern",
+      "license": "fair-use",
+      "slug": "shurangama-sutra",
+      "source_url": "https://archive.org/download/TheSurangamaSutraWithCommentary/The%20Surangama%20Sutra%20with%20commentary_djvu.txt",
+      "title": "The Shurangama Sutra (in Buddhist texts)",
+      "tradition": "buddhism",
+      "translator": "Hsuan Hua (BTTS)"
+    },
+    {
+      "canon_status": "esoteric",
+      "license": "public-domain",
+      "slug": "picatrix-selections",
+      "source_url": "https://archive.org/download/the-Picatrix-Liber-Rubeus-Edition-Greer-and-Warnock/the-Picatrix-Liber-Rubeus-Edition-Greer-and-Warnock_djvu.txt",
+      "title": "The Picatrix (selections)",
+      "tradition": "hermeticism",
+      "translator": "Greer & Warnock"
+    },
+    {
+      "canon_status": "secondary",
+      "license": "public-domain",
+      "slug": "varieties-religious-experience",
+      "source_url": "https://archive.org/download/varietiesofrelig0000will_k3y3/varietiesofrelig0000will_k3y3_djvu.txt",
+      "title": "The Varieties of Religious Experience",
+      "tradition": "interfaith",
+      "translator": "William James"
+    }
+  ],
+  "version": 1
+}

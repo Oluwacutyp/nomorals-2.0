@@ -15,10 +15,23 @@ from pathlib import Path
 from typing import Any
 
 from ..core.diff import DiffApplyError, apply_unified_diff
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
 from .workspace import WorkspaceError
 
 __all__ = ["review_patch", "apply_patch", "preview_patch", "record_patch"]
+
+_log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break patching (fail-open telemetry, fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 _DEV_NULL = "/dev/null"
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -170,6 +183,16 @@ def apply_patch(diff_text: str, *, dry_run: bool = True,
                                 "error": f"write failed: {exc}"})
                 continue
         results.append({"path": target, "ok": True, "error": ""})
+    if not dry_run:
+        patched = sum(1 for r in results if r["ok"])
+        failed = len(results) - patched
+        _emit("codews.patch.applied", {
+            "root": str(base),
+            "dry_run": False,
+            "files": [r["path"] for r in results],
+            "patched": patched,
+            "failed": failed,
+        })
     return results
 
 
