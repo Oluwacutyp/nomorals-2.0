@@ -32,6 +32,7 @@ from ..tools.browser import BrowserSession
 __all__ = [
     "BrowserError",
     "Tab",
+    "RenderedTab",
     "SessionHandle",
     "BrowserService",
     "DownloadResult",
@@ -201,6 +202,213 @@ class Tab:
 
 # ── session handle ───────────────────────────────────────────────────────────
 
+# Playwright install hint, same shape as the screenshot() fail-fast.
+_PLAYWRIGHT_HINT = (
+    "rendered tabs require the 'playwright' package and a chromium build: "
+    "pip install playwright && playwright install chromium"
+)
+
+#: goto timeout for rendered tabs (Cloudflare-guarded pages can be slow).
+_RENDERED_GOTO_TIMEOUT_MS = 60_000
+
+
+def _require_playwright_sync():
+    """The playwright sync API factory, or a BrowserError that says exactly
+    how to get it. Never imports playwright at module load."""
+    if importlib.util.find_spec("playwright") is None:
+        raise BrowserError(_PLAYWRIGHT_HINT)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise BrowserError(_PLAYWRIGHT_HINT) from exc
+    return sync_playwright
+
+
+class RenderedTab:
+    """A playwright-backed tab with the same navigate/text/links shape as
+    :class:`Tab`, rendered through real headless Chromium.
+
+    Plain-HTTP tabs cannot pass Cloudflare managed challenges ("Just a
+    moment..."); a rendered tab executes the page's JavaScript and keeps
+    cookies via playwright's ``storage_state``, persisted to the session's
+    cookie directory so logins survive restarts.
+
+    The tab does NOT own the playwright driver: it receives the started
+    driver object from :meth:`BrowserService.open_rendered_tab` and
+    launches one browser per tab on the first ``navigate()``. The driver
+    itself lives as long as the service — playwright's sync API cannot
+    be stopped and restarted in one thread, so the service starts it once
+    and only tears it down in :meth:`BrowserService.shutdown`.
+    """
+
+    def __init__(
+        self,
+        tab_id: str,
+        session_name: str,
+        storage_state_path: str | os.PathLike[str],
+        playwright: Any,
+    ) -> None:
+        self.tab_id = tab_id
+        self.session_name = session_name
+        self.url: str = ""
+        self.title: str = ""
+        self.history: list[dict[str, Any]] = []
+        #: last load failure (set by navigate); empty when the tab is clean.
+        self.error: str = ""
+        self._storage_state_path = Path(storage_state_path)
+        #: started driver object (owns .chromium); owned by the service.
+        self._playwright = playwright
+        self._browser: Any = None
+        self._context: Any = None
+        self._page: Any = None
+
+    # -- browser lifecycle ---------------------------------------------------
+    def _ensure_page(self) -> Any:
+        """Launch this tab's browser (once) and return the page. Fail fast:
+        a launch failure raises BrowserError, never None."""
+        if self._page is not None:
+            return self._page
+        try:
+            self._browser = self._playwright.chromium.launch(headless=True)
+            state = str(self._storage_state_path)
+            if self._storage_state_path.is_file():
+                self._context = self._browser.new_context(storage_state=state)
+            else:
+                self._context = self._browser.new_context()
+            self._page = self._context.new_page()
+        except Exception as exc:  # noqa: BLE001 - launch errors are opaque
+            self._teardown_quiet()
+            raise BrowserError(
+                f"rendered tab could not launch chromium: {exc}. "
+                f"{_PLAYWRIGHT_HINT}"
+            ) from exc
+        return self._page
+
+    def _teardown_quiet(self) -> None:
+        for attr in ("_page", "_context", "_browser"):
+            obj = getattr(self, attr)
+            setattr(self, attr, None)
+            if obj is None:
+                continue
+            close = getattr(obj, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - teardown best effort
+                    _log.debug("rendered tab teardown %s.close failed", attr)
+
+    # -- navigation ----------------------------------------------------------
+    def navigate(self, url: str) -> dict[str, Any]:
+        """Render the page and append to history AFTER the load succeeded."""
+        url = (url or "").strip()
+        if not url:
+            raise BrowserError("navigate needs a url")
+        page = self._ensure_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=_RENDERED_GOTO_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 - goto errors are opaque
+            self.error = f"navigate {url} failed: {exc}"
+            raise BrowserError(self.error) from exc
+        self.url = page.url
+        try:
+            self.title = page.title()
+        except Exception:  # noqa: BLE001 - title is cosmetic
+            self.title = ""
+        self.error = ""
+        entry = {"url": self.url, "title": self.title, "ts": time.time()}
+        self.history.append(entry)
+        return dict(entry)
+
+    def _require_loaded(self) -> Any:
+        if self._page is None or not self.url:
+            raise BrowserError("rendered tab has no loaded page — navigate first")
+        return self._page
+
+    # -- page work (same result shapes as Tab) --------------------------------
+    def text(self, max_chars: int = 40000) -> dict[str, Any]:
+        """Rendered DOM inner text of <body>."""
+        page = self._require_loaded()
+        try:
+            content = page.inner_text("body")
+        except Exception as exc:  # noqa: BLE001 - extraction errors are opaque
+            raise BrowserError(f"text on {self.url} failed: {exc}") from exc
+        return {"url": self.url, "title": self.title, "chars": len(content),
+                "text": content[:max_chars],
+                "truncated": len(content) > max_chars}
+
+    def links(self, max_links: int = 100) -> dict[str, Any]:
+        """Rendered links; ``el.href`` is already absolute per the DOM."""
+        page = self._require_loaded()
+        try:
+            raw = page.eval_on_selector_all(
+                "a[href]",
+                "els => els.map(e => ({text: (e.innerText || '').trim(), "
+                "href: e.href}))",
+            )
+        except Exception as exc:  # noqa: BLE001 - extraction errors are opaque
+            raise BrowserError(f"links on {self.url} failed: {exc}") from exc
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in raw or []:
+            href = str((item or {}).get("href", ""))
+            parsed = urllib.parse.urlparse(href)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            key = href.split("#", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"text": str((item or {}).get("text", "")),
+                        "url": href})
+            if len(out) >= max_links:
+                break
+        return {"url": self.url, "count": len(out), "links": out}
+
+    def html(self, max_chars: int = 2_000_000) -> dict[str, Any]:
+        """Full rendered HTML (post-JavaScript DOM) for structured parsing."""
+        page = self._require_loaded()
+        try:
+            content = page.content()
+        except Exception as exc:  # noqa: BLE001 - extraction errors are opaque
+            raise BrowserError(f"html on {self.url} failed: {exc}") from exc
+        return {"url": self.url, "title": self.title, "chars": len(content),
+                "html": content[:max_chars],
+                "truncated": len(content) > max_chars}
+
+    def state(self) -> dict[str, Any]:
+        return {
+            "tab_id": self.tab_id,
+            "session_name": self.session_name,
+            "url": self.url,
+            "title": self.title,
+            "history": [dict(h) for h in self.history],
+            "error": self.error,
+            "rendered": True,
+        }
+
+    def close(self) -> None:
+        """Persist cookies (storage_state) to the session dir, then tear the
+        browser down. A state-save failure is logged, never masks teardown."""
+        if self._context is not None:
+            try:
+                self._storage_state_path.parent.mkdir(parents=True,
+                                                      exist_ok=True)
+                self._context.storage_state(path=str(self._storage_state_path))
+            except Exception as exc:  # noqa: BLE001 - persistence best effort
+                _log.warning("rendered tab %s: could not persist cookies: %s",
+                             self.tab_id, exc)
+        self._teardown_quiet()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tab_id": self.tab_id,
+            "url": self.url,
+            "title": self.title,
+            "history": [dict(h) for h in self.history],
+            "rendered": True,
+        }
+
 
 class SessionHandle:
     """The tabs of one named browsing session."""
@@ -301,6 +509,12 @@ class BrowserService:
         ).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, SessionHandle] = {}
+        self._rendered_tabs: dict[str, RenderedTab] = {}
+        #: playwright driver for rendered tabs: started once, lazily, and
+        #: kept for the service's lifetime — the sync API cannot be
+        #: stopped and restarted in one thread.
+        self._pw_cm: Any = None
+        self._playwright: Any = None
         self._artifact_store = artifact_store
         self._mission_id = mission_id or ""
 
@@ -331,8 +545,105 @@ class BrowserService:
             raise BrowserError(f"unknown session {name!r}")
         for tab_id in list(handle._tabs):
             handle.close_tab(tab_id)
+        for tab_id, tab in list(self._rendered_tabs.items()):
+            if tab.session_name == name:
+                tab.close()
+                del self._rendered_tabs[tab_id]
         del self._sessions[name]
         self.save()
+
+    # -- rendered tabs (real headless Chromium via playwright) -----------------
+    def _rendered_state_path(self, session_name: str) -> Path:
+        return Path(self._cookie_dir(session_name)) / "playwright-storage.json"
+
+    def _driver(self) -> Any:
+        """The started playwright driver object, created once and kept for
+        the service's lifetime. Fail fast with the install hint when
+        playwright is missing or the driver won't start."""
+        if self._playwright is not None:
+            return self._playwright
+        sync_playwright = _require_playwright_sync()  # fail fast first
+        try:
+            # NOTE: sync_playwright() returns a context manager; .chromium
+            # only exists on the object start() returns (what ``with``
+            # binds as ``p``). Teardown is __exit__ — there is no stop().
+            self._pw_cm = sync_playwright()
+            self._playwright = self._pw_cm.start()
+        except Exception as exc:  # noqa: BLE001 - driver errors are opaque
+            self._pw_cm = None
+            self._playwright = None
+            raise BrowserError(
+                f"rendered tabs could not start the playwright driver: "
+                f"{exc}. {_PLAYWRIGHT_HINT}"
+            ) from exc
+        return self._playwright
+
+    def shutdown(self) -> None:
+        """Close all rendered tabs and stop the playwright driver.
+
+        Idempotent. After this, rendered tabs cannot be opened again on
+        this service (the sync API cannot restart in one thread) — only
+        call it when the service is truly done.
+        """
+        for tab_id in list(self._rendered_tabs):
+            try:
+                self.close_rendered_tab(tab_id)
+            except Exception as exc:  # noqa: BLE001 - shutdown must complete
+                _log.warning("shutdown: closing rendered tab %s failed: %s",
+                             tab_id, exc)
+        cm, self._pw_cm = self._pw_cm, None
+        self._playwright = None
+        if cm is not None:
+            try:
+                cm.__exit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 - shutdown best effort
+                _log.warning("browser service shutdown failed: %s", exc)
+
+    def open_rendered_tab(self, session_name: str, url: str = "") -> RenderedTab:
+        """Open a playwright-backed tab in ``session_name``'s cookie space.
+
+        For JavaScript/Cloudflare-guarded pages that plain-HTTP tabs cannot
+        pass. Cookies persist via playwright storage_state in the session's
+        cookie dir. Fail fast: raises BrowserError when playwright or its
+        chromium build is missing, or when the initial navigate fails.
+        """
+        session_name = (session_name or "").strip()
+        if not session_name:
+            raise BrowserError("session name must not be empty")
+        playwright = self._driver()  # fail fast before touching anything
+        tab_id = ulid_now()
+        tab = RenderedTab(
+            tab_id=tab_id,
+            session_name=session_name,
+            storage_state_path=self._rendered_state_path(session_name),
+            playwright=playwright,
+        )
+        self._rendered_tabs[tab_id] = tab
+        try:
+            if (url or "").strip():
+                tab.navigate(url)
+        except BrowserError:
+            tab.close()
+            del self._rendered_tabs[tab_id]
+            raise
+        return tab
+
+    def close_rendered_tab(self, tab_id: str) -> None:
+        tab = self._rendered_tabs.get(tab_id)
+        if tab is None:
+            raise BrowserError(f"unknown rendered tab {tab_id!r}")
+        tab.close()
+        del self._rendered_tabs[tab_id]
+
+    def find_rendered_tab(self, tab_id: str) -> RenderedTab | None:
+        return self._rendered_tabs.get(tab_id)
+
+    def list_rendered_tabs(self) -> list[dict[str, str]]:
+        return [
+            {"tab_id": t.tab_id, "session_name": t.session_name,
+             "url": t.url, "title": t.title}
+            for t in self._rendered_tabs.values()
+        ]
 
     def list_sessions(self) -> list[str]:
         return list(self._sessions)

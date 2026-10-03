@@ -30,6 +30,7 @@ from .checkpoints import (
     request_human_action,
 )
 from .github import GitHubConnector, GitHubError
+from .jiji import JijiConnector, JijiError
 from .jumia import JumiaConnector
 from .konga import KongaConnector, KongaError
 from .mono import MonoConnector
@@ -56,6 +57,8 @@ __all__ = [
     "GitHubError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
+    "JijiConnector",
+    "JijiError",
     "JumiaConnector",
     "KongaConnector",
     "KongaError",
