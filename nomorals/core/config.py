@@ -245,6 +245,8 @@ class ChatSettings:
     telegram_bot_chats: str = ""
     discord_enabled: bool = False
     discord_token: str = ""
+    discord_channels: str = ""
+    discord_greet_new: bool = True
     whatsapp_enabled: bool = False
     whatsapp_host: str = "127.0.0.1"
     whatsapp_port: int = 8787
@@ -726,6 +728,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_DISCORD_ENABLED": "chat.discord_enabled",
     "NM_CHAT_DISCORD_TOKEN": "chat.discord_token",
     "NM_CHAT_DISCORD_WEBHOOK": "chat.discord_webhook",
+    "NM_CHAT_DISCORD_CHANNELS": "chat.discord_channels",
     "NM_CHAT_WEBHOOK_ENABLED": "chat.webhook_enabled",
     "NM_CHAT_WEBHOOK_HOST": "chat.webhook_host",
     "NM_CHAT_WEBHOOK_PORT": "chat.webhook_port",
