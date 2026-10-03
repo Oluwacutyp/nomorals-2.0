@@ -44,7 +44,7 @@ from typing import Any
 
 from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
-from .service import BrowserError, BrowserService
+from .service import BrowserError, BrowserService, _mask_proxy
 
 __all__ = [
     "DaemonClient",
@@ -69,7 +69,7 @@ _FRAME_HEADER = struct.Struct(">I")
 #: Refuse absurd frames early instead of buffering garbage.
 _MAX_FRAME = 256 * 1024 * 1024
 #: Ops that mutate persisted session state; the daemon saves after each.
-_MUTATING_OPS = frozenset({"open", "close"})
+_MUTATING_OPS = frozenset({"open", "close", "click", "submit"})
 #: Cap on bus events buffered between client drains.
 _MAX_BUFFERED_EVENTS = 10_000
 
@@ -463,6 +463,13 @@ def _active_tab_or_raise(handle: Any):
         raise BrowserError("no tabs open — `nm browse open <url>` first") from exc
 
 
+def _rendered_tab_or_raise(svc: BrowserService, tab_id: str):
+    tab = svc.find_rendered_tab(tab_id)
+    if tab is None:
+        raise BrowserError(f"unknown rendered tab {tab_id!r}")
+    return tab
+
+
 def _get_or_open(svc: BrowserService, name: str):
     name = (name or "").strip() or "cli"
     try:
@@ -515,7 +522,8 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         except BrowserError:
             tab = None
         result = svc.download(tab if tab is not None else url,
-                              url if tab is not None else "")
+                              url if tab is not None else "",
+                              organize=bool(params.get("organize")))
         return {"result": result.to_dict()}
     if op == "history":
         return {"history": _get_or_open(svc, name).history()}
@@ -524,6 +532,103 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         return {"closed": name}
     if op == "shutdown":
         return {"stopped": True}
+    # -- forms & interaction --------------------------------------------------
+    if op == "fill":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.fill(params.get("name") or "",
+                                   params.get("value") or "")}
+    if op == "click":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.click(params.get("target") or "")}
+    if op == "submit":
+        uploads = params.get("uploads")
+        if uploads is not None and not isinstance(uploads, dict):
+            raise DaemonError("submit uploads must be a {field: path} object")
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.submit(params.get("target") or "",
+                                     uploads=uploads)}
+    if op == "extract":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.extract(params.get("target") or "",
+                                      kind=params.get("kind") or "")}
+    if op == "task":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.task(params.get("steps"))}
+    # -- cookies --------------------------------------------------------------
+    if op == "cookies":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"cookies": tab.cookies()}
+    if op == "cookies_export":
+        return {"result": svc.export_cookies(
+            name, params.get("path") or "",
+            format=params.get("format") or "netscape")}
+    if op == "cookies_import":
+        return {"result": svc.import_cookies(
+            name, params.get("path") or "",
+            format=params.get("format") or "netscape")}
+    # -- proxies --------------------------------------------------------------
+    if op == "proxy":
+        action = (params.get("action") or "status").strip().lower()
+        if action == "rotate":
+            return {"result": svc.rotate_proxy(name)}
+        if action == "set":
+            return {"result": svc.set_session_proxy(
+                name, params.get("proxy_url") or "")}
+        if action == "clear":
+            return {"result": svc.set_session_proxy(name, "")}
+        if action == "status":
+            return {"attached": svc.proxy_pool_attached(),
+                    "proxy": _mask_proxy(svc.session_proxy(name)) or "direct"}
+        raise DaemonError(
+            f"unknown proxy action {action!r}: status|rotate|set|clear")
+    # -- downloads ------------------------------------------------------------
+    if op == "downloads":
+        return {"downloads": svc.list_downloads(
+            params.get("session") or name,
+            category=params.get("category") or "",
+            limit=int(params.get("limit") or 100))}
+    if op == "wait_download":
+        return {"result": svc.wait_for_download(
+            params.get("download_id") or "",
+            timeout=float(params.get("timeout") or 60.0))}
+    # -- rendered tabs ----------------------------------------------------------
+    if op == "r_open":
+        tab = svc.open_rendered_tab(name, params.get("url") or "",
+                                    proxy=params.get("proxy") or "")
+        return {"tab": tab.to_dict(), "tab_id": tab.tab_id}
+    if op == "r_tabs":
+        return {"tabs": svc.list_rendered_tabs()}
+    if op == "r_close":
+        tab_id = params.get("tab_id") or ""
+        svc.close_rendered_tab(tab_id)
+        return {"closed": tab_id}
+    if op == "r_shot":
+        return {"result": svc.screenshot_rendered(
+            params.get("tab_id") or "",
+            full_page=bool(params.get("full_page"))).to_dict()}
+    if op == "r_fill":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.fill(params.get("name") or "",
+                                   params.get("value") or "")}
+    if op == "r_click":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.click(params.get("target") or "")}
+    if op == "r_submit":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.submit(params.get("target") or "")}
+    if op == "r_wait":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for(
+            params.get("selector") or "",
+            state=params.get("state") or "visible",
+            timeout=int(params.get("timeout") or 10_000))}
+    if op == "r_extract":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.extract(params.get("target") or "",
+                                      kind=params.get("kind") or "")}
+    if op == "r_download":
+        return {"result": svc.rendered_tab_download(
+            params.get("tab_id") or "", params.get("target") or "")}
     raise DaemonError(f"unknown daemon op {op!r}")
 
 

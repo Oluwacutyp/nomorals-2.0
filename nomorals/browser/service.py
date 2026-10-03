@@ -5,8 +5,13 @@ A :class:`BrowserService` owns named sessions. Each session holds tabs;
 each :class:`Tab` wraps exactly one ``tools.browser.BrowserSession`` and
 adds per-tab navigation history on top of it. State persists to disk
 (``sessions.json``) and cookie jars persist per session, so logins survive
-restarts. Downloads stream through the owning tab's cookie jar; screenshots
-use headless Chromium via playwright when it is installed.
+restarts. Downloads stream through the owning tab's cookie jar and are
+tracked in a registry (``downloads.json``); screenshots use headless
+Chromium via playwright when it is installed. Sessions can route traffic
+through a proxy pool (duck-typed — see :meth:`BrowserService.attach_proxy_pool`);
+cookies can be inspected/exported/imported; forms support multipart file
+uploads; rendered (playwright) tabs support fill/click/submit/wait/
+extract/upload/download on the live DOM.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import http.cookiejar
 import importlib.util
 import json
+import mimetypes
 import os
 import time
 import urllib.error
@@ -28,7 +34,15 @@ from ..core.events import Event, global_bus
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
-from ..tools.browser import BrowserSession
+from ..tools.browser import (
+    BrowserSession,
+    dom_forms,
+    dom_headings,
+    dom_meta,
+    dom_nav,
+    dom_tables,
+    parse_html,
+)
 
 __all__ = [
     "BrowserError",
@@ -52,7 +66,45 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
         _log.debug("event %s failed", topic, exc_info=True)
 
 _SESSIONS_FILE = "sessions.json"
+_DOWNLOADS_FILE = "downloads.json"
 _SAVE_VERSION = 1
+
+#: MIME top-type -> download subfolder used when organize=True.
+_MIME_CATEGORIES = {
+    "image": "images",
+    "video": "videos",
+    "audio": "audio",
+}
+
+
+def _mime_category(mime: str) -> str:
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if mime == "application/octet-stream":
+        # generic binary bucket — unknown content, not a document
+        return "other"
+    top = mime.split("/", 1)[0].strip().lower()
+    if top in _MIME_CATEGORIES:
+        return _MIME_CATEGORIES[top]
+    if top in {"text", "application"}:
+        return "documents"
+    return "other"
+
+
+def _mask_proxy(proxy_url: str) -> str:
+    """Hide the proxy password for logs/events/results."""
+    try:
+        parsed = urllib.parse.urlparse(proxy_url)
+        if parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.username:
+                netloc = f"{parsed.username}:***@{netloc}"
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            return urllib.parse.urlunparse(
+                (parsed.scheme, netloc, parsed.path, "", "", ""))
+    except Exception:  # noqa: BLE001 - masking must never raise
+        pass
+    return proxy_url
 
 
 class BrowserError(Exception):
@@ -179,18 +231,67 @@ class Tab:
         return result
 
     def fill(self, name: str, value: str) -> dict[str, Any]:
-        return self._delegate("fill", name=name, value=value)
+        return self._delegate("fill", name, value)
 
-    def submit(self, target: str) -> dict[str, Any]:
-        result = self._delegate("submit", target=target)
+    def upload(self, field_name: str, file_path: str) -> dict[str, Any]:
+        """Stage a file for a ``<input type="file">`` field, then submit.
+
+        This only *stages* the path (like :meth:`fill`); the multipart
+        upload happens on the next :meth:`submit`. The file must exist and
+        be readable — otherwise this fails fast here, not at submit time.
+        """
+        field_name = (field_name or "").strip()
+        path = os.path.abspath(os.path.expanduser((file_path or "").strip()))
+        if not field_name:
+            raise BrowserError("upload needs a field name")
+        if not os.path.isfile(path):
+            raise BrowserError(f"upload: not a file: {file_path!r}")
+        try:
+            with open(path, "rb"):
+                pass
+        except OSError as exc:
+            raise BrowserError(
+                f"upload: cannot read {file_path!r}: {exc}") from exc
+        return self._delegate("fill", field_name, path)
+
+    def submit(self, target: str = "",
+               uploads: dict[str, str] | None = None) -> dict[str, Any]:
+        result = self._delegate("submit", target=target, uploads=uploads)
         self.url = self.session.url
         self.title = self.session.title
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
         return result
 
+    def cookies(self) -> list[dict[str, Any]]:
+        """This tab's live cookie jar as plain dicts (inspection, not just
+        persistence)."""
+        out: list[dict[str, Any]] = []
+        for cookie in self.session.cookie_jar:
+            out.append({
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+                "secure": bool(cookie.secure),
+                "expires": cookie.expires,
+                "http_only": bool(cookie.has_nonstandard_attr("HttpOnly")),
+            })
+        out.sort(key=lambda c: (c["domain"], c["path"], c["name"]))
+        return out
+
+    def set_proxy(self, proxy_url: str = "") -> dict[str, Any]:
+        """Route this tab's session through ``proxy_url`` ("" = direct).
+
+        The tab's cookie jar survives the switch."""
+        return self.session.set_proxy(proxy_url)
+
     def extract(self, target: str = "", kind: str = "") -> dict[str, Any]:
         return self._delegate("extract", target=target, kind=kind)
+
+    def task(self, steps: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """Run a multi-step task program on this tab's session."""
+        return self._delegate("task", steps=steps, **kwargs)
 
     def state(self) -> dict[str, Any]:
         base = self._delegate("state")
@@ -240,6 +341,27 @@ def _require_playwright_sync():
     return sync_playwright
 
 
+def _playwright_proxy_config(proxy_url: str) -> dict[str, Any] | None:
+    """Playwright's ``launch(proxy=...)`` dict from a proxy URL (userinfo
+    becomes username/password). None when no proxy is configured."""
+    proxy_url = (proxy_url or "").strip()
+    if not proxy_url:
+        return None
+    parsed = urllib.parse.urlparse(
+        proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    if not parsed.hostname:
+        raise BrowserError(f"bad proxy URL {proxy_url!r}")
+    server = f"{parsed.scheme or 'http'}://{parsed.hostname}"
+    if parsed.port:
+        server += f":{parsed.port}"
+    cfg: dict[str, Any] = {"server": server}
+    if parsed.username:
+        cfg["username"] = urllib.parse.unquote(parsed.username)
+    if parsed.password:
+        cfg["password"] = urllib.parse.unquote(parsed.password)
+    return cfg
+
+
 class RenderedTab:
     """A playwright-backed tab with the same navigate/text/links shape as
     :class:`Tab`, rendered through real headless Chromium.
@@ -263,6 +385,7 @@ class RenderedTab:
         session_name: str,
         storage_state_path: str | os.PathLike[str],
         playwright: Any,
+        proxy: str = "",
     ) -> None:
         self.tab_id = tab_id
         self.session_name = session_name
@@ -274,6 +397,8 @@ class RenderedTab:
         self._storage_state_path = Path(storage_state_path)
         #: started driver object (owns .chromium); owned by the service.
         self._playwright = playwright
+        #: proxy URL for this tab's chromium ("" = direct).
+        self._proxy = (proxy or "").strip()
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -285,7 +410,11 @@ class RenderedTab:
         if self._page is not None:
             return self._page
         try:
-            self._browser = self._playwright.chromium.launch(headless=True)
+            launch_kwargs: dict[str, Any] = {"headless": True}
+            proxy_cfg = _playwright_proxy_config(self._proxy)
+            if proxy_cfg:
+                launch_kwargs["proxy"] = proxy_cfg
+            self._browser = self._playwright.chromium.launch(**launch_kwargs)
             state = str(self._storage_state_path)
             if self._storage_state_path.is_file():
                 self._context = self._browser.new_context(storage_state=state)
@@ -391,6 +520,234 @@ class RenderedTab:
         return {"url": self.url, "title": self.title, "chars": len(content),
                 "html": content[:max_chars],
                 "truncated": len(content) > max_chars}
+
+    # -- interaction (same verbs as Tab.fill/click/submit, on the live DOM) --
+    @staticmethod
+    def _field_selector(name: str) -> str:
+        """Match a form field by name, then id — whichever the page uses."""
+        escaped = (name or "").replace('"', '\\"')
+        return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"], [id="{escaped}"]'
+
+    def fill(self, name: str, value: str) -> dict[str, Any]:
+        """Fill a form field by name or id on the rendered page."""
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("rendered fill needs a field name")
+        selector = self._field_selector(name)
+        try:
+            page.fill(selector, str(value))
+        except Exception as exc:  # noqa: BLE001 - selector errors are opaque
+            raise BrowserError(
+                f"rendered fill of {name!r} on {self.url} failed: {exc}") from exc
+        return {"ok": True, "field": name, "tab_id": self.tab_id}
+
+    def click(self, target: str) -> dict[str, Any]:
+        """Click a link/button: CSS selector when it looks like one
+        (starts with ``#``, ``.``, ``[``, or contains ``>>``), otherwise
+        visible text match. The tab's URL/title/history refresh after the
+        click, like :meth:`Tab.click`."""
+        page = self._require_loaded()
+        target = (target or "").strip()
+        if not target:
+            raise BrowserError("rendered click needs a target")
+        selector = (target if target[:1] in {"#", ".", "["} or ">>" in target
+                    else f"text={target}")
+        before = page.url
+        try:
+            page.click(selector)
+        except Exception as exc:  # noqa: BLE001 - click errors are opaque
+            raise BrowserError(
+                f"rendered click of {target!r} on {self.url} failed: {exc}") from exc
+        try:
+            after = page.url
+        except Exception:  # noqa: BLE001 - url read is cosmetic
+            after = before
+        if after != before:
+            self.url = after
+            try:
+                self.title = page.title()
+            except Exception:  # noqa: BLE001 - title is cosmetic
+                pass
+            self.history.append(
+                {"url": self.url, "title": self.title, "ts": time.time()})
+        return {"ok": True, "target": target, "url": self.url,
+                "title": self.title, "navigated": after != before}
+
+    def submit(self, target: str = "") -> dict[str, Any]:
+        """Submit a form: click ``target`` when given (button text/selector),
+        else submit the page's first form directly. URL/title/history
+        refresh after the submit."""
+        page = self._require_loaded()
+        target = (target or "").strip()
+        try:
+            if target:
+                self.click(target)
+            else:
+                page.eval_on_selector("form", "f => f.submit()")
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - submit errors are opaque
+            raise BrowserError(
+                f"rendered submit on {self.url} failed: {exc}") from exc
+        try:
+            self.url = page.url
+            self.title = page.title()
+        except Exception:  # noqa: BLE001 - cosmetic
+            pass
+        self.history.append(
+            {"url": self.url, "title": self.title, "ts": time.time()})
+        return {"ok": True, "url": self.url, "title": self.title}
+
+    def wait_for(self, selector: str = "", *, state: str = "visible",
+                 timeout: int = 10_000) -> dict[str, Any]:
+        """Wait for a selector to reach ``state`` (visible|hidden|attached|
+        detached). Fail fast on timeout — never a silent pass."""
+        page = self._require_loaded()
+        selector = (selector or "").strip()
+        if not selector:
+            raise BrowserError("rendered wait_for needs a selector")
+        try:
+            page.wait_for_selector(selector, state=state, timeout=int(timeout))
+        except Exception as exc:  # noqa: BLE001 - timeout errors are opaque
+            raise BrowserError(
+                f"rendered wait_for {selector!r} ({state}) on {self.url} "
+                f"timed out after {timeout}ms: {exc}") from exc
+        return {"ok": True, "selector": selector, "state": state}
+
+    def screenshot(self, *, full_page: bool = False,
+                   path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+        """Screenshot THIS tab's live rendered page (unlike
+        :meth:`BrowserService.screenshot`, this does not reload the URL in
+        a fresh context — logged-in state and JS mutations are captured).
+        """
+        page = self._require_loaded()
+        dest_dir = Path(self._storage_state_path).parent.parent / "screenshots" / self.session_name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = Path(path) if path else dest_dir / f"rendered-{int(time.time() * 1000)}.png"
+        try:
+            page.screenshot(path=str(out), full_page=full_page)
+        except Exception as exc:  # noqa: BLE001 - capture errors are opaque
+            raise BrowserError(
+                f"rendered screenshot of {self.url} failed: {exc}") from exc
+        if not out.is_file() or out.stat().st_size == 0:
+            raise BrowserError(
+                f"rendered screenshot of {self.url} produced no image")
+        return {"path": str(out), "url": self.url, "tab_id": self.tab_id}
+
+    def extract(self, target: str = "", kind: str = "") -> dict[str, Any]:
+        """Structured extraction from the rendered DOM: ``kind`` selects
+        headings|tables|forms|meta|nav (same shapes as Tab.extract), or a
+        ``target`` tag/#id/.class for plain text."""
+        page = self._require_loaded()
+        kind = (kind or "").strip().lower()
+        if kind and kind not in {"headings", "h", "tables", "table", "forms",
+                                 "form", "meta", "head", "nav", "links-structured",
+                                 "sitemap"}:
+            raise BrowserError(
+                f"unknown extract kind {kind!r}; use headings|tables|forms|meta|nav")
+        try:
+            content = page.content()
+        except Exception as exc:  # noqa: BLE001 - extraction errors are opaque
+            raise BrowserError(f"rendered extract on {self.url} failed: {exc}") from exc
+        dom = parse_html(content)
+        if kind in {"headings", "h"}:
+            return dom_headings(dom, self.url)
+        if kind in {"tables", "table"}:
+            return dom_tables(dom, self.url)
+        if kind in {"forms", "form"}:
+            return dom_forms(dom, self.url)
+        if kind in {"meta", "head"}:
+            return dom_meta(dom, self.url, self.title)
+        if kind in {"nav", "links-structured", "sitemap"}:
+            return dom_nav(dom, self.url)
+        # selector mode: reuse the plain-tab text-of-elements shape
+        wanted = (target or "body").strip()
+        nodes = []
+        if wanted.startswith("#"):
+            ident = wanted[1:]
+            nodes = [n for n in dom.walk()
+                     if not n.is_text and n.attrs.get("id") == ident]
+        elif wanted.startswith("."):
+            cls = wanted[1:]
+            nodes = [n for n in dom.walk()
+                     if not n.is_text and cls in (n.attrs.get("class") or "").split()]
+        else:
+            nodes = dom.find_all(wanted or "body")
+        matches = [n.inner_text().strip()[:2000] for n in nodes[:50]
+                   if n.inner_text().strip()]
+        return {"url": self.url, "count": len(matches), "matches": matches}
+
+    def cookies(self) -> list[dict[str, Any]]:
+        """This tab's live cookie jar (playwright context cookies) as dicts."""
+        page = self._require_loaded()
+        try:
+            raw = self._context.cookies()
+        except Exception as exc:  # noqa: BLE001 - cookie errors are opaque
+            raise BrowserError(
+                f"rendered cookies on {self.url} failed: {exc}") from exc
+        out = [{
+            "name": c.get("name", ""),
+            "value": c.get("value", ""),
+            "domain": c.get("domain", ""),
+            "path": c.get("path", "/"),
+            "secure": bool(c.get("secure")),
+            "expires": c.get("expires", -1),
+            "http_only": bool(c.get("httpOnly")),
+        } for c in (raw or [])]
+        out.sort(key=lambda c: (c["domain"], c["path"], c["name"]))
+        return out
+
+    def upload(self, selector: str, file_path: str) -> dict[str, Any]:
+        """Set a ``<input type="file">`` to a local file (playwright
+        set_input_files). The file must exist — fail fast otherwise."""
+        page = self._require_loaded()
+        selector = (selector or "").strip()
+        path = os.path.abspath(os.path.expanduser((file_path or "").strip()))
+        if not selector:
+            raise BrowserError("rendered upload needs a selector")
+        if not os.path.isfile(path):
+            raise BrowserError(f"rendered upload: not a file: {file_path!r}")
+        try:
+            page.set_input_files(selector, path)
+        except Exception as exc:  # noqa: BLE001 - upload errors are opaque
+            raise BrowserError(
+                f"rendered upload of {file_path!r} on {self.url} failed: {exc}") from exc
+        return {"ok": True, "selector": selector, "path": path,
+                "tab_id": self.tab_id}
+
+    def trigger_download(self, target: str,
+                         dest_dir: str | os.PathLike[str]) -> dict[str, Any]:
+        """Click ``target`` and capture the download it triggers
+        (playwright expect_download). Returns the saved path; the caller
+        (the service) registers it in the download registry."""
+        page = self._require_loaded()
+        target = (target or "").strip()
+        if not target:
+            raise BrowserError("trigger_download needs a target")
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        selector = (target if target[:1] in {"#", ".", "["} or ">>" in target
+                    else f"text={target}")
+        try:
+            with page.expect_download() as download_info:
+                page.click(selector)
+            download = download_info.value
+        except Exception as exc:  # noqa: BLE001 - download errors are opaque
+            raise BrowserError(
+                f"download trigger {target!r} on {self.url} failed: {exc}") from exc
+        suggested = str(getattr(download, "suggested_filename", "") or "download.bin")
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_"
+                       for c in suggested).strip("._") or "download.bin"
+        out = dest / f"{int(time.time() * 1000)}-{safe}"
+        try:
+            download.save_as(str(out))
+        except Exception as exc:  # noqa: BLE001 - save errors are opaque
+            raise BrowserError(f"could not save download to {out}: {exc}") from exc
+        if not out.is_file() or out.stat().st_size == 0:
+            raise BrowserError(f"download from {self.url} produced no file")
+        return {"path": str(out), "url": self.url,
+                "suggested_filename": suggested, "tab_id": self.tab_id}
 
     def state(self) -> dict[str, Any]:
         return {
@@ -533,6 +890,115 @@ class BrowserService:
         self._playwright: Any = None
         self._artifact_store = artifact_store
         self._mission_id = mission_id or ""
+        #: per-session proxy URL (in-memory only — never persisted to
+        #: sessions.json, since URLs can carry credentials).
+        self._session_proxies: dict[str, str] = {}
+        #: proxy pool (duck-typed — see attach_proxy_pool). The pool lives
+        #: at L5 (nomorals/connectors), which L4 must not import, so the
+        #: service talks to any object with a conforming rotate().
+        self._proxy_pool: Any = None
+        #: download registry: id -> record (persisted to downloads.json).
+        self._downloads: dict[str, dict[str, Any]] = {}
+        self._load_downloads()
+
+    # -- proxies -----------------------------------------------------------------
+    def attach_proxy_pool(self, pool: Any) -> dict[str, Any]:
+        """Attach a proxy pool for traffic rotation.
+
+        ``pool`` is duck-typed (the pool connector lives at L5, which this
+        L4 service must not import): any object whose ``rotate()`` returns
+        a mapping carrying the proxy's connection URL under
+        ``"url_with_auth"`` (exactly what
+        ``nomorals.connectors.proxypool.ProxyPoolConnector.rotate()``
+        returns). The pool is live-probed once at attach time — a dead
+        pool fails here, not on the first download.
+        """
+        rotate = getattr(pool, "rotate", None)
+        if not callable(rotate):
+            raise BrowserError(
+                "proxy pool needs a rotate() method returning "
+                "{'url_with_auth': ...}")
+        try:
+            probe = rotate()
+        except Exception as exc:
+            raise BrowserError(f"proxy pool rotate() failed: {exc}") from exc
+        if not isinstance(probe, dict) or not probe.get("url_with_auth"):
+            raise BrowserError(
+                "proxy pool rotate() must return a mapping with 'url_with_auth'")
+        self._proxy_pool = pool
+        _emit("browser.proxy.attached", {"pool": type(pool).__name__})
+        _log.info("browser service: proxy pool attached (%s)",
+                  type(pool).__name__)
+        return {"attached": True, "pool": type(pool).__name__}
+
+    def detach_proxy_pool(self) -> None:
+        """Detach the pool and clear every session/tab proxy (direct traffic)."""
+        self._proxy_pool = None
+        self._session_proxies = {}
+        for handle in self._sessions.values():
+            for tab in handle._tabs.values():
+                tab.session.set_proxy("")
+        _emit("browser.proxy.detached", {})
+
+    def proxy_pool_attached(self) -> bool:
+        return self._proxy_pool is not None
+
+    def rotate_proxy(self, session_name: str = "") -> dict[str, Any]:
+        """Pull the next healthy proxy from the pool and apply it.
+
+        With ``session_name`` given, only that session's tabs (and future
+        tabs — new tabs inherit the session proxy); empty applies to every
+        open session. Returns the masked proxy URL and what it covered.
+        """
+        if self._proxy_pool is None:
+            raise BrowserError(
+                "no proxy pool attached — attach_proxy_pool() first")
+        try:
+            details = self._proxy_pool.rotate()
+        except Exception as exc:
+            raise BrowserError(f"proxy pool rotate() failed: {exc}") from exc
+        proxy_url = (details or {}).get("url_with_auth", "") \
+            if isinstance(details, dict) else ""
+        if not proxy_url:
+            raise BrowserError(
+                "proxy pool rotate() returned no url_with_auth")
+        names = [session_name] if session_name else list(self._sessions)
+        applied = 0
+        for name in names:
+            handle = self._sessions.get(name)
+            if handle is None:
+                raise BrowserError(f"unknown session {name!r}")
+            self._session_proxies[name] = proxy_url
+            for tab in handle._tabs.values():
+                tab.session.set_proxy(proxy_url)
+                applied += 1
+        _emit("browser.proxy.rotated", {
+            "session": session_name or "*",
+            "proxy": _mask_proxy(proxy_url),
+            "tabs": applied,
+        })
+        return {"proxy": _mask_proxy(proxy_url), "sessions": names,
+                "tabs": applied}
+
+    def set_session_proxy(self, session_name: str,
+                          proxy_url: str = "") -> dict[str, Any]:
+        """Pin a session to an explicit proxy URL ("" = direct traffic)."""
+        handle = self.get_session(session_name)  # fail fast: unknown session
+        proxy_url = (proxy_url or "").strip()
+        self._session_proxies[session_name] = proxy_url
+        for tab in handle._tabs.values():
+            tab.session.set_proxy(proxy_url)
+        _emit("browser.proxy.set", {
+            "session": session_name,
+            "proxy": _mask_proxy(proxy_url) if proxy_url else "direct",
+        })
+        return {"session": session_name,
+                "proxy": _mask_proxy(proxy_url) if proxy_url else "direct"}
+
+    def session_proxy(self, session_name: str) -> str:
+        """The proxy URL configured for a session ("" = direct). Masked? No —
+        this is the real URL; callers that display it must mask it."""
+        return self._session_proxies.get(session_name, "")
 
     # -- sessions --------------------------------------------------------------
     def _cookie_dir(self, name: str) -> str:
@@ -543,6 +1009,10 @@ class BrowserService:
             name=f"{handle.name}:{tab_id}",
             session_dir=self._cookie_dir(handle.name),
         )
+        # new tabs inherit the session's proxy (rotation applies live)
+        proxy = self._session_proxies.get(handle.name, "")
+        if proxy:
+            session.set_proxy(proxy)
         return Tab(tab_id=tab_id, session_name=handle.name, session=session)
 
     def open_session(self, name: str) -> SessionHandle:
@@ -617,24 +1087,29 @@ class BrowserService:
             except Exception as exc:  # noqa: BLE001 - shutdown best effort
                 _log.warning("browser service shutdown failed: %s", exc)
 
-    def open_rendered_tab(self, session_name: str, url: str = "") -> RenderedTab:
+    def open_rendered_tab(self, session_name: str, url: str = "",
+                          proxy: str = "") -> RenderedTab:
         """Open a playwright-backed tab in ``session_name``'s cookie space.
 
         For JavaScript/Cloudflare-guarded pages that plain-HTTP tabs cannot
         pass. Cookies persist via playwright storage_state in the session's
-        cookie dir. Fail fast: raises BrowserError when playwright or its
-        chromium build is missing, or when the initial navigate fails.
+        cookie dir. ``proxy`` overrides the session's proxy for this tab
+        ("" = inherit the session proxy, which may itself be direct).
+        Fail fast: raises BrowserError when playwright or its chromium
+        build is missing, or when the initial navigate fails.
         """
         session_name = (session_name or "").strip()
         if not session_name:
             raise BrowserError("session name must not be empty")
         playwright = self._driver()  # fail fast before touching anything
         tab_id = ulid_now()
+        tab_proxy = (proxy or "").strip() or self._session_proxies.get(session_name, "")
         tab = RenderedTab(
             tab_id=tab_id,
             session_name=session_name,
             storage_state_path=self._rendered_state_path(session_name),
             playwright=playwright,
+            proxy=tab_proxy,
         )
         self._rendered_tabs[tab_id] = tab
         try:
@@ -687,18 +1162,75 @@ class BrowserService:
         self._mission_id = mission_id or ""
 
     # -- downloads ---------------------------------------------------------------
+    def _load_downloads(self) -> None:
+        """Load the download registry. A corrupt registry file resets with
+        a warning — it must never kill the service."""
+        path = self.data_dir / _DOWNLOADS_FILE
+        if not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records = payload.get("downloads") or {}
+            self._downloads = {
+                str(did): dict(rec) for did, rec in records.items()
+                if isinstance(rec, dict)}
+        except (OSError, ValueError) as exc:
+            _log.warning("download registry %s unreadable (%s) — starting empty",
+                         path, exc)
+            self._downloads = {}
+
+    def _save_downloads(self) -> None:
+        path = self.data_dir / _DOWNLOADS_FILE
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": _SAVE_VERSION, "downloads": self._downloads},
+                      fh, indent=2)
+        os.replace(tmp, path)
+
+    def _record_download(self, record: dict[str, Any]) -> dict[str, Any]:
+        self._downloads[record["id"]] = record
+        try:
+            self._save_downloads()
+        except OSError as exc:  # noqa: BLE001 - registry is bookkeeping
+            _log.warning("could not persist download registry: %s", exc)
+        return record
+
+    def _finish_download(self, download_id: str, *,
+                         status: str, path: str = "", size: int = 0,
+                         mime: str = "", error: str = "") -> dict[str, Any]:
+        rec = self._downloads.get(download_id)
+        if rec is None:  # pragma: no cover - defensive
+            raise BrowserError(f"unknown download {download_id!r}")
+        rec.update({
+            "status": status,
+            "path": path or rec.get("path", ""),
+            "size": size,
+            "mime": mime or rec.get("mime", ""),
+            "category": _mime_category(mime or rec.get("mime", "")),
+            "finished_at": time.time(),
+            "error": error,
+        })
+        return self._record_download(rec)
+
     def download(
         self,
         tab_or_url: Tab | str,
         url: str = "",
         *,
         filename: str = "",
+        organize: bool = False,
     ) -> DownloadResult:
         """Download ``url`` reusing the owning tab's cookies.
 
         ``tab_or_url`` is a :class:`Tab`, a tab id string (resolved across
         sessions), or — when no tab is involved — the URL itself, in which
-        case ``url`` may be omitted.
+        case ``url`` may be omitted. With ``organize=True`` the file lands
+        in a MIME-category subfolder (images/, videos/, audio/,
+        documents/, other/) under the session's download dir; the default
+        keeps the flat ``downloads/<session>/`` layout.
+
+        Every download is registered in the download registry (see
+        :meth:`list_downloads` / :meth:`wait_for_download`).
         """
         tab: Tab | None = None
         if isinstance(tab_or_url, Tab):
@@ -727,6 +1259,23 @@ class BrowserService:
         name = (filename or "").strip() or _filename_from_url(url)
         path = dest_dir / name
 
+        download_id = ulid_now()
+        self._record_download({
+            "id": download_id,
+            "session": session_name,
+            "tab_id": tab.tab_id if tab is not None else "",
+            "rendered_tab_id": "",
+            "url": url,
+            "path": "",
+            "size": 0,
+            "mime": "",
+            "category": "",
+            "status": "in_progress",
+            "started_at": time.time(),
+            "finished_at": 0.0,
+            "error": "",
+        })
+
         request = urllib.request.Request(
             url, headers={"User-Agent": "NoMoralsBrowser/0.1 (download)"})
         if tab is not None:
@@ -739,11 +1288,24 @@ class BrowserService:
                     raise BrowserError(f"download {url} failed: HTTP {status}")
                 mime = (response.headers.get("Content-Type", "") or "").split(";")[0].strip()
                 data = response.read()
+        except BrowserError as exc:
+            self._finish_download(download_id, status="failed", error=str(exc))
+            raise
         except urllib.error.HTTPError as exc:
+            self._finish_download(
+                download_id, status="failed",
+                error=f"download {url} failed: HTTP {exc.code}")
             raise BrowserError(f"download {url} failed: HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
+            self._finish_download(
+                download_id, status="failed",
+                error=f"download {url} failed: {exc.reason}")
             raise BrowserError(f"download {url} failed: {exc.reason}") from exc
 
+        if organize:
+            category_dir = dest_dir / _mime_category(mime)
+            category_dir.mkdir(parents=True, exist_ok=True)
+            path = category_dir / name
         with open(path, "wb") as fh:
             fh.write(data)
 
@@ -758,6 +1320,11 @@ class BrowserService:
                 provenance=Provenance(source_type="browser", source_id=url),
             )
             artifact_uri = art.uri
+        rec = self._finish_download(
+            download_id, status="completed", path=str(path),
+            size=len(data), mime=mime)
+        rec["artifact_uri"] = artifact_uri
+        self._record_download(rec)
         _emit("browser.download.completed", {
             "url": url,
             "path": str(path),
@@ -766,10 +1333,140 @@ class BrowserService:
             "artifact_uri": artifact_uri,
             "session": session_name,
             "tab_id": tab.tab_id if tab is not None else "",
+            "download_id": download_id,
             "mission_id": self._mission_id,
         })
         return DownloadResult(path=str(path), size=len(data), mime=mime,
                               artifact_uri=artifact_uri)
+
+    def list_downloads(self, session_name: str = "",
+                       category: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        """The download registry, newest first. Filter by session and/or
+        MIME category (images|videos|audio|documents|other)."""
+        session_name = (session_name or "").strip()
+        category = (category or "").strip().lower()
+        recs = sorted(self._downloads.values(),
+                      key=lambda r: r.get("started_at", 0.0), reverse=True)
+        out = []
+        for rec in recs:
+            if session_name and rec.get("session") != session_name:
+                continue
+            if category and rec.get("category") != category:
+                continue
+            out.append(dict(rec))
+            if len(out) >= max(1, limit):
+                break
+        return out
+
+    def wait_for_download(self, download_id: str,
+                          timeout: float = 60.0) -> dict[str, Any]:
+        """Wait for a download to finish. Completed/failed records return
+        immediately; an in-progress record is polled until its file stops
+        growing (2s stable) or the timeout hits — then the record is
+        finalized from disk. Fail fast on unknown ids."""
+        rec = self._downloads.get(download_id)
+        if rec is None:
+            raise BrowserError(f"unknown download {download_id!r}")
+        if rec.get("status") in {"completed", "failed"}:
+            return dict(rec)
+        deadline = time.time() + max(1.0, float(timeout))
+        last_size = -1
+        stable_since = time.time()
+        while time.time() < deadline:
+            rec = self._downloads.get(download_id) or rec
+            if rec.get("status") in {"completed", "failed"}:
+                return dict(rec)
+            try:
+                size = os.path.getsize(rec.get("path") or "")
+            except OSError:
+                size = -1
+            now = time.time()
+            if size >= 0 and size == last_size:
+                if now - stable_since >= 2.0:
+                    break  # file stopped growing — treat as done
+            else:
+                last_size = size
+                stable_since = now
+            time.sleep(0.5)
+        rec = self._downloads.get(download_id) or rec
+        if rec.get("status") == "in_progress":
+            size = -1
+            try:
+                size = os.path.getsize(rec.get("path") or "")
+            except OSError:
+                size = -1  # file vanished mid-download; mark failed below
+            if size and size > 0:
+                rec = self._finish_download(
+                    download_id, status="completed", size=size)
+            else:
+                rec = self._finish_download(
+                    download_id, status="failed",
+                    error="download did not complete within the wait")
+        return dict(rec)
+
+    def rendered_tab_download(self, tab_id: str, target: str) -> dict[str, Any]:
+        """Click ``target`` in a rendered tab and capture the download it
+        triggers (for JS-driven downloads plain HTTP can't see). The
+        download is registered like any other."""
+        tab = self._rendered_tabs.get(tab_id)
+        if tab is None:
+            raise BrowserError(f"unknown rendered tab {tab_id!r}")
+        dest_dir = self.data_dir / "downloads" / tab.session_name
+        download_id = ulid_now()
+        self._record_download({
+            "id": download_id,
+            "session": tab.session_name,
+            "tab_id": "",
+            "rendered_tab_id": tab_id,
+            "url": tab.url,
+            "path": "",
+            "size": 0,
+            "mime": "",
+            "category": "",
+            "status": "in_progress",
+            "started_at": time.time(),
+            "finished_at": 0.0,
+            "error": "",
+        })
+        try:
+            result = tab.trigger_download(target, dest_dir)
+        except BrowserError as exc:
+            self._finish_download(download_id, status="failed", error=str(exc))
+            raise
+        path = result["path"]
+        mime = (mimetypes.guess_type(path)[0] or "application/octet-stream")
+        rec = self._finish_download(
+            download_id, status="completed", path=path,
+            size=os.path.getsize(path), mime=mime)
+        _emit("browser.download.completed", {
+            "url": tab.url, "path": path, "size": rec["size"], "mime": mime,
+            "session": tab.session_name, "rendered_tab_id": tab_id,
+            "download_id": download_id, "mission_id": self._mission_id,
+        })
+        return rec
+
+    def screenshot_rendered(self, tab_id: str, *,
+                            full_page: bool = False) -> ScreenshotResult:
+        """Screenshot a rendered tab's LIVE page — logged-in state and JS
+        mutations included (unlike :meth:`screenshot`, which reloads the
+        URL in a fresh context)."""
+        tab = self._rendered_tabs.get(tab_id)
+        if tab is None:
+            raise BrowserError(f"unknown rendered tab {tab_id!r}")
+        shot = tab.screenshot(full_page=full_page)
+        path = Path(shot["path"])
+        artifact_uri: str | None = None
+        if self._artifact_store is not None:
+            art = self._artifact_store.put(
+                path.read_bytes(),
+                type="screenshot",
+                mime="image/png",
+                creator="browser-service",
+                mission_id=self._mission_id,
+                provenance=Provenance(source_type="browser", source_id=tab.url),
+            )
+            artifact_uri = art.uri
+        return ScreenshotResult(path=str(path), artifact_uri=artifact_uri)
 
     # -- screenshots -------------------------------------------------------------
     def screenshot(self, tab: Tab | str, *, full_page: bool = False) -> ScreenshotResult:
@@ -823,6 +1520,108 @@ class BrowserService:
             )
             artifact_uri = art.uri
         return ScreenshotResult(path=str(path), artifact_uri=artifact_uri)
+
+    # -- cookies: inspect / export / import --------------------------------------
+    def _session_jar(self, session_name: str) -> http.cookiejar.CookieJar:
+        """All tabs' cookies of a session merged into one jar (deduped by
+        name/domain/path)."""
+        handle = self.get_session(session_name)  # fail fast: unknown session
+        jar = http.cookiejar.CookieJar()
+        seen: set[tuple[str, str, str]] = set()
+        for tab in handle._tabs.values():
+            for cookie in tab.session.cookie_jar:
+                key = (cookie.name, cookie.domain, cookie.path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                jar.set_cookie(cookie)
+        return jar
+
+    def export_cookies(self, session_name: str,
+                       path: str | os.PathLike[str],
+                       format: str = "netscape") -> dict[str, Any]:
+        """Export a session's cookies to ``path``.
+
+        ``format="netscape"`` writes the classic Mozilla cookies.txt that
+        curl, wget, and yt-dlp read; ``format="json"`` writes a plain list
+        of cookie dicts. An empty jar still writes a valid (empty) file —
+        0 cookies is an honest result, not an error.
+        """
+        fmt = (format or "").strip().lower()
+        if fmt not in {"netscape", "json"}:
+            raise BrowserError(
+                f"unknown cookie format {format!r}: netscape|json")
+        jar = self._session_jar(session_name)
+        out = Path(path).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        count = len(jar)
+        try:
+            if fmt == "netscape":
+                mcj = http.cookiejar.MozillaCookieJar()
+                for cookie in jar:
+                    mcj.set_cookie(cookie)
+                mcj.save(str(out), ignore_discard=True, ignore_expires=True)
+            else:
+                payload = [{
+                    "name": c.name, "value": c.value, "domain": c.domain,
+                    "path": c.path, "secure": bool(c.secure),
+                    "expires": c.expires,
+                    "http_only": bool(c.has_nonstandard_attr("HttpOnly")),
+                } for c in jar]
+                tmp = out.with_suffix(out.suffix + ".tmp")
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2)
+                os.replace(tmp, out)
+        except OSError as exc:
+            raise BrowserError(f"cookie export to {out} failed: {exc}") from exc
+        _emit("browser.cookies.exported", {
+            "session": session_name, "path": str(out), "format": fmt,
+            "cookies": count})
+        return {"path": str(out), "format": fmt, "cookies": count,
+                "session": session_name}
+
+    def import_cookies(self, session_name: str,
+                       path: str | os.PathLike[str],
+                       format: str = "netscape") -> dict[str, Any]:
+        """Import cookies into every tab of a session (netscape or json, as
+        written by :meth:`export_cookies`). The tabs' cookie persistence
+        is flushed so the import survives restarts."""
+        fmt = (format or "").strip().lower()
+        if fmt not in {"netscape", "json"}:
+            raise BrowserError(
+                f"unknown cookie format {format!r}: netscape|json")
+        handle = self.get_session(session_name)  # fail fast: unknown session
+        src = Path(path).expanduser()
+        if not src.is_file():
+            raise BrowserError(f"cookie file not found: {src}")
+        try:
+            if fmt == "netscape":
+                mcj = http.cookiejar.MozillaCookieJar(str(src))
+                mcj.load(ignore_discard=True, ignore_expires=True)
+                cookies = list(mcj)
+            else:
+                payload = json.loads(src.read_text(encoding="utf-8"))
+                if not isinstance(payload, list):
+                    raise BrowserError(
+                        f"cookie file {src} is not a JSON list")
+                cookies = [_cookie_from_dict(entry) for entry in payload]
+        except BrowserError:
+            raise
+        except (OSError, ValueError,
+                http.cookiejar.LoadError) as exc:
+            raise BrowserError(f"cannot read cookies from {src}: {exc}") from exc
+        if not handle._tabs:
+            raise BrowserError(
+                f"session {session_name!r} has no tabs — open a tab first")
+        for tab in handle._tabs.values():
+            for cookie in cookies:
+                tab.session.cookie_jar.set_cookie(cookie)
+            tab.session._save_cookies()
+        _emit("browser.cookies.imported", {
+            "session": session_name, "path": str(src), "format": fmt,
+            "cookies": len(cookies)})
+        return {"session": session_name, "imported": len(cookies),
+                "tabs": len(handle._tabs), "format": fmt}
 
     # -- persistence ---------------------------------------------------------------
     def save(self) -> str:
@@ -897,3 +1696,52 @@ def _filename_from_url(url: str) -> str:
         urllib.parse.urlparse(url).path.rsplit("/", 1)[-1]).strip()
     safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in base).strip("._")
     return safe or "download.bin"
+
+
+#: Cookie constructor fields (the same set tools/browser persists).
+_COOKIE_FIELDS = {
+    "version", "name", "value", "port", "port_specified",
+    "domain", "domain_specified", "domain_initial_dot",
+    "path", "path_specified", "secure", "expires", "discard",
+    "comment", "comment_url", "rest", "rfc2109",
+}
+
+_COOKIE_DEFAULTS: dict[str, Any] = {
+    "version": 0,
+    "port": None,
+    "port_specified": False,
+    "domain_specified": False,
+    "domain_initial_dot": False,
+    "path": "/",
+    "path_specified": True,
+    "secure": False,
+    "expires": None,
+    "discard": True,
+    "comment": None,
+    "comment_url": None,
+    "rest": {},
+    "rfc2109": False,
+}
+
+
+def _cookie_from_dict(entry: dict[str, Any]) -> http.cookiejar.Cookie:
+    """Build a Cookie from an exported dict. Fail fast on malformed entries
+    — a half-formed cookie is never silently skipped into the jar."""
+    if not isinstance(entry, dict):
+        raise BrowserError(f"bad cookie entry: {entry!r}"[:160])
+    cookie = http.cookiejar.Cookie.__new__(http.cookiejar.Cookie)
+    for key, value in entry.items():
+        if key in _COOKIE_FIELDS:
+            setattr(cookie, key, value)
+    for key, value in _COOKIE_DEFAULTS.items():
+        if not hasattr(cookie, key):
+            setattr(cookie, key, value)
+    if not getattr(cookie, "name", "") or not getattr(cookie, "domain", ""):
+        raise BrowserError(
+            f"cookie entry missing name/domain: {entry!r}"[:160])
+    # Cookie.__init__ normally derives _rest from rest; replicate it so
+    # has_nonstandard_attr() works on imported cookies.
+    cookie._rest = dict(getattr(cookie, "rest", None) or {})
+    if getattr(cookie, "http_only", False):
+        cookie._rest.setdefault("HttpOnly", "")
+    return cookie

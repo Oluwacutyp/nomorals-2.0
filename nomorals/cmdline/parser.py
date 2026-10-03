@@ -1757,7 +1757,10 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm doc parse <file> [--json]\n"
                      "nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]\n"
                      "nm doc search <query> --dir DIR [--limit N]\n"
-                     "nm doc show <file>"),
+                     "nm doc show <file>\n"
+                     "nm doc diff <file-a> <file-b> [--json]\n"
+                     "nm doc summarize <file> [--sentences N] [--json]\n"
+                     "nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     doc.add_argument("task", nargs="*", default=[], help="verb and arguments")
@@ -1765,13 +1768,25 @@ def _parser() -> argparse.ArgumentParser:
     doc.add_argument("--out", default="", help="write converted output here")
     doc.add_argument("--dir", default="", help="search: directory of documents")
     doc.add_argument("--limit", type=int, default=10, help="search: max hits")
+    doc.add_argument("--sentences", type=int, default=5,
+                     help="summarize: sentences to keep")
+    doc.add_argument("--lang", default="eng", help="ocr: tesseract language")
+    doc.add_argument("--dpi", type=int, default=200, help="ocr: render DPI")
     doc.add_argument("--json", action="store_true", help="Output as JSON")
 
     browse = sub.add_parser("browse", aliases=CLI_ALIASES["browse"],
-        help="browser service: sessions, tabs, downloads, screenshots",
+        help="browser service: sessions, tabs, forms, uploads, downloads, screenshots, proxies",
         description=("nm browse open <url> [--session S]\n"
                      "nm browse tabs|text|md|links|history [--session S]\n"
-                     "nm browse shot [--out PATH] | nm browse download <url>\n"
+                     "nm browse fill <name> <value> | nm browse click <target>\n"
+                     "nm browse submit [target] [--upload field=path ...]\n"
+                     "nm browse extract [target] [--kind headings|tables|forms|meta|nav]\n"
+                     "nm browse task --steps-file PATH | --steps-json '[...]'\n"
+                     "nm browse cookies [export|import <path> [--format netscape|json]]\n"
+                     "nm browse proxy status|rotate|set <url>|clear\n"
+                     "nm browse downloads [--category C] [--limit N]\n"
+                     "nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
+                     "nm browse rtab open <url> [--proxy P] | rtab tabs|shot|fill|click|submit|wait|extract|download\n"
                      "nm browse close | nm browse sessions\n"
                      "nm browse daemon start|stop|status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1781,6 +1796,24 @@ def _parser() -> argparse.ArgumentParser:
                         help="browser session name (default: cli)")
     browse.add_argument("--out", default="", help="shot: save PNG here")
     browse.add_argument("--json", action="store_true", help="Output as JSON")
+    browse.add_argument("--upload", action="append", default=[],
+                        help="submit: file upload as field=path (repeatable)")
+    browse.add_argument("--kind", default="",
+                        help="extract: headings|tables|forms|meta|nav")
+    browse.add_argument("--steps-file", default="",
+                        help="task: JSON file with the step list")
+    browse.add_argument("--steps-json", default="",
+                        help="task: JSON step list inline")
+    browse.add_argument("--format", default="",
+                        help="cookies export/import: netscape|json")
+    browse.add_argument("--category", default="",
+                        help="downloads: filter by MIME category")
+    browse.add_argument("--limit", type=int, default=100,
+                        help="downloads: max rows (default 100)")
+    browse.add_argument("--organize", action="store_true",
+                        help="download: file into a MIME-category subfolder")
+    browse.add_argument("--proxy", default="",
+                        help="rtab open: proxy URL override for this tab")
 
     repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
         help="code workspace: branches, worktrees, patches, test/build",
@@ -1989,7 +2022,10 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm doc parse <file> [--json]\n"
                      "nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]\n"
                      "nm doc search <query> --dir DIR [--limit N]\n"
-                     "nm doc show <file>"),
+                     "nm doc show <file>\n"
+                     "nm doc diff <file-a> <file-b> [--json]\n"
+                     "nm doc summarize <file> [--sentences N] [--json]\n"
+                     "nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     doc.add_argument("task", nargs="*", default=[], help="verb and arguments")
@@ -1997,6 +2033,10 @@ def _parser() -> argparse.ArgumentParser:
     doc.add_argument("--out", default="", help="write converted output here")
     doc.add_argument("--dir", default="", help="search: directory of documents")
     doc.add_argument("--limit", type=int, default=10, help="search: max hits")
+    doc.add_argument("--sentences", type=int, default=5,
+                     help="summarize: sentences to keep")
+    doc.add_argument("--lang", default="eng", help="ocr: tesseract language")
+    doc.add_argument("--dpi", type=int, default=200, help="ocr: render DPI")
     doc.add_argument("--json", action="store_true", help="Output as JSON")
 
     browse = sub.add_parser("browse", aliases=CLI_ALIASES["browse"],

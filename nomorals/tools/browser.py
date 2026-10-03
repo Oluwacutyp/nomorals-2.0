@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import http.cookiejar
 import json
+import mimetypes
 import os
 import re
 import threading
@@ -25,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from html.parser import HTMLParser
 from typing import Any
 
@@ -33,7 +35,9 @@ from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.trust import domain_tier
 
-__all__ = ["BrowserSession", "Node", "register"]
+__all__ = ["BrowserSession", "Node", "register",
+           "dom_headings", "dom_tables", "dom_forms", "dom_meta", "dom_nav",
+           "parse_html"]
 
 _log = get_logger(__name__)
 
@@ -238,15 +242,8 @@ class BrowserSession:
         self.session_dir = str(session_dir or "").strip()
         self.cookie_jar = http.cookiejar.CookieJar()
         self._load_cookies()
-        handlers: list[Any] = [
-            urllib.request.HTTPCookieProcessor(self.cookie_jar),
-            urllib.request.HTTPSHandler(context=_ssl_context()),
-        ]
-        if proxy_url:
-            handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-        else:
-            handlers.append(urllib.request.ProxyHandler({}))
-        self._opener = urllib.request.build_opener(*handlers)
+        self.proxy_url = (proxy_url or "").strip()
+        self._opener = self._build_opener()
 
         self.url: str = ""
         self.title: str = ""
@@ -259,10 +256,42 @@ class BrowserSession:
         self.created_at = time.time()
         self.request_count = 0
 
+    def _build_opener(self) -> Any:
+        """The urllib opener for this session: cookie jar + proxy config.
+
+        Rebuilt whenever the proxy changes so the SAME jar survives a
+        proxy switch (cookies are not dropped on rotation).
+        """
+        handlers: list[Any] = [
+            urllib.request.HTTPCookieProcessor(self.cookie_jar),
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+        ]
+        if self.proxy_url:
+            handlers.append(urllib.request.ProxyHandler(
+                {"http": self.proxy_url, "https": self.proxy_url}))
+        else:
+            handlers.append(urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
+
+    def set_proxy(self, proxy_url: str = "") -> dict[str, Any]:
+        """Route this session's traffic through ``proxy_url`` ("" = direct).
+
+        Rebuilds the opener around the existing cookie jar — a proxy
+        switch never drops the session's cookies. Returns the applied
+        proxy ("direct" when cleared).
+        """
+        self.proxy_url = (proxy_url or "").strip()
+        self._opener = self._build_opener()
+        _log.info("browser session %r: proxy -> %s", self.name,
+                  self.proxy_url or "direct")
+        return {"session": self.name,
+                "proxy": self.proxy_url or "direct"}
+
     # -- low-level fetch ------------------------------------------------------
     def _fetch(self, url: str, *, method: str = "GET",
                form: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None,
                retry: bool = True,
+               files: dict[str, tuple[str, bytes, str]] | None = None,
                ) -> dict[str, Any]:
         """Fetch one URL.
 
@@ -283,7 +312,11 @@ class BrowserSession:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
-        if form is not None:
+        if files:
+            # multipart/form-data (file upload): fields + files in one body.
+            data, content_type = _encode_multipart(form or {}, files)
+            headers["Content-Type"] = content_type
+        elif form is not None:
             data = urllib.parse.urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         if extra_headers:
@@ -452,8 +485,17 @@ class BrowserSession:
         return {"ok": True, "field": name,
                 "pending": sorted(self._form_values)}
 
-    def submit(self, target: str = "", **_: Any) -> dict[str, Any]:
-        """Submit a form: by index, id, or action-text match. Uses fills."""
+    def submit(self, target: str = "", *,
+               uploads: dict[str, str] | None = None, **_: Any) -> dict[str, Any]:
+        """Submit a form: by index, id, or action-text match. Uses fills.
+
+        ``uploads`` maps a file-input field name to a local file path —
+        the form is then posted as multipart/form-data. A ``fill`` whose
+        target is an ``<input type="file">`` is treated the same way (the
+        filled value is the file path). Every upload path must exist and
+        be a readable file, otherwise the submit fails fast. File uploads
+        require a POST form — a GET form with files raises immediately.
+        """
         self._require_page()
         forms = self.dom.find_all("form")
         if not forms:
@@ -478,17 +520,42 @@ class BrowserSession:
 
         fields = _form_fields(form)
         values: dict[str, str] = {}
+        file_field_names: set[str] = set()
         for field in fields:
             name = field.attrs.get("name")
             if not name:
                 continue
+            ftype = (field.attrs.get("type") or "").lower()
+            if field.tag == "input" and ftype == "file":
+                file_field_names.add(name)
+                continue  # files go in the multipart body, not urlencoded
             if name in self._form_values:
                 values[name] = self._form_values[name]
             else:
                 values[name] = field.attrs.get("value", "")
+
+        # file uploads: explicit uploads= wins, then fills on file fields.
+        upload_paths: dict[str, str] = {}
+        if uploads:
+            if not isinstance(uploads, dict):
+                raise ToolError("submit uploads must be a {field_name: file_path} dict")
+            for name, path in uploads.items():
+                if not isinstance(name, str) or not isinstance(path, str):
+                    raise ToolError("submit uploads must map field names to file paths")
+                upload_paths[name] = path
+        for name in file_field_names:
+            if name not in upload_paths and name in self._form_values:
+                upload_paths[name] = self._form_values[name]
+        files: dict[str, tuple[str, bytes, str]] = {}
+        for name, path in upload_paths.items():
+            files[name] = _read_upload_file(name, path)
+
         method = (form.attrs.get("method") or "get").upper()
         if method not in {"GET", "POST"}:
             method = "POST"
+        if files and method != "POST":
+            raise ToolError(
+                "file uploads require a POST form — this form uses GET")
         action = form.attrs.get("action", "") or self.url
         url = urllib.parse.urljoin(self.url, action)
         if method == "GET" and values:
@@ -499,6 +566,7 @@ class BrowserSession:
         # and keep the transient-failure retry.
         result = self._fetch(url, method=method,
                              form=values if method == "POST" else None,
+                             files=files or None,
                              retry=(method == "GET"))
         self.url = result["url"]
         self._raw = result["text"]
@@ -513,6 +581,7 @@ class BrowserSession:
             "ok": result["status"] < 400,
             "url": self.url, "status": result["status"],
             "title": self.title[:200], "chars": len(self._raw),
+            "uploaded": sorted(files),
         }
 
     def extract(self, target: str = "", kind: str = "", **_: Any) -> dict[str, Any]:
@@ -565,118 +634,22 @@ class BrowserSession:
                 matches.append(text[:2000])
         return {"url": self.url, "count": len(matches), "matches": matches}
 
-    # -- structured extractors (wave 86 browser v2) ---------------------------
+    # -- structured extractors (wave 86 browser v2; bodies live at module
+    # level as dom_* so rendered tabs can reuse them without duplication) --
     def _extract_headings(self) -> dict[str, Any]:
-        out: list[dict[str, Any]] = []
-        for node in self.dom.walk():
-            if node.is_text:
-                continue
-            tag = (node.tag or "").lower()
-            if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-                text = " ".join(node.inner_text().split())
-                if text:
-                    out.append({"level": int(tag[1]), "text": text[:300]})
-        return {"url": self.url, "kind": "headings", "count": len(out), "items": out[:120]}
+        return dom_headings(self.dom, self.url)
 
     def _extract_tables(self) -> dict[str, Any]:
-        out: list[dict[str, Any]] = []
-        for table in self.dom.find_all("table")[:20]:
-            trs = table.find_all("tr")
-            rows: list[list[str]] = []
-            for tr in trs:
-                cells = [
-                    " ".join(td.inner_text().split())
-                    for td in tr.find_all(("td", "th"))
-                ]
-                if any(cells):
-                    rows.append([c[:200] for c in cells])
-            if not rows:
-                continue
-            first_cells = trs[0].find_all(("td", "th")) if trs else []
-            header_row = (
-                first_cells
-                and any((n.tag or "") == "th" for n in first_cells)
-                and all((n.tag or "") == "th" for n in first_cells)
-            )
-            headers = rows[0] if header_row else []
-            data_rows = rows[1:] if header_row else rows
-            out.append({
-                "headers": headers,
-                "rows": data_rows[:100],
-                "row_count": len(rows),
-            })
-        return {"url": self.url, "kind": "tables", "count": len(out), "tables": out}
+        return dom_tables(self.dom, self.url)
 
     def _extract_forms(self) -> dict[str, Any]:
-        out: list[dict[str, Any]] = []
-        for form in self.dom.find_all("form")[:20]:
-            fields = []
-            for field in _form_fields(form):
-                tag = (field.tag or "").lower()
-                if tag not in {"input", "select", "textarea"}:
-                    continue
-                ftype = field.attrs.get("type", "" if tag != "input" else "text")
-                fields.append({
-                    "tag": tag,
-                    "type": ftype if tag == "input" else "",
-                    "name": field.attrs.get("name", ""),
-                    "id": field.attrs.get("id", ""),
-                    "placeholder": field.attrs.get("placeholder", ""),
-                    "value": field.attrs.get("value", "")[:80],
-                    "required": field.attrs.get("required") is not None
-                                or "aria-required" in field.attrs,
-                })
-            out.append({
-                "id": form.attrs.get("id", ""),
-                "name": form.attrs.get("name", ""),
-                "action": form.attrs.get("action", ""),
-                "method": (form.attrs.get("method") or "get").upper(),
-                "fields": fields[:40],
-            })
-        return {"url": self.url, "kind": "forms", "count": len(out), "forms": out}
+        return dom_forms(self.dom, self.url)
 
     def _extract_meta(self) -> dict[str, Any]:
-        meta: dict[str, str] = {}
-        for node in self.dom.walk():
-            if node.is_text or (node.tag or "").lower() != "meta":
-                continue
-            key = (node.attrs.get("property") or node.attrs.get("name") or "").strip().lower()
-            content = (node.attrs.get("content") or "").strip()
-            if key and content and key not in meta:
-                meta[key] = content[:300]
-        canonical = ""
-        for node in self.dom.walk():
-            if not node.is_text and (node.tag or "").lower() == "link" \
-                    and node.attrs.get("rel") == "canonical":
-                canonical = node.attrs.get("href", "")
-                break
-        return {
-            "url": self.url, "kind": "meta",
-            "title": self.title,
-            "description": meta.get("description", "") or meta.get("og:description", ""),
-            "canonical": canonical,
-            "og": {k: v for k, v in meta.items() if k.startswith("og:")},
-            "other": {k: v for k, v in meta.items()
-                      if not k.startswith("og:") and k not in {"description", "viewport"}},
-        }
+        return dom_meta(self.dom, self.url, self.title)
 
     def _extract_nav(self, limit: int = 200) -> dict[str, Any]:
-        out: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for a in self.dom.find_all("a"):
-            href = (a.attrs.get("href") or "").strip()
-            if not href or href.startswith(("#", "javascript:")):
-                continue
-            absolute = urllib.parse.urljoin(self.url, href)
-            text = " ".join(a.inner_text().split())[:120]
-            key = (absolute, text)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({"url": absolute, "text": text, "tag": (a.attrs.get("class") or "")[:60]})
-            if len(out) >= limit:
-                break
-        return {"url": self.url, "kind": "nav", "count": len(out), "links": out}
+        return dom_nav(self.dom, self.url, limit)
 
     # -- advanced multi-page research walk (wave 85) --------------------------
     def walk(self, url: str = "", *, max_pages: int = 4,
@@ -883,7 +856,8 @@ class BrowserSession:
             return self.fill(name=str(step.get("name", "")),
                              value=str(step.get("value", "")))
         if act == "submit":
-            return self.submit(target=str(step.get("target", "")))
+            return self.submit(target=str(step.get("target", "")),
+                               uploads=step.get("uploads"))
         if act == "extract":
             return self.extract(target=str(step.get("target", "")),
                                 kind=str(step.get("kind", "")))
@@ -1030,6 +1004,131 @@ def _parse_selector(selector: str) -> tuple[str, str]:
     return "tag", s
 
 
+# ── structured DOM extractors (module-level: reusable by rendered tabs) ──
+
+
+def dom_headings(dom: Node, url: str) -> dict[str, Any]:
+    """The h1-h6 outline of a parsed DOM as {level, text} items."""
+    out: list[dict[str, Any]] = []
+    for node in dom.walk():
+        if node.is_text:
+            continue
+        tag = (node.tag or "").lower()
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            text = " ".join(node.inner_text().split())
+            if text:
+                out.append({"level": int(tag[1]), "text": text[:300]})
+    return {"url": url, "kind": "headings", "count": len(out), "items": out[:120]}
+
+
+def dom_tables(dom: Node, url: str) -> dict[str, Any]:
+    """Every table as {headers, rows, row_count}."""
+    out: list[dict[str, Any]] = []
+    for table in dom.find_all("table")[:20]:
+        trs = table.find_all("tr")
+        rows: list[list[str]] = []
+        for tr in trs:
+            cells = [
+                " ".join(td.inner_text().split())
+                for td in tr.find_all(("td", "th"))
+            ]
+            if any(cells):
+                rows.append([c[:200] for c in cells])
+        if not rows:
+            continue
+        first_cells = trs[0].find_all(("td", "th")) if trs else []
+        header_row = (
+            first_cells
+            and any((n.tag or "") == "th" for n in first_cells)
+            and all((n.tag or "") == "th" for n in first_cells)
+        )
+        headers = rows[0] if header_row else []
+        data_rows = rows[1:] if header_row else rows
+        out.append({
+            "headers": headers,
+            "rows": data_rows[:100],
+            "row_count": len(rows),
+        })
+    return {"url": url, "kind": "tables", "count": len(out), "tables": out}
+
+
+def dom_forms(dom: Node, url: str) -> dict[str, Any]:
+    """Every form as {id, name, action, method, fields}."""
+    out: list[dict[str, Any]] = []
+    for form in dom.find_all("form")[:20]:
+        fields = []
+        for field in _form_fields(form):
+            tag = (field.tag or "").lower()
+            if tag not in {"input", "select", "textarea"}:
+                continue
+            ftype = field.attrs.get("type", "" if tag != "input" else "text")
+            fields.append({
+                "tag": tag,
+                "type": ftype if tag == "input" else "",
+                "name": field.attrs.get("name", ""),
+                "id": field.attrs.get("id", ""),
+                "placeholder": field.attrs.get("placeholder", ""),
+                "value": field.attrs.get("value", "")[:80],
+                "required": field.attrs.get("required") is not None
+                            or "aria-required" in field.attrs,
+            })
+        out.append({
+            "id": form.attrs.get("id", ""),
+            "name": form.attrs.get("name", ""),
+            "action": form.attrs.get("action", ""),
+            "method": (form.attrs.get("method") or "get").upper(),
+            "fields": fields[:40],
+        })
+    return {"url": url, "kind": "forms", "count": len(out), "forms": out}
+
+
+def dom_meta(dom: Node, url: str, title: str) -> dict[str, Any]:
+    """Title, description, og:*, canonical, and other head metadata."""
+    meta: dict[str, str] = {}
+    for node in dom.walk():
+        if node.is_text or (node.tag or "").lower() != "meta":
+            continue
+        key = (node.attrs.get("property") or node.attrs.get("name") or "").strip().lower()
+        content = (node.attrs.get("content") or "").strip()
+        if key and content and key not in meta:
+            meta[key] = content[:300]
+    canonical = ""
+    for node in dom.walk():
+        if not node.is_text and (node.tag or "").lower() == "link" \
+                and node.attrs.get("rel") == "canonical":
+            canonical = node.attrs.get("href", "")
+            break
+    return {
+        "url": url, "kind": "meta",
+        "title": title,
+        "description": meta.get("description", "") or meta.get("og:description", ""),
+        "canonical": canonical,
+        "og": {k: v for k, v in meta.items() if k.startswith("og:")},
+        "other": {k: v for k, v in meta.items()
+                  if not k.startswith("og:") and k not in {"description", "viewport"}},
+    }
+
+
+def dom_nav(dom: Node, url: str, limit: int = 200) -> dict[str, Any]:
+    """Link groups: {url, text, tag}."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for a in dom.find_all("a"):
+        href = (a.attrs.get("href") or "").strip()
+        if not href or href.startswith(("#", "javascript:")):
+            continue
+        absolute = urllib.parse.urljoin(url, href)
+        text = " ".join(a.inner_text().split())[:120]
+        key = (absolute, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"url": absolute, "text": text, "tag": (a.attrs.get("class") or "")[:60]})
+        if len(out) >= limit:
+            break
+    return {"url": url, "kind": "nav", "count": len(out), "links": out}
+
+
 # ── form helpers ─────────────────────────────────────────────────────────────
 
 
@@ -1049,6 +1148,58 @@ def _form_field_names(dom: Node) -> set[str]:
             if name:
                 names.add(name)
     return names
+
+
+# ── multipart file uploads ─────────────────────────────────────────────────
+
+
+def _read_upload_file(field: str, path: str) -> tuple[str, bytes, str]:
+    """Read an upload file off disk. Fail fast: missing/unreadable files
+    are errors, never silent empty uploads."""
+    p = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(p):
+        raise ToolError(f"upload field {field!r}: not a file: {path!r}")
+    try:
+        with open(p, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        raise ToolError(f"upload field {field!r}: cannot read {path!r}: {exc}") from exc
+    mime, _ = mimetypes.guess_type(p)
+    return os.path.basename(p), data, mime or "application/octet-stream"
+
+
+def _encode_multipart(
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes, str]],
+) -> tuple[bytes, str]:
+    """Encode urlencoded fields + files as multipart/form-data.
+
+    Returns (body, content_type). The boundary is random per call so two
+    uploads never collide.
+    """
+    boundary = "----NoMoralsBoundary" + uuid.uuid4().hex
+    buf = bytearray()
+
+    def _part_headers(name: str, filename: str = "", mime: str = "") -> bytes:
+        disp = f'form-data; name="{name}"'
+        if filename:
+            # quote the filename the way browsers do
+            disp += f'; filename="{filename}"'
+        head = f"--{boundary}\r\nContent-Disposition: {disp}\r\n"
+        if mime:
+            head += f"Content-Type: {mime}\r\n"
+        return head.encode("utf-8") + b"\r\n"
+
+    for name, value in (fields or {}).items():
+        buf += _part_headers(str(name))
+        buf += str(value).encode("utf-8")
+        buf += b"\r\n"
+    for name, (filename, data, mime) in (files or {}).items():
+        buf += _part_headers(str(name), filename=filename, mime=mime)
+        buf += data
+        buf += b"\r\n"
+    buf += f"--{boundary}--\r\n".encode("utf-8")
+    return bytes(buf), f"multipart/form-data; boundary={boundary}"
 
 
 
@@ -1118,7 +1269,9 @@ def register(registry: Any) -> None:
         "browser",
         description=(
             "stateful web browsing (v2): open a page and read it (text/markdown), "
-            "list links, click, fill and submit forms, extract elements or "
+            "list links, click, fill and submit forms (submit takes a "
+            "multipart file upload via uploads={field: path}), extract "
+            "elements or "
             "STRUCTURED views (headings/tables/forms/meta/nav), walk a "
             "trust-ranked multi-page research path, or run a multi-step task "
             "(a small program of open/fill/submit/extract/click/back steps); "
@@ -1136,6 +1289,7 @@ def register(registry: Any) -> None:
             "value": "str — for fill: the value",
             "session": "str (optional, default 'default') — named cookie session (persisted to disk)",
             "steps": "list|json — for task: [{act, ...}] multi-step program (open/fill/submit/extract/click/back/wait/stop)",
+            "uploads": "dict (optional) — for submit: {field_name: local_file_path} multipart file upload",
             "max_chars": "int (optional) — cap for text/markdown output",
         },
     )
@@ -1147,6 +1301,7 @@ def register(registry: Any) -> None:
         value: str = "",
         kind: str = "",
         steps: Any = None,
+        uploads: Any = None,
         session: str = "default",
         max_chars: int = 40000,
         **_: Any,
@@ -1156,7 +1311,8 @@ def register(registry: Any) -> None:
                            session_dir=session_dir, max_task_steps=max_task_steps)
         try:
             return sess.do(action, url=url, target=target, name=name,
-                           value=value, kind=kind, steps=steps, max_chars=max_chars)
+                           value=value, kind=kind, steps=steps, uploads=uploads,
+                           max_chars=max_chars)
         except ToolError:
             raise
         except Exception as exc:  # noqa: BLE001 - a browser error is a result
