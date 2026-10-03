@@ -47,9 +47,11 @@ CLI_ALIASES: dict[str, list[str]] = {
     "cookies": ["ck"],
     "crack": ["cr"],
     "data": ["d"],
+    "datasci": ["ds"],
     "decode": ["dec"],
     "exec": ["e"],
     "goal": ["g"],
+    "plugin": ["plug"],
     "hub": ["hb"],
     "improve": ["imp"],
     "inbox": ["ib"],
@@ -1523,6 +1525,46 @@ def _parser() -> argparse.ArgumentParser:
                         help="timeline: end year")
     wisdom.add_argument("--json", action="store_true", help="Output as JSON")
 
+    datasci = sub.add_parser("datasci", aliases=CLI_ALIASES["datasci"],
+        help="data-science workspace: load, describe, query, plot",
+        description=("nm datasci load <file> [--name N] [--overwrite]\n"
+                     "nm datasci list [--json]\n"
+                     "nm datasci describe <name> [--json]\n"
+                     "nm datasci head <name> [--rows N] [--json]\n"
+                     "nm datasci query <name> \"<pandas expr>\" [--as NEW] [--json]\n"
+                     "nm datasci plot <name> --kind line|bar|scatter|hist "
+                     "--x COL [--y COL] [--title T]\n"
+                     "nm datasci drop <name>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    datasci.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    datasci.add_argument("--name", default="", help="load: dataset name")
+    datasci.add_argument("--overwrite", action="store_true",
+                         help="load: replace existing dataset")
+    datasci.add_argument("--rows", type=int, default=5, help="head: row count")
+    datasci.add_argument("--as_name", default="",
+                         help="query: save result as new dataset")
+    datasci.add_argument("--kind", default="line",
+                         choices=["line", "bar", "scatter", "hist"],
+                         help="plot: chart kind")
+    datasci.add_argument("--x", default="", help="plot: x column")
+    datasci.add_argument("--y", default="", help="plot: y column")
+    datasci.add_argument("--title", default="", help="plot: chart title")
+    datasci.add_argument("--json", action="store_true", help="Output as JSON")
+
+    plugin = sub.add_parser("plugin", aliases=CLI_ALIASES["plugin"],
+        help="plugin packages: install, list, enable/disable, run",
+        description=("nm plugin install <path|url|zip>\n"
+                     "nm plugin list [--json]\n"
+                     "nm plugin info <name> [--json]\n"
+                     "nm plugin enable|disable <name>\n"
+                     "nm plugin remove <name>\n"
+                     "nm plugin run <name> [entry] [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    plugin.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    plugin.add_argument("--json", action="store_true", help="Output as JSON")
+
     return parser
 
     # Wave K commands: document engine, browser service, code workspace.
@@ -1570,4 +1612,3 @@ def _parser() -> argparse.ArgumentParser:
                       help="patch apply: write files (default is dry-run)")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
 
-    return parser
