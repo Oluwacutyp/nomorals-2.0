@@ -680,13 +680,73 @@ def _parser() -> argparse.ArgumentParser:
                      "nm studio bg-remove <file> [--mode M] "
                      "[--chroma-color C] [--tolerance N]\n"
                      "nm studio upscale <file> [--scale F]\n"
+                     "nm studio denoise <file> [--strength F] "
+                     "[--method nlmeans|bilateral]\n"
+                     "nm studio edges <file> [--low N] [--high N]\n"
+                     "nm studio inpaint-cv <file> --mask l,t,r,b|MASKFILE "
+                     "[--method telea|ns]\n"
+                     "nm studio clone <file> --background BGFILE "
+                     "[--x N --y N]\n"
+                     "nm studio sharpen <file> [--amount F] [--sigma F]\n"
+                     "nm studio cartoon <file>\n"
+                     "nm studio sketch <file> [--sigma F]\n"
+                     "nm studio perspective <file> "
+                     "[--corners x1,y1;x2,y2;x3,y3;x4,y4]\n"
+                     "nm studio grabcut <file> [--rect l,t,r,b] "
+                     "[--background transparent|blur|white]\n"
+                     "nm studio rescale <file> [--scale F] [--order N]\n"
+                     "nm studio exposure <file> [--mode MODE] [--gamma F]\n"
+                     "nm studio match-hist <file> --reference REFFILE\n"
+                     "nm studio threshold <file> [--method M]\n"
+                     "nm studio features <file> [--n N]\n"
+                     "nm studio kmeans <file> [--k N]\n"
+                     "nm studio deblur <file> [--psf N] [--method M]\n"
+                     "nm studio superpixels <file> [--n N]\n"
+                     "nm studio white-balance <file> [--method M]\n"
+                     "nm studio autolevels <file> [--cutoff F]\n"
+                     "nm studio color-transfer <file> --reference REFFILE\n"
+                     "nm studio panorama <file> --images B.png [C.png ...]\n"
+                     "nm studio backends\n"
+                     "nm studio retouch <file> [--radius F] [--amount F]\n"
+                     "nm studio tonemap <file> [--method M]\n"
+                     "nm studio detail <file>\n"
+                     "nm studio stylize <file>\n"
+                     "nm studio clarity <file> [--amount F]\n"
+                     "nm studio shadows <file>\n"
+                     "nm studio dehaze <file>\n"
+                     "nm studio seamcarve <file> --width W [--height H]\n"
+                     "nm studio tiltshift <file>\n"
+                     "nm studio selective <file> [--hue H]\n"
+                     "nm studio split-tone <file>\n"
+                     "nm studio curves <file> [--points P] [--channel C]\n"
+                     "nm studio lut <file> --lut L.cube\n"
+                     "nm studio bg-replace <file> --background BG\n"
                      "nm studio template <name> [--param k=v ...] [--wait]\n"
                      "nm studio project save <file> <project> --ops JSON\n"
                      "nm studio project render <project> [--wait]\n"
                      "nm studio project describe <project>\n"
                      "nm studio batch <dir> <project> [--pattern GLOB]\n"
                      "nm studio compare <file> --ops JSON [--mode MODE]\n"
-                     "nm studio gen-status"),
+                     "nm studio gen-status\n"
+                     "nm studio vframes <file> [--timestamps T,.. | --interval S | --count N] [--width W]\n"
+                     "nm studio vfilter <file> <filter> [--strength F]\n"
+                     "nm studio vtimelapse <file> [--factor N]\n"
+                     "nm studio vstabilize <file> [--smoothing N]\n"
+                     "nm studio vhighlights <file> [--threshold F] [--min-gap S]\n"
+                     "nm studio vthumb <file> [timestamp] [--width W]\n"
+                     "nm studio vpreview <file> [--cols N] [--rows N]\n"
+                     "nm studio vslowmo <file> [--factor N] [--method flow|blend]\n"
+                     "nm studio vreverse <file>\n"
+                     "nm studio vboomerang <file> [--start S] [--duration D]\n"
+                     "nm studio vblurry <file> [--threshold F]\n"
+                     "nm studio vheatmap <file>\n"
+                     "nm studio vsplit <file> [--threshold F]\n"
+                     "nm studio vkenburns <img> [--duration S] [--zoom-from F] [--zoom-to F]\n"
+                     "nm studio vslideshow <img...> [--duration-each S] [--transition T]\n"
+                     "nm studio vchroma <file> <background> [--color C]\n"
+                     "nm studio vpip <main> <overlay> [--position P] [--scale F]\n"
+                     "nm studio vfreeze <file> [timestamp] [--duration S]\n"
+                     "nm studio vdenoise <file> [--strength F]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     studio_sub = studio.add_subparsers(dest="studio_action", required=True)
@@ -909,6 +969,237 @@ def _parser() -> argparse.ArgumentParser:
                            help="scale factor (default 2.0)")
     _s_json(s_upscale)
 
+    # -- OpenCV / scikit-image advanced ops (media-edit extra) ----------
+    def _s_cv_file(p, help_text):
+        p.add_argument("file", help="image file (workspace-relative)")
+        _s_json(p)
+        return p
+
+    s_denoise = studio_sub.add_parser("denoise", help="OpenCV denoise "
+                                      "(nlmeans/bilateral)")
+    _s_cv_file(s_denoise, "image file")
+    s_denoise.add_argument("--strength", type=float, default=10.0)
+    s_denoise.add_argument("--method", default="nlmeans",
+                           choices=["nlmeans", "bilateral"])
+
+    s_edges = studio_sub.add_parser("edges", help="Canny edge detection")
+    _s_cv_file(s_edges, "image file")
+    s_edges.add_argument("--low", type=float, default=100.0)
+    s_edges.add_argument("--high", type=float, default=200.0)
+
+    s_inpcv = studio_sub.add_parser("inpaint-cv", help="OpenCV inpainting "
+                                    "(Telea/NS)")
+    _s_cv_file(s_inpcv, "image file")
+    s_inpcv.add_argument("--mask", required=True,
+                         help="l,t,r,b box or mask image file")
+    s_inpcv.add_argument("--method", default="telea",
+                         choices=["telea", "ns"])
+
+    s_clone = studio_sub.add_parser("clone", help="seamless clone onto a "
+                                    "background (Poisson blending)")
+    _s_cv_file(s_clone, "image file")
+    s_clone.add_argument("--background", required=True,
+                         help="background image file (workspace-relative)")
+    s_clone.add_argument("--x", type=int, default=None,
+                         help="paste center x (default: image center)")
+    s_clone.add_argument("--y", type=int, default=None,
+                         help="paste center y (default: image center)")
+
+    s_sharp = studio_sub.add_parser("sharpen", help="unsharp-mask "
+                                    "sharpening (OpenCV)")
+    _s_cv_file(s_sharp, "image file")
+    s_sharp.add_argument("--amount", type=float, default=1.0)
+    s_sharp.add_argument("--sigma", type=float, default=1.0)
+
+    s_cartoon = studio_sub.add_parser("cartoon", help="cartoon stylization")
+    _s_cv_file(s_cartoon, "image file")
+
+    s_sketch = studio_sub.add_parser("sketch", help="pencil-sketch "
+                                     "stylization")
+    _s_cv_file(s_sketch, "image file")
+    s_sketch.add_argument("--sigma", type=float, default=21.0)
+
+    s_persp = studio_sub.add_parser("perspective", help="perspective "
+                                    "correction (auto document detect)")
+    _s_cv_file(s_persp, "image file")
+    s_persp.add_argument("--corners", default=None,
+                         help="x1,y1;x2,y2;x3,y3;x4,y4 (default: auto)")
+
+    s_grab = studio_sub.add_parser("grabcut", help="GrabCut foreground "
+                                   "extraction")
+    _s_cv_file(s_grab, "image file")
+    s_grab.add_argument("--rect", default=None,
+                        help="l,t,r,b subject box (default: auto inset)")
+    s_grab.add_argument("--background", default="transparent",
+                        choices=["transparent", "blur", "white"])
+
+    s_rescale = studio_sub.add_parser("rescale", help="high-quality "
+                                      "rescaling (scikit-image)")
+    _s_cv_file(s_rescale, "image file")
+    s_rescale.add_argument("--scale", type=float, default=2.0)
+    s_rescale.add_argument("--order", type=int, default=3)
+
+    s_expo = studio_sub.add_parser("exposure", help="exposure correction "
+                                   "(scikit-image)")
+    _s_cv_file(s_expo, "image file")
+    s_expo.add_argument("--mode", default="adaptive",
+                        choices=["gamma", "log", "adaptive"])
+    s_expo.add_argument("--gamma", type=float, default=1.0)
+
+    s_mhist = studio_sub.add_parser("match-hist", help="match color "
+                                    "histogram to a reference image")
+    _s_cv_file(s_mhist, "image file")
+    s_mhist.add_argument("--reference", required=True,
+                         help="reference image file (workspace-relative)")
+
+    s_thresh = studio_sub.add_parser("threshold", help="adaptive "
+                                      "binarization (scikit-image)")
+    _s_cv_file(s_thresh, "image file")
+    s_thresh.add_argument("--method", default="sauvola",
+                          choices=["sauvola", "niblack", "otsu"])
+
+    # -- full capability set: detection, deconvolution, segmentation ----
+    s_feat = studio_sub.add_parser("features", help="ORB feature detection "
+                                   "visualization")
+    _s_cv_file(s_feat, "image file")
+    s_feat.add_argument("--n", type=int, default=500,
+                        help="max keypoints (default 500)")
+
+    s_km = studio_sub.add_parser("kmeans", help="color quantization to k "
+                                 "dominant colors")
+    _s_cv_file(s_km, "image file")
+    s_km.add_argument("--k", type=int, default=8)
+
+    s_deblur = studio_sub.add_parser("deblur", help="deconvolution deblur "
+                                     "(scikit-image)")
+    _s_cv_file(s_deblur, "image file")
+    s_deblur.add_argument("--psf", type=int, default=5,
+                          help="blur kernel diameter (default 5)")
+    s_deblur.add_argument("--method", default="wiener",
+                          choices=["wiener", "richardson_lucy"])
+
+    s_sp = studio_sub.add_parser("superpixels", help="SLIC superpixel "
+                                 "segmentation overlay")
+    _s_cv_file(s_sp, "image file")
+    s_sp.add_argument("--n", type=int, default=100,
+                      help="number of segments (default 100)")
+
+    s_wb = studio_sub.add_parser("white-balance", help="automatic white "
+                                 "balance")
+    _s_cv_file(s_wb, "image file")
+    s_wb.add_argument("--method", default="grayworld",
+                      choices=["grayworld", "maxwhite"])
+
+    s_al = studio_sub.add_parser("autolevels", help="auto histogram levels")
+    _s_cv_file(s_al, "image file")
+    s_al.add_argument("--cutoff", type=float, default=0.5)
+
+    s_ct = studio_sub.add_parser("color-transfer", help="Reinhard color "
+                                 "transfer from a reference image")
+    _s_cv_file(s_ct, "image file")
+    s_ct.add_argument("--reference", required=True,
+                      help="reference image file (workspace-relative)")
+
+    s_pano = studio_sub.add_parser("panorama", help="stitch overlapping "
+                                   "photos into a panorama")
+    _s_cv_file(s_pano, "image file")
+    s_pano.add_argument("--images", nargs="+", required=True,
+                        help="additional frames (workspace-relative)")
+    s_pano.add_argument("--mode", default="panorama",
+                        choices=["panorama", "scans"])
+
+    s_be = studio_sub.add_parser("backends", help="show image-op backend "
+                                 "availability and selection")
+    _s_json(s_be)
+
+    # -- pro retouch / color / compositing (free path) -----------------
+    s_ret = studio_sub.add_parser("retouch", help="frequency-separation "
+                                  "skin/tone smoothing")
+    _s_cv_file(s_ret, "image file")
+    s_ret.add_argument("--radius", type=float, default=8.0)
+    s_ret.add_argument("--amount", type=float, default=0.7)
+
+    s_tm = studio_sub.add_parser("tonemap", help="HDR-style local tone "
+                                 "mapping")
+    _s_cv_file(s_tm, "image file")
+    s_tm.add_argument("--method", default="mantiuk",
+                      choices=["mantiuk", "drago", "reinhard"])
+    s_tm.add_argument("--saturation", type=float, default=1.0)
+
+    s_de = studio_sub.add_parser("detail", help="edge-preserving detail "
+                                 "enhancement")
+    _s_cv_file(s_de, "image file")
+    s_de.add_argument("--sigma-s", type=float, default=10.0)
+    s_de.add_argument("--sigma-r", type=float, default=0.15)
+
+    s_sty = studio_sub.add_parser("stylize", help="watercolor-style "
+                                  "rendering")
+    _s_cv_file(s_sty, "image file")
+    s_sty.add_argument("--sigma-s", type=float, default=60.0)
+    s_sty.add_argument("--sigma-r", type=float, default=0.6)
+
+    s_cl = studio_sub.add_parser("clarity", help="local-contrast punch")
+    _s_cv_file(s_cl, "image file")
+    s_cl.add_argument("--amount", type=float, default=0.5)
+    s_cl.add_argument("--radius", type=float, default=24.0)
+
+    s_sh = studio_sub.add_parser("shadows", help="shadow/highlight "
+                                 "recovery")
+    _s_cv_file(s_sh, "image file")
+    s_sh.add_argument("--shadows", type=float, default=0.3)
+    s_sh.add_argument("--highlights", type=float, default=0.3)
+
+    s_dh = studio_sub.add_parser("dehaze", help="haze/fog removal (dark "
+                                 "channel prior)")
+    _s_cv_file(s_dh, "image file")
+    s_dh.add_argument("--omega", type=float, default=0.95)
+
+    s_sc = studio_sub.add_parser("seamcarve", help="content-aware shrinking")
+    _s_cv_file(s_sc, "image file")
+    s_sc.add_argument("--width", type=int, default=None)
+    s_sc.add_argument("--height", type=int, default=None)
+
+    s_ts = studio_sub.add_parser("tiltshift", help="tilt-shift miniature "
+                                 "effect")
+    _s_cv_file(s_ts, "image file")
+    s_ts.add_argument("--center", type=float, default=0.5)
+    s_ts.add_argument("--size", type=float, default=0.25)
+    s_ts.add_argument("--blur", type=float, default=15.0)
+
+    s_sel = studio_sub.add_parser("selective", help="selective color "
+                                  "(one hue stays, rest goes mono)")
+    _s_cv_file(s_sel, "image file")
+    s_sel.add_argument("--hue", type=float, default=0.0)
+    s_sel.add_argument("--width", type=float, default=30.0)
+
+    s_splt = studio_sub.add_parser("split-tone", help="tint shadows and "
+                                   "highlights independently")
+    _s_cv_file(s_splt, "image file")
+    s_splt.add_argument("--shadows", default="30,60,120")
+    s_splt.add_argument("--highlights", default="200,180,140")
+    s_splt.add_argument("--strength", type=float, default=0.5)
+
+    s_cur = studio_sub.add_parser("curves", help="tonal curves")
+    _s_cv_file(s_cur, "image file")
+    s_cur.add_argument("--points", default="0,0;255,255",
+                       help="in,out;in,out;... (0..255)")
+    s_cur.add_argument("--channel", default="rgb",
+                       choices=["rgb", "r", "g", "b"])
+
+    s_lut = studio_sub.add_parser("lut", help="apply a .cube 3D LUT")
+    _s_cv_file(s_lut, "image file")
+    s_lut.add_argument("--lut", required=True,
+                       help=".cube LUT file (workspace-relative)")
+
+    s_bgr = studio_sub.add_parser("bg-replace", help="cut subject out and "
+                                  "drop on a new background")
+    _s_cv_file(s_bgr, "image file")
+    s_bgr.add_argument("--background", required=True,
+                       help="background image file (workspace-relative)")
+    s_bgr.add_argument("--rect", default=None,
+                       help="l,t,r,b subject box (default: auto inset)")
+    s_bgr.add_argument("--feather", type=float, default=2.0)
+
     s_tmpl = studio_sub.add_parser("template", help="build a template project")
     s_tmpl.add_argument("name", help="podcast-clip, quote-card, "
                                     "product-showcase, meme, slideshow")
@@ -947,6 +1238,228 @@ def _parser() -> argparse.ArgumentParser:
     s_gen = studio_sub.add_parser("gen-status",
                                   help="generative backend status")
     _s_json(s_gen)
+
+    # --- more OpenCV/ffmpeg frame-level video ops ---
+    s_vslow = studio_sub.add_parser(
+        "vslowmo", help="slow motion with interpolated frames")
+    s_vslow.add_argument("file", help="video file (workspace-relative)")
+    s_vslow.add_argument("--factor", type=int, default=2,
+                         help="slow-down factor (default 2)")
+    s_vslow.add_argument("--method", default="flow",
+                         choices=["flow", "blend"],
+                         help="OpenCV interp method (ffmpeg uses "
+                              "minterpolate; default flow)")
+    s_vslow.add_argument("--out-dir", default=None)
+    s_vslow.add_argument("--backend", default="auto",
+                         choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vslow)
+
+    s_vrev = studio_sub.add_parser("vreverse", help="play video backwards")
+    s_vrev.add_argument("file", help="video file (workspace-relative)")
+    s_vrev.add_argument("--out-dir", default=None)
+    s_vrev.add_argument("--backend", default="auto",
+                        choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vrev)
+
+    s_vboom = studio_sub.add_parser(
+        "vboomerang", help="forward-then-backward loop of a slice")
+    s_vboom.add_argument("file", help="video file (workspace-relative)")
+    s_vboom.add_argument("--start", default=0, help="slice start")
+    s_vboom.add_argument("--duration", default=2, help="slice seconds")
+    s_vboom.add_argument("--out-dir", default=None)
+    s_vboom.add_argument("--backend", default="auto",
+                         choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vboom)
+
+    s_vblur = studio_sub.add_parser(
+        "vblurry", help="find blurry/out-of-focus frames")
+    s_vblur.add_argument("file", help="video file (workspace-relative)")
+    s_vblur.add_argument("--threshold", type=float, default=100.0,
+                         help="Laplacian variance threshold (default 100)")
+    s_vblur.add_argument("--out-dir", default=None)
+    s_vblur.add_argument("--backend", default="auto",
+                         choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vblur)
+
+    s_vheat = studio_sub.add_parser(
+        "vheatmap", help="heatmap of where motion happened")
+    s_vheat.add_argument("file", help="video file (workspace-relative)")
+    s_vheat.add_argument("--out-dir", default=None)
+    s_vheat.add_argument("--backend", default="auto",
+                         choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vheat)
+
+    s_vsplit = studio_sub.add_parser(
+        "vsplit", help="split video into one file per scene")
+    s_vsplit.add_argument("file", help="video file (workspace-relative)")
+    s_vsplit.add_argument("--threshold", type=float, default=0.03,
+                          help="scene-cut threshold 0..1 (default 0.03)")
+    s_vsplit.add_argument("--min-gap", type=float, default=0.5,
+                          help="min seconds between cuts (default 0.5)")
+    s_vsplit.add_argument("--min-scene", type=float, default=0.5,
+                          help="merge shorter scenes (default 0.5s)")
+    s_vsplit.add_argument("--out-dir", default=None)
+    s_vsplit.add_argument("--backend", default="auto",
+                          choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vsplit)
+
+    s_vkb = studio_sub.add_parser("vkenburns",
+                                  help="Ken Burns pan/zoom on a still image")
+    s_vkb.add_argument("file", help="image file (workspace-relative)")
+    s_vkb.add_argument("--duration", default=5, help="seconds")
+    s_vkb.add_argument("--zoom-from", type=float, default=1.0)
+    s_vkb.add_argument("--zoom-to", type=float, default=1.5)
+    s_vkb.add_argument("--pan", default="center",
+                       choices=["center", "left", "right", "up", "down"])
+    s_vkb.add_argument("--fps", type=int, default=30)
+    s_vkb.add_argument("--out-dir", default=None)
+    s_vkb.add_argument("--backend", default="auto",
+                       choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vkb)
+
+    s_vss = studio_sub.add_parser("vslideshow",
+                                  help="image slideshow with transitions")
+    s_vss.add_argument("images", nargs="+",
+                       help="image files (workspace-relative)")
+    s_vss.add_argument("--duration-each", default=3,
+                       help="seconds per image")
+    s_vss.add_argument("--transition", default="fade",
+                       help="ffmpeg xfade transition (default fade)")
+    s_vss.add_argument("--transition-duration", type=float, default=0.5)
+    s_vss.add_argument("--out-dir", default=None)
+    s_vss.add_argument("--backend", default="auto",
+                       choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vss)
+
+    s_vch = studio_sub.add_parser("vchroma",
+                                  help="green-screen key over a background")
+    s_vch.add_argument("file", help="video file (workspace-relative)")
+    s_vch.add_argument("background", help="background image/video")
+    s_vch.add_argument("--color", default="green",
+                       help="green|blue|red|hex (default green)")
+    s_vch.add_argument("--similarity", type=float, default=0.3)
+    s_vch.add_argument("--blend", type=float, default=0.1)
+    s_vch.add_argument("--out-dir", default=None)
+    s_vch.add_argument("--backend", default="auto",
+                       choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vch)
+
+    s_vpip = studio_sub.add_parser("vpip", help="picture-in-picture overlay")
+    s_vpip.add_argument("main", help="main video (workspace-relative)")
+    s_vpip.add_argument("overlay", help="overlay video/image")
+    s_vpip.add_argument("--position", default="bottom-right",
+                        choices=["top-left", "top-right", "bottom-left",
+                                 "bottom-right", "center"])
+    s_vpip.add_argument("--scale", type=float, default=0.25)
+    s_vpip.add_argument("--out-dir", default=None)
+    s_vpip.add_argument("--backend", default="auto",
+                        choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vpip)
+
+    s_vfr = studio_sub.add_parser("vfreeze",
+                                  help="hold a frame as a still clip")
+    s_vfr.add_argument("file", help="video file (workspace-relative)")
+    s_vfr.add_argument("timestamp", nargs="?", default=0)
+    s_vfr.add_argument("--duration", default=2, help="hold seconds")
+    s_vfr.add_argument("--out-dir", default=None)
+    s_vfr.add_argument("--backend", default="auto",
+                       choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vfr)
+
+    s_vdn = studio_sub.add_parser("vdenoise", help="reduce video noise")
+    s_vdn.add_argument("file", help="video file (workspace-relative)")
+    s_vdn.add_argument("--strength", type=float, default=1.0)
+    s_vdn.add_argument("--out-dir", default=None)
+    s_vdn.add_argument("--backend", default="auto",
+                       choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vdn)
+
+    # --- OpenCV frame-level video ops (nomorals.media_edit.cv_video) ---
+    s_vframes = studio_sub.add_parser(
+        "vframes", help="extract exact video frames (OpenCV)")
+    s_vframes.add_argument("file", help="video file (workspace-relative)")
+    s_vframes.add_argument("--timestamps", default=None,
+                           help="comma-separated timestamps, e.g. 1.5,10,1:30")
+    s_vframes.add_argument("--interval", default=None,
+                           help="every N seconds, e.g. 2.5")
+    s_vframes.add_argument("--count", type=int, default=None,
+                           help="N evenly spaced frames")
+    s_vframes.add_argument("--width", type=int, default=None,
+                           help="resize frames to this width")
+    s_vframes.add_argument("--out-dir", default=None)
+    s_vframes.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vframes)
+
+    s_vfilter = studio_sub.add_parser(
+        "vfilter", help="per-frame video filter (OpenCV)")
+    s_vfilter.add_argument("file", help="video file (workspace-relative)")
+    s_vfilter.add_argument(
+        "filter",
+        help="grayscale|blur|sharpen|edges|cartoonize|invert|sepia|"
+             "emboss|vignette|pixelate|sketch|warm|cool")
+    s_vfilter.add_argument("--strength", type=float, default=1.0,
+                           help="effect strength 0..2 (default 1.0)")
+    s_vfilter.add_argument("--out-dir", default=None)
+    s_vfilter.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vfilter)
+
+    s_vtl = studio_sub.add_parser(
+        "vtimelapse", help="speed up video by frame sampling (OpenCV)")
+    s_vtl.add_argument("file", help="video file (workspace-relative)")
+    s_vtl.add_argument("--factor", type=int, default=4,
+                       help="keep every Nth frame (default 4)")
+    s_vtl.add_argument("--out-dir", default=None)
+    s_vtl.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vtl)
+
+    s_vstab = studio_sub.add_parser(
+        "vstabilize", help="basic video stabilization (OpenCV)")
+    s_vstab.add_argument("file", help="video file (workspace-relative)")
+    s_vstab.add_argument("--smoothing", type=int, default=30,
+                         help="trajectory smoothing radius (default 30)")
+    s_vstab.add_argument("--no-crop", action="store_true",
+                         help="keep full frame instead of cropping borders")
+    s_vstab.add_argument("--out-dir", default=None)
+    s_vstab.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vstab)
+
+    s_vhl = studio_sub.add_parser(
+        "vhighlights", help="detect scene changes / motion (OpenCV)")
+    s_vhl.add_argument("file", help="video file (workspace-relative)")
+    s_vhl.add_argument("--threshold", type=float, default=0.03,
+                       help="frame-diff threshold 0..1 (default 0.03)")
+    s_vhl.add_argument("--min-gap", type=float, default=1.0,
+                       help="min seconds between highlights (default 1.0)")
+    s_vhl.add_argument("--out-dir", default=None)
+    s_vhl.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vhl)
+
+    s_vthumb = studio_sub.add_parser(
+        "vthumb", help="frame-accurate thumbnail at a timestamp (OpenCV)")
+    s_vthumb.add_argument("file", help="video file (workspace-relative)")
+    s_vthumb.add_argument("timestamp", nargs="?", default=0,
+                          help="timestamp (default 0)")
+    s_vthumb.add_argument("--width", type=int, default=640)
+    s_vthumb.add_argument("--out-dir", default=None)
+    s_vthumb.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vthumb)
+
+    s_vprev = studio_sub.add_parser(
+        "vpreview", help="contact-sheet preview grid (OpenCV)")
+    s_vprev.add_argument("file", help="video file (workspace-relative)")
+    s_vprev.add_argument("--cols", type=int, default=4)
+    s_vprev.add_argument("--rows", type=int, default=3)
+    s_vprev.add_argument("--cell-width", type=int, default=320)
+    s_vprev.add_argument("--out-dir", default=None)
+    s_vprev.add_argument("--backend", default="auto",
+                           choices=["auto", "opencv", "ffmpeg", "python"])
+    _s_json(s_vprev)
 
     captcha = sub.add_parser("captcha", aliases=CLI_ALIASES["captcha"],
         help="captcha detection and solving for browser automation",

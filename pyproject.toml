@@ -30,8 +30,10 @@ dependencies = []
 fast = ["numpy>=1.24"]
 # Media download and processing.
 media = ["yt-dlp>=2024.4.9"]
-# Media editing engine (Pillow-backed image ops; ffmpeg used from PATH).
-media-edit = ["Pillow>=10.0"]
+# Media editing engine (Pillow + OpenCV + scikit-image advanced ops;
+# ffmpeg used from PATH).
+media-edit = ["Pillow>=10.0", "opencv-python-headless>=4.8",
+              "scikit-image>=0.22"]
 # Local model training on GPU.
 train = ["torch>=2.1", "transformers>=4.38", "datasets>=2.17", "peft>=0.9"]
 # Fine-tuning backends.
@@ -40,8 +42,8 @@ finetune = ["unsloth", "trl>=0.8"]
 hub = ["huggingface-hub>=0.22"]
 # Development / test tooling.
 dev = ["pytest>=7.4", "ruff>=0.3"]
-# Everything.
-all = ["nomorals[fast,media,train,hub,dev]"]
+# Everything. Install this and Devon just works — no pip-hint chasing.
+all = ["nomorals[fast,media,media-edit,train,finetune,hub,dev]"]
 
 [project.scripts]
 nm = "nomorals.cli:main"

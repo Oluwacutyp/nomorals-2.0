@@ -69,6 +69,11 @@ from .dropbox import DropboxConnector, DropboxError
 from .spotify import SpotifyConnector, SpotifyError
 from .youtube import YouTubeConnector, YouTubeError
 
+from .googleflow import GoogleFlowConnector, GoogleFlowError
+from .leonardo import LeonardoConnector, LeonardoError
+from .nanobanana import NanoBananaConnector, NanoBananaError
+from .stabilityai import StabilityAIConnector, StabilityAIError
+
 __all__ = [
     "AuthMethod",
     "AWSConnector",
@@ -96,6 +101,8 @@ __all__ = [
     "GitHubError",
     "GmailConnector",
     "GmailError",
+    "GoogleFlowConnector",
+    "GoogleFlowError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
     "InstagramConnector",
@@ -107,7 +114,11 @@ __all__ = [
     "LinkedInError",
     "KongaConnector",
     "KongaError",
+    "LeonardoConnector",
+    "LeonardoError",
     "MonoConnector",
+    "NanoBananaConnector",
+    "NanoBananaError",
     "NotionConnector",
     "NotionError",
     "PaystackConnector",
@@ -118,6 +129,8 @@ __all__ = [
     "SlackError",
     "SpotifyConnector",
     "SpotifyError",
+    "StabilityAIConnector",
+    "StabilityAIError",
     "TelegramConnector",
     "TelegramError",
     "TrelloConnector",

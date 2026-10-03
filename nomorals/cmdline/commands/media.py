@@ -137,6 +137,218 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
             result = _media_call(
                 context, "studio_run", source=args.file,
                 ops=[{"op": "upscale", "scale": args.scale}])
+        elif action == "denoise":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "denoise", "strength": args.strength,
+                      "method": args.method}])
+        elif action == "edges":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "edge_detect", "low": args.low,
+                      "high": args.high}])
+        elif action == "inpaint-cv":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "inpaint_cv", "mask": args.mask,
+                      "method": args.method}])
+        elif action == "clone":
+            clone_op: dict[str, Any] = {
+                "op": "seamless_clone", "background": args.background}
+            if args.x is not None and args.y is not None:
+                clone_op["position"] = [args.x, args.y]
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[clone_op])
+        elif action == "sharpen":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "sharpen", "amount": args.amount,
+                      "sigma": args.sigma}])
+        elif action == "cartoon":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "cartoonize"}])
+        elif action == "sketch":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "pencil_sketch", "blur_sigma": args.sigma}])
+        elif action == "perspective":
+            persp_op: dict[str, Any] = {"op": "perspective"}
+            if args.corners:
+                persp_op["corners"] = args.corners
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[persp_op])
+        elif action == "grabcut":
+            grab_op: dict[str, Any] = {"op": "grabcut",
+                                       "background": args.background}
+            if args.rect:
+                grab_op["rect"] = args.rect
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[grab_op])
+        elif action == "rescale":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "rescale", "scale": args.scale,
+                      "order": args.order}])
+        elif action == "exposure":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "exposure", "mode": args.mode,
+                      "gamma": args.gamma}])
+        elif action == "match-hist":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "match_histogram",
+                      "reference": args.reference}])
+        elif action == "threshold":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "adaptive_threshold", "method": args.method}])
+        elif action == "features":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "orb_features", "n": args.n}])
+        elif action == "kmeans":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "kmeans", "k": args.k}])
+        elif action == "deblur":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "deblur", "psf_size": args.psf,
+                      "method": args.method}])
+        elif action == "superpixels":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "superpixels", "n_segments": args.n}])
+        elif action == "white-balance":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "white_balance", "method": args.method}])
+        elif action == "autolevels":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "auto_levels", "cutoff": args.cutoff}])
+        elif action == "color-transfer":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "color_transfer",
+                      "reference": args.reference}])
+        elif action == "panorama":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "panorama", "images": list(args.images),
+                      "mode": args.mode}])
+        elif action == "backends":
+            from ...media_edit.cv_ops import backend_status
+            result = backend_status()
+            if as_json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(f"opencv:       {result['opencv']}")
+                print(f"scikit-image: {result['scikit_image']}")
+                print(f"numpy:        {result['numpy']}")
+                print("selected backend per op:")
+                for op, be in sorted(result["selected"].items()):
+                    print(f"  {op:20s} {be}")
+            return 0
+        elif action == "retouch":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "retouch_smooth", "radius": args.radius,
+                      "amount": args.amount}])
+        elif action == "tonemap":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "tone_map", "method": args.method,
+                      "saturation": args.saturation}])
+        elif action == "detail":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "detail_enhance", "sigma_s": args.sigma_s,
+                      "sigma_r": args.sigma_r}])
+        elif action == "stylize":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "stylize", "sigma_s": args.sigma_s,
+                      "sigma_r": args.sigma_r}])
+        elif action == "clarity":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "clarity", "amount": args.amount,
+                      "radius": args.radius}])
+        elif action == "shadows":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "shadow_highlight", "shadows": args.shadows,
+                      "highlights": args.highlights}])
+        elif action == "dehaze":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "dehaze", "omega": args.omega}])
+        elif action == "seamcarve":
+            if args.width is None and args.height is None:
+                print("seamcarve needs --width and/or --height",
+                      file=sys.stderr)
+                return 2
+            sc_op: dict[str, Any] = {"op": "seam_carve"}
+            if args.width is not None:
+                sc_op["width"] = args.width
+            if args.height is not None:
+                sc_op["height"] = args.height
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[sc_op])
+        elif action == "tiltshift":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "tilt_shift", "focus_center": args.center,
+                      "focus_size": args.size, "blur": args.blur}])
+        elif action == "selective":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "selective_color", "hue": args.hue,
+                      "hue_width": args.width}])
+        elif action == "split-tone":
+            def _rgb3(spec: str, what: str) -> tuple[int, int, int]:
+                try:
+                    r, g, b = (int(v) for v in spec.split(","))
+                except ValueError:
+                    raise RuntimeError(
+                        f"bad --{what} {spec!r}; use r,g,b")
+                return (r, g, b)
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "split_tone",
+                      "shadows": list(_rgb3(args.shadows, "shadows")),
+                      "highlights": list(_rgb3(args.highlights,
+                                               "highlights")),
+                      "strength": args.strength}])
+        elif action == "curves":
+            pts = []
+            for pair in args.points.split(";"):
+                try:
+                    x, y = (int(v) for v in pair.split(","))
+                except ValueError:
+                    print(f"bad --points {pair!r}; use in,out;...",
+                          file=sys.stderr)
+                    return 2
+                pts.append([x, y])
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "curves", "points": pts,
+                      "channel": args.channel}])
+        elif action == "lut":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "cube_lut", "lut": args.lut}])
+        elif action == "bg-replace":
+            bgr_op: dict[str, Any] = {"op": "replace_background",
+                                      "background": args.background,
+                                      "feather": args.feather}
+            if args.rect:
+                bgr_op["rect"] = args.rect
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[bgr_op])
         elif action == "img2img":
             i2i_op: dict[str, Any] = {
                 "op": "img2img", "prompt": args.prompt,
@@ -259,6 +471,12 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
                           "huggingface_hub + set HF_TOKEN, or install "
                           "diffusers+torch")
             return 0
+        elif action in ("vframes", "vfilter", "vtimelapse", "vstabilize",
+                        "vhighlights", "vthumb", "vpreview", "vslowmo",
+                        "vreverse", "vboomerang", "vblurry", "vheatmap",
+                        "vsplit", "vkenburns", "vslideshow", "vchroma",
+                        "vpip", "vfreeze", "vdenoise"):
+            return _cmd_studio_cv_video(args, as_json)
         else:
             print(f"unknown studio action: {action}", file=sys.stderr)
             return 2
@@ -283,6 +501,141 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
     else:
         print(f"wrote {result['output']}")
         print(f"original untouched: {result['input']}")
+    return 0
+
+
+def _cmd_studio_cv_video(args: argparse.Namespace, as_json: bool) -> int:
+    """`nm studio v*` — OpenCV frame-level video ops.
+
+    Calls nomorals.media_edit.cv_video / videos directly (no tool-registry
+    round trip); these functions fail with plain, actionable errors.
+    """
+    from ...media_edit import cv_video
+    from ...media_edit import videos as V
+    action = args.studio_action
+    backend = getattr(args, "backend", "auto") or "auto"
+    try:
+        if action == "vframes":
+            ts = ([t.strip() for t in args.timestamps.split(",")]
+                  if args.timestamps else None)
+            result = cv_video.extract_frames(
+                args.file, timestamps=ts, interval=args.interval,
+                count=args.count, width=args.width, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vfilter":
+            result = cv_video.apply_filter_to_video(
+                args.file, filter_name=args.filter,
+                strength=args.strength, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vtimelapse":
+            result = cv_video.create_timelapse(
+                args.file, factor=args.factor, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vstabilize":
+            result = cv_video.stabilize_basic(
+                args.file, smoothing_radius=args.smoothing,
+                crop_borders=not args.no_crop, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vhighlights":
+            result = cv_video.frame_diff_highlights(
+                args.file, threshold=args.threshold, min_gap=args.min_gap,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vthumb":
+            result = V.frame_accurate_thumbnail(
+                args.file, timestamp=args.timestamp, width=args.width,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vpreview":
+            result = V.make_preview_grid(
+                args.file, cols=args.cols, rows=args.rows,
+                cell_width=args.cell_width, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vslowmo":
+            result = cv_video.slow_motion(
+                args.file, factor=args.factor, method=args.method,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vreverse":
+            result = cv_video.reverse_video(
+                args.file, out_dir=args.out_dir, backend=backend)
+        elif action == "vboomerang":
+            result = cv_video.boomerang(
+                args.file, start=args.start, duration=args.duration,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vblurry":
+            result = cv_video.find_blurry_frames(
+                args.file, threshold=args.threshold, out_dir=args.out_dir)
+        elif action == "vheatmap":
+            result = cv_video.motion_heatmap(
+                args.file, out_dir=args.out_dir)
+        elif action == "vsplit":
+            result = cv_video.split_on_scenes(
+                args.file, threshold=args.threshold, min_gap=args.min_gap,
+                min_scene=args.min_scene, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vkenburns":
+            result = cv_video.kenburns(
+                args.file, duration=args.duration,
+                zoom_from=args.zoom_from, zoom_to=args.zoom_to,
+                pan=args.pan, fps=args.fps, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vslideshow":
+            result = cv_video.slideshow(
+                args.images, duration_each=args.duration_each,
+                transition=args.transition,
+                transition_duration=args.transition_duration,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vchroma":
+            result = cv_video.chroma_key(
+                args.file, args.background, color=args.color,
+                similarity=args.similarity, blend=args.blend,
+                out_dir=args.out_dir, backend=backend)
+        elif action == "vpip":
+            result = cv_video.pip(
+                args.main, args.overlay, position=args.position,
+                scale=args.scale, out_dir=args.out_dir, backend=backend)
+        elif action == "vfreeze":
+            result = cv_video.freeze_frame(
+                args.file, timestamp=args.timestamp,
+                duration=args.duration, out_dir=args.out_dir,
+                backend=backend)
+        elif action == "vdenoise":
+            result = cv_video.denoise_video(
+                args.file, strength=args.strength, out_dir=args.out_dir,
+                backend=backend)
+        else:  # pragma: no cover - argparse restricts choices
+            print(f"unknown studio action: {action}", file=sys.stderr)
+            return 2
+    except Exception as exc:  # noqa: BLE001 - CLI surface: report, don't trace
+        print(f"studio {action} failed: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    if result.get("backend"):
+        print(f"backend: {result['backend']}")
+    if action == "vframes":
+        print(f"{result['count']} frames → {result['frames_dir']}")
+    elif action in ("vhighlights", "vblurry"):
+        kind = "highlights" if action == "vhighlights" else "blurry frames"
+        print(f"{result['count']} {kind} → {result['thumbs_dir']}")
+        for ev in result["events"][:10]:
+            print(f"  t={ev['t']}s score={ev['score']} {ev['thumb']}")
+        if result["count"] > 10:
+            print(f"  ... and {result['count'] - 10} more")
+    elif action == "vheatmap":
+        print(f"heatmap → {result['heatmap']}")
+        pk = result["peak_motion"]
+        print(f"peak motion: t={pk['t']}s score={pk['score']}")
+    elif action == "vsplit":
+        print(f"{result['count']} scenes → {result['scenes_dir']}")
+        for sc in result["scenes"]:
+            print(f"  scene {sc['n']}: {sc['start']}s–{sc['end']}s "
+                  f"{sc['output']}")
+    else:
+        print(f"wrote {result['output']}")
+        print(f"original untouched: {result['input']}")
+        if result.get("audio_dropped"):
+            print("note: output is video-only (OpenCV can't mux audio); "
+                  "use `nm media` mix_audio to re-attach sound")
     return 0
 
 
