@@ -16,6 +16,8 @@ env/
 
 # NoMorals Core runtime data — never commit local state
 data/
+!nomorals/wisdom/data/timeline.json
+!nomorals/wisdom/data/manifest.json
 backups/
 models/
 artifacts/
