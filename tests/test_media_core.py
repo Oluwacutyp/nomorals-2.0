@@ -333,7 +333,7 @@ class MusicComposeTests(MediaCoreBase):
         grp = c._rhyme_for("chasing the night", rng, None)
         self.assertIsNotNone(grp)
         self.assertIn("night", [g.lower() for g in grp])
-        line, _img = c._build_line(
+        line, _img, _em = c._build_line(
             "chorus", "x", "X", ["train"], "midnight train",
             STYLES["pop"], rng, end_group=("night", "light", "flight"))
         self.assertIn(line.split()[-1].lower(), ("night", "light", "flight"))
