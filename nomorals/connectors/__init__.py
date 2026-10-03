@@ -8,10 +8,11 @@ Adding a service: subclass :class:`Connector`, decorate with
 :func:`register_connector`, and it appears in ``nm connectors list``.
 Shipped: GitHub, Mono (NG bank data), Plaid (US/EU bank data), virtual
 cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse,
-Telegram Bot API, Discord Bot API, Gmail, Google Drive, Paystack (NG
-payments), Binance spot, Coinbase Advanced Trade, Wise transfers, Notion,
-Google Calendar, Trello — the framework is deliberately service-agnostic
-so more slot in.
+Jiji listings, Telegram Bot API, Discord Bot API, Gmail, Google Drive,
+Paystack (NG payments), Binance spot, Coinbase Advanced Trade, Wise
+transfers, Notion, Google Calendar, Trello, X/Twitter, Instagram,
+LinkedIn, Slack, Twilio, AWS, Dropbox, YouTube, Spotify — the framework
+is deliberately service-agnostic so more slot in.
 """
 
 from __future__ import annotations
