@@ -98,8 +98,10 @@ def _gen_webhook(cfg: dict) -> tuple[str, str]:
             raise ToolError("discord target must be 'token:channel_id'")
         body = (
             f"API='https://discord.com/api/webhooks/{token}/{channel}'\n"
+            f"JSON=$(printf '%s' \"$MSG\" | python3 -c "
+            f"'import json,sys; print(json.dumps({{\"content\": sys.stdin.read()}}))')\n"
             f"curl -fsS -X POST -H 'Content-Type: application/json' "
-            f"-d '{{\"content\":{json.dumps(json.dumps('$MSG'))}}}' \"$API\" >/dev/null\n"
+            f"-d \"$JSON\" \"$API\" >/dev/null\n"
         )
     elif kind == "ntfy":
         host, _, topic = target.partition("/")

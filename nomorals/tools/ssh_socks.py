@@ -178,7 +178,7 @@ class SshSocksTunnel:
             cmd = self.build_cmd()
             env = dict(os.environ)
             if self.profile.password:
-                env["SSH_PASS"] = self.profile.password
+                env["SSHPASS"] = self.profile.password
             try:
                 self.proc = subprocess.Popen(
                     cmd, env=env,
@@ -205,7 +205,7 @@ class SshSocksTunnel:
         cmd = self.build_cmd()
         env = dict(os.environ)
         if self.profile.password:
-            env["SSH_PASS"] = self.profile.password
+            env["SSHPASS"] = self.profile.password
         try:
             self.proc = subprocess.Popen(
                 cmd, env=env, stdin=subprocess.DEVNULL,
@@ -473,6 +473,8 @@ def register(registry: Any) -> None:
             "never argv."
         ),
         capability=Capability.NET_OUT,
+        # Note: also spawns ssh subprocesses (EXEC_SHELL). NET_OUT declared
+        # as the primary capability; process execution is inherent to SSH tunnels.
         parameters={
             "action": "str — start | stop | status | list | urls | remove",
             "name": "str — tunnel name (stop/status/remove)",

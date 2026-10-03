@@ -241,11 +241,13 @@ def socks4_connect(proxy_host: str, proxy_port: int, target_ip: str,
     sock = _connect(proxy_host, proxy_port, timeout)
     try:
         user = (userid or "").encode("latin-1", "replace")[:255]
-        request = (b"\x05\x0a\x00\x00" + struct.pack("!H", target_port)
+        # SOCKS4: VN=0x04, CD=0x01 (CONNECT), DSTPORT, DSTIP, USERID, NULL
+        request = (b"\x04\x01" + struct.pack("!H", target_port)
                    + packed + user + b"\x00")
         sock.sendall(request)
-        reply = _recv_exact(sock, 2, timeout)
-        if reply[0] != 0x05 or reply[1] != 0x00:
+        reply = _recv_exact(sock, 8, timeout)
+        # SOCKS4 reply: VN=0x00, CD=0x5A (granted)
+        if reply[0] != 0x00 or reply[1] != 0x5A:
             raise ConnectionError(f"socks4 connect failed: {reply.hex()}")
         return sock
     except Exception:
@@ -1559,7 +1561,7 @@ def register(registry: Any) -> None:
             "copy). Returns the file path + count. The chat layer can send "
             "this file to the owner directly (/proxy file)."
         ),
-        capability=Capability.FS_READ,
+        capability=Capability.FS_WRITE,
         parameters={
             "limit": "int (optional, 1000) — max proxies in the file",
             "max_age_hours": "float (optional, 24) — drop proxies tested older than this",
@@ -1670,7 +1672,7 @@ def register(registry: Any) -> None:
             "harvest size, and disabled sources (3 straight failures "
             "retire a source for 24h; a good harvest reinstates it)."
         ),
-        capability=Capability.FS_READ,
+        capability=Capability.FS_WRITE,
         parameters={},
     )
     def proxy_sources() -> dict[str, Any]:

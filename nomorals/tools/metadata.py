@@ -95,10 +95,12 @@ def _jpeg_exif(data: bytes) -> dict[str, Any]:
             out["exif"] = _parse_exif_ifd(segment[6:])
         elif marker == 0xE0 and segment[:5] == b"JFIF\x00":
             out["jif_version"] = f"{segment[5]}.{segment[6]}"
-            density = struct.unpack(">HH", segment[7:11])[0]
-            unit = segment[6]
+            # JFIF layout: ver_major[5], ver_minor[6], units[7],
+            # Xdensity[8:10], Ydensity[10:12] (big-endian)
+            unit = segment[7]
+            xdensity, ydensity = struct.unpack(">HH", segment[8:12])
             if unit == 1:
-                out["dpi"] = density
+                out["dpi"] = (xdensity, ydensity)
         elif marker == 0xDA:  # start of scan = done walking headers
             break
         pos += 2 + length
@@ -335,8 +337,13 @@ def _mp3_meta(data: bytes) -> dict[str, Any]:
                   b"TRCK": "track", b"TCON": "genre", b"COMM": "comment"}
         while frame + 10 < min(tag_end, len(data)):
             frame_id = data[frame:frame + 4]
-            fsize = (data[frame + 4] << 21) | (data[frame + 5] << 14) \
-                | (data[frame + 6] << 7) | data[frame + 7]
+            # v2.4: frame size is syncsafe (7 bits/byte).
+            # v2.3 and earlier: plain 32-bit big-endian.
+            if version >= 4:
+                fsize = ((data[frame + 4] & 0x7F) << 21) | ((data[frame + 5] & 0x7F) << 14) \
+                    | ((data[frame + 6] & 0x7F) << 7) | (data[frame + 7] & 0x7F)
+            else:
+                fsize = struct.unpack(">I", data[frame + 4:frame + 8])[0]
             if fsize <= 0:
                 break
             if frame_id in labels and version >= 3:
@@ -371,11 +378,14 @@ def _flac_meta(data: bytes) -> dict[str, Any]:
         block = data[pos + 4:pos + 4 + length]
         if block_type == 0:  # STREAMINFO
             if len(block) >= 18:
-                sample_rate = struct.unpack(">I", b"\x00" + block[11:14])[0] & 0x0FFFFFFF
-                channels = (block[11] >> 3) & 0x7
-                bps = (block[13] >> 1) & 0x7
+                # Packed field bytes 10-17:
+                # sample_rate: 20 bits, channels-1: 3 bits, bps-1: 5 bits
+                sample_rate = ((block[10] << 12) | (block[11] << 4)
+                               | (block[12] >> 4))
+                channels = ((block[12] >> 1) & 0x07) + 1
+                bps = (((block[12] & 0x01) << 4) | (block[13] >> 4)) + 1
                 out["sample_rate"] = sample_rate
-                out["channels"] = channels + 1
+                out["channels"] = channels
                 out["bits_per_sample"] = bps
         elif block_type == 4:  # VORBIS_COMMENT
             try:
