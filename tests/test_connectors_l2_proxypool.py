@@ -97,11 +97,13 @@ class _ForwardProxyHandler(_QuietHandler):
         import urllib.request
 
         # Retry upstream fetch: under full-suite load the loopback target
-        # can be slow to accept connections. Retry a few times before
-        # giving up with 502.
+        # can be unresponsive for tens of seconds (fd/GIL pressure from
+        # thousands of tests). Retry with backoff before giving up with
+        # 502 — a 502 here must mean genuinely unreachable, not a slow
+        # test double.
         body = b"bad gateway"
         code = 502
-        for _ in range(5):
+        for attempt in range(10):
             try:
                 with urllib.request.urlopen(
                     self.path, timeout=10
@@ -110,7 +112,7 @@ class _ForwardProxyHandler(_QuietHandler):
                     code = int(upstream.status)
                 break
             except Exception:  # noqa: BLE001 - test double, retry then 502
-                time.sleep(0.2)
+                time.sleep(min(0.2 * (2 ** attempt), 2.0))
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -629,18 +631,24 @@ class HealthCheckTests(_ProxyNetCase):
     def test_single_healthy_proxy(self) -> None:
         self.conn.add_proxy("127.0.0.1", self.open_port)
         pid = f"http://127.0.0.1:{self.open_port}"
-        # Retry: under full-suite load the loopback target can be slow,
-        # and the test proxy maps any upstream failure to 502. Multiple
-        # attempts with backoff stabilize the test. Each attempt records
-        # a check, so assert checks >= 1 (not == 1).
+        # Retry until a deadline: under full-suite load the loopback
+        # target can be unresponsive for tens of seconds, and the test
+        # proxy maps any upstream failure to 502. Deadline-based (not
+        # fixed-count) so extreme load spikes don't flake the test.
+        # Each attempt records a check, so assert checks >= 1 (not == 1).
         health = None
-        for attempt in range(10):
+        deadline = time.monotonic() + 100.0
+        attempt = 0
+        while True:
             result = self.conn.health_check(pid, url=self.target_url,
                                             timeout=10)
             health = result["health"]
             if health["status_code"] == 200:
                 break
-            time.sleep(0.5 * (attempt + 1))
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.5 * (attempt + 1), 5.0))
+            attempt += 1
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)

@@ -272,7 +272,10 @@ class DispatchRetryTest(unittest.TestCase):
         self.assertIn("that route just failed", reply)
         job = mind._jobs[-1]
         self.assertEqual(job["status"], "failed")
-        self.assertIn("2 attempts", job["note"])
+        # "status" is a read-only intent -> 3 attempts by the dynamic
+        # dispatch budget (read-only retries more freely; write intents
+        # stay at 2 to avoid duplicating side effects).
+        self.assertIn("3 attempts", job["note"])
 
 
 # ── coremind: job registry + browse normalization ─────────────────────────
