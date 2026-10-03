@@ -12,7 +12,7 @@ pkg install -y python git curl wget ffmpeg
 
 # 2. Python dependencies (core only — no heavy ML on phone)
 echo "[2/5] Installing Python deps..."
-pip install --upgrade pip
+# Note: do NOT upgrade pip on Termux — it breaks the python-pip package
 pip install pyyaml requests
 
 # 3. Clone Devon (nomorals-2.0)
