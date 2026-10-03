@@ -15,16 +15,16 @@ NM_LLM_SYSTEM_PROMPT=
 NM_LLM_TIMEOUT=
 NM_LLM_CACHE_DIR=
 
-NM_HF_TOKEN=
+NM_HF_TOKEN=                        # get at: https://huggingface.co/settings/tokens
 NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
 NM_HF_BASE_URL=
 NM_HF_ENDPOINT_URL=
 
-NM_GROQ_API_KEY=
+NM_GROQ_API_KEY=                    # get at: https://console.groq.com/keys
 NM_GROQ_MODEL=llama-3.3-70b-versatile
 NM_GROQ_BASE_URL=
 
-NM_OPENROUTER_API_KEY=
+NM_OPENROUTER_API_KEY=              # get at: https://openrouter.ai/keys
 NM_OPENROUTER_MODEL=openrouter/free
 NM_OPENROUTER_BASE_URL=
 
@@ -38,8 +38,8 @@ NM_EMBED_MODEL=
 
 # ---------- TELEGRAM USERBOT (your own account via Telethon) ----------
 NM_CHAT_TELEGRAM_ENABLED=1
-NM_CHAT_TELEGRAM_API_ID=          # digits from my.telegram.org
-NM_CHAT_TELEGRAM_API_HASH=        # hex from my.telegram.org
+NM_CHAT_TELEGRAM_API_ID=          # digits from: https://my.telegram.org
+NM_CHAT_TELEGRAM_API_HASH=        # hex from: https://my.telegram.org
 NM_CHAT_TELEGRAM_SESSION=/data/data/com.termux/files/home/.devon-tg.session
 NM_CHAT_TELEGRAM_CHATS=           # empty = all chats/DMs
 
