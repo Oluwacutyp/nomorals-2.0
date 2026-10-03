@@ -40,6 +40,7 @@ columns and confuse both systems; ``MonitorAgent`` keeps working untouched.
 
 from __future__ import annotations
 
+import abc
 import hashlib
 import json
 import re
@@ -493,13 +494,18 @@ def _semantic_hash(body: bytes) -> tuple[str, bool]:
         return "", False
 
 
-class _KindChecker:
-    """One watcher kind: ``check(wctx, watcher) -> WatchResult``."""
+class _KindChecker(abc.ABC):
+    """One watcher kind: ``check(wctx, watcher) -> WatchResult``.
+
+    Abstract — subclass and implement :meth:`check`.  Instantiating the
+    base directly fails fast instead of blowing up mid-sweep.
+    """
     name = ""
 
+    @abc.abstractmethod
     def check(self, wctx: WatcherContext,
-              watcher: Watcher) -> WatchResult:  # pragma: no cover
-        raise NotImplementedError
+              watcher: Watcher) -> WatchResult:
+        """Run one check of this watcher kind."""
 
     def describe(self, watcher: Watcher) -> str:
         return f"{self.name} watcher"
