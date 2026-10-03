@@ -777,6 +777,17 @@ _ENV_MAP: dict[str, str] = {
 _EMPTY: Any = object()
 
 
+# Field name fragments that indicate a path value — empty strings for these
+# mean "not set" (template placeholder), not a valid empty path.
+_PATH_HINTS = ("path", "dir", "file", "home")
+
+
+def _is_path_field(dotted: str) -> bool:
+    """Does this config field hold a filesystem path?"""
+    leaf = dotted.rsplit(".", 1)[-1].lower()
+    return any(h in leaf for h in _PATH_HINTS)
+
+
 def _coerce(value: str, target: type) -> Any:
     """Convert a string from env/TOML into the declared field type.
 
@@ -992,6 +1003,9 @@ def load_settings(
             continue
         if key in _ENV_MAP:
             dotted = _ENV_MAP[key]
+            # Empty path fields = not set (template placeholder).
+            if _is_path_field(dotted) and not value.strip():
+                continue
             # Coerce value to proper type based on field definition
             field_type = _find_field_type(Settings, dotted)
             if field_type is not None:
@@ -1009,6 +1023,9 @@ def load_settings(
             if target is None:
                 continue
             dotted = target
+        # Empty path fields = not set (template placeholder).
+        if _is_path_field(dotted) and not value.strip():
+            continue
         # Coerce value to proper type based on field definition
         field_type = _find_field_type(Settings, dotted)
         if field_type is not None:
@@ -1022,8 +1039,7 @@ def load_settings(
         for key, value in overrides.items():
             _apply_dotted(merged, key, value)
 
-    # 6b. Path fields must never be empty — an empty template value would
-    # resolve to the current directory instead of the real data home.
+    # 6b. Belt-and-suspenders: home must never be empty (would resolve to cwd).
     if not merged.get("home", "").strip():
         merged["home"] = "~/.nomorals"
 
