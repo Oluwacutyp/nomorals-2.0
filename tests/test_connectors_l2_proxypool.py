@@ -1,0 +1,578 @@
+"""Wave L2: proxypool connector.
+
+Offline by design — health checks run against in-process fake HTTP
+forward proxies on loopback (one open, one requiring proxy auth) plus a
+fake target server they forward to. No real external proxies, no network
+beyond 127.0.0.1.
+"""
+
+from __future__ import annotations
+
+import base64
+import http.server
+import json
+import os
+import socket
+import threading
+import unittest
+from unittest import mock
+
+from nomorals.accounts.vault import CredentialVault
+from nomorals.connectors.base import ConnectorError
+from nomorals.connectors.proxypool import ProxyPoolConnector, ProxyPoolError
+from nomorals.connectors.registry import (
+    create_connector,
+    get_connector,
+    list_connectors,
+)
+from nomorals.storage.db import Database
+
+
+def _vault() -> CredentialVault:
+    return CredentialVault(Database(":memory:"), master_passphrase="test")
+
+
+def _connector() -> ProxyPoolConnector:
+    return ProxyPoolConnector(_vault())
+
+
+#: Proxy env vars neutralized so urllib really goes through the fake proxy.
+_CLEAR_PROXY_ENV = {
+    "http_proxy": "",
+    "https_proxy": "",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": "",
+    "all_proxy": "",
+    "ALL_PROXY": "",
+    "no_proxy": "",
+    "NO_PROXY": "",
+}
+
+
+# ── fake network: target + forward proxies ────────────────────────────
+
+
+class _QuietHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *args: object) -> None:  # noqa: D102
+        pass
+
+
+class _TargetHandler(_QuietHandler):
+    """The origin server the fake proxies forward to."""
+
+    def do_GET(self) -> None:  # noqa: D102
+        body = b"target-ok"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _ForwardProxyHandler(_QuietHandler):
+    """Minimal real HTTP forward proxy (absolute-URI GET).
+
+    Optionally demands Proxy-Authorization (``server.require_auth`` /
+    ``server.expected_auth``), else forwards to the target directly.
+    """
+
+    def do_GET(self) -> None:  # noqa: D102
+        if getattr(self.server, "require_auth", False):
+            got = self.headers.get("Proxy-Authorization", "")
+            if got != self.server.expected_auth:
+                body = b"proxy authentication required"
+                self.send_response(407)
+                self.send_header(
+                    "Proxy-Authenticate", 'Basic realm="proxypool-test"'
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(
+                self.path, timeout=10
+            ) as upstream:
+                body = upstream.read()
+                code = int(upstream.status)
+        except Exception:  # noqa: BLE001 - test double, any failure is a 502
+            body = b"bad gateway"
+            code = 502
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _serve(handler_cls: type, **attrs: object) -> http.server.ThreadingHTTPServer:
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), handler_cls
+    )
+    for key, value in attrs.items():
+        setattr(server, key, value)
+    thread = threading.Thread(
+        target=server.serve_forever, daemon=True, name="proxypool-test-server"
+    )
+    thread.start()
+    return server
+
+
+def _closed_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = int(sock.getsockname()[1])
+    sock.close()
+    return port
+
+
+class _ProxyNetCase(unittest.TestCase):
+    """Base: fake target + open proxy + auth proxy on loopback."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.target = _serve(_TargetHandler)
+        cls.target_port = cls.target.server_address[1]
+        cls.open_proxy = _serve(_ForwardProxyHandler)
+        cls.open_port = cls.open_proxy.server_address[1]
+        cls.auth_user = "testuser"
+        cls.auth_pass = "s3cret-pw"
+        expected = "Basic " + base64.b64encode(
+            f"{cls.auth_user}:{cls.auth_pass}".encode()
+        ).decode()
+        cls.auth_proxy = _serve(
+            _ForwardProxyHandler, require_auth=True, expected_auth=expected
+        )
+        cls.auth_port = cls.auth_proxy.server_address[1]
+        cls.target_url = f"http://127.0.0.1:{cls.target_port}/"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        for server in (cls.target, cls.open_proxy, cls.auth_proxy):
+            server.shutdown()
+            server.server_close()
+        super().tearDownClass()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._env = mock.patch.dict(os.environ, _CLEAR_PROXY_ENV)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+
+# ── add / list / remove / get ─────────────────────────────────────────
+
+
+class AddProxyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = _connector()
+
+    def test_add_and_list_masks_password(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", 8080, username="u", password="pw-secret",
+            tags=["research"],
+        )
+        self.assertEqual(proxy["id"], "http://127.0.0.1:8080")
+        self.assertEqual(proxy["password"], "***")
+        self.assertTrue(proxy["has_auth"])
+        self.assertEqual(proxy["username"], "u")
+        self.assertEqual(proxy["health"]["status"], "unknown")
+        listed = self.conn.list_proxies()
+        self.assertEqual(len(listed), 1)
+        blob = json.dumps(listed)
+        self.assertNotIn("pw-secret", blob)
+
+    def test_add_defaults(self) -> None:
+        proxy = self.conn.add_proxy("Example.COM ", "3128")
+        self.assertEqual(proxy["id"], "http://example.com:3128")
+        self.assertEqual(proxy["protocol"], "http")
+        self.assertFalse(proxy["has_auth"])
+        self.assertEqual(proxy["password"], "")
+        self.assertEqual(proxy["tags"], [])
+
+    def test_add_rejects_bad_input(self) -> None:
+        bad = [
+            dict(host="", port=8080),
+            dict(host="   ", port=8080),
+            dict(host="ho st", port=8080),
+            dict(host="h", port=0),
+            dict(host="h", port=65536),
+            dict(host="h", port="abc"),
+            dict(host="h", port=-1),
+            dict(host="h", port=8080, protocol="socks5"),
+            dict(host="h", port=8080, protocol="ftp"),
+            dict(host="h", port=8080, username="u"),  # user w/o password
+            dict(host="h", port=8080, password="p"),  # password w/o user
+            dict(host="h", port=8080, tags="nope"),  # type: ignore[dict-item]
+            dict(host="h", port=8080, tags=["ok", 5]),  # type: ignore[list-item]
+        ]
+        for kwargs in bad:
+            with self.assertRaises(ConnectorError, msg=str(kwargs)):
+                self.conn.add_proxy(**kwargs)  # type: ignore[arg-type]
+
+    def test_add_is_idempotent_update(self) -> None:
+        first = self.conn.add_proxy("127.0.0.1", 8080, tags=["a"])
+        second = self.conn.add_proxy(
+            "127.0.0.1", 8080, username="u2", password="p2",
+            protocol="HTTP", tags=["b"],
+        )
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(self.conn.list_proxies()), 1)
+        updated = self.conn.list_proxies()[0]
+        self.assertEqual(updated["tags"], ["b"])
+        self.assertTrue(updated["has_auth"])
+
+    def test_vault_holds_encrypted_secret(self) -> None:
+        self.conn.add_proxy("127.0.0.1", 8080, username="u",
+                            password="topsecret-pw")
+        row = self.conn.vault.db.query_one(
+            "SELECT password_encrypted FROM credentials "
+            "WHERE service = 'connector:proxypool'"
+        )
+        self.assertIsNotNone(row)
+        self.assertNotIn("topsecret-pw", row["password_encrypted"])
+        # ...while get_proxy can still decrypt it for component use.
+        self.assertEqual(
+            self.conn.get_proxy("http://127.0.0.1:8080")["password"],
+            "topsecret-pw",
+        )
+
+
+class RemoveProxyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = _connector()
+        self.conn.add_proxy("127.0.0.1", 8080)
+        self.conn.add_proxy("127.0.0.1", 8081)
+
+    def test_remove(self) -> None:
+        self.conn.remove_proxy("http://127.0.0.1:8080")
+        remaining = self.conn.list_proxies()
+        self.assertEqual([p["id"] for p in remaining],
+                         ["http://127.0.0.1:8081"])
+
+    def test_remove_is_idempotent(self) -> None:
+        self.conn.remove_proxy("http://127.0.0.1:9999")  # unknown: no-op
+        self.conn.remove_proxy("http://127.0.0.1:8080")
+        self.conn.remove_proxy("http://127.0.0.1:8080")  # twice: no-op
+        self.assertEqual(len(self.conn.list_proxies()), 1)
+
+    def test_remove_normalizes_id(self) -> None:
+        self.conn.remove_proxy(" HTTP://127.0.0.1:8080 ")
+        self.assertEqual(len(self.conn.list_proxies()), 1)
+
+    def test_remove_rejects_malformed_id(self) -> None:
+        with self.assertRaises(ConnectorError):
+            self.conn.remove_proxy("not-a-proxy-id")
+
+
+class GetProxyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = _connector()
+        self.conn.add_proxy("127.0.0.1", 8080, username="u", password="p@ss:w0rd")
+
+    def test_get_returns_full_details_with_credential(self) -> None:
+        details = self.conn.get_proxy("http://127.0.0.1:8080")
+        self.assertEqual(details["host"], "127.0.0.1")
+        self.assertEqual(details["port"], 8080)
+        self.assertEqual(details["username"], "u")
+        self.assertEqual(details["password"], "p@ss:w0rd")
+        # url_with_auth is the hand-to-HttpClient form; url stays clean.
+        self.assertIn("u:", details["url_with_auth"])
+        self.assertNotIn("p@ss", details["url"])
+        self.assertTrue(details["url_with_auth"].startswith("http://"))
+
+    def test_get_unknown_raises(self) -> None:
+        with self.assertRaises(ConnectorError):
+            self.conn.get_proxy("http://127.0.0.1:1234")
+
+
+# ── health checks ───────────────────────────────────────────────────
+
+
+class HealthCheckTests(_ProxyNetCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.conn = _connector()
+
+    def test_single_healthy_proxy(self) -> None:
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        pid = f"http://127.0.0.1:{self.open_port}"
+        result = self.conn.health_check(pid, url=self.target_url, timeout=10)
+        health = result["health"]
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["status_code"], 200)
+        self.assertGreaterEqual(health["latency_ms"], 0)
+        self.assertGreater(health["last_checked"], 0)
+        self.assertEqual(health["checks"], 1)
+        self.assertEqual(health["consecutive_failures"], 0)
+        # Password still masked in the health result.
+        self.assertNotIn("s3cret", json.dumps(result))
+
+    def test_single_failure_raises_and_records(self) -> None:
+        port = _closed_port()
+        self.conn.add_proxy("127.0.0.1", port)
+        pid = f"http://127.0.0.1:{port}"
+        with self.assertRaises(ProxyPoolError):
+            self.conn.health_check(pid, url=self.target_url, timeout=5)
+        stored = self.conn.list_proxies()[0]
+        health = stored["health"]
+        self.assertEqual(health["status"], "unhealthy")
+        self.assertTrue(health["last_error"])
+        self.assertEqual(health["consecutive_failures"], 1)
+        self.assertEqual(health["checks"], 1)
+        self.assertGreater(health["last_checked"], 0)
+
+    def test_failure_counters_accumulate(self) -> None:
+        port = _closed_port()
+        self.conn.add_proxy("127.0.0.1", port)
+        pid = f"http://127.0.0.1:{port}"
+        for _ in range(2):
+            with self.assertRaises(ProxyPoolError):
+                self.conn.health_check(pid, url=self.target_url, timeout=5)
+        health = self.conn.list_proxies()[0]["health"]
+        self.assertEqual(health["consecutive_failures"], 2)
+        self.assertEqual(health["checks"], 2)
+        # Recovery resets the failure streak.
+        self.conn.remove_proxy(pid)
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        pid2 = f"http://127.0.0.1:{self.open_port}"
+        self.conn.health_check(pid2, url=self.target_url, timeout=10)
+        self.assertEqual(
+            self.conn.list_proxies()[0]["health"]["consecutive_failures"], 0
+        )
+
+    def test_auth_proxy_healthy_with_right_credentials(self) -> None:
+        self.conn.add_proxy(
+            "127.0.0.1", self.auth_port,
+            username=self.auth_user, password=self.auth_pass,
+        )
+        pid = f"http://127.0.0.1:{self.auth_port}"
+        result = self.conn.health_check(pid, url=self.target_url, timeout=10)
+        self.assertEqual(result["health"]["status"], "healthy")
+
+    def test_auth_proxy_fails_with_wrong_password(self) -> None:
+        self.conn.add_proxy(
+            "127.0.0.1", self.auth_port,
+            username=self.auth_user, password="wrong",
+        )
+        pid = f"http://127.0.0.1:{self.auth_port}"
+        with self.assertRaises(ProxyPoolError) as ctx:
+            self.conn.health_check(pid, url=self.target_url, timeout=10)
+        self.assertIn("407", str(ctx.exception))
+        self.assertEqual(
+            self.conn.list_proxies()[0]["health"]["status"], "unhealthy"
+        )
+
+    def test_check_all_returns_summary(self) -> None:
+        good = f"http://127.0.0.1:{self.open_port}"
+        bad = f"http://127.0.0.1:{_closed_port()}"
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        self.conn.add_proxy("127.0.0.1", int(bad.rsplit(":", 1)[1]))
+        summary = self.conn.health_check(url=self.target_url, timeout=10)
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["healthy"], 1)
+        self.assertEqual(summary["unhealthy"], 1)
+        self.assertEqual(summary["results"][good]["health"]["status"], "healthy")
+        self.assertEqual(summary["results"][bad]["health"]["status"], "unhealthy")
+
+    def test_check_all_empty_pool_raises(self) -> None:
+        with self.assertRaises(ProxyPoolError):
+            self.conn.health_check()
+
+    def test_check_unknown_id_raises(self) -> None:
+        with self.assertRaises(ConnectorError):
+            self.conn.health_check("http://127.0.0.1:1", url=self.target_url)
+
+
+# ── rotation ────────────────────────────────────────────────────────
+
+
+class RotateTests(_ProxyNetCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.conn = _connector()
+
+    def _make_pool(self) -> tuple[str, str]:
+        port_a, port_b, port_bad = self.open_port, self.auth_port, _closed_port()
+        self.conn.add_proxy("127.0.0.1", port_a, tags=["a"])
+        self.conn.add_proxy(
+            "127.0.0.1", port_b, username=self.auth_user,
+            password=self.auth_pass, tags=["b"],
+        )
+        self.conn.add_proxy("127.0.0.1", port_bad, tags=["dead"])
+        self.conn.health_check(url=self.target_url, timeout=10)
+        return (
+            f"http://127.0.0.1:{port_a}",
+            f"http://127.0.0.1:{port_b}",
+        )
+
+    def test_round_robin_over_healthy(self) -> None:
+        id_a, id_b = self._make_pool()
+        picks = [self.conn.rotate()["id"] for _ in range(4)]
+        self.assertEqual(picks, [id_a, id_b, id_a, id_b])
+
+    def test_rotate_skips_unhealthy(self) -> None:
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        self.conn.add_proxy("127.0.0.1", _closed_port())
+        self.conn.health_check(url=self.target_url, timeout=10)
+        good = f"http://127.0.0.1:{self.open_port}"
+        for _ in range(3):
+            self.assertEqual(self.conn.rotate()["id"], good)
+
+    def test_rotate_returns_credential_for_components(self) -> None:
+        self.conn.add_proxy(
+            "127.0.0.1", self.auth_port, username=self.auth_user,
+            password=self.auth_pass,
+        )
+        self.conn.health_check(url=self.target_url, timeout=10)
+        details = self.conn.rotate()
+        self.assertEqual(details["password"], self.auth_pass)
+        self.assertIn("url_with_auth", details)
+
+    def test_rotate_no_healthy_raises(self) -> None:
+        self.conn.add_proxy("127.0.0.1", _closed_port())
+        self.conn.health_check(url=self.target_url, timeout=10)
+        with self.assertRaises(ProxyPoolError) as ctx:
+            self.conn.rotate()
+        self.assertIn("no healthy proxies", str(ctx.exception))
+
+    def test_rotate_empty_pool_raises(self) -> None:
+        with self.assertRaises(ProxyPoolError):
+            self.conn.rotate()
+
+    def test_disconnect_resets_rotation(self) -> None:
+        id_a, _id_b = self._make_pool()
+        self.conn.rotate()
+        self.conn.disconnect()
+        self.conn.disconnect()  # idempotent
+        self.assertEqual(self.conn.rotate()["id"], id_a)
+
+
+# ── lifecycle ───────────────────────────────────────────────────────
+
+
+class LifecycleTests(_ProxyNetCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.conn = _connector()
+
+    def test_connect_empty_pool_is_honest_failure(self) -> None:
+        result = self.conn.connect(check=False)
+        self.assertFalse(result.ok)
+        self.assertIn("add_proxy", result.message)
+
+    def test_connect_without_check(self) -> None:
+        self.conn.add_proxy("127.0.0.1", 8080)
+        result = self.conn.connect(check=False)
+        self.assertTrue(result.ok)
+        self.assertIn("1 proxies", result.message)
+
+    def test_connect_with_live_check(self) -> None:
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        with mock.patch.object(
+            ProxyPoolConnector, "DEFAULT_CHECK_URL", self.target_url
+        ):
+            result = self.conn.connect()
+        self.assertTrue(result.ok)
+        self.assertIn("1/1", result.message)
+
+    def test_connect_fails_when_nothing_healthy(self) -> None:
+        self.conn.add_proxy("127.0.0.1", _closed_port())
+        with mock.patch.object(
+            ProxyPoolConnector, "DEFAULT_CHECK_URL", self.target_url
+        ):
+            result = self.conn.connect()
+        self.assertFalse(result.ok)
+        self.assertIn("none passed", result.message)
+
+    def test_status_empty(self) -> None:
+        status = self.conn.status()
+        self.assertFalse(status.connected)
+        self.assertIn("empty", status.detail)
+
+    def test_status_reports_counts(self) -> None:
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        self.conn.add_proxy("127.0.0.1", _closed_port())
+        self.conn.health_check(url=self.target_url, timeout=10)
+        status = self.conn.status()
+        self.assertTrue(status.connected)
+        self.assertIn("2 proxies", status.detail)
+        self.assertIn("1 healthy", status.detail)
+        self.assertIn("1 unhealthy", status.detail)
+        self.assertGreater(status.last_checked, 0)
+
+    def test_status_not_connected_when_none_healthy(self) -> None:
+        self.conn.add_proxy("127.0.0.1", _closed_port())
+        self.conn.health_check(url=self.target_url, timeout=10)
+        self.assertFalse(self.conn.status().connected)
+
+    def test_test_connection(self) -> None:
+        self.assertFalse(self.conn.test_connection())  # empty pool
+        self.conn.add_proxy("127.0.0.1", self.open_port)
+        with mock.patch.object(
+            ProxyPoolConnector, "DEFAULT_CHECK_URL", self.target_url
+        ):
+            self.assertTrue(self.conn.test_connection())
+        dead = _connector()
+        dead.add_proxy("127.0.0.1", _closed_port())
+        with mock.patch.object(
+            ProxyPoolConnector, "DEFAULT_CHECK_URL", self.target_url
+        ):
+            self.assertFalse(dead.test_connection())
+
+
+# ── provisioning / registry ─────────────────────────────────────────
+
+
+class ProvisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = _connector()
+
+    def test_provision_proxy(self) -> None:
+        self.assertTrue(self.conn.can_provision("proxy"))
+        result = self.conn.provision(
+            "proxy", host="127.0.0.1", port=8080, tags=["paid"]
+        )
+        self.assertEqual(result["id"], "http://127.0.0.1:8080")
+        self.assertEqual(len(self.conn.list_proxies()), 1)
+
+    def test_provision_unknown_kind_fails(self) -> None:
+        self.assertFalse(self.conn.can_provision("repo"))
+        with self.assertRaises(ConnectorError) as ctx:
+            self.conn.provision("repo", name="x")
+        self.assertIn("proxy", str(ctx.exception))
+
+
+class RegistryTests(unittest.TestCase):
+    def test_registered_as_proxypool(self) -> None:
+        self.assertIs(get_connector("proxypool"), ProxyPoolConnector)
+        conn = create_connector("proxypool", _vault())
+        self.assertIsInstance(conn, ProxyPoolConnector)
+        infos = {info["id"]: info for info in list_connectors()}
+        self.assertIn("proxypool", infos)
+        self.assertEqual(infos["proxypool"]["auth_methods"], ["none"])
+        self.assertEqual(infos["proxypool"]["provisionable"], ["proxy"])
+
+
+class NoLeakTests(_ProxyNetCase):
+    SECRET = "leak-me-not-pw"
+
+    def test_no_secret_in_any_owner_facing_output(self) -> None:
+        conn = _connector()
+        conn.add_proxy(
+            "127.0.0.1", self.open_port, username="u", password=self.SECRET
+        )
+        blob = json.dumps(conn.list_proxies())
+        self.assertNotIn(self.SECRET, blob)
+        summary = conn.health_check(url=self.target_url, timeout=10)
+        self.assertNotIn(self.SECRET, json.dumps(summary))
+        self.assertNotIn(self.SECRET, json.dumps(conn.status().to_dict()))
+        self.assertNotIn(self.SECRET, conn.connect(check=False).message)
+
+
+if __name__ == "__main__":
+    unittest.main()
