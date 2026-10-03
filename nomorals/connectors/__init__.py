@@ -9,8 +9,8 @@ Adding a service: subclass :class:`Connector`, decorate with
 Shipped: GitHub, Mono (NG bank data), Plaid (US/EU bank data), virtual
 cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse,
 Telegram Bot API, Discord Bot API, Gmail, Google Drive, Paystack (NG
-payments), Binance spot — the framework is deliberately service-agnostic
-so more slot in.
+payments), Binance spot, AWS (EC2/S3), Dropbox, YouTube, Spotify — the
+framework is deliberately service-agnostic so more slot in.
 """
 
 from __future__ import annotations
@@ -45,14 +45,20 @@ from .registry import (
     register_connector,
 )
 from .virtualcards import VirtualCardsConnector
+from .aws import AWSConnector, AWSError
 from .binance import BinanceConnector, BinanceError
 from .discord import DiscordConnector, DiscordError
+from .dropbox import DropboxConnector, DropboxError
 from .drive import DriveConnector, DriveError
 from .gmail import GmailConnector, GmailError
 from .paystack import PaystackConnector, PaystackError
+from .spotify import SpotifyConnector, SpotifyError
 from .telegram import TelegramConnector, TelegramError
+from .youtube import YouTubeConnector, YouTubeError
 
 __all__ = [
+    "AWSConnector",
+    "AWSError",
     "AuthMethod",
     "BinanceConnector",
     "BinanceError",
@@ -67,6 +73,8 @@ __all__ = [
     "DiscordError",
     "DriveConnector",
     "DriveError",
+    "DropboxConnector",
+    "DropboxError",
     "GitHubConnector",
     "GitHubError",
     "GmailConnector",
@@ -83,9 +91,13 @@ __all__ = [
     "PaystackError",
     "PlaidConnector",
     "ProxyPoolConnector",
+    "SpotifyConnector",
+    "SpotifyError",
     "TelegramConnector",
     "TelegramError",
     "VirtualCardsConnector",
+    "YouTubeConnector",
+    "YouTubeError",
     "create_connector",
     "device_flow_token",
     "get_connector",
