@@ -245,17 +245,12 @@ def _cmd_voice_fetch(args: argparse.Namespace, context: Any) -> int:
 def _cmd_voice_clone(args: argparse.Namespace, context: Any) -> int:  # noqa: ARG001
     from ...voice.catalogue import default_catalogue
 
-    if not args.consent:
-        print("refusing: pass --consent to confirm this is your voice or "
-              "you have permission to clone it", file=sys.stderr)
-        return 2
     cat = default_catalogue()
     try:
         voice = cat.clone(args.name, args.audio,
                           transcript=args.transcript or "",
                           backend=args.backend or "auto",
-                          description=args.describe or "",
-                          consent_confirmed=True)
+                          description=args.describe or "")
     except Exception as exc:
         print(f"clone failed: {exc}", file=sys.stderr)
         return 1
@@ -280,7 +275,7 @@ def _cmd_voice_catalogue_list(args: argparse.Namespace,  # noqa: ARG001
         print(json.dumps(voices, indent=2))
     elif not voices:
         print("no voices yet — clone one: "
-              "nm voice clone <name> <audio> --consent")
+              "nm voice clone <name> <audio>")
     else:
         for v in voices:
             mark = "●" if v["active"] else "○"

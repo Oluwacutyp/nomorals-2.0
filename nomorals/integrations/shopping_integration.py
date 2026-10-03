@@ -32,9 +32,17 @@ from ..accounts.manager import AccountManager
 from ..accounts.sessions import SessionManager
 from ..core.logging_setup import get_logger
 
-__all__ = ["ShoppingIntegration", "Product", "PriceComparison"]
+__all__ = ["ShoppingIntegration", "ShoppingError", "Product", "PriceComparison"]
 
 _log = get_logger(__name__)
+
+
+class ShoppingError(Exception):
+    """Raised when a shopping operation cannot be completed.
+
+    Loud failure — never fake success. If you see this, no item was
+    added to any cart and no order was placed.
+    """
 
 
 @dataclass
@@ -284,10 +292,12 @@ class ShoppingIntegration:
     
     async def _add_to_cart_amazon(self, quantity: int) -> bool:
         """Add to cart on Amazon."""
-        # This would use browser automation to click "Add to Cart"
-        # Simplified version
-        _log.info(f"Adding {quantity} item(s) to Amazon cart")
-        return True
+        # Loud failure: browser automation for cart not implemented.
+        # Never return fake True — the user would believe an item is in their cart.
+        raise ShoppingError(
+            "Amazon add-to-cart not implemented: requires browser automation "
+            "which is not yet wired. No item was added to any cart."
+        )
     
     async def _checkout_amazon(
         self,
@@ -296,9 +306,11 @@ class ShoppingIntegration:
         shipping_address: str,
     ) -> dict[str, Any]:
         """Checkout on Amazon."""
-        # This would use browser automation to complete checkout
-        _log.info("Completing Amazon checkout")
-        return {"status": "pending", "order_id": None}
+        # Loud failure: never return a fake pending order.
+        raise ShoppingError(
+            "Amazon checkout not implemented: requires browser automation. "
+            "No order was placed."
+        )
     
     # ── eBay ───────────────────────────────────────────────────────────────
     
@@ -355,8 +367,10 @@ class ShoppingIntegration:
     
     async def _add_to_cart_ebay(self, quantity: int) -> bool:
         """Add to cart on eBay."""
-        _log.info(f"Adding {quantity} item(s) to eBay cart")
-        return True
+        raise ShoppingError(
+            "eBay add-to-cart not implemented: requires browser automation. "
+            "No item was added to any cart."
+        )
     
     # ── Walmart ────────────────────────────────────────────────────────────
     
@@ -463,14 +477,18 @@ class ShoppingIntegration:
     # ── Generic ────────────────────────────────────────────────────────────
     
     async def _search_generic(self, retailer: str, query: str, max_results: int) -> list[Product]:
-        """Generic product search (placeholder)."""
-        _log.info(f"Generic search on {retailer} not implemented")
-        return []
+        """Generic product search."""
+        raise ShoppingError(
+            f"Product search not implemented for retailer '{retailer}'. "
+            f"Supported: amazon, ebay, walmart, bestbuy."
+        )
     
     async def _add_to_cart_generic(self, quantity: int) -> bool:
         """Generic add to cart."""
-        _log.info(f"Adding {quantity} item(s) to cart")
-        return True
+        raise ShoppingError(
+            "Generic add-to-cart not implemented: requires browser automation. "
+            "No item was added to any cart."
+        )
     
     async def _checkout_generic(
         self,
@@ -479,5 +497,7 @@ class ShoppingIntegration:
         shipping_address: str,
     ) -> dict[str, Any]:
         """Generic checkout."""
-        _log.info("Completing checkout")
-        return {"status": "pending", "order_id": None}
+        raise ShoppingError(
+            "Generic checkout not implemented: requires browser automation. "
+            "No order was placed."
+        )

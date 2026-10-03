@@ -13,9 +13,42 @@ import logging
 import time
 from typing import Any
 
-import pandas as pd
 
 from .math import ensure_ohlcv
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 _log = logging.getLogger(__name__)
 
@@ -82,7 +115,7 @@ def _binance_interval(interval: str) -> str:
 
 
 def fetch_binance(symbol: str, interval: str = "1h", limit: int = 200, *,
-                  vault=None, http=None, connector=None) -> pd.DataFrame:
+                  vault=None, http=None, connector=None) -> _pd.DataFrame:
     """Binance spot klines as an OHLCV frame.
 
     Uses the public ``/api/v3/klines`` endpoint (no signed key needed for
@@ -101,11 +134,11 @@ def fetch_binance(symbol: str, interval: str = "1h", limit: int = 200, *,
     })
     if not rows:
         raise RuntimeError(f"binance returned no klines for {sym}")
-    df = pd.DataFrame([
+    df = _pd.DataFrame([
         {"open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
          "close": float(r[4]), "volume": float(r[5])}
         for r in rows
-    ], index=pd.to_datetime([r[0] for r in rows], unit="ms", utc=True))
+    ], index=_pd.to_datetime([r[0] for r in rows], unit="ms", utc=True))
     return ensure_ohlcv(df)
 
 
@@ -123,7 +156,7 @@ def _coinbase_product(symbol: str) -> str:
 
 
 def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
-                   vault=None, http=None, connector=None) -> pd.DataFrame:
+                   vault=None, http=None, connector=None) -> _pd.DataFrame:
     """Coinbase Advanced Trade candles as an OHLCV frame.
 
     The candles endpoint is paged at 300 candles per call; this walks
@@ -160,12 +193,12 @@ def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
     if not collected:
         raise RuntimeError(
             f"coinbase returned no candles for {product_id}")
-    df = pd.DataFrame([
+    df = _pd.DataFrame([
         {"open": float(c["open"]), "high": float(c["high"]),
          "low": float(c["low"]), "close": float(c["close"]),
          "volume": float(c["volume"])}
         for c in collected
-    ], index=pd.to_datetime([c["start"] for c in collected], unit="s",
+    ], index=_pd.to_datetime([c["start"] for c in collected], unit="s",
                              utc=True))
     df = df.sort_index()
     return ensure_ohlcv(df.tail(limit))
@@ -173,7 +206,7 @@ def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
 
 def fetch_ohlcv(source: str, symbol: str, interval: str = "1h",
                 limit: int = 200, *, vault=None, http=None,
-                connector=None) -> pd.DataFrame:
+                connector=None) -> _pd.DataFrame:
     """OHLCV from any supported connector source.
 
     ``source`` is one of ``SOURCES`` (``"binance"`` | ``"coinbase"``);

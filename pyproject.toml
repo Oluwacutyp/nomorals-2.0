@@ -38,10 +38,28 @@ train = ["torch>=2.1", "transformers>=4.38", "datasets>=2.17", "peft>=0.9"]
 finetune = ["unsloth", "trl>=0.8"]
 # Hugging Face model management.
 hub = ["huggingface-hub>=0.22"]
+# Technical analysis, finance, data science.
+ta = ["numpy>=1.24", "pandas>=1.5", "matplotlib>=3.7", "scikit-learn>=1.3"]
+# Data science workspace.
+datasci = ["pandas>=1.5", "matplotlib>=3.7"]
+# Document parsing (office formats, OCR).
+docs = ["python-docx>=1.1", "openpyxl>=3.1", "pytesseract>=0.3", "pdf2image>=1.17"]
+# Voice: TTS/STT engines.
+voice = ["edge-tts>=6.1", "openai-whisper>=20231117", "sounddevice>=0.4"]
+# Chat adapters.
+chat = ["telethon>=1.36", "discord.py>=2.3"]
+# Cloud connectors.
+cloud = ["boto3>=1.34", "paramiko>=3.4"]
+# Image generation.
+genimg = ["diffusers>=0.27", "rembg>=2.0"]
+# Browser automation.
+browser = ["playwright>=1.42"]
+# Configuration formats.
+config = ["pyyaml>=6.0"]
 # Development / test tooling.
 dev = ["pytest>=7.4", "ruff>=0.3"]
 # Everything.
-all = ["nomorals[fast,media,train,hub,dev]"]
+all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,chat,cloud,genimg,browser,config,dev]"]
 
 [project.scripts]
 nm = "nomorals.cli:main"

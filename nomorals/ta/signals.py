@@ -12,10 +12,42 @@ doesn't flicker.
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 
 from .math import softmax
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 __all__ = [
     "KINDS",
@@ -33,24 +65,24 @@ KINDS = ("trend", "meanrev", "breakout", "momentum", "squeeze", "reversal",
          "confluence")
 
 
-def fuse_equal(frames: dict) -> pd.DataFrame:
+def fuse_equal(frames: dict) -> _pd.DataFrame:
     """Confidence × gate weighted vote across ``{name: signal-frame}``."""
     if not frames:
-        return pd.DataFrame(columns=["vote", "agreement", "n"])
+        return _pd.DataFrame(columns=["vote", "agreement", "n"])
     names = list(frames)
     idx = frames[names[0]].index
-    votes = np.zeros(len(idx))
-    mass = np.zeros(len(idx))
-    longs = np.zeros(len(idx))
+    votes = _np.zeros(len(idx))
+    mass = _np.zeros(len(idx))
+    longs = _np.zeros(len(idx))
     for s in frames.values():
         w = s["confidence"].to_numpy(dtype=float) * s["gate"].to_numpy(dtype=float)
-        d = np.sign(s["signal"].to_numpy(dtype=float))
+        d = _np.sign(s["signal"].to_numpy(dtype=float))
         votes += d * w
         mass += w
         longs += (d > 0).astype(float)
     vote = votes / (mass + 1e-12)
-    agreement = np.abs(longs / max(1, len(frames)) - 0.5) * 2.0
-    return pd.DataFrame(
+    agreement = _np.abs(longs / max(1, len(frames)) - 0.5) * 2.0
+    return _pd.DataFrame(
         {"vote": vote, "agreement": agreement, "n": float(len(frames))}, index=idx
     )
 
@@ -81,10 +113,10 @@ def kind_of(name: str, lookup: dict | None = None) -> str:
 
 def fuse_weighted(frames: dict, kind_weights: dict | None = None,
                   lookup: dict | None = None,
-                  scores: dict | None = None) -> pd.DataFrame:
+                  scores: dict | None = None) -> _pd.DataFrame:
     """Vote with per-kind and per-strategy weighting on top of confidence."""
     if not frames:
-        return pd.DataFrame(columns=["vote", "agreement", "n"])
+        return _pd.DataFrame(columns=["vote", "agreement", "n"])
     kw = adaptive_kind_weights(
         None if kind_weights is None else {k: 0.0 for k in KINDS})
     if kind_weights:
@@ -98,21 +130,21 @@ def fuse_weighted(frames: dict, kind_weights: dict | None = None,
         sw = {n: v / (m + 1e-12) for n, v in sw.items()}
     names = list(frames)
     idx = frames[names[0]].index
-    votes = np.zeros(len(idx))
-    mass = np.zeros(len(idx))
-    longs = np.zeros(len(idx))
+    votes = _np.zeros(len(idx))
+    mass = _np.zeros(len(idx))
+    longs = _np.zeros(len(idx))
     for n, s in frames.items():
         w = s["confidence"].to_numpy(dtype=float) * s["gate"].to_numpy(dtype=float)
         w = w * kw.get(kind_of(n, lookup), 1.0)
         if sw:
             w = w * sw.get(n, 1.0)
-        d = np.sign(s["signal"].to_numpy(dtype=float))
+        d = _np.sign(s["signal"].to_numpy(dtype=float))
         votes += d * w
         mass += w
         longs += (d > 0).astype(float)
     vote = votes / (mass + 1e-12)
-    agreement = np.abs(longs / max(1, len(frames)) - 0.5) * 2.0
-    return pd.DataFrame(
+    agreement = _np.abs(longs / max(1, len(frames)) - 0.5) * 2.0
+    return _pd.DataFrame(
         {"vote": vote, "agreement": agreement, "n": float(len(frames))}, index=idx
     )
 
@@ -124,22 +156,22 @@ def cost_aware_threshold(cost_bps: float, atr_pct: float,
     Needs ``edge >= 2× costs`` in ATR units — never a magic number.
     """
     edge_need = (float(cost_bps) / 1e4) / (max(1e-6, float(atr_pct)) + 1e-9)
-    return float(np.clip(k * edge_need * 2.0, 0.02, 0.6))
+    return float(_np.clip(k * edge_need * 2.0, 0.02, 0.6))
 
 
-def hysteresis_position(vote: pd.Series, enter: float,
-                        exit: float = 0.03) -> pd.Series:
+def hysteresis_position(vote: _pd.Series, enter: float,
+                        exit: float = 0.03) -> _pd.Series:
     """Sticky position series: enter past ``enter``, exit below ``exit``.
 
     Reversals need a full ``enter``-sized opposing vote; plain decay exits
     below ``exit``. Deterministic.
     """
-    v = np.asarray(vote, dtype=float)
-    out = np.zeros(len(v))
+    v = _np.asarray(vote, dtype=float)
+    out = _np.zeros(len(v))
     state = 0.0
     for i in range(len(v)):
         if state == 0.0 and abs(v[i]) >= enter:
-            state = float(np.sign(v[i]))
+            state = float(_np.sign(v[i]))
         elif state > 0 and v[i] < -enter:
             state = -1.0
         elif state < 0 and v[i] > enter:
@@ -147,14 +179,14 @@ def hysteresis_position(vote: pd.Series, enter: float,
         elif state != 0.0 and abs(v[i]) < exit:
             state = 0.0
         out[i] = state
-    return pd.Series(out, index=vote.index, name="position")
+    return _pd.Series(out, index=vote.index, name="position")
 
 
-def disagreement_filter(blend: pd.DataFrame,
-                        min_agreement: float = 0.55) -> pd.Series:
+def disagreement_filter(blend: _pd.DataFrame,
+                        min_agreement: float = 0.55) -> _pd.Series:
     """Binary mask: 1 where the committee agrees enough to be trusted."""
     agr = blend["agreement"].to_numpy(dtype=float)
-    return pd.Series((agr >= min_agreement).astype(float), index=blend.index,
+    return _pd.Series((agr >= min_agreement).astype(float), index=blend.index,
                      name="agree_mask")
 
 
@@ -169,7 +201,7 @@ def fuse_all(frames: dict, kind_weights: dict | None = None,
     blend = fuse_weighted(frames, kind_weights, lookup, scores)
     if blend.empty:
         return {"blend": blend,
-                "position": blend.get("vote", pd.Series(dtype=float)),
+                "position": blend.get("vote", _pd.Series(dtype=float)),
                 "enter_threshold": cost_aware_threshold(cost_bps, atr_pct),
                 "n_strategies": len(frames)}
     enter = cost_aware_threshold(cost_bps, atr_pct)

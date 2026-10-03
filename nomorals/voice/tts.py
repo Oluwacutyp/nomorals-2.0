@@ -20,8 +20,7 @@ integrated with the framework:
   stutters, pauses, emphasis, pacing — and each backend renders the
   canonical markup in its own native vocabulary. ``UniversalTTS.perform()``
   is the one-call path: text in, human-sounding wav out.
-- Voice profiles persisted to disk, with a hard consent gate on cloning
-  backends (reference audio is only used when consent_confirmed=True).
+- Voice profiles persisted to disk. Clone operations are audit-logged.
   Multiple reference samples per voice are blended where the backend
   supports it (XTTS averages the embeddings).
 - A mood bridge: the partner's mood system maps straight into tags.
@@ -76,17 +75,13 @@ class VoiceProfile:
 
     ``reference_audio_path`` is only needed for cloning backends (XTTS);
     Bark/Kokoro use built-in preset voices instead.
-    ``consent_confirmed`` exists on purpose: cloning backends refuse to
-    run without it.  Set it True only for your own voice, a
-    public-domain recording, or someone who explicitly agreed to be
-    cloned.
+    Clone operations are audit-logged (voice name, timestamp, backend).
     """
 
     name: str
     reference_audio_path: Optional[str] = None
     preset_id: Optional[str] = None   # for Bark/Kokoro built-in voices
     language: str = "en"
-    consent_confirmed: bool = False
     description: str = ""
     #: Transcript of the reference clip. Zero-shot backends (CosyVoice)
     #: need it to clone; XTTS does not.
@@ -96,12 +91,16 @@ class VoiceProfile:
     #: blend them; single-sample backends use the first clip.
     extra_samples: list = field(default_factory=list)
 
-    def validate_for_cloning(self) -> None:
-        if self.reference_audio_path and not self.consent_confirmed:
-            raise PermissionError(
-                f"VoiceProfile '{self.name}' has reference audio but "
-                "consent_confirmed=False. Set it True only if this is "
-                "your own voice or you have explicit permission to use it.")
+    def audit_clone(self, backend: str) -> None:
+        """Log a voice-clone operation for the owner's audit trail."""
+        from ..core.logging_setup import get_logger
+        _log = get_logger(__name__)
+        from datetime import datetime, timezone
+        _log.info(
+            "voice clone initiated: name=%s backend=%s time=%s",
+            self.name, backend,
+            datetime.now(timezone.utc).isoformat(),
+        )
 
     @property
     def reference_audios(self) -> list[str]:
@@ -117,7 +116,6 @@ class VoiceProfile:
             "reference_audio_path": self.reference_audio_path,
             "preset_id": self.preset_id,
             "language": self.language,
-            "consent_confirmed": self.consent_confirmed,
             "description": self.description,
             "prompt_text": self.prompt_text,
             "extra_samples": list(self.extra_samples),
@@ -162,7 +160,7 @@ class VoiceLibrary:
             _log.warning("could not persist voice profile index: %s", e)
 
     def upload_voice(self, name: str, audio_file_path: str,
-                     language: str = "en", consent_confirmed: bool = False,
+                     language: str = "en",
                      preset_id: Optional[str] = None,
                      description: str = "") -> VoiceProfile:
         """Register a reference clip.  Copies it into managed storage."""
@@ -176,7 +174,6 @@ class VoiceLibrary:
             reference_audio_path=dest,
             preset_id=preset_id,
             language=language,
-            consent_confirmed=consent_confirmed,
             description=description,
         )
         self.profiles[name] = profile
@@ -250,7 +247,6 @@ class VoiceLibrary:
                 "name": p.name,
                 "preset_id": p.preset_id,
                 "cloning": bool(p.reference_audio_path),
-                "consent_confirmed": p.consent_confirmed,
                 "language": p.language,
                 "description": p.description,
             })
@@ -490,7 +486,7 @@ class XTTSBackend:
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
                    *, instruct: str = "") -> Any:
         if voice:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
         # XTTS averages the speaker embedding over several reference
         # clips when given a list — multi-sample voices blend here.
         wavs = voice.reference_audios if voice else []
@@ -617,7 +613,7 @@ class CosyVoiceBackend:
         ref = voice.reference_audio_path if voice else None
         if ref:
             if voice is not None:
-                voice.validate_for_cloning()
+                voice.audit_clone(self.name)
             prompt_text = (voice.prompt_text if voice else "").strip()
             if not prompt_text:
                 raise ValueError(
@@ -667,7 +663,7 @@ class DiaBackend:
         ref = voice.reference_audio_path if voice else None
         if ref:
             if voice is not None:
-                voice.validate_for_cloning()
+                voice.audit_clone(self.name)
             try:
                 out = self.model.generate(text, audio_prompt=ref)
             except TypeError:
@@ -719,7 +715,7 @@ class OrpheusBackend:
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
                    *, instruct: str = "") -> Any:
         if voice is not None:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
         voice_id = (voice.preset_id if voice and voice.preset_id
                     else "tara")
         # generate_speech yields 16-bit mono PCM chunks at 24kHz
@@ -823,7 +819,7 @@ class HFEndpointBackend:
         if instruct:
             params["instruct"] = instruct
         if voice is not None:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
             if voice.preset_id:
                 params["speaker"] = voice.preset_id
             if voice.language:
@@ -897,7 +893,7 @@ class UniversalTTS:
     """The unified voice engine.
 
     engine = UniversalTTS(backend="auto", voices_dir=".../voices")
-    engine.voices.upload_voice("me", "my_sample.wav", consent_confirmed=True)
+    engine.voices.upload_voice("me", "my_sample.wav")
     out = engine.speak("[happy] omg baby I missed you [laughs]")
     # out -> {"path": ".../say.wav", "bytes": 240000,
     #         "sample_rate": 24000, "backend": "bark"}

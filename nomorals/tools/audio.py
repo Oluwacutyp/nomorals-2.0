@@ -489,8 +489,8 @@ def register(registry: Any) -> None:
         "tts_voices",
         description=(
             "Manage TTS voice profiles: list, add a reference clip for "
-            "cloning (consent gate), register a built-in preset, or remove. "
-            "Cloning backends refuse to run without consent_confirmed."
+            "cloning, register a built-in preset, or remove. "
+            "Clone operations are audit-logged."
         ),
         capability=Capability.FS_WRITE,
         parameters={
@@ -498,12 +498,11 @@ def register(registry: Any) -> None:
             "name": "str — profile name (add/preset/remove)",
             "path": "str — reference audio file (add)",
             "preset_id": "str — built-in voice id (preset)",
-            "consent": "bool-ish (optional) — confirmed consent for cloning",
             "language": "str (optional, en)",
         },
     )
     def tts_voices(action: str, *, name: str = "", path: str = "",
-                   preset_id: str = "", consent: str = "",
+                   preset_id: str = "",
                    language: str = "") -> dict[str, Any]:
         from ..voice.tts import VoiceLibrary
 
@@ -527,17 +526,14 @@ def register(registry: Any) -> None:
                 from ..voice.tts import VoiceProfile
 
                 profile = VoiceProfile(
-                    name=name, language=language or "en",
-                    consent_confirmed=str(consent).lower()
-                    in {"1", "true", "yes", "on"})
+                    name=name, language=language or "en")
                 lib.profiles[name] = profile
                 lib._save_index()
                 return {"ok": True, "profile": profile.to_dict()}
             profile = lib.upload_voice(
                 name, sample,
-                language=language or "en",
-                consent_confirmed=str(consent).lower()
-                in {"1", "true", "yes", "on"})
+                language=language or "en")
+            profile.audit_clone("tts_voices")
             return {"ok": True, "profile": profile.to_dict()}
         if action == "preset":
             if not name or not preset_id:

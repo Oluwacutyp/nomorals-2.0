@@ -367,14 +367,50 @@ def default_proxy_handler() -> dict[str, Any] | None:
     return None
 
 
-def apply_socks_proxy(proxy_url: str) -> None:
-    """Stub: apply SOCKS proxy (removed)."""
-    pass
+def apply_socks_proxy(proxy_url: str) -> bool:
+    """Route raw-socket traffic through a SOCKS proxy via PySocks.
+
+    Patches :mod:`socket` so urllib and raw-socket code honor the proxy.
+    Returns True on success, False if PySocks is not installed.
+    """
+    try:
+        import socks  # type: ignore[import-not-found]
+        import socket as _socket
+    except ImportError:
+        return False
+    parsed = urllib.parse.urlparse(proxy_url)
+    if not parsed.hostname or not parsed.port:
+        return False
+    proxy_type = {
+        "socks5": socks.SOCKS5,
+        "socks5h": socks.SOCKS5,
+        "socks4": socks.SOCKS4,
+        "socks4a": socks.SOCKS4,
+    }.get((parsed.scheme or "").lower(), socks.SOCKS5)
+    socks.set_default_proxy(
+        proxy_type,
+        parsed.hostname,
+        parsed.port,
+        username=parsed.username,
+        password=parsed.password,
+    )
+    _socket.socket = socks.socksocket  # type: ignore[assignment]
+    return True
 
 
 def reset_socks_proxy() -> None:
-    """Stub: reset SOCKS proxy settings."""
-    pass
+    """Restore direct socket routing (undo :func:`apply_socks_proxy`)."""
+    try:
+        import socks  # type: ignore[import-not-found]
+        import socket as _socket
+    except ImportError:
+        return
+    socks.set_default_proxy()
+    # Restore the original socket class if it was patched.
+    if getattr(_socket.socket, "__module__", "") == "socks":
+        import _socket as _real_socket  # type: ignore[import-not-found]
+
+        _socket.socket = _real_socket.socket
 
 
 _default_proxy: str = ""

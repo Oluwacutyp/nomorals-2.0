@@ -12,8 +12,35 @@ never touches the network.
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
 
 from ..core.logging_setup import get_logger
 from .data import clean_ohlcv
@@ -76,28 +103,28 @@ def regime_vote_alignment(frames: dict, regime_label: str,
     factor = max(0.2, 1.0 - float(p_trend))
     out = {}
     for name, frame in frames.items():
-        d = np.sign(frame["signal"].to_numpy(dtype=float))
-        scale = np.where(d == 0.0, 1.0,
-                         np.where(d == direction, 1.0, factor))
+        d = _np.sign(frame["signal"].to_numpy(dtype=float))
+        scale = _np.where(d == 0.0, 1.0,
+                         _np.where(d == direction, 1.0, factor))
         adj = frame.copy()
         adj["confidence"] = frame["confidence"] * scale
         out[name] = adj
     return out
 
 
-def committee_position(df: pd.DataFrame, names: list[str] | None = None,
-                       min_agreement: float = 0.0) -> pd.Series:
+def committee_position(df: _pd.DataFrame, names: list[str] | None = None,
+                       min_agreement: float = 0.0) -> _pd.Series:
     """Fused committee position series for a set of strategy names."""
     df = ensure_ohlcv(df)
     names = names or list_strategies()
     frames = run_zoo(names, df)
     if not frames:
-        return pd.Series(0.0, index=df.index, name="position")
+        return _pd.Series(0.0, index=df.index, name="position")
     return fuse_all(frames, min_agreement=min_agreement)["position"]
 
 
-def _meta_approval(vote: pd.Series, agreement: pd.Series,
-                   regime_frame: pd.DataFrame, close: pd.Series,
+def _meta_approval(vote: _pd.Series, agreement: _pd.Series,
+                   regime_frame: _pd.DataFrame, close: _pd.Series,
                    threshold: float = 0.55,
                    min_agreement: float = 0.50,
                    enter_threshold: float = 0.10) -> tuple[bool, str]:
@@ -120,7 +147,7 @@ def _meta_approval(vote: pd.Series, agreement: pd.Series,
     return ok, "rule"
 
 
-def analyze(df: pd.DataFrame, profile: str = "default",
+def analyze(df: _pd.DataFrame, profile: str = "default",
             strategies: list[str] | None = None) -> dict:
     """Full committee analysis of OHLCV bars.
 
@@ -198,7 +225,7 @@ def analyze(df: pd.DataFrame, profile: str = "default",
                                      enter_threshold=enter_thr)
 
     rm = RiskManager(cfg)
-    side = int(np.sign(position_now)) or int(np.sign(bias)) or 1
+    side = int(_np.sign(position_now)) or int(_np.sign(bias)) or 1
     stops = rm.stop_levels(side, entry, atr_last)
     sizing = rm.size_position(100_000.0, entry, atr_last)
     stop_distance_pct = abs(entry - stops["stop"]) / (entry + 1e-12) * 100.0

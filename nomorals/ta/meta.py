@@ -16,8 +16,40 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
-import pandas as pd
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
+
 
 __all__ = ["labeled_matrix", "MetaGate", "sklearn_available"]
 
@@ -35,28 +67,28 @@ def sklearn_available() -> bool:
         return False
 
 
-def labeled_matrix(vote: pd.Series, agreement: pd.Series,
-                   regime: pd.DataFrame, close: pd.Series,
+def labeled_matrix(vote: _pd.Series, agreement: _pd.Series,
+                   regime: _pd.DataFrame, close: _pd.Series,
                    horizon: int = 10, min_vote: float = 0.1):
     """Build (X, y, mask): features at t, label = did sign(vote) win?"""
     idx = vote.index
     fwd = close.shift(-horizon).astype(float) / (close.astype(float) + 1e-12) - 1.0
     v = vote.reindex(idx).fillna(0.0)
     a = agreement.reindex(idx).fillna(0.0)
-    X = pd.DataFrame(index=idx)
+    X = _pd.DataFrame(index=idx)
     X["vote"] = v
     X["agreement"] = a
     X["vote_x_agree"] = v * a
     for c in _REGIME_COLS:
         if c in regime.columns:
             X[c] = regime[c].reindex(idx).fillna(0.0)
-    direction = np.sign(v.to_numpy(dtype=float))
+    direction = _np.sign(v.to_numpy(dtype=float))
     fwd_a = fwd.reindex(idx).fillna(0.0).to_numpy(dtype=float)
     won = (direction * fwd_a) > 0
-    active = (np.abs(v.to_numpy(dtype=float)) >= min_vote) & (
-        np.arange(len(idx)) < len(idx) - horizon)
-    y = pd.Series(np.where(won & active, 1, 0), index=idx)
-    return X.fillna(0.0), y, pd.Series(active, index=idx)
+    active = (_np.abs(v.to_numpy(dtype=float)) >= min_vote) & (
+        _np.arange(len(idx)) < len(idx) - horizon)
+    y = _pd.Series(_np.where(won & active, 1, 0), index=idx)
+    return X.fillna(0.0), y, _pd.Series(active, index=idx)
 
 
 class MetaGate:
@@ -82,11 +114,11 @@ class MetaGate:
         return make_pipeline(StandardScaler(), clf)
 
     def fit(self, X, y, sample_weight=None) -> "MetaGate":
-        Xa = np.asarray(X, dtype=float)
-        ya = np.asarray(y, dtype=int)
+        Xa = _np.asarray(X, dtype=float)
+        ya = _np.asarray(y, dtype=int)
         self.n_features = Xa.shape[1]
         self.train_pos_rate = float(ya.mean()) if len(ya) else 0.5
-        if len(np.unique(ya)) < 2:
+        if len(_np.unique(ya)) < 2:
             self.model = None
             return self
         try:
@@ -97,18 +129,18 @@ class MetaGate:
             self.model = None
         return self
 
-    def predict_proba(self, X) -> np.ndarray:
-        Xa = np.asarray(X, dtype=float)
+    def predict_proba(self, X) -> _np.ndarray:
+        Xa = _np.asarray(X, dtype=float)
         if self.model is None or Xa.shape[1] != self.n_features \
                 or self.n_features == 0:
-            return np.full(len(Xa), 0.5)
+            return _np.full(len(Xa), 0.5)
         try:
             return self.model.predict_proba(Xa)[:, 1]
         except Exception as e:
             _log.debug("meta model predict failed, using 0.5: %s", e)
-            return np.full(len(Xa), 0.5)
+            return _np.full(len(Xa), 0.5)
 
-    def approve(self, X, threshold: float | None = None) -> np.ndarray:
+    def approve(self, X, threshold: float | None = None) -> _np.ndarray:
         thr = self.threshold if threshold is None else float(threshold)
         return self.predict_proba(X) >= thr
 
