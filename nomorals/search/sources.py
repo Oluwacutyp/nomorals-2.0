@@ -39,6 +39,14 @@ does not reimplement):
 - connectors (``nomorals/connectors/``) — **skip**. The connectors own no
   local searchable store; their reads (e.g. ``list_repos``) are live API
   calls needing network + credentials, out of scope for this layer.
+- web (``nomorals/search/web.py``) — **new in the universal upgrade**.
+  Six live web-search backends behind this same ``SourceAdapter``
+  interface: SearXNG (keyless metasearch, primary free), ddgs
+  (keyless multi-engine via the optional ``ddgs`` package), Tavily,
+  Serper, Exa, and Brave (keyed free-tier APIs; Brave's free tier was
+  withdrawn 2026-02, so it is last). Each backend probes cheaply and
+  reports itself unavailable when unconfigured — no key/instance/package
+  means a skip note, never a crash.
 """
 
 from __future__ import annotations
@@ -54,8 +62,10 @@ from ..documents import DocumentIndex, parse_path
 from ..memory.manager import MemoryManager
 from ..tools.code_indexer import _get_indexer, _run_async
 from ..wisdom import WisdomKeeper
+from .base import SourceAdapter
 from .errors import SearchError
 from .model import SearchResult
+from .web import WEB_SPECS, WebSearchSource
 
 __all__ = [
     "SourceAdapter",
@@ -65,6 +75,7 @@ __all__ = [
     "WisdomAdapter",
     "CodeAdapter",
     "TimelineAdapter",
+    "WebSearchSource",
     "SOURCE_SPECS",
     "list_sources",
     "build_adapters",
@@ -95,26 +106,9 @@ def _query_terms(query: str) -> list[str]:
     return [t for t in _TERM_RE.findall(query.lower()) if len(t) >= 2]
 
 
-class SourceAdapter:
-    """One searchable subsystem. ``probe`` returns None when searchable,
-    otherwise a human note explaining why the source is skipped."""
-
-    name: str = ""
-    result_type: str = ""
-    description: str = ""
-
-    def probe(self) -> str | None:
-        return None
-
-    def search(
-        self,
-        query: str,
-        *,
-        limit: int,
-        since: float | None = None,
-        before: float | None = None,
-    ) -> list[SearchResult]:
-        raise NotImplementedError
+# SourceAdapter now lives in .base (shared with web.py, avoiding an
+# import cycle); re-exported here so ``from .sources import
+# SourceAdapter`` keeps working (it is also in __all__ above).
 
 
 # ── books ──────────────────────────────────────────────────────────────
@@ -531,7 +525,9 @@ class TimelineAdapter(SourceAdapter):
 
 
 #: Canonical source order: (name, result type, description, adapter class).
-#: The order doubles as the ranking tie-break.
+#: The order doubles as the ranking tie-break. Local knowledge first
+#: (memory → wisdom → books → docs → code → timeline), then the live web
+#: backends in free-first priority order (see ``web.WEB_SPECS``).
 SOURCE_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
     ("memory", "memory", MemoryAdapter.description, MemoryAdapter),
     ("wisdom", "passage", WisdomAdapter.description, WisdomAdapter),
@@ -539,6 +535,10 @@ SOURCE_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
     ("docs", "doc", DocsAdapter.description, DocsAdapter),
     ("code", "code", CodeAdapter.description, CodeAdapter),
     ("timeline", "event", TimelineAdapter.description, TimelineAdapter),
+    *[
+        (name, WebSearchSource.result_type, cls.description, cls)
+        for name, cls in WEB_SPECS
+    ],
 ]
 
 
@@ -555,7 +555,13 @@ def valid_source_names() -> list[str]:
 
 
 def valid_types() -> list[str]:
-    return [rtype for _, rtype, _, _ in SOURCE_SPECS]
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, rtype, _, _ in SOURCE_SPECS:
+        if rtype not in seen:
+            seen.add(rtype)
+            out.append(rtype)
+    return out
 
 
 def build_adapters(
@@ -564,13 +570,26 @@ def build_adapters(
     doc_dir: str | Path | None = None,
     doc_index_path: str | Path | None = None,
     timeline: Any = None,
+    web_backends: list[str] | None = None,
 ) -> dict[str, SourceAdapter]:
     """Instantiate one adapter per source. ``timeline`` is the injected
     ``os.Timeline`` (or duck-typed equivalent); ``None`` makes the
-    timeline source report itself unavailable instead of crashing."""
+    timeline source report itself unavailable instead of crashing.
+    ``web_backends`` optionally restricts which web backends are built
+    (names from ``web.WEB_SPECS``); the default builds all six — each
+    web backend probes cheaply and reports itself unavailable when its
+    key/instance/package is missing, so building them never costs a
+    network call."""
     if context is None:
         raise SearchError("federated_search needs a context (or prebuilt adapters)")
-    return {
+    wanted = set(web_backends) if web_backends is not None else None
+    unknown = (wanted - {name for name, _ in WEB_SPECS}) if wanted else set()
+    if unknown:
+        raise SearchError(
+            f"unknown web backends: {sorted(unknown)}; "
+            f"valid: {[n for n, _ in WEB_SPECS]}"
+        )
+    adapters: dict[str, SourceAdapter] = {
         "memory": MemoryAdapter(context),
         "wisdom": WisdomAdapter(context),
         "books": BooksAdapter(context),
@@ -578,3 +597,7 @@ def build_adapters(
         "code": CodeAdapter(context),
         "timeline": TimelineAdapter(timeline),
     }
+    for name, cls in WEB_SPECS:
+        if wanted is None or name in wanted:
+            adapters[name] = cls(context)
+    return adapters

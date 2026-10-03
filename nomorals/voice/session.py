@@ -4,7 +4,9 @@ This is the synchronous counterpart to the async voice notes in
 :mod:`nomorals.voice.bridge`. It reuses the existing pieces instead of
 forking a parallel "voice brain":
 
-- STT: ``VoiceBridge.transcribe_voice`` (whatever backend it wraps)
+- STT: ``VoiceBridge.transcribe_voice`` (whatever backend it wraps), or
+  local-only via :func:`make_local_stt` (faster-whisper → parakeet →
+  whisper.cpp → … — zero cloud, zero bridge)
 - TTS: :class:`nomorals.voice.tts.UniversalTTS` (swappable backends, tag
   system, consent-gated voice cloning — reused exactly)
 - Think: the caller's ``think`` callable — the CLI wires it to
@@ -69,6 +71,7 @@ __all__ = [
     "read_wav_bytes",
     "split_wav",
     "make_bridge_stt",
+    "make_local_stt",
     "stt_supports_partial",
     "decrypt_kept_audio",
 ]
@@ -703,6 +706,26 @@ def make_bridge_stt(bridge: Any, *, language: str = "en",
 
     _stt.supports_partial = False  # type: ignore[attr-defined]
     return _stt
+
+
+def make_local_stt(backend: str = "auto", *, language: str = "en",
+                   **kwargs: Any) -> Callable[[str], str]:
+    """Local STT for the live loop: no cloud, no bridge needed.
+
+    Builds a :class:`nomorals.voice.stt.UniversalSTT` (faster-whisper →
+    parakeet → whisper.cpp → classic whisper → HF serverless) and adapts
+    it to the sync session callable, so the whole loop stays in
+    :class:`VoiceSession`:
+
+        session = VoiceSession(stt=make_local_stt(), ...)
+
+    Transcription errors degrade to ``""`` inside the adapter — a dead
+    mic never kills the conversation loop.
+    """
+    from .stt import UniversalSTT, make_session_stt
+
+    engine = UniversalSTT(backend=backend, **kwargs)
+    return make_session_stt(engine, language=language)
 
 
 def stt_supports_partial(stt: Callable[..., Any]) -> bool:

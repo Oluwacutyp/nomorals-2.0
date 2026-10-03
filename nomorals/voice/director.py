@@ -1109,6 +1109,74 @@ def render_orpheus(script: str | PerformanceScript) -> str:
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
+# canonical burst → Chatterbox Turbo/Nano native paralinguistic tags.
+# Documented natives: [laugh] [chuckle] [cough] ("and more" per the
+# README). Everything else degrades to speakable onomatopoeia —
+# Turbo/Nano speak plain words well, so nothing vanishes.
+_CHATTERBOX_NATIVE = {
+    "laugh": "[laugh]", "bellylaugh": "[laugh]",
+    "nervouslaugh": "[laugh]", "giggle": "[laugh]",
+    "chuckle": "[chuckle]",
+    "cough": "[cough]",
+}
+
+
+def render_chatterbox(script: str | PerformanceScript) -> str:
+    """Canonical markup → Chatterbox Turbo/Nano native direction.
+
+    Speaks the native paralinguistic tags — ``[laugh]`` ``[chuckle]``
+    ``[cough]`` — natively; every other burst becomes speakable
+    onomatopoeia (``achoo!``, ``ha-ha``) instead of silence. Emotion /
+    delivery tags are dropped from the text — Chatterbox takes them
+    through the ``exaggeration``/``cfg_weight`` synthesis knobs (see
+    ``ChatterboxBackend.synthesize``), not inline text. Stutters stay
+    textual, pauses become ellipses. For the multilingual V3 variant
+    (no native tags) the engine renders plain text instead.
+    """
+    s = _apply_beat(str(script))
+    s = _burst_or_onomatopoeia(_CHATTERBOX_NATIVE, s)
+    s = _apply_stutter(s)
+    s = _RATE_RE.sub("", s)
+    s = _EMOTION_RE.sub("", s)
+    s = _PAUSE_RE.sub("... ", s)
+    s = _STRONG_RE.sub(lambda m: m.group(1).upper(), s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+# canonical burst → OmniVoice (k2-fsa) non-verbal symbols.
+# Documented natives: [laughter] [sigh] [sniff]. OmniVoice also reads
+# free-form [tags] as direction (like Fish S2), so unmapped bursts pass
+# through as [name] rather than being dropped.
+_OMNIVOICE_BURSTS = {
+    "laugh": "[laughter]", "bellylaugh": "[laughter]",
+    "nervouslaugh": "[laughter]", "chuckle": "[laughter]",
+    "giggle": "[laughter]",
+    "sigh": "[sigh]",
+    "sniffle": "[sniff]",
+}
+
+
+def render_omnivoice(script: str | PerformanceScript) -> str:
+    """Canonical markup → OmniVoice native direction.
+
+    Maps the documented non-verbal symbols (``[laughter]`` ``[sigh]``
+    ``[sniff]``); every other burst passes through in its canonical
+    ``[name]`` form, which the model reads as free-form direction.
+    Emotion/delivery tags pass through untouched — 600+ languages and
+    the model is direction-tuned. Stutters stay textual, pauses become
+    ellipses, ``<strong>`` becomes CAPS.
+    """
+    s = _apply_beat(str(script))
+    s = _BURST_RE.sub(
+        lambda m: _OMNIVOICE_BURSTS.get(m.group(1).lower(),
+                                        f"[{m.group(1).lower()}]"), s)
+    s = _apply_stutter(s)
+    s = _RATE_RE.sub("", s)
+    s = _PAUSE_RE.sub("... ", s)
+    s = _STRONG_RE.sub(lambda m: m.group(1).upper(), s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
 def render_for(backend: str,
                script: str | PerformanceScript) -> tuple[str, str | None]:
     """Render a script for a backend. Returns ``(text, extra)`` where
@@ -1125,5 +1193,17 @@ def render_for(backend: str,
         return render_dia(script), None
     if backend == "orpheus":
         return render_orpheus(script), None
+    if backend == "chatterbox":
+        return render_chatterbox(script), None
+    if backend == "omnivoice":
+        return render_omnivoice(script), None
+    if backend == "qwen3tts":
+        # native [laugh]/[sigh]/[yawn]/[wow]/[giggle]/[scoff] +
+        # [emotion] switching — canonical markup is already its
+        # vocabulary. Pauses become ellipses: Qwen reads "[pause:350]"
+        # literally, while "..." reads as a natural beat.
+        s = _apply_beat(str(script))
+        s = _PAUSE_RE.sub("... ", s)
+        return re.sub(r"\s{2,}", " ", s).strip(), None
     text, _pauses = render_plain(script)
     return text, None

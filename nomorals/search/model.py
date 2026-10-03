@@ -143,3 +143,47 @@ def rank_results(
         return (-r.score, order.get(r.source, 999), -ts, r.title)
 
     return sorted(results, key=_key)
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[SearchResult]], k: int = 60
+) -> tuple[list[SearchResult], int]:
+    """Fuse per-source ranked lists with reciprocal rank fusion (RRF).
+
+    Each input list must already be ordered best-first (rank 1 = first
+    element); a hit appearing at rank ``r`` in a source contributes
+    ``1 / (k + r)`` to its fused score, summed across every source that
+    returned it. Cross-source content duplicates (same
+    :meth:`SearchResult.dedupe_key`) fuse into one hit — the kept
+    representative is the one with the strongest single-source
+    contribution, and its ``score`` is set to the fused total.
+
+    Unlike per-source min-max normalization, RRF scores are comparable
+    *across* sources without assuming anything about the native scales,
+    which is why it is the fusion mode for heterogeneous web backends.
+
+    Returns ``(fused, deduped_count)`` where ``deduped_count`` is the
+    number of duplicate hits folded away. The fused list is sorted by
+    fused score descending; ties break on title (fully deterministic —
+    source-order tie-breaking happens downstream in :func:`rank_results`).
+    """
+    if k <= 0:
+        raise ValueError(f"RRF k must be positive, got {k}")
+    fused: dict[str, float] = {}
+    best: dict[str, tuple[SearchResult, float]] = {}
+    total = 0
+    for hits in ranked_lists:
+        for rank, hit in enumerate(hits, start=1):
+            total += 1
+            key = hit.dedupe_key()
+            contrib = 1.0 / (k + rank)
+            fused[key] = fused.get(key, 0.0) + contrib
+            prev = best.get(key)
+            if prev is None or contrib > prev[1]:
+                best[key] = (hit, contrib)
+    out: list[SearchResult] = []
+    for key, (hit, _contrib) in best.items():
+        hit.score = fused[key]
+        out.append(hit)
+    out.sort(key=lambda h: (-h.score, h.title or ""))
+    return out, total - len(out)

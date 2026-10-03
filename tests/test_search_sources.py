@@ -315,7 +315,9 @@ class RegistryTests(unittest.TestCase):
         srcs = list_sources()
         self.assertEqual(
             [s["name"] for s in srcs],
-            ["memory", "wisdom", "books", "docs", "code", "timeline"])
+            ["memory", "wisdom", "books", "docs", "code", "timeline",
+             "web_searxng", "web_ddgs", "web_tavily", "web_serper",
+             "web_exa", "web_brave"])
         self.assertTrue(all(s["type"] and s["description"] for s in srcs))
 
     def test_build_adapters_needs_context(self):
@@ -323,10 +325,12 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(SearchError):
             build_adapters(None)
 
-    def test_build_adapters_all_six(self):
+    def test_build_adapters_all_sources(self):
         ads = build_adapters(_ctx())
         self.assertEqual(set(ads), {"memory", "wisdom", "books", "docs",
-                                   "code", "timeline"})
+                                   "code", "timeline",
+                                   "web_searxng", "web_ddgs", "web_tavily",
+                                   "web_serper", "web_exa", "web_brave"})
 
 
 if __name__ == "__main__":

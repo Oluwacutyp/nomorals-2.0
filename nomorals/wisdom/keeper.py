@@ -35,9 +35,25 @@ class WisdomKeeper:
 
     # ── ask ───────────────────────────────────────────────────────────
     def ask(self, query: str, *, top: int = 5,
-            tradition: str = "") -> Answer:
-        """Ask the corpus. Every returned passage carries provenance."""
-        return self.corpus.ask(query, top=top, tradition=tradition)
+            tradition: str = "", mode: str = "keyword") -> Answer:
+        """Ask the corpus. Every returned passage carries provenance.
+
+        ``mode``: ``"keyword"`` (FTS5/BM25), ``"semantic"`` (vector KNN),
+        or ``"hybrid"`` (reciprocal-rank fusion of both).
+        """
+        return self.corpus.ask(query, top=top, tradition=tradition,
+                               mode=mode)
+
+    def build_semantic_index(self, backend_name: str = "", *,
+                             rebuild: bool = False,
+                             progress: Any = None) -> dict[str, Any]:
+        """Embed every corpus passage and build the vector index."""
+        return self.corpus.build_semantic_index(
+            backend_name, rebuild=rebuild, progress=progress)
+
+    def semantic_index_status(self) -> dict[str, Any]:
+        """Backend/engine/vector counts for the semantic index."""
+        return self.corpus.semantic_index_status()
 
     def status(self) -> dict[str, Any]:
         """Corpus + organ status for `nm wisdom status`."""
