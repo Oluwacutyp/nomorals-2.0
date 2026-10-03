@@ -25,6 +25,7 @@ from .images import (
     OP_ALLOWLIST,
 )
 from .studio import EditStudio, build_template, list_templates, studio_presets
+from .layers import LayerStack
 from .generate import (
     GenerativeBackend,
     GenerativeEditError,
@@ -50,6 +51,7 @@ __all__ = [
     "build_template",
     "list_templates",
     "studio_presets",
+    "LayerStack",
     "GenerativeBackend",
     "GenerativeEditError",
     "get_backend",

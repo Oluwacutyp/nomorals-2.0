@@ -627,7 +627,18 @@ def _parser() -> argparse.ArgumentParser:
                      "nm studio generate \"<prompt>\" [--seed N] "
                      "[--negative-prompt T] [--steps N] [--guidance F] "
                      "[--backend B] [--width W] [--height H] [--n N] "
-                     "[--out FILE]\n"
+                     "[--style S] [--aspect A] [--quality Q] [--out FILE]\n"
+                     "nm studio img2img <file> \"<prompt>\" [--strength F] "
+                     "[--seed N] [--style S] [--negative-prompt T] "
+                     "[--steps N] [--guidance F] [--backend B]\n"
+                     "nm studio inpaint <file> \"<prompt>\" --mask l,t,r,b "
+                     "[--seed N] [--negative-prompt T] [--steps N] "
+                     "[--guidance F] [--backend B]\n"
+                     "nm studio outpaint <file> \"<prompt>\" "
+                     "[--top N] [--right N] [--bottom N] [--left N] "
+                     "[--seed N] [--backend B]\n"
+                     "nm studio bg-remove <file> [--mode M] "
+                     "[--chroma-color C] [--tolerance N]\n"
                      "nm studio upscale <file> [--scale F]\n"
                      "nm studio template <name> [--param k=v ...] [--wait]\n"
                      "nm studio project save <file> <project> --ops JSON\n"
@@ -709,9 +720,147 @@ def _parser() -> argparse.ArgumentParser:
                        help="output height")
     s_gen.add_argument("--n", type=int, default=1,
                        help="number of images to generate")
+    s_gen.add_argument("--style", default=None,
+                       help="style preset: photorealistic|cinematic|anime|"
+                            "digital-art|oil-painting|watercolor|cyberpunk|"
+                            "3d-render|pixel-art|sketch|portrait|product")
+    s_gen.add_argument("--aspect", default=None,
+                       help="aspect ratio: 1:1|16:9|9:16|4:3|3:2|21:9")
+    s_gen.add_argument("--quality", default=None,
+                       help="quality: draft|standard|ultra")
     s_gen.add_argument("--out", default=None,
                        help="output file (workspace-relative)")
     _s_json(s_gen)
+
+    s_i2i = studio_sub.add_parser("img2img", help="image-to-image: restyle "
+                                  "or make variations of an image")
+    s_i2i.add_argument("file", help="source image (workspace-relative)")
+    s_i2i.add_argument("prompt", help="prompt describing the new look")
+    s_i2i.add_argument("--strength", type=float, default=0.6,
+                       help="0=near-copy … 1=near-total regen (default 0.6)")
+    s_i2i.add_argument("--seed", type=int, default=None)
+    s_i2i.add_argument("--style", default=None,
+                       help="style preset (see generate --help)")
+    s_i2i.add_argument("--negative-prompt", default=None)
+    s_i2i.add_argument("--steps", type=int, default=None)
+    s_i2i.add_argument("--guidance", type=float, default=None)
+    s_i2i.add_argument("--backend", default=None)
+    _s_json(s_i2i)
+
+    s_inp = studio_sub.add_parser("inpaint", help="regenerate a masked "
+                                  "region via prompt")
+    s_inp.add_argument("file", help="source image (workspace-relative)")
+    s_inp.add_argument("prompt", help="prompt for the masked region")
+    s_inp.add_argument("--mask", required=True,
+                       help="region as l,t,r,b (required)")
+    s_inp.add_argument("--seed", type=int, default=None)
+    s_inp.add_argument("--negative-prompt", default=None)
+    s_inp.add_argument("--steps", type=int, default=None)
+    s_inp.add_argument("--guidance", type=float, default=None)
+    s_inp.add_argument("--backend", default=None)
+    _s_json(s_inp)
+
+    s_outp = studio_sub.add_parser("outpaint", help="extend the canvas and "
+                                   "AI-fill the new border")
+    s_outp.add_argument("file", help="source image (workspace-relative)")
+    s_outp.add_argument("prompt", help="prompt for the new region")
+    s_outp.add_argument("--top", type=int, default=0)
+    s_outp.add_argument("--right", type=int, default=0)
+    s_outp.add_argument("--bottom", type=int, default=0)
+    s_outp.add_argument("--left", type=int, default=0)
+    s_outp.add_argument("--seed", type=int, default=None)
+    s_outp.add_argument("--negative-prompt", default=None)
+    s_outp.add_argument("--steps", type=int, default=None)
+    s_outp.add_argument("--guidance", type=float, default=None)
+    s_outp.add_argument("--backend", default=None)
+    _s_json(s_outp)
+
+    s_bg = studio_sub.add_parser("bg-remove", help="remove image background "
+                                 "(→ transparent PNG)")
+    s_bg.add_argument("file", help="source image (workspace-relative)")
+    s_bg.add_argument("--mode", default="auto",
+                      help="auto|rembg|chroma (default auto)")
+    s_bg.add_argument("--chroma-color", default=None,
+                      help="chroma key color (name/hex), default: corners")
+    s_bg.add_argument("--tolerance", type=int, default=40)
+    _s_json(s_bg)
+
+    s_layer = studio_sub.add_parser(
+        "layer", help="Photoshop-style layer stack: new/add/list/flatten",
+        description="nm studio layer new 1920 1080 --bg white --stack s.json\n"
+                    "nm studio layer add-image s.json photo.png --blend multiply --opacity 0.8\n"
+                    "nm studio layer add-text s.json \"Hello\" --size 96 --color white\n"
+                    "nm studio layer list s.json\n"
+                    "nm studio layer flatten s.json --out final.png",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    layer_sub = s_layer.add_subparsers(dest="layer_action", required=True)
+
+    l_new = layer_sub.add_parser("new", help="new empty layer stack")
+    l_new.add_argument("width", type=int)
+    l_new.add_argument("height", type=int)
+    l_new.add_argument("--bg", default="white", help="canvas color")
+    l_new.add_argument("--stack", required=True, help="stack JSON file")
+    _s_json(l_new)
+
+    l_ai = layer_sub.add_parser("add-image", help="add an image layer")
+    l_ai.add_argument("stack", help="stack JSON file")
+    l_ai.add_argument("image", help="image file (workspace-relative)")
+    l_ai.add_argument("--name", default=None)
+    l_ai.add_argument("--opacity", type=float, default=1.0)
+    l_ai.add_argument("--blend", default="normal")
+    l_ai.add_argument("--position", default=None,
+                      help="x,y pixels (default 0,0)")
+    l_ai.add_argument("--scale", type=float, default=None)
+    _s_json(l_ai)
+
+    l_at = layer_sub.add_parser("add-text", help="add a text layer")
+    l_at.add_argument("stack", help="stack JSON file")
+    l_at.add_argument("text", help="the text to render")
+    l_at.add_argument("--name", default=None)
+    l_at.add_argument("--size", type=int, default=64)
+    l_at.add_argument("--color", default="white")
+    l_at.add_argument("--position", default="center")
+    l_at.add_argument("--opacity", type=float, default=1.0)
+    l_at.add_argument("--blend", default="normal")
+    _s_json(l_at)
+
+    l_as = layer_sub.add_parser("add-shape", help="add a shape layer")
+    l_as.add_argument("stack", help="stack JSON file")
+    l_as.add_argument("shape", help="rect|ellipse|line")
+    l_as.add_argument("--box", default=None,
+                      help="l,t,r,b pixels (default: full canvas)")
+    l_as.add_argument("--fill", default="red")
+    l_as.add_argument("--name", default=None)
+    l_as.add_argument("--opacity", type=float, default=1.0)
+    l_as.add_argument("--blend", default="normal")
+    _s_json(l_as)
+
+    l_ls = layer_sub.add_parser("list", help="list layers in a stack")
+    l_ls.add_argument("stack", help="stack JSON file")
+    _s_json(l_ls)
+
+    l_set = layer_sub.add_parser("set", help="tweak a layer")
+    l_set.add_argument("stack", help="stack JSON file")
+    l_set.add_argument("id", help="layer id (see list)")
+    l_set.add_argument("--opacity", type=float, default=None)
+    l_set.add_argument("--blend", default=None)
+    l_set.add_argument("--visible", default=None,
+                       help="true|false")
+    l_set.add_argument("--move", default=None, help="x,y pixels")
+    l_set.add_argument("--rename", default=None)
+    _s_json(l_set)
+
+    l_rm = layer_sub.add_parser("remove", help="remove a layer")
+    l_rm.add_argument("stack", help="stack JSON file")
+    l_rm.add_argument("id", help="layer id (see list)")
+    _s_json(l_rm)
+
+    l_flat = layer_sub.add_parser("flatten", help="flatten stack to an image")
+    l_flat.add_argument("stack", help="stack JSON file")
+    l_flat.add_argument("--out", default=None,
+                        help="output PNG (default: <stack>_flat.png)")
+    _s_json(l_flat)
 
     s_upscale = studio_sub.add_parser("upscale", help="upscale an image "
                                       "(Lanczos)")

@@ -467,6 +467,364 @@ def overlay_text(src: str | os.PathLike[str],
             "bytes": out.stat().st_size}
 
 
+# ---------------------------------------------------------------------------
+# pro ops — transitions, one-click effects, speed ramping, audio mixing
+# ---------------------------------------------------------------------------
+
+def _has_audio(info: dict[str, Any]) -> bool:
+    return any(s.get("type") == "audio" for s in info.get("streams", []))
+
+
+def _norm_video_chain(info: dict[str, Any], ref: dict[str, Any]) -> str:
+    """Normalize one video stream to the reference clip's geometry.
+
+    xfade/concat filters demand identical resolution, pixel format and
+    framerate on every input; scaling to clip A keeps the transition
+    robust when the clips don't match.
+    """
+    w, h, fps = ref.get("width"), ref.get("height"), ref.get("fps")
+    parts = ["format=yuv420p"]
+    if w and h:
+        parts.append(f"scale={int(w)}:{int(h)}:flags=lanczos")
+    parts.append("setsar=1")
+    if fps:
+        parts.append(f"fps={fps}")
+    return ",".join(parts)
+
+
+# Validated against `ffmpeg -h filter=xfade` (ffmpeg 8.1.2); "custom" is
+# excluded since it needs an extra transition-source input.
+_XFADE_TRANSITIONS = (
+    "fade", "fadeblack", "fadewhite", "wipeleft", "wiperight", "wipeup",
+    "wipedown", "slideleft", "slideright", "slideup", "slidedown",
+    "smoothleft", "smoothright", "smoothup", "smoothdown", "circlecrop",
+    "rectcrop", "circleopen", "circleclose", "vertopen", "vertclose",
+    "horzopen", "horzclose", "dissolve", "pixelize", "radial", "distance",
+    "diagtl", "diagtr", "diagbl", "diagbr", "hlslice", "hrslice",
+    "vuslice", "vdslice", "hblur", "fadegrays", "fadefast", "fadeslow",
+    "squeezeh", "squeezev", "zoomin", "wipetl", "wipetr", "wipebl",
+    "wipebr", "hlwind", "hrwind", "vuwind", "vdwind", "coverleft",
+    "coverright", "coverup", "coverdown", "revealleft", "revealright",
+    "revealup", "revealdow",
+)
+
+
+def transition(a: str | os.PathLike[str],
+               b: str | os.PathLike[str], *,
+               kind: str = "xfade",
+               duration: float = 1.0,
+               transition: str = "fade",
+               out_dir: str | os.PathLike[str] | None = None,
+               suffix: str = "transitioned", ext: str = ".mp4",
+               timeout: float = FFMPEG_TIMEOUT,
+               progress_cb: Callable[[float], None] | None = None
+               ) -> dict[str, Any]:
+    """Join two clips with a real transition instead of a hard cut.
+
+    kind="xfade": crossfade via the xfade filter (video) + acrossfade
+        (audio). ``transition`` picks the xfade transition type
+        (fade, slideleft, dissolve, ...).
+    kind="fadeblack": A fades out to black, B fades in from black
+        (classic dip-to-black); output is durA + durB.
+    """
+    pa, pb = Path(a), Path(b)
+    for p in (pa, pb):
+        if not p.exists():
+            raise MediaEditError(f"no such video: {p}")
+        _check_size(p)
+    if kind not in ("xfade", "fadeblack"):
+        raise MediaEditError(
+            f"unknown transition kind {kind!r}; valid: xfade, fadeblack")
+    if kind == "xfade" and transition not in _XFADE_TRANSITIONS:
+        raise MediaEditError(
+            f"unknown xfade transition {transition!r}; "
+            f"valid: {', '.join(_XFADE_TRANSITIONS)}")
+    if not duration > 0:
+        raise MediaEditError(f"transition duration must be > 0, got {duration}")
+    info_a, info_b = video_probe(pa), video_probe(pb)
+    dur_a, dur_b = info_a.get("duration"), info_b.get("duration")
+    if not dur_a or not dur_b:
+        raise MediaEditError("cannot transition: unknown clip duration")
+    if duration >= dur_a or duration >= dur_b:
+        raise MediaEditError(
+            f"transition duration ({duration}s) must be shorter than both "
+            f"clips ({dur_a:.1f}s, {dur_b:.1f}s)")
+    out = _out(pa, Path(out_dir) if out_dir else None, suffix, ext)
+    norm_a = _norm_video_chain(info_a, info_a)
+    norm_b = _norm_video_chain(info_b, info_a)
+    a_audio, b_audio = _has_audio(info_a), _has_audio(info_b)
+    if kind == "xfade":
+        offset = dur_a - duration
+        out_dur = dur_a + dur_b - duration
+        fc = (f"[0:v]{norm_a}[va];[1:v]{norm_b}[vb];"
+              f"[va][vb]xfade=transition={transition}:duration={duration}"
+              f":offset={offset}[vout];")
+        audio_map: list[str] = []
+        if a_audio and b_audio:
+            fc += f"[0:a][1:a]acrossfade=d={duration}[aout]"
+            audio_map = ["-map", "[aout]"]
+        elif a_audio or b_audio:
+            idx = 0 if a_audio else 1
+            fc += f"[{idx}:a]apad[aout]"
+            audio_map = ["-map", "[aout]", "-t", str(out_dur)]
+        else:
+            audio_map = ["-an"]
+    else:  # fadeblack
+        out_dur = dur_a + dur_b
+        fc = (f"[0:v]{norm_a},fade=t=out:st={dur_a - duration}"
+              f":d={duration}[va];"
+              f"[1:v]{norm_b},fade=t=in:st=0:d={duration}[vb];"
+              f"[va][vb]concat=n=2:v=1:a=0[vout];")
+        audio_map = []
+        if a_audio and b_audio:
+            fc += "[0:a][1:a]concat=n=2:v=0:a=1[aout]"
+            audio_map = ["-map", "[aout]"]
+        elif a_audio or b_audio:
+            idx = 0 if a_audio else 1
+            fc += f"[{idx}:a]apad[aout]"
+            audio_map = ["-map", "[aout]", "-t", str(out_dur)]
+        else:
+            audio_map = ["-an"]
+    args = (["-i", str(pa), "-i", str(pb), "-filter_complex", fc,
+             "-map", "[vout]"] + audio_map +
+            ["-c:v", "libx264", "-preset", "fast", "-crf", "20",
+             "-c:a", "aac", str(out)])
+    run_ffmpeg(args, timeout=timeout, progress_cb=progress_cb,
+               duration=out_dur or None)
+    result: dict[str, Any] = {
+        "input": str(pa), "inputs": [str(pa), str(pb)],
+        "output": str(out), "kind": kind, "duration": out_dur,
+        "bytes": out.stat().st_size,
+    }
+    if kind == "xfade":
+        result["transition"] = transition
+    return result
+
+
+# One-click looks: each preset is a plain ffmpeg -vf string.
+_EFFECTS = {
+    "grayscale": "hue=s=0",
+    "sepia": ("colorchannelmixer=.393:.769:.189:0:"
+              ".349:.686:.168:0:.272:.534:.131"),
+    "vignette": "vignette=PI/4",
+    "sharpen": "unsharp=5:5:1.0:5:5:0.0",
+    "denoise": "hqdn3d=4:4:6:6",
+    "vintage": "curves=vintage,colorbalance=rs=.1:gs=-.05:bs=-.1",
+    "invert": "negate",
+}
+
+
+def effect(src: str | os.PathLike[str],
+           preset: str, *,
+           out_dir: str | os.PathLike[str] | None = None,
+           suffix: str | None = None,
+           ext: str = ".mp4",
+           timeout: float = FFMPEG_TIMEOUT,
+           progress_cb: Callable[[float], None] | None = None
+           ) -> dict[str, Any]:
+    """Apply a one-click look: grayscale, sepia, vignette, sharpen,
+    denoise, vintage, invert. Audio is untouched."""
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    vf = _EFFECTS.get(preset)
+    if vf is None:
+        raise MediaEditError(
+            f"unknown effect {preset!r}; "
+            f"valid presets: {', '.join(sorted(_EFFECTS))}")
+    out = _out(p, Path(out_dir) if out_dir else None,
+               suffix or f"fx-{preset}", ext)
+    info = video_probe(p)
+    run_ffmpeg(["-i", str(p), "-vf", vf,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "copy", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=info.get("duration"))
+    return {"input": str(p), "output": str(out), "preset": preset,
+            "filter": vf, "bytes": out.stat().st_size}
+
+
+def speed_ramp(src: str | os.PathLike[str],
+               segments: list[tuple[str | float, str | float, float]], *,
+               out_dir: str | os.PathLike[str] | None = None,
+               suffix: str = "ramped", ext: str = ".mp4",
+               timeout: float = FFMPEG_TIMEOUT,
+               progress_cb: Callable[[float], None] | None = None
+               ) -> dict[str, Any]:
+    """Variable speed: segments=[(start, end, factor), ...] must tile the
+    whole timeline with no gaps and no overlaps — anything else is a
+    MediaEditError, never a guess.
+
+    Implemented honestly: trim each segment, run the existing speed() on
+    it, then concat the parts.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    if not segments:
+        raise MediaEditError("speed_ramp needs at least one segment")
+    duration = (video_probe(p).get("duration"))
+    if not duration:
+        raise MediaEditError("cannot speed_ramp: unknown video duration")
+    parsed: list[tuple[float, float, float]] = []
+    for i, seg in enumerate(segments):
+        if len(seg) != 3:
+            raise MediaEditError(
+                f"segment {i} must be (start, end, factor), got {seg!r}")
+        s, e, factor = parse_time(seg[0]), parse_time(seg[1]), float(seg[2])
+        if not factor > 0:
+            raise MediaEditError(
+                f"segment {i}: factor must be > 0, got {seg[2]!r}")
+        if e <= s:
+            raise MediaEditError(
+                f"segment {i}: end ({e}s) must be after start ({s}s)")
+        if s < 0 or e > duration:
+            raise MediaEditError(
+                f"segment {i}: [{s}s, {e}s] is outside the video "
+                f"(duration {duration:.1f}s)")
+        parsed.append((s, e, factor))
+    order = sorted(range(len(parsed)), key=lambda i: parsed[i][0])
+    if order != list(range(len(parsed))):
+        raise MediaEditError("segments must be sorted by start time")
+    if abs(parsed[0][0]) > 1e-3:
+        raise MediaEditError(
+            f"gap at the start: first segment begins at {parsed[0][0]}s, "
+            "segments must tile the whole timeline from 0")
+    for i in range(len(parsed) - 1):
+        prev_e, cur_s = parsed[i][1], parsed[i + 1][0]
+        if cur_s < prev_e - 1e-3:
+            raise MediaEditError(
+                f"segments {i} and {i + 1} overlap "
+                f"([{parsed[i][0]}s, {prev_e}s] vs [{cur_s}s, ...])")
+        if cur_s - prev_e > 1e-3:
+            raise MediaEditError(
+                f"gap between segments {i} and {i + 1} "
+                f"({prev_e}s -> {cur_s}s): segments must tile the timeline")
+    if duration - parsed[-1][1] > 1e-3:
+        raise MediaEditError(
+            f"gap at the end: last segment ends at {parsed[-1][1]}s, "
+            f"video is {duration:.1f}s")
+    tmpdir = tempfile.mkdtemp(prefix="speedramp-")
+    try:
+        parts = []
+        for i, (s, e, factor) in enumerate(parsed):
+            seg = trim(src, start=s, end=e, out_dir=tmpdir,
+                       suffix=f"seg{i:02d}")
+            sped = speed(seg["output"], factor, out_dir=tmpdir,
+                         suffix=f"seg{i:02d}r")
+            parts.append(sped["output"])
+        final = concat(parts, out_dir=out_dir, suffix=suffix, ext=ext,
+                       timeout=timeout, progress_cb=progress_cb)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    out = Path(final["output"])
+    return {"input": str(p), "output": str(out),
+            "segments": [{"start": s, "end": e, "factor": f}
+                         for s, e, f in parsed],
+            "parts": parts, "bytes": out.stat().st_size}
+
+
+def ducking(src: str | os.PathLike[str],
+            music: str | os.PathLike[str], *,
+            voice_db: float = 0.0,
+            music_db: float = -14.0,
+            out_dir: str | os.PathLike[str] | None = None,
+            suffix: str = "ducked", ext: str = ".mp4",
+            timeout: float = FFMPEG_TIMEOUT,
+            progress_cb: Callable[[float], None] | None = None
+            ) -> dict[str, Any]:
+    """Audio ducking: lay ``music`` under the video's audio and duck it
+    whenever the video's voice/audio is present.
+
+    sidechaincompress is keyed on the video's own audio stream against
+    the music input; the music is first lowered to ``music_db`` dB, the
+    voice trimmed to ``voice_db`` dB. Music is padded so a short track
+    never cuts the video short.
+    """
+    p = Path(src)
+    m = Path(music)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    if not m.exists():
+        raise MediaEditError(f"no such music file: {music}")
+    _check_size(p)
+    _check_size(m)
+    for name, db in (("voice_db", voice_db), ("music_db", music_db)):
+        try:
+            float(db)
+        except (TypeError, ValueError):
+            raise MediaEditError(f"{name} must be a number, got {db!r}")
+    info = video_probe(p)
+    if not _has_audio(info):
+        raise MediaEditError(
+            "ducking needs an audio stream in the video to key on")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    duration = info.get("duration")
+    fc = (f"[0:a]asplit[a_voice][a_key];"
+          f"[a_voice]volume={voice_db}dB[v];"
+          f"[1:a]volume={music_db}dB,apad[m];"
+          f"[m][a_key]sidechaincompress=threshold=0.02:ratio=8"
+          f":attack=20:release=400[d];"
+          f"[v][d]amix=inputs=2:duration=first:dropout_transition=0[aout]")
+    run_ffmpeg(["-i", str(p), "-i", str(m), "-filter_complex", fc,
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=duration or None)
+    return {"input": str(p), "output": str(out), "music": str(m),
+            "voice_db": voice_db, "music_db": music_db,
+            "bytes": out.stat().st_size}
+
+
+def mix_audio(src: str | os.PathLike[str],
+              audio: str | os.PathLike[str], *,
+              volume: float = 1.0,
+              replace: bool = False,
+              out_dir: str | os.PathLike[str] | None = None,
+              suffix: str = "mixed", ext: str = ".mp4",
+              timeout: float = FFMPEG_TIMEOUT,
+              progress_cb: Callable[[float], None] | None = None
+              ) -> dict[str, Any]:
+    """Lay an audio track under the video.
+
+    replace=False mixes it with the existing audio (amix); replace=True
+    swaps the video's audio for the new track. The track is
+    padded/trimmed to the video's length so the video is never cut.
+    """
+    p = Path(src)
+    a = Path(audio)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    if not a.exists():
+        raise MediaEditError(f"no such audio file: {audio}")
+    _check_size(p)
+    _check_size(a)
+    if not volume >= 0:
+        raise MediaEditError(f"volume must be >= 0, got {volume}")
+    info = video_probe(p)
+    duration = info.get("duration")
+    if not duration:
+        raise MediaEditError("cannot mix_audio: unknown video duration")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    src_audio = _has_audio(info)
+    if replace or not src_audio:
+        fc = (f"[1:a]volume={volume},apad,atrim=0:{duration}[aout]")
+    else:
+        fc = (f"[1:a]volume={volume},apad[b];"
+              f"[0:a][b]amix=inputs=2:duration=first"
+              f":dropout_transition=0[aout]")
+    run_ffmpeg(["-i", str(p), "-i", str(a), "-filter_complex", fc,
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", str(out)],
+               timeout=timeout, progress_cb=progress_cb,
+               duration=duration or None)
+    return {"input": str(p), "output": str(out), "audio": str(a),
+            "volume": volume, "replace": replace,
+            "bytes": out.stat().st_size}
+
+
 def concat(sources: list[str | os.PathLike[str]], *,
            out_dir: str | os.PathLike[str] | None = None,
            suffix: str = "joined", ext: str = ".mp4",
