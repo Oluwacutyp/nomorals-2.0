@@ -177,8 +177,19 @@ def template_outline(book: Book, *, n_chapters: int) -> list[Chapter]:
     (explicit chapter count); the organic path uses seed_outline +
     assess_continuation instead.
     """
-    terms = key_terms(book.topic)
-    subject = book.topic.strip() or book.display_title
+    # key terms from the cleaned title when available — never "write"/"me"
+    # from a pasted raw request
+    _clean = (book.display_title or "").strip()
+    if _clean and not _clean.lower().startswith(("write me", "make me")):
+        terms = key_terms(_clean)
+    else:
+        terms = key_terms(book.topic)
+    # use the cleaned title as the subject when available — never the raw
+    # pasted request ("Write me a book about...")
+    subject = _clean or book.topic.strip()
+    if len(subject) > 80:
+        subject = key_terms(book.topic)[0:1]
+        subject = subject[0].title() if subject else book.topic.strip()[:60]
     # anchor chapters are fixed; the middle deep dives absorb the rest.
     # n=3 drops the synthesis chapter (intro + foundations + mastery).
     n = max(3, min(int(n_chapters), 24))
@@ -220,6 +231,12 @@ def _model_outline(book: Book, *, n_chapters: int) -> list[Chapter] | None:
     context = getattr(book, "_context", None)
     if context is None:
         return None
+    try:
+        from ..llm.power import model_usable
+        if not model_usable(context):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
     router = getattr(context, "router", None)
     if router is None:
         return None

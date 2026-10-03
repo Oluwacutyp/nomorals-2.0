@@ -22,7 +22,17 @@ _ROUTER_FAIL = re.compile(r"\b(i'?m (?:sorry|afraid)|cannot (?:do|provide)|i can
 
 
 def model_available(context: Any) -> bool:
-    """True when a real (non-mock) model is actively answering."""
+    """True when a real (non-mock) model is actively answering.
+
+    Delegates to :mod:`nomorals.llm.power` — the single online-first
+    authority.  Kept as the import-stable name the rest of the books
+    package already uses.
+    """
+    try:
+        from ..llm.power import model_usable
+        return model_usable(context)
+    except Exception:  # noqa: BLE001
+        pass
     router = getattr(context, "router", None)
     snapshot = getattr(router, "stats_snapshot", None)
     if snapshot is None:

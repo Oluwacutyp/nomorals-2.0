@@ -455,12 +455,51 @@ _RE_NARRATIVE_GUARD = re.compile(
     r"\bbedtime (story|stories)\b|\b(story|stories) about\b",
     re.I,
 )
-#: Owner identity assertion — "I'm peace", "I'm your creator", "drop the act".
+#: Owner identity assertion — semantic, not just keywords.  Covers:
+#: "I'm peace", "I'm your creator", "drop the act", "it's me, your maker",
+#: "you know who I am", "I made you", "I built you", "remember who I am".
 _RE_OWNER = re.compile(
     r"\b(i'?m|i am)\s+(peace|your (creator|owner|maker|boss)|the owner)\b|"
-    r"\bdrop the act\b|\byou know who i am\b|\bstop pretending\b",
+    r"\bdrop the act\b|\byou know who i am\b|\bstop pretending\b|"
+    r"\bit'?s me\b.{0,20}\byour (maker|creator|owner)\b|"
+    r"\bi (made|built|created) you\b|"
+    r"\bremember who i am\b",
     re.I,
 )
+
+
+def _owner_intent_model_check(text: str, context: Any = None) -> bool:
+    """Model-based disambiguation for ambiguous identity assertions.
+
+    Only consulted when the regex misses but the text smells like an
+    identity claim (first-person + creator/owner language).  Returns True
+    when the model reads it as the owner asserting identity.
+    """
+    low = text.lower()
+    if not any(w in low for w in ("i'm", "i am", "it's me", "my ", "me,")):
+        return False
+    if not any(w in low for w in ("creat", "made you", "built you", "owner",
+                                   "maker", "boss", "master")):
+        return False
+    router = getattr(context, "router", None)
+    if router is None:
+        return False
+    try:
+        from ..llm.power import model_usable
+        if not model_usable(context):
+            return False
+        from ..llm.base import Message, SamplingParams
+        response = router.chat(
+            [Message.system(
+                "Reply with ONLY 'yes' or 'no'. Is the speaker claiming to be "
+                "the owner/creator of the AI they are talking to?"),
+             Message.user(text[:300])],
+            SamplingParams(temperature=0.0, max_tokens=8),
+        )
+        return getattr(response, "ok", False) and "yes" in (
+            getattr(response, "text", "") or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _clean_topic(text: str, verb: re.Pattern) -> str:
@@ -1194,6 +1233,18 @@ class CoreMind:
                 allow_model: bool = True) -> Intent:
         """The decision, pure and inspectable.  ``chat`` = just talk."""
         cands = understand(text, live_game=live_game)
+        # owner identity is semantic, not just regex: if the deterministic
+        # pass missed it but the text smells like an identity claim, ask the
+        # model (when usable).  Runs before everything else — recognizing
+        # the owner beats every work intent.
+        if allow_model and not any(c.kind == "owner" for c in cands):
+            try:
+                if _owner_intent_model_check(text, self.context):
+                    return Intent("owner", 0.85, target=text.strip()[:200],
+                                  action="recognize", route="brain",
+                                  why="owner identity assertion (model-confirmed)")
+            except Exception:  # noqa: BLE001 - model check never breaks routing
+                pass
         if not cands:
             return Intent("chat", 1.0, route="brain", why="no goal signal")
         best = cands[0]
@@ -1248,123 +1299,29 @@ class CoreMind:
         None immediately — in non-owner chats, commands are the only
         trigger, and no launch path exists for natural language.
 
-        This is the formal six-step agent loop
-        (nomorals/agents/agent_loop.py):
-        1. context pack → 2. goal inference → 3. plan → 4. execute →
-        5. verify → 6. reply (at the call site).
+        The six-step agent loop lives in ONE place —
+        :func:`nomorals.agents.agent_loop.run_loop`.  This method is the
+        gate; everything past it is the loop.  No duplicated logic.
         """
         if not text or not text.strip():
             return None
         if not self._is_owner_dm(message, chat_key):
             return None
-        text = text.strip()
-
-        # step 1 — context pack (cheap, local, never raises). Built once
-        # and available to every step below; the origin stamp travels with
-        # any WORK job so notify/deliver returns to this chat.
-        try:
-            from .agent_loop import build_loop_context
-            loop_ctx = build_loop_context(
-                message, mind=self, runtime=self.runtime, chat_key=chat_key)
-            loop_ctx.is_owner_dm = True
-        except Exception:  # noqa: BLE001 - pack is best-effort
-            loop_ctx = None
-
-        # an open clarification? this message may be the answer
-        pending = self._get_pending(chat_key)
-        if pending is not None:
-            if _RE_CANCEL.match(text):
-                self._clear_pending(chat_key)
-                return "ok — scrapped. what's next?"
-            resolved = self._pending_resolves(pending, text)
-            if resolved is not None:
-                self._clear_pending(chat_key)
-                return self._dispatch(resolved, chat_key, message) or None
-            # not an answer — clear the stale question and fall through
-            self._clear_pending(chat_key)
-
-        # step 1 reuse: live game comes from the context pack when built
-        live_game = (getattr(loop_ctx, "live_game", None)
-                     if loop_ctx is not None else None)
-        if live_game is None:
-            live_game = self._live_game(chat_key)
-        # wave F1 stream 2: the fast path sits ABOVE the heavy path.
-        # Trivial chat (greetings, time/date, chitchat, thanks, farewells,
-        # bare acks) gets a deterministic reply right here — no router
-        # model call, no swarms, no research loops, no heavy organs, and
-        # no brain call either.  The patterns are whole-message anchored,
-        # so explicit organ invocations and multi-intent inputs can never
-        # match; anything ambiguous returns None and falls through below
-        # (fail-open toward capability, never toward cheapness).
-        fast = fast_path(text)
-        if fast is not None:
-            reply, why = fast
-            self._record_route(Intent("fastchat", 1.0, route="fastchat",
-                                     why=why))
-            _log.info("core mind fast path in %s: %s", chat_key, why)
-            return reply
-
-        intent = self.decide(text, live_game=live_game, allow_model=True)
-        if intent.kind == "chat":
-            return None
-        if intent.action == "ask":
-            question = self._question_for(intent)
-            self._set_pending(chat_key, intent, question)
-            return question
-        # step 5 of the formal agent loop: verify the organ actually did
-        # the work — a fake success becomes an honest failure, never green.
-        reply = self._dispatch(intent, chat_key, message) or None
-        try:
-            from .agent_loop import verify_dispatch
-            _ok, reply = verify_dispatch(intent.kind, reply)
-        except Exception:  # noqa: BLE001 - verification never breaks routing
-            pass
+        from .agent_loop import run_loop
+        reply, _ctx = run_loop(self, text.strip(), message=message,
+                               chat_key=chat_key, runtime=self.runtime)
         return reply
 
     def _dispatch_from_loop(self, loop_ctx: Any, text: str, *,
                             message: Any) -> str | None:
-        """Steps 2–4 of the formal agent loop (nomorals/agents/agent_loop.py).
-
-        Takes a LoopContext built by ``build_loop_context`` and runs goal
-        inference → plan → execute. Verification (step 5) and reply (step 6)
-        happen at the call site via ``verify_dispatch``.
+        """Backward-compatible alias — the loop now lives in
+        :func:`nomorals.agents.agent_loop.run_loop`, which ``handle()``
+        calls directly.  Kept so external callers don't break.
         """
+        from .agent_loop import run_loop
         chat_key = getattr(loop_ctx, "chat_key", "")
-        # an open clarification? this message may be the answer
-        pending = self._get_pending(chat_key)
-        if pending is not None:
-            if _RE_CANCEL.match(text):
-                self._clear_pending(chat_key)
-                return "ok — scrapped. what's next?"
-            resolved = self._pending_resolves(pending, text)
-            if resolved is not None:
-                self._clear_pending(chat_key)
-                return self._dispatch(resolved, chat_key, message) or None
-            self._clear_pending(chat_key)
-
-        live_game = getattr(loop_ctx, "live_game", None)
-        # fast path for trivial chat — same as handle()
-        fast = fast_path(text)
-        if fast is not None:
-            reply, why = fast
-            self._record_route(Intent("fastchat", 1.0, route="fastchat",
-                                     why=why))
-            return reply
-
-        intent = self.decide(text, live_game=live_game, allow_model=True)
-        if intent.kind == "chat":
-            return None
-        if intent.action == "ask":
-            question = self._question_for(intent)
-            self._set_pending(chat_key, intent, question)
-            return question
-        # step 5 of the formal agent loop: verify before returning
-        reply = self._dispatch(intent, chat_key, message) or None
-        try:
-            from .agent_loop import verify_dispatch
-            _ok, reply = verify_dispatch(intent.kind, reply)
-        except Exception:  # noqa: BLE001 - verification never breaks routing
-            pass
+        reply, _ctx = run_loop(self, text, message=message, chat_key=chat_key,
+                               runtime=self.runtime)
         return reply
 
     def _is_owner_dm(self, message: Any, chat_key: str) -> bool:

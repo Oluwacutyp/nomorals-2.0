@@ -124,6 +124,7 @@ class RunLoopTests(unittest.TestCase):
         class FakeMind:
             def __init__(self):
                 self._route_log = []
+                self._kind = kind
 
             def _live_game(self, key):
                 return None
@@ -131,11 +132,28 @@ class RunLoopTests(unittest.TestCase):
             def _get_pending(self, key):
                 return None
 
-            def _dispatch_from_loop(self, loop_ctx, text, *, message):
-                self._route_log.append({"kind": kind, "route": kind})
-                if kind == "chat":
+            def _pending_resolves(self, pending, text):
+                return None
+
+            def _clear_pending(self, key):
+                pass
+
+            def decide(self, text, live_game=None, allow_model=True):
+                return Intent(self._kind, 0.9, route=self._kind)
+
+            def _dispatch(self, intent, chat_key, message):
+                self._route_log.append({"kind": intent.kind, "route": intent.kind})
+                if intent.kind == "chat":
                     return None
-                return f"[{kind}] did the thing"
+                return f"[{intent.kind}] did the thing"
+
+            def _dispatch_from_loop(self, loop_ctx, text, *, message):
+                # backward-compat alias still works
+                from nomorals.agents.agent_loop import run_loop
+                chat_key = getattr(loop_ctx, "chat_key", "")
+                reply, _ctx = run_loop(self, text, message=message,
+                                       chat_key=chat_key)
+                return reply
 
         return FakeMind()
 
@@ -156,12 +174,10 @@ class RunLoopTests(unittest.TestCase):
     def test_fake_success_converted(self):
         mind = self._mind("build")
         # override to return fake success
-        orig = mind._dispatch_from_loop
-
-        def fake(loop_ctx, text, *, message):
+        def fake_dispatch(intent, chat_key, message):
             mind._route_log.append({"kind": "build", "route": "coding"})
             return "code done!\nno tests directory — nothing ran"
-        mind._dispatch_from_loop = fake
+        mind._dispatch = fake_dispatch
         reply, ctx = run_loop(mind, "build a thing", message=_msg("build a thing"),
                              chat_key="telegram:123")
         self.assertIn("didn't actually complete", reply)
