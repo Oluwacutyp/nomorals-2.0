@@ -8,7 +8,8 @@ echo "=== Devon Termux Setup ==="
 # 1. Base packages
 echo "[1/5] Installing base packages..."
 pkg update -y
-pkg install -y python git curl wget ffmpeg
+pkg install -y python git curl wget ffmpeg python-numpy
+# python-numpy from pkg is prebuilt — pip would try to compile from source and fail
 
 # 2. Python dependencies (core only — no heavy ML on phone)
 echo "[2/5] Installing Python deps..."
@@ -25,9 +26,11 @@ else
   cd "$HOME/nomorals-2.0"
 fi
 
-# 4. Install Devon (minimal — phone-friendly)
+# 4. Install Devon (minimal — phone-friendly, no build-from-source)
 echo "[4/5] Installing Devon..."
-pip install -e ".[fast]"
+# Use --no-build-isolation and --no-deps to avoid pip trying to build numpy
+# (numpy comes from pkg as python-numpy, prebuilt)
+pip install -e . --no-build-isolation --no-deps
 
 # 5. Create secrets template
 echo "[5/5] Setting up secrets..."
