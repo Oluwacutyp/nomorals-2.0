@@ -661,14 +661,15 @@ class PlaidRegistryTests(unittest.TestCase):
     def test_registered(self) -> None:
         self.assertIs(get_connector("plaid"), PlaidConnector)
 
-    def test_read_only_docstring(self) -> None:
+    def test_full_functionality_surface(self) -> None:
         import nomorals.connectors.plaid as plaid_mod
-        self.assertIn("READ-ONLY", plaid_mod.__doc__)
-        self.assertIn("Read-only", PlaidConnector.__doc__)
-        # no money-movement surface at all
-        for name in ("transfer", "pay", "payment", "move_money",
-                     "initiate_payment"):
-            self.assertFalse(hasattr(PlaidConnector, name), name)
+        self.assertNotIn("READ-ONLY", plaid_mod.__doc__)
+        # money-movement surface exists
+        for name in ("create_transfer", "get_transfer", "list_transfers",
+                     "cancel_transfer", "create_payment", "get_payment",
+                     "list_payments", "reverse_payment",
+                     "create_payment_recipient", "audit_log"):
+            self.assertTrue(hasattr(PlaidConnector, name), name)
 
 
 class PlaidConnectTests(unittest.TestCase):
@@ -1161,6 +1162,263 @@ class PlaidErrorTests(unittest.TestCase):
         self.assertEqual(result["public_token"], "public-sandbox-1")
         body = http.last_post_body()
         self.assertEqual(body["institution_id"], "ins_109508")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Plaid money movement (Transfer + Payment Initiation)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _plaid_with_item_and_audit(tmpdir):
+    """Connected Plaid with one linked bank and an isolated audit log."""
+    import os
+    from unittest import mock
+
+    http = FakeHttp()
+    conn, http = _plaid(http)
+    _route_institutions_ok(http)
+    http.route("POST", "/item/public_token/exchange", FakeResponse(200, {
+        "access_token": "access-sandbox-xyz",
+        "item_id": "item_1",
+        "request_id": "r1",
+    }))
+    http.route("POST", "/accounts/get", FakeResponse(200, PLAID_ACCOUNTS))
+    http.route("POST", "/institutions/get_by_id", FakeResponse(200, {
+        "institution": {"institution_id": "ins_1", "name": "First Bank"}}))
+    with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": str(tmpdir)}):
+        conn.connect(client_id="cid", secret="sec",
+                     access_token="<redacted>")
+        yield conn, http
+
+
+class PlaidTransferTests(unittest.TestCase):
+    def test_authorization_create(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/authorization/create",
+                       FakeResponse(200, {
+                           "authorization_id": "auth_123",
+                           "request_id": "r"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.create_transfer_authorization(
+                    account_id="acc_1", type="debit", amount="25.00")
+            self.assertEqual(result["authorization_id"], "auth_123")
+            body = http.last_post_body()
+            self.assertEqual(body["account_id"], "acc_1")
+            self.assertEqual(body["amount"], "25.00")
+            self.assertEqual(body["type"], "debit")
+
+    def test_authorization_bad_amount(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                with self.assertRaises(ConnectorError):
+                    conn.create_transfer_authorization(
+                        account_id="acc_1", amount="25")
+                with self.assertRaises(ConnectorError):
+                    conn.create_transfer_authorization(
+                        account_id="acc_1", amount="-5.00")
+
+    def test_transfer_create(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/create", FakeResponse(200, {
+                "transfer_id": "tr_123", "status": "pending",
+                "request_id": "r"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.create_transfer(
+                    account_id="acc_1", authorization_id="auth_123",
+                    type="debit", amount="25.00", description="rent")
+            self.assertEqual(result["transfer_id"], "tr_123")
+            self.assertEqual(result["status"], "pending")
+            body = http.last_post_body()
+            self.assertEqual(body["authorization_id"], "auth_123")
+            # audit log written
+            log = conn.audit_log()
+            self.assertEqual(len(log), 1)
+            self.assertEqual(log[0]["action"], "transfer_create")
+            self.assertEqual(log[0]["transfer_id"], "tr_123")
+
+    def test_transfer_requires_authorization(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                with self.assertRaises(ConnectorError) as ctx:
+                    conn.create_transfer(account_id="acc_1", amount="25.00")
+            self.assertIn("authorization_id", str(ctx.exception))
+
+    def test_transfer_idempotent_replay(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/create", FakeResponse(200, {
+                "transfer_id": "tr_123", "status": "pending",
+                "request_id": "r"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                r1 = conn.create_transfer(
+                    account_id="acc_1", authorization_id="auth_123",
+                    amount="25.00", idempotency_key="key-1")
+                calls_before = len(http.calls)
+                r2 = conn.create_transfer(
+                    account_id="acc_1", authorization_id="auth_123",
+                    amount="25.00", idempotency_key="key-1")
+            self.assertEqual(r2["transfer_id"], "tr_123")
+            self.assertTrue(r2["idempotent_replay"])
+            # no new API call on replay
+            self.assertEqual(len(http.calls), calls_before)
+
+    def test_transfer_confirm_needs_db(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                with self.assertRaises(ConnectorError) as ctx:
+                    conn.create_transfer(
+                        account_id="acc_1", authorization_id="auth_123",
+                        amount="25.00", confirm=True)
+            self.assertIn("db=", str(ctx.exception))
+
+    def test_get_transfer(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/get", FakeResponse(200, {
+                "transfer": {"transfer_id": "tr_123", "status": "posted"}}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.get_transfer("tr_123")
+            self.assertEqual(result["status"], "posted")
+
+    def test_cancel_transfer(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/cancel", FakeResponse(200, {
+                "status": "cancelled"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.cancel_transfer("tr_123")
+            self.assertTrue(result["cancelled"])
+            log = conn.audit_log()
+            self.assertEqual(log[-1]["action"], "transfer_cancel")
+
+    def test_transfer_not_enabled(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/authorization/create",
+                       FakeResponse(400, {
+                           "error_code": "TRANSFER_NOT_ENABLED",
+                           "error_message": "not enabled"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                with self.assertRaises(PlaidError) as ctx:
+                    conn.create_transfer_authorization(
+                        account_id="acc_1", amount="25.00")
+            self.assertIn("not enabled", str(ctx.exception).lower())
+
+
+class PlaidPaymentTests(unittest.TestCase):
+    def test_recipient_bacs(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/payment_initiation/recipient/create",
+                       FakeResponse(200, {"recipient_id": "rec_1"}))
+            result = conn.create_payment_recipient(
+                "John Doe", bacs_account="26207729",
+                bacs_sort_code="560029")
+            self.assertEqual(result["recipient_id"], "rec_1")
+            body = http.last_post_body()
+            self.assertEqual(body["bacs"]["account"], "26207729")
+
+    def test_recipient_needs_details(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            with self.assertRaises(ConnectorError):
+                conn.create_payment_recipient("John Doe")
+
+    def test_payment_create(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/payment_initiation/payment/create",
+                       FakeResponse(200, {
+                           "payment_id": "pay_1", "status": "pending"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.create_payment(
+                    "rec_1", "invoice-42", 100.00, currency="GBP")
+            self.assertEqual(result["payment_id"], "pay_1")
+            body = http.last_post_body()
+            self.assertEqual(body["amount"]["value"], 100.00)
+            self.assertEqual(body["amount"]["currency"], "GBP")
+
+    def test_payment_idempotent(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/payment_initiation/payment/create",
+                       FakeResponse(200, {
+                           "payment_id": "pay_1", "status": "pending"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                r1 = conn.create_payment(
+                    "rec_1", "ref", 50.00, idempotency_key="pkey-1")
+                calls_before = len(http.calls)
+                r2 = conn.create_payment(
+                    "rec_1", "ref", 50.00, idempotency_key="pkey-1")
+            self.assertTrue(r2["idempotent_replay"])
+            self.assertEqual(len(http.calls), calls_before)
+
+    def test_reverse_payment(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/payment_initiation/payment/reverse",
+                       FakeResponse(200, {"status": "reversed"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                result = conn.reverse_payment("pay_1")
+            self.assertTrue(result["reversed"])
+
 
 
 if __name__ == "__main__":
