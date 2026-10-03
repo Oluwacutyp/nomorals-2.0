@@ -110,12 +110,14 @@ _FULL_PAN = "5531886652142950"
 
 
 def _card_obj() -> dict[str, Any]:
+    # Flutterwave's real card shape (per the official SDK sample
+    # responses): PAN in card_pan, expiry as expiration "YYYY-MM".
     return {
         "id": _CARD_ID,
-        "card_number": _FULL_PAN,
+        "card_pan": _FULL_PAN,
+        "masked_pan": "5531********2950",
         "cvv": "564",
-        "expiry_month": "09",
-        "expiry_year": "29",
+        "expiration": "2029-09",
         "card_type": "MASTERCARD",
         "name_on_card": "Jermaine Graham",
         "currency": "USD",
@@ -146,8 +148,13 @@ def _flw() -> FakeHttp:
     )
     http.route(
         "PUT",
-        f"/v3/virtual-cards/{_CARD_ID}/block",
+        f"/v3/virtual-cards/{_CARD_ID}/status/block",
         _flw_envelope({"is_active": False}, "blocked"),
+    )
+    http.route(
+        "PUT",
+        f"/v3/virtual-cards/{_CARD_ID}/status/unblock",
+        _flw_envelope({"is_active": True}, "unblocked"),
     )
     http.route(
         "PUT",
@@ -172,6 +179,7 @@ def _vcards(http: FakeHttp | None = None) -> VirtualCardsConnector:
 _CREATE_KWARGS = {
     "currency": "USD",
     "amount": 200,
+    "debit_currency": "NGN",
     "billing_name": "Jermaine Graham",
     "billing_address": "2014 Forest Hills Drive",
     "billing_city": "Lagos",
@@ -214,15 +222,19 @@ class RegistrationTests(unittest.TestCase):
 
 class MaskingTests(unittest.TestCase):
     def test_full_pan_reduced_to_last4(self) -> None:
-        masked = mask_card({"card_number": _FULL_PAN, "cvv": "564"})
-        self.assertEqual(masked["card_number"], "**** **** **** 2950")
-        self.assertNotIn(_FULL_PAN, masked["card_number"])
+        masked = mask_card({"card_pan": _FULL_PAN, "cvv": "564"})
+        self.assertEqual(masked["card_pan"], "**** **** **** 2950")
+        self.assertNotIn(_FULL_PAN, masked["card_pan"])
         self.assertEqual(masked["cvv"], "***")
 
+    def test_legacy_card_number_field_still_masked(self) -> None:
+        masked = mask_card({"card_number": _FULL_PAN})
+        self.assertEqual(masked["card_number"], "**** **** **** 2950")
+
     def test_masked_pan_stays_masked(self) -> None:
-        masked = mask_card({"card_number": "5531********2950"})
-        self.assertIn("2950", masked["card_number"])
-        self.assertNotIn("55318866", masked["card_number"])
+        masked = mask_card({"card_pan": "5531********2950"})
+        self.assertIn("2950", masked["card_pan"])
+        self.assertNotIn("55318866", masked["card_pan"])
 
     def test_non_card_shapes_pass_through(self) -> None:
         card = {"id": "abc", "currency": "USD", "is_active": True}
@@ -230,12 +242,12 @@ class MaskingTests(unittest.TestCase):
 
     def test_missing_fields_ok(self) -> None:
         self.assertEqual(mask_card({}), {})
-        self.assertEqual(mask_card({"card_number": None})["card_number"], None)
+        self.assertEqual(mask_card({"card_pan": None})["card_pan"], None)
 
     def test_input_not_mutated(self) -> None:
-        card = {"card_number": _FULL_PAN, "cvv": "564"}
+        card = {"card_pan": _FULL_PAN, "cvv": "564"}
         mask_card(card)
-        self.assertEqual(card["card_number"], _FULL_PAN)
+        self.assertEqual(card["card_pan"], _FULL_PAN)
 
 
 # ── connect lifecycle ────────────────────────────────────────────────
@@ -343,7 +355,7 @@ class CardOpsTests(unittest.TestCase):
 
     def test_create_card_returns_masked_and_vaults_secrets(self) -> None:
         masked = self.conn.create_card(**_CREATE_KWARGS)
-        self.assertEqual(masked["card_number"], "**** **** **** 2950")
+        self.assertEqual(masked["card_pan"], "**** **** **** 2950")
         self.assertEqual(masked["cvv"], "***")
         self.assertNotIn(_FULL_PAN, json.dumps(masked))
 
@@ -352,8 +364,9 @@ class CardOpsTests(unittest.TestCase):
             "connector:virtualcards", f"card:{_CARD_ID}"
         )
         details = json.loads(cred.password)
-        self.assertEqual(details["card_number"], _FULL_PAN)
+        self.assertEqual(details["card_pan"], _FULL_PAN)
         self.assertEqual(details["cvv"], "564")
+        self.assertEqual(details["expiration"], "2029-09")
 
         # Payload went to POST /v3/virtual-cards with create fields
         method, url, payload, _ = self.http.calls[1]
@@ -361,6 +374,8 @@ class CardOpsTests(unittest.TestCase):
         self.assertTrue(url.endswith("/v3/virtual-cards"))
         self.assertEqual(payload["currency"], "USD")
         self.assertEqual(payload["amount"], 200)
+        # debit_currency is a real create field (official SDK payload)
+        self.assertEqual(payload["debit_currency"], "NGN")
 
     def test_create_card_strips_unknown_fields(self) -> None:
         kwargs = dict(_CREATE_KWARGS, evil="drop me")
@@ -386,12 +401,12 @@ class CardOpsTests(unittest.TestCase):
         cards = self.conn.list_cards(per_page=5)
         self.assertEqual(len(cards), 2)
         for card in cards:
-            self.assertEqual(card["card_number"], "**** **** **** 2950")
+            self.assertEqual(card["card_pan"], "**** **** **** 2950")
             self.assertNotIn(_FULL_PAN, json.dumps(card))
 
     def test_get_card_masked(self) -> None:
         card = self.conn.get_card(_CARD_ID)
-        self.assertEqual(card["card_number"], "**** **** **** 2950")
+        self.assertEqual(card["card_pan"], "**** **** **** 2950")
         self.assertEqual(card["cvv"], "***")
         self.assertNotIn(_FULL_PAN, json.dumps(card))
 
@@ -422,9 +437,17 @@ class CardOpsTests(unittest.TestCase):
     def test_block_and_unblock(self) -> None:
         self.conn.block_card(_CARD_ID)
         _, url, payload, _ = [
-            c for c in self.http.calls if c[1].endswith("/block")
+            c for c in self.http.calls if "/status/block" in c[1]
         ][0]
+        self.assertTrue(url.endswith(f"/virtual-cards/{_CARD_ID}/status/block"))
         self.assertEqual(payload, {"status_action": "block"})
+        self.conn.unblock_card(_CARD_ID)
+        _, url2, payload2, _ = [
+            c for c in self.http.calls if "/status/unblock" in c[1]
+        ][0]
+        self.assertTrue(
+            url2.endswith(f"/virtual-cards/{_CARD_ID}/status/unblock"))
+        self.assertEqual(payload2, {"status_action": "unblock"})
         with self.assertRaises(VirtualCardsError):
             self.conn._require_provider().block_card(_CARD_ID, "freeze")
 
@@ -458,7 +481,7 @@ class CardOpsTests(unittest.TestCase):
     def test_reveal_card_from_vault(self) -> None:
         self.conn.create_card(**_CREATE_KWARGS)
         details = self.conn.reveal_card(_CARD_ID)
-        self.assertEqual(details["card_number"], _FULL_PAN)
+        self.assertEqual(details["card_pan"], _FULL_PAN)
         self.assertEqual(details["cvv"], "564")
 
     def test_reveal_card_unknown_fails_fast(self) -> None:
@@ -501,7 +524,7 @@ class ProvisionTests(unittest.TestCase):
 
     def test_provision_virtual_card_routes_to_create(self) -> None:
         masked = self.conn.provision("virtual_card", **_CREATE_KWARGS)
-        self.assertEqual(masked["card_number"], "**** **** **** 2950")
+        self.assertEqual(masked["card_pan"], "**** **** **** 2950")
 
     def test_provision_unknown_kind_refused(self) -> None:
         with self.assertRaises(ConnectorError) as ctx:
@@ -535,7 +558,7 @@ class ProvisionTests(unittest.TestCase):
         masked = self.conn.resume_checkpoint(
             store.get(cp.id), db=db, context=None
         )
-        self.assertEqual(masked["card_number"], "**** **** **** 2950")
+        self.assertEqual(masked["card_pan"], "**** **** **** 2950")
 
     def test_fund_confirm_pauses_then_resumes(self) -> None:
         db = _db()

@@ -548,6 +548,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
                 state["reference"],
                 state["amount"],
                 currency=state.get("currency", "GBP"),
+                user_id=state.get("user_id", ""),
                 idempotency_key=state.get("idempotency_key"),
             )
         if intent == "reverse_payment":
@@ -795,12 +796,18 @@ document.getElementById('link-btn').onclick = () => handler.open();
         amount: str = "",
         ach_class: str = "ppd",
         legal_name: str = "",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Authorize a transfer (``POST /transfer/authorization/create``).
 
         Returns an ``authorization_id`` — pass it to :meth:`create_transfer`.
         The authorization_id doubles as Plaid's idempotency key: creating
-        twice with the same id returns the same transfer, never a duplicate.
+        twice with the same id returns the same transfer, never a duplicate
+        (the standalone ``idempotency_key`` request field is deprecated per
+        the current API reference). ``idempotency_key`` here is the
+        *authorization* idempotency key (Plaid expires it after 48h —
+        pass your own for safe retries of this call).
+
         ``amount`` is the MAXIMUM as a decimal string (``"25.00"``);
         ``type`` is ``"debit"`` (pull from the account) or ``"credit"``
         (push to it). Raises a clear error if Transfer isn't enabled on
@@ -821,6 +828,8 @@ document.getElementById('link-btn').onclick = () => handler.open();
             "ach_class": ach_class,
             "user": {"legal_name": legal_name or "Devon Owner"},
         }
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
         try:
             resp = self._authed(item, "/transfer/authorization/create", body)
         except PlaidError as exc:
@@ -1101,6 +1110,39 @@ document.getElementById('link-btn').onclick = () => handler.open();
             "/payment_initiation/recipient/list", {})
         return resp.get("recipients", [])
 
+    def create_payment_user(
+        self,
+        name: str,
+        *,
+        email: str = "",
+        phone: str = "",
+    ) -> dict[str, Any]:
+        """Create a Plaid end user (``POST /user/create``).
+
+        New Plaid integrations MUST pass a ``user_id`` when creating a
+        payment (``/payment_initiation/payment/create``) — create the user
+        first with this method and hand the returned ``user_id`` to
+        :meth:`create_payment`. The user needs a name plus an email
+        address or a phone number (per the Plaid API reference).
+        """
+        self._require_client()
+        if not (name or "").strip():
+            raise ConnectorError("payment user name is required")
+        if not (email or "").strip() and not (phone or "").strip():
+            raise ConnectorError(
+                "a payment user needs an email address or a phone number"
+            )
+        body: dict[str, Any] = {"client_user_id": name.strip()[:64]}
+        if email.strip():
+            body["email_address"] = email.strip()
+        if phone.strip():
+            body["phone_number"] = phone.strip()
+        resp = self._client_api("/user/create", body)
+        user_id = str(resp.get("user_id", ""))
+        if not user_id:
+            raise PlaidError("plaid did not return a user_id")
+        return {"user_id": user_id, "request_id": resp.get("request_id", "")}
+
     def create_payment(
         self,
         recipient_id: str,
@@ -1108,6 +1150,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
         amount: float,
         *,
         currency: str = "GBP",
+        user_id: str = "",
         confirm: bool = False,
         db: Any = None,
         context: Any = None,
@@ -1119,6 +1162,11 @@ document.getElementById('link-btn').onclick = () => handler.open();
         payment in Plaid Link (mint a link token with
         ``products=["payment_initiation"]`` and the payment_id).
 
+        ``user_id`` (from :meth:`create_payment_user`) is REQUIRED for new
+        Plaid integrations per the current API reference; older
+        integrations may omit it. ``reference`` must be alphanumeric,
+        1–18 chars (bank rule — Plaid truncates overlong ones itself).
+
         ``confirm=True`` (with ``db=``) pauses at a human checkpoint showing
         the exact amount, currency, and recipient — the owner approves
         before the payment is created. Idempotency-keyed and audit-logged
@@ -1127,8 +1175,12 @@ document.getElementById('link-btn').onclick = () => handler.open();
         self._require_client()
         if not recipient_id.strip():
             raise ConnectorError("recipient_id is required")
-        if not reference.strip():
-            raise ConnectorError("payment reference is required")
+        reference = (reference or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9]{1,18}", reference):
+            raise ConnectorError(
+                f"invalid payment reference {reference!r}: must be "
+                "alphanumeric, 1-18 characters (bank rule)"
+            )
         if not isinstance(amount, (int, float)) or amount <= 0:
             raise ConnectorError(
                 f"invalid payment amount {amount!r}: must be positive"
@@ -1170,17 +1222,21 @@ document.getElementById('link-btn').onclick = () => handler.open();
                     "reference": reference,
                     "amount": amount,
                     "currency": currency,
+                    "user_id": user_id,
                     "idempotency_key": key,
                 },
             )
             return self.resume_checkpoint(cp, db=db, context=context)
+        payload: dict[str, Any] = {
+            "recipient_id": recipient_id,
+            "reference": reference,
+            "amount": {"currency": currency, "value": amount},
+        }
+        if user_id.strip():
+            payload["user_id"] = user_id.strip()
         resp = self._client_api(
             "/payment_initiation/payment/create",
-            {
-                "recipient_id": recipient_id,
-                "reference": reference,
-                "amount": {"currency": currency, "value": amount},
-            },
+            payload,
         )
         payment_id = str(resp.get("payment_id", ""))
         result = {

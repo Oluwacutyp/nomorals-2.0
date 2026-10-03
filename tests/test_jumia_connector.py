@@ -621,6 +621,20 @@ class JumiaHonestyTests(unittest.TestCase):
             conn.list_orders()
         self.assertIn("200", str(ctx.exception))
 
+    def test_capabilities_documents_seller_only_contract(self) -> None:
+        conn = JumiaConnector(self.vault, http=self.http)
+        caps = conn.capabilities()
+        self.assertEqual(caps["side"], "seller")
+        self.assertIn("orders", caps["can"])
+        self.assertIn("catalog", caps["can"])
+        self.assertIn("feeds", caps["can"])
+        # the hard API limitation, stated plainly
+        self.assertIn("buyer_product_search", caps["cannot"])
+        self.assertIn("no buyer product search api",
+                      caps["cannot"]["buyer_product_search"].lower()
+                      .replace("-", " "))
+        self.assertIn("checkout", caps["cannot"]["buyer_checkout"])
+
 
 if __name__ == "__main__":
     unittest.main()

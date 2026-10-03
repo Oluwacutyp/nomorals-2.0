@@ -1,22 +1,26 @@
 """Virtual Cards connector — issue and manage virtual debit cards via API.
 
-Provider status (verified 2026-10-02):
+Provider status (verified 2026-10-03 against Flutterwave's official SDK,
+``flutterwave/node-v3`` ``services/virtual-cards/*.js``, which mirrors
+https://developer.flutterwave.com):
 
 * **Implemented: Flutterwave** (https://api.flutterwave.com/v3,
   docs: https://developer.flutterwave.com). The only major
   Nigerian-serving PSP with a documented, API-driven card-issuance
   product. Auth: ``Authorization: Bearer <secret key>``.
-  Docs references: the Virtual Cards section of
-  https://developer.flutterwave.com (create/list/fetch/fund/terminate/
-  transactions/withdraw/block-unblock), mirrored by the official
-  SDKs ``flutterwave/flutterwave-node-v3`` (``VirtualCard`` service) and
-  ``flutterwave/flutterwave-ruby-v3`` (``VirtualCard`` class).
 * **Evaluated, not implemented:**
   - *Paystack*: no virtual-card issuance endpoint exists in the Paystack
     API reference (their "virtual accounts" are bank account numbers, not
     cards; no documented create/list/fund card API).
   - *Stripe Issuing*: does not serve Nigerian businesses for card
     issuance.
+
+Response shape (per the official SDK sample responses): card objects
+carry the PAN in ``card_pan``, the CVV in ``cvv``, and expiry as
+``expiration`` (``"YYYY-MM"``); a pre-masked ``masked_pan`` is also
+returned. Masking and secret-vaulting below key off these real field
+names (``card_number``/``expiry_month``/``expiry_year`` are accepted as
+legacy fallbacks only).
 
 Structure: :class:`VirtualCardProvider` is the provider ABC — a second
 provider (whenever a real, documented API exists for one) slots in by
@@ -109,13 +113,15 @@ def _mask_pan(pan: Any) -> Any:
 def mask_card(card: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of a card object safe to log, print, or return.
 
-    Masks ``card_number`` (last 4 only) and redacts ``cvv``. Every other
-    field passes through untouched. Works on Flutterwave card shapes and
-    degrades gracefully on unknown shapes.
+    Masks the PAN (last 4 only) and redacts ``cvv``. Flutterwave's real
+    field name is ``card_pan``; ``card_number`` is honored as a legacy
+    fallback. Every other field passes through untouched. Works on
+    Flutterwave card shapes and degrades gracefully on unknown shapes.
     """
     masked = dict(card)
-    if "card_number" in masked:
-        masked["card_number"] = _mask_pan(masked.get("card_number"))
+    for pan_field in ("card_pan", "card_number"):
+        if pan_field in masked:
+            masked[pan_field] = _mask_pan(masked.get(pan_field))
     if "cvv" in masked:
         masked["cvv"] = "***" if masked.get("cvv") else masked.get("cvv")
     return masked
@@ -191,7 +197,9 @@ class VirtualCardProvider(ABC):
 class FlutterwaveProvider(VirtualCardProvider):
     """Flutterwave Virtual Cards (api.flutterwave.com/v3).
 
-    Endpoints (Bearer secret key):
+    Endpoints (Bearer secret key) — verified 2026-10-03 against the
+    official ``flutterwave/node-v3`` SDK source
+    (``services/virtual-cards/*.js``):
 
     * ``POST   /v3/virtual-cards`` — create
     * ``GET    /v3/virtual-cards`` — list
@@ -202,8 +210,9 @@ class FlutterwaveProvider(VirtualCardProvider):
       (payload ``{"amount": ...}``)
     * ``PUT    /v3/virtual-cards/:id/terminate`` — terminate
     * ``GET    /v3/virtual-cards/:id/transactions?from=&to=&index=&size=``
-    * ``PUT    /v3/virtual-cards/:id/block`` — block/unblock
-      (payload ``{"status_action": "block"|"unblock"}``)
+    * ``PUT    /v3/virtual-cards/:id/status/:block|:unblock`` — block/unblock
+      (the action rides in the path, per the SDK; the payload passes
+      through too)
 
     The API answers with ``{"status": "success"|"error", "message": str,
     "data": ...}``.
@@ -214,10 +223,13 @@ class FlutterwaveProvider(VirtualCardProvider):
 
     # ── create payload shape ───────────────────────────────────────
 
-    #: fields accepted by POST /v3/virtual-cards (per the docs/SDKs).
+    #: fields accepted by POST /v3/virtual-cards (per the official SDK's
+    #: create-card payload example — note ``debit_currency``, the currency
+    #: the funding is debited in, is required alongside currency/amount).
     CREATE_FIELDS = (
         "currency",
         "amount",
+        "debit_currency",
         "billing_name",
         "billing_address",
         "billing_city",
@@ -285,9 +297,11 @@ class FlutterwaveProvider(VirtualCardProvider):
                 f"block_card action must be 'block' or 'unblock', "
                 f"got {action!r}"
             )
+        # Per the official SDK (rave.block_unblock.js): the action is part
+        # of the path — PUT v3/virtual-cards/{id}/status/{block|unblock}.
         data = self._api(
             "PUT",
-            f"/virtual-cards/{card_id}/block",
+            f"/virtual-cards/{card_id}/status/{action}",
             {"status_action": action},
         )
         return data if isinstance(data, dict) else {"data": data}
@@ -807,13 +821,19 @@ class VirtualCardsConnector(Connector):
 
     # ── card-secret vault plumbing ─────────────────────────────
 
+    #: Card-secret fields copied into the vault at creation. Flutterwave's
+    #: real field names first; ``card_number``/``expiry_month``/
+    #: ``expiry_year`` kept as legacy fallbacks only.
     _CARD_SECRET_FIELDS = (
-        "card_number",
+        "card_pan",
         "cvv",
-        "expiry_month",
-        "expiry_year",
+        "expiration",
+        "masked_pan",
         "card_id",
         "id",
+        "card_number",
+        "expiry_month",
+        "expiry_year",
     )
 
     def _store_card_secrets(
@@ -851,7 +871,8 @@ class VirtualCardsConnector(Connector):
     def _mask_nested(data: Any) -> Any:
         """Mask card objects nested anywhere in a transactions envelope."""
         if isinstance(data, dict):
-            if "card_number" in data or "cvv" in data:
+            if ("card_pan" in data or "card_number" in data
+                    or "cvv" in data):
                 return mask_card(data)
             return {k: VirtualCardsConnector._mask_nested(v)
                     for k, v in data.items()}
@@ -874,6 +895,6 @@ class VirtualCardsConnector(Connector):
 
 
 def _last4(card: dict[str, Any]) -> str:
-    pan = card.get("card_number", "")
+    pan = card.get("card_pan") or card.get("card_number") or ""
     digits = "".join(ch for ch in str(pan) if ch.isdigit())
     return digits[-4:] if digits else "?"

@@ -416,10 +416,15 @@ class MonoConnector(Connector):
     ) -> dict[str, Any]:
         """Bank statement (``GET /accounts/{id}/statement``).
 
+        Endpoint shape verified 2026-10-03 against Mono's official Node
+        SDK (withmono/mono-node ``src/lib/Account.ts``):
+        ``GET /accounts/{id}/statement?period=...&output=...`` — a
+        ``pdf`` output starts a generation job; poll it with
+        :meth:`poll_statement_pdf`.
+
         ``output`` is ``json`` or ``pdf``; ``period`` like
         ``last3months``/``last6months``/``last12months`` (1–12 months per
-        call). A ``pdf`` request starts a generation job — poll it with
-        :meth:`poll_statement_pdf`.
+        call).
         """
         if output not in ("json", "pdf"):
             raise ConnectorError(
@@ -438,12 +443,21 @@ class MonoConnector(Connector):
     def poll_statement_pdf(
         self, account_id: str, job_id: str
     ) -> dict[str, Any]:
-        """Poll a PDF statement generation job to completion."""
+        """Poll a PDF statement generation job to completion.
+
+        Endpoint verified 2026-10-03 against Mono's official Node SDK
+        (github.com/withmono/mono-node, ``src/lib/Account.ts`` →
+        ``pollPdfAccountStatementStatus``): the poll target is
+        ``GET /accounts/{id}/statement/jobs/{job_id}`` — note the extra
+        ``jobs/`` segment; ``/statement/{job_id}`` without it is NOT a
+        Mono endpoint. docs.mono.co does not publish a page for this
+        call, so the first-party SDK is the reference.
+        """
         cred = self._require_credential()
         aid = self._account_or_default(cred, account_id)
         data = self._api(
             "GET",
-            f"/accounts/{aid}/statement/{job_id}",
+            f"/accounts/{aid}/statement/jobs/{job_id}",
             secret=cred.password,
         )
         return {"account_id": aid, "job_id": job_id,

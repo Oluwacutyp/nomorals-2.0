@@ -654,6 +654,91 @@ class KongaJsonLdParsingTest(unittest.TestCase):
         with self.assertRaises(KongaError):
             conn.search_products("x")
 
+    def test_fallback_generic_script_block(self) -> None:
+        # site moved structured data out of ld+json into a plain
+        # application/json block — the fallback layer must find it
+        block = json.dumps(_product(77, "Fallback Widget", 42000.0))
+        html = (
+            "<!DOCTYPE html><html><head><title>K</title></head><body>"
+            f'<script type="application/json">{block}</script>'
+            "</body></html>"
+        )
+        entries = KongaConnector._product_entries(html)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["name"], "Fallback Widget")
+
+    def test_fallback_next_data_block(self) -> None:
+        block = json.dumps({
+            "props": {
+                "pageProps": {
+                    "dehydratedState": {
+                        "queries": [{"state": {"data": _product(
+                            78, "Next Widget", 31000.0)}}]
+                    }
+                }
+            }
+        })
+        html = (
+            "<!DOCTYPE html><html><head><title>K</title></head><body>"
+            f'<script id="__NEXT_DATA__" type="application/json">{block}'
+            "</script></body></html>"
+        )
+        entries = KongaConnector._product_entries(html)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["name"], "Next Widget")
+
+    def test_fallback_meta_tags(self) -> None:
+        # detail page lost its script blocks but keeps OG/product metas
+        html = (
+            "<!DOCTYPE html><html><head>"
+            '<meta property="og:title" content="Meta Widget Pro" />'
+            '<meta property="product:price:amount" content="55500" />'
+            '<meta property="product:price:currency" content="NGN" />'
+            '<meta property="og:url" '
+            'content="https://www.konga.com/product/meta-widget-pro-99" />'
+            '<meta property="og:image" '
+            'content="https://res.cloudinary.com/konga/image/99.jpg" />'
+            "</head><body><div>no scripts at all</div></body></html>"
+        )
+        entries = KongaConnector._product_entries(html)
+        self.assertEqual(len(entries), 1)
+        product = KongaConnector._normalize_product(entries[0])
+        assert product is not None
+        self.assertEqual(product["name"], "Meta Widget Pro")
+        self.assertEqual(product["price_ngn"], 55500.0)
+        self.assertEqual(
+            product["url"], "https://www.konga.com/product/meta-widget-pro-99"
+        )
+
+    def test_meta_without_price_is_not_a_product(self) -> None:
+        # og:title alone (e.g. a search page) must not fabricate a product
+        html = (
+            "<!DOCTYPE html><html><head>"
+            '<meta property="og:title" content="Konga Online Shopping" />'
+            "</head><body></body></html>"
+        )
+        self.assertEqual(KongaConnector._product_entries(html), [])
+
+    def test_meta_fallback_drives_get_product(self) -> None:
+        html = (
+            "<!DOCTYPE html><html><head>"
+            '<meta name="twitter:title" content="Twitter Widget" />'
+            '<meta property="og:price:amount" content="12000" />'
+            '<meta property="product:availability" content="instock" />'
+            "</head><body></body></html>"
+        )
+        conn = KongaConnector(
+            _vault(),
+            browser_service=FakeBrowserService(FakeTab(html)),
+            clock=FakeClock(),
+            sleeper=FakeClock().sleep,
+        )
+        detail = conn.get_product(
+            "https://www.konga.com/product/twitter-widget-55")
+        self.assertEqual(detail["name"], "Twitter Widget")
+        self.assertEqual(detail["price_ngn"], 12000.0)
+        self.assertEqual(detail["availability"], "in_stock")
+
 
 if __name__ == "__main__":
     unittest.main()

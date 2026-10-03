@@ -572,6 +572,37 @@ class KongaConnector(Connector):
 
     @staticmethod
     def _product_entries(html: str) -> list[dict[str, Any]]:
+        """Product nodes from a page, through a fallback chain.
+
+        1. ``<script type="application/ld+json">`` blocks (the primary,
+           pinned contract — cheapest and most structured);
+        2. ANY other ``<script>`` block whose content parses as JSON and
+           carries schema.org Product nodes (e.g. ``application/json``,
+           Next.js ``__NEXT_DATA__``);
+        3. ``<meta>`` tags (``og:title``, ``product:price:amount``,
+           ...) synthesized into a Product-shaped dict — detail pages
+           only, but the chain is honest about what it found.
+
+        Returns [] only when every layer came up empty; callers turn
+        that into a "page structure changed" fail-fast.
+        """
+        entries = KongaConnector._ld_json_products(html)
+        if entries:
+            return entries
+        entries = KongaConnector._any_script_products(html)
+        if entries:
+            _log.info("konga: ld+json missing, fell back to generic "
+                      "script-block Product extraction")
+            return entries
+        meta_entry = KongaConnector._meta_product(html)
+        if meta_entry is not None:
+            _log.info("konga: no script Product blocks, fell back to "
+                      "meta-tag extraction")
+            return [meta_entry]
+        return []
+
+    @staticmethod
+    def _ld_json_products(html: str) -> list[dict[str, Any]]:
         """All schema.org Product nodes from the page's ld+json blocks."""
         entries: list[dict[str, Any]] = []
         for match in _LD_JSON_RE.finditer(html or ""):
@@ -583,6 +614,91 @@ class KongaConnector(Connector):
             for node in nodes:
                 entries.extend(KongaConnector._find_products(node))
         return entries
+
+    #: any script block, regardless of its type attribute
+    _ANY_SCRIPT_RE = re.compile(
+        r"<script[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL
+    )
+
+    @staticmethod
+    def _any_script_products(html: str) -> list[dict[str, Any]]:
+        """Product nodes from ANY script block that parses as JSON.
+
+        Covers sites that move structured data out of ld+json (plain
+        ``application/json`` blobs, framework state like ``__NEXT_DATA__``).
+        Blocks already covered by the ld+json pass are re-scanned
+        harmlessly — duplicates are impossible here because this layer
+        only runs when the ld+json pass found nothing.
+        """
+        entries: list[dict[str, Any]] = []
+        for match in KongaConnector._ANY_SCRIPT_RE.finditer(html or ""):
+            text = (match.group(1) or "").strip()
+            if not text or "Product" not in text:
+                continue  # cheap pre-filter before paying for json.loads
+            try:
+                block = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            nodes = block if isinstance(block, list) else [block]
+            for node in nodes:
+                entries.extend(KongaConnector._find_products(node))
+        return entries
+
+    #: meta tags carrying product data (OpenGraph / product namespace)
+    _META_RE = re.compile(
+        r'<meta[^>]+(?:property|name)\s*=\s*["\']([^"\']+)["\']'
+        r'[^>]+content\s*=\s*["\']([^"\']*)["\'][^>]*>'
+        r'|<meta[^>]+content\s*=\s*["\']([^"\']*)["\']'
+        r'[^>]+(?:property|name)\s*=\s*["\']([^"\']+)["\'][^>]*>',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _meta_tags(html: str) -> dict[str, str]:
+        """property/name -> content for the page's meta tags (first wins)."""
+        tags: dict[str, str] = {}
+        for match in KongaConnector._META_RE.finditer(html or ""):
+            prop = (match.group(1) or match.group(4) or "").strip().lower()
+            content = (match.group(2) or match.group(3) or "").strip()
+            if prop and prop not in tags:
+                tags[prop] = content
+        return tags
+
+    @staticmethod
+    def _meta_product(html: str) -> dict[str, Any] | None:
+        """Synthesize a Product-shaped dict from meta tags.
+
+        Detail pages usually carry ``og:title`` + ``product:price:amount``
+        even when the script blocks change shape. Returns None when the
+        tags don't describe a product (no title, or no price).
+        """
+        tags = KongaConnector._meta_tags(html)
+        name = tags.get("og:title") or tags.get("twitter:title") or ""
+        price_raw = (
+            tags.get("product:price:amount")
+            or tags.get("og:price:amount")
+            or ""
+        )
+        price = KongaConnector._coerce_price(price_raw) if price_raw else None
+        if not name.strip() or price is None:
+            return None
+        currency = (
+            tags.get("product:price:currency")
+            or tags.get("og:price:currency")
+            or "NGN"
+        )
+        return {
+            "@type": "Product",
+            "name": name.strip(),
+            "url": tags.get("og:url", ""),
+            "image": tags.get("og:image", ""),
+            "offers": {
+                "@type": "Offer",
+                "price": price,
+                "priceCurrency": currency,
+                "availability": tags.get("product:availability", ""),
+            },
+        }
 
     @staticmethod
     def _find_products(node: Any) -> list[dict[str, Any]]:

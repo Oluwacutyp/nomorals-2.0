@@ -13,6 +13,7 @@ import http.server
 import json
 import os
 import socket
+import socketserver
 import threading
 import unittest
 from unittest import mock
@@ -164,6 +165,326 @@ class _ProxyNetCase(unittest.TestCase):
         self.addCleanup(self._env.stop)
 
 
+# ── fake network: SOCKS servers ─────────────────────────────────────
+
+
+def _read_n(sock: socket.socket, n: int) -> bytes:
+    chunks: list[bytes] = []
+    while n:
+        chunk = sock.recv(n)
+        if not chunk:
+            raise ConnectionError("eof mid-handshake")
+        chunks.append(chunk)
+        n -= len(chunk)
+    return b"".join(chunks)
+
+
+def _socks_relay(a: socket.socket, b: socket.socket) -> None:
+    """Bidirectional byte relay between the tunneled sockets."""
+
+    def fwd(src: socket.socket, dst: socket.socket) -> None:
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                dst.sendall(data)
+        except OSError:
+            pass
+        finally:
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    t1 = threading.Thread(target=fwd, args=(a, b), daemon=True)
+    t2 = threading.Thread(target=fwd, args=(b, a), daemon=True)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+
+class _Socks5Handler(socketserver.BaseRequestHandler):
+    """Minimal real SOCKS5 server: greeting, optional user/pass auth,
+    CONNECT, then a byte relay to the target. Honors ``server.require_auth``,
+    ``server.expected_user``, ``server.expected_pass``."""
+
+    def handle(self) -> None:  # noqa: D102
+        conn = self.request
+        try:
+            _ver, nmethods = _read_n(conn, 2)
+            methods = _read_n(conn, nmethods)
+            if getattr(self.server, "require_auth", False):
+                if 0x02 not in methods:
+                    conn.sendall(b"\x05\xff")
+                    return
+                conn.sendall(b"\x05\x02")
+                _read_n(conn, 1)  # auth version
+                ulen = _read_n(conn, 1)[0]
+                user = _read_n(conn, ulen)
+                plen = _read_n(conn, 1)[0]
+                pwd = _read_n(conn, plen)
+                if ((user, pwd) != (self.server.expected_user,
+                                    self.server.expected_pass)):
+                    conn.sendall(b"\x01\x01")
+                    return
+                conn.sendall(b"\x01\x00")
+            else:
+                conn.sendall(b"\x05\x00")
+            _ver, cmd, _rsv, atyp = _read_n(conn, 4)
+            if cmd != 0x01:
+                conn.sendall(b"\x05\x07\x00\x01" + b"\x00" * 6)
+                return
+            if atyp == 0x01:
+                host = socket.inet_ntoa(_read_n(conn, 4))
+            elif atyp == 0x03:
+                ln = _read_n(conn, 1)[0]
+                host = _read_n(conn, ln).decode("idna")
+            elif atyp == 0x04:
+                host = socket.inet_ntop(socket.AF_INET6, _read_n(conn, 16))
+            else:
+                conn.sendall(b"\x05\x08\x00\x01" + b"\x00" * 6)
+                return
+            port = int.from_bytes(_read_n(conn, 2), "big")
+            try:
+                upstream = socket.create_connection((host, port), timeout=10)
+            except OSError:
+                conn.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
+                return
+            conn.sendall(b"\x05\x00\x00\x01" + b"\x00" * 6)
+            _socks_relay(conn, upstream)
+        except (ConnectionError, OSError):
+            pass
+
+
+class _Socks4aHandler(socketserver.BaseRequestHandler):
+    """Minimal real SOCKS4/4a server: CONNECT (4a when the address is the
+    0.0.0.1 marker, hostname follows the userid), then a byte relay."""
+
+    def handle(self) -> None:  # noqa: D102
+        conn = self.request
+        try:
+            hdr = _read_n(conn, 8)
+            _vn, _cd = hdr[0], hdr[1]
+            port = int.from_bytes(hdr[2:4], "big")
+            ip = socket.inet_ntoa(hdr[4:8])
+            while _read_n(conn, 1) != b"\x00":  # userid, ignored
+                pass
+            if ip == "0.0.0.1":
+                domain = b""
+                while True:
+                    ch = _read_n(conn, 1)
+                    if ch == b"\x00":
+                        break
+                    domain += ch
+                host = domain.decode("idna")
+            else:
+                host = ip
+            try:
+                upstream = socket.create_connection((host, port), timeout=10)
+            except OSError:
+                conn.sendall(b"\x00\x5b" + b"\x00" * 6)
+                return
+            conn.sendall(b"\x00\x5a" + b"\x00" * 6)
+            _socks_relay(conn, upstream)
+        except (ConnectionError, OSError):
+            pass
+
+
+class _ThreadedSocksServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _serve_socks(handler_cls: type, **attrs: object) -> _ThreadedSocksServer:
+    server = _ThreadedSocksServer(("127.0.0.1", 0), handler_cls)
+    for key, value in attrs.items():
+        setattr(server, key, value)
+    thread = threading.Thread(
+        target=server.serve_forever, daemon=True,
+        name="proxypool-socks-test",
+    )
+    thread.start()
+    return server
+
+
+class _SocksNetCase(unittest.TestCase):
+    """Base: fake target + SOCKS5 (open + auth) + SOCKS4a on loopback."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.target = _serve(_TargetHandler)
+        cls.target_port = cls.target.server_address[1]
+        cls.target_url = f"http://127.0.0.1:{cls.target_port}/"
+        cls.socks5_open = _serve_socks(_Socks5Handler)
+        cls.socks5_open_port = cls.socks5_open.server_address[1]
+        cls.socks5_user = b"socksbob"
+        cls.socks5_pass = b"socks-pw"
+        cls.socks5_auth = _serve_socks(
+            _Socks5Handler,
+            require_auth=True,
+            expected_user=cls.socks5_user,
+            expected_pass=cls.socks5_pass,
+        )
+        cls.socks5_auth_port = cls.socks5_auth.server_address[1]
+        cls.socks4a = _serve_socks(_Socks4aHandler)
+        cls.socks4a_port = cls.socks4a.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        for server in (
+            cls.target, cls.socks5_open, cls.socks5_auth, cls.socks4a
+        ):
+            server.shutdown()
+            server.server_close()
+        super().tearDownClass()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.conn = _connector()
+
+
+# ── SOCKS: add / validation ────────────────────────────────────────────
+
+
+class SocksAddTests(_SocksNetCase):
+    def test_add_socks5(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_open_port, protocol="socks5"
+        )
+        self.assertEqual(proxy["protocol"], "socks5")
+        self.assertEqual(
+            proxy["id"], f"socks5://127.0.0.1:{self.socks5_open_port}"
+        )
+
+    def test_socks_alias_normalizes_to_socks5(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_open_port, protocol="socks"
+        )
+        self.assertEqual(proxy["protocol"], "socks5")
+        self.assertTrue(proxy["id"].startswith("socks5://"))
+
+    def test_add_socks4_and_socks4a(self) -> None:
+        p4 = self.conn.add_proxy(
+            "127.0.0.1", self.socks4a_port, protocol="socks4"
+        )
+        self.assertEqual(p4["protocol"], "socks4")
+        p4a = self.conn.add_proxy(
+            "127.0.0.1", self.socks4a_port, protocol="socks4a"
+        )
+        self.assertEqual(p4a["protocol"], "socks4a")
+
+    def test_socks4_password_rejected(self) -> None:
+        with self.assertRaises(ProxyPoolError):
+            self.conn.add_proxy(
+                "127.0.0.1", self.socks4a_port, protocol="socks4",
+                username="u", password="p",
+            )
+
+    def test_socks4a_password_rejected(self) -> None:
+        with self.assertRaises(ProxyPoolError):
+            self.conn.add_proxy(
+                "127.0.0.1", self.socks4a_port, protocol="socks4a",
+                username="u", password="p",
+            )
+
+    def test_socks5_allows_user_pass(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_auth_port, protocol="socks5",
+            username="socksbob", password="socks-pw",
+        )
+        self.assertTrue(proxy["has_auth"])
+        details = self.conn.get_proxy(proxy["id"])
+        self.assertTrue(
+            details["url_with_auth"].startswith("socks5://socksbob:")
+        )
+
+
+# ── SOCKS: health checks through real tunnels ───────────────────────────
+
+
+class SocksHealthTests(_SocksNetCase):
+    def test_health_check_socks5_no_auth(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_open_port, protocol="socks5"
+        )
+        summary = self.conn.health_check(url=self.target_url)
+        self.assertEqual(summary["healthy"], 1)
+        view = summary["results"][proxy["id"]]
+        self.assertEqual(view["health"]["status"], "healthy")
+        self.assertEqual(view["health"]["status_code"], 200)
+        self.assertGreater(view["health"]["latency_ms"], 0)
+
+    def test_health_check_socks5_with_auth(self) -> None:
+        self.conn.add_proxy(
+            "127.0.0.1", self.socks5_auth_port, protocol="socks5",
+            username="socksbob", password="socks-pw",
+        )
+        summary = self.conn.health_check(url=self.target_url)
+        self.assertEqual(summary["healthy"], 1)
+
+    def test_health_check_socks5_bad_auth_fails_fast(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_auth_port, protocol="socks5",
+            username="socksbob", password="wrong",
+        )
+        with self.assertRaises(ProxyPoolError) as ctx:
+            self.conn.health_check(proxy["id"], url=self.target_url)
+        self.assertIn("authentication failed", str(ctx.exception))
+        view = self.conn.list_proxies()[0]
+        self.assertEqual(view["health"]["status"], "unhealthy")
+
+    def test_health_check_socks4a(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks4a_port, protocol="socks4a"
+        )
+        summary = self.conn.health_check(url=self.target_url)
+        self.assertEqual(summary["healthy"], 1)
+        self.assertEqual(
+            summary["results"][proxy["id"]]["health"]["status_code"], 200
+        )
+
+    def test_health_check_socks4_ipv4_literal(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks4a_port, protocol="socks4"
+        )
+        summary = self.conn.health_check(url=self.target_url)
+        self.assertEqual(summary["healthy"], 1)
+
+    def test_health_check_socks5_hostname_target(self) -> None:
+        # SOCKS5 ATYP=0x03 (domain form): the proxy resolves the name.
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_open_port, protocol="socks5"
+        )
+        url = f"http://localhost:{self.target_port}/"
+        summary = self.conn.health_check(url=url)
+        self.assertEqual(summary["healthy"], 1)
+        self.assertEqual(
+            summary["results"][proxy["id"]]["health"]["status_code"], 200
+        )
+
+    def test_health_check_socks_unreachable(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", _closed_port(), protocol="socks5"
+        )
+        summary = self.conn.health_check(url=self.target_url)
+        self.assertEqual(summary["healthy"], 0)
+        self.assertEqual(summary["unhealthy"], 1)
+        view = summary["results"][proxy["id"]]
+        self.assertIn("unreachable", view["health"]["last_error"])
+
+    def test_rotate_picks_healthy_socks(self) -> None:
+        proxy = self.conn.add_proxy(
+            "127.0.0.1", self.socks5_open_port, protocol="socks5"
+        )
+        self.conn.health_check(url=self.target_url)
+        picked = self.conn.rotate()
+        self.assertEqual(picked["url"], proxy["url"])
+        self.assertTrue(picked["url_with_auth"].startswith("socks5://"))
+
+
 # ── add / list / remove / get ─────────────────────────────────────────
 
 
@@ -203,7 +524,6 @@ class AddProxyTests(unittest.TestCase):
             dict(host="h", port=65536),
             dict(host="h", port="abc"),
             dict(host="h", port=-1),
-            dict(host="h", port=8080, protocol="socks5"),
             dict(host="h", port=8080, protocol="ftp"),
             dict(host="h", port=8080, username="u"),  # user w/o password
             dict(host="h", port=8080, password="p"),  # password w/o user

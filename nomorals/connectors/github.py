@@ -482,6 +482,10 @@ class GitHubConnector(Connector):
         The token reaches git through a one-shot GIT_ASKPASS script fed from
         an environment variable — never on the command line, never written
         to git config or disk.
+
+        FAIL-FAST: a failed push raises :class:`GitHubError` with git's
+        output — it never returns a soft ``{"pushed": False}`` that a
+        caller could silently ignore.
         """
         cred = self._require_credential()
         repo = Path(local_dir)
@@ -498,11 +502,14 @@ class GitHubConnector(Connector):
                 repo, "push", remote_name, branch,
                 timeout=timeout, env=env,
             )
-        pushed = proc.returncode == 0
         out = (proc.stdout + proc.stderr)[-2000:]
-        _log.info("github push %s %s: %s", full_name, branch,
-                  "ok" if pushed else "failed")
-        return {"pushed": pushed, "branch": branch, "output": out}
+        if proc.returncode != 0:
+            raise GitHubError(
+                f"git push {remote_name} {branch} to {full_name} failed: "
+                f"{out.strip() or '(no output)'}"
+            )
+        _log.info("github push %s %s: ok", full_name, branch)
+        return {"pushed": True, "branch": branch, "output": out}
 
     # ── repo backup ────────────────────────────────────────────
 

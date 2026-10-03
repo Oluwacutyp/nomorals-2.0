@@ -1,8 +1,18 @@
 """Proxy pool connector — Devon's own proxy rotation pool.
 
 A LOCAL management interface (AuthMethod.NONE): Devon keeps its own pool
-of HTTP(S) proxies for rotation across research, fetching, and other
-outbound work.
+of proxies for rotation across research, fetching, and other outbound
+work. Supported protocols: ``http``, ``https`` (forward proxies), and
+``socks4`` / ``socks4a`` / ``socks5``.
+
+SOCKS support is a real implementation, not a label: neither ``PySocks``
+nor ``python-socks`` is installed in this runtime, so the SOCKS4/4a/5
+handshakes are implemented directly on stdlib ``socket`` (SOCKS5
+RFC 1928 greeting/auth/CONNECT, SOCKS4/4a CONNECT). SOCKS health probes
+open a real tunnel through the proxy and fetch the check URL through it
+(plain HTTP, or TLS-wrapped for https:// targets). SOCKS4/4a have no
+password authentication by protocol design — ``add_proxy`` fails fast
+when a password is given for them (use SOCKS5 for user/pass proxies).
 
 Storage: one vault credential per proxy under ``"connector:proxypool"``.
 The vault username is the proxy's endpoint id (``protocol://host:port``);
@@ -13,8 +23,9 @@ metadata. Proxy passwords never appear in plaintext config, logs, or
 list output.
 
 Health is never guessed: :meth:`health_check` sends a real HTTP request
-through each proxy (stdlib urllib + ProxyHandler, auth via the proxy URL's
-userinfo) and records latency, outcome, and timestamp. :meth:`rotate`
+through each proxy (stdlib urllib + ProxyHandler for HTTP(S) proxies,
+auth via the proxy URL's userinfo; manual SOCKS tunnel for SOCKS
+proxies) and records latency, outcome, and timestamp. :meth:`rotate`
 round-robins over proxies whose last recorded check was healthy.
 """
 
@@ -23,6 +34,10 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import json
+import re
+import socket
+import ssl
+import struct
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +65,25 @@ HEALTHY = "healthy"
 UNHEALTHY = "unhealthy"
 UNKNOWN = "unknown"
 
+#: Human-readable SOCKS5 CONNECT reply codes (RFC 1928 §6).
+_SOCKS5_ERRORS = {
+    0x01: "general SOCKS server failure",
+    0x02: "connection not allowed by ruleset",
+    0x03: "network unreachable",
+    0x04: "host unreachable",
+    0x05: "connection refused",
+    0x06: "TTL expired",
+    0x07: "command not supported",
+    0x08: "address type not supported",
+}
+
+#: SOCKS4a reply codes.
+_SOCKS4_ERRORS = {
+    0x5B: "request rejected or failed",
+    0x5C: "request rejected (no identd on client)",
+    0x5D: "request rejected (identd identity mismatch)",
+}
+
 
 class ProxyPoolError(ConnectorError):
     """A proxy pool operation failed."""
@@ -57,20 +91,26 @@ class ProxyPoolError(ConnectorError):
 
 @register_connector
 class ProxyPoolConnector(Connector):
-    """Devon's proxy pool: store, health-check, and rotate HTTP(S) proxies."""
+    """Devon's proxy pool: store, health-check, and rotate proxies.
+
+    HTTP(S) forward proxies plus SOCKS4/SOCKS4a/SOCKS5 (handshakes
+    implemented on stdlib socket — no PySocks dependency).
+    """
 
     id = "proxypool"
     name = "Proxy Pool"
     description = (
-        "Manage Devon's own pool of HTTP(S) proxies: store endpoints with "
+        "Manage Devon's own pool of proxies: store endpoints with "
         "vault-held credentials, health-check them with real requests, and "
-        "rotate across the healthy ones. Local service — no external auth."
+        "rotate across the healthy ones. HTTP(S) forward proxies and "
+        "SOCKS4/SOCKS4a/SOCKS5. Local service — no external auth."
     )
     auth_methods = (AuthMethod.NONE,)
     PROVISIONABLE = ("proxy",)
 
     #: Proxy protocols this pool can store and actively health-check.
-    PROTOCOLS = ("http", "https")
+    #: ``"socks"`` is accepted as an alias for ``"socks5"`` on the way in.
+    PROTOCOLS = ("http", "https", "socks4", "socks4a", "socks5")
 
     #: Default target for health checks: small, stable, plain HTTP.
     DEFAULT_CHECK_URL = "http://example.com/"
@@ -215,10 +255,19 @@ class ProxyPoolConnector(Connector):
     ) -> dict[str, Any]:
         """Store a proxy endpoint. Re-adding an endpoint updates it in place.
 
+        ``protocol`` is ``http``/``https`` (forward proxy), ``socks5``
+        (``"socks"`` is accepted as an alias), ``socks4a`` (SOCKS4 with
+        remote DNS), or ``socks4`` (SOCKS4, IPv4 literals only). SOCKS4
+        and SOCKS4a have no password authentication by protocol design —
+        passing a password with them raises immediately (use SOCKS5 for
+        user/pass proxies).
+
         The proxy password is encrypted into the vault; list/status views
         never expose it. Returns the stored proxy with the password masked.
         """
         protocol = (protocol or "").strip().lower()
+        if protocol == "socks":
+            protocol = "socks5"  # alias: bare "socks" means SOCKS5
         if protocol not in self.PROTOCOLS:
             raise ProxyPoolError(
                 f"unsupported proxy protocol {protocol!r}: "
@@ -230,6 +279,12 @@ class ProxyPoolConnector(Connector):
         if bool(proxy_user) != (password is not None and password != ""):
             raise ProxyPoolError(
                 "proxy auth needs both username and password, or neither"
+            )
+        if protocol in ("socks4", "socks4a") and password:
+            raise ProxyPoolError(
+                f"{protocol} has no password authentication by protocol "
+                "design — store this proxy as socks5 (user/pass) or drop "
+                "the password"
             )
         clean_tags = self._normalize_tags(tags)
         proxy_id = f"{protocol}://{host}:{port_num}"
@@ -400,8 +455,12 @@ class ProxyPoolConnector(Connector):
         Returns (status code, latency_ms). Any completed HTTP response —
         whatever the status — proves the proxy forwarded the request, so
         it counts as healthy. Network/auth failures raise ProxyPoolError
-        with a specific reason.
+        with a specific reason. SOCKS proxies go through the manual
+        socket tunnel below; urllib's ProxyHandler cannot speak SOCKS.
         """
+        parsed = urllib.parse.urlparse(proxy_url)
+        if parsed.scheme in ("socks4", "socks4a", "socks5", "socks"):
+            return self._probe_via_socks(parsed, url, timeout)
         handler = urllib.request.ProxyHandler(
             {"http": proxy_url, "https": proxy_url}
         )
@@ -430,6 +489,283 @@ class ProxyPoolConnector(Connector):
         except OSError as exc:
             raise ProxyPoolError(f"proxy connection failed: {exc}") from exc
         return status, (time.monotonic() - start) * 1000.0
+
+    # ── SOCKS probing (stdlib socket, no PySocks) ──────────────────
+
+    def _probe_via_socks(
+        self, proxy: urllib.parse.ParseResult, url: str, timeout: float
+    ) -> tuple[int, float]:
+        """Probe the check URL through a SOCKS proxy's TCP tunnel.
+
+        Handshakes SOCKS4/4a/5 manually, sends a real HTTP request
+        through the tunnel (TLS-wrapped for https:// targets), and
+        returns (status code, latency_ms) on any completed HTTP response.
+        """
+        target = urllib.parse.urlparse(url)
+        if target.scheme not in ("http", "https"):
+            raise ProxyPoolError(
+                f"cannot probe {url!r} through SOCKS: only http/https "
+                "targets are supported"
+            )
+        target_host = target.hostname or ""
+        if not target_host:
+            raise ProxyPoolError(f"cannot probe {url!r}: no target host")
+        target_port = target.port or (443 if target.scheme == "https" else 80)
+        path = target.path or "/"
+        if target.query:
+            path += "?" + target.query
+
+        protocol = proxy.scheme
+        proxy_host = proxy.hostname or ""
+        proxy_port = proxy.port or 1080
+        username = urllib.parse.unquote(proxy.username or "")
+        password = urllib.parse.unquote(proxy.password or "")
+
+        start = time.monotonic()
+        sock: socket.socket | None = None
+        try:
+            try:
+                sock = socket.create_connection(
+                    (proxy_host, proxy_port), timeout=timeout
+                )
+            except OSError as exc:
+                raise ProxyPoolError(
+                    f"socks proxy {proxy_host}:{proxy_port} unreachable: "
+                    f"{exc}"
+                ) from exc
+            sock.settimeout(timeout)
+            if protocol in ("socks4", "socks4a"):
+                self._socks4_handshake(
+                    sock, protocol, target_host, target_port, username
+                )
+            else:
+                self._socks5_handshake(
+                    sock, target_host, target_port, username, password
+                )
+            stream: socket.socket = sock
+            if target.scheme == "https":
+                context = ssl.create_default_context()
+                try:
+                    stream = context.wrap_socket(
+                        sock, server_hostname=target_host
+                    )
+                except (ssl.SSLError, OSError) as exc:
+                    raise ProxyPoolError(
+                        f"socks TLS to {target_host} failed: {exc}"
+                    ) from exc
+            request = (
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: {target_host}\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode("ascii")
+            try:
+                stream.sendall(request)
+                raw = self._read_http_head(stream)
+            except (OSError, ssl.SSLError) as exc:
+                raise ProxyPoolError(
+                    f"socks tunnel request failed: {exc}"
+                ) from exc
+            finally:
+                if stream is not sock:
+                    with contextlib.suppress(OSError):
+                        stream.close()
+        finally:
+            if sock is not None:
+                with contextlib.suppress(OSError):
+                    sock.close()
+        status = self._parse_http_status(raw, target_host)
+        return status, (time.monotonic() - start) * 1000.0
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, count: int) -> bytes:
+        """Read exactly ``count`` bytes or raise on EOF."""
+        chunks: list[bytes] = []
+        remaining = count
+        while remaining:
+            try:
+                chunk = sock.recv(remaining)
+            except socket.timeout as exc:
+                raise ProxyPoolError(
+                    "socks proxy timed out mid-handshake"
+                ) from exc
+            if not chunk:
+                raise ProxyPoolError(
+                    "socks proxy closed the connection mid-handshake"
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _socks5_handshake(
+        self,
+        sock: socket.socket,
+        target_host: str,
+        target_port: int,
+        username: str,
+        password: str,
+    ) -> None:
+        """RFC 1928: greeting (+ user/pass auth) then CONNECT."""
+        # 1. greeting: version, method count, methods
+        if username:
+            sock.sendall(b"\x05\x02\x00\x02")  # no-auth or user/pass
+        else:
+            sock.sendall(b"\x05\x01\x00")  # no-auth only
+        ver, method = self._recv_exact(sock, 2)
+        if ver != 0x05:
+            raise ProxyPoolError(
+                f"socks5 proxy answered with bad version byte {ver:#x}"
+            )
+        if method == 0xFF:
+            raise ProxyPoolError(
+                "socks5 proxy accepts no offered auth method"
+            )
+        if method == 0x02:
+            # RFC 1929 username/password subnegotiation
+            user_b = username.encode("utf-8")
+            pass_b = password.encode("utf-8")
+            if len(user_b) > 255 or len(pass_b) > 255:
+                raise ProxyPoolError(
+                    "socks5 username/password must be <= 255 bytes"
+                )
+            sock.sendall(
+                b"\x01"
+                + bytes([len(user_b)]) + user_b
+                + bytes([len(pass_b)]) + pass_b
+            )
+            auth_ver, auth_status = self._recv_exact(sock, 2)
+            if auth_ver != 0x01 or auth_status != 0x00:
+                raise ProxyPoolError(
+                    "socks5 proxy authentication failed: bad "
+                    "username/password"
+                )
+        elif method != 0x00:
+            raise ProxyPoolError(
+                f"socks5 proxy chose unsupported auth method {method:#x}"
+            )
+        # 2. CONNECT request: VER CMD RSV ATYP ADDR PORT
+        try:
+            addr = socket.inet_pton(socket.AF_INET, target_host)
+            atyp, addr_field = b"\x01", addr
+        except OSError:
+            try:
+                addr = socket.inet_pton(socket.AF_INET6, target_host)
+                atyp, addr_field = b"\x04", addr
+            except OSError:
+                host_b = target_host.encode("idna")
+                if len(host_b) > 255:
+                    raise ProxyPoolError(
+                        f"socks5 target hostname too long: {target_host!r}"
+                    ) from None
+                atyp = b"\x03"
+                addr_field = bytes([len(host_b)]) + host_b
+        sock.sendall(
+            b"\x05\x01\x00" + atyp + addr_field
+            + struct.pack(">H", target_port)
+        )
+        # 3. reply: VER REP RSV ATYP BND.ADDR BND.PORT
+        ver, rep, _rsv, atyp_b = self._recv_exact(sock, 4)
+        if ver != 0x05:
+            raise ProxyPoolError(
+                f"socks5 proxy answered CONNECT with bad version {ver:#x}"
+            )
+        if rep != 0x00:
+            detail = _SOCKS5_ERRORS.get(rep, f"unknown reply {rep:#x}")
+            raise ProxyPoolError(f"socks5 CONNECT failed: {detail}")
+        atyp = atyp_b
+        if atyp == 0x01:
+            self._recv_exact(sock, 4)
+        elif atyp == 0x04:
+            self._recv_exact(sock, 16)
+        elif atyp == 0x03:
+            name_len = self._recv_exact(sock, 1)[0]
+            self._recv_exact(sock, name_len)
+        else:
+            raise ProxyPoolError(
+                f"socks5 proxy returned unknown address type {atyp:#x}"
+            )
+        self._recv_exact(sock, 2)  # bound port
+
+    def _socks4_handshake(
+        self,
+        sock: socket.socket,
+        protocol: str,
+        target_host: str,
+        target_port: int,
+        username: str,
+    ) -> None:
+        """SOCKS4/4a CONNECT. SOCKS4 needs an IPv4 literal; 4a resolves
+        the hostname at the proxy (0.0.0.1 marker)."""
+        if protocol == "socks4":
+            try:
+                ip_bytes = socket.inet_pton(socket.AF_INET, target_host)
+            except OSError as exc:
+                raise ProxyPoolError(
+                    f"socks4 cannot resolve hostnames — use socks4a or "
+                    f"socks5 for {target_host!r}"
+                ) from exc
+            host_field = ip_bytes
+            domain_field = b""
+        else:  # socks4a: proxy-side DNS
+            host_field = b"\x00\x00\x00\x01"
+            domain_field = target_host.encode("idna") + b"\x00"
+        user_b = username.encode("utf-8") + b"\x00"
+        sock.sendall(
+            b"\x04\x01"
+            + struct.pack(">H", target_port)
+            + host_field
+            + user_b
+            + domain_field
+        )
+        reply = self._recv_exact(sock, 8)
+        if reply[0] != 0x00:
+            raise ProxyPoolError(
+                f"{protocol} proxy answered with bad version byte "
+                f"{reply[0]:#x}"
+            )
+        if reply[1] != 0x5A:
+            detail = _SOCKS4_ERRORS.get(
+                reply[1], f"unknown reply {reply[1]:#x}"
+            )
+            raise ProxyPoolError(f"{protocol} CONNECT failed: {detail}")
+
+    @staticmethod
+    def _read_http_head(stream: socket.socket) -> bytes:
+        """Read an HTTP response through the tunnel: headers + up to 64KB.
+
+        Reading headers first keeps the probe honest about protocol-level
+        failures; draining a body chunk proves bytes actually flow.
+        """
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            try:
+                chunk = stream.recv(65536)
+            except socket.timeout as exc:
+                raise ProxyPoolError(
+                    "socks tunnel timed out waiting for the response"
+                ) from exc
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > 1 << 20:
+                break
+        try:
+            body = stream.recv(65536)
+        except (OSError, socket.timeout):
+            body = b""
+        return buf + body
+
+    @staticmethod
+    def _parse_http_status(raw: bytes, target_host: str) -> int:
+        """The status code off the response's status line."""
+        head = raw.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        match = re.match(r"HTTP/\d(?:\.\d)?\s+(\d{3})", head)
+        if not match:
+            raise ProxyPoolError(
+                f"socks tunnel to {target_host} returned a non-HTTP "
+                f"response: {head[:80]!r}"
+            )
+        return int(match.group(1))
 
     def _record_health(
         self,
@@ -583,6 +919,8 @@ class ProxyPoolConnector(Connector):
         host_part, _, port_part = rest.rpartition(":")
         host = cls._normalize_host(host_part)
         port = cls._normalize_port(port_part)
+        if protocol == "socks":
+            protocol = "socks5"  # alias, same as add_proxy()
         if protocol not in cls.PROTOCOLS:
             raise ProxyPoolError(
                 f"invalid proxy id {proxy_id!r}: unsupported protocol "
