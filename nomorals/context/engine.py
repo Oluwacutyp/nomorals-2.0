@@ -107,6 +107,8 @@ class ContextEngine:
         artifacts: Any = None,
         tools: Any = None,
         history: Any = None,
+        memory: Any = None,
+        memory_query: str = "",
         budget: ContextBudget | None = None,
         extra_sections: list[Section] | None = None,
     ) -> BuiltContext:
@@ -115,6 +117,8 @@ class ContextEngine:
         sections: list[Section] = [self._system_section(system)]
         if mission is not None:
             sections.append(self._mission_section(mission))
+        if memory is not None:
+            sections.append(self._memory_section(memory, memory_query))
         if artifacts:
             sections.append(self._artifacts_section(artifacts))
         if tools is not None:
@@ -230,6 +234,23 @@ class ContextEngine:
             load_bearing=True,
             keep=tuple(keep),
             meta={"mission_id": mid, "status": status},
+        )
+
+    def _memory_section(self, memory: Any, query: str) -> Section:
+        """Build a memory section from a MemoryManager.
+
+        Uses MemoryManager.build_context() so there's one unified path
+        for memory → context (not a parallel implementation).
+        """
+        try:
+            text = memory.build_context(query or "current task")
+        except Exception:  # noqa: BLE001 - memory is best-effort, never breaks context
+            text = ""
+        return Section(
+            name="memory",
+            content=text,
+            priority=priority_for("memory"),
+            load_bearing=False,
         )
 
     def _artifacts_section(self, artifacts: Any) -> Section:
