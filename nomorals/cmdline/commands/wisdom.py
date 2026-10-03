@@ -154,7 +154,9 @@ def _wisdom_seed(args: Any, context: Any) -> int:
 def _wisdom_ingest(args: Any, context: Any, rest: list[str]) -> int:
     from ...wisdom import ArchiveIngestor
     ing = ArchiveIngestor(context)
-    if rest and rest[0] == "--all":
+    # --all is a real argparse flag; it also arrives inside task words on
+    # some dispatch paths, so accept both.
+    if getattr(args, "all", False) or (rest and rest[0] == "--all"):
         entries = ing.corpus.list()
         if not entries:
             print("manifest is empty — nothing to ingest", file=sys.stderr)

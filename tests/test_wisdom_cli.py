@@ -167,5 +167,22 @@ class WisdomSeedTests(unittest.TestCase):
         self.assertIn("seeded 0", out)
 
 
+class IngestAllFlagTest(unittest.TestCase):
+    def test_all_flag_parses(self):
+        # regression: `nm wisdom ingest --all` died in argparse with
+        # "unrecognized arguments: --all" because only `task` nargs="*"
+        # existed; --all is now a real flag.
+        args = _args(["wisdom", "ingest", "--all"])
+        self.assertTrue(args.all)
+        self.assertEqual(args.task, ["ingest"])
+
+    def test_ingest_all_empty_manifest_reports(self):
+        ctx, _ = _ctx()
+        rc, _out = _run(["wisdom", "ingest", "--all"], ctx)
+        # empty manifest: fail-fast with a clear error (message goes to
+        # stderr); the command must not silently succeed.
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,18 @@ class ManifestEntryTests(unittest.TestCase):
         self.assertEqual(e2.slug, e.slug)
         self.assertEqual(e2.source_url, e.source_url)
 
+    def test_notes_round_trip(self):
+        # triage notes (e.g. "mirror unreachable, kept original URL")
+        # must survive a manifest save/load cycle.
+        e = _entry()
+        e.notes = "sacred-texts.com blocked from this network 2026-10-02"
+        e2 = ManifestEntry.from_dict(e.to_dict())
+        self.assertEqual(e2.notes, e.notes)
+        # and absent notes default to empty, not KeyError
+        d = e.to_dict()
+        del d["notes"]
+        self.assertEqual(ManifestEntry.from_dict(d).notes, "")
+
 
 class CorpusTests(unittest.TestCase):
     def setUp(self):

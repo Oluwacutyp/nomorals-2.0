@@ -1513,6 +1513,8 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     wisdom.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    wisdom.add_argument("--all", action="store_true",
+                        help="ingest: ingest every manifest entry")
     wisdom.add_argument("--limit", type=int, default=0, help="max results")
     wisdom.add_argument("--rounds", type=int, default=0, help="practice: repeat")
     wisdom.add_argument("--chat", action="store_true",

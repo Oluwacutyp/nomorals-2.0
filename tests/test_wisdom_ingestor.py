@@ -76,6 +76,14 @@ def _make_ingestor(fake_http=None, robots_ok=True):
 
 
 class FetchBytesTests(unittest.TestCase):
+    def test_ingest_error_str_is_readable(self):
+        # regression: str(IngestError(url, reason)) rendered the tuple
+        # repr "('url', 'reason')" in CLI output; it must read as a
+        # sentence.
+        exc = IngestError("https://example.com/x", "403 unauthorized")
+        self.assertEqual(str(exc),
+                         "https://example.com/x: 403 unauthorized")
+        self.assertNotIn("('", str(exc))
     def test_fetch_returns_bytes_and_caches_blob(self):
         ing, tmp = _make_ingestor()
         data = ing.fetch_bytes(URL)
@@ -228,6 +236,21 @@ class SearchTests(unittest.TestCase):
     def _archive_json(self, docs):
         payload = {"response": {"docs": docs}}
         return _resp(json.dumps(payload).encode("utf-8"))
+
+    def test_archive_query_emits_repeated_fl_params(self):
+        # regression: urlencode without doseq=True stringified the field
+        # list into one param (fl[]=['identifier', ...]), which archive.org
+        # ignores — every search silently returned zero results.
+        url = ing_mod.ArchiveIngestor._archive_query("tao te ching", "", 5)
+        self.assertIn("fl%5B%5D=identifier", url)
+        self.assertIn("fl%5B%5D=title", url)
+        self.assertIn("fl%5B%5D=description", url)
+        self.assertNotIn("%5B%27identifier%27", url)  # no stringified list
+
+    def test_archive_query_quotes_multiword_terms(self):
+        url = ing_mod.ArchiveIngestor._archive_query("tao te ching", "", 5)
+        # phrase-quoted so token OR semantics don't drown exact matches
+        self.assertIn("%22tao+te+ching%22", url)
 
     def test_search_archive_returns_candidates(self):
         docs = [

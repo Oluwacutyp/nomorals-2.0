@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import json
 import mimetypes
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -95,9 +96,33 @@ def _error_snippet(body: str) -> str:
     return body[:200]
 
 
+def _safe_detail(body: str, limit: int = 500) -> str:
+    """Make an error detail from a response body that may be binary.
+
+    Response bodies are decoded with ``errors="replace"``, so a gzip or
+    other binary body shows up as mojibake: U+FFFD replacement characters
+    mixed with printable garbage. Quoting that corrupts logs and
+    terminals, so detect it (a text body has essentially no U+FFFD) and
+    say so instead of dumping it.
+    """
+    text = body or ""
+    if text:
+        fffd = text.count("�")
+        if fffd / len(text) > 0.03:
+            return "<non-text (likely compressed) response body>"
+    text = "".join(
+        ch if (ch.isprintable() or ch in " \t\n\r") else ""
+        for ch in text
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text or "<no readable error detail>"
+
+
 def http_error(status: int, body: str, url: str = "") -> NoMoralsError:
     """Map an HTTP status onto the framework error hierarchy."""
-    detail = body[:500]
+    detail = _safe_detail(body)
     if status == 429:
         retry_after = 1.0
         return RateLimited(f"429 from {url}: {detail}", retry_after=retry_after)

@@ -38,6 +38,9 @@ class ManifestEntry:
     translator: str = ""
     sha256: str = ""
     ingested_at: float = 0.0
+    #: Operator triage notes (e.g. why a URL was changed, or why a text
+    #: is currently unmirrorable). Informational only; never affects fetch.
+    notes: str = ""
 
     def validate(self) -> None:
         if not self.slug or not self.slug.replace("-", "").replace("_", "").isalnum():
@@ -65,6 +68,7 @@ class ManifestEntry:
             "license": self.license,
             "sha256": self.sha256,
             "ingested_at": self.ingested_at,
+            "notes": self.notes,
         }
 
     @classmethod
@@ -80,6 +84,7 @@ class ManifestEntry:
                 translator=str(d.get("translator", "")),
                 sha256=str(d.get("sha256", "")),
                 ingested_at=float(d.get("ingested_at", 0.0)),
+                notes=str(d.get("notes", "")),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CorpusError(f"malformed manifest entry: {exc}") from exc

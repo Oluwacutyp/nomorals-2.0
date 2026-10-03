@@ -66,6 +66,26 @@ class Http404BodyTest(unittest.TestCase):
         self.assertIn("404 not found", err.message)
         self.assertFalse(err.message.endswith("— "))
 
+    def test_binary_body_sanitized_no_control_chars(self) -> None:
+        from nomorals.core.http import http_error
+
+        # a gzipped 403 page: raw binary must never land in the message
+        body = "\x1f\ufffd\x08\x00blocked-by-waf\x00\x01\x02binary"
+        err = http_error(403, body, "https://example.com/page")
+        self.assertIn("403", err.message)
+        self.assertNotIn("blocked-by-waf", err.message)
+        for ch in err.message:
+            self.assertTrue(ch.isprintable() or ch in " \t\n\r",
+                            f"non-printable char {ch!r} in error message")
+
+    def test_mostly_replacement_chars_reports_non_text(self) -> None:
+        from nomorals.core.http import http_error
+
+        # gzip decoded as text: mojibake with many U+FFFD
+        body = "\ufffd" * 20 + "X s8++M" + "\ufffd" * 10
+        err = http_error(403, body, "https://example.com/page")
+        self.assertIn("non-text", err.message)
+
 
 class NoSilentMockTest(unittest.TestCase):
     def setUp(self) -> None:

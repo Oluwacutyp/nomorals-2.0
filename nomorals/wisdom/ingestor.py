@@ -326,7 +326,12 @@ class ArchiveIngestor:
     @staticmethod
     def _archive_query(query: str, tradition: str,
                        max_results: int) -> str:
-        terms = query
+        # Quote multi-word queries as a phrase so archive.org's token OR
+        # semantics don't drown exact-title matches in token soup.
+        terms = query.strip()
+        if " " in terms and not (
+                terms.startswith('"') and terms.endswith('"')):
+            terms = f'"{terms}"'
         if tradition:
             terms = f"{terms} AND {tradition}"
         params = {
@@ -335,7 +340,11 @@ class ArchiveIngestor:
             "rows": str(max_results),
             "output": "json",
         }
-        return f"{_ARCHIVE_SEARCH}?{urllib.parse.urlencode(params)}"
+        # doseq=True: each field in fl[] becomes its own query param.
+        # Without it urlencode stringifies the list into one param
+        # (fl[]=%5B%27identifier%27%2C+...%5D), which archive.org ignores —
+        # docs come back with no fields and every result is skipped.
+        return f"{_ARCHIVE_SEARCH}?{urllib.parse.urlencode(params, doseq=True)}"
 
     def _search_web(self, query: str, tradition: str,
                     max_results: int) -> list[dict[str, Any]]:
