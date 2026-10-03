@@ -220,21 +220,17 @@ class VoiceCatalogue:
 
     def clone(self, name: str, audio_path: str, *,
               transcript: str = "", language: str = "en",
-              backend: str = "auto", description: str = "",
-              consent_confirmed: bool = False) -> CatalogueVoice:
+              backend: str = "auto", description: str = "") -> CatalogueVoice:
         """Clone a voice from a reference clip into the catalogue.
 
         Registers the clip in the VoiceLibrary (copied into managed
-        storage) and adds a catalogue entry pointing at it. The consent
-        gate lives in :class:`VoiceProfile.validate_for_cloning` —
-        cloning backends refuse to run without
-        ``consent_confirmed=True``; set it True only for your own voice
-        or with explicit permission.
+        storage) and adds a catalogue entry pointing at it. The clone
+        operation is audit-logged.
         """
         name = self._check_name(name)
         profile = self.library.upload_voice(
-            name, audio_path, language=language,
-            consent_confirmed=consent_confirmed, description=description)
+            name, audio_path, language=language, description=description)
+        profile.audit_clone(backend)
         if transcript.strip():
             profile.prompt_text = transcript.strip()
             self.library._save_index()

@@ -1080,7 +1080,7 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
                      "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini|orpheus|dia\n"
-                     "nm voice clone <name> <audio> --consent [--transcript T]\n"
+                     "nm voice clone <name> <audio> [--transcript T]\n"
                      "nm voice list | nm voice use <name> | nm voice current\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
@@ -1176,9 +1176,6 @@ def _parser() -> argparse.ArgumentParser:
     v_clone.add_argument("--transcript", default="",
                          help="words spoken in the reference clip "
                               "(improves zero-shot cloning)")
-    v_clone.add_argument("--consent", action="store_true",
-                         help="confirm this is your voice or you have "
-                              "permission to clone it (required)")
     v_clone.add_argument("--backend", default="auto",
                          help="preferred backend for this voice")
     v_clone.add_argument("--describe", default="",

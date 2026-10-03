@@ -222,7 +222,6 @@ class RuntimeVoiceMixin:
                 transcript = ""
             try:
                 voice = cat.clone(name, path, transcript=transcript,
-                                  consent_confirmed=True,
                                   description="cloned by owner via /voice clone")
             except Exception as exc:  # noqa: BLE001
                 return f"clone failed: {exc}"

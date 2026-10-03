@@ -8,9 +8,10 @@ words.  Every word game in the suite validates against it:
 * wordle    — answers and guesses are 5-letter entries from the set
 * hangman/spy — word pools are drawn from the same vocabulary family
 
-The loader is lazy (first use) and case-insensitive.  A small
-explicit blocklist is stripped so the list stays chat-safe for a
-group game.  Games that need a deterministic AI pick pull from the
+The loader is lazy (first use) and case-insensitive.  An optional
+owner-configurable blocklist (default: empty) can filter words for
+family-friendly games via ``set_blocklist()``.  Games that need a
+deterministic AI pick pull from the
 per-letter index rather than the model, so the house plays identically
 with or without an API key.
 """
@@ -22,18 +23,22 @@ from pathlib import Path
 
 _DATA = Path(__file__).parent / "data" / "words.txt"
 
-#: Explicit / adult words present in the raw frequency list that would
-#: be tone-deaf in a friendly group chat.  Only words that actually
-#: occur in ``words.txt`` matter here.
-_BLOCKLIST: frozenset[str] = frozenset({
-    "babe", "babes", "butts", "breast", "fetish", "pantyhose",
-    "peeing", "spanking", "sucking", "titten", "swingers",
-    "voyeurweb", "nudist", "naked", "sperm", "erotica", "sexually",
-    "sexuality", "escort", "escorts", "thong", "thongs",
-    "transexual", "transexuales", "transsexual", "travesti",
-    "gay", "gays", "lesbian", "lesbians", "interracial",
-    "poison", "slave", "suicide", "torture", "violence", "violent",
-})
+#: Owner-configurable word blocklist for games. Defaults to empty — no
+#: vendor-style content filtering. The owner can add words via
+#: ``set_blocklist()`` if they want family-friendly word pools.
+#: Identity terms (LGBTQ+, etc.) are NEVER blocked by default.
+_BLOCKLIST: frozenset[str] = frozenset()
+
+
+def set_blocklist(words: set[str] | frozenset[str]) -> None:
+    """Set the owner's custom blocklist (empty by default)."""
+    global _BLOCKLIST
+    _BLOCKLIST = frozenset(w.lower() for w in words)
+
+
+def get_blocklist() -> frozenset[str]:
+    """Return the current blocklist."""
+    return _BLOCKLIST
 
 _WORD_RE = re.compile(r"^[a-z']+$")
 
