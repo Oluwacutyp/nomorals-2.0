@@ -201,7 +201,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
     "mission": (0, None),    # /mission status|list|stall|clear|pause|resume|cancel|retry|watch|unwatch|new
                              #   /mission new <research|build|fix> <args>
-    "image": (1, 3),         # /image <path-or-url> — lookup
+    "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
     "devon": (0, None),      # /devon [free text] — plan tools, run, digest, reply
@@ -349,7 +349,7 @@ _HELP_TEXT = "\n".join(
 "  /mission pause|resume|cancel|retry    pause, resume, stop, or restart a mission",
 "  /mission watch|unwatch <id>            this chat gets milestone updates",
 "  /mission new <research|build|fix>…     create a mission from a template",
-        "  /image <path-or-url>                    look it up (hash, dims, seen?)",
+        "  /image <path-or-url> | <prompt>         look up, or generate an image",
         "  /lens <path-or-url>                     reverse image search",
         "  — devon (autonomous dev agent) —",
         "  /devon <free text>                      e.g. 'check if the brain replied to the last messages'",
@@ -829,8 +829,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                          "/upgrade applied",
                 "example": "/upgrade diff upg_9f2k",
                 "related": "/evolve /research /notify"},
-    "image": {"what": "look up an image: hash, dimensions, seen-before.",
-              "usage": "/image <path-or-url>", "example": "/image /sdcard/pic.jpg",
+    "image": {"what": "look up an image (path/URL) or generate one from a text prompt.",
+              "usage": "/image <path-or-url> | /image <prompt>",
+              "example": "/image a cyberpunk city at night",
               "related": "/lens /look"},
     "lens": {"what": "reverse image search.",
              "usage": "/lens <path-or-url>", "example": "/lens /sdcard/pic.jpg",

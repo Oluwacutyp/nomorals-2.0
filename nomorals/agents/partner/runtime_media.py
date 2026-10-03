@@ -3,6 +3,31 @@
 from __future__ import annotations
 
 import os
+import re
+
+
+def _looks_like_path_or_url(ref: str) -> bool:
+    """Heuristic: is this an image path/URL (lookup) or a text prompt (generate)?"""
+    s = (ref or "").strip()
+    if not s:
+        return False
+    # URLs
+    if re.match(r"(?i)^(https?|ftp|data|file)://", s):
+        return True
+    # Absolute or home-relative paths
+    if s.startswith(("/", "~", "./", "../")):
+        return True
+    # Windows paths
+    if re.match(r"(?i)^[a-z]:[\\/]", s):
+        return True
+    # Existing file (relative path)
+    if os.path.exists(os.path.expanduser(s)):
+        return True
+    # Looks like a filename with an image extension
+    if re.search(r"(?i)\.(png|jpe?g|gif|webp|bmp|tiff?|avif|heic|svg)$", s.split()[0]):
+        return True
+    return False
+
 
 class RuntimeMediaMixin:
     """RuntimeMediaMixin for :class:`PartnerRuntime`."""
@@ -163,7 +188,12 @@ class RuntimeMediaMixin:
     def _control_image(self, tail: str) -> str:
         ref = (tail or "").strip()
         if not ref:
-            return "usage: /image <path-or-url>"
+            return "usage: /image <path-or-url> (lookup) or /image <prompt> (generate)"
+        if _looks_like_path_or_url(ref):
+            return self._image_lookup(ref)
+        return self._image_generate(ref)
+
+    def _image_lookup(self, ref: str) -> str:
         outcome = self.context.tools.call("image_lookup", path=ref)
         data, error = self._tool_data(outcome)
         if data is None:
@@ -177,6 +207,41 @@ class RuntimeMediaMixin:
         if near:
             lines.append("near duplicates: " + "; ".join(near[:3]))
         return "\n".join(lines)
+
+    def _image_generate(self, prompt: str) -> str:
+        """Generate an image from a text prompt via the generative backend."""
+        try:
+            from ...media_edit.generate import get_backend, GenerativeEditError
+        except ImportError as exc:
+            return f"image generation unavailable: {exc}"
+        try:
+            backend = get_backend()
+        except GenerativeEditError as exc:
+            return f"image generation unavailable: {exc}"
+        try:
+            images = backend.generate(prompt)
+        except Exception as exc:  # noqa: BLE001 - backend errors surface as text
+            return f"image generation failed: {exc}"
+        if not images:
+            return "image generation failed: backend returned no images"
+        # Save the first image to the workspace and report the path
+        try:
+            from pathlib import Path
+            import time
+            out_dir = Path(self.context.settings.resolve("data/media/generated"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"img_{int(time.time())}.png"
+            out_path = out_dir / fname
+            img = images[0]
+            if hasattr(img, "save"):
+                img.save(str(out_path))
+            else:
+                return f"🎨 generated image for: {prompt!r} (could not save — unsupported image type)"
+            return (f"🎨 generated: {prompt}\n"
+                    f"saved: {out_path}\n"
+                    f"backend: {backend.describe()}")
+        except Exception as exc:  # noqa: BLE001 - save errors surface as text
+            return f"image generated but save failed: {exc}"
 
     def _control_lens(self, tail: str) -> str:
         ref = (tail or "").strip()
