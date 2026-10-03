@@ -42,7 +42,8 @@ def _dispatch_tui_command(context: Any, state: Any, text: str) -> None:
                 "plain text chats with the active model\n"
                 "/mem <text> remember   /recall <query> search memory\n"
                 "/tools list tools   /models list models   /missions list missions\n"
-                "/doctor environment   /clear clear   /quit exit",
+                "/doctor environment   /clear clear   /quit exit\n"
+                "press ? (or F1) for the full key-binding overlay",
                 kind="info",
             )
         elif command == "tools":

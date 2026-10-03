@@ -68,6 +68,7 @@ from .serve import _cmd_serve
 from .skills import _cmd_skill_pkg
 from .snapshot import _cmd_snapshot
 from .status import _cmd_status, _status_section
+from .stream import _cmd_stream
 from .swarm import _cmd_swarm, _critique_from_json, _work_from_json
 from .timeline import _cmd_timeline, _render_timeline_row
 from .tools import _cmd_tools

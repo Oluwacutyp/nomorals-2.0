@@ -22,9 +22,90 @@ from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 from ..version import __version__
 
-__all__ = ["StreamServer", "serve"]
+__all__ = ["StreamServer", "emit_sse", "serve"]
 
 _log = get_logger(__name__)
+
+
+def _send_json(handler: Any, status: int, payload: dict) -> None:
+    """Write a small JSON response through a ``BaseHTTPRequestHandler``."""
+    raw = json.dumps(payload, default=str).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(raw)
+
+
+def emit_sse(
+    handler: Any,
+    timeline_factory: Callable[[], Any],
+    query: dict[str, list[str]],
+) -> None:
+    """Push Timeline events to ``handler`` as Server-Sent Events.
+
+    ``handler`` is any ``BaseHTTPRequestHandler`` — this is the shared SSE
+    loop used both by :class:`StreamServer` (its own port) and by the main
+    API server's ``GET /stream`` route (no separate port).
+
+    ``query`` maps names to value lists (as ``parse_qs`` returns); ``since``
+    is an optional epoch cursor, ``topic`` an optional topic filter. Bad
+    ``since`` → 400 JSON, fail fast. The call returns when the subscriber
+    disconnects; the timeline instance is created fresh per poll by
+    ``timeline_factory`` and closed after each poll.
+    """
+    try:
+        since = float(query["since"][0]) if "since" in query else 0.0
+    except (ValueError, IndexError) as exc:
+        _send_json(handler, 400, {"ok": False, "error": f"bad since: {exc}"})
+        return
+    topic = query["topic"][0] if "topic" in query else None
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Connection", "keep-alive")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.end_headers()
+
+    cursor = since
+    last_beat = time.time()
+    _log.info("stream subscriber connected (topic=%s)", topic)
+    try:
+        while True:
+            timeline = timeline_factory()
+            try:
+                events = timeline.query(
+                    since=cursor, topic=topic, limit=100
+                )
+            finally:
+                close = getattr(timeline, "close", None)
+                if callable(close):
+                    close()
+            # query() is newest-first; emit oldest-first.
+            for ev in reversed(events):
+                ts = float(ev.get("ts", 0) or 0)
+                if ts > cursor:
+                    cursor = ts
+                data = json.dumps(ev, default=str)
+                chunk = (
+                    f"event: timeline\n"
+                    f"id: {cursor}\n"
+                    f"data: {data}\n\n"
+                ).encode("utf-8")
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+            now = time.time()
+            if now - last_beat >= HEARTBEAT_INTERVAL:
+                handler.wfile.write(b":ping\n\n")
+                handler.wfile.flush()
+                last_beat = now
+            time.sleep(POLL_INTERVAL)
+    except (ConnectionResetError, BrokenPipeError):
+        _log.info("stream subscriber disconnected")
+    except Exception:  # noqa: BLE001 - log and close
+        _log.exception("stream handler error")
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -86,66 +167,10 @@ class StreamServer:
                     self._json(404, {"ok": False, "error": "not found"})
 
             def _json(self, status: int, payload: dict) -> None:
-                raw = json.dumps(payload, default=str).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(raw)
+                _send_json(self, status, payload)
 
             def _sse(self, query: dict[str, list[str]]) -> None:
-                try:
-                    since = float(query["since"][0]) if "since" in query else 0.0
-                except (ValueError, IndexError) as exc:
-                    self._json(400, {"ok": False, "error": f"bad since: {exc}"})
-                    return
-                topic = query["topic"][0] if "topic" in query else None
-
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
-                self.send_header("X-Accel-Buffering", "no")
-                self.end_headers()
-
-                cursor = since
-                last_beat = time.time()
-                _log.info("stream subscriber connected (topic=%s)", topic)
-                try:
-                    while True:
-                        timeline = server.timeline_factory()
-                        try:
-                            events = timeline.query(
-                                since=cursor, topic=topic, limit=100
-                            )
-                        finally:
-                            close = getattr(timeline, "close", None)
-                            if callable(close):
-                                close()
-                        # query() is newest-first; emit oldest-first.
-                        for ev in reversed(events):
-                            ts = float(ev.get("ts", 0) or 0)
-                            if ts > cursor:
-                                cursor = ts
-                            data = json.dumps(ev, default=str)
-                            chunk = (
-                                f"event: timeline\n"
-                                f"id: {cursor}\n"
-                                f"data: {data}\n\n"
-                            ).encode("utf-8")
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                        now = time.time()
-                        if now - last_beat >= HEARTBEAT_INTERVAL:
-                            self.wfile.write(b":ping\n\n")
-                            self.wfile.flush()
-                            last_beat = now
-                        time.sleep(POLL_INTERVAL)
-                except (ConnectionResetError, BrokenPipeError):
-                    _log.info("stream subscriber disconnected")
-                except Exception:  # noqa: BLE001 - log and close
-                    _log.exception("stream handler error")
+                emit_sse(self, server.timeline_factory, query)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         # Resolve the real port when port=0 was requested.

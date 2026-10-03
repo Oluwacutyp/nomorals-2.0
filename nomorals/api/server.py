@@ -113,6 +113,26 @@ DEFAULT_GRANT = CapabilitySet.of(
 DEFAULT_PRINCIPAL = Principal(name="local", grant=DEFAULT_GRANT)
 
 
+def _require_capability(principal: Principal, capability: str) -> None:
+    """Raise :class:`CapabilityDenied` (→ 403) when ``principal`` lacks
+    ``capability``. Route handlers call this so every new endpoint honors
+    the resolved principal's grant."""
+    if not principal.grant.grants(capability):
+        raise CapabilityDenied(
+            f"principal {principal.name!r} lacks capability {capability!r}",
+            capability=capability,
+        )
+
+
+def _open_timeline(context: Any) -> Any:
+    """Open an ``os.Timeline`` on the context's database (same helper the
+    ``nm`` CLI uses). ``db_path`` may be ``None`` → in-memory timeline."""
+    from ..os.timeline import Timeline
+
+    db_path = getattr(getattr(context, "db", None), "path", None)
+    return Timeline(db_path)
+
+
 def _json_limit_error(
     body: Any,
     *,
@@ -225,6 +245,8 @@ class APIServer:
         self.max_json_elements = max_json_elements
         self._tls = threading.local()
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
+        # (method, path) -> human description, surfaced by GET /docs.
+        self._route_docs: dict[tuple[str, str], str] = {}
         self._register_defaults()
 
     # ── principals ─────────────────────────────────────────────────────────
@@ -292,9 +314,13 @@ class APIServer:
         finally:
             self._tls.principal = previous
 
-    def route(self, method: str, path: str):
+    def route(self, method: str, path: str, *, description: str = ""):
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._routes[(method.upper(), path)] = fn
+            key = (method.upper(), path)
+            self._routes[key] = fn
+            # An explicit description wins; otherwise fall back to the
+            # handler's name so /docs never shows a blank line.
+            self._route_docs[key] = description or fn.__name__
             return fn
 
         return decorator
@@ -305,7 +331,7 @@ class APIServer:
         context = self.context
         server = self
 
-        @self.route("GET", "/health")
+        @self.route("GET", "/health", description="Health check: version, ok, schema version")
         def health(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             db = getattr(context, "db", None)
             schema = 0
@@ -317,7 +343,7 @@ class APIServer:
                 schema = MigrationRunner(db).current_version()
             return {"version": __version__, "ok": True, "schema_version": schema}
 
-        @self.route("GET", "/models")
+        @self.route("GET", "/models", description="List registered LLM models plus registry stats")
         def models(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             from ..llm.registry import ModelRegistry
 
@@ -325,7 +351,7 @@ class APIServer:
             return {"stats": registry.stats(),
                     "models": [r.__dict__ for r in registry.list(limit=100)]}
 
-        @self.route("GET", "/tools")
+        @self.route("GET", "/tools", description="List tool schemas")
         def tools(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             return {"tools": context.tools.register_builtins().schemas()}
 
@@ -339,7 +365,10 @@ class APIServer:
         except Exception:  # noqa: BLE001 - webhook routes are additive
             _log.warning("trigger webhook routes not registered", exc_info=True)
 
-        @self.route("POST", "/tools/call")
+        @self.route(
+            "POST", "/tools/call",
+            description="Call a tool as the principal, with exactly its capability grant",
+        )
         def call_tool(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             principal = server._current_principal()
             name = str(body.get("name") or "")
@@ -361,7 +390,7 @@ class APIServer:
             # CapabilityDenied -> 403, other tool errors -> 400/500.
             raise outcome.error if outcome.error is not None else NoMoralsError("tool call failed")
 
-        @self.route("POST", "/chat")
+        @self.route("POST", "/chat", description="Chat with the model router")
         def chat(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             from ..llm.base import Message, SamplingParams
 
@@ -378,7 +407,7 @@ class APIServer:
             response = context.router.chat(messages, params)
             return response.to_dict()
 
-        @self.route("POST", "/memory/remember")
+        @self.route("POST", "/memory/remember", description="Store a memory record")
         def remember(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             record_id = context.memory.remember(
                 str(body.get("content") or ""),
@@ -388,7 +417,7 @@ class APIServer:
             )
             return {"id": record_id}
 
-        @self.route("POST", "/memory/recall")
+        @self.route("POST", "/memory/recall", description="Recall memory records")
         def recall(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             result = context.memory.recall(
                 str(body.get("query") or ""),
@@ -397,11 +426,11 @@ class APIServer:
             )
             return result.to_dict()
 
-        @self.route("GET", "/memory/stats")
+        @self.route("GET", "/memory/stats", description="Memory statistics snapshot")
         def memory_stats(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             return context.memory.stats_snapshot()
 
-        @self.route("POST", "/agents/run")
+        @self.route("POST", "/agents/run", description="Run the master orchestrator toward a goal")
         def run_agent(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             from ..agents.orchestrator import MasterOrchestrator
 
@@ -412,7 +441,7 @@ class APIServer:
             result = orchestrator.run(goal, reflect=bool(body.get("reflect", False)))
             return result.to_dict()
 
-        @self.route("POST", "/backup")
+        @self.route("POST", "/backup", description="Create a database backup, then rotate")
         def backup(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             from ..storage.backup import BackupManager
 
@@ -421,10 +450,235 @@ class APIServer:
             manager.rotate()
             return info.to_dict()
 
-        @self.route("GET", "/events")
+        @self.route("GET", "/events", description="Event bus snapshot (static; use /stream for live events)")
         def events(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             bus = getattr(context, "bus", None)
             return {"events": bus.snapshot() if bus is not None else []}
+
+        # ── surface track: module endpoints ──────────────────────────────
+        # Every handler resolves the principal's grant first (→ 403 when it
+        # lacks the needed capability) and validates its input (→ 400 via
+        # NoMoralsError). Organ errors that are plain Exceptions (SearchError,
+        # WisdomError, TriggerError) are wrapped in NoMoralsError so the
+        # dispatch mapping stays consistent.
+
+        @self.route(
+            "POST", "/wisdom/ask",
+            description="Ask the WisdomKeeper corpus; every passage carries provenance",
+        )
+        def wisdom_ask(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.MEM_READ)
+            from ..wisdom.errors import WisdomError
+            from ..wisdom.keeper import WisdomKeeper
+
+            question = str(body.get("query") or "").strip()
+            if not question:
+                raise NoMoralsError("query is required")
+            try:
+                top = int(body.get("top", 5))
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    f"top must be an integer, got {body.get('top')!r}") from None
+            top = max(1, min(top, 50))
+            keeper = WisdomKeeper(context)
+            try:
+                answer = keeper.ask(
+                    question, top=top, tradition=str(body.get("tradition") or "")
+                )
+            except WisdomError as exc:
+                raise NoMoralsError(str(exc)) from exc
+            return {"ok": True, **answer.to_dict()}
+
+        @self.route(
+            "POST", "/search",
+            description="Federated search across memory, wisdom, books, docs, code, timeline",
+        )
+        def search(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.NET_OUT)
+            from ..search.errors import SearchError
+            from ..search.federated import federated_search
+
+            text = str(body.get("query") or "").strip()
+            if not text:
+                raise NoMoralsError("query is required")
+            try:
+                limit = int(body.get("limit", 10))
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    f"limit must be an integer, got {body.get('limit')!r}") from None
+            sources = body.get("sources")
+            if sources is not None and not isinstance(sources, list):
+                raise NoMoralsError("sources must be a list of source names")
+            types = body.get("types")
+            if types is not None and not isinstance(types, list):
+                raise NoMoralsError("types must be a list of result types")
+            timeline = _open_timeline(context)
+            try:
+                response = federated_search(
+                    text,
+                    context=context,
+                    sources=[str(s) for s in sources] if sources is not None else None,
+                    limit=limit,
+                    types=[str(t) for t in types] if types is not None else None,
+                    since=body.get("since"),
+                    before=body.get("before"),
+                    timeline=timeline,
+                )
+            except SearchError as exc:
+                raise NoMoralsError(str(exc)) from exc
+            finally:
+                timeline.close()
+            return {"ok": True, **response.to_dict()}
+
+        @self.route(
+            "GET", "/connectors",
+            description="List registered service connectors (metadata only, no secrets)",
+        )
+        def connectors(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_READ)
+            from ..connectors.registry import list_connectors
+
+            return {"connectors": list_connectors()}
+
+        @self.route(
+            "GET", "/sessions",
+            description="List active OS sessions via the SessionBridge",
+        )
+        def sessions(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_READ)
+            from ..os.session_bridge import SessionBridge
+
+            bridge = SessionBridge(context.db)
+            return {
+                "sessions": [s.to_dict() for s in bridge.store.list_active()]
+            }
+
+        @self.route(
+            "GET", "/triggers",
+            description="List automation triggers (?enabled_only=1, ?source=NAME)",
+        )
+        def triggers_list(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_READ)
+            from ..triggers.store import TriggerStore
+
+            store = TriggerStore(context.db)
+            enabled_only = (
+                str(query.get("enabled_only", "")).strip().lower()
+                in ("1", "true", "yes")
+            )
+            source = str(query.get("source") or "") or None
+            return {
+                "triggers": [
+                    t.to_dict()
+                    for t in store.list(enabled_only=enabled_only, source=source)
+                ]
+            }
+
+        @self.route(
+            "POST", "/triggers",
+            description="Create an automation trigger (name, source, condition, action, action_params)",
+        )
+        def triggers_create(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_WRITE)
+            from ..core.ids import new_short_id
+            from ..triggers.models import Trigger, TriggerError, validate_definition
+            from ..triggers.store import TriggerStore
+
+            name = str(body.get("name") or "").strip()
+            if not name:
+                raise NoMoralsError("name is required")
+            source = str(body.get("source") or "")
+            action = str(body.get("action") or "")
+            try:
+                cooldown_s = float(body.get("cooldown_s", 0.0))
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    f"cooldown_s must be a number, "
+                    f"got {body.get('cooldown_s')!r}") from None
+            try:
+                condition, params, cooldown_s = validate_definition(
+                    source,
+                    body.get("condition"),
+                    action,
+                    body.get("action_params"),
+                    cooldown_s=cooldown_s,
+                )
+            except TriggerError as exc:
+                raise NoMoralsError(str(exc)) from exc
+            trigger = Trigger(
+                id=new_short_id("trg_"),
+                name=name,
+                enabled=bool(body.get("enabled", True)),
+                source=source,
+                condition=condition,
+                action=action,
+                action_params=params,
+                cooldown_s=cooldown_s,
+            )
+            TriggerStore(context.db).save(trigger)
+            return {"ok": True, "trigger": trigger.to_dict()}
+
+        @self.route(
+            "GET", "/timeline",
+            description="Query the OS event timeline (?topic=, ?since=, ?until=, ?limit=, ...)",
+        )
+        def timeline(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_READ)
+            try:
+                limit = int(query.get("limit", 100))
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    f"limit must be an integer, got {query.get('limit')!r}") from None
+            limit = max(1, min(limit, 1000))
+            tl = _open_timeline(context)
+            try:
+                events = tl.query(
+                    session_id=str(query.get("session_id") or "") or None,
+                    project_id=str(query.get("project_id") or "") or None,
+                    mission_id=str(query.get("mission_id") or "") or None,
+                    artifact_id=str(query.get("artifact_id") or "") or None,
+                    topic=str(query.get("topic") or "") or None,
+                    since=str(query.get("since") or "") or None,
+                    until=str(query.get("until") or "") or None,
+                    limit=limit,
+                )
+            except ValueError as exc:
+                # _coerce_ts rejects unparseable since/until — a 400, not a 500.
+                raise NoMoralsError(str(exc)) from exc
+            finally:
+                tl.close()
+            return {"events": events}
+
+        @self.route(
+            "GET", "/docs",
+            description="Self-documentation: every route on this API",
+        )
+        def docs(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            keys = sorted(set(server._routes) | set(server._route_docs))
+            return {
+                "version": __version__,
+                "routes": [
+                    {
+                        "method": method,
+                        "path": path,
+                        "description": server._route_docs.get((method, path), ""),
+                    }
+                    for (method, path) in keys
+                ],
+            }
+
+        # GET /stream is served directly by the request handler (SSE cannot
+        # go through the JSON dispatch); its docs entry is registered here.
+        self._route_docs[("GET", "/stream")] = (
+            "Live Timeline events as Server-Sent Events (?since=EPOCH, ?topic=GLOB)"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -543,6 +797,27 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             )
             if principal is None:
                 self._respond(401, {"error": "missing or invalid bearer token"})
+                return
+            if method == "GET" and parsed.path == "/stream":
+                # SSE cannot go through the JSON dispatch: the connection is
+                # held open and framed as text/event-stream. Reuse the stream
+                # server's emitter directly — the streaming API from the mesh
+                # track, served on the main API port instead of a separate one.
+                from ..stream.server import emit_sse
+
+                try:
+                    _require_capability(principal, Capability.DB_READ)
+                except CapabilityDenied as exc:
+                    self._respond(403, {
+                        "error": str(exc) or "capability denied",
+                        "kind": "CapabilityDenied",
+                    })
+                    return
+                emit_sse(
+                    self,
+                    lambda: _open_timeline(server.context),
+                    parse_qs(parsed.query),
+                )
                 return
             body: dict[str, Any] = {}
             if method != "GET":
