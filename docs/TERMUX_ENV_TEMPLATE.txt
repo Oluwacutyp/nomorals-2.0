@@ -35,7 +35,19 @@ NM_CHAT_TELEGRAM_API_ID=FILL ME        # digits from my.telegram.org
 NM_CHAT_TELEGRAM_API_HASH=FILL ME      # hex from my.telegram.org
 NM_CHAT_TELEGRAM_SESSION=/data/data/com.termux/files/home/.devon-tg.session
 # Numeric chat ids Devon may operate in (your DM with yourself, groups). Comma-separated:
-NM_CHAT_TELEGRAM_CHATS=FILL ME
+# Leave empty to listen in ALL chats/DMs:
+NM_CHAT_TELEGRAM_CHATS=
+
+# ---------- TELEGRAM BOT (via @BotFather) ----------
+# Separate from the userbot above — this is the bot token for Devon's Telegram bot:
+NM_CHAT_TELEGRAM_BOT_ENABLED=1
+NM_CHAT_TELEGRAM_BOT_TOKEN=FILL ME     # from @BotFather
+# Chat IDs the bot may operate in (leave empty for all):
+NM_CHAT_TELEGRAM_BOT_CHATS=
+
+# ---------- DISCORD ----------
+NM_CHAT_DISCORD_ENABLED=0
+NM_CHAT_DISCORD_TOKEN=FILL ME          # from discord.com/developers/applications
 
 # ---------- OWNER: who Devon answers to ----------
 # Your numeric Telegram id — Devon treats this chat as the owner:
