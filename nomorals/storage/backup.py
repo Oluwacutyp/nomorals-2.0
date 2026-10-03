@@ -101,16 +101,16 @@ class BackupManager:
             base = f"{base}-{safe}"
 
         raw_path = self.directory / f"{base}.db"
+        # Checkpoint first so the snapshot is self-contained (no -wal sidecar
+        # needed): everything committed is in the main database file.
+        with contextlib.suppress(StorageError):  # not in WAL mode; nothing to checkpoint
+            self.db.checkpoint("TRUNCATE")
         source = self.db._connection()  # noqa: SLF001 - intentional: same-process snapshot
         destination = sqlite3.connect(str(raw_path))
         try:
             source.backup(destination, pages=0)
         finally:
             destination.close()
-
-        # Checkpoint first so the snapshot is self-contained (no -wal sidecar needed).
-        with contextlib.suppress(StorageError):  # not in WAL mode; nothing to checkpoint
-            self.db.checkpoint("TRUNCATE")
 
         pages = int(
             sqlite3.connect(str(raw_path)).execute("PRAGMA page_count").fetchone()[0]
@@ -450,13 +450,13 @@ class BackupManager:
             )
 
         init = run("clone", "--depth", "1", "--branch", self.git_branch, self.git_repo, "repo")
-        if init.returncode != 0:
-            workdir.mkdir(parents=True, exist_ok=True)
-            run("init", cwd=workdir / "repo")
-            (workdir / "repo").mkdir(parents=True, exist_ok=True)
-            run("remote", "add", "origin", self.git_repo, cwd=workdir / "repo")
-            run("checkout", "-B", self.git_branch, cwd=workdir / "repo")
         repo_dir = workdir / "repo"
+        if init.returncode != 0:
+            # Fresh remote (no branch yet): start a local repo and wire it up.
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            run("init", cwd=repo_dir)
+            run("remote", "add", "origin", self.git_repo, cwd=repo_dir)
+            run("checkout", "-B", self.git_branch, cwd=repo_dir)
         shutil.copy2(target.path, repo_dir / target.name)
         (repo_dir / MANIFEST).write_text(
             json.dumps(self._load_manifest(), indent=2), encoding="utf-8"

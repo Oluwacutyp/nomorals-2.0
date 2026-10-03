@@ -193,6 +193,9 @@ class Database:
         except sqlite3.IntegrityError as exc:
             self.stats["errors"] += 1
             raise ConstraintViolation(str(exc)) from exc
+        except sqlite3.OperationalError as exc:
+            self.stats["errors"] += 1
+            raise StorageError(str(exc), retryable=_is_retryable_sqlite(exc)) from exc
         except sqlite3.Error as exc:
             self.stats["errors"] += 1
             raise StorageError(str(exc)) from exc

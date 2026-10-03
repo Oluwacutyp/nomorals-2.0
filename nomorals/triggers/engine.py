@@ -29,6 +29,7 @@ import time
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from ..core.events import Event, global_bus
 from ..storage.db import Database
 from . import actions as _actions
 from .models import (
@@ -56,6 +57,16 @@ from .sources import (
 from .store import TriggerStore
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break the trigger engine (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 #: context.extras key under which a live engine is published for the
 #: partner runtime's message hook.
@@ -89,6 +100,7 @@ class TriggerEngine:
         context: Any = None,
         *,
         scheduler: Any = None,
+        resources: Any = None,
         send_message: Callable[[str, str], Any] | None = None,
         notify_fn: Callable[..., Any] | None = None,
         run_command: Callable[[list[str], float], dict[str, Any]] | None = None,
@@ -100,6 +112,9 @@ class TriggerEngine:
         self.context = context
         self.store = TriggerStore(db)
         self._scheduler = scheduler
+        #: Optional resource advisor (duck-typed: consult(mission) -> dict).
+        #: Injected by L7 entry points; keeps L5 -> L6 imports out of this module.
+        self._resources = resources
         self.send_message = send_message
         self.notify_fn = notify_fn
         self.run_command = run_command
@@ -118,7 +133,8 @@ class TriggerEngine:
         if self._scheduler is None:
             from ..scheduler.scheduler import Scheduler
 
-            self._scheduler = Scheduler(self.db)
+            self._scheduler = Scheduler(
+                self.db, resources=self._resources)
         return self._scheduler
 
     @staticmethod
@@ -238,6 +254,13 @@ class TriggerEngine:
                 self.store.delete(trigger.id)
                 raise
         _log.info("added trigger %s (%s -> %s)", trigger.id, source, action)
+        _emit("trigger.added", {
+            "trigger_id": trigger.id,
+            "name": trigger.name,
+            "source": trigger.source,
+            "action": trigger.action,
+            "enabled": trigger.enabled,
+        })
         return trigger
 
     def remove(self, trigger_id: str) -> bool:
@@ -250,7 +273,13 @@ class TriggerEngine:
             except Exception:  # noqa: BLE001 - keep removing anyway
                 _log.exception("unwire failed for %s", trigger_id)
         self._source_state.pop(trigger_id, None)
-        return self.store.delete(trigger_id)
+        removed = self.store.delete(trigger_id)
+        if removed:
+            _emit("trigger.removed", {
+                "trigger_id": trigger_id,
+                "name": trigger.name,
+            })
+        return removed
 
     def set_enabled(self, trigger_id: str, enabled: bool) -> Trigger:
         trigger = self.store.get(trigger_id)
@@ -263,6 +292,10 @@ class TriggerEngine:
                 self._wire_schedule(trigger)
             else:
                 self._unwire_schedule(trigger_id)
+        _emit("trigger.enabled" if enabled else "trigger.disabled", {
+            "trigger_id": trigger_id,
+            "name": trigger.name,
+        })
         return trigger
 
     def get(self, trigger_id: str) -> Trigger | None:
@@ -423,6 +456,12 @@ class TriggerEngine:
                           fired=True)
         _log.info("trigger %s (%s) fired action %s",
                   trigger.id, trigger.name, trigger.action)
+        _emit("trigger.fired", {
+            "trigger_id": trigger.id,
+            "name": trigger.name,
+            "action": trigger.action,
+            "evidence": dict(evidence),
+        })
         return {"fired": True, "outcome": OUTCOME_FIRED, "result": result}
 
 

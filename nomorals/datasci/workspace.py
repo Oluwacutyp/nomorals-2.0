@@ -18,9 +18,20 @@ from pathlib import Path
 from typing import Any
 
 from .errors import DatasetExists, DatasetNotFound, LoadError, QueryError
+from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break the data workspace (fail-open telemetry, fail-closed
+    function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 __all__ = [
     "Dataset",
@@ -179,6 +190,12 @@ class DataWorkspace:
                      sha256=_sha256_file(p))
         self._sets[name] = ds
         self._persist(ds)
+        _emit("datasci.dataset.loaded", {
+            "name": name,
+            "source": str(p),
+            "rows": ds.rows,
+            "columns": ds.columns,
+        })
         return ds
 
     def load_frame(self, name: str, frame: Any, *,
@@ -218,6 +235,7 @@ class DataWorkspace:
                 p = self._root / f"{name}{suffix}"
                 if p.is_file():
                     p.unlink()
+        _emit("datasci.dataset.dropped", {"name": name})
 
     def describe(self, name: str) -> dict[str, Any]:
         """Summary statistics + dtypes, JSON-serializable."""

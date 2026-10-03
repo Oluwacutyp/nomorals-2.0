@@ -7,6 +7,10 @@ Production-grade scheduler with:
 - Event hooks (fire on data arrival)
 - Reminder lifecycle (open/closed/snoozed)
 - Goal-owned scheduled tasks
+- Resource-aware execution: heavy tasks are deferred (not dropped) while the
+  machine is under pressure, light tasks always run.  The resource advisor is
+  injected (dependency injection, never an upward import) — see
+  :class:`ResourceAdvisor`.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
@@ -32,9 +36,30 @@ __all__ = [
     "EventHook",
     "ScheduledTask",
     "TaskStatus",
+    "ResourceAdvisor",
+    "HEAVY_WEIGHT_THRESHOLD",
 ]
 
 _log = get_logger(__name__)
+
+
+#: Metadata ``weight`` at or above this value marks a task as heavy.
+#: Heavy tasks are deferred (skipped for the tick, retried later) while the
+#: resource advisory reports pressure.  Default task weight is light.
+HEAVY_WEIGHT_THRESHOLD = 1.0
+
+
+class ResourceAdvisor(Protocol):
+    """The resource-advisory interface the scheduler needs.
+
+    Duck-typed: ``nomorals.os.resources.ResourceManager`` satisfies this
+    protocol, and is injected by the caller (L7 entry points) — the
+    scheduler (L4) must never import ``nomorals.os`` (L6) itself.
+    """
+
+    def consult(self, mission: Any = None) -> dict[str, Any]:
+        """Advisory consult -> ``{ok, throttled, reasons, pressure, sample}``."""
+        ...
 
 
 class TaskStatus(str, Enum):
@@ -218,10 +243,28 @@ class CronParser:
 
 
 class Scheduler:
-    """Production-grade scheduler with cron, reminders, and event hooks."""
-    
-    def __init__(self, db: Database) -> None:
+    """Production-grade scheduler with cron, reminders, and event hooks.
+
+    Resource-aware: pass a ``resources`` advisor (e.g. an injected
+    ``nomorals.os.resources.ResourceManager``) and each tick consults it
+    once.  While the advisory reports pressure (throttled or not ok),
+    heavy tasks are deferred to the next tick — never dropped — while
+    light tasks (reminders, notifications) still run.  A task is heavy
+    when its metadata sets ``heavy: true`` or a numeric ``weight`` at or
+    above :data:`HEAVY_WEIGHT_THRESHOLD`; the default is light.
+    """
+
+    def __init__(
+        self,
+        db: Database,
+        resources: ResourceAdvisor | None = None,
+    ) -> None:
         self.db = db
+        # Injected advisor (L6 wiring happens at the entry point, never here).
+        # None = ungated scheduling, fully backwards compatible.
+        self._resources = resources
+        # task_id -> number of times deferred under resource pressure
+        self._deferrals: dict[str, int] = {}
         self._action_handlers: dict[str, Callable] = {}
         self._running = False
         self._worker_thread: Optional[threading.Thread] = None
@@ -306,6 +349,8 @@ class Scheduler:
         *,
         max_runs: int | None = None,
         goal_id: str | None = None,
+        heavy: bool = False,
+        weight: float = 0.0,
     ) -> CronJob:
         """Schedule a recurring cron job.
         
@@ -316,12 +361,15 @@ class Scheduler:
             parameters: Action parameters
             max_runs: Maximum executions (None = unlimited)
             goal_id: Optional goal that owns this job
+            heavy: Mark as heavy work (deferred while resources are pressured)
+            weight: Numeric weight; >= HEAVY_WEIGHT_THRESHOLD counts as heavy
             
         Returns:
             CronJob object
         """
         task_id = task_id or new_id("cron")
         parameters = parameters or {}
+        metadata = {"heavy": heavy, "weight": weight}
         
         # Validate cron expression
         next_run = CronParser.next_run(cron_expr)
@@ -330,8 +378,9 @@ class Scheduler:
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO scheduled_tasks (task_id, task_type, action, parameters, status, created_at, updated_at, metadata)
-                VALUES (?, 'cron', ?, ?, 'pending', ?, ?, '{}')
-            """, (task_id, action, json.dumps(parameters), time.time(), time.time()))
+                VALUES (?, 'cron', ?, ?, 'pending', ?, ?, ?)
+            """, (task_id, action, json.dumps(parameters), time.time(), time.time(),
+                  json.dumps(metadata)))
             
             self.db.execute("""
                 INSERT INTO cron_jobs (task_id, cron_expr, next_run, last_run, run_count, max_runs, goal_id)
@@ -342,6 +391,7 @@ class Scheduler:
             task_id=task_id,
             action=action,
             parameters=parameters,
+            metadata=metadata,
             cron_expr=cron_expr,
             next_run=next_run,
             max_runs=max_runs,
@@ -399,6 +449,8 @@ class Scheduler:
         *,
         action: str = "send_reminder",
         parameters: dict[str, Any] | None = None,
+        heavy: bool = False,
+        weight: float = 0.0,
     ) -> Reminder:
         """Create a reminder.
         
@@ -408,6 +460,8 @@ class Scheduler:
             user_id: User to remind
             action: Action to execute (default: send_reminder)
             parameters: Additional parameters
+            heavy: Mark as heavy work (deferred while resources are pressured)
+            weight: Numeric weight; >= HEAVY_WEIGHT_THRESHOLD counts as heavy
             
         Returns:
             Reminder object
@@ -416,6 +470,7 @@ class Scheduler:
         parameters = parameters or {}
         parameters.setdefault("text", text)
         parameters.setdefault("user_id", user_id)
+        metadata = {"heavy": heavy, "weight": weight}
         
         if isinstance(due_at, datetime):
             due_at = due_at.timestamp()
@@ -423,8 +478,9 @@ class Scheduler:
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO scheduled_tasks (task_id, task_type, action, parameters, status, created_at, updated_at, metadata)
-                VALUES (?, 'reminder', ?, ?, 'pending', ?, ?, '{}')
-            """, (task_id, action, json.dumps(parameters), time.time(), time.time()))
+                VALUES (?, 'reminder', ?, ?, 'pending', ?, ?, ?)
+            """, (task_id, action, json.dumps(parameters), time.time(), time.time(),
+                  json.dumps(metadata)))
             
             self.db.execute("""
                 INSERT INTO reminders (task_id, text, due_at, user_id, snooze_count, completed_at)
@@ -435,6 +491,7 @@ class Scheduler:
             task_id=task_id,
             action=action,
             parameters=parameters,
+            metadata=metadata,
             text=text,
             due_at=due_at,
             user_id=user_id,
@@ -523,6 +580,8 @@ class Scheduler:
         parameters: dict[str, Any] | None = None,
         *,
         max_triggers: int | None = None,
+        heavy: bool = False,
+        weight: float = 0.0,
     ) -> EventHook:
         """Create an event hook.
         
@@ -532,18 +591,22 @@ class Scheduler:
             action: Action to execute when triggered
             parameters: Action parameters
             max_triggers: Maximum triggers (None = unlimited)
+            heavy: Mark as heavy work (deferred while resources are pressured)
+            weight: Numeric weight; >= HEAVY_WEIGHT_THRESHOLD counts as heavy
             
         Returns:
             EventHook object
         """
         task_id = new_id("hook")
         parameters = parameters or {}
+        metadata = {"heavy": heavy, "weight": weight}
         
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO scheduled_tasks (task_id, task_type, action, parameters, status, created_at, updated_at, metadata)
-                VALUES (?, 'event_hook', ?, ?, 'pending', ?, ?, '{}')
-            """, (task_id, action, json.dumps(parameters), time.time(), time.time()))
+                VALUES (?, 'event_hook', ?, ?, 'pending', ?, ?, ?)
+            """, (task_id, action, json.dumps(parameters), time.time(), time.time(),
+                  json.dumps(metadata)))
             
             self.db.execute("""
                 INSERT INTO event_hooks (task_id, event_type, conditions, trigger_count, max_triggers)
@@ -554,6 +617,7 @@ class Scheduler:
             task_id=task_id,
             action=action,
             parameters=parameters,
+            metadata=metadata,
             event_type=event_type,
             conditions=conditions,
             max_triggers=max_triggers,
@@ -626,6 +690,9 @@ class Scheduler:
         run_at: datetime | float,
         action: str,
         parameters: dict[str, Any] | None = None,
+        *,
+        heavy: bool = False,
+        weight: float = 0.0,
     ) -> ScheduledTask:
         """Schedule a one-time task.
         
@@ -634,6 +701,8 @@ class Scheduler:
             run_at: When to run
             action: Action to execute
             parameters: Action parameters
+            heavy: Mark as heavy work (deferred while resources are pressured)
+            weight: Numeric weight; >= HEAVY_WEIGHT_THRESHOLD counts as heavy
             
         Returns:
             ScheduledTask object
@@ -644,19 +713,20 @@ class Scheduler:
         if isinstance(run_at, datetime):
             run_at = run_at.timestamp()
         
+        metadata = {"run_at": run_at, "heavy": heavy, "weight": weight}
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO scheduled_tasks (task_id, task_type, action, parameters, status, created_at, updated_at, metadata)
                 VALUES (?, 'one_time', ?, ?, 'pending', ?, ?, ?)
             """, (task_id, action, json.dumps(parameters), time.time(), time.time(),
-                  json.dumps({"run_at": run_at})))
+                  json.dumps(metadata)))
         
         task = ScheduledTask(
             task_id=task_id,
             task_type="one_time",
             action=action,
             parameters=parameters,
-            metadata={"run_at": run_at},
+            metadata=metadata,
         )
         
         _log.info(f"Scheduled one-time task: {task_id} at {datetime.fromtimestamp(run_at)}")
@@ -692,40 +762,166 @@ class Scheduler:
             time.sleep(1)  # Check every second
     
     def _tick(self) -> None:
-        """Process due tasks."""
+        """Process due tasks.
+
+        When a resource advisor is injected and reports pressure, heavy
+        tasks are deferred this tick (they stay pending and are retried on
+        the next tick); light tasks still run.
+        """
         now = time.time()
-        
+        defer_heavy, pressure_reasons = self._pressure_gate()
+        deferred = 0
+
         # Process due cron jobs
         cron_rows = self.db.query("""
-            SELECT c.*, t.action, t.parameters FROM cron_jobs c
+            SELECT c.*, t.action, t.parameters, t.metadata, t.task_type FROM cron_jobs c
             JOIN scheduled_tasks t ON c.task_id = t.task_id
             WHERE c.next_run <= ? AND t.status = 'pending'
         """, (now,))
-        
+
         for row in cron_rows:
+            if self._maybe_defer(row, defer_heavy, pressure_reasons):
+                deferred += 1
+                continue
             asyncio.run(self._execute_cron(row))
-        
+
         # Process due reminders
         reminder_rows = self.db.query("""
-            SELECT r.*, t.action, t.parameters FROM reminders r
+            SELECT r.*, t.action, t.parameters, t.metadata, t.task_type FROM reminders r
             JOIN scheduled_tasks t ON r.task_id = t.task_id
             WHERE r.due_at <= ? AND t.status = 'pending'
         """, (now,))
-        
+
         for row in reminder_rows:
+            if self._maybe_defer(row, defer_heavy, pressure_reasons):
+                deferred += 1
+                continue
             asyncio.run(self._execute_reminder(row))
-        
+
         # Process one-time tasks
         task_rows = self.db.query("""
             SELECT * FROM scheduled_tasks
             WHERE task_type = 'one_time' AND status = 'pending'
         """)
-        
+
         for row in task_rows:
-            metadata = json.loads(row["metadata"])
+            metadata = self._row_metadata(row)
             run_at = metadata.get("run_at", 0)
             if run_at <= now:
+                if self._maybe_defer(row, defer_heavy, pressure_reasons):
+                    deferred += 1
+                    continue
                 asyncio.run(self._execute_task(row))
+
+        if deferred:
+            _log.info(
+                "Scheduler tick deferred %d heavy task(s) under resource pressure "
+                "[%s]; they remain pending and will be retried next tick",
+                deferred,
+                "; ".join(pressure_reasons) if pressure_reasons else "no reasons reported",
+            )
+
+    # ── Resource-aware gating ──────────────────────────────────────────────
+
+    def _pressure_gate(self) -> tuple[bool, list[str]]:
+        """Consult the injected resource advisor once per tick.
+
+        Returns ``(defer_heavy, reasons)``.  Heavy tasks are deferred when
+        the advisory reports ``throttled`` or ``ok == False``.  Never
+        raises and never blocks: with no advisor injected there is no
+        gating, and a failing advisor fails closed for heavy work while
+        light tasks still run.
+        """
+        advisor = self._resources
+        if advisor is None:
+            return False, []
+        try:
+            advisory = advisor.consult()
+        except Exception as exc:  # noqa: BLE001 - advisor must never break the tick
+            _log.warning(
+                "Resource consult failed (%s); deferring heavy tasks this tick", exc
+            )
+            return True, [f"consult failed: {exc}"]
+        if not isinstance(advisory, dict):
+            _log.warning(
+                "Resource consult returned %s; deferring heavy tasks this tick",
+                type(advisory).__name__,
+            )
+            return True, ["consult returned non-dict advisory"]
+        throttled = bool(advisory.get("throttled", False))
+        ok = bool(advisory.get("ok", True))
+        reasons = [str(r) for r in (advisory.get("reasons") or [])]
+        if throttled or not ok:
+            return True, reasons
+        return False, reasons
+
+    def _maybe_defer(
+        self,
+        row: dict[str, Any],
+        defer_heavy: bool,
+        pressure_reasons: list[str],
+    ) -> bool:
+        """Defer a heavy task while pressure is high; log the deferral.
+
+        Returns True when the task was deferred (caller must skip it).
+        Deferred tasks are NOT dropped — they stay pending and are picked
+        up on a later tick when pressure eases.
+        """
+        if not defer_heavy:
+            return False
+        metadata = self._row_metadata(row)
+        if not self._is_heavy(metadata):
+            return False
+        task_id = str(row.get("task_id", "?"))
+        task_type = str(row.get("task_type", "task"))
+        action = str(row.get("action", "?"))
+        self._deferrals[task_id] = self._deferrals.get(task_id, 0) + 1
+        _log.warning(
+            "Deferring heavy %s task %s (action=%s, deferral #%d): "
+            "resource pressure high [%s] — task stays pending, retried next tick",
+            task_type,
+            task_id,
+            action,
+            self._deferrals[task_id],
+            "; ".join(pressure_reasons) if pressure_reasons else "no reasons reported",
+        )
+        return True
+
+    @staticmethod
+    def _row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+        """Parse a task row's metadata column into a dict (never raises)."""
+        raw = row.get("metadata")
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _is_heavy(metadata: dict[str, Any]) -> bool:
+        """True when task metadata marks the task as heavy work.
+
+        Explicit ``heavy: true`` wins; otherwise a numeric ``weight`` at
+        or above :data:`HEAVY_WEIGHT_THRESHOLD` counts as heavy.  The
+        default (no keys) is light, so reminders and notifications keep
+        running under pressure.
+        """
+        if metadata.get("heavy"):
+            return True
+        try:
+            weight = float(metadata.get("weight", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return weight >= HEAVY_WEIGHT_THRESHOLD
+
+    @property
+    def deferral_counts(self) -> dict[str, int]:
+        """Per-task deferral counts for this session (heavy skips under pressure)."""
+        return dict(self._deferrals)
     
     async def _execute_cron(self, row: dict[str, Any]) -> None:
         """Execute a cron job."""

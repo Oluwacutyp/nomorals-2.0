@@ -20,9 +20,29 @@ Consumes the H2 event topic contract:
 * ``codews.patch.applied`` — {root, files, patched, failed}
 * ``codews.tests.run``    — {root, runner, ok, passed, failed}
 * ``codews.build.run``    — {root, target, ok}
+* ``wisdom.practice.started`` / ``wisdom.practice.completed`` —
+  {session_id, name, rounds, phases_done}
+* ``connector.connected`` / ``connector.disconnected`` —
+  {connector_id, name, account}
+* ``datasci.dataset.loaded`` / ``datasci.dataset.dropped`` —
+  {name, source, rows, columns}
+* ``plugin.installed`` / ``plugin.enabled`` / ``plugin.disabled`` /
+  ``plugin.removed`` — {name, version}
+* ``mesh.task.dispatched`` / ``mesh.task.completed`` / ``mesh.task.failed`` —
+  {job_id, task_type, origin_node, target_node}
+* ``sync.completed`` — {peer_id, pushed, pulled, conflicts_resolved,
+  duration_s}
+* ``power.task.dispatched`` / ``power.task.completed`` /
+  ``power.task.failed`` — {job_id, task_type, power_class}
+* ``stream.started`` / ``stream.stopped`` — {host, port, url}
+* ``search.performed`` — {query, sources, result_count}
+* ``trigger.added`` / ``trigger.fired`` / ``trigger.removed`` /
+  ``trigger.enabled`` / ``trigger.disabled`` — {trigger_id, name, action}
 * plus any other ``mission.*`` / ``artifact.*`` / ``session.*`` /
-  ``task.*`` / ``document.*`` / ``browser.*`` / ``codews.*`` topics the
-  siblings emit.
+  ``task.*`` / ``document.*`` / ``browser.*`` / ``codews.*`` /
+  ``wisdom.*`` / ``connector.*`` / ``datasci.*`` / ``plugin.*`` /
+  ``mesh.*`` / ``sync.*`` / ``power.*`` / ``stream.*`` / ``search.*`` /
+  ``trigger.*`` topics the siblings emit.
 
 The table is created with ``CREATE TABLE IF NOT EXISTS`` so this module
 never needs a storage migration (and can never collide with one a sibling
@@ -50,6 +70,8 @@ _log = logging.getLogger(__name__)
 TIMELINE_PATTERNS: tuple[str, ...] = (
     "mission.*", "artifact.*", "session.*", "task.*",
     "document.*", "browser.*", "codews.*",
+    "wisdom.*", "connector.*", "datasci.*", "plugin.*", "mesh.*",
+    "sync.*", "power.*", "stream.*", "search.*", "trigger.*",
 )
 
 _SCHEMA = """
