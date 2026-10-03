@@ -49,6 +49,7 @@ __all__ = [
     "extract_image_captcha_urls",
     "backend_for",
     "solve",
+    "creator_solver_adapter",
     "register",
 ]
 
@@ -532,6 +533,45 @@ def solve(challenge: CaptchaChallenge, backend: str = "auto",
         "error": "" if ok else detail[:200],
     }, settings)
     return result
+
+
+# ── AccountCreator adapter (dependency injection bridge) ───────────────────
+
+def creator_solver_adapter(
+    solver_enabled: bool | None = None,
+    settings: Any = None,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Build a solver callable for ``nomorals.accounts.AccountCreator``.
+
+    ``accounts`` is L2 and this module is L4, so the creator cannot
+    import the solver — it takes an injected callable instead. This
+    adapter is that callable: it wraps :func:`solve` with
+    ``backend="auto"`` (service first, owner-takeover fallback) and
+    honors the same enablement rule as the CLI — explicit
+    ``solver_enabled`` wins, otherwise ``NM_CAPTCHA_SOLVER`` (default
+    ON). Every attempt is audit-logged by :func:`solve`.
+
+    The challenge dict carries ``kind`` plus ``sitekey``/``page_url``/
+    ``image_url``/``image_bytes``/``action``/``min_score`` as known; the
+    returned dict is ``SolveResult.to_dict()``.
+    """
+    def _solve(challenge: dict[str, Any]) -> dict[str, Any]:
+        on = solver_enabled
+        if on is None:
+            on = os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0"
+        ch = CaptchaChallenge(
+            kind=challenge.get("kind", CaptchaKind.UNKNOWN),
+            sitekey=challenge.get("sitekey", "") or "",
+            page_url=challenge.get("page_url", "") or "",
+            image_url=challenge.get("image_url", "") or "",
+            image_bytes=challenge.get("image_bytes", b"") or b"",
+            action=challenge.get("action", "") or "",
+            min_score=float(challenge.get("min_score", 0.3) or 0.3),
+        )
+        return solve(ch, backend="auto", settings=settings,
+                     solver_enabled=on).to_dict()
+
+    return _solve
 
 
 def fetch_image_bytes(url: str, timeout: float = 20.0) -> bytes:

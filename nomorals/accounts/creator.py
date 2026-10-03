@@ -10,31 +10,41 @@ re-implemented here rather than imported:
 * **the owner's own identity** — flows never invent fake identities;
   when a real identity (name/email) is needed and none is on file, the
   flow pauses on a checkpoint and the owner supplies it;
-* **pause, don't bypass** — when automation reaches a step only a human
-  can do (CAPTCHA, email-verification click, phone 2FA, accepting
-  terms), the flow persists a checkpoint, pings the owner through the
-  injected ``notify`` hook, and raises :class:`AccountCheckpointPending`.
-  A later call to :meth:`AccountCreator.resume_checkpoint` continues
-  the flow after the owner acts.
+* **solver first, human fallback** — when automation hits a CAPTCHA, the
+  CAPTCHA solver (``nomorals.tools.captcha``) is tried FIRST — it is ON
+  by default (service backend, then owner-takeover backend as fallback).
+  Only when the solver is disabled (``NM_CAPTCHA_SOLVER=0``) or the
+  solve fails does the flow persist a checkpoint, ping the owner
+  through the injected ``notify`` hook, and raise
+  :class:`AccountCheckpointPending`. A later call to
+  :meth:`AccountCreator.resume_checkpoint` continues the flow after the
+  owner acts.
 
-HARD BOUNDARY: Devon never auto-solves CAPTCHAs — no solver services,
-no AI bypass, no verification dodging. The human checkpoint is the only
-path through human verification.
+The solver itself lives in the higher ``tools`` layer, so it is
+**injected** rather than imported here (layering: L2 may not import
+L4) — see :func:`nomorals.tools.captcha.creator_solver_adapter`.
 
 Usage:
-    creator = AccountCreator(vault, notify=send_owner_ping)
+    from nomorals.tools.captcha import creator_solver_adapter
+
+    creator = AccountCreator(
+        vault,
+        notify=send_owner_ping,
+        captcha_solver=creator_solver_adapter(),  # solver ON by default
+    )
     creator.set_owner_identity("Death", "owner@example.com")
 
     try:
         creator.create_account("github", username="my-bot")
     except AccountCheckpointPending as pending:
-        # owner solves the CAPTCHA, then:
+        # solver failed or is off — owner solves the CAPTCHA, then:
         account = creator.resume_checkpoint(pending.checkpoint.id)
 """
 
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import string
 import time
@@ -393,6 +403,17 @@ def generate_username(prefix: str = "nm", length: int = 8) -> str:
 # (higher-layer) notifier itself.
 NotifyHook = Callable[[str, str, str], None]
 
+# Injected CAPTCHA solver: takes a challenge dict
+# {"kind", "sitekey", "page_url", "image_url", "image_bytes", "action",
+#  "min_score"} and returns a result dict shaped like
+# tools.captcha.SolveResult.to_dict():
+# {"ok", "kind", "backend", "token", "text", "takeover", "elapsed_ms",
+#  "detail"}.
+# Injected (rather than imported) because accounts is L2 and the solver
+# lives in tools (L4) — lower layers may not import higher ones. Build
+# one with nomorals.tools.captcha.creator_solver_adapter().
+CaptchaSolverFn = Callable[[dict[str, Any]], dict[str, Any]]
+
 
 class AccountCreator:
     """Creates accounts on services with human-in-the-loop checkpoints.
@@ -400,6 +421,12 @@ class AccountCreator:
     One account per service, the owner's own identity, and human
     verification steps (CAPTCHA, email/phone verification) pause on a
     persisted checkpoint instead of being bypassed or faked.
+
+    CAPTCHA policy: the injected ``captcha_solver`` is tried FIRST
+    whenever a challenge is hit — it is ON by default. The owner is
+    pinged only when the solver is disabled (``solver_enabled=False`` or
+    ``NM_CAPTCHA_SOLVER=0``) or the solve fails. Every solve attempt is
+    audit-logged by the solver itself.
     """
 
     #: Services that hand out throwaway addresses via API — exempt from
@@ -413,12 +440,18 @@ class AccountCreator:
         *,
         db: Database | None = None,
         notify: NotifyHook | None = None,
+        captcha_solver: CaptchaSolverFn | None = None,
+        solver_enabled: bool | None = None,
     ) -> None:
         self.vault = vault
         self.browser = browser_session
         self.db = db or vault.db
         self.checkpoints = CheckpointStore(self.db)
         self.notify = notify
+        # Solver wiring (injected: accounts/L2 may not import tools/L4).
+        # solver_enabled=None → NM_CAPTCHA_SOLVER env, default ON.
+        self.captcha_solver = captcha_solver
+        self._solver_enabled = solver_enabled
         self._owner_identity: dict[str, str] | None = None
         self._creation_history: list[CreatedAccount] = []
         _log.info("Account creator initialized")
@@ -481,6 +514,116 @@ class AccountCreator:
                 "username": username,
                 "password": password,
             },
+        )
+        raise AccountCheckpointPending(cp)
+
+    # ── CAPTCHA solver (tried first, human checkpoint is the fallback) ──
+
+    def _solver_on(self) -> bool:
+        """Is the CAPTCHA solver enabled? Explicit flag wins; otherwise
+        the ``NM_CAPTCHA_SOLVER`` env var (default ON)."""
+        if self._solver_enabled is not None:
+            return self._solver_enabled
+        return os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0"
+
+    def solve_captcha(self, challenge: dict[str, Any]) -> dict[str, Any]:
+        """Run one challenge through the injected solver.
+
+        ``challenge`` carries ``kind`` plus ``sitekey``/``page_url``/
+        ``image_url``/``image_bytes``/``action``/``min_score`` as known.
+        Returns the solver's result dict (``ok``, ``takeover``,
+        ``token``/``text``, ``backend``, ``detail``). Every attempt is
+        audit-logged by the solver itself.
+
+        Raises:
+            NoMoralsError: No solver injected, or the solver is disabled.
+        """
+        if self.captcha_solver is None:
+            raise NoMoralsError(
+                "no CAPTCHA solver injected — construct AccountCreator "
+                "with captcha_solver=creator_solver_adapter()"
+            )
+        if not self._solver_on():
+            raise NoMoralsError(
+                "CAPTCHA solver is disabled "
+                "(solver_enabled=False or NM_CAPTCHA_SOLVER=0)"
+            )
+        return self.captcha_solver(dict(challenge))
+
+    def attempt_captcha_solve(
+        self,
+        *,
+        kind: str,
+        sitekey: str = "",
+        page_url: str = "",
+        image_url: str = "",
+        image_bytes: bytes = b"",
+        action: str = "",
+        min_score: float = 0.3,
+        service: str = "",
+        resume_state: dict[str, Any] | None = None,
+    ) -> str:
+        """Try the solver first; fall back to a human checkpoint.
+
+        This is the integration point for browser-driven ``_create_*``
+        flows: when automation detects a CAPTCHA, call this instead of
+        giving up. On success returns the solve token (or solved text
+        for image captchas) so the flow can continue unattended.
+
+        Only when the solver is unavailable/disabled or the solve fails
+        does this persist a CAPTCHA checkpoint, ping the owner, and
+        raise :class:`AccountCheckpointPending`.
+
+        Raises:
+            AccountCheckpointPending: Owner must solve it by hand.
+        """
+        result: dict[str, Any] | None = None
+        if self.captcha_solver is not None and self._solver_on():
+            try:
+                result = self.solve_captcha({
+                    "kind": kind,
+                    "sitekey": sitekey,
+                    "page_url": page_url,
+                    "image_url": image_url,
+                    "image_bytes": image_bytes,
+                    "action": action,
+                    "min_score": min_score,
+                })
+            except Exception as exc:  # noqa: BLE001 — fall back to human
+                _log.warning("captcha solver raised, falling back to "
+                             "human checkpoint: %s", exc)
+                result = None
+
+        if result and result.get("ok"):
+            token = result.get("token") or result.get("text") or ""
+            _log.info("captcha solved via %s backend",
+                      result.get("backend", "unknown"))
+            return token
+
+        # Solver off, missing, or failed → the owner takes over.
+        reason = "solver disabled" if not self._solver_on() else (
+            "solver unavailable" if self.captcha_solver is None
+            else f"solver failed: {(result or {}).get('detail', 'unknown')}"
+        )
+        state = dict(resume_state or {})
+        state.update({
+            "flow": "captcha_takeover",
+            "service": service,
+            "kind": kind,
+            "sitekey": sitekey,
+            "page_url": page_url,
+        })
+        cp = self._pause_for_human(
+            CheckpointKind.CAPTCHA,
+            title=f"CAPTCHA needs a human hand ({service or 'signup'})",
+            instructions=(
+                f"The automated solver could not clear this one ({reason}).\n"
+                f"1. Open {page_url or 'the signup page'} in your browser\n"
+                "2. Complete the CAPTCHA challenge yourself\n"
+                "3. Resume — the flow continues from here"
+            ),
+            service=service,
+            resume_state=state,
         )
         raise AccountCheckpointPending(cp)
 
@@ -708,9 +851,10 @@ class AccountCreator:
         """Start an account creation flow for a service.
 
         One account per service: raises :class:`AccountExistsError` while
-        an active credential exists. Every service needs a human-only
-        verification step, so this always pauses on a checkpoint and
-        raises :class:`AccountCheckpointPending` — resume with
+        an active credential exists. When automation hits a CAPTCHA, the
+        injected solver is tried FIRST (ON by default) — only if it is
+        disabled or fails does the flow pause on a checkpoint and raise
+        :class:`AccountCheckpointPending`. Resume with
         :meth:`resume_checkpoint` after the owner completes the step,
         which stores the credentials in the vault and returns the
         :class:`CreatedAccount`.
@@ -779,7 +923,8 @@ class AccountCreator:
                 "kind": CheckpointKind.CAPTCHA,
                 "title": "Create GitHub account {username}",
                 "instructions": (
-                    "GitHub blocks automated signup, so create it yourself:\n"
+                    "GitHub signup hit a CAPTCHA the automated solver "
+                    "could not clear, so create it yourself:\n"
                     "1. Go to https://github.com/signup\n"
                     "2. Use email: {email}\n"
                     "3. Create a password you choose (a strong one was "

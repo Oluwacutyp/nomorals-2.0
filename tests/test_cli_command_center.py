@@ -91,7 +91,8 @@ class AliasMapTests(unittest.TestCase):
                       "media": ["probe", "x"], "room": ["new", "x"],
                       "studio": ["presets"], "swarm": ["run", "x"],
                       "trade": ["analyze", "x"], "vision": ["describe", "x"],
-                      "voice": ["stats"], "weather": ["now"]}
+                      "voice": ["stats"], "weather": ["now"],
+                      "account": ["pending"]}
         for canonical, aliases in CLI_ALIASES.items():
             for alias in aliases:
                 argv = [alias] + dummy_args.get(canonical, [])

@@ -1,16 +1,21 @@
 """Human-in-the-loop checkpoints for account and signup flows.
 
-When Devon's automation reaches a step only a human can do — a CAPTCHA, an
-email-verification click, a 2FA code, accepting terms — it does NOT try to
-bypass it. It persists a checkpoint, pings the owner through the owner-only
-delivery channel, pauses, and resumes after the owner personally completes
-the step. A human solving the check IS the check being satisfied; nothing
-is bypassed.
+When Devon's automation reaches a step only a human can do — a CAPTCHA
+the solver could not clear, an email-verification click, a 2FA code,
+accepting terms — it does NOT try to bypass it. It persists a
+checkpoint, pings the owner through the owner-only delivery channel,
+pauses, and resumes after the owner personally completes the step. A
+human solving the check IS the check being satisfied; nothing is
+bypassed.
 
-HARD BOUNDARY: Devon never auto-solves CAPTCHAs — no solver services, no
-AI-based bypass, no verification dodging. The human checkpoint is the only
-path through human verification. (Structurally enforced: the connectors
-package contains no CAPTCHA-solving code, and the test suite asserts it.)
+CAPTCHA policy: the CAPTCHA solver (``nomorals.tools.captcha``, wired
+through ``nomorals.accounts.creator``) is tried FIRST and is ON by
+default. These checkpoints are the fallback path — reached only when
+the solver is disabled by configuration or a solve fails.
+
+Structural rule (enforced by the test suite): the connectors package
+itself contains no CAPTCHA-solving code — solving lives in the tools
+layer and is injected into account flows, never implemented here.
 
 Design rules for account flows:
 * one account per service — a second account flow refuses while a

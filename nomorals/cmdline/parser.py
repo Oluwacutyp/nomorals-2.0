@@ -20,6 +20,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "power": ["pw"],
     "run": ["r"],
     "ask": ["a"],
+    "account": ["acct"],
     "backup": ["bak"],
     "missions": ["ms"],
     "mission": ["mi"],
@@ -947,6 +948,39 @@ def _parser() -> argparse.ArgumentParser:
     s_gen = studio_sub.add_parser("gen-status",
                                   help="generative backend status")
     _s_json(s_gen)
+
+    account = sub.add_parser("account", aliases=CLI_ALIASES["account"],
+        help="account creation flows (solver-first CAPTCHA handling)",
+        description=("nm account create --service github [--username U] [--email E]\n"
+                     "                    [--solver|--no-solver]\n"
+                     "nm account resume --id ID [--note NOTE]\n"
+                     "nm account pending [--service S]"),
+    )
+    account_sub = account.add_subparsers(dest="account_action", required=True)
+    a_create = account_sub.add_parser("create", help="start an account flow")
+    a_create.add_argument("--service", required=True,
+                          help="service name (github, gmail, twitter, ...)")
+    a_create.add_argument("--username", default=None,
+                          help="desired username (generated if omitted)")
+    a_create.add_argument("--email", default=None,
+                          help="email to use (owner's email by default)")
+    a_create.add_argument("--solver", dest="solver_enabled",
+                          action="store_true", default=None,
+                          help="try the CAPTCHA solver first (default: on)")
+    a_create.add_argument("--no-solver", dest="solver_enabled",
+                          action="store_false",
+                          help="skip the solver, go straight to owner takeover")
+    a_create.add_argument("--json", action="store_true",
+                          help="output as JSON")
+    a_resume = account_sub.add_parser("resume",
+                                      help="resume a paused checkpoint")
+    a_resume.add_argument("--id", required=True, help="checkpoint id")
+    a_resume.add_argument("--note", default="",
+                          help="note recorded on resolve")
+    a_pending = account_sub.add_parser("pending",
+                                       help="list pending checkpoints")
+    a_pending.add_argument("--service", default=None,
+                           help="filter by service")
 
     captcha = sub.add_parser("captcha", aliases=CLI_ALIASES["captcha"],
         help="captcha detection and solving for browser automation",
