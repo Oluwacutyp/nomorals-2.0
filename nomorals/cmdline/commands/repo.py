@@ -16,16 +16,18 @@ def _ws(args: Any):
 
 
 def _cmd_repo(args: Any, context: Any) -> int:
-    """Route ``nm repo <status|branches|branch|switch|diff|log|worktree|patch|test|build>``."""
+    """Route ``nm repo <status|branches|branch|switch|diff|log|worktree|patch|test|build|commit|push|pull|fetch|stash>``."""
     from ...codews import WorkspaceError
 
     words = list(getattr(args, "task", None) or [])
     if not words:
         print("usage: nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
               "       nm repo branch <name> | nm repo switch <name>\n"
-              "       nm repo worktree <add|list|remove> [path] [branch]\n"
-              "       nm repo patch review|apply|preview <file> [--root DIR]\n"
-              "       nm repo test [selector] | nm repo build [target] [--root DIR]",
+              "       nm repo worktree <add|list|remove> [path] [branch] [--force]\n"
+              "       nm repo patch review|apply|preview|record <file> [path] [--root DIR]\n"
+              "       nm repo test [selector] | nm repo build [target] [--root DIR]\n"
+              "       nm repo commit -m \"msg\" [paths...] | nm repo push|pull|fetch [remote] [branch]\n"
+              "       nm repo stash <push|pop|list> [-m \"msg\"]",
               file=sys.stderr)
         return 2
     verb = words[0]
@@ -50,6 +52,16 @@ def _cmd_repo(args: Any, context: Any) -> int:
             return _repo_test(args, words[1:])
         if verb == "build":
             return _repo_build(args, words[1:])
+        if verb == "commit":
+            return _repo_commit(args, words[1:])
+        if verb == "push":
+            return _repo_push_pull(args, "push", words[1:])
+        if verb == "pull":
+            return _repo_push_pull(args, "pull", words[1:])
+        if verb == "fetch":
+            return _repo_fetch(args, words[1:])
+        if verb == "stash":
+            return _repo_stash(args, words[1:])
         print(f"unknown repo verb: {verb}", file=sys.stderr)
         return 2
     except WorkspaceError as exc:
@@ -136,9 +148,9 @@ def _repo_worktree(args: Any, rest: list[str]) -> int:
         return 0
     if rest[0] == "remove":
         if len(rest) < 2:
-            print("usage: nm repo worktree remove <path>", file=sys.stderr)
+            print("usage: nm repo worktree remove <path> [--force]", file=sys.stderr)
             return 2
-        ws.worktree_remove(rest[1])
+        ws.worktree_remove(rest[1], force=getattr(args, "force", False))
         print(f"removed worktree {rest[1]}")
         return 0
     print(f"unknown worktree verb: {rest[0]}", file=sys.stderr)
@@ -149,7 +161,7 @@ def _repo_patch(args: Any, context: Any, rest: list[str]) -> int:
     from ...codews import apply_patch, preview_patch, record_patch, review_patch
 
     if len(rest) < 2:
-        print("usage: nm repo patch review|apply|preview <diff-file> [--root DIR]",
+        print("usage: nm repo patch review|apply|preview|record <diff-file> [path] [--root DIR]",
               file=sys.stderr)
         return 2
     verb, path = rest[0], rest[1]
@@ -243,3 +255,70 @@ def _repo_build(args: Any, rest: list[str]) -> int:
     if not result["ok"]:
         print(result["output"][-4000:])
     return 0 if result["ok"] else 1
+
+
+def _repo_commit(args: Any, rest: list[str]) -> int:
+    message = getattr(args, "message", "") or ""
+    paths = list(rest)
+    if not message:
+        # allow `nm repo commit "message" [paths...]` as well
+        if not rest:
+            print('usage: nm repo commit -m "message" [paths...]', file=sys.stderr)
+            return 2
+        message, paths = rest[0], rest[1:]
+    res = _ws(args).commit(message, paths or None)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"committed {res['sha'][:8]}: {res['message'][:70]}")
+    return 0
+
+
+def _repo_push_pull(args: Any, which: str, rest: list[str]) -> int:
+    ws = _ws(args)
+    remote = rest[0] if len(rest) > 0 else "origin"
+    branch = rest[1] if len(rest) > 1 else ""
+    res = ws.push(remote, branch) if which == "push" else ws.pull(remote, branch)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"{which}ed {res['remote']}" + (f" {res['branch']}" if res["branch"] else ""))
+    return 0
+
+
+def _repo_fetch(args: Any, rest: list[str]) -> int:
+    remote = rest[0] if rest else "origin"
+    res = _ws(args).fetch(remote)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"fetched {res['remote']}")
+    return 0
+
+
+def _repo_stash(args: Any, rest: list[str]) -> int:
+    ws = _ws(args)
+    if not rest or rest[0] == "list":
+        items = ws.stash_list()
+        if getattr(args, "json", False):
+            print(json.dumps(items, indent=2))
+            return 0
+        for item in items:
+            print(f"stash@{{{item['index']}}}: {item['message']}")
+        if not items:
+            print("no stashes")
+        return 0
+    if rest[0] == "push":
+        message = getattr(args, "message", "") or ""
+        res = ws.stash_push(message)
+        if getattr(args, "json", False):
+            print(json.dumps(res, indent=2))
+        else:
+            print("stashed" + (f": {message}" if message else ""))
+        return 0
+    if rest[0] == "pop":
+        ws.stash_pop()
+        print("popped stash")
+        return 0
+    print("unknown stash verb: " + rest[0], file=sys.stderr)
+    return 2
