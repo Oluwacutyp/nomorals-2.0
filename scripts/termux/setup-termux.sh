@@ -28,8 +28,8 @@ fi
 
 # 4. Install Devon (minimal — phone-friendly, no build-from-source)
 echo "[4/5] Installing Devon..."
-# Use --no-build-isolation and --no-deps to avoid pip trying to build numpy
-# (numpy comes from pkg as python-numpy, prebuilt)
+# setuptools needed for editable install; numpy comes from pkg (prebuilt)
+pip install setuptools
 pip install -e . --no-build-isolation --no-deps
 
 # 5. Create secrets template
