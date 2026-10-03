@@ -27,7 +27,8 @@ from typing import Any
 from ..ai import GameMind
 from ..players import AI_PLAYER, Player
 
-__all__ = ["Room", "MultiGame", "parse_command", "GAME_COMMANDS"]
+__all__ = ["Room", "MultiGame", "parse_command", "GAME_COMMANDS",
+           "DIFFICULTY_LEVELS", "DEFAULT_DIFFICULTY"]
 
 #: in-game commands understood by the engine (not the game).
 GAME_COMMANDS = {
@@ -39,6 +40,19 @@ GAME_COMMANDS = {
     "shop": "open the shop (catalog | buy <slug>)",
     "balance": "your coins and items",
 }
+
+#: AI/puzzle difficulty ladder. Games opt in by declaring a named
+#: ``difficulty`` parameter on ``new_state`` — the engine only hands it
+#: to games that ask for it, so everyone else plays as always.
+#: Players pick it at the table: ``/game connect4 hard``.
+DIFFICULTY_LEVELS = ("easy", "normal", "hard", "expert")
+DEFAULT_DIFFICULTY = "normal"
+
+
+def normalize_difficulty(value: str | None) -> str:
+    """Coerce a difficulty word to the ladder; unknown → normal."""
+    v = (value or "").strip().lower()
+    return v if v in DIFFICULTY_LEVELS else DEFAULT_DIFFICULTY
 
 
 @dataclass
@@ -184,9 +198,17 @@ class MultiGame:
     #: (one message per turn, days between moves) set this to days.
     idle_ttl: float | None = None
     rules: str = ""             # shown by /help and in the intro
+    #: difficulty ladder this game actually honors (subset of
+    #: DIFFICULTY_LEVELS). Empty = the game doesn't take a difficulty.
+    difficulties: tuple[str, ...] = ()
 
     def rng(self, room: Room) -> random.Random:
         return room.rng()
+
+    def difficulty(self, room: Room) -> str:
+        """This room's difficulty, or ``DEFAULT_DIFFICULTY`` when the
+        game doesn't take one."""
+        return normalize_difficulty(room.state.get("difficulty"))
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def new_state(self, rng: random.Random, **kw: Any) -> dict[str, Any]:

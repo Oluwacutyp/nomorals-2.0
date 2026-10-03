@@ -139,9 +139,10 @@ class GameEngine:
         from .games.arcade import ARCADE_GAMES
         from .games.casino import CASINO_GAMES
         from .games.inbox import INBOX_GAMES
+        from .games.puzzles import PUZZLE_GAMES
         for game in (*EASY_GAMES, *MEDIUM_GAMES, *AMBITIOUS_GAMES,
                      *WILD_GAMES, *ARCADE_GAMES, *CASINO_GAMES,
-                     *INBOX_GAMES):
+                     *INBOX_GAMES, *PUZZLE_GAMES):
             self.games[game.name] = game
 
     def register(self, game: MultiGame) -> None:
@@ -317,12 +318,14 @@ class GameEngine:
     def start(self, chat_key: str, game_name: str,
               host: Player, *, kind: str = "dm",
               platform: str = "", daily: bool = False,
-              timed: bool = False) -> tuple[Room, list[str]]:
+              timed: bool = False,
+              difficulty: str = "normal") -> tuple[Room, list[str]]:
         """Open a room and seat the host (plus AI seats).
 
         Returns (room, messages_to_send). Raises ValueError when the
         game is unknown or the chat kind doesn't fit (group-only game in
-        a DM, …).
+        a DM, …). ``difficulty`` is only handed to games that declare a
+        named ``difficulty`` parameter on ``new_state``.
         """
         name = (game_name or "").strip().lower()
         game = self.games.get(name)
@@ -346,9 +349,10 @@ class GameEngine:
             )
             room.players = [host]
             self._fill_ai(room, game)
-            # daily/timed/history are opt-in: only handed to games
-            # whose new_state accepts kwargs (hangman: daily; case:
-            # history + timed). The rest play as always.
+            # daily/timed/difficulty/history are opt-in: only handed to
+            # games whose new_state accepts kwargs (hangman: daily; case:
+            # history + timed; connect4/reversi/…: difficulty). The rest
+            # play as always.
             history = None
             load = getattr(game, "load_history", None)
             if load is not None and _new_state_accepts_kwargs(game):
@@ -359,7 +363,8 @@ class GameEngine:
             room.state = game.new_state(
                 game.rng(room),
                 **_new_state_kwargs(
-                    game, daily=daily, timed=timed, history=history))
+                    game, daily=daily, timed=timed,
+                    difficulty=difficulty, history=history))
             self._mirror_inventory(room)
             self._rooms[chat_key] = room
             self._by_id[room.id] = room
@@ -543,6 +548,19 @@ class GameEngine:
         if cmd == "shop":
             if rest.startswith("buy "):
                 ok, msg = self.economy.purchase(sender, rest[4:].strip())
+                if ok:
+                    # refresh this player's mirrored inventory: games that
+                    # spend items mid-match (sudoku/cryptogram hints) read the
+                    # snapshot, so a purchase must land there immediately.
+                    # consumption is still reconciled from
+                    # state["consumed"] when the room closes.
+                    try:
+                        inv = room.state.setdefault("inventory", {})
+                        inv[sender.key] = dict(
+                            self.store.get(sender.key).items)
+                    except Exception:  # noqa: BLE001
+                        _log.debug("inventory mirror refresh failed",
+                                   exc_info=True)
                 return [msg]
             return [self.economy.catalog_text(game.name, sender)]
         if cmd == "balance":
@@ -985,6 +1003,127 @@ class GameEngine:
                         and int(room.state.get("time_bonus", 0)) > 0):
                     grant("case_timed")
 
+        # Sudoku achievements
+        elif game_name == "sudoku":
+            if won:
+                grant("sudoku_win")
+                if room.state.get("difficulty") in ("hard", "expert"):
+                    grant("sudoku_hard")
+                if (room.state.get("mistakes", 0) == 0
+                        and room.state.get("hints_used", 0) == 0):
+                    grant("sudoku_clean")
+
+        # Anagram achievements
+        elif game_name == "anagram":
+            if won:
+                grant("anagram_win")
+                rounds = int(room.state.get("rounds", 6))
+                rw = int((room.state.get("round_wins") or {})
+                         .get(player.key, 0))
+                if rw >= rounds:
+                    grant("anagram_ace")
+
+        # Cryptogram achievements
+        elif game_name == "cryptogram":
+            if won:
+                grant("cryptogram_win")
+            rounds = room.state.get("rounds", [])
+            wrong_total = sum(int((r.get("wrong") or {}).get(player.key, 0))
+                              for r in rounds)
+            solved_any = any(r.get("solved_by") == player.key
+                             for r in rounds)
+            if solved_any and wrong_total == 0:
+                grant("cryptogram_perfect")
+
+        # Wordle achievements
+        elif game_name == "wordle":
+            if won:
+                grant("wordle_win")
+                if len(room.state.get("guesses", [])) <= 3:
+                    grant("wordle_ace")
+
+        # Minesweeper
+        elif game_name == "mines" and won:
+            grant("mines_win")
+
+        # Concentration
+        elif game_name == "memory":
+            if won:
+                grant("memory_win")
+                if int(room.state.get("moves", 999)) <= 24:
+                    grant("memory_sharp")
+
+        # Craps
+        elif game_name == "craps":
+            if won:
+                grant("craps_win")
+                bank = int((room.state.get("bank") or {})
+                           .get(player.key, 0))
+                if bank >= 200:
+                    grant("craps_high_roller")
+
+        # Inbox classics
+        elif game_name == "reversi" and won:
+            grant("reversi_win")
+
+        elif game_name == "checkers" and won:
+            grant("checkers_win")
+
+        elif game_name == "gomoku" and won:
+            grant("gomoku_win")
+
+        # Quiz duel
+        elif game_name == "duel":
+            if won:
+                grant("duel_win")
+                opp = [int(v) for k, v in
+                       (room.state.get("points") or {}).items()
+                       if k != player.key]
+                if opp and max(opp) == 0:
+                    grant("duel_flawless")
+
+        # Trivia royale
+        elif game_name == "trivia" and won:
+            grant("trivia_win")
+
+        # Tic-tac-toe: a draw vs the perfect house is the achievement
+        elif game_name == "ttt":
+            if won is None and room.state.get("winner") == "draw":
+                grant("ttt_draw")
+
+        # Mafia: surviving the five nights
+        elif game_name == "mafia":
+            if player.key in (room.state.get("alive") or []):
+                grant("mafia_win")
+
+        # Escape room: the table got out together
+        elif game_name == "escape":
+            puzzles = room.state.get("puzzles") or []
+            if puzzles and int(room.state.get("lock", 0)) >= len(puzzles):
+                grant("escape_win")
+
+        # Political / spy / auction / 20q / bulls / numberguess / king
+        elif game_name == "political" and won:
+            grant("political_win")
+
+        elif game_name == "spy" and won:
+            grant("spy_win")
+
+        elif game_name == "auction" and won:
+            grant("auction_win")
+
+        elif game_name == "20q" and won:
+            grant("twentyq_win")
+
+        elif game_name == "bulls" and won:
+            grant("bulls_win")
+
+        elif game_name == "numberguess" and won:
+            grant("numberguess_win")
+
+        elif game_name == "king" and won:
+            grant("king_win")
+
         return newly
 
     # ── inspection ─────────────────────────────────────────────────────────
@@ -1018,6 +1157,7 @@ class GameEngine:
         from .games.arcade import ARCADE_GAMES
         from .games.casino import CASINO_GAMES
         from .games.inbox import INBOX_GAMES
+        from .games.puzzles import PUZZLE_GAMES
         lines = ["games — start one with /game <name>:"]
         for label, group in (("easy", EASY_GAMES),
                              ("medium", MEDIUM_GAMES),
@@ -1025,12 +1165,16 @@ class GameEngine:
                              ("wild", WILD_GAMES),
                              ("arcade", ARCADE_GAMES),
                              ("casino", CASINO_GAMES),
+                             ("puzzles", PUZZLE_GAMES),
                              ("inbox — async, one message per turn, "
                               "no clock", INBOX_GAMES)):
             lines.append(f"  — {label} —")
             for g in group:
                 extra = " (group)" if g.needs_group else ""
-                lines.append(f"  /game {g.name:<18} {g.description}{extra}")
+                diff = (" [easy|normal|hard|expert]"
+                        if g.difficulties else "")
+                lines.append(f"  /game {g.name:<18} {g.description}"
+                             f"{diff}{extra}")
         lines.append("  /game leaderboard [game]   the rankings")
         lines.append("  /game stats [name]         a player's record")
         lines.append("  /game shop                 spend your coins")

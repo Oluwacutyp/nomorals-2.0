@@ -172,6 +172,12 @@ GAME_ALIASES: dict[str, str] = {
     "othello": "reversi",
     "checkers": "checkers",
     "draughts": "checkers",
+    # puzzles (gamesbooks-1.0): sudoku, anagram, cryptogram
+    "sudoku": "sudoku",
+    "anagram": "anagram",
+    "unscramble": "anagram",
+    "cryptogram": "cryptogram",
+    "cryptoquote": "cryptogram",
 }
 
 #: names the /<name> chat commands can start (``arena`` is already taken
@@ -186,6 +192,8 @@ COMMAND_STARTABLE = [
     "2048", "snake", "connect4", "battleship",
     "blackjack", "roulette", "slots",
     "gomoku", "reversi", "checkers",
+    # puzzles (gamesbooks-1.0)
+    "sudoku", "anagram", "cryptogram",
 ]
 
 
