@@ -637,10 +637,22 @@ class HealthCheckTests(_ProxyNetCase):
         # proxy maps any upstream failure to 502. Deadline-based (not
         # fixed-count) so extreme load spikes don't flake the test.
         # Each attempt records a check, so assert checks >= 1 (not == 1).
+        # The loop first pings the fake target DIRECTLY: if the lab
+        # itself is wedged, that's an environment issue (wait), not a
+        # proxy failure — only a reachable target + bad proxy status
+        # counts against the product.
+        import urllib.request
         health = None
-        deadline = time.monotonic() + 100.0
+        deadline = time.monotonic() + 120.0
         attempt = 0
         while True:
+            try:
+                with urllib.request.urlopen(
+                    self.target_url, timeout=3
+                ) as direct:
+                    target_up = direct.status == 200
+            except Exception:  # noqa: BLE001 - lab wedged, wait it out
+                target_up = False
             result = self.conn.health_check(pid, url=self.target_url,
                                             timeout=10)
             health = result["health"]
@@ -648,7 +660,9 @@ class HealthCheckTests(_ProxyNetCase):
                 break
             if time.monotonic() >= deadline:
                 break
-            time.sleep(min(0.5 * (attempt + 1), 5.0))
+            # Back off longer when the lab itself is down; the proxy
+            # can't be blamed for an unreachable target.
+            time.sleep(min(0.5 * (attempt + 1), 5.0) * (2 if not target_up else 1))
             attempt += 1
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["status_code"], 200)
