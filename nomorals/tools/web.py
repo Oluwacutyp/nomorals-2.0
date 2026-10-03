@@ -189,7 +189,7 @@ def register(registry: Any) -> None:
         description="Search the web (DuckDuckGo primary, Bing automatic fallback; no API key) and return ranked links.",
         capability=Capability.NET_OUT,
     )
-    def web_search(query: str, *, max_results: int = 8, site: str = "") -> dict[str, Any]:
+    def web_search(query: str, *, max_results: int = 8, site: str = "", freshness: str = "") -> dict[str, Any]:
         needle = f"{query} site:{site}" if site else query
         encoded = urllib.parse.quote_plus(needle)
         results: list[dict[str, str]] = []
