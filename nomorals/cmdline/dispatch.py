@@ -76,6 +76,8 @@ from .commands.vision import _cmd_vision
 from .commands.voice import _cmd_voice
 from .commands.weather import _cmd_weather
 from .commands.wisdom import _cmd_wisdom
+from .commands.mesh import _cmd_mesh
+from .commands.sync import _cmd_sync
 from .emit import _emit
 from .parser import CLI_ALIASES, _parser
 
@@ -330,6 +332,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_doc(args, context)
         if args.command == "wisdom":
             return _cmd_wisdom(args, context)
+        if args.command == "mesh":
+            return _cmd_mesh(args, context)
+        if args.command == "sync":
+            return _cmd_sync(args, context)
         if args.command == "browse":
             return _cmd_browse(args, context)
         if args.command == "repo":

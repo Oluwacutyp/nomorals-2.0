@@ -85,6 +85,8 @@ CLI_ALIASES: dict[str, list[str]] = {
     "wisdom": ["wis"],
     "browse": ["brw"],
     "repo": ["rp"],
+    "mesh": ["msh"],
+    "sync": ["sy"],
 }
 
 
@@ -210,6 +212,7 @@ def _parser() -> argparse.ArgumentParser:
                               "(prompts securely)")
     power_sub.add_parser("lock", help="lock power mode")
     power_sub.add_parser("status", help="power mode status")
+    power_sub.add_parser("battery", help="battery/thermal status (power monitor)")
 
     bench = sub.add_parser("benchmark", aliases=CLI_ALIASES["benchmark"],
                            help="K3 scoreboard: benchmark the agent system")
@@ -1582,7 +1585,27 @@ def _parser() -> argparse.ArgumentParser:
     )
     plugin.add_argument("task", nargs="*", default=[], help="verb and arguments")
     plugin.add_argument("--json", action="store_true", help="Output as JSON")
+    mesh = sub.add_parser("mesh", aliases=CLI_ALIASES["mesh"],
+        help="device mesh: nodes, presence, task dispatch",
+        description=("nm mesh nodes [--json]\n"
+                     "nm mesh register <name> [--platform P]\n"
+                     "nm mesh heartbeat <node-id>\n"
+                     "nm mesh dispatch <task-type> [--target NODE]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mesh.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    mesh.add_argument("--json", action="store_true", help="Output as JSON")
 
+    sync = sub.add_parser("sync", aliases=CLI_ALIASES["sync"],
+        help="multi-device sync: status, push, pull",
+        description=("nm sync status [--json]\n"
+                     "nm sync push --peer-db PATH [--json]\n"
+                     "nm sync pull --peer-db PATH [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sync.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    sync.add_argument("--json", action="store_true", help="Output as JSON")
+    sync.add_argument("--peer-db", default="", help="peer database path")
     return parser
 
     # Wave K commands: document engine, browser service, code workspace.
