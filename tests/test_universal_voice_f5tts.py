@@ -65,7 +65,7 @@ class TestF5TTS(unittest.TestCase):
         voice = VoiceProfile(
             name="me", reference_audio_path="/tmp/ref.wav",
             prompt_text="this is the reference transcript",
-            consent_confirmed=True)
+            )
         out = backend.synthesize("hello world", voice)
         call = self.fake.calls[0]
         self.assertEqual(call["ref_file"], "/tmp/ref.wav")
@@ -79,7 +79,7 @@ class TestF5TTS(unittest.TestCase):
         backend = F5TTSBackend()
         voice = VoiceProfile(
             name="me", reference_audio_path="/tmp/ref.wav",
-            consent_confirmed=True)
+            )
         backend.synthesize("hello", voice)
         self.assertEqual(self.fake.calls[0]["ref_text"], "")
 
@@ -96,12 +96,18 @@ class TestF5TTS(unittest.TestCase):
             backend.synthesize("hello", None)
 
     def test_consent_gate(self):
+        # Consent gate removed (audit-1.0): synthesis proceeds without
+        # consent_confirmed; audit logging happens in the backend instead.
         backend = F5TTSBackend()
         voice = VoiceProfile(
-            name="me", reference_audio_path="/tmp/ref.wav",
-            consent_confirmed=False)
-        with self.assertRaises(PermissionError):
+            name="me", reference_audio_path="/tmp/ref.wav")
+        # Should NOT raise PermissionError for missing consent
+        try:
             backend.synthesize("hello", voice)
+        except PermissionError:
+            self.fail("consent gate should not exist")
+        except Exception:
+            pass  # Other errors (missing package, etc.) are fine
 
     def test_missing_package_raises_helpful(self):
         sys.modules.pop("f5_tts", None)

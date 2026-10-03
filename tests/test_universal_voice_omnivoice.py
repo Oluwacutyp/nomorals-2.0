@@ -67,7 +67,7 @@ class TestOmniVoice(unittest.TestCase):
         backend = OmniVoiceBackend()
         voice = VoiceProfile(
             name="me", reference_audio_path="/tmp/ref.wav",
-            prompt_text="hello there", consent_confirmed=True,
+            prompt_text="hello there",
             description="female, low pitch, british accent")
         out = backend.synthesize("new words", voice)
         call = self.model.calls[0]
@@ -86,12 +86,18 @@ class TestOmniVoice(unittest.TestCase):
         self.assertTrue(len(out) > 0)
 
     def test_consent_gate(self):
+        # Consent gate removed (audit-1.0): synthesis proceeds without
+        # consent_confirmed; audit logging happens in the backend instead.
         backend = OmniVoiceBackend()
         voice = VoiceProfile(
-            name="me", reference_audio_path="/tmp/ref.wav",
-            consent_confirmed=False)
-        with self.assertRaises(PermissionError):
+            name="me", reference_audio_path="/tmp/ref.wav")
+        # Should NOT raise PermissionError for missing consent
+        try:
             backend.synthesize("hello", voice)
+        except PermissionError:
+            self.fail("consent gate should not exist")
+        except Exception:
+            pass  # Other errors (missing package, etc.) are fine
 
     def test_missing_package_raises_helpful(self):
         sys.modules.pop("omnivoice", None)

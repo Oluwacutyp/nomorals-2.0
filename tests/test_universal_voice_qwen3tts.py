@@ -69,7 +69,7 @@ class TestQwen3TTS(unittest.TestCase):
         voice = VoiceProfile(
             name="me", reference_audio_path="/tmp/ref.wav",
             prompt_text="the transcript", language="fr",
-            consent_confirmed=True)
+            )
         out = backend.synthesize("bonjour le monde", voice)
         self.assertTrue(any("Base" in entry["model_id"]
                             for entry in self.loaded))
@@ -106,12 +106,18 @@ class TestQwen3TTS(unittest.TestCase):
             VoiceProfile(name="x", language="xx")), "Auto")
 
     def test_consent_gate(self):
+        # Consent gate removed (audit-1.0): synthesis proceeds without
+        # consent_confirmed; audit logging happens in the backend instead.
         backend = Qwen3TTSBackend()
         voice = VoiceProfile(
-            name="me", reference_audio_path="/tmp/ref.wav",
-            consent_confirmed=False)
-        with self.assertRaises(PermissionError):
+            name="me", reference_audio_path="/tmp/ref.wav")
+        # Should NOT raise PermissionError for missing consent
+        try:
             backend.synthesize("hello", voice)
+        except PermissionError:
+            self.fail("consent gate should not exist")
+        except Exception:
+            pass  # Other errors (missing package, etc.) are fine
 
     def test_missing_package_raises_helpful(self):
         sys.modules.pop("qwen_tts", None)

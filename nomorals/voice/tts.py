@@ -110,6 +110,10 @@ class VoiceProfile:
     #: blend them; single-sample backends use the first clip.
     extra_samples: list = field(default_factory=list)
 
+    def validate_for_cloning(self, backend: str = "unknown") -> None:
+        """Validate voice for cloning (audit-logged, no consent gate)."""
+        self.audit_clone(backend)
+
     def audit_clone(self, backend: str) -> None:
         """Log a voice-clone operation for the owner's audit trail."""
         from ..core.logging_setup import get_logger

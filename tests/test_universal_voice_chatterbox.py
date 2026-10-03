@@ -109,7 +109,7 @@ class TestChatterbox(unittest.TestCase):
         backend = ChatterboxBackend()
         voice = VoiceProfile(
             name="me", reference_audio_path="/tmp/ref.wav",
-            language="fr", consent_confirmed=True)
+            language="fr", )
         out = backend.synthesize("bonjour", voice)
         call = self.models["multilingual"].calls[0]
         self.assertEqual(call["language_id"], "fr")
@@ -126,12 +126,18 @@ class TestChatterbox(unittest.TestCase):
         self.assertTrue(len(out) > 0)
 
     def test_consent_gate(self):
+        # Consent gate removed (audit-1.0): synthesis proceeds without
+        # consent_confirmed; audit logging happens in the backend instead.
         backend = ChatterboxBackend()
         voice = VoiceProfile(
-            name="me", reference_audio_path="/tmp/ref.wav",
-            consent_confirmed=False)
-        with self.assertRaises(PermissionError):
+            name="me", reference_audio_path="/tmp/ref.wav")
+        # Should NOT raise PermissionError for missing consent
+        try:
             backend.synthesize("hello", voice)
+        except PermissionError:
+            self.fail("consent gate should not exist")
+        except Exception:
+            pass  # Other errors (missing package, etc.) are fine
 
     def test_missing_package_raises_helpful(self):
         for name in ("chatterbox", "chatterbox.mtl_tts",

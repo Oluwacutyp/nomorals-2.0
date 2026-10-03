@@ -55,6 +55,9 @@ class FakeSession:
             return FakeResponse({"ok": True, "result": {"message_id": 43}})
         return FakeResponse({"ok": True, "result": True})
 
+    def post_json(self, url: str, params: dict, timeout: float = 30) -> FakeResponse:
+        return self.post(url, json=params)
+
     def get(self, url: str, **kwargs: object) -> FakeResponse:
         return FakeResponse({"ok": True}, content=b"fake-bytes")
 

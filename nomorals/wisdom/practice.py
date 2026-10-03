@@ -44,12 +44,15 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
 SAFETY_TEXT = (
     "Safety notes for breathing practice:\n"
     "(1) Slow breathing with a longer exhale promotes relaxation via the "
-    "parasympathetic nervous system.\n"
-    "(2) If you feel lightheaded, dizzy, or uncomfortable, stop and breathe "
+    "parasympathetic nervous system — this is well supported.\n"
+    "(2) It does NOT guarantee any particular state — there is no verified "
+    "link between breathing techniques and astral projection or kundalini "
+    "awakening.\n"
+    "(3) If you feel lightheaded, dizzy, or uncomfortable, stop and breathe "
     "normally.\n"
-    "(3) If you have a lung or heart condition, are pregnant, or have "
+    "(4) If you have a lung or heart condition, are pregnant, or have "
     "blood-pressure conditions, check with a clinician first.\n"
-    "(4) This is not medical or mental-health care."
+    "(5) This is not medical or mental-health care."
 )
 
 # Phase instructions must stay short and self-contained so a chat bot

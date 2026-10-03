@@ -144,7 +144,7 @@ class RunTests(unittest.TestCase):
     def test_run_prints_safety_text_first(self):
         ctx, _ = _ctx()
         guide = PracticeGuide(ctx)
-        _, lines, _ = _run(guide, "box-breathing")
+        _, lines, _ = _run(guide, "box-breathing", show_safety=True)
         self.assertEqual(lines[0], "=== Box Breathing 4-4-4-4 ===")
         self.assertEqual(lines[1], SAFETY_TEXT)
 
