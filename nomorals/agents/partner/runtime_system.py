@@ -515,12 +515,24 @@ class RuntimeSystemMixin:
             send_to = (chat_key.split(":", 1)[0] if ":" in chat_key else "",
                        chat_key.split(":", 1)[1] if ":" in chat_key else "")
             if action == "song":
+                # Smart style detection: only treat the last word as a style
+                # if it actually resolves to one (exact, alias, or fuzzy).
+                # Otherwise the whole input is the topic ("lucid dream" ->
+                # topic="lucid dream", style="pop").
+                from ...media.music import resolve_style
                 words = rest.split()
-                style = words[-1] if len(words) > 1 else "pop"
+                style = "pop"
+                topic = rest
                 if len(words) > 1:
-                    topic = " ".join(words[:-1])
-                else:
-                    topic, style = words[0], "pop"
+                    try:
+                        resolve_style(words[-1])
+                        style = words[-1]
+                        topic = " ".join(words[:-1])
+                    except Exception:  # noqa: BLE001
+                        # Last word isn't a style — whole input is the topic.
+                        pass
+                elif words:
+                    topic = words[0]
                 out = hub.run("song", topic=topic, style=style)
                 song = out.get("song", {})
                 lines = [f"🎵 {song.get('title', topic)}  "

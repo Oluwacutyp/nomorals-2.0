@@ -1364,10 +1364,20 @@ class DevonAgent:
         )
 
     def _tool_file_send(self, args: dict[str, Any]) -> str:
+        # Default to the current chat when platform/chat_id not specified —
+        # the agent should "just know" where to send, like _tool_speak does.
+        platform = str(args.get("platform") or "")
+        chat_id = str(args.get("chat_id") or "")
+        if not platform or not chat_id:
+            chat_key = getattr(self, "_last_chat_key", "") or ""
+            if chat_key and ":" in chat_key:
+                default_platform, _, default_chat_id = chat_key.partition(":")
+                platform = platform or default_platform
+                chat_id = chat_id or default_chat_id
         return self._registry_tool(
             "file_send",
-            platform=str(args.get("platform") or ""),
-            chat_id=str(args.get("chat_id") or ""),
+            platform=platform,
+            chat_id=chat_id,
             path=str(args.get("path") or ""),
             caption=str(args.get("caption") or ""),
         )
@@ -1453,8 +1463,16 @@ class DevonAgent:
         )
 
     def _tool_proxy_file(self, args: dict[str, Any]) -> str:
-        v = self._call("proxy_file", limit=str(args.get("limit") or ""),
-                       max_age_hours=str(args.get("max_age_hours") or ""))
+        import json
+        try:
+            raw = self._registry_tool(
+                "proxy_file",
+                limit=str(args.get("limit") or ""),
+                max_age_hours=str(args.get("max_age_hours") or ""),
+            )
+            v = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as exc:  # noqa: BLE001
+            return f"proxy_file failed: {exc}"
         if not isinstance(v, dict):
             return "proxy_file failed"
         if not v.get("written"):
