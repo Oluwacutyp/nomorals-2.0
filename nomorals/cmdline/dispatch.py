@@ -65,6 +65,7 @@ from .commands.search import _cmd_search
 from .commands.serve import _cmd_serve
 from .commands.skills import _cmd_skill_pkg
 from .commands.snapshot import _cmd_snapshot
+from .commands.stream import _cmd_stream
 from .commands.status import _cmd_status
 from .commands.session import _cmd_session
 from .commands.swarm import _cmd_swarm
@@ -237,6 +238,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_tui(args, context)
         if args.command == "serve":
             return _cmd_serve(args, context)
+        if args.command == "stream":
+            return _cmd_stream(args, context)
         if args.command == "queue":
             return _cmd_queue(args, context)
         if args.command == "commands":

@@ -89,6 +89,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "repo": ["rp"],
     "mesh": ["msh"],
     "sync": ["sy"],
+    "stream": ["strm"],
 
     "search": ["s"],
 }
@@ -334,8 +335,24 @@ def _parser() -> argparse.ArgumentParser:
     missions.add_argument("--resume-status", default="",
                           help="lift a pause and report the mission's status")
 
-    sub.add_parser("serve", aliases=CLI_ALIASES["serve"], help="start the HTTP API server")
+    serve = sub.add_parser("serve", aliases=CLI_ALIASES["serve"], help="start the HTTP API server")
+    serve.add_argument("--host", default=None,
+                       help="bind host (default: settings api.host)")
+    serve.add_argument("--port", type=int, default=None,
+                       help="bind port (default: settings api.port)")
     sub.add_parser("tui", aliases=CLI_ALIASES["tui"], help="start the interactive terminal UI")
+    stream = sub.add_parser("stream", aliases=CLI_ALIASES["stream"],
+                            help="SSE live event stream: serve the timeline over HTTP")
+    stream.add_argument("action", nargs="?", default="serve",
+                        choices=["serve", "status"],
+                        help="serve: start the SSE server (default); "
+                             "status: probe the server's /health endpoint")
+    stream.add_argument("--host", default="127.0.0.1",
+                        help="bind/probe host (default 127.0.0.1)")
+    stream.add_argument("--port", type=int, default=8899,
+                        help="bind/probe port (default 8899)")
+    stream.add_argument("--json", action="store_true",
+                        help="status: emit JSON instead of prose")
     queue = sub.add_parser("queue", aliases=CLI_ALIASES["queue"],
                            help="inspect the durable work queue")
     queue.add_argument("--topic", default="")

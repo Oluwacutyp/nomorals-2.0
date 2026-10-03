@@ -70,6 +70,7 @@ IMPORTER_USED = [
     "_cmd_mission",
     "_cmd_tui",
     "_cmd_serve",
+    "_cmd_stream",
     "_cmd_queue",
     "_cmd_status",
     "_cmd_mind",
