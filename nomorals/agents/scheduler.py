@@ -363,11 +363,15 @@ class Scheduler:
             )
         # alert the owner — durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
-        # not page every run); successes are silent — the owner doesn't
-        # need a ping for every routine tick.
-        alert = not ok
+        # not page every run). Successes notify too, except for routine
+        # tick/heartbeat jobs which would spam.
+        job_name = row['name'].lower()
+        is_routine_tick = 'tick' in job_name or 'heartbeat' in job_name or 'sweep' in job_name
+        alert = True
         if not ok and prev_failed:
             alert = False  # still failing — the owner already knows
+        if ok and is_routine_tick:
+            alert = False  # routine tick succeeded — silent
         if alert:
             try:
                 self.notifier.publish(
