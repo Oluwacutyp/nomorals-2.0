@@ -159,7 +159,7 @@ backups.
 ## Honest status
 
 This is a working, tested system — past the 100,000-line target it was designed
-around. Roughly 187,000 lines of Python across 550+ modules, with ~4,000 tests.
+around. Roughly 236,000 lines of Python across 550+ modules, with ~5,700 tests.
 around. Roughly 209,000 lines of Python across 540+ modules, with ~4,000 tests.
 The count is reported as measured (blank lines and comments included); no filler
 was ever added to hit a number — the tree grew because the feature list did:
