@@ -1,65 +1,137 @@
 # ============================================================
-# DEVON — Termux first-run .env (API-only, no local model needed)
+# DEVON — Complete .env template (Termux / any platform)
 # ============================================================
-# HOW TO USE
-#   1. Copy this file to ~/.devon-bot.env   (Termux: $HOME/.devon-bot.env)
-#   Template lives in the repo at docs/TERMUX_ENV_TEMPLATE.txt
-#   2. Fill in every value marked  FILL ME
-#   3. chmod 600 ~/.devon-bot.env            (secrets stay private)
-#   4. Never paste these values into any chat — type them here only.
-# WHERE TO GET EACH KEY  (all free)
-#   HF token      -> huggingface.co/settings/tokens  (fine-grained, inference:read)
-#   Groq key      -> console.groq.com/keys            (starts gsk_)
-#   OpenRouter    -> openrouter.ai/keys
-#   api_id/hash   -> my.telegram.org  (API development tools)
-#   Your numeric Telegram id -> message @userinfobot on Telegram
+# Fill in what you want, leave the rest empty.
+# Devon works with whatever's configured and skips what's missing.
+# NEVER paste these values into any chat — edit this file only.
+# chmod 600 ~/.devon-secrets  (keeps secrets private)
 # ============================================================
 
-# ---------- BRAIN: cloud APIs, HF first, Groq then OpenRouter ----------
+# ---------- BRAIN: LLM providers (HF first, then Groq, then OpenRouter) ----------
 NM_LLM_PROVIDER=hf_serverless
 NM_LLM_FALLBACK_CHAIN=hf_serverless,groq,openrouter
+NM_LLM_ACTIVE_MODEL=
+NM_LLM_SYSTEM_PROMPT=
+NM_LLM_TIMEOUT=
+NM_LLM_CACHE_DIR=
 
-NM_HF_TOKEN=FILL ME            # hf_...
+NM_HF_TOKEN=
 NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
+NM_HF_BASE_URL=
+NM_HF_ENDPOINT_URL=
 
-NM_GROQ_API_KEY=FILL ME        # gsk_...
+NM_GROQ_API_KEY=
 NM_GROQ_MODEL=llama-3.3-70b-versatile
+NM_GROQ_BASE_URL=
 
-NM_OPENROUTER_API_KEY=FILL ME
-# Pin a free model from openrouter.ai/models (catalog changes); this alias auto-routes free models:
+NM_OPENROUTER_API_KEY=
 NM_OPENROUTER_MODEL=openrouter/free
+NM_OPENROUTER_BASE_URL=
 
-# ---------- TELEGRAM: your own account (userbot via Telethon) ----------
+NM_OPENAI_API_KEY=
+NM_OPENAI_MODEL=
+NM_OPENAI_BASE_URL=
+
+# ---------- EMBEDDINGS ----------
+NM_EMBED_PROVIDER=
+NM_EMBED_MODEL=
+
+# ---------- TELEGRAM USERBOT (your own account via Telethon) ----------
 NM_CHAT_TELEGRAM_ENABLED=1
-NM_CHAT_TELEGRAM_API_ID=FILL ME        # digits from my.telegram.org
-NM_CHAT_TELEGRAM_API_HASH=FILL ME      # hex from my.telegram.org
+NM_CHAT_TELEGRAM_API_ID=          # digits from my.telegram.org
+NM_CHAT_TELEGRAM_API_HASH=        # hex from my.telegram.org
 NM_CHAT_TELEGRAM_SESSION=/data/data/com.termux/files/home/.devon-tg.session
-# Numeric chat ids Devon may operate in (your DM with yourself, groups). Comma-separated:
-# Leave empty to listen in ALL chats/DMs:
-NM_CHAT_TELEGRAM_CHATS=
+NM_CHAT_TELEGRAM_CHATS=           # empty = all chats/DMs
 
 # ---------- TELEGRAM BOT (via @BotFather) ----------
-# Separate from the userbot above — this is the bot token for Devon's Telegram bot:
 NM_CHAT_TELEGRAM_BOT_ENABLED=1
-NM_CHAT_TELEGRAM_BOT_TOKEN=FILL ME     # from @BotFather
-# Chat IDs the bot may operate in (leave empty for all):
-NM_CHAT_TELEGRAM_BOT_CHATS=
+NM_CHAT_TELEGRAM_BOT_TOKEN=       # from @BotFather
+NM_CHAT_TELEGRAM_BOT_CHATS=       # empty = all chats
 
-# ---------- DISCORD ----------
-NM_CHAT_DISCORD_ENABLED=0
-NM_CHAT_DISCORD_TOKEN=FILL ME          # from discord.com/developers/applications
+# ---------- WEBHOOK (for chat integrations) ----------
+NM_CHAT_WEBHOOK_ENABLED=0
+NM_CHAT_WEBHOOK_HOST=
+NM_CHAT_WEBHOOK_PORT=
+NM_CHAT_WEBHOOK_TOKEN=
+NM_CHAT_WEBHOOK_REPLY_URL=
 
-# ---------- OWNER: who Devon answers to ----------
-# Your numeric Telegram id — Devon treats this chat as the owner:
-NM_PARTNER_OWNER_CHATS=FILL ME
-# NM_PARTNER_PERSONALITY=devon
+# ---------- MEDIA ----------
+NM_CHAT_MEDIA_IN_GROUPS=
+NM_CHAT_MEDIA_MAX_MB=
 
-# ---------- OPTIONAL: OSINT keys (Devon works without them) ----------
-# NM_OSINT_HIBP_KEY=
-# NM_OSINT_ABUSEIPDB_KEY=
-# NM_OSINT_SHODAN_KEY=
+# ---------- OWNER ----------
+NM_PARTNER_OWNER_CHATS=            # your numeric Telegram ID
+NM_PARTNER_PERSONALITY=devon
+NM_PARTNER_PLATFORMS=
+NM_PARTNER_LEXICON_SEED=
+NM_PARTNER_LEXICON_VOICE=
+NM_PARTNER_MEMORY_ENABLED=
 
-# ---------- OPTIONAL: proactive pings (default ON) ----------
-# NM_PARTNER_PROACTIVE_ENABLED=1
-# NM_PARTNER_QUIET_START=23
-# NM_PARTNER_QUIET_END=7
+# ---------- PROACTIVE ----------
+NM_PARTNER_PROACTIVE_ENABLED=1
+NM_PARTNER_PROACTIVE=1
+NM_PARTNER_PROACTIVE_BRIEFING=
+NM_PARTNER_PROACTIVE_WATCHERS=
+NM_PARTNER_QUIET_START=23
+NM_PARTNER_QUIET_END=7
+
+# ---------- OSINT ----------
+NM_OSINT_ENABLED=
+NM_OSINT_HIBP_KEY=
+NM_OSINT_ABUSEIPDB_KEY=
+NM_OSINT_SHODAN_KEY=
+NM_OSINT_CRTSH_DAYS=
+NM_OSINT_REQUEST_TIMEOUT=
+
+# ---------- ARENA ----------
+NM_ARENA_ENABLED=
+NM_ARENA_BUILD=
+NM_ARENA_INTERVAL_HOURS=
+NM_ARENA_ANTI_REPEAT_WINDOW=
+NM_ARENA_RESEARCH_PAGES=
+
+# ---------- NETWORK ----------
+NM_NET_ENABLED=
+NM_NET_ALLOWED_TARGETS=
+NM_NET_BANNER=
+NM_NET_DEFAULT_PORTS=
+NM_NET_MAX_PROBE_PORTS=
+NM_NET_PROBE_TIMEOUT=
+NM_NET_PROXY=
+
+# ---------- PROXY ----------
+NM_PROXY_ACTIVE=
+NM_PROXY_KNOWN=
+NM_PROXY_URL=
+
+# ---------- BUDGETS ----------
+NM_BUDGET_TOKENS=
+NM_BUDGET_WALL_SECONDS=
+NM_BUDGET_CHILDREN=
+NM_MAX_SUBAGENTS=
+NM_THREADS=
+NM_PROCESSES=
+
+# ---------- MIND ----------
+NM_MIND_MAX_INFLIGHT=
+NM_MIND_INFLIGHT_TIMEOUT=
+
+# ---------- STORAGE ----------
+NM_HOME=
+NM_DB_PATH=
+NM_DB_WAL=
+NM_BACKUP_DIR=
+NM_BACKUP_GIT_REPO=
+NM_BACKUP_KEEP=
+
+# ---------- API SERVER ----------
+NM_API_HOST=
+NM_API_PORT=
+NM_API_TOKEN=
+
+# ---------- LOGGING / DEBUG ----------
+NM_LOG_LEVEL=
+NM_LOG_FILE=
+NM_DEBUG=
+NM_PROFILE=
+NM_OFFLINE=
