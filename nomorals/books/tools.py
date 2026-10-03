@@ -40,23 +40,24 @@ def register(registry: Any) -> None:
     @registry.register(
         "book_create",
         description=(
-            "Start a book: gather live research notes on the topic and write a "
-            "real outline (chapters + beats). Saved to disk — resumable. Returns "
-            "the plan."
+            "Start a book: gather live research notes on the topic and plant "
+            "the opening arc. The book then grows organically — chapters "
+            "emerge as it is written until the topic is genuinely covered, "
+            "never a preset count. Saved to disk — resumable. Returns the plan."
         ),
         capability=Capability.NET_OUT,
         parameters={
             "topic": "str — what the book is about",
             "title": "str (optional) — the book title (else derived from topic)",
-            "chapters": "int (optional, 8) — chapters to plan (3-16)",
-            "words_per_chapter": "int (optional, 1200)",
+            "chapters": "int (optional, 0) — explicit chapter count ONLY if the user asked for one; 0 = organic growth",
+            "words_per_chapter": "int (optional, 1000) — soft length guide, never a quota",
             "author": "str (optional)",
             "genre": "str (optional) — tone/genre",
             "research": "bool (optional, true) — gather live research notes",
         },
     )
-    def book_create(topic: str, *, title: str = "", chapters: int = 8,
-                    words_per_chapter: int = 1200, author: str = "",
+    def book_create(topic: str, *, title: str = "", chapters: int = 0,
+                    words_per_chapter: int = 1000, author: str = "",
                     genre: str = "", research: bool = True) -> dict[str, Any]:
         book = forge().create(topic, title=title, chapters=chapters,
                               words_per_chapter=words_per_chapter, author=author,
