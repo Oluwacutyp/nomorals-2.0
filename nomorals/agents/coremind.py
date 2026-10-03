@@ -363,6 +363,35 @@ _RE_MISSION_LIST = re.compile(
     r"waiting|progress|how'?s)\b|\b(status|list|progress)\b.{0,24}"
     r"\b(mission|task|directive)s?\b|\bhow'?s (the|my) (mission|task|directive)s?\b", re.I)
 _RE_CANCEL = re.compile(r"^\s*(no|nope|never ?mind|stop|cancel|scrub|drop it|forget it)\b", re.I)
+#: "create a spotify account" — account creation, NOT code building.
+#: The service group captures the service name ("sound cloud" → "soundcloud").
+_RE_ACCOUNT = re.compile(
+    r"\b(create|make|open|register|set\s*up)\b"
+    r"(?:\s+(?:me|us|a|an|new|myself|my|for\s+me))*"
+    r"\s+([a-z][a-z0-9]*(?:[\s\-_][a-z0-9]+){0,2})"
+    r"\s+accounts?\b",
+    re.I,
+)
+#: "sign me up for twitter" / "sign up for github account"
+_RE_ACCOUNT_SIGNUP = re.compile(
+    r"\bsign\s+(?:me\s+)?up\s+for\s+"
+    r"([a-z][a-z0-9]*(?:[\s\-_][a-z0-9]+){0,2})"
+    r"(?:\s+accounts?)?\b",
+    re.I,
+)
+#: bare "create an account" — no service named, ask which one
+_RE_ACCOUNT_BARE = re.compile(
+    r"\b(create|make|open|register|set\s*up)\b"
+    r"(?:\s+(?:me|us|a|an|new|myself|my))*"
+    r"\s+accounts?\b",
+    re.I,
+)
+#: service names that mean the app's OWN user system (a coding task),
+#: never an external service account
+_ACCOUNT_SERVICE_DENYLIST = frozenset({
+    "user", "users", "test", "dummy", "fake", "mock", "sample",
+    "new", "admin", "guest", "a", "an", "the",
+})
 
 _MULTI_JOINERS = re.compile(r"\b(and|then|after that|also|while you'?re at it|plus)\b", re.I)
 
@@ -489,6 +518,40 @@ def _research_intent(text: str) -> Intent | None:
                   why=f"research verb + topic “{topic[:40]}”")
 
 
+def _account_intent(text: str) -> Intent | None:
+    """Detect "create a <service> account" — routes to account creation.
+
+    Must run BEFORE _build_intent: "create" is also a build verb, but
+    "<service> account" is an account-creation goal, not a coding task.
+    Returns None for the app's own user system ("create a user account"
+    is coding) and for bare "create an account" (asks which service).
+    """
+    m = _RE_ACCOUNT.search(text)
+    service = ""
+    if m:
+        service = re.sub(r"[\s\-_]+", "", m.group(2).lower())
+    else:
+        m = _RE_ACCOUNT_SIGNUP.search(text)
+        if m:
+            service = re.sub(r"[\s\-_]+", "", m.group(1).lower())
+    if service:
+        if service not in _ACCOUNT_SERVICE_DENYLIST:
+            return Intent("account", 0.85, target=service, action="create",
+                          route="account", meta={"service": service},
+                          why=f"account verb + service “{service}”")
+        # denylisted (article or "user") — fall through to the bare pattern
+    # bare "create an account" — no service named
+    if _RE_ACCOUNT_BARE.search(text):
+        # but not "create an account system/table" (that's coding)
+        if re.search(r"\baccount\s+(system|table|database|schema|feature)\b",
+                     text, re.I):
+            return None
+        return Intent("account", 0.7, target="", action="ask",
+                      route="account",
+                      why="account verb, no service named — asking which")
+    return None
+
+
 def _build_intent(text: str) -> Intent | None:
     m = _RE_BUILD.search(text)
     if not m:
@@ -577,7 +640,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     """Deterministic intent pass.  Returns every candidate, best first."""
     cands: list[Intent] = []
     for fn in (_status_intent, _mission_intent, _game_intent,
-               _research_intent, _build_intent):
+               _research_intent, _account_intent, _build_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1057,6 +1120,7 @@ class CoreMind:
             "game": self._dispatch_game,
             "research": self._dispatch_research,
             "build": self._dispatch_build,
+            "account": self._dispatch_account,
             "browse": self._dispatch_browse,
             "download": self._dispatch_download,
             "mission": self._dispatch_mission,
@@ -1225,6 +1289,71 @@ class CoreMind:
             f"on it — researching “{intent.target[:80]}” with {workers} "
             f"researchers (profile: {env}). findings land here.\n{self._route_line(intent)}",
             kind="research")
+
+    def _dispatch_account(self, intent: Intent, job_id: str, chat_key: str,
+                          message: Any) -> str:
+        """Route "create a <service> account" to the AccountCreator.
+
+        Human-in-the-loop: CAPTCHAs go through the solver first (ON by
+        default); when the solver is off or fails, the flow pauses on a
+        checkpoint and the owner is told exactly what to do and how to
+        resume (``nm account resume --id <id>``).
+        """
+        service = intent.meta.get("service", "") or intent.target
+        if intent.action == "ask" or not service:
+            self._job_done(job_id, True, "asked which service")
+            return ("which service? e.g. “create a spotify account” — "
+                    "one account per service, under your own identity.")
+
+        def job() -> str:
+            import asyncio
+
+            from ..accounts.creator import (
+                AccountCheckpointPending,
+                AccountCreator,
+                AccountExistsError,
+            )
+            from ..accounts.vault import CredentialVault
+            from ..tools.captcha import creator_solver_adapter
+
+            passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+            if not passphrase:
+                return (
+                    "❌ vault is locked: set the NM_VAULT_PASSPHRASE "
+                    "environment variable so I can store the new "
+                    "credentials, then ask me again."
+                )
+            vault = CredentialVault(self.context.db,
+                                    master_passphrase=passphrase)
+            settings = getattr(self.context, "settings", None)
+            creator = AccountCreator(
+                vault,
+                db=self.context.db,
+                captcha_solver=creator_solver_adapter(settings=settings),
+            )
+            try:
+                account = asyncio.run(creator.create_account(service))
+            except AccountExistsError as exc:
+                return f"ℹ️ {exc}"
+            except AccountCheckpointPending as pending:
+                cp = pending.checkpoint
+                return (
+                    "⏸️ account creation paused — I need your help:\n\n"
+                    f"**{cp.title}**\n{cp.instructions}\n\n"
+                    f"When you're done: `nm account resume --id {cp.id}`"
+                )
+            return (
+                f"✅ {account.service} account ready — "
+                f"username: {account.username}, email: {account.email}. "
+                "Credentials are stored in the vault."
+            )
+
+        return self._send_async(
+            chat_key, job, job_id,
+            f"creating your {service} account — I'll report back here. "
+            f"Some services need your help (CAPTCHA/verification).\n"
+            f"{self._route_line(intent)}",
+            kind="account")
 
     def _dispatch_build(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:

@@ -152,6 +152,26 @@ def _bg_progress(status: dict[str, Any]) -> None:
               status["errors"], status["seconds"])
 
 
+def _workdir_has_tests(workdir: Any) -> bool:
+    """Does this workdir actually contain tests?  A simple single-file
+    script (no tests/ dir, no test_*.py) should just run — not go through
+    the pytest runner and print "nothing ran"."""
+    from pathlib import Path
+    root = Path(str(workdir))
+    if (root / "tests").is_dir() or (root / "test").is_dir():
+        return True
+    # test files anywhere in the tree (bounded depth)
+    try:
+        for pat in ("test_*.py", "*_test.py"):
+            for _ in root.glob(pat):
+                return True
+            for _ in root.glob(f"*/{pat}"):
+                return True
+    except Exception:  # noqa: BLE001 — unreadable dir, treat as no tests
+        pass
+    return False
+
+
 def _unified_diff(before: str, after: str, rel: str) -> str:
     """Unified diff of two file texts ("" when identical)."""
     if before == after:
@@ -511,6 +531,10 @@ class CodingAgent:
             pass
 
         workdir = self._resolve(".")
+        # Simple scripts (no tests anywhere) just run — the pytest runner's
+        # "nothing ran" output confuses more than it helps.
+        if use_runner and not _workdir_has_tests(workdir):
+            use_runner = False
         # Git mission rollback: snapshot the workdir before any change is
         # made.  A failed snapshot must never kill the mission — it just
         # means rollback() becomes a no-op (loudly logged).
