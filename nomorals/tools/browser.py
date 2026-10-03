@@ -386,6 +386,15 @@ class BrowserSession:
         return {"url": self.url, "title": self.title, "chars": len(content),
                 "markdown": content[:max_chars], "truncated": len(content) > max_chars}
 
+    def html(self, max_chars: int = 2_000_000, **_: Any) -> dict[str, Any]:
+        """Raw page HTML — the fetched markup before DOM parsing strips
+        anything (``<script type="application/ld+json">`` blocks included).
+        Used by connectors that parse structured data the DOM hides."""
+        self._require_page()
+        raw = self._raw
+        return {"url": self.url, "title": self.title, "chars": len(raw),
+                "html": raw[:max_chars], "truncated": len(raw) > max_chars}
+
     def links(self, max_links: int = 100, **_: Any) -> dict[str, Any]:
         self._require_page()
         out: list[dict[str, str]] = []
@@ -998,6 +1007,7 @@ _ACTIONS = {
     "open": BrowserSession.open,
     "text": BrowserSession.text,
     "markdown": BrowserSession.markdown,
+    "html": BrowserSession.html,
     "links": BrowserSession.links,
     "click": BrowserSession.click,
     "fill": BrowserSession.fill,
