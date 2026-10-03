@@ -85,6 +85,13 @@ MAX_INFLIGHT_DEFAULT = 8
 #: (``mind.inflight_acquire_timeout_s``, env NM_MIND_INFLIGHT_TIMEOUT).
 INFLIGHT_ACQUIRE_TIMEOUT_S = 30.0
 
+#: Dispatch crash budget: a dispatch *setup* crash is retried this many
+#: times total (1 retry) with ``_DISPATCH_RETRY_BACKOFF_S`` between
+#: attempts. Organ-level failures are the organ's own job note, not
+#: retries — so a retry never re-runs minutes of heavy work.
+_DISPATCH_MAX_ATTEMPTS = 2
+_DISPATCH_RETRY_BACKOFF_S = 1.0
+
 # ── the game catalogue (the games organ owns the rules — here is the map) ──
 
 #: engine game name -> every alias a human might say (longest-match wins).
@@ -583,6 +590,24 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
 
 # ── the mind ─────────────────────────────────────────────────────────────────
 
+class _AsyncStarted(str):
+    """A dispatch reply whose job now belongs to a background thread.
+
+    Still a plain ``str`` to every caller — but ``CoreMind._dispatch``
+    recognizes it and skips the interim ``_job_done``: the worker thread
+    finalizes the job when the organ actually finishes, so a still-running
+    job is never recorded "done".
+    """
+
+
+class _SendFailed(str):
+    """A dispatch reply ``_send_async`` already recorded as failed.
+
+    ``_dispatch`` recognizes it and leaves the recorded failure (and its
+    note) alone instead of re-marking the job from the reply text.
+    """
+
+
 class CoreMind:
     """The always-on mind: understand → clarify → route → remember.
 
@@ -698,15 +723,19 @@ class CoreMind:
     # ── job registry (inspectable progress + recovery) ──────────────────────
     def _new_job(self, intent: Intent) -> str:
         job_id = new_short_id(length=8)
-        self._jobs.append({"id": job_id, "kind": intent.kind,
-                           "target": intent.target[:200], "route": intent.route,
-                           "status": "active", "created": time.time(),
-                           "mem": self._remember_objective(intent, job_id),
-                           "note": ""})
-        self._state["last_objective"] = {"text": intent.target or intent.kind,
-                                         "route": intent.route,
-                                         "job": job_id, "created": time.time()}
-        self._save_state()
+        mem = self._remember_objective(intent, job_id)
+        with self._lock:
+            self._jobs.append({"id": job_id, "kind": intent.kind,
+                               "target": str(intent.target or "")[:200],
+                               "route": intent.route,
+                               "status": "active", "created": time.time(),
+                               "mem": mem,
+                               "note": ""})
+            self._state["last_objective"] = {
+                "text": str(intent.target or intent.kind or "")[:200],
+                "route": intent.route,
+                "job": job_id, "created": time.time()}
+            self._save_state()
         return job_id
 
     def _job_done(self, job_id: str, ok: bool, note: str = "") -> None:
@@ -725,7 +754,10 @@ class CoreMind:
                                               "job": job_id,
                                               "status": "done" if ok else "failed"})
                         except Exception:  # noqa: BLE001
-                            pass
+                            # best-effort memory sync, but never silent:
+                            # a failing memory backend must stay visible
+                            _log.debug("coremind objective memory update "
+                                       "failed for %s", job_id, exc_info=True)
                     break
             self._save_state()
 
@@ -1026,12 +1058,42 @@ class CoreMind:
         if fn is None:
             self._job_done(job_id, True, "no route — treated as chat")
             return None
-        try:
-            reply = fn(intent, job_id, chat_key, message)
-        except Exception as exc:  # noqa: BLE001 - a dispatch failure must not kill the chat
-            _log.exception("coremind dispatch failed for %s", intent.kind)
-            self._job_done(job_id, False, str(exc)[:200])
-            return f"that route just failed: {str(exc)[:160]} — /mind status shows the detail."
+        # Bounded retry: a dispatch *setup* crash (not an organ failure —
+        # organs report their own outcome via the job note) is retried
+        # once after a short backoff. Retrying is safe here because a
+        # raised dispatch fn never started background work; ``_send_async``
+        # reports its own failures as replies, never as raises.
+        reply: str | None = None
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                reply = fn(intent, job_id, chat_key, message)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempts >= _DISPATCH_MAX_ATTEMPTS:
+                    _log.exception("coremind dispatch failed for %s",
+                                   intent.kind)
+                    self._job_done(
+                        job_id, False,
+                        f"dispatch failed after {attempts} attempts: "
+                        f"{str(exc)[:200]}")
+                    return (f"that route just failed: {str(exc)[:160]} — "
+                            "/mind status shows the detail.")
+                _log.warning("coremind dispatch attempt %d/%d for %s failed "
+                             "(%s) — retrying once",
+                             attempts, _DISPATCH_MAX_ATTEMPTS, intent.kind,
+                             exc)
+                time.sleep(_DISPATCH_RETRY_BACKOFF_S)
+        if isinstance(reply, _AsyncStarted):
+            # The background thread owns this job now and finalizes it via
+            # _job_done when the organ finishes — do not mark it done here
+            # before the work even starts.
+            return reply
+        if isinstance(reply, _SendFailed):
+            # _send_async already recorded the failure with its note —
+            # leave it exactly as recorded.
+            return reply
         if reply is None:
             self._job_done(job_id, False, "route returned nothing")
         else:
@@ -1063,7 +1125,9 @@ class CoreMind:
             with self._lock:
                 self._send_shed += 1
             self._job_done(job_id, False, note)
-            return started_note + f"\n⚠️ {note}"
+            # _SendFailed: the job is already recorded failed with this
+            # note — _dispatch must not re-mark it from the reply text.
+            return _SendFailed(started_note + f"\n❌ {note}")
 
         def _run() -> None:
             note = ""
@@ -1096,9 +1160,25 @@ class CoreMind:
         with self._lock:
             self._send_started += 1
             self._inflight_now += 1
-        threading.Thread(target=_run, name=f"mind-{kind}-{job_id}",
-                         daemon=True).start()
-        return started_note
+        thread = threading.Thread(target=_run, name=f"mind-{kind}-{job_id}",
+                                  daemon=True)
+        try:
+            thread.start()
+        except Exception as exc:  # noqa: BLE001 - a dead start must not leak the slot
+            # The semaphore was already acquired and the gauge bumped: put
+            # both back, or this job's slot is gone forever and
+            # _inflight_now lies.
+            self._inflight.release()
+            with self._lock:
+                self._inflight_now = max(0, self._inflight_now - 1)
+            _log.exception("coremind could not start %s thread %s", kind, job_id)
+            self._job_done(job_id, False,
+                           f"could not start background thread: {exc}")
+            return _SendFailed(
+                started_note + f"\n❌ could not start the background worker: {exc}")
+        # _AsyncStarted: the worker thread owns the job now; _dispatch
+        # leaves the interim state alone and the thread finalizes it.
+        return _AsyncStarted(started_note)
 
     def _dispatch_research(self, intent: Intent, job_id: str, chat_key: str,
                            message: Any) -> str:
@@ -1168,15 +1248,22 @@ class CoreMind:
         except Exception:  # noqa: BLE001
             return ""
 
+    @staticmethod
+    def _browse_url(target: str) -> str:
+        """One URL normalization for both browse paths (chat dispatch and
+        the console ``_dispatch_inline``): a bare URL passes through, well
+        known shorthands map to their front doors, and anything else is
+        treated as a domain."""
+        if target.startswith("http"):
+            return target
+        lowered = target.lower()
+        if lowered in ("hn", "hacker news"):
+            return "https://news.ycombinator.com"
+        return (f"https://{target if '.' in target else target + '.com'}")
+
     def _dispatch_browse(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
-        url = intent.target if intent.target.startswith("http") else ""
-        if not url:
-            # a site name: open its front door
-            url = {"hn": "https://news.ycombinator.com",
-                   "hacker news": "https://news.ycombinator.com"}.get(
-                       intent.target.lower(),
-                       f"https://{intent.target if '.' in intent.target else intent.target + '.com'}")
+        url = self._browse_url(intent.target)
 
         def job() -> str:
             from ..tools.browser import BrowserSession
@@ -1480,8 +1567,7 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
     if intent.kind == "browse":
         from ..tools.browser import BrowserSession
 
-        url = intent.target if intent.target.startswith("http") else \
-            f"https://{intent.target}"
+        url = mind._browse_url(intent.target)
         session = BrowserSession(name=f"mind-{job_id}",
                                  session_dir=mind._browser_session_dir())
         report = session.task(steps=[{"act": "open", "url": url},

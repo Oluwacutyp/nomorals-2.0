@@ -51,6 +51,7 @@ tests newly fail.
 
 from __future__ import annotations
 
+import abc
 import ast
 import builtins
 import concurrent.futures
@@ -61,6 +62,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -130,13 +132,17 @@ def _dotted_path(rel: str) -> str:
     return Path(rel).with_suffix("").as_posix().replace("/", ".")
 
 
-class Subagent:
+class Subagent(abc.ABC):
     """Base for the roster: per-mission instance, dataclass in/out.
 
     ``router`` is anything with ``.chat(messages, params)`` returning an
     object with ``.ok`` / ``.text`` / ``.error`` (the LLMRouter, or a
     provider such as the mock used in tests). ``None`` means "no model":
     roles degrade explicitly rather than failing.
+
+    Abstract: instantiating the bare base is a ``TypeError`` at
+    construction time, not a ``NotImplementedError`` at call time — a
+    subagent that cannot ``run`` must fail fast.
     """
 
     roster_type: str = "base"
@@ -176,8 +182,15 @@ class Subagent:
         """Repo-relative path validated to stay inside the project root."""
         return self.project_root / _safe_rel(self.project_root, rel)
 
+    @abc.abstractmethod
     def run(self, inp: Any) -> Any:
-        raise NotImplementedError
+        """Run one mission input and return its result dataclass.
+
+        Every concrete role implements this; failures are returned as
+        explicit ``ok=False`` results, never raised — except for
+        programming errors (bad input types, broken project root), which
+        fail fast here in the caller via :func:`run_parallel`.
+        """
 
 
 # ── 1. Planner ───────────────────────────────────────────────────────────
@@ -1693,26 +1706,39 @@ class ApiDesigner(Subagent):
             return ApiDesignResult(stub_code="", imports_ok=False,
                                    note="model returned no stub code")
         tmpdir = tempfile.mkdtemp(prefix="subagent_api_")
-        stub_path = os.path.join(tmpdir, "api_stub.py")
-        with open(stub_path, "w", encoding="utf-8") as fh:
-            fh.write(stub if stub.endswith("\n") else stub + "\n")
-        imports_ok, import_error = self._try_import(stub_path)
+        try:
+            stub_path = os.path.join(tmpdir, "api_stub.py")
+            with open(stub_path, "w", encoding="utf-8") as fh:
+                fh.write(stub if stub.endswith("\n") else stub + "\n")
+            imports_ok, import_error = self._try_import(stub_path)
+        finally:
+            # The stub is validated by import, not by keeping the file:
+            # never leave scratch dirs behind in the temp tree.
+            shutil.rmtree(tmpdir, ignore_errors=True)
         notes = _check_stub_conventions(stub)
         return ApiDesignResult(stub_code=stub, imports_ok=imports_ok,
                                import_error=import_error,
                                consistency_notes=notes,
-                               note=f"stub validated at {stub_path}" if imports_ok
+                               note="stub imported cleanly" if imports_ok
                                else "stub failed to import")
 
     @staticmethod
     def _try_import(path: str) -> tuple[bool, str]:
+        name = "subagent_api_stub"
         try:
-            spec = importlib.util.spec_from_file_location(
-                "subagent_api_stub", path)
+            spec = importlib.util.spec_from_file_location(name, path)
             if spec is None or spec.loader is None:
                 return False, "could not build import spec"
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # Register before exec: dataclasses resolve string
+            # annotations (``from __future__ import annotations``) via
+            # sys.modules, and an unregistered module makes every
+            # dataclass stub fail with a confusing AttributeError.
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.modules.pop(name, None)
             exported = getattr(module, "__all__", None)
             if isinstance(exported, (list, tuple)):
                 missing = [n for n in exported if not hasattr(module, n)]
