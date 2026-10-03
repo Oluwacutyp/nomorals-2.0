@@ -31,7 +31,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+# (timezone resolution lives in nomorals.core.tz.safe_zoneinfo — it never
+# raises, even when the tz database is absent, e.g. Termux without tzdata)
 
 from ..core.logging_setup import get_logger
 
@@ -500,11 +501,12 @@ def owner_tz(settings: Any = None) -> str:
     return os.environ.get("TZ", "UTC")
 
 
-def _zone(name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError, TypeError):
-        return ZoneInfo("UTC")
+def _zone(name: str):
+    """tzinfo for ``name``; never raises — falls back to fixed UTC when the
+    tz database is absent (e.g. Termux without tzdata)."""
+    from ..core.tz import safe_zoneinfo
+
+    return safe_zoneinfo(name)
 
 
 def now_in_tz(tz_name: str) -> datetime:

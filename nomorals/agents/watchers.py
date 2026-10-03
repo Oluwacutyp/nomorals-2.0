@@ -1171,12 +1171,8 @@ def _in_quiet_hours(quiet_hours: dict[str, Any], now: float,
     if not start or not end:
         return False
     tz_name = str(quiet_hours.get("tz") or _owner_timezone(context) or "UTC")
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(tz_name)
-    except Exception:  # noqa: BLE001 — bad tz never breaks alerting
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo("UTC")
+    from ..core.tz import safe_zoneinfo
+    tz = safe_zoneinfo(tz_name)
     import datetime as _dt
 
     local = _dt.datetime.fromtimestamp(now, tz=tz)
