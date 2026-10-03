@@ -405,6 +405,16 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         attach_learning(router, db=db)
     except Exception:  # noqa: BLE001
         _log.warning("learning attach failed; continuing without it", exc_info=True)
+    # Capability-based routing: attach a ModelBroker so the router can select
+    # the best provider per operation (not just failover order).
+    # Best-effort — broker must never break boot or routing.
+    try:
+        from ..llm.broker import ModelBroker
+        broker = ModelBroker()
+        broker.build_from_router(router)
+        router.set_broker(broker)
+    except Exception:  # noqa: BLE001
+        _log.warning("broker attach failed; continuing without it", exc_info=True)
     return router
 
 
