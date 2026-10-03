@@ -375,5 +375,28 @@ class ToolRegistrationTests(unittest.TestCase):
         self.assertEqual(out.value["max_words"], mb.MAX_WORDS)
 
 
+class AbstractBaseTests(unittest.TestCase):
+    """The _Provider base is a real abstract interface: instantiating it
+    fails fast, and every concrete provider still instantiates."""
+
+    def test_base_provider_not_instantiable(self):
+        with self.assertRaises(TypeError):
+            mb._Provider()
+
+    def test_all_builtin_providers_instantiable(self):
+        subs = [c for c in vars(mb).values()
+                if isinstance(c, type) and issubclass(c, mb._Provider)
+                and c is not mb._Provider]
+        self.assertGreater(len(subs), 0)
+        for cls in subs:
+            cls()  # must not raise: each overrides collect
+
+    def test_abstract_collect_enforced(self):
+        class Bad(mb._Provider):
+            pass
+        with self.assertRaises(TypeError):
+            Bad()
+
+
 if __name__ == "__main__":
     unittest.main()

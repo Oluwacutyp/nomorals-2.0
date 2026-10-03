@@ -26,6 +26,7 @@ Staking = fractional Kelly, capped.  Everything is seeded and reproducible.
 
 from __future__ import annotations
 
+import abc
 import json
 import math
 import os
@@ -355,11 +356,13 @@ class PoissonModel:
 
 # ── base models ──────────────────────────────────────────────────────────────
 
-class _Base:
+class _Base(abc.ABC):
+    """Abstract prediction model: ``probs(home, away, ctx) -> 1X2 tuple``."""
     name = "base"
 
+    @abc.abstractmethod
     def probs(self, home: str, away: str, ctx: dict) -> tuple:
-        raise NotImplementedError
+        """Return (p_home, p_draw, p_away)."""
 
 
 class EloModel(_Base):
@@ -768,13 +771,17 @@ def default_store(bet_dir: str = "") -> BetStore:
 
 # ── odds fetchers (pluggable; manual works with no keys) ─────────────────────
 
-class OddsFetcher:
-    """Fetch upcoming fixtures + odds.  Subclass per provider."""
+class OddsFetcher(abc.ABC):
+    """Fetch upcoming fixtures + odds.  Subclass per provider.
+
+    Abstract — subclass and implement :meth:`fetch`.  :meth:`available`
+    stays concrete so providers can report (ok, reason) without fetching.
+    """
     name = "base"
 
+    @abc.abstractmethod
     def fetch(self, league: str = "", limit: int = 20) -> list:
         """Return [(Fixture, [OddsSnapshot])]."""
-        raise NotImplementedError
 
     def available(self) -> tuple:
         return (True, "ok")

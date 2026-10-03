@@ -793,5 +793,28 @@ class CliTests(unittest.TestCase):
         self.assertIn("threshold", proc.stdout.lower())
 
 
+class AbstractBaseTests(unittest.TestCase):
+    """_KindChecker is a real abstract interface: the base fails fast on
+    instantiation, and all six concrete kinds still instantiate."""
+
+    def test_kind_checker_base_not_instantiable(self):
+        with self.assertRaises(TypeError):
+            W._KindChecker()
+
+    def test_all_builtin_kinds_instantiable(self):
+        subs = [c for c in vars(W).values()
+                if isinstance(c, type) and issubclass(c, W._KindChecker)
+                and c is not W._KindChecker]
+        self.assertEqual(len(subs), 6)
+        for cls in subs:
+            cls()  # must not raise: each overrides check
+
+    def test_abstract_check_enforced(self):
+        class Bad(W._KindChecker):
+            pass
+        with self.assertRaises(TypeError):
+            Bad()
+
+
 if __name__ == "__main__":
     unittest.main()
