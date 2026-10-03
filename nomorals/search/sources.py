@@ -168,11 +168,14 @@ class BooksAdapter(SourceAdapter):
                 provenance={
                     "book": h.book,
                     "title": h.title,
+                    "author": getattr(h, "author", ""),
                     "chapter": h.chapter,
+                    "chapter_number": getattr(h, "chapter_number", 0),
                     "book_slug": h.book_slug,
                     "match": h.source,
+                    "ingested_at": getattr(h, "ingested_at", 0.0),
                 },
-                timestamp=None,  # the library stores no timestamps
+                timestamp=getattr(h, "ingested_at", 0.0) or None,
                 source_id=f"book:{h.book_slug}:{h.chapter}",
             ))
         return out

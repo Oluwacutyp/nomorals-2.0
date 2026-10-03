@@ -20,9 +20,10 @@ import random
 import re
 from typing import Any
 
-from ..ai import GameMind
+from ..ai import GameMind, reversi_move
 from ..players import Player
-from .base import MultiGame, Room
+from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
+                   normalize_difficulty)
 
 __all__ = ["INBOX_GAMES"]
 
@@ -79,10 +80,15 @@ def _gomoku_wins(grid: list[list[str]], r: int, c: int, side: str) -> bool:
 
 
 def _gomoku_house_move(grid: list[list[str]],
-                       rng: random.Random) -> tuple[int, int] | None:
+                       rng: random.Random,
+                       difficulty: str = "normal"
+                       ) -> tuple[int, int] | None:
     """Win if we can, block if we must, otherwise play the most
     pressuring empty cell (longest threat through it, centre-biased).
-    Deterministic given the room's rng."""
+    On hard/expert the house also reads one move ahead: each candidate
+    is scored minus the opponent's best reply, so it spots double
+    threats and doesn't walk into forks. Deterministic given the
+    room's rng."""
     empties = [(r, c) for r in range(_GOMOKU_SIZE)
                for c in range(_GOMOKU_SIZE) if not grid[r][c]]
     if not empties:
@@ -106,15 +112,36 @@ def _gomoku_house_move(grid: list[list[str]],
                 if (0 <= rr < _GOMOKU_SIZE and 0 <= cc < _GOMOKU_SIZE
                         and not grid[rr][cc]):
                     near.add((rr, cc))
-    scored: list[tuple[float, int, int]] = []
-    for r, c in near:
+
+    def pressure(r: int, c: int) -> float:
         grid[r][c] = "W"
         w = _gomoku_run(grid, r, c, "W")
         grid[r][c] = "B"
         b = _gomoku_run(grid, r, c, "B")
         grid[r][c] = ""
         centre = 7 - (abs(r - 7) + abs(c - 7)) / 2.0
-        scored.append((w * 10.0 + b * 9.0 + centre, r, c))
+        return w * 10.0 + b * 9.0 + centre
+
+    lookahead = difficulty in ("hard", "expert")
+    scored: list[tuple[float, int, int]] = []
+    for r, c in near:
+        val = pressure(r, c)
+        if lookahead:
+            # their best reply after our move — subtract it
+            grid[r][c] = "W"
+            reply = 0.0
+            for rr, cc in near:
+                if (rr, cc) == (r, c) or grid[rr][cc]:
+                    continue
+                grid[rr][cc] = "B"
+                b = _gomoku_run(grid, rr, cc, "B")
+                grid[rr][cc] = ""
+                reply = max(reply, b * 9.0)
+                if reply >= 40.0:  # they make five next — dead move
+                    break
+            grid[r][c] = ""
+            val -= reply
+        scored.append((val, r, c))
     scored.sort(key=lambda t: t[0], reverse=True)
     top = scored[0][0]
     tied = [(r, c) for s, r, c in scored if s == top]
@@ -129,20 +156,24 @@ class GomokuGame(MultiGame):
     ai_seats = 1
     move_timeout = 0          # inbox game: no per-turn clock
     idle_ttl = INBOX_IDLE_TTL  # …the table waits up to a week
+    difficulties = DIFFICULTY_LEVELS
     rules = ("15×15 board. You're ● (black, first), the house is ○. "
              "Say a square like h8 (columns a–o, rows 1–15) — one move "
              "per message, whenever you like. Five in a row, any "
              "direction, wins. No clock: the table stays open a week "
              "between moves.")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         return {"grid": [[""] * _GOMOKU_SIZE for _ in range(_GOMOKU_SIZE)],
-                "moves": 0, "over": False, "winner": ""}
+                "moves": 0, "over": False, "winner": "",
+                "difficulty": normalize_difficulty(difficulty)}
 
     def setup(self, room: Room, mind: GameMind) -> str:
         return ("gomoku — five in a row wins. you're ●, the house is ○. "
                 "say a square like h8 (a–o, 1–15). no clock — play "
-                "whenever.")
+                "whenever. set the house's strength: /game gomoku "
+                "[easy|normal|hard|expert].")
 
     def _board(self, room: Room) -> str:
         g = room.state["grid"]
@@ -184,7 +215,8 @@ class GomokuGame(MultiGame):
         if self._place(room, r, c, "B"):
             out.append(self._board(room))
             return out
-        hm = _gomoku_house_move(s["grid"], self.rng(room))
+        hm = _gomoku_house_move(s["grid"], self.rng(room),
+                                self.difficulty(room))
         if hm is not None:
             hr, hc = hm
             out.append(f"○ {chr(ord('a') + hc)}{hr + 1}.")
@@ -289,19 +321,32 @@ class ReversiGame(MultiGame):
     ai_seats = 1
     move_timeout = 0
     idle_ttl = INBOX_IDLE_TTL
+    difficulties = DIFFICULTY_LEVELS
     rules = ("8×8 othello. You're ● (black, first), the house is ○. Say a "
              "square like d3 — it must outflank at least one white disc in "
              "a straight line (every line you close flips to your colour). "
              "No legal move? You pass automatically. Most discs when nobody "
-             "can move wins. No clock — the table waits a week.")
+             "can move wins. No clock — the table waits a week. Set the "
+             "house's strength: /game reversi [easy|normal|hard|expert].")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         grid = [[""] * _REVERSI_SIZE for _ in range(_REVERSI_SIZE)]
         grid[3][3] = "W"
         grid[4][4] = "W"
         grid[3][4] = "B"
         grid[4][3] = "B"
-        return {"grid": grid, "moves": 0, "over": False, "winner": ""}
+        return {"grid": grid, "moves": 0, "over": False, "winner": "",
+                "difficulty": normalize_difficulty(difficulty)}
+
+    @staticmethod
+    def _apply_grid(grid: list[list[str]], r: int, c: int,
+                    side: str) -> None:
+        """Apply a placement to a bare grid (used by the AI's lookahead)."""
+        flips = _reversi_flips(grid, r, c, side)
+        grid[r][c] = side
+        for fr, fc in flips:
+            grid[fr][fc] = side
 
     def setup(self, room: Room, mind: GameMind) -> str:
         return ("reversi — you're ● (black, first). say a square like d3 "
@@ -367,10 +412,15 @@ class ReversiGame(MultiGame):
                 self._close(room)
                 break
             if w_moves:
-                # greedy: most flips, rng breaks ties
-                best = max(mv[2] for mv in w_moves)
-                tied = [(rr, cc) for rr, cc, f in w_moves if f == best]
-                hr, hc = self.rng(room).choice(tied)
+                hm = reversi_move(s["grid"], "W",
+                                  difficulty=self.difficulty(room),
+                                  rng=self.rng(room),
+                                  legal_fn=_reversi_legal,
+                                  apply_fn=self._apply_grid)
+                if hm is None:
+                    out.append("house passes — your move.")
+                    break
+                hr, hc = hm
                 n = self._apply(room, hr, hc, "W")
                 out.append(f"○ {_reversi_sq(hr, hc)} flips {n}.")
                 if self._close(room):
@@ -559,15 +609,18 @@ class CheckersGame(MultiGame):
     ai_seats = 1
     move_timeout = 0
     idle_ttl = INBOX_IDLE_TTL
+    difficulties = DIFFICULTY_LEVELS
     rules = ("English draughts. You're black (b, bottom, moving up), the "
              "house is white (w). Say a move like c3-d4 — captures are "
              "c3-e5, chains c3-e5-g7. Jumps are FORCED: if you can take, "
              "you must, and you must finish the chain (men crown the "
              "moment they reach the far rank, ending the move). Kings "
              "(B/W) step any diagonal way. Take every enemy piece — or "
-             "leave it with no legal move — to win. No clock.")
+             "leave it with no legal move — to win. No clock. Set the "
+             "house's strength: /game checkers [easy|normal|hard|expert].")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         grid = [[""] * 8 for _ in range(8)]
         for r in range(3):
             for c in range(8):
@@ -578,7 +631,39 @@ class CheckersGame(MultiGame):
                 if (r + c) % 2 == 1:
                     grid[r][c] = "w"
         return {"grid": grid, "moves": 0, "over": False, "winner": "",
-                "caps_b": 0, "caps_w": 0}
+                "caps_b": 0, "caps_w": 0,
+                "difficulty": normalize_difficulty(difficulty)}
+
+    def _house_pick(self, room: Room,
+                    moves: list[list[tuple[int, int]]]
+                    ) -> list[tuple[int, int]]:
+        """Difficulty-aware house move: easy wanders, normal takes the
+        longest chain, hard+ also guards its back rank and prefers
+        crowning."""
+        rng = self.rng(room)
+        diff = self.difficulty(room)
+        caps = [p for p in moves if abs(p[1][0] - p[0][0]) == 2]
+        pool = caps or moves
+        if diff == "easy":
+            return rng.choice(pool)
+        best = max(len(p) for p in pool)
+        tied = [p for p in pool if len(p) == best]
+        if diff == "normal":
+            return rng.choice(tied)
+
+        def value(path: list[tuple[int, int]]) -> tuple[int, ...]:
+            g = room.state["grid"]
+            (sr, sc), (er, ec) = path[0], path[-1]
+            piece = g[sr][sc]
+            crown = 1 if (piece == "w" and er == 0) else 0
+            # don't abandon the back rank with a man
+            back = 1 if (piece == "w" and sr == 7 and er != 7) else 0
+            # centralize
+            centre = -abs(ec - 3.5)
+            return (len(path), crown, -back, int(centre * 2))
+
+        top = max(value(p) for p in tied)
+        return rng.choice([p for p in tied if value(p) == top])
 
     def setup(self, room: Room, mind: GameMind) -> str:
         return ("checkers — you're black (b), bottom, moving up. say "
@@ -658,11 +743,7 @@ class CheckersGame(MultiGame):
         # the house replies (captures forced for it too)
         w_moves = _ck_all_moves(s["grid"], "W")
         if w_moves:
-            rng = self.rng(room)
-            caps = [p for p in w_moves if abs(p[1][0] - p[0][0]) == 2]
-            pool = caps or w_moves
-            best = max(len(p) for p in pool)
-            pick = rng.choice([p for p in pool if len(p) == best])
+            pick = self._house_pick(room, w_moves)
             taken = self._apply(room, pick, "W")
             hmv = "-".join(_ck_sq(r, c) for r, c in pick)
             out.append(f"house plays {hmv}"

@@ -15,6 +15,7 @@ from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
 from .commands.book import _cmd_book
+from .commands.books import _cmd_books
 from .commands.briefing import _cmd_briefing
 from .commands.builders import _cmd_build
 from .commands.captcha import _cmd_captcha
@@ -258,6 +259,8 @@ def _dispatch(args: argparse.Namespace) -> int:
 
         if args.command == "book":
             return _cmd_book(args, context)
+        if args.command == "books":
+            return _cmd_books(args, context)
         if args.command == "hub":
             return _cmd_hub(args, context)
         if args.command == "cipher":

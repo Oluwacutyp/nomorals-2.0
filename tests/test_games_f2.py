@@ -70,7 +70,7 @@ class GomokuPlayTests(unittest.TestCase):
         return room
 
     def test_counts(self):
-        self.assertEqual(len(self.engine.games), 39)
+        self.assertEqual(len(self.engine.games), 42)
 
     def test_move_and_house_replies(self):
         room = self._start()
@@ -349,7 +349,11 @@ class InboxAsyncTests(unittest.TestCase):
         self.assertIsNone(MultiGame.idle_ttl)
         # every non-inbox game keeps the engine default
         for name, g in self.engine.games.items():
-            if name in ("gomoku", "reversi", "checkers"):
+            if name in ("gomoku", "reversi", "checkers",
+                        # sudoku is a slow puzzle (no per-turn clock),
+                        # so it brings its own longer TTL like the
+                        # inbox games do
+                        "sudoku"):
                 continue
             self.assertIsNone(g.idle_ttl, name)
 
@@ -490,7 +494,7 @@ class QuitClearsEveryGameTests(unittest.TestCase):
     def test_registry_count(self):
         engine, _db, _sent = make_engine()
         try:
-            self.assertEqual(len(engine.games), 39)
+            self.assertEqual(len(engine.games), 42)
         finally:
             engine.shutdown()
 

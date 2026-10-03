@@ -13,7 +13,8 @@ from typing import Any
 
 from ..ai import GameMind
 from ..players import Player
-from .base import MultiGame, Room
+from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
+                   normalize_difficulty)
 from .cases import (  # noqa: F401 - CASES kept for back-compat
     CASES,
     HINT_COST,
@@ -1356,13 +1357,21 @@ class QuizDuelGame(MultiGame):
     max_players = 1
     ai_seats = 1
     move_timeout = 15
+    difficulties = DIFFICULTY_LEVELS
     rules = ("You vs the house, rapid fire. 15 seconds a question. "
              "Correct: +1 (streak 2+: +2). First to 5 takes the duel. "
-             "The house answers at 85% and doesn't blink.")
+             "The house answers at 85% on normal — set its brain with "
+             "/game duel [easy|normal|hard|expert].")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    #: house answer accuracy per difficulty
+    DUEL_ACCURACY = {"easy": 0.60, "normal": 0.85, "hard": 0.94,
+                     "expert": 0.99}
+
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         return {"questions": rng.sample(list(TRIVIA), 20), "idx": 0,
-                "points": {}, "streak": {}, "target": 5, "done": False}
+                "points": {}, "streak": {}, "target": 5, "done": False,
+                "difficulty": normalize_difficulty(difficulty)}
 
     def setup(self, room, mind):
         q, _ = room.state["questions"][0]
@@ -1421,7 +1430,8 @@ class QuizDuelGame(MultiGame):
     def ai_turn(self, room, mind):
         s = room.state
         q, a = s["questions"][s["idx"]]
-        correct = mind.rng.random() < 0.85
+        accuracy = self.DUEL_ACCURACY.get(self.difficulty(room), 0.85)
+        correct = mind.rng.random() < accuracy
         out: list[str] = []
         if correct:
             s["streak"][room.current.key] = \

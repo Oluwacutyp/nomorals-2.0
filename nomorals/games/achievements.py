@@ -74,6 +74,43 @@ ACHIEVEMENTS: tuple[Achievement, ...] = (
     Achievement("blackjack_21", "Perfect 21", "Hit exactly 21 in Blackjack", "rare"),
     Achievement("roulette_number", "Lucky Number", "Win a straight-up number bet in Roulette", "epic"),
     Achievement("slots_jackpot", "Jackpot!", "Hit three diamonds in Slots", "legendary"),
+    # Sudoku
+    Achievement("sudoku_win", "Grid Filler", "Solve a Sudoku", "common"),
+    Achievement("sudoku_hard", "Puzzle Master", "Solve a hard/expert Sudoku", "epic"),
+    Achievement("sudoku_clean", "Flawless Logic", "Solve a Sudoku with no strikes and no hints", "rare"),
+    # Anagram
+    Achievement("anagram_win", "Word Unscrambler", "Win an Anagram match", "common"),
+    Achievement("anagram_ace", "Perfect Rounds", "Win every round of an Anagram match", "epic"),
+    # Cryptogram
+    Achievement("cryptogram_win", "Master Codebreaker", "Win a Cryptogram match", "common"),
+    Achievement("cryptogram_perfect", "Clean Decode", "Crack a quote with no wrong letter guesses", "rare"),
+    # Wordle / Mines / Memory / Craps
+    Achievement("wordle_win", "Five-Letter Sleuth", "Solve a Wordle", "common"),
+    Achievement("wordle_ace", "Three and Done", "Solve a Wordle in 3 guesses or fewer", "rare"),
+    Achievement("mines_win", "Mine Sweeper", "Clear a Minesweeper board", "rare"),
+    Achievement("memory_win", "Total Recall", "Find every pair in Concentration", "common"),
+    Achievement("memory_sharp", "Eagle Eyes", "Win Concentration in 24 moves or fewer", "rare"),
+    Achievement("craps_win", "Hot Roller", "Finish a Craps table on top", "common"),
+    Achievement("craps_high_roller", "High Roller", "Finish Craps with 200+ chips", "epic"),
+    # Inbox classics
+    Achievement("reversi_win", "Flank Master", "Win a game of Reversi", "common"),
+    Achievement("checkers_win", "Crowned", "Win a game of Checkers", "common"),
+    Achievement("gomoku_win", "Five Alive", "Win a game of Gomoku", "common"),
+    # Duel / trivia / ttt
+    Achievement("duel_win", "Duelist", "Win a Quiz Duel", "common"),
+    Achievement("duel_flawless", "Untouchable", "Win a Quiz Duel 5–0", "epic"),
+    Achievement("trivia_win", "Quiz Night Champion", "Win a Trivia Royale", "common"),
+    Achievement("ttt_draw", "Held the Line", "Draw against the perfect Tic-Tac-Toe house", "rare"),
+    # Social deduction & co.
+    Achievement("mafia_win", "Survivor", "Survive the Mafia's five nights", "rare"),
+    Achievement("escape_win", "Escapist", "Escape the room", "rare"),
+    Achievement("political_win", "Landslide", "Win the Political campaign", "rare"),
+    Achievement("spy_win", "Double Agent", "Win a game of Spy", "common"),
+    Achievement("auction_win", "Top Bidder", "Win the Auction on profit", "common"),
+    Achievement("twentyq_win", "Mind Reader", "Win a game of 20 Questions", "common"),
+    Achievement("bulls_win", "Code Cracker", "Crack the Bulls & Cows code", "common"),
+    Achievement("numberguess_win", "Sharpshooter", "Win the Number Guess battle", "common"),
+    Achievement("king_win", "Hill King", "Win King of the Hill", "common"),
 )
 
 

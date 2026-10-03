@@ -36,6 +36,7 @@ class RuntimeGamesMixin:
                     f"live game: {live.game} — send your move (or /game quit)")
             lines.append(engine.list_games())
             lines.append("  /game <name> — start · /game rematch — run it back")
+            lines.append("  /game <name> [easy|normal|hard|expert] — AI/puzzle difficulty")
             lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
             return "\n".join(lines)
         if verb == "quit":
@@ -137,12 +138,18 @@ class RuntimeGamesMixin:
                 return "start a game from a chat — I need to know who's at the table."
             # "/hangman daily" — same word for everyone, all day
             # "/game case timed" — countdown mode with a speed bonus
+            # "/game connect4 hard" — AI/puzzle difficulty
             words = [p.lower() for p in parts[1:]]
             daily = "daily" in words
             timed = "timed" in words
+            difficulty = next(
+                (w for w in words
+                 if w in ("easy", "normal", "hard", "expert")),
+                "normal")
             try:
                 room, msgs = engine.start(chat_key, verb, player, kind=kind,
-                                          daily=daily, timed=timed)
+                                          daily=daily, timed=timed,
+                                          difficulty=difficulty)
             except ValueError as exc:
                 return str(exc)
             if msgs and not msgs[0].startswith("🎮"):
@@ -154,7 +161,7 @@ class RuntimeGamesMixin:
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.
 
-        The multi-player engine owns every game (39 and counting, every
+        The multi-player engine owns every game (42 and counting, every
         platform). Relay rooms (DM-to-DM multiplayer) are checked first.
         """
         try:

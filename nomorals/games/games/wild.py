@@ -5,8 +5,9 @@ not a stub of a game:
 
 * poker    — texas hold'em vs the house: a real 7-card hand evaluator,
              blinds, betting rounds, all-ins, side pot
-* ttt      — tic-tac-toe vs a perfect-play minimax house (unbeatable,
-             and it takes your first move or the second)
+* ttt      — tic-tac-toe vs the house: perfect-play minimax on
+             normal and up (unbeatable — the best you can do is a draw),
+             a blundering house on easy (beatable: the legend is real)
 * bulls    — bulls & cows: the house solves a 4-digit code with a real
              candidate-elimination algorithm, you solve its code
 * craps    — full pass-bet craps: come-out roll, the point phase,
@@ -31,7 +32,8 @@ from typing import Any
 
 from ..ai import GameMind
 from ..players import Player
-from .base import MultiGame, Room
+from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
+                   normalize_difficulty)
 
 __all__ = ["WILD_GAMES"]
 
@@ -445,7 +447,8 @@ def _ttt_win(board: tuple[str, ...]) -> str:
 def _ttt_minimax(board: list[str], turn: str, me: str,
                  depth: int) -> tuple[int, int]:
     """Return (score, move). score: +10-depth win for me, -10+depth loss,
-    0 draw. The house plays ``me``; it never loses."""
+    0 draw. The house plays ``me``; it never loses. True minimax: our
+    nodes maximize, the opponent's nodes minimize."""
     winner = _ttt_win(tuple(board))
     if winner == me:
         return 10 - depth, -1
@@ -453,7 +456,19 @@ def _ttt_minimax(board: list[str], turn: str, me: str,
         return -10 + depth, -1
     if all(board):
         return 0, -1
-    best = (-99, -1)
+    if turn == me:
+        best = (-99, -1)
+        for i, cell in enumerate(board):
+            if cell:
+                continue
+            board[i] = turn
+            sc, _ = _ttt_minimax(board, "O" if turn == "X" else "X",
+                                 me, depth + 1)
+            board[i] = ""
+            if sc > best[0]:
+                best = (sc, i)
+        return best
+    best = (99, -1)
     for i, cell in enumerate(board):
         if cell:
             continue
@@ -461,27 +476,43 @@ def _ttt_minimax(board: list[str], turn: str, me: str,
         sc, _ = _ttt_minimax(board, "O" if turn == "X" else "X",
                              me, depth + 1)
         board[i] = ""
-        if sc > best[0]:
+        if sc < best[0]:
             best = (sc, i)
     return best
 
 
 class TicTacToeGame(MultiGame):
     name = "ttt"
-    description = "tic-tac-toe vs a perfect-play house — it never loses"
+    description = "tic-tac-toe vs the house — perfect on normal+"
     min_players = 1
     max_players = 2
     ai_seats = 1
     move_timeout = 60
+    difficulties = DIFFICULTY_LEVELS
     rules = ("3×3, you are X, the house is O. Say a square 1–9 (or "
-             "'c' center, 'c1'–'c3' corners, 'e1'–'e4' edges). The house "
-             "plays perfect minimax: the best you can do is a draw. "
-             "Beating it is a legend.")
+             "'c' center, 'c1'–'c3' corners, 'e1'–'e4' edges). On "
+             "normal and up the house plays perfect minimax: the best "
+             "you can do is a draw. On easy it blunders sometimes — "
+             "beating it is the legend. /game ttt [easy|normal|hard|expert].")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         board = [""] * 9
         return {"board": board, "turn": "X", "over": False,
-                "winner": "", "moves": 0}
+                "winner": "", "moves": 0,
+                "difficulty": normalize_difficulty(difficulty)}
+
+    def _house_move(self, room: Room) -> int:
+        """The house's square: perfect minimax on normal+, a blundering
+        house on easy (35% random legal move — beatable, but it still
+        takes its wins)."""
+        s = room.state
+        if (self.difficulty(room) == "easy"
+                and self.rng(room).random() < 0.35):
+            open_squares = [i for i, c in enumerate(s["board"]) if not c]
+            return self.rng(room).choice(open_squares)
+        _sc, move = _ttt_minimax(list(s["board"]), "O", "O", 0)
+        return move
 
     def setup(self, room, mind):
         return ("tic-tac-toe — you're X, the house is O. say 1–9. "
@@ -523,7 +554,7 @@ class TicTacToeGame(MultiGame):
         if self._finish(room):
             return out
         # house replies
-        sc, move = _ttt_minimax(list(s["board"]), "O", "O", 0)
+        move = self._house_move(room)
         s["board"][move] = "O"
         s["moves"] += 1
         out.append(f"house takes {move+1}.")

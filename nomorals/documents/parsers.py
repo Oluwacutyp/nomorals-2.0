@@ -1,10 +1,10 @@
 """Parsers: bytes/path in any supported format -> :class:`Document`.
 
 Format detection order: file extension first, then magic bytes
-(PDF ``%PDF``, RTF ``{\\rtf``, ZIP ``PK`` for the OOXML/ODF/EPUB family
-with content sniffing), then the explicit ``mime`` hint, then a plain-text
-fallback.  Anything else raises :class:`DocumentError` — the engine never
-returns a silently-empty Document.
+(PDF ``%PDF``, ZIP ``PK`` for the OOXML family with ``[Content_Types].xml``
+sniffing), then the explicit ``mime`` hint, then a plain-text fallback.
+Anything else raises :class:`DocumentError` — the engine never returns a
+silently-empty Document.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from ..core.pdf import PdfError, read_pdf_text
 from ..tools.browser import node_to_markdown, parse_html
 from .errors import DocumentError
 from .model import Document, Section, Table, new_document
-from .pdf_tables import extract_text_tables
 
 __all__ = ["parse_bytes", "parse_path"]
 
@@ -44,6 +43,7 @@ _ZIP_MAGIC = b"PK\x03\x04"
 
 _EXTENSIONS = {
     ".pdf": "pdf",
+    ".epub": "epub",
     ".docx": "docx",
     ".xlsx": "xlsx",
     ".pptx": "pptx",
@@ -54,22 +54,14 @@ _EXTENSIONS = {
     ".csv": "csv",
     ".tsv": "tsv",
     ".txt": "txt",
-    ".rtf": "rtf",
-    ".epub": "epub",
-    ".odt": "odt",
-    ".ods": "ods",
 }
 
 _MIMES = {
     "application/pdf": "pdf",
+    "application/epub+zip": "epub",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
-    "application/rtf": "rtf",
-    "text/rtf": "rtf",
-    "application/epub+zip": "epub",
-    "application/vnd.oasis.opendocument.text": "odt",
-    "application/vnd.oasis.opendocument.spreadsheet": "ods",
     "text/html": "html",
     "text/markdown": "markdown",
     "text/x-markdown": "markdown",
@@ -113,29 +105,12 @@ def _promote_title(doc: Document) -> None:
 
 
 def _sniff_zip(data: bytes) -> str:
-    """Identify the ZIP-based flavour inside an archive."""
+    """Identify the flavour inside a ZIP archive (EPUB or OOXML)."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = set(archive.namelist())
-            # OpenDocument (ODT/ODS): the spec mandates a leading "mimetype" entry.
-            if "mimetype" in names:
-                try:
-                    mime = archive.read("mimetype").decode("ascii", "replace").strip()
-                except Exception:  # noqa: BLE001 - fall through to other probes
-                    mime = ""
-                if mime == "application/vnd.oasis.opendocument.text":
-                    return "odt"
-                if mime == "application/vnd.oasis.opendocument.spreadsheet":
-                    return "ods"
-            # EPUB: META-INF/container.xml points at the OPF package file.
-            if "META-INF/container.xml" in names:
-                try:
-                    container = archive.read("META-INF/container.xml").decode(
-                        "utf-8", "replace")
-                    if ".opf" in container:
-                        return "epub"
-                except Exception:  # noqa: BLE001 - fall through to other probes
-                    pass
+            if "META-INF/container.xml" in names or "mimetype" in names:
+                return "epub"
             try:
                 types_xml = archive.read("[Content_Types].xml").decode("utf-8", "replace")
             except KeyError:
@@ -148,9 +123,107 @@ def _sniff_zip(data: bytes) -> str:
                     return fmt
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"not a readable ZIP archive: {exc}") from exc
-    raise DocumentError(
-        "ZIP archive is not a recognized document "
-        "(docx/xlsx/pptx/odt/ods/epub)")
+    raise DocumentError("ZIP archive is not a recognized document (epub/docx/xlsx/pptx)")
+
+
+def _epub_opf_path(archive: zipfile.ZipFile, names: set[str]) -> str:
+    """Locate the OPF package file via META-INF/container.xml."""
+    if "META-INF/container.xml" in names:
+        try:
+            container = archive.read("META-INF/container.xml").decode(
+                "utf-8", "replace")
+            root = ET.fromstring(container)
+        except ET.ParseError:
+            root = None  # fall through to the .opf filename scan
+        if root is not None:
+            for el in root.iter():
+                if el.tag.endswith("rootfile"):
+                    path = el.get("full-path", "")
+                    if path:
+                        return path
+    for name in sorted(names):
+        if name.lower().endswith(".opf"):
+            return name
+    raise DocumentError("EPUB has no OPF package file")
+
+
+def _parse_epub(data: bytes, doc: Document) -> Document:
+    """EPUB: spine-ordered XHTML → markdown sections.
+
+    Reads META-INF/container.xml for the OPF, then walks the spine in
+    reading order, converting each XHTML content document with the same
+    HTML→markdown machinery used for plain HTML files.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DocumentError(f"EPUB is not a readable ZIP: {exc}") from exc
+    with archive:
+        names = set(archive.namelist())
+        opf_path = _epub_opf_path(archive, names)
+        try:
+            opf_xml = archive.read(opf_path).decode("utf-8", "replace")
+            opf = ET.fromstring(opf_xml)
+        except (ET.ParseError, KeyError) as exc:
+            raise DocumentError(f"EPUB package file unreadable: {exc}") from exc
+        base = opf_path.rpartition("/")[0]
+        prefix = f"{base}/" if base else ""
+
+        def _text(tag: str) -> str:
+            for el in opf.iter():
+                if el.tag.endswith(tag) and el.text and el.text.strip():
+                    return el.text.strip()
+            return ""
+
+        title = _text("title")
+        creator = _text("creator")
+        manifest: dict[str, str] = {}
+        for el in opf.iter():
+            if el.tag.endswith("manifest"):
+                for item in el:
+                    iid = item.get("id", "")
+                    href = item.get("href", "")
+                    if iid and href:
+                        manifest[iid] = href
+                break
+        spine: list[str] = []
+        for el in opf.iter():
+            if el.tag.endswith("spine"):
+                for ref in el:
+                    iid = ref.get("idref", "")
+                    if iid in manifest:
+                        spine.append(manifest[iid])
+                break
+        if not spine:
+            raise DocumentError("EPUB spine is empty — no readable content")
+
+        markdown_parts: list[str] = []
+        for href in spine:
+            name = prefix + href
+            if name not in names:
+                continue
+            raw = archive.read(name)
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            try:
+                root = parse_html(text)
+            except Exception:  # noqa: BLE001 - one bad page must not kill the book
+                continue
+            bodies = root.find_all("body")
+            md = node_to_markdown(bodies[0] if bodies else root)
+            if md.strip():
+                markdown_parts.append(md.strip())
+        if not markdown_parts:
+            raise DocumentError("EPUB has no readable content")
+        if title:
+            doc.title = title
+        if creator:
+            doc.author = creator
+        doc.sections = _parse_markdown_sections("\n\n".join(markdown_parts))
+        _promote_title(doc)
+        return doc
 
 
 def _sniff(data: bytes, filename: str, mime: str) -> str:
@@ -166,8 +239,6 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
         return "pdf"
     if data[:4] == _ZIP_MAGIC:
         return _sniff_zip(data)
-    if data.lstrip()[:5] == b"{\\rtf":
-        return "rtf"
     if mime:
         fmt = _MIMES.get(mime.split(";")[0].strip().lower())
         if fmt:
@@ -230,105 +301,6 @@ def _parse_markdown_sections(text: str) -> list[Section]:
 # ── per-format parsers ──────────────────────────────────────────────────────
 
 
-_PDF_INFO_KEY_RE = re.compile(rb"/(Title|Author|Subject|Keywords|Creator|Producer|CreationDate|ModDate)")
-_PDF_LITERAL_RE = re.compile(rb"\((?:\\.|[^()\\])*\)")
-_PDF_HEX_RE = re.compile(rb"<([0-9A-Fa-f\s]+)>")
-
-
-def _pdf_unescape_string(raw: bytes) -> str:
-    """Decode a PDF literal string ``( ... )`` (escapes + octal codes)."""
-    body = raw[1:-1]
-    out: list[str] = []
-    i, n = 0, len(body)
-    simple = {ord("n"): "\n", ord("r"): "\r", ord("t"): "\t", ord("b"): "\b",
-              ord("f"): "\f", ord("\\"): "\\", ord("("): "(", ord(")"): ")"}
-    while i < n:
-        byte = body[i]
-        if byte != 0x5C or i + 1 >= n:  # not a backslash escape
-            out.append(chr(byte))
-            i += 1
-            continue
-        nxt = body[i + 1]
-        if nxt in simple:
-            out.append(simple[nxt])
-            i += 2
-        elif nxt in (0x0A, 0x0D):  # line continuation: drop
-            i += 2
-            if nxt == 0x0D and i < n and body[i] == 0x0A:
-                i += 1
-        elif 0x30 <= nxt <= 0x37:  # octal \ddd
-            digits = body[i + 1:i + 4]
-            count = 0
-            for digit in digits:
-                if 0x30 <= digit <= 0x37:
-                    count += 1
-                else:
-                    break
-            out.append(chr(int(digits[:count], 8) & 0xFF))
-            i += 1 + count
-        else:
-            out.append(chr(nxt))
-            i += 2
-    return "".join(out)
-
-
-def _pdf_info(data: bytes) -> dict[str, str]:
-    """Extract the PDF /Info dictionary (title/author/dates), best effort.
-
-    Returns {} when the trailer has no /Info entry or it cannot be read —
-    metadata is a bonus, never a failure.
-    """
-    info_ref = re.search(rb"/Info\s+(\d+)\s+\d+\s+R", data)
-    if not info_ref:
-        return {}
-    obj = re.search(rb"\b" + info_ref.group(1) + rb"\s+\d+\s+obj(.*?)endobj",
-                    data, re.DOTALL)
-    if not obj:
-        return {}
-    body = obj.group(1)
-    out: dict[str, str] = {}
-    for key_match in _PDF_INFO_KEY_RE.finditer(body):
-        key = key_match.group(1).decode("ascii")
-        rest = body[key_match.end():]
-        literal = _PDF_LITERAL_RE.match(rest.lstrip())
-        if literal is not None:
-            out[key] = _pdf_unescape_string(literal.group(0))
-            continue
-        hexed = _PDF_HEX_RE.match(rest.lstrip())
-        if hexed is not None:
-            try:
-                raw_hex = re.sub(rb"\s", b"", hexed.group(1))
-                decoded = bytes.fromhex(raw_hex.decode("ascii"))
-                if decoded[:2] == b"\xfe\xff":
-                    out[key] = decoded[2:].decode("utf-16-be", "replace")
-                else:
-                    out[key] = decoded.decode("latin-1", "replace")
-            except (ValueError, UnicodeDecodeError):
-                # A corrupt hex Info value is best-effort metadata, not a
-                # parse failure: skip the key and keep the document.
-                _log.debug("unreadable hex PDF Info value for %s", key)
-    for date_key in ("CreationDate", "ModDate"):
-        raw = out.get(date_key, "")
-        parsed = _pdf_date_to_iso(raw)
-        if parsed:
-            out[date_key] = parsed
-    return out
-
-
-def _pdf_date_to_iso(raw: str) -> str:
-    """``D:20261003120000+02'00'`` -> ``2026-10-03T12:00:00``; '' on failure."""
-    match = re.match(
-        r"D:(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?", raw.strip())
-    if not match:
-        return ""
-    year, mon, day, hour, minute, second = match.groups()
-    try:
-        return (f"{year}-{mon or '01'}-{day or '01'}"
-                f"T{hour or '00'}:{minute or '00'}:{second or '00'}")
-    except (TypeError, ValueError):
-        return ""
-
-
 def _parse_pdf(data: bytes, doc: Document) -> Document:
     try:
         text = read_pdf_text(data)
@@ -341,25 +313,7 @@ def _parse_pdf(data: bytes, doc: Document) -> Document:
     pages = [p for p in text.split("\n\n") if p.strip()]
     doc.sections = [Section(level=1, heading=f"Page {i + 1}", text=page)
                     for i, page in enumerate(pages)]
-    # Recover whitespace-aligned tables from the page text (conservative:
-    # only consistent columnar blocks become tables).
-    for i, page in enumerate(pages):
-        for table in extract_text_tables(page):
-            table.name = f"Page {i + 1} {table.name}"
-            doc.tables.append(table)
     doc.metadata["pages"] = len(pages)
-    if doc.tables:
-        doc.metadata["tables"] = len(doc.tables)
-    # PDF document-information dictionary: title/author/dates.
-    info = _pdf_info(data)
-    if info.get("Title"):
-        doc.title = info["Title"]
-    if info.get("Author"):
-        doc.author = info["Author"]
-    for key in ("Subject", "Keywords", "Creator", "Producer",
-                "CreationDate", "ModDate"):
-        if info.get(key):
-            doc.metadata[key.lower()] = info[key]
     return doc
 
 
@@ -382,16 +336,6 @@ def _parse_docx(data: bytes, doc: Document) -> Document:
         doc.title = props.title
     if props.author:
         doc.author = props.author
-    for attr, key in (("keywords", "keywords"), ("comments", "comments"),
-                      ("description", "description"),
-                      ("last_modified_by", "last_modified_by")):
-        value = getattr(props, attr, None)
-        if value:
-            doc.metadata[key] = str(value)
-    for attr, key in (("created", "created"), ("modified", "modified")):
-        value = getattr(props, attr, None)
-        if value is not None and hasattr(value, "isoformat"):
-            doc.metadata[key] = value.isoformat()
 
     word_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     sections: list[Section] = []
@@ -471,15 +415,6 @@ def _parse_xlsx(data: bytes, doc: Document) -> Document:
         doc.title = props.title
     if getattr(props, "creator", None):
         doc.author = props.creator
-    for attr, key in (("keywords", "keywords"), ("description", "description"),
-                      ("lastModifiedBy", "last_modified_by")):
-        value = getattr(props, attr, None)
-        if value:
-            doc.metadata[key] = str(value)
-    for attr, key in (("created", "created"), ("modified", "modified")):
-        value = getattr(props, attr, None)
-        if value is not None and hasattr(value, "isoformat"):
-            doc.metadata[key] = value.isoformat()
 
     for sheet in workbook.worksheets:
         grid = [[_cell_text(cell.value) for cell in row]
@@ -645,420 +580,15 @@ def _parse_txt(data: bytes, doc: Document) -> Document:
     return doc
 
 
-# ── RTF (stdlib-only) ───────────────────────────────────────────────────────
-
-#: Destination groups whose content is formatting, not prose.
-_RTF_SKIP_DESTINATIONS = frozenset({
-    "fonttbl", "colortbl", "stylesheet", "info", "themedata", "listtable",
-    "listoverridetable", "rsidtbl", "generator", "colorschememapping",
-    "datastore", "header", "footer", "footnote", "annotation", "pict",
-    "shppict", "pnseclvl", "themedata", "latentstyles",
-})
-
-#: One-shot control words that map to literal characters.
-_RTF_SPECIAL = {
-    "par": "\n", "line": "\n", "tab": "\t", "emdash": "\u2014",
-    "endash": "\u2013", "bullet": "\u2022", "lquote": "\u2018",
-    "rquote": "\u2019", "ldblquote": "\u201c", "rdblquote": "\u201d",
-}
-
-_RTF_WORD_RE = re.compile(r"[a-z]+")
-_RTF_NUM_RE = re.compile(r"-?\d+")
-
-
-def _rtf_to_text(data: bytes) -> str:
-    """Extract plain text from RTF markup.
-
-    Handles groups (with ignorable ``{\\*...}`` destinations and known
-    formatting destinations skipped), control words, ``\\uN`` Unicode
-    escapes with their fallback character, and ``\\'hh`` hex escapes.
-    """
-    src = data.decode("latin-1", "replace")  # 1:1 bytes; \'hh handled below
-    out: list[str] = []
-    skip_stack: list[bool] = []  # skip-state of each open group
-    skip = False
-    i, n = 0, len(src)
-    while i < n:
-        ch = src[i]
-        if ch == "{":
-            skip_stack.append(skip)
-            i += 1
-            continue
-        if ch == "}":
-            skip = skip_stack.pop() if skip_stack else False
-            i += 1
-            continue
-        if ch != "\\":
-            # Raw newlines in RTF source are formatting, not content.
-            if not skip and ch not in "\r\n":
-                out.append(ch)
-            i += 1
-            continue
-        i += 1
-        if i >= n:
-            break
-        esc = src[i]
-        if esc in "\\{}":
-            if not skip:
-                out.append(esc)
-            i += 1
-            continue
-        if esc == "'":
-            hexpair = src[i + 1:i + 3]
-            try:
-                code = int(hexpair, 16)
-            except ValueError:
-                code = 0x3F  # '?'
-            if not skip:
-                out.append(chr(code))
-            i += 3
-            continue
-        if esc == "*":  # ignorable destination group
-            skip = True
-            i += 1
-            continue
-        if esc == "~":
-            if not skip:
-                out.append("\u00a0")
-            i += 1
-            continue
-        if esc in "-_":
-            # \- optional hyphen (dropped); \_ non-breaking hyphen
-            if not skip and esc == "_":
-                out.append("-")
-            i += 1
-            continue
-        word_match = _RTF_WORD_RE.match(src, i)
-        if not word_match:
-            i += 1
-            continue
-        word = word_match.group(0)
-        i = word_match.end()
-        num: int | None = None
-        num_match = _RTF_NUM_RE.match(src, i)
-        if num_match:
-            num = int(num_match.group(0))
-            i = num_match.end()
-        if i < n and src[i] == " ":  # control-word delimiter space
-            i += 1
-        if skip:
-            continue
-        if word in _RTF_SKIP_DESTINATIONS:
-            skip = True
-            continue
-        if word == "u" and num is not None:
-            out.append(chr(num + 65536 if num < 0 else num))
-            # Skip the single fallback character (a char or \'hh).
-            if i < n:
-                if src[i] == "\\" and i + 3 < n and src[i + 1] == "'":
-                    i += 4
-                else:
-                    i += 1
-            continue
-        special = _RTF_SPECIAL.get(word)
-        if special is not None:
-            out.append(special)
-    return "".join(out)
-
-
-def _parse_rtf(data: bytes, doc: Document) -> Document:
-    text = _rtf_to_text(data)
-    blocks = [b.strip() for b in re.split(r"\n{2,}|\r\n{2,}", text) if b.strip()]
-    # Single-newline paragraphs collapse into blocks; stray lone lines that
-    # look like headings are not promoted — RTF carries no heading info.
-    if not blocks:
-        raise DocumentError("RTF document contains no readable text")
-    doc.sections = [Section(level=1, heading="", text=block)
-                    for block in blocks]
-    return doc
-
-
-# ── EPUB (stdlib-only zip + XML) ────────────────────────────────────────────
-
-_OPF_NS = "{http://www.idpf.org/2007/opf}"
-_DC_NS = "{http://purl.org/dc/elements/1.1/}"
-_CONTAINER_NS = "{urn:oasis:names:tc:opendocument:xmlns:container}"
-_EPUB_HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
-
-
-def _localname(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
-
-
-def _xhtml_text(elem: Any) -> str:
-    return "".join(elem.itertext()).strip()
-
-
-def _parse_epub(data: bytes, doc: Document) -> Document:
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise DocumentError(f"invalid .epub file: {exc}") from exc
-    with archive:
-        try:
-            container = ET.fromstring(archive.read("META-INF/container.xml"))
-        except (KeyError, ET.ParseError) as exc:
-            raise DocumentError(f".epub has no readable container.xml: {exc}") from exc
-        rootfile = container.find(f".//{_CONTAINER_NS}rootfile")
-        opf_path = (rootfile.get("full-path", "")
-                    if rootfile is not None else "")
-        if not opf_path or opf_path not in archive.namelist():
-            raise DocumentError(".epub container points to no OPF package file")
-        try:
-            opf = ET.fromstring(archive.read(opf_path))
-        except ET.ParseError as exc:
-            raise DocumentError(f"malformed OPF package file {opf_path}: {exc}") from exc
-        title_node = opf.find(f".//{_OPF_NS}metadata/{_DC_NS}title")
-        if title_node is not None and title_node.text and title_node.text.strip():
-            doc.title = title_node.text.strip()
-        creator_node = opf.find(f".//{_OPF_NS}metadata/{_DC_NS}creator")
-        if (creator_node is not None and creator_node.text
-                and creator_node.text.strip()):
-            doc.author = creator_node.text.strip()
-        manifest = {item.get("id", ""): item.get("href", "")
-                    for item in opf.iter(f"{_OPF_NS}item")}
-        opf_dir = str(Path(opf_path).parent)
-        spine_hrefs: list[str] = []
-        for ref in opf.iter(f"{_OPF_NS}itemref"):
-            href = manifest.get(ref.get("idref", ""), "")
-            if not href:
-                continue
-            full = href if opf_dir in ("", ".") else f"{opf_dir}/{href}"
-            if full in archive.namelist() and \
-                    full.lower().endswith((".xhtml", ".html", ".htm")):
-                spine_hrefs.append(full)
-
-        sections: list[Section] = []
-        current = Section(level=1, heading="", text="")
-        body: list[str] = []
-
-        def flush() -> None:
-            text_out = "\n".join(body).strip()
-            if current.heading or text_out:
-                sections.append(Section(level=current.level,
-                                        heading=current.heading, text=text_out))
-            body.clear()
-
-        def flush_table(table_elem: Any) -> None:
-            grid: list[list[str]] = []
-            for tr in table_elem.iter():
-                if _localname(tr.tag) != "tr":
-                    continue
-                cells = [_xhtml_text(c) for c in tr
-                         if _localname(c.tag) in ("th", "td")]
-                if any(cells):
-                    grid.append(cells)
-            if not grid:
-                return
-            width = max(len(row) for row in grid)
-            grid = [row + [""] * (width - len(row)) for row in grid]
-            doc.tables.append(Table(name=f"Table {len(doc.tables) + 1}",
-                                    headers=grid[0], rows=grid[1:]))
-
-        for href in spine_hrefs:
-            try:
-                chapter = ET.fromstring(archive.read(href))
-            except ET.ParseError as exc:
-                raise DocumentError(
-                    f"malformed chapter {href} in .epub: {exc}") from exc
-            bodies = [e for e in chapter.iter()
-                      if _localname(e.tag) == "body"]
-            scope = bodies[0] if bodies else chapter
-            for elem in scope.iter():
-                tag = _localname(elem.tag)
-                if tag in _EPUB_HEADINGS:
-                    flush()
-                    current = Section(level=_EPUB_HEADINGS[tag],
-                                      heading=_xhtml_text(elem), text="")
-                elif tag == "p":
-                    text = _xhtml_text(elem)
-                    if text:
-                        body.append(text)
-                elif tag == "table":
-                    flush_table(elem)
-    flush()
-    if not sections and not doc.tables:
-        raise DocumentError(".epub contains no readable chapters")
-    doc.sections = sections
-    doc.metadata["chapters"] = len(spine_hrefs)
-    if doc.tables:
-        doc.metadata["tables"] = len(doc.tables)
-    return doc
-
-
-# ── ODT / ODS (stdlib-only zip + XML) ───────────────────────────────────────
-
-_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
-_TEXT_NS = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
-_TABLE_NS = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
-_DC_NS_URI = "http://purl.org/dc/elements/1.1/"
-
-_ODT_OFFICE = f"{{{_OFFICE_NS}}}"
-_ODT_TEXT = f"{{{_TEXT_NS}}}"
-_ODT_TABLE = f"{{{_TABLE_NS}}}"
-_ODT_DC = f"{{{_DC_NS_URI}}}"
-
-
-def _odt_cell_text(cell: Any) -> str:
-    return " ".join(cell.itertext()).strip()
-
-
-def _odt_table_grid(table_elem: Any) -> list[list[str]]:
-    grid: list[list[str]] = []
-    for row in table_elem.iter(f"{_ODT_TABLE}table-row"):
-        cells = [_odt_cell_text(c) for c in row
-                 if _localname(c.tag) in ("table-cell", "covered-table-cell")]
-        if any(cells):
-            grid.append(cells)
-    if not grid:
-        return []
-    width = max(len(row) for row in grid)
-    return [row + [""] * (width - len(row)) for row in grid]
-
-
-class _OdtFlow:
-    """Accumulates ODT flow content (headings/paragraphs/tables) in order."""
-
-    def __init__(self, doc: Document) -> None:
-        self._doc = doc
-        self.sections: list[Section] = []
-        self._current = Section(level=1, heading="", text="")
-        self._body: list[str] = []
-
-    def flush(self) -> None:
-        text_out = "\n".join(self._body).strip()
-        if self._current.heading or text_out:
-            self.sections.append(Section(level=self._current.level,
-                                         heading=self._current.heading,
-                                         text=text_out))
-        self._body.clear()
-
-    def heading(self, level: int, text: str) -> None:
-        if not text:
-            return
-        self.flush()
-        self._current = Section(level=min(max(level, 1), 6),
-                                heading=text, text="")
-
-    def para(self, text: str) -> None:
-        if text:
-            self._body.append(text)
-
-    def table(self, grid: list[list[str]], name: str) -> None:
-        if not grid:
-            return
-        self._doc.tables.append(
-            Table(name=name, headers=grid[0], rows=grid[1:]))
-        self._body.append(f"[{name}: {len(grid) - 1} data rows]")
-
-    def walk(self, elem: Any) -> None:
-        for child in elem:
-            tag = _localname(child.tag)
-            if tag == "h":
-                try:
-                    level = int(child.get(f"{_ODT_TEXT}outline-level", "1"))
-                except (TypeError, ValueError):
-                    level = 1
-                self.heading(level, _odt_cell_text(child))
-            elif tag == "p":
-                self.para(_odt_cell_text(child))
-            elif tag == "table":
-                name = child.get(f"{_ODT_TABLE}name", "") or \
-                    f"Table {len(self._doc.tables) + 1}"
-                grid = _odt_table_grid(child)
-                self.table(grid, name)
-            elif tag in ("list", "list-item", "section", "table-of-content",
-                         "index-body", "alphabetical-index", "toc"):
-                self.walk(child)
-            # Other elements (draw:frame, text:soft-page-break, …) carry no
-            # flow text and are skipped on purpose.
-
-
-def _parse_odt(data: bytes, doc: Document) -> Document:
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise DocumentError(f"invalid .odt file: {exc}") from exc
-    with archive:
-        try:
-            root = ET.fromstring(archive.read("content.xml"))
-        except (KeyError, ET.ParseError) as exc:
-            raise DocumentError(f".odt has no readable content.xml: {exc}") from exc
-        try:
-            meta_root = ET.fromstring(archive.read("meta.xml"))
-            title_node = meta_root.find(f".//{_ODT_DC}title")
-            if (title_node is not None and title_node.text
-                    and title_node.text.strip()):
-                doc.title = title_node.text.strip()
-            creator_node = meta_root.find(f".//{_ODT_DC}creator")
-            if (creator_node is not None and creator_node.text
-                    and creator_node.text.strip()):
-                doc.author = creator_node.text.strip()
-        except (KeyError, ET.ParseError):
-            # meta.xml is optional metadata; a missing/corrupt one must
-            # never fail the document parse.
-            _log.debug("odt meta.xml unreadable; continuing without it")
-        body = root.find(f"{_ODT_OFFICE}body")
-        if body is None:
-            raise DocumentError(".odt content.xml has no office:body")
-        text_root = body.find(f"{_ODT_OFFICE}text")
-        if text_root is None:
-            raise DocumentError(".odt has no office:text content")
-        flow = _OdtFlow(doc)
-        flow.walk(text_root)
-        flow.flush()
-    if not flow.sections and not doc.tables:
-        raise DocumentError(".odt contains no paragraphs or tables")
-    doc.sections = flow.sections
-    if doc.tables:
-        doc.metadata["tables"] = len(doc.tables)
-    return doc
-
-
-def _parse_ods(data: bytes, doc: Document) -> Document:
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise DocumentError(f"invalid .ods file: {exc}") from exc
-    with archive:
-        try:
-            root = ET.fromstring(archive.read("content.xml"))
-        except (KeyError, ET.ParseError) as exc:
-            raise DocumentError(f".ods has no readable content.xml: {exc}") from exc
-        body = root.find(f"{_ODT_OFFICE}body")
-        sheet_root = (body.find(f"{_ODT_OFFICE}spreadsheet")
-                      if body is not None else None)
-        if sheet_root is None:
-            raise DocumentError(".ods has no office:spreadsheet content")
-        for table_elem in sheet_root.iter(f"{_ODT_TABLE}table"):
-            name = table_elem.get(f"{_ODT_TABLE}name", "") or \
-                f"Sheet {len(doc.tables) + 1}"
-            grid = _odt_table_grid(table_elem)
-            if not grid:
-                continue
-            doc.tables.append(Table(name=name, headers=grid[0], rows=grid[1:]))
-            doc.sections.append(Section(
-                level=1, heading=name,
-                text=(f"Worksheet {name!r}: {len(grid) - 1} data rows × "
-                      f"{len(grid[0])} columns.")))
-    if not doc.tables:
-        raise DocumentError(".ods spreadsheet has no non-empty tables")
-    doc.metadata["sheets"] = [t.name for t in doc.tables]
-    return doc
-
-
 _PARSERS: dict[str, Callable[..., Document]] = {
     "pdf": _parse_pdf,
+    "epub": _parse_epub,
     "docx": _parse_docx,
     "xlsx": _parse_xlsx,
     "pptx": _parse_pptx,
     "html": _parse_html,
     "markdown": _parse_markdown,
     "txt": _parse_txt,
-    "rtf": _parse_rtf,
-    "epub": _parse_epub,
-    "odt": _parse_odt,
-    "ods": _parse_ods,
 }
 
 

@@ -12,9 +12,10 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from ..ai import GameMind
+from ..ai import GameMind, battleship_shot, connect4_move
 from ..players import Player
-from .base import MultiGame, Room
+from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
+                   normalize_difficulty)
 
 __all__ = ["ARCADE_GAMES"]
 
@@ -254,13 +255,17 @@ class ConnectFourGame(MultiGame):
     max_players = 2
     ai_seats = 1
     move_timeout = 60
+    difficulties = DIFFICULTY_LEVELS
     rules = ("Drop a disc into columns 1–7. First to align four "
              "(horizontal, vertical, or diagonal) wins. The board "
-             "is 6 rows × 7 columns.")
+             "is 6 rows × 7 columns. The house thinks ahead — pick "
+             "its strength with /game connect4 [easy|normal|hard|expert].")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         return {"board": [[0] * 7 for _ in range(6)], "turn": 1,
-                "winner": 0, "moves": 0}
+                "winner": 0, "moves": 0,
+                "difficulty": normalize_difficulty(difficulty)}
 
     def _drop(self, board: list[list[int]], col: int, player: int) -> int:
         """Drop a disc into col. Returns the row it landed on, or -1 if full."""
@@ -319,26 +324,28 @@ class ConnectFourGame(MultiGame):
 
     def ai_turn(self, room, mind):
         s = room.state
-        # simple AI: block wins, take wins, else pick a random column
-        for col in range(7):
-            if s["board"][0][col] != 0:
-                continue
-            test_board = [row[:] for row in s["board"]]
-            self._drop(test_board, col, s["turn"])
-            if self._check_win(test_board, s["turn"]):
-                return [f"{room.current.name} drops in column {col + 1}"]
-        for col in range(7):
-            if s["board"][0][col] != 0:
-                continue
-            test_board = [row[:] for row in s["board"]]
-            self._drop(test_board, col, 3 - s["turn"])
-            if self._check_win(test_board, 3 - s["turn"]):
-                return [f"{room.current.name} drops in column {col + 1}"]
-        available = [c for c in range(7) if s["board"][0][c] == 0]
-        if available:
-            col = mind.rng.choice(available)
-            return [f"{room.current.name} drops in column {col + 1}"]
-        return []
+        me = s["turn"]
+        col = connect4_move(s["board"], me,
+                            difficulty=self.difficulty(room),
+                            rng=self.rng(room))
+        if col < 0:
+            return ["no column left — the board is full."]
+        self._drop(s["board"], col, me)
+        s["moves"] += 1
+        name = room.current.name if room.current else "the house"
+        out = [f"{name} drops in column {col + 1}",
+               self._render(s["board"])]
+        if self._check_win(s["board"], me):
+            s["winner"] = me
+            out.append(f"🏆 {name} aligns four!")
+        elif s["moves"] >= 42:
+            out.append("draw — the board is full.")
+        else:
+            s["turn"] = 3 - me
+            nxt = room.players[s["turn"] - 1].name \
+                if s["turn"] - 1 < len(room.players) else "?"
+            out.append(f"{nxt}'s turn.")
+        return out
 
     def is_over(self, room):
         return room.state.get("winner", 0) != 0 or room.state.get("moves", 0) >= 42
@@ -363,19 +370,24 @@ class BattleshipGame(MultiGame):
     max_players = 1
     ai_seats = 1
     move_timeout = 0
+    difficulties = DIFFICULTY_LEVELS
     rules = ("10×10 grid. You have 5 ships (sizes 5,4,3,3,2). The AI "
              "has the same. Take turns firing coordinates (e.g. B5). "
-             "Sink all five to win.")
+             "Sink all five to win. The house hunts with real "
+             "probability maps — set its strength with "
+             "/game battleship [easy|normal|hard|expert].")
 
     SHIP_SIZES = (5, 4, 3, 3, 2)
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
         player_board = self._place_ships(rng)
         ai_board = self._place_ships(rng)
         return {"player": player_board, "ai": ai_board,
                 "player_shots": [[0] * 10 for _ in range(10)],
                 "ai_shots": [[0] * 10 for _ in range(10)],
-                "turn": "player", "winner": ""}
+                "turn": "player", "winner": "",
+                "difficulty": normalize_difficulty(difficulty)}
 
     def _place_ships(self, rng: random.Random) -> list[list[int]]:
         board = [[0] * 10 for _ in range(10)]
@@ -481,7 +493,7 @@ class BattleshipGame(MultiGame):
             out.append("🏆 you sank all their ships!")
             return out
         # AI's turn
-        ai_coord = self._ai_fire(s["player_shots"], room.rng())
+        ai_coord = self._ai_fire(room)
         if s["player"][ai_coord[0]][ai_coord[1]]:
             s["player_shots"][ai_coord[0]][ai_coord[1]] = 1
             ai_result = "HIT!"
@@ -497,10 +509,12 @@ class BattleshipGame(MultiGame):
         out.append("\nenemy waters:\n" + self._render_enemy(s["ai_shots"]))
         return out
 
-    def _ai_fire(self, shots: list[list[int]], rng: random.Random) -> tuple[int, int]:
-        # simple: pick a random unshot coordinate
-        available = [(r, c) for r in range(10) for c in range(10) if shots[r][c] == 0]
-        return rng.choice(available)
+    def _ai_fire(self, room: Room) -> tuple[int, int]:
+        """The house's shot: a probability-density hunter on normal+,
+        a checkerboard guesser on easy."""
+        return battleship_shot(
+            room.state["player_shots"], self.SHIP_SIZES,
+            difficulty=self.difficulty(room), rng=self.rng(room))
 
     def ai_turn(self, room, mind):
         return []

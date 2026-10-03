@@ -76,6 +76,8 @@ GAME_COMMANDS = (
     "blackjack", "roulette", "slots",
     # inbox (wave F2): async, one message per turn, no clock
     "gomoku", "reversi", "checkers",
+    # puzzles (gamesbooks-1.0)
+    "sudoku", "anagram", "cryptogram",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -152,6 +154,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 0),
     # inbox (wave F2): async, one message per turn, no clock
     "gomoku": (0, 0), "reversi": (0, 0), "checkers": (0, 0),
+    # puzzles (gamesbooks-1.0)
+    "sudoku": (0, 0), "anagram": (0, 0), "cryptogram": (0, 0),
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
     "news": (0, 2),          # /news [run|status]
@@ -289,7 +293,7 @@ _HELP_TEXT = "\n".join(
         "  /trial send <platform>                  send it via WhatsApp/Telegram",
         "  /trial list | /trial rm <platform>",
         "  — expansion —",
-        "  /game [list|<name>|quit]                39 games (DM + group): /game list",
+        "  /game [list|<name>|quit]                42 games (DM + group): /game list",
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
         "   /king /story /case /world /escape /political /auction\n"
         "   /shop /wyrr /two_truths /numberguess   start any of the 39 (every chat)",
@@ -569,7 +573,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
               "usage": "/trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]",
               "example": "/trial list", "related": "/say"},
-    "game": {"what": "the social game engine — 39 games across DM, group and "
+    "game": {"what": "the social game engine — 42 games across DM, group and "
                      "channel, with a shared economy, items and leaderboards. "
                      "Works for every participant in every chat; in a group a "
                      "new player is seated the moment they speak.",
@@ -1055,6 +1059,9 @@ _GAME_HELP: dict[str, str] = {
     "gomoku": "gomoku — five in a row on 15×15, async, no clock.",
     "reversi": "reversi (othello) — outflank and flip, most discs wins.",
     "checkers": "english draughts — forced jumps, kings, async.",
+    "sudoku": "sudoku — 9×9, real generated puzzles, 3 strikes and you're out.",
+    "anagram": "anagram — 6-round unscramble race, fastest fingers win.",
+    "cryptogram": "cryptogram — crack the substitution cipher, 3-quote race.",
     "20q": "20 questions — she thinks of something, you ask yes/no (20 max).",
     "rps": "rock paper scissors — best of five vs the house.",
     "digits": "digit memory — repeat the digits back, they grow every round.",
@@ -1221,7 +1228,7 @@ LIST_ONELINERS: dict[str, str] = {
     "forget": "delete a memory",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (0-1)",
-    "game": "the social game engine — 39 games, DM + group + channel, with economy and leaderboards",
+    "game": "the social game engine — 42 games, DM + group + channel, with economy and leaderboards",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",
