@@ -27,6 +27,7 @@ from .runtime_system import RuntimeSystemMixin
 from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
+from .runtime_wisdom import RuntimeWisdomMixin
 _log = get_logger(__name__)
 
 
@@ -43,6 +44,7 @@ class PartnerRuntime(
     RuntimeMediaMixin,
     RuntimeIntelMixin,
     RuntimeSearchMixin,
+    RuntimeWisdomMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -293,6 +295,20 @@ class PartnerRuntime(
                         _log.warning("game reply send failed: %s", exc)
                 else:
                     _log.warning("game command produced empty reply in %s", message.chat.key)
+                return
+        # WisdomKeeper practice sessions own their chats while live: plain
+        # words (pause/resume/stop) steer the run and the reply after a
+        # session closes is journaled. Only active sessions and pending
+        # journal prompts intercept — everything else falls through to
+        # normal flow untouched.
+        if message.incoming:
+            wisdom_reply = self._wisdom_incoming(message.chat.key, message.text)
+            if wisdom_reply is not None:
+                try:
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      wisdom_reply)
+                except Exception:  # noqa: BLE001
+                    _log.exception("wisdom reply send failed")
                 return
         # Control commands: from the console or the owner chat, a *known*
         # slash command is a command, not conversation. Unknown slashes and
@@ -1002,6 +1018,10 @@ class PartnerRuntime(
             return self._control_search_hist(arg)
         if kind == "book":
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
+        if kind in {"wisdom", "wis"}:
+            # WisdomKeeper: /wisdom and its /wis alias share one handler.
+            return self._control_wisdom(command.tail or arg, chat_key=chat_key,
+                                        message=message)
         if kind == "decode":
             return self._control_decode(command.tail or arg, chat_key=chat_key)
         if kind == "cookies":

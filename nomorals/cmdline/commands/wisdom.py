@@ -23,7 +23,7 @@ def _cmd_wisdom(args: Any, context: Any) -> int:
               "       nm wisdom timeline [--tradition T] [--start Y] [--end Y] [--json]\n"
               "       nm wisdom compare <topic> [--json]\n"
               "       nm wisdom practice list [--json]\n"
-              "       nm wisdom practice <session-id> [--rounds N] [--json]",
+              "       nm wisdom practice <session-id> [--rounds N] [--chat]",
               file=sys.stderr)
         return 2
     verb = words[0]
@@ -87,6 +87,56 @@ def _wisdom_ask(args: Any, context: Any, rest: list[str]) -> int:
         src = p.url or "(no url)"
         print(f"  source: {src} [{p.canon_status}]")
         print()
+    return 0
+
+
+def _wisdom_practice_chat(args: Any, context: Any, session_id: str) -> int:
+    """Deliver a practice session to chat instead of pacing it in the
+    terminal.
+
+    The pacer thread runs here and every message goes out through the
+    Notifier on the live gateway; the CLI blocks until the session
+    closes so delivery completes. The journal prompt goes out at the
+    end and the journal-await marker is persisted, so a reply in chat
+    is journaled by the live runtime.
+
+    Fail fast: with no live gateway there is nothing to deliver to —
+    the owner should start the session from their DMs instead.
+    """
+    from ...agents.notifier import resolve_gateway
+    from ...wisdom import PracticeError
+    from ...wisdom import chat_session as _chat_session
+
+    if resolve_gateway(context) is None:
+        print(f"error: no live chat gateway — start this from your DMs "
+              f"with /wisdom practice {session_id}", file=sys.stderr)
+        return 1
+    settings = getattr(context, "settings", None)
+    partner = getattr(settings, "partner", None) if settings else None
+    owner_chats = [c.strip() for c in
+                   str(getattr(partner, "owner_chats", "") or "").split(",")
+                   if c.strip()]
+    if not owner_chats:
+        print("error: no owner chat configured "
+              "(settings.partner.owner_chats) — nothing to deliver to",
+              file=sys.stderr)
+        return 1
+    chat_key = owner_chats[0]
+    platform = chat_key.partition(":")[0]
+    mgr = _chat_session.WisdomChatManager(context)
+    try:
+        ack = mgr.start_session(chat_key, session_id, platform=platform)
+    except PracticeError as exc:
+        # unknown session id — the message lists what's available
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(ack)
+    session = mgr.active_session(chat_key)
+    if session is not None:
+        # block so the pacer thread (daemon) finishes delivery; the
+        # journal prompt is sent by the session itself before it ends.
+        session.join(timeout=session.estimated_seconds() + 120)
+    print("session delivered to chat — reply there and it will be journaled.")
     return 0
 
 
@@ -209,6 +259,8 @@ def _wisdom_practice(args: Any, context: Any, rest: list[str]) -> int:
             print(f"{s['id']}: {s['name']} ({s['total_seconds']}s, {tag})")
         return 0
     session_id = rest[0]
+    if getattr(args, "chat", False):
+        return _wisdom_practice_chat(args, context, session_id)
     rounds = getattr(args, "rounds", 0) or None
     if _as_json(args):
         print(json.dumps({"session_id": session_id,

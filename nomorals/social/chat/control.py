@@ -104,6 +104,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "searchhist": (0, 1),    # /searchhist [n]
     # BookForge: write a real book → PDF → send when done
     "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
+    # WisdomKeeper: esoteric corpus Q&A, history timeline, guided practice
+    "wisdom": (0, None),     # /wisdom ask <q> | practice list|<id>|stop | timeline [t] | compare <t> | status
+    "wis": (0, None),        # alias of /wisdom
     # Universal Decoder: identify + decode anything, send binary results
     "decode": (0, None),     # /decode <data> | /decode file:<path> | /decode hash <digest>
     # Cookie analysis & handling (the CookieLab)
@@ -242,6 +245,11 @@ _HELP_TEXT = "\n".join(
         "  /book <topic> [chapters]                start a book (auto-sends the pdf)",
         "  /book status [slug] | /book list        progress",
         "  /book build <slug> | /book send <slug> <p> <chat>",
+        "  — wisdom keeper (corpus · history · practice) —",
+        "  /wisdom ask <query>                     ask the corpus (answer + provenance)",
+        "  /wisdom practice list | <session-id>    list sessions / start a guided session here",
+        "  /wisdom practice stop                   stop the running session",
+        "  /wisdom timeline [tradition] | /wisdom compare <topic> | /wisdom status",
         "  — decode & crypto —",
         "  /decode <data> | /decode file:<path>     Universal Decoder (sends binary back)",
         "  /decode hash <digest> | /decode decoders identify hashes / list engine",
@@ -494,6 +502,19 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/book <topic> [chapters]   |   /book status [slug]  |  /book list",
              "example": "/book eBPF for system security 8",
              "related": "/searchdeep (it researches the topic first)"},
+    "wisdom": {"what": "WisdomKeeper: ask the esoteric corpus (answer + provenance), "
+                       "browse the history timeline, or run a guided breathing / "
+                       "sitting session right here in chat with timed messages.",
+             "usage": "/wisdom ask <query>   |   /wisdom practice list   |   "
+                      "/wisdom practice <session-id>   |   /wisdom practice stop   |   "
+                      "/wisdom timeline [tradition]   |   /wisdom compare <topic>   |   "
+                      "/wisdom status",
+             "example": "/wisdom practice box-breathing",
+             "related": "/search (general research)"},
+    "wis": {"what": "alias of /wisdom.",
+            "usage": "/wis <verb…> — same as /wisdom",
+            "example": "/wis ask kundalini breathing",
+            "related": "/wisdom"},
     "decode": {"what": "Universal Decoder: identifies and decodes almost anything — "
                        "base64/hex/base32/base58/binary, ROT13, leetspeak, URL, "
                        "hashes (with known-secret match), cookies, JWTs, tokens, and "
@@ -1095,6 +1116,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "whois", "ports"]),
+    ("wisdom keeper — corpus · history · practice",
+     ["wisdom", "wis"]),
     ("building for real — code & missions",
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
       "upgrade", "arena", "trial", "book", "exec", "apps", "fix", "structure",

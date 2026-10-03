@@ -8,6 +8,7 @@ from .ingestor import ArchiveIngestor
 from .history import HistoryEngine
 from .keeper import WisdomKeeper
 from .practice import SAFETY_TEXT, PracticeGuide
+from .chat_session import ChatPracticeSession, WisdomChatManager
 
 __all__ = [
     "Answer",
@@ -21,7 +22,9 @@ __all__ = [
     "PracticeError",
     "ProvenanceHit",
     "SAFETY_TEXT",
+    "ChatPracticeSession",
     "PracticeGuide",
+    "WisdomChatManager",
     "WisdomError",
     "WisdomKeeper",
 ]

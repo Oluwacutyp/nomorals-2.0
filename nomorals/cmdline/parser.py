@@ -1507,12 +1507,15 @@ def _parser() -> argparse.ArgumentParser:
                      "nm wisdom timeline [--tradition T] [--from Y] [--to Y] [--json]\n"
                      "nm wisdom compare <topic> [--json]\n"
                      "nm wisdom practice list [--json]\n"
-                     "nm wisdom practice <session-id> [--rounds N]"),
+                     "nm wisdom practice <session-id> [--rounds N] [--chat]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     wisdom.add_argument("task", nargs="*", default=[], help="verb and arguments")
     wisdom.add_argument("--limit", type=int, default=0, help="max results")
     wisdom.add_argument("--rounds", type=int, default=0, help="practice: repeat")
+    wisdom.add_argument("--chat", action="store_true",
+                        help="practice: deliver the session to chat via the "
+                             "live gateway instead of pacing it in the terminal")
     wisdom.add_argument("--tradition", default="", help="timeline: filter tradition")
     wisdom.add_argument("--start", type=int, default=-3000,
                         help="timeline: start year")

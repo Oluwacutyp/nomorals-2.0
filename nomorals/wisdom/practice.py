@@ -189,6 +189,10 @@ class PracticeGuide:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def data_dir(self) -> Path:
+        """Workspace dir for wisdom state (practice log, chat state)."""
+        return self._wisdom_root()
+
     def _log_path(self) -> Path:
         return self._wisdom_root() / "practice_log.jsonl"
 
@@ -245,14 +249,22 @@ class PracticeGuide:
     def phases_for_chat(self, session_id: str) -> list[str]:
         """Flat per-phase message strings for chat delivery: short,
         self-contained, one per timed message."""
+        return [msg for msg, _ in self.timed_phases_for_chat(session_id)]
+
+    def timed_phases_for_chat(self, session_id: str) -> list[tuple[str, float]]:
+        """Like :meth:`phases_for_chat` but each message is paired with
+        its phase's seconds, for timed chat delivery. Raises
+        PracticeError on an unknown session id (fail fast)."""
         session = self._get(session_id)
-        messages: list[str] = []
+        plan: list[tuple[str, float]] = []
         for phase in session.phases:
             secs = phase.seconds
             secs_s = str(int(secs)) if float(secs).is_integer() else str(secs)
             for _ in range(phase.repeat):
-                messages.append(f"{phase.label} ({secs_s}s): {phase.instruction}")
-        return messages
+                plan.append(
+                    (f"{phase.label} ({secs_s}s): {phase.instruction}",
+                     float(secs)))
+        return plan
 
     # ── run ───────────────────────────────────────────────────────────
     def run(self, session_id: str, *, clock: Any = None,
@@ -332,6 +344,24 @@ class PracticeGuide:
             "session_id": session.id,
             "journaled_at": datetime.now(timezone.utc).isoformat(),
             "notes": text,
+        }
+        self._append_log(entry)
+        return entry
+
+    def log_session(self, session_id: str, *, completed: bool,
+                    phases_done: int, notes: str = "") -> dict[str, Any]:
+        """Record a chat-driven session run in the practice log, using the
+        same ``session`` entry schema as :meth:`run`. Raises PracticeError
+        on an unknown session id (fail fast)."""
+        session = self._get(session_id)
+        entry = {
+            "type": "session",
+            "session_id": session.id,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed": bool(completed),
+            "phases_done": int(phases_done),
+            "notes": notes,
+            "via": "chat",
         }
         self._append_log(entry)
         return entry
