@@ -93,17 +93,24 @@ class _ForwardProxyHandler(_QuietHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+        import time
         import urllib.request
 
-        try:
-            with urllib.request.urlopen(
-                self.path, timeout=10
-            ) as upstream:
-                body = upstream.read()
-                code = int(upstream.status)
-        except Exception:  # noqa: BLE001 - test double, any failure is a 502
-            body = b"bad gateway"
-            code = 502
+        # Retry upstream fetch: under full-suite load the loopback target
+        # can be slow to accept connections. Retry a few times before
+        # giving up with 502.
+        body = b"bad gateway"
+        code = 502
+        for _ in range(5):
+            try:
+                with urllib.request.urlopen(
+                    self.path, timeout=10
+                ) as upstream:
+                    body = upstream.read()
+                    code = int(upstream.status)
+                break
+            except Exception:  # noqa: BLE001 - test double, retry then 502
+                time.sleep(0.2)
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
