@@ -112,7 +112,16 @@ class _ForwardProxyHandler(_QuietHandler):
                     body = upstream.read()
                     code = int(upstream.status)
                 break
-            except Exception:  # noqa: BLE001 - test double, retry then 502
+            except Exception as exc:  # noqa: BLE001 - test double, retry then 502
+                # DIAGNOSTIC (cifix-4.0): log the real upstream failure so
+                # full-suite flakes can be root-caused. Remove after green.
+                try:
+                    with open("/home/hatch/workspace/devon-cifix/.proxydiag.log",
+                              "a") as f:
+                        f.write(f"{time.time():.1f} upstream fail "
+                                f"{type(exc).__name__}: {exc}\n")
+                except Exception:
+                    pass
                 time.sleep(min(0.2 * (2 ** attempt), 1.0))
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
