@@ -1064,7 +1064,7 @@ class PartnerRuntime(
         if kind == "cipher":
             return self._control_cipher(command.tail or arg)
         if kind == "music":
-            return self._control_music(command.tail or arg)
+            return self._control_music(command.tail or arg, chat_key=chat_key)
         if kind == "play":
             return self._control_play(command.tail or arg)
         if kind == "video":

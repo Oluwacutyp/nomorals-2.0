@@ -143,6 +143,8 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
             return 1
         return show(v,
                     f"composed: {v.get('title', topic)} [{v.get('style', '')}]\n"
+                    f"  audio: {v.get('audio_path', '') or '(render failed)'}\n"
+                    f"  score: {v.get('score_pdf_path', '') or '(render failed)'}\n"
                     f"  midi: {v.get('midi_path', '')}\n"
                     f"  melody: {str(v.get('melody_description', ''))[:160]}")
 

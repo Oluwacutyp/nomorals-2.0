@@ -51,6 +51,7 @@ from typing import Any, Callable, Optional
 from ..core.error_intelligence import ErrorIntelligence, catch_and_analyze
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..search.adaptive import adaptive_result_limit
 from ..integrations.calendar_integration import CalendarIntegration
 from ..integrations.email_integration import EmailIntegration
 from ..integrations.shopping_integration import ShoppingIntegration
@@ -630,7 +631,10 @@ Generate the plan:"""
             raise RuntimeError("Shopping integration not available")
         
         query = kwargs.get("query", "")
-        max_results = kwargs.get("max_results", 10)
+        # adaptive breadth when the caller didn't pick a count
+        max_results = (kwargs.get("max_results")
+                       or adaptive_result_limit(query, base=10,
+                                                floor=5, ceiling=20))
         
         products = await self.shopping.search(query=query, max_results=max_results)
         

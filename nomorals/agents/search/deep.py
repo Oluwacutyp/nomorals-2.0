@@ -244,7 +244,9 @@ class DeepResearcher:
     # ── search fan-out ───────────────────────────────────────────────────────
     def _search_one(self, sub: str) -> list[dict[str, Any]]:
         try:
-            results = self.engine.search(sub, max_results=8)
+            # adaptive per-sub-query breadth: each angle gets the result
+            # count its own phrasing deserves
+            results = self.engine.search(sub)
         except Exception as exc:  # noqa: BLE001 - one dead sub-query must not sink the run
             _log.debug("deep research sub-query failed %r: %s", sub, exc)
             return []

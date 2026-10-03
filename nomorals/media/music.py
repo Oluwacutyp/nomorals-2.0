@@ -758,6 +758,8 @@ class Song:
     instrumentation: tuple[str, ...] = ()
     mood: str = ""
     midi_path: str = ""
+    audio_path: str = ""
+    score_pdf_path: str = ""
     seed: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -772,7 +774,37 @@ class Song:
                  "chords": list(s.chords), "note": s.note}
                 for s in self.sections],
             "midi_path": self.midi_path,
+            "audio_path": self.audio_path,
+            "score_pdf_path": self.score_pdf_path,
         }
+
+    def to_score_markdown(self) -> str:
+        """A proper lead sheet: title block + sections with chord symbols,
+        lyrics, and arrangement notes.  This is what the score PDF renders."""
+        lines = [
+            f"# {self.title}",
+            f"*{self.style.title()} · Key of {self.key} {self.mode} · "
+            f"{self.tempo} BPM · Mood: {self.mood}*",
+            "",
+        ]
+        if self.melody_description:
+            lines += [f"**Melody:** {self.melody_description}", ""]
+        for s in self.sections:
+            tag = s.name.upper()
+            lines.append(f"## {tag} — {s.bars} bars")
+            if s.chords:
+                # chord symbols as a lead-sheet row
+                lines.append("**Chords:** " + " | ".join(s.chords))
+            if s.note:
+                lines.append(f"*{s.note}*")
+            if s.lyrics:
+                lines.append("")
+                lines += [f"> {ln}" for ln in s.lyrics]
+            lines.append("")
+        if self.instrumentation:
+            lines += ["## Instrumentation",
+                      ", ".join(self.instrumentation), ""]
+        return "\n".join(lines).rstrip() + "\n"
 
     def to_markdown(self) -> str:
         lines = [f"# {self.title}", "",
@@ -795,6 +827,10 @@ class Song:
                       ", ".join(self.instrumentation), ""]
         if self.midi_path:
             lines.append(f"**MIDI file:** `{self.midi_path}`")
+        if self.audio_path:
+            lines.append(f"**Audio:** `{self.audio_path}`")
+        if self.score_pdf_path:
+            lines.append(f"**Score PDF:** `{self.score_pdf_path}`")
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -831,7 +867,8 @@ class MusicCreator:
 
     def compose(self, topic: str, *, style: str = "pop", title: str = "",
                 key: str = "", seed: int | None = None,
-                with_midi: bool = True, workdir: str = "music") -> Song:
+                with_midi: bool = True, with_audio: bool = True,
+                with_score: bool = True, workdir: str = "music") -> Song:
         spec = resolve_style(style)
         if seed is None:
             seed = int(hashlib.sha256(
@@ -871,6 +908,16 @@ class MusicCreator:
                 song.midi_path = self._write_midi(song, workdir)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("midi generation failed: %s", exc)
+        if with_audio:
+            try:
+                song.audio_path = self._render_audio(song, workdir)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("audio render failed: %s", exc)
+        if with_score:
+            try:
+                song.score_pdf_path = self._write_score_pdf(song, workdir)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("score pdf failed: %s", exc)
         return song
 
     # ── lyrics ──────────────────────────────────────────────────────────
@@ -1262,6 +1309,39 @@ class MusicCreator:
         b.add_notes(drum_tr, parts["drums"])
         return b.write(str(target))
 
+    def _render_audio(self, song: Song, workdir: str) -> str:
+        """Render the arrangement to a playable WAV (pure-Python synth)."""
+        from ..tools.filesystem import safe_path
+        from .synth import write_wav
+
+        base = safe_path(self.context, (workdir or "music").strip("/"))
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / f"{_slugify(song.title)}.wav"
+
+        spec = resolve_style(song.style)
+        rng = random.Random(song.seed ^ 0x5EED)
+        parts = self._arrange(song, spec, rng)
+        return write_wav(str(target), parts, float(song.tempo),
+                         seed=song.seed ^ 0xA071)
+
+    def _write_score_pdf(self, song: Song, workdir: str) -> str:
+        """Render the lead sheet (chords + lyrics + arrangement) to PDF."""
+        from ..tools.filesystem import safe_path
+        from ..core.pdf import render_pdf
+
+        base = safe_path(self.context, (workdir or "music").strip("/"))
+        base.mkdir(parents=True, exist_ok=True)
+        target = base / f"{_slugify(song.title)}-score.pdf"
+
+        data = render_pdf(
+            song.to_score_markdown(),
+            title=f"{song.title} — Score",
+            headings=True,
+            toc=False,
+        )
+        target.write_bytes(data)
+        return str(target)
+
 
 def register(registry: Any) -> None:
     context = registry.context
@@ -1271,8 +1351,10 @@ def register(registry: Any) -> None:
         description=(
             "Compose a real song from a topic: style-aware lyrics (model or "
             "offline rhyme engine), section structure, chord progression, "
-            "melody description, and a playable .mid file. action=compose "
-            "(topic, style, title, key, seed, with_midi) | styles | "
+            "melody description, a playable .mid file, a rendered WAV audio "
+            "file, and a score PDF (lead sheet with chords + lyrics). "
+            "action=compose (topic, style, title, key, seed, with_midi, "
+            "with_audio, with_score) | styles | "
             "song (slug|title) to re-fetch a saved one."
         ),
         capability=Capability.FS_WRITE,
@@ -1280,7 +1362,8 @@ def register(registry: Any) -> None:
     def music_writer(
         action: str = "compose", topic: str = "", style: str = "pop",
         title: str = "", key: str = "", seed: int = 0,
-        with_midi: bool = True,
+        with_midi: bool = True, with_audio: bool = True,
+        with_score: bool = True,
     ) -> dict[str, Any]:
         if action == "styles":
             return {"styles": {
@@ -1297,7 +1380,8 @@ def register(registry: Any) -> None:
                 raise ToolError("music_writer compose needs a topic")
             song = creator.compose(
                 topic, style=style, title=title, key=key,
-                seed=seed or None, with_midi=with_midi)
+                seed=seed or None, with_midi=with_midi,
+                with_audio=with_audio, with_score=with_score)
             return song.to_dict()
         raise ToolError(f"unknown music_writer action {action!r}")
 

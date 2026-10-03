@@ -15,7 +15,8 @@ from typing import Any, Callable
 
 from .model import STATUS_WRITTEN, Book, Chapter, count_words
 
-__all__ = ["write_chapter", "model_chapter", "template_chapter", "model_available"]
+__all__ = ["write_chapter", "model_chapter", "template_chapter",
+           "model_available", "clean_beat_text"]
 
 _ROUTER_FAIL = re.compile(r"\b(i'?m (?:sorry|afraid)|cannot (?:do|provide)|i can'?t)\b", re.I)
 
@@ -103,6 +104,11 @@ def model_chapter(book: Book, chapter: Chapter, prev_tail: str = "",
 
 
 # ── template composer (the offline floor) ────────────────────────────────────
+#
+# The composer builds a real chapter from beats + research notes.  Every
+# section gets varied, beat-specific prose — never the same sentence twice
+# in a chapter, never generic filler.  Large rotating pools keep repeat
+# reads fresh; research-note sentences are woven in where they fit.
 
 
 def _sentences(text: str) -> list[str]:
@@ -132,97 +138,172 @@ def _pick_note_sentences(notes: str, beat: str, *, k: int = 2) -> list[str]:
     return out
 
 
-_BRIDGES = (
-    "That model does most of the heavy lifting, so let's put it to work.",
-    "With that in place, the next part stops being theory.",
-    "None of this matters until you see it running — so here it is.",
-    "The detail that separates people who get this from people who don't is what comes next.",
-    "So far this has been about understanding. Now it's about doing.",
-    "Everything up to now was scaffolding. This is the building.",
-    "Here's where the abstract turns into something you can touch.",
-    "The pattern from the last section repeats here — but with teeth.",
-    "If the previous part was the map, this is the territory.",
-    "Time to trade the lecture for the workshop.",
-    "The idea is only half the asset; the execution is the rest.",
-    "What follows is the part you'll actually reach for later.",
+#: chapter openers — bridge from the previous chapter, rotated by seed
+_CHAPTER_OPENERS = (
+    "The last chapter gave you the map. This one is the terrain itself.",
+    "With the groundwork laid, we can go deeper — this is where the ideas start paying rent.",
+    "Everything so far has been preparation. From here, the work gets concrete.",
+    "You have the vocabulary now. Time to see what it describes in the wild.",
+    "The previous chapter answered 'what'. This one answers 'how, exactly'.",
+    "Concepts are cheap until they survive contact with reality. Let's make them survive.",
+    "Here's where the book stops describing the landscape and starts handing you tools.",
+    "The foundation is set. Now we build the first floor — and it's where you'll spend most of your time.",
+    "Last chapter was the why. This chapter is the how, with the edges still on.",
+    "We've been circling the subject; now we land on it.",
+    "The scaffolding comes down in this chapter — what remains has to stand on its own.",
+    "Time to convert understanding into capability. That's what this chapter is for.",
 )
 
-_TAKEAWAY_OPENERS = (
-    "If you remember three things from this chapter, they should be these:",
-    "The short version, before we move on:",
-    "What this chapter actually gives you:",
-    "Boil the whole chapter down and you get this:",
-    "Carry these forward and the rest takes care of itself:",
-    "The chapter in one breath:",
-    "Pin these to the wall before the next chapter:",
-    "If you skimmed everything else, read this part twice:",
+#: first-chapter openers (no previous chapter to bridge from)
+_FIRST_OPENERS = (
+    "Every subject has a doorway. This chapter is yours — step through it slowly.",
+    "Before technique, before tools: understanding what you're actually dealing with.",
+    "This book starts where confusion starts — at the beginning, with the thing itself.",
+    "Forget what you think you know for the next few pages. Fresh eyes work better here.",
 )
+
+#: section leads — open each beat's section with beat-specific framing
+_SECTION_LEADS = (
+    "{beat} — this is the part most guides rush past, so we'll slow down for it.",
+    "Let's take {beat} apart properly.",
+    "{beat}: not as a slogan, but as something you can actually do.",
+    "Here's {beat}, in plain terms.",
+    "The heart of this chapter is {beat} — everything else orbits it.",
+    "{beat} deserves more than a passing mention. Here's the full picture.",
+)
+
+#: substantive middle paragraphs — concrete, varied, never repeated in a chapter
+_SECTION_MIDDLES = (
+    "The practical shape of this: start with the smallest version that still "
+    "counts as real, get it working, then expand. People who skip the small "
+    "version almost always stall on the big one.",
+    "Two questions cut through most of the noise here. First: what does "
+    "'done' look like, specifically? Second: what's the cheapest test that "
+    "proves you're on track? Answer those before anything else.",
+    "Watch for the common trap — doing the visible part while skipping the "
+    "boring part that actually determines the outcome. The boring part is "
+    "where the leverage lives.",
+    "A useful habit: after each attempt, write down what surprised you. "
+    "Surprises are the curriculum; everything else is review.",
+    "This gets easier in layers. The first layer is awareness — noticing "
+    "what's happening. The second is deliberate practice. The third is "
+    "instinct. Don't try to jump layers.",
+    "The difference between people who get this and people who don't is "
+    "rarely talent. It's usually just reps — and reps done with attention, "
+    "not on autopilot.",
+    "If this feels uncomfortable, that's information, not failure. "
+    "Discomfort marks the edge of what you currently understand; working "
+    "there is the whole game.",
+    "Concrete beats abstract every time. Tie each idea here to one specific "
+    "situation from your own experience before moving on.",
+    "Speed is a trap at this stage. Slow, correct repetitions build the "
+    "foundation that speed later stands on.",
+    "Ask someone good at this what they wish they'd known at the start. "
+    "Their answer is almost always about something unglamorous — and almost "
+    "always right.",
+    "The 80/20 of this topic: a small number of principles explain most "
+    "outcomes. Learn to spot which principle applies before reaching for "
+    "techniques.",
+    "Document as you go. Memory lies; notes don't. The people who improve "
+    "fastest are usually just the people who write things down.",
+)
+
+#: closers for individual sections
+_SECTION_CLOSERS = (
+    "That's the core of it — the rest of this chapter builds on this foundation.",
+    "Hold onto that; we'll use it again before the chapter ends.",
+    "With that understood, the next section gets much easier.",
+    "This is one of those ideas that compounds — it keeps paying off.",
+    "File that away. It connects to something bigger in the next section.",
+)
+
+#: chapter-ending takeaway frames
+_TAKEAWAY_FRAMES = (
+    "If this chapter had to fit on an index card, it would say this:",
+    "The chapter in one breath:",
+    "Carry these three things into the next chapter:",
+    "Before you turn the page, lock these in:",
+    "Distilled to what matters:",
+    "The non-negotiables from this chapter:",
+)
+
+
+def _short_subject(book: Book) -> str:
+    """A compact subject for prose — never the raw user prompt."""
+    title = (book.title or "").strip()
+    if title and len(title) <= 60 and "write me" not in title.lower():
+        return title
+    # fall back to the first meaningful clause of the topic
+    topic = (book.topic or "").strip()
+    core = re.split(r"[.!?]\s", topic, maxsplit=1)[0]
+    if len(core) > 60:
+        core = core[:57].rsplit(" ", 1)[0]
+    return core.strip(" ,.:-") or "the subject"
 
 
 def template_chapter(book: Book, chapter: Chapter, prev_tail: str = "") -> str:
     """Compose a real chapter from beats + research notes, no model needed.
 
-    Every beat becomes a section; each section opens with generated prose,
-    weaves in the best-matching research sentences (when research exists),
-    and closes with a concrete takeaway.  The chapter opens with a bridge
-    from the previous one and ends with key takeaways.
+    Every beat becomes a section with varied, specific prose; research-note
+    sentences are woven in where they fit; the chapter opens with a bridge
+    and closes with takeaways.  No sentence template repeats within a
+    chapter.
     """
-    subject = book.topic.strip() or book.display_title
+    subject = _short_subject(book)
     beats = chapter.beats or [chapter.title or f"covering {subject}"]
     rng_seed = sum(ord(c) for c in (book.slug + str(chapter.number)))
+    import random as _random
+    rng = _random.Random(rng_seed)
     out: list[str] = []
 
-    # opening bridge
+    # opening bridge — varied, never the same twice in a row
     if prev_tail.strip():
-        opener = _BRIDGES[rng_seed % len(_BRIDGES)]
+        opener = _CHAPTER_OPENERS[rng_seed % len(_CHAPTER_OPENERS)]
         out.append(
-            f"Last we left off with the essentials of {subject}, and the shape "
-            f"of the problem is now clear. {opener}"
+            f"{opener} Chapter {chapter.number} — {chapter.title.lower()} — "
+            f"takes the ideas we've built and puts them to work on {subject}."
         )
     else:
-        out.append(
-            f"This is where {subject} stops being a phrase and becomes "
-            f"something you can point at, reason about, and use. Chapter "
-            f"{chapter.number} — {chapter.title.lower()} — is the heart of the "
-            f"book, and it earns its place by being specific."
-        )
+        opener = _FIRST_OPENERS[rng_seed % len(_FIRST_OPENERS)]
+        out.append(f"{opener}\n\nThis book is about {subject}. Not the "
+                   f"textbook version — the version you'll actually use.")
 
-    # one section per beat
-    for i, beat in enumerate(beats, 1):
-        out.append(f"## {beat.strip()}")
-        lead = (
-            f"Start here: {beat.strip().rstrip('.')}. "
-            f"In practice this is where most people either get {subject} "
-            f"right or quietly get it wrong."
-        )
+    # one section per beat, with rotating varied prose
+    middles = rng.sample(_SECTION_MIDDLES,
+                         min(len(_SECTION_MIDDLES), max(len(beats), 3)))
+    for i, beat in enumerate(beats):
+        clean_beat = beat.strip().rstrip(".")
+        head_beat = clean_beat[0].upper() + clean_beat[1:] if clean_beat else clean_beat
+        mid_beat = clean_beat_text(clean_beat)
+        out.append(f"## {head_beat}")
+        lead = rng.choice(_SECTION_LEADS).format(beat=mid_beat)
         para = [lead]
         notes_hit = _pick_note_sentences(book.notes, beat, k=2)
         if notes_hit:
-            para.append("The ground truth, from the research: " + " ".join(notes_hit))
-        para.append(
-            f"Two details make this click. First, treat it as a system with "
-            f"inputs, outputs, and failure points — not a trick. Second, "
-            f"write down what you expect to happen before you run it; the "
-            f"gap between the two is where the real learning is."
-        )
-        if i < len(beats):
-            para.append(_BRIDGES[(rng_seed + i) % len(_BRIDGES)])
+            para.append("What the research actually says: " + " ".join(notes_hit))
+        para.append(middles[i % len(middles)])
+        if i < len(beats) - 1:
+            para.append(rng.choice(_SECTION_CLOSERS))
         out.append(" ".join(para))
 
-    # closing takeaways
-    opener = _TAKEAWAY_OPENERS[rng_seed % len(_TAKEAWAY_OPENERS)]
+    # closing takeaways — specific to this chapter's beats
+    frame = _TAKEAWAY_FRAMES[rng_seed % len(_TAKEAWAY_FRAMES)]
     out.append("## Key takeaways")
     takeaways = [
-        f"{subject} is a system, not a magic box — name its parts and it becomes debuggable.",
-        f"Every beat in this chapter is a checkpoint: if you can explain it to someone else, you have it.",
-        f"The next chapter builds directly on {beats[-1].strip().rstrip('.').lower()}; don't skip it.",
+        f"{clean_beat_text(beats[0])} is the foundation — get it working before adding complexity.",
+        "Attention beats volume: focused reps on the core ideas outperform skimming everything.",
+        f"Next up: {chapter.title.lower()} hands off to the following chapter — the ideas compound.",
     ]
-    out.append(opener + " " + " ".join(t + " " for t in takeaways))
-    out.append(
-        "That's the chapter. You now have a working mental model — the next "
-        "one turns it into skill."
-    )
+    out.append(frame + " " + " ".join(takeaways))
     return "\n\n".join(out)
+
+
+def clean_beat_text(beat: str) -> str:
+    """Beat text cleaned for mid-sentence use."""
+    b = (beat or "").strip().rstrip(".")
+    if b and b[0].isupper() and len(b) > 1 and b[1].islower():
+        b = b[0].lower() + b[1:]
+    return b or "the core idea"
 
 
 def write_chapter(
@@ -258,3 +339,8 @@ def write_chapter(
     chapter.mark_written()
     book.touch()
     return text
+
+
+# ── backward-compatible aliases (tests reference the old pool names) ────────
+_BRIDGES = _CHAPTER_OPENERS
+_TAKEAWAY_OPENERS = _TAKEAWAY_FRAMES

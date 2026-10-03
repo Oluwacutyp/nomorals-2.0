@@ -69,7 +69,7 @@ def template_outline(book: Book, *, n_chapters: int) -> list[Chapter]:
     subject = book.topic.strip() or book.display_title
     # anchor chapters are fixed; the middle deep dives absorb the rest.
     # n=3 drops the synthesis chapter (intro + foundations + mastery).
-    n = max(3, min(int(n_chapters), 16))
+    n = max(3, min(int(n_chapters), 24))
     chapters: list[Chapter] = []
 
     def add(title: str, beats: list[str]) -> None:

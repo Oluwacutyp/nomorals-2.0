@@ -409,7 +409,8 @@ class ResearchSwarm:
     def _research_angle(self, angle: str, worker_index: int,
                         domain: str = "") -> dict[str, Any]:
         started = time.time()
-        results = self.search_engine.search(angle, max_results=6)
+        # adaptive breadth: the angle's own phrasing sets the result count
+        results = self.search_engine.search(angle)
         try:
             results = self.trust.annotate(results)
         except Exception:  # noqa: BLE001 - trust is an enhancement

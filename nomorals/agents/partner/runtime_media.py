@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 
+from ...search.adaptive import adaptive_result_limit
+
 
 def _looks_like_path_or_url(ref: str) -> bool:
     """Heuristic: is this an image path/URL (lookup) or a text prompt (generate)?"""
@@ -35,14 +37,16 @@ class RuntimeMediaMixin:
 
     # ── wave 72 systems: media · execution · archives · builders ───────────
 
-    def _control_music(self, tail: str) -> str:
-        """/music <topic> [style] | /music styles | /music song [slug]."""
+    def _control_music(self, tail: str, chat_key: str = "") -> str:
+        """ /music <topic> [style] — composes a real song and sends the
+        audio + the score PDF (lead sheet) straight to this chat.
+        /music styles | /music song [slug]."""
         from ...media.music import STYLES, MusicCreator
 
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /music <topic> [style]  |  /music styles  |  "
-                    "/music song [slug]\nstYLES: " + ", ".join(STYLES))
+                    "/music song [slug]\nstyles: " + ", ".join(STYLES))
         words = tail.split()
         if words[0].lower() == "styles":
             return ("styles:\n" + "\n".join(
@@ -76,8 +80,38 @@ class RuntimeMediaMixin:
             return f"music error: {exc}"
         n_lines = sum(len(sec.lyrics) for sec in song.sections)
         text = (f"🎵 “{song.title}”  [{song.style}, {song.key}, {song.tempo} bpm]\n"
-                f"{n_lines} lyric lines across {len(song.sections)} sections\n"
-                f"{song.midi_path}\nqueue it with: /play {song.midi_path}")
+                f"{n_lines} lyric lines across {len(song.sections)} sections")
+        # deliver the audio + the written score to this chat
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None:
+            sent = []
+            try:
+                if song.audio_path:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        song.audio_path,
+                        caption=f"🎵 {song.title} — listen")
+                    sent.append("audio")
+            except Exception:  # noqa: BLE001 - text fallback below
+                pass
+            try:
+                if song.score_pdf_path:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        song.score_pdf_path,
+                        caption=f"🎼 {song.title} — score (chords + lyrics)")
+                    sent.append("score")
+            except Exception:  # noqa: BLE001
+                pass
+            if sent:
+                text += f"\n sent {' + '.join(sent)} to this chat."
+            else:
+                text += (f"\n audio: {song.audio_path or '(render failed)'}"
+                         f"\n score: {song.score_pdf_path or '(render failed)'}")
+        else:
+            text += (f"\n audio: {song.audio_path or '(render failed)'}"
+                     f"\n score: {song.score_pdf_path or '(render failed)'}"
+                     f"\n midi: {song.midi_path or '(not written)'}")
         return text
 
     def _control_play(self, tail: str) -> str:
@@ -279,7 +313,9 @@ def _resolve_play_title(context: Any, title: str) -> str:
             platform = words[-1].lower()
             query = " ".join(words[:-1])
         try:
-            out = VideoFinder(self.context).find(query, max_results=8,
+            # adaptive breadth: the query's own phrasing sets the result count
+            n = adaptive_result_limit(query, base=8, floor=4, ceiling=12)
+            out = VideoFinder(self.context).find(query, max_results=n,
                                                  platform=platform)
         except Exception as exc:  # noqa: BLE001
             return f"video error: {exc}"
@@ -288,7 +324,7 @@ def _resolve_play_title(context: Any, title: str) -> str:
                     + (f" on {platform}" if platform else "")
                     + " — try a broader query or another platform.")
         lines = [f"🎬 {out['count']} result(s) for “{query}”:"]
-        for i, r in enumerate(out["results"][:6], 1):
+        for i, r in enumerate(out["results"], 1):
             title = (r.get("title") or r["url"])[:64]
             dur = f"  [{r['duration']}]" if r.get("duration") else ""
             extra = f" · {r['author']}" if r.get("author") else ""
