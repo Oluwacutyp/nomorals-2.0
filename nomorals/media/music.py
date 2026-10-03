@@ -760,6 +760,8 @@ class Song:
     midi_path: str = ""
     audio_path: str = ""
     score_pdf_path: str = ""
+    synth_backend: str = ""
+    synth_note: str = ""
     seed: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -776,6 +778,8 @@ class Song:
             "midi_path": self.midi_path,
             "audio_path": self.audio_path,
             "score_pdf_path": self.score_pdf_path,
+            "synth_backend": self.synth_backend,
+            "synth_note": self.synth_note,
         }
 
     def to_score_markdown(self) -> str:
@@ -1310,9 +1314,15 @@ class MusicCreator:
         return b.write(str(target))
 
     def _render_audio(self, song: Song, workdir: str) -> str:
-        """Render the arrangement to a playable WAV (pure-Python synth)."""
+        """Render the arrangement to a playable WAV.
+
+        Backend is profile-aware (see :mod:`nomorals.media.synth_backend`):
+        FluidSynth + soundfont on capable machines, the lightweight
+        builtin synth on phones.  The choice lands on the song so chat
+        can surface a soundfont offer when one would help.
+        """
         from ..tools.filesystem import safe_path
-        from .synth import write_wav
+        from .synth_backend import render_wav as backend_render_wav
 
         base = safe_path(self.context, (workdir or "music").strip("/"))
         base.mkdir(parents=True, exist_ok=True)
@@ -1321,8 +1331,14 @@ class MusicCreator:
         spec = resolve_style(song.style)
         rng = random.Random(song.seed ^ 0x5EED)
         parts = self._arrange(song, spec, rng)
-        return write_wav(str(target), parts, float(song.tempo),
-                         seed=song.seed ^ 0xA071)
+        midi_path = song.midi_path or self._write_midi(song, workdir)
+        choice = backend_render_wav(parts, float(song.tempo),
+                                    song.seed ^ 0xA071, midi_path,
+                                    str(target), context=self.context)
+        song.synth_backend = choice.name
+        song.synth_note = choice.note
+        _log.info("audio rendered via %s (%s)", choice.name, choice.reason)
+        return str(target)
 
     def _write_score_pdf(self, song: Song, workdir: str) -> str:
         """Render the lead sheet (chords + lyrics + arrangement) to PDF."""
