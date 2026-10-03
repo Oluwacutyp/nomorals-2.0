@@ -9,6 +9,7 @@ tested, so keeping it small is the point.
 from __future__ import annotations
 
 import curses
+import threading
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
@@ -18,7 +19,7 @@ __all__ = ["TuiApp", "run"]
 
 _log = get_logger(__name__)
 
-_KINDS = {"status": 1, "input": 2, "error": 3, "tool": 4, "assistant": 5, "user": 6}
+_KINDS = {"status": 1, "input": 2, "error": 3, "tool": 4, "assistant": 5, "user": 6, "help": 7}
 
 
 class TuiApp:
@@ -48,17 +49,30 @@ class TuiApp:
 
         if action is KeyAction.QUIT:
             return False
+        if state.help_visible and action is not KeyAction.HELP:
+            # Any key dismisses the help overlay; the key itself is swallowed
+            # so a stray keypress cannot type into the buffer underneath.
+            state.help_visible = False
+            return True
+        if action is KeyAction.HELP:
+            state.toggle_help()
+            return True
         if action is KeyAction.SUBMIT:
             text = state.submit()
             if text:
                 state.say(f"{state.prompt}{text}", kind="user")
                 state.busy = True
-                try:
-                    self.on_submit(text)
-                except Exception as exc:  # noqa: BLE001 - one bad command must not kill the UI
-                    state.error(f"{type(exc).__name__}: {exc}")
-                finally:
-                    state.busy = False
+                if self._screen is None:
+                    # Embedded/test mode: run inline so the caller sees the
+                    # result before handle() returns.
+                    self._run_submit(text)
+                else:
+                    # Live mode: run in the background so the loop keeps
+                    # redrawing and the busy indicator is actually visible.
+                    worker = threading.Thread(
+                        target=self._run_submit, args=(text,), daemon=True
+                    )
+                    worker.start()
         elif action is KeyAction.CANCEL:
             state.busy = False
             state.status = "cancelled"
@@ -98,6 +112,17 @@ class TuiApp:
             state.insert(key)
         return True
 
+    def _run_submit(self, text: str) -> None:
+        """Run the submit handler, reporting failures without killing the UI."""
+        try:
+            self.on_submit(text)
+        except KeyboardInterrupt:  # noqa: E106 - /quit arrives as KeyboardInterrupt; stop the loop
+            self.stop()
+        except Exception as exc:  # noqa: BLE001 - one bad command must not kill the UI
+            self.state.error(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.state.busy = False
+
     def _viewport_height(self) -> int:
         if self._screen is None:
             return 20
@@ -110,6 +135,10 @@ class TuiApp:
             return
         height, width = self._screen.getmaxyx()
         frame = render(self.state, width=width, height=height)
+        try:
+            curses.curs_set(0 if self.state.help_visible else 1)
+        except curses.error:  # noqa: E103 - some terminals reject cursor visibility changes
+            pass
         self._screen.erase()
         for index, (text, kind) in enumerate(frame.rows[:height]):
             attribute = curses.A_NORMAL
@@ -117,6 +146,8 @@ class TuiApp:
                 attribute = curses.color_pair(_KINDS.get(kind, 0))
             if kind == "status":
                 attribute |= curses.A_REVERSE
+            if kind == "help":
+                attribute |= curses.A_BOLD
             try:
                 self._screen.addnstr(index, 0, text, width - 1, attribute)
             except curses.error:  # noqa: E103 - writing the bottom-right cell always raises; ignore it
@@ -140,7 +171,13 @@ class TuiApp:
                 if index and index < curses.COLORS:
                     curses.init_pair(index, _color_for(kind), -1)
         screen.keypad(True)
-        self.state.say("NoMorals Core — type a message, Ctrl-D to quit, Tab to switch panels.")
+        # Poll instead of blocking forever: the loop redraws ~8x a second so
+        # the busy indicator animates while a submit handler runs in a worker.
+        screen.timeout(120)
+        self.state.say(
+            "NoMorals Core — type a message and press Enter, ? for keys, "
+            "/help for commands, Ctrl-D to quit, Tab to switch panels."
+        )
         while self._running:
             self.draw()
             try:
@@ -162,6 +199,7 @@ def _color_for(kind: str) -> int:
         "status": curses.COLOR_WHITE, "input": curses.COLOR_GREEN,
         "error": curses.COLOR_RED, "tool": curses.COLOR_YELLOW,
         "assistant": curses.COLOR_CYAN, "user": curses.COLOR_MAGENTA,
+        "help": curses.COLOR_WHITE,
     }.get(kind, curses.COLOR_WHITE)
 
 
@@ -170,6 +208,7 @@ _KEY_NAMES = {
     curses.KEY_RIGHT: "\x1b[C", curses.KEY_HOME: "\x01", curses.KEY_END: "\x05",
     curses.KEY_BACKSPACE: "\x08", curses.KEY_DC: "\x1b[3~",
     curses.KEY_PPAGE: "u", curses.KEY_NPAGE: "d",
+    curses.KEY_F1: "?",
 }
 
 

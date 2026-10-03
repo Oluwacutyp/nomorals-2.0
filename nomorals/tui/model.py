@@ -18,7 +18,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-__all__ = ["Panel", "Line", "KeyAction", "TuiState", "render"]
+__all__ = [
+    "Panel", "Line", "KeyAction", "TuiState", "render",
+    "KEY_HELP", "SLASH_HELP", "help_overlay",
+]
 
 
 class Panel(str, Enum):
@@ -51,6 +54,7 @@ class KeyAction(str, Enum):
     DELETE_CHAR = "delete_char"
     BACKSPACE = "backspace"
     TAB_COMPLETE = "tab_complete"
+    HELP = "help"
 
 
 @dataclass
@@ -91,6 +95,7 @@ class TuiState:
     busy: bool = False
     status: str = "ready"
     prompt: str = "> "
+    help_visible: bool = False
     max_history: int = 200
     max_lines: int = 2000
 
@@ -197,6 +202,9 @@ class TuiState:
         index = order.index(self.focus) if self.focus in order else 0
         self.focus = order[(index + 1) % len(order)]
 
+    def toggle_help(self) -> None:
+        self.help_visible = not self.help_visible
+
 
 DEFAULT_BINDINGS: dict[str, KeyAction] = {
     "\n": KeyAction.SUBMIT,
@@ -214,7 +222,74 @@ DEFAULT_BINDINGS: dict[str, KeyAction] = {
     "\x08": KeyAction.BACKSPACE,
     "\x7f": KeyAction.BACKSPACE,
     "\x1b[3~": KeyAction.DELETE_CHAR,
+    "?": KeyAction.HELP,
 }
+
+
+# ── help overlay ─────────────────────────────────────────────────────────────
+# The single source of truth for what the keys do. The overlay in render() and
+# the /help slash command both draw from these tables, so the docs cannot drift
+# from the bindings above.
+
+KEY_HELP: list[tuple[str, str]] = [
+    ("Enter", "submit the line"),
+    ("Ctrl-D", "quit"),
+    ("Ctrl-C", "cancel the running command"),
+    ("Ctrl-L", "clear the scrollback"),
+    ("Tab", "switch panel focus"),
+    ("Up / Down", "history (input) · scroll (scrollback)"),
+    ("Left / Right", "move the cursor"),
+    ("Ctrl-A / Ctrl-E", "line start / end"),
+    ("Del", "delete char under cursor"),
+    ("PgUp / PgDn", "page the scrollback"),
+    ("j / k", "scroll one line (scrollback)"),
+    ("u / d", "scroll one page (scrollback)"),
+    ("g / G", "top / bottom (scrollback)"),
+    ("? or F1", "toggle this help"),
+]
+
+SLASH_HELP: list[tuple[str, str]] = [
+    ("/help", "list commands"),
+    ("/tools", "list available tools"),
+    ("/models", "list models"),
+    ("/missions", "list missions"),
+    ("/mem <text>", "remember something"),
+    ("/recall <query>", "search memory"),
+    ("/doctor", "environment info"),
+    ("/clear", "clear the scrollback"),
+    ("/quit", "exit the TUI"),
+]
+
+
+def help_overlay(width: int) -> list[str]:
+    """The help panel as plain text rows: boxed and width-clamped.
+
+    Key bindings and slash commands sit side by side on wide terminals; on
+    narrow ones the keys get the full width and a pointer to ``/help`` covers
+    the commands. Either way the panel is short enough to fit the body.
+    """
+    left = ["KEY BINDINGS"] + [f"  {keys:<14} {desc}" for keys, desc in KEY_HELP]
+    right = ["COMMANDS"] + [f"  {keys:<16} {desc}" for keys, desc in SLASH_HELP]
+    left_width = max(len(row) for row in left)
+    right_width = max(len(row) for row in right)
+    if left_width + right_width + 7 <= width - 4:
+        height = max(len(left), len(right))
+        left += [""] * (height - len(left))
+        right += [""] * (height - len(right))
+        content = [
+            first.ljust(left_width) + " | " + second
+            for first, second in zip(left, right)
+        ]
+    else:
+        content = left + ["", "  type /help for the command list"]
+
+    box_width = min(max(len(row) for row in content) + 4, width - 4)
+    inner_width = box_width - 4
+    rows = ["+" + "-" * (box_width - 2) + "+"]
+    for text in content:
+        rows.append("| " + text[:inner_width].ljust(inner_width) + " |")
+    rows.append("+" + "-" * (box_width - 2) + "+")
+    return rows
 
 
 def action_for(key: str, state: TuiState, bindings: dict[str, KeyAction] | None = None) -> KeyAction:
@@ -225,6 +300,12 @@ def action_for(key: str, state: TuiState, bindings: dict[str, KeyAction] | None 
     driver so it can be tested.
     """
     table = bindings or DEFAULT_BINDINGS
+    if key == "?" and table.get(key) is KeyAction.HELP:
+        # A "?" typed mid-line is punctuation, not a help request: only an
+        # empty input line (or the scrollback panel) opens the help overlay,
+        # so asking the model a question still works.
+        if state.focus is Panel.INPUT and state.buffer:
+            return KeyAction.NONE
     action = table.get(key)
     if action is not None:
         return action
@@ -276,9 +357,17 @@ def render(state: TuiState, *, width: int, height: int) -> Rendered:
     rows.extend(visible)
     rows.append((prompt_line[:width], "input"))
 
-    indicator = "…" if state.busy else ""
+    if state.help_visible:
+        overlay = help_overlay(width)
+        top = 1 + max(0, (body_height - len(overlay)) // 2)
+        for index, text in enumerate(overlay):
+            row = top + index
+            if 1 <= row < len(rows) - 1:
+                rows[row] = (text[:width], "help")
+
+    indicator = "… working" if state.busy else ""
     status = f" {state.status} {indicator}".strip()
-    right = f"[{state.focus.value}] "
+    right = f"? help  [{state.focus.value}] "
     padding = max(1, width - len(status) - len(right))
     rows.insert(0, ((status + " " * padding + right)[:width], "status"))
 

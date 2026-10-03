@@ -8,7 +8,17 @@ from __future__ import annotations
 
 import unittest
 
-from nomorals.tui import KeyAction, Line, Panel, TuiApp, TuiState, action_for, render
+from nomorals.tui import (
+    KEY_HELP,
+    KeyAction,
+    Line,
+    Panel,
+    TuiApp,
+    TuiState,
+    action_for,
+    help_overlay,
+    render,
+)
 
 
 class LineTests(unittest.TestCase):
@@ -309,6 +319,114 @@ class AppTests(unittest.TestCase):
     def test_tab_switches_focus(self):
         self.app.handle("\t")
         self.assertIs(self.state.focus, Panel.SCROLLBACK)
+
+
+class HelpTests(unittest.TestCase):
+    def test_question_mark_opens_help_on_an_empty_input_line(self):
+        self.assertIs(action_for("?", TuiState()), KeyAction.HELP)
+
+    def test_question_mark_is_typable_mid_line(self):
+        state = TuiState()
+        state.insert("really")
+        self.assertIs(action_for("?", state), KeyAction.NONE)
+
+    def test_question_mark_opens_help_from_the_scrollback(self):
+        state = TuiState()
+        state.focus = Panel.SCROLLBACK
+        state.insert("x")
+        self.assertIs(action_for("?", state), KeyAction.HELP)
+
+    def test_toggle_help_flips_the_flag(self):
+        state = TuiState()
+        state.toggle_help()
+        self.assertTrue(state.help_visible)
+        state.toggle_help()
+        self.assertFalse(state.help_visible)
+
+    def test_overlay_lists_bindings_and_commands(self):
+        narrow = "\n".join(help_overlay(80))
+        self.assertIn("KEY BINDINGS", narrow)
+        for keys, _ in KEY_HELP:
+            self.assertIn(keys, narrow)
+        self.assertIn("/help", narrow, "narrow terminals point at /help")
+        wide = "\n".join(help_overlay(120))
+        self.assertIn("COMMANDS", wide)
+        self.assertIn("/tools", wide)
+        self.assertIn("/quit", wide)
+
+    def test_overlay_rows_fit_a_narrow_terminal(self):
+        for width in (40, 60, 120):
+            rows = help_overlay(width)
+            self.assertTrue(all(len(row) <= width for row in rows), f"width {width}")
+
+    def test_render_draws_the_overlay_over_the_body(self):
+        state = TuiState()
+        state.say("content")
+        state.toggle_help()
+        frame = render(state, width=80, height=24)
+        kinds = [kind for _, kind in frame.rows]
+        self.assertIn("help", kinds)
+        joined = " ".join(text for text, _ in frame.rows)
+        self.assertIn("KEY BINDINGS", joined)
+        self.assertEqual(frame.rows[0][1], "status", "status bar stays on top")
+        self.assertEqual(frame.rows[-1][1], "input", "input line stays at the bottom")
+
+    def test_render_without_help_has_no_help_rows(self):
+        frame = render(TuiState(), width=80, height=24)
+        self.assertNotIn("help", [kind for _, kind in frame.rows])
+
+    def test_status_bar_hints_at_the_help_key(self):
+        frame = render(TuiState(), width=60, height=10)
+        self.assertIn("? help", frame.rows[0][0])
+
+    def test_busy_status_names_it(self):
+        state = TuiState()
+        state.busy = True
+        frame = render(state, width=60, height=10)
+        self.assertIn("working", frame.rows[0][0])
+        self.assertIn("…", frame.rows[0][0])
+
+
+class HelpAppTests(unittest.TestCase):
+    """Help overlay behaviour through the driver's key handling."""
+
+    def setUp(self):
+        self.state = TuiState()
+        self.app = TuiApp(state=self.state, on_submit=lambda text: None)
+
+    def test_question_mark_toggles_the_overlay(self):
+        self.app.handle("?")
+        self.assertTrue(self.state.help_visible)
+        self.app.handle("?")
+        self.assertFalse(self.state.help_visible)
+
+    def test_any_key_dismisses_the_overlay_and_is_swallowed(self):
+        self.app.handle("?")
+        self.assertTrue(self.state.help_visible)
+        self.app.handle("x")
+        self.assertFalse(self.state.help_visible)
+        self.assertEqual(self.state.buffer, "", "the dismissing key must not type")
+
+    def test_escape_dismisses_the_overlay(self):
+        self.app.handle("?")
+        self.app.handle("\x1b")
+        self.assertFalse(self.state.help_visible)
+
+    def test_question_mark_mid_line_types_a_question_mark(self):
+        for char in "really?":
+            self.app.handle(char)
+        self.assertEqual(self.state.buffer, "really?")
+
+    def test_f1_maps_to_the_help_key(self):
+        import curses
+
+        from nomorals.tui.app import _key_name
+
+        self.assertEqual(_key_name(curses.KEY_F1), "?")
+
+    def test_quit_still_quits_from_the_overlay(self):
+        self.app.handle("?")
+        self.assertFalse(self.app.handle("\x04"))
 
 
 if __name__ == "__main__":

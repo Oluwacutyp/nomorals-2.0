@@ -11,9 +11,20 @@ the result.
 from __future__ import annotations
 
 from .app import TuiApp, run
-from .model import KeyAction, Line, Panel, Rendered, TuiState, action_for, render
+from .model import (
+    KEY_HELP,
+    SLASH_HELP,
+    KeyAction,
+    Line,
+    Panel,
+    Rendered,
+    TuiState,
+    action_for,
+    help_overlay,
+    render,
+)
 
 __all__ = [
-    "KeyAction", "Line", "Panel", "Rendered", "TuiApp", "TuiState",
-    "action_for", "render", "run",
+    "KEY_HELP", "SLASH_HELP", "KeyAction", "Line", "Panel", "Rendered",
+    "TuiApp", "TuiState", "action_for", "help_overlay", "render", "run",
 ]
