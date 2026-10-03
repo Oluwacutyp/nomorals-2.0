@@ -1498,7 +1498,8 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm browse open <url> [--session S]\n"
                      "nm browse tabs|text|md|links|history [--session S]\n"
                      "nm browse shot [--out PATH] | nm browse download <url>\n"
-                     "nm browse close | nm browse sessions"),
+                     "nm browse close | nm browse sessions\n"
+                     "nm browse daemon start|stop|status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     browse.add_argument("task", nargs="*", default=[], help="verb and arguments")
@@ -1723,7 +1724,8 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm browse open <url> [--session S]\n"
                      "nm browse tabs|text|md|links|history [--session S]\n"
                      "nm browse shot [--out PATH] | nm browse download <url>\n"
-                     "nm browse close | nm browse sessions"),
+                     "nm browse close | nm browse sessions\n"
+                     "nm browse daemon start|stop|status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     browse.add_argument("task", nargs="*", default=[], help="verb and arguments")

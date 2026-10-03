@@ -14,13 +14,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
 from .workspace import WorkspaceError
 
 __all__ = ["run_tests", "run_build"]
 
+_log = get_logger(__name__)
+
 _TEST_TIMEOUT = 300
 _BUILD_TIMEOUT = 600
 _OUTPUT_CAP = 20_000
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break the runners (fail-open telemetry, fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 _PYTEST_PASSED_RE = re.compile(r"(\d+)\s+passed")
 _PYTEST_FAILED_RE = re.compile(r"(\d+)\s+failed")
@@ -123,8 +136,16 @@ def run_tests(root: str | Path, selector: str = "") -> dict[str, Any]:
     proc = _run_cmd(args, base, _TEST_TIMEOUT)
     output = _cap(proc.stdout + proc.stderr)
     passed, failed = parse(output) if parse else (-1, -1)
-    return {"runner": runner, "ok": proc.returncode == 0,
-            "passed": passed, "failed": failed, "output": output}
+    result = {"runner": runner, "ok": proc.returncode == 0,
+              "passed": passed, "failed": failed, "output": output}
+    _emit("codews.tests.run", {
+        "root": str(base),
+        "runner": runner,
+        "ok": result["ok"],
+        "passed": passed,
+        "failed": failed,
+    })
+    return result
 
 
 def _first_make_target(makefile: Path) -> str:
@@ -148,6 +169,7 @@ def run_build(root: str | Path, target: str = "") -> dict[str, Any]:
     """
     base = _resolve_root(root)
     makefile = base / "Makefile"
+    tgt = ""
     if makefile.is_file():
         tgt = target or _first_make_target(makefile)
         if not tgt:
@@ -161,5 +183,11 @@ def run_build(root: str | Path, target: str = "") -> dict[str, Any]:
         proc = _run_cmd([sys.executable, "-m", "build"], base, _BUILD_TIMEOUT)
     else:
         raise WorkspaceError("no build system found")
-    return {"ok": proc.returncode == 0,
-            "output": _cap(proc.stdout + proc.stderr)}
+    result = {"ok": proc.returncode == 0,
+              "output": _cap(proc.stdout + proc.stderr)}
+    _emit("codews.build.run", {
+        "root": str(base),
+        "target": tgt,
+        "ok": result["ok"],
+    })
+    return result

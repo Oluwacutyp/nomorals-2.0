@@ -18,9 +18,24 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..core.events import Event, global_bus
+from ..core.logging_setup import get_logger
+
 __all__ = ["WorkspaceError", "CodeWorkspace"]
 
+_log = get_logger(__name__)
+
 _DEFAULT_TIMEOUT = 60
+
+
+def _emit(topic: str, data: dict[str, Any]) -> None:
+    """Publish a telemetry event. Best-effort: a broken bus or subscriber
+    must never break workspace operations (fail-open telemetry,
+    fail-closed function)."""
+    try:
+        global_bus.publish(Event(topic=topic, data=data, source=__name__))
+    except Exception:  # noqa: BLE001 - telemetry is fail-open
+        _log.debug("event %s failed", topic, exc_info=True)
 
 
 class WorkspaceError(Exception):
@@ -35,6 +50,10 @@ class CodeWorkspace:
         self.root = Path(root).expanduser().resolve()
         self.artifact_store = artifact_store
         self.mission_id = mission_id
+        _emit("codews.workspace.opened", {
+            "root": str(self.root),
+            "mission_id": mission_id,
+        })
 
     # ── plumbing ──────────────────────────────────────────────────────────
     def _git_bin(self) -> str:

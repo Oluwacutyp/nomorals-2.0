@@ -11,8 +11,18 @@ Consumes the H2 event topic contract:
 * ``artifact.created``    — {artifact_id, uri, type, creator, mission_id, task_id}
 * ``session.created``     — {session_id, frontend, principal}
 * ``session.ended``       — {session_id}
-* plus any other ``mission.*`` / ``artifact.*`` / ``session.*`` / ``task.*``
-  topics the siblings emit.
+* ``document.parsed``     — {doc_id, format, title, sections, tables, source}
+* ``browser.session.opened`` / ``browser.session.closed`` — {session}
+* ``browser.tab.navigated`` — {session, tab_id, url, title}
+* ``browser.download.completed`` — {url, path, size, mime, artifact_uri,
+  session, tab_id, mission_id}
+* ``codews.workspace.opened`` — {root, mission_id}
+* ``codews.patch.applied`` — {root, files, patched, failed}
+* ``codews.tests.run``    — {root, runner, ok, passed, failed}
+* ``codews.build.run``    — {root, target, ok}
+* plus any other ``mission.*`` / ``artifact.*`` / ``session.*`` /
+  ``task.*`` / ``document.*`` / ``browser.*`` / ``codews.*`` topics the
+  siblings emit.
 
 The table is created with ``CREATE TABLE IF NOT EXISTS`` so this module
 never needs a storage migration (and can never collide with one a sibling
@@ -37,7 +47,10 @@ __all__ = ["Timeline", "TIMELINE_PATTERNS"]
 _log = logging.getLogger(__name__)
 
 #: Bus topic patterns the timeline subscribes to (async delivery).
-TIMELINE_PATTERNS: tuple[str, ...] = ("mission.*", "artifact.*", "session.*", "task.*")
+TIMELINE_PATTERNS: tuple[str, ...] = (
+    "mission.*", "artifact.*", "session.*", "task.*",
+    "document.*", "browser.*", "codews.*",
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS event_log (
