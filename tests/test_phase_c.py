@@ -139,7 +139,14 @@ class RoleAllowlistTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         router = ScriptedRouter([
             _json_block({"files": []}),  # plan -> default single file
-            "```python\nX = 1\n```\n",  # new-file draft
+            # new-file draft: substantive enough to pass honest acceptance
+            # (a trivial one-liner with no output is correctly rejected as
+            # fake success — see the CodingAgent acceptance guard).
+            "```python\n\"\"\"Main module.\"\"\"\n\nX = 1\n\n\n"
+            "def get_x():\n    \"\"\"Return the module constant.\"\"\"\n"
+            "    return X\n\n\n"
+            "if __name__ == \"__main__\":\n"
+            "    print(f\"X = {get_x()}\")\n```\n",
         ])
         self.ctx = StubContext(router)
         self.registry = ToolRegistry(context=self.ctx).register_builtins()

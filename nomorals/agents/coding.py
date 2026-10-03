@@ -561,7 +561,13 @@ class CodingAgent:
 
         started = time.perf_counter()
         use_runner = not accept
-        accept = accept or f'python3 "{filename}"'
+        # The --accept escape hatch wins verbatim.  Otherwise the runnable
+        # target is derived AFTER planning (below): the old code blindly
+        # ran `python3 "main.py"` even when main.py was never created, so
+        # every surgical-edit mission on pre-existing files failed with
+        # "can't open file ... main.py".
+        explicit_accept = (accept or "").strip()
+        accept_cmd: str | None = explicit_accept or None
         # wave 68: a long/multi-clause build ask is structured into a
         # spec first — unchanged from Phase A.
         draft_task = task
@@ -599,8 +605,29 @@ class CodingAgent:
         # Phase D: explore phase reads all planned files in one parallel
         # call_many block instead of N sequential reads.
         texts = self._explore_reads(plan)
+        # Derive the accept target from what actually exists: prefer the
+        # default filename, else the planned .py files that exist, else
+        # None (nothing runnable — the reviewed+linted diff is the
+        # deliverable).
+        if accept_cmd is None and not use_runner:
+            if (workdir / filename).is_file():
+                accept_cmd = f'python3 "{filename}"'
+            else:
+                seen_targets: set[str] = set()
+                targets: list[str] = []
+                for spec in plan:
+                    rel = str(spec["path"])
+                    if (rel.endswith(".py") and rel not in seen_targets
+                            and (workdir / rel).is_file()):
+                        seen_targets.add(rel)
+                        targets.append(rel)
+                accept_cmd = (" && ".join(f'python3 "{t}"' for t in targets)
+                              or None)
         file_errors = {spec["path"]: "" for spec in plan}
         changed: list[str] = []
+        #: files the agent created from scratch this run (vs surgical edits
+        #: to pre-existing files) — the fake-success guard applies to these.
+        created_files: set[str] = set()
         last_error = ""
         rounds = max(1, max_iterations)
         # Phase C: diff-review gate state.  all_diffs keeps the latest diff
@@ -643,6 +670,7 @@ class CodingAgent:
                         code = self._reason_review_code(draft_task, code)
                     path.write_text(code, encoding="utf-8")
                     texts[rel] = code
+                    created_files.add(rel)
                 else:
                     change = self._draft_change(
                         draft_task, rel, texts[rel] or "",
@@ -656,7 +684,8 @@ class CodingAgent:
                         # Unified-diff protocol: the model shipped a whole
                         # diff (possibly multi-file); apply it directly.
                         patch_ok, patch_err = self._apply_model_patch(
-                            payload, workdir, texts, diffs, touched, changed)
+                            payload, workdir, texts, diffs, touched, changed,
+                            created_files)
                         budgets[rel] -= 1
                         if not patch_ok:
                             file_errors[rel] = patch_err
@@ -734,15 +763,26 @@ class CodingAgent:
                 verify_out = _pytest_mod.format_test_result(tres)
                 verify_err = "" if green else verify_out
             else:
-                raw = self._run(accept, workdir, timeout)
+                if accept_cmd:
+                    raw = self._run(accept_cmd, workdir, timeout)
+                else:
+                    # No tests and no runnable entry point: nothing to
+                    # execute.  The reviewed + linted diff is the
+                    # deliverable — not a failure.
+                    raw = {"exit_code": 0, "timed_out": False,
+                           "stdout": "", "stderr": ""}
                 out_text = (raw.get("stdout") or "").strip()
                 # Real acceptance: exit 0 AND (meaningful stdout OR a
-                # substantive artifact).  An empty main.py that exits 0
-                # with no output is FAILURE, not green — never report
-                # "0 tests, empty file" as success.
+                # substantive artifact).  The fake-success guard applies to
+                # files the agent CREATED — an empty new main.py that exits
+                # 0 with no output is FAILURE, never green.  Surgical edits
+                # to pre-existing files are accepted on a clean run: the
+                # diff was already reviewed and lint-gated.
                 ran_something = bool(out_text)
-                made_artifact = self._substantive_artifact(
-                    changed or [filename], workdir)
+                newly_created = [r for r in (changed or [])
+                                 if r in created_files]
+                made_artifact = (self._substantive_artifact(
+                    newly_created, workdir) if newly_created else True)
                 green = (raw["exit_code"] == 0 and not raw["timed_out"]
                          and (ran_something or made_artifact))
                 verify_out = (raw.get("stdout") or "")[-4000:]
@@ -1005,7 +1045,8 @@ class CodingAgent:
     def _apply_model_patch(self, patch_text: str, workdir: Path,
                            texts: dict[str, str | None],
                            diffs: dict[str, str], touched: list[str],
-                           changed: list[str]) -> tuple[bool, str]:
+                           changed: list[str],
+                           created: set[str] | None = None) -> tuple[bool, str]:
         """Apply a model-supplied unified diff; refresh texts/diffs/touched.
 
         Returns ``(True, "")`` on full success, ``(False, reason)`` when the
@@ -1040,6 +1081,8 @@ class CodingAgent:
             p = self._resolve(target_rel)
             after = p.read_text(encoding="utf-8") if p.is_file() else ""
             texts[target_rel] = after
+            if created is not None and not before.get(target_rel) and after:
+                created.add(target_rel)
             diff_text = _unified_diff(before.get(target_rel, ""), after,
                                       target_rel)
             if diff_text.strip():
