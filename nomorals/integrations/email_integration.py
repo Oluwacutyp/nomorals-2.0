@@ -39,9 +39,13 @@ from ..accounts.manager import AccountManager
 from ..accounts.sessions import SessionManager
 from ..core.logging_setup import get_logger
 
-__all__ = ["EmailIntegration", "EmailMessage"]
+__all__ = ["EmailIntegration", "EmailError", "EmailMessage"]
 
 _log = get_logger(__name__)
+
+
+class EmailError(Exception):
+    """Raised when an email operation cannot be completed."""
 
 
 class EmailMessage:
@@ -658,12 +662,52 @@ class EmailIntegration:
     
     async def _mark_read_imap(self, message_id: str, account: str) -> None:
         """Mark message as read via IMAP."""
-        # IMAP marking requires connecting and setting flags
-        # This is a simplified version
-        _log.info(f"Mark as read not fully implemented for IMAP: {message_id}")
+        service = account.split("@")[1].split(".")[0]
+        cred = self.account_manager.get_credential(f"email_{service}", account)
+        imap_servers = {
+            "gmail": "imap.gmail.com",
+            "yahoo": "imap.mail.yahoo.com",
+            "outlook": "outlook.office365.com",
+            "hotmail": "outlook.office365.com",
+        }
+        imap_host = imap_servers.get(service, f"imap.{service}.com")
+        try:
+            with imaplib.IMAP4_SSL(imap_host, 993) as mail:
+                mail.login(account, cred.password)
+                mail.select("INBOX")
+                # message_id may be a sequence number or UID; try UID first
+                status, _ = mail.uid("STORE", message_id, "+FLAGS", "\\Seen")
+                if status != "OK":
+                    status, _ = mail.store(message_id, "+FLAGS", "\\Seen")
+                if status != "OK":
+                    raise EmailError(f"IMAP STORE failed for {message_id}: {status}")
+                _log.info(f"Marked {message_id} as read")
+        except Exception as e:
+            _log.error(f"Failed to mark read via IMAP: {e}")
+            raise EmailError(f"IMAP mark-read failed: {e}") from e
     
     async def _delete_imap(self, message_id: str, account: str) -> None:
         """Delete message via IMAP."""
-        # IMAP deletion requires connecting and deleting
-        # This is a simplified version
-        _log.info(f"Delete not fully implemented for IMAP: {message_id}")
+        service = account.split("@")[1].split(".")[0]
+        cred = self.account_manager.get_credential(f"email_{service}", account)
+        imap_servers = {
+            "gmail": "imap.gmail.com",
+            "yahoo": "imap.mail.yahoo.com",
+            "outlook": "outlook.office365.com",
+            "hotmail": "outlook.office365.com",
+        }
+        imap_host = imap_servers.get(service, f"imap.{service}.com")
+        try:
+            with imaplib.IMAP4_SSL(imap_host, 993) as mail:
+                mail.login(account, cred.password)
+                mail.select("INBOX")
+                status, _ = mail.uid("STORE", message_id, "+FLAGS", "\\Deleted")
+                if status != "OK":
+                    status, _ = mail.store(message_id, "+FLAGS", "\\Deleted")
+                if status != "OK":
+                    raise EmailError(f"IMAP DELETE failed for {message_id}: {status}")
+                mail.expunge()
+                _log.info(f"Deleted {message_id}")
+        except Exception as e:
+            _log.error(f"Failed to delete via IMAP: {e}")
+            raise EmailError(f"IMAP delete failed: {e}") from e

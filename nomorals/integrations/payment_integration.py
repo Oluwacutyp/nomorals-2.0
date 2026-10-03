@@ -45,6 +45,7 @@ from ..core.logging_setup import get_logger
 
 __all__ = [
     "PaymentIntegration",
+    "PaymentError",
     "Transaction",
     "Wallet",
     "VirtualCard",
@@ -52,6 +53,14 @@ __all__ = [
 ]
 
 _log = get_logger(__name__)
+
+
+class PaymentError(Exception):
+    """Raised when a payment operation cannot be completed.
+
+    This is always a loud failure — never a fake success. If you see
+    this, no money moved and no transaction was broadcast.
+    """
 
 
 @dataclass
@@ -671,38 +680,44 @@ class PaymentIntegration:
         return 0.0
     
     async def _get_crypto_balance_generic(self, address: str, currency: str) -> float:
-        """Get balance via CoinGecko or similar API."""
-        _log.warning(f"Generic balance check not implemented for {currency}")
-        return 0.0
+        """Get balance via blockchain explorer API."""
+        # Loud failure: never return a fake zero balance.
+        # Per-currency implementations (_get_btc_balance, _get_eth_balance)
+        # use real explorer APIs. Generic currencies need a real implementation.
+        raise PaymentError(
+            f"Balance check not implemented for {currency} — no fake zero "
+            f"returned. Add a _get_{currency.lower()}_balance method with a "
+            f"real blockchain explorer API."
+        )
     
     async def _send_btc(self, cred: Any, to_address: str, amount: float, fee_rate: str) -> str:
         """Send BTC transaction."""
-        # In production, this would use a proper Bitcoin library
-        # For now, return a mock transaction hash
-        tx_hash = hashlib.sha256(
-            f"{cred.username}:{to_address}:{amount}:{time.time()}".encode()
-        ).hexdigest()
-        
-        _log.info(f"BTC send simulated: {amount} BTC to {to_address}")
-        return tx_hash
+        # Loud failure: on-chain broadcast requires wallet signing infrastructure
+        # (private key management, UTXO selection, tx construction) which does
+        # not exist yet. NEVER return a fake tx hash — the user approved a
+        # real send and must know it did not happen.
+        raise PaymentError(
+            "BTC send not implemented: on-chain broadcast requires wallet "
+            "signing infrastructure (private keys, UTXO management). "
+            "No transaction was created or broadcast. "
+            "This is NOT a simulation — it is an unimplemented feature."
+        )
     
     async def _send_eth(self, cred: Any, to_address: str, amount: float, fee_rate: str) -> str:
         """Send ETH transaction."""
-        tx_hash = hashlib.sha256(
-            f"{cred.username}:{to_address}:{amount}:{time.time()}".encode()
-        ).hexdigest()
-        
-        _log.info(f"ETH send simulated: {amount} ETH to {to_address}")
-        return tx_hash
+        # Loud failure: see _send_btc. Never fake a tx hash.
+        raise PaymentError(
+            "ETH send not implemented: on-chain broadcast requires wallet "
+            "signing infrastructure. No transaction was created or broadcast."
+        )
     
     async def _send_crypto_generic(self, cred: Any, currency: str, to_address: str, amount: float) -> str:
         """Send crypto via generic method."""
-        tx_hash = hashlib.sha256(
-            f"{cred.username}:{to_address}:{amount}:{time.time()}".encode()
-        ).hexdigest()
-        
-        _log.info(f"{currency} send simulated: {amount} to {to_address}")
-        return tx_hash
+        # Loud failure: never fake a tx hash.
+        raise PaymentError(
+            f"{currency} send not implemented: on-chain broadcast requires "
+            f"wallet signing infrastructure. No transaction was created."
+        )
     
     # ── Transaction History ──────────────────────────────────────────────────
     
@@ -784,8 +799,11 @@ class PaymentIntegration:
     
     async def _get_transactions_generic(self, address: str, currency: str, limit: int) -> list[Transaction]:
         """Get transactions via generic API."""
-        _log.warning(f"Generic transaction history not implemented for {currency}")
-        return []
+        # Loud failure: never return fake empty history.
+        raise PaymentError(
+            f"Transaction history not implemented for {currency} — no fake "
+            f"empty list returned."
+        )
     
     # ── Helpers ──────────────────────────────────────────────────────────────
     
