@@ -150,8 +150,9 @@ class ToolRegistry:
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video
+            from ..media import library as _library
 
-            for _mod in (_music, _playback, _video):
+            for _mod in (_music, _playback, _library, _video):
                 try:
                     _mod.register(self)
                 except Exception:  # noqa: BLE001 — module-level opt-out

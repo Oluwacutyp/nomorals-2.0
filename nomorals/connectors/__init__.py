@@ -67,6 +67,7 @@ from .twilio import TwilioConnector, TwilioError
 from .aws import AWSConnector, AWSError
 from .dropbox import DropboxConnector, DropboxError
 from .spotify import SpotifyConnector, SpotifyError
+from .soundcloud import SoundCloudConnector, SoundCloudError
 from .youtube import YouTubeConnector, YouTubeError
 
 from .googleflow import GoogleFlowConnector, GoogleFlowError
@@ -127,6 +128,8 @@ __all__ = [
     "ProxyPoolConnector",
     "SlackConnector",
     "SlackError",
+    "SoundCloudConnector",
+    "SoundCloudError",
     "SpotifyConnector",
     "SpotifyError",
     "StabilityAIConnector",

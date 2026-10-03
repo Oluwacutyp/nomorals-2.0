@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,11 +27,10 @@ from unittest import mock
 from nomorals.core.errors import ToolError
 from nomorals.llm.base import Message, SamplingParams
 from nomorals.media import MediaHub
-from nomorals.media.music import MusicCreator, resolve_style, STYLES
+from nomorals.media.music import STYLES, MusicCreator, resolve_style
 from nomorals.media.playback import Backend, PlaybackEngine, detect_backend
 from nomorals.media.video import VideoFinder, _relevance, _video_score
 from nomorals.storage.db import Database
-
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -106,7 +104,7 @@ class PlaybackQueueTests(MediaCoreBase):
         self.assertEqual(res["added"][0]["kind"], "url")
 
     def test_add_missing_file_raises(self) -> None:
-        with self.assertRaises(Exception):
+        with self.assertRaises(ToolError):
             self.eng.add("nope/gone.mp3")
 
     def test_play_empty_queue_raises(self) -> None:
@@ -121,7 +119,7 @@ class PlaybackQueueTests(MediaCoreBase):
     def test_remove_and_clear(self) -> None:
         self.eng.add(self.a, self.b)
         res = self.eng.remove(0)
-        self.assertEqual(self.eng.queue()[0]["title"], "b.mp3")
+        self.assertEqual(self.eng.queue()[0]["title"], "b")
         self.assertTrue(res["removed"].endswith("a.mp3"))
         self.eng.clear()
         self.assertEqual(self.eng.queue(), [])
@@ -139,7 +137,7 @@ class PlaybackQueueTests(MediaCoreBase):
         self.assertEqual(st["status"], "no-backend")
         q = self.eng.queue()
         self.assertEqual(self.eng.status()["position"], 1)
-        self.assertEqual(q[self.eng.status()["position"]]["title"], "b.mp3")
+        self.assertEqual(q[self.eng.status()["position"]]["title"], "b")
         self.eng.next()  # wraps
         self.assertEqual(self.eng.status()["position"], 0)
         self.eng.prev()  # wraps back
@@ -190,6 +188,15 @@ class PlaybackSimpleBackendTests(MediaCoreBase):
             pb.os, "getpgid", lambda pid: pid)
         self._getpgid_patch.start()
         self.addCleanup(self._getpgid_patch.stop)
+
+        # add() probes audio metadata with ffprobe when available; keep
+        # this test about transport processes only, not metadata probes
+        self._meta_patch = mock.patch.object(
+            pb, "read_metadata",
+            lambda path: {"title": "", "artist": "", "album": "",
+                          "genre": "", "duration": 0.0})
+        self._meta_patch.start()
+        self.addCleanup(self._meta_patch.stop)
 
     def test_start_kills_previous_player(self) -> None:
         self.eng.add(self.a, self.b)
@@ -244,14 +251,14 @@ class PlayerToolIndexTests(MediaCoreBase):
         eng = PlaybackEngine(self.ctx)
         self.assertEqual(eng._state["position"], 1)
         res = self.player(action="play", index=0)
-        self.assertEqual(res["current"]["title"], "a.mp3")
+        self.assertEqual(res["current"]["title"], "a")
         eng2 = PlaybackEngine(self.ctx)
         self.assertEqual(eng2._state["position"], 0)
 
     def test_default_plays_current_position(self) -> None:
         self.player(action="next")
         res = self.player(action="play")
-        self.assertEqual(res["current"]["title"], "b.mp3")
+        self.assertEqual(res["current"]["title"], "b")
 
     def test_unknown_action_raises(self) -> None:
         with self.assertRaises(ToolError):
@@ -333,7 +340,7 @@ class MusicComposeTests(MediaCoreBase):
         grp = c._rhyme_for("chasing the night", rng, None)
         self.assertIsNotNone(grp)
         self.assertIn("night", [g.lower() for g in grp])
-        line, _img = c._build_line(
+        line, _img, _em = c._build_line(
             "chorus", "x", "X", ["train"], "midnight train",
             STYLES["pop"], rng, end_group=("night", "light", "flight"))
         self.assertIn(line.split()[-1].lower(), ("night", "light", "flight"))

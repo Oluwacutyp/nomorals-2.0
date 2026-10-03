@@ -2233,16 +2233,68 @@ def _parser() -> argparse.ArgumentParser:
     decode.add_argument("--show", default="", metavar="ID",
                         help="print one stored decode report (JSON)")
     decode.add_argument("--json", action="store_true", help="Output as JSON")
-    music = sub.add_parser("music", aliases=CLI_ALIASES["music"], help="Music generation")
+    music = sub.add_parser("music", aliases=CLI_ALIASES["music"], help="Music player + generation")
     music.add_argument("action", nargs="?", default="styles",
-                       choices=["styles", "compose", "songs"],
-                       help="styles | compose <topic> | songs [name]")
+                       choices=["styles", "compose", "songs",
+                                "play", "pause", "resume", "stop", "next",
+                                "prev", "status", "now", "queue", "add",
+                                "remove", "move", "clear", "shuffle",
+                                "repeat", "volume", "seek",
+                                "playlist", "playlists", "playlist-create",
+                                "playlist-delete", "playlist-rename",
+                                "playlist-add", "playlist-remove",
+                                "playlist-move", "playlist-clear",
+                                "playlist-save", "playlist-export",
+                                "playlist-import",
+                                "playlist-play", "history", "history-clear",
+                                "top", "like",
+                                "unlike", "liked", "search", "stats"],
+                       help=("styles | compose <topic> | songs [name] | "
+                             "play [n|files…] | pause | resume | stop | next | "
+                             "prev | status | now | queue | add <files…> | "
+                             "remove <n> | move <n> <m> | clear | "
+                             "shuffle [on|off] | repeat [off|one|all] | "
+                             "volume <0-100> | seek <sec> | playlist [name] | "
+                             "playlists | playlist-create <name> | "
+                             "playlist-delete <name> | "
+                             "playlist-rename <old> <new> | "
+                             "playlist-add <name> <files…> | "
+                             "playlist-remove <name> <n> | "
+                             "playlist-move <name> <n> <m> | "
+                             "playlist-clear <name> | "
+                             "playlist-save <name> | "
+                             "playlist-export <name> <file.m3u> | "
+                             "playlist-import <name> <file.m3u> | "
+                             "playlist-play <name> | history | history-clear | top | "
+                             "like [target] | unlike [target] | liked | "
+                             "search <query> | stats"))
     music.add_argument("topic", nargs="?", default="",
-                       help="song topic (compose) or lookup (songs)")
+                       help="song topic (compose), lookup (songs), index/file "
+                            "(play/add), playlist name, query (search), or a "
+                            "Spotify URI / open.spotify.com link / "
+                            "soundcloud.com link / stream search text (play)")
+    music.add_argument("extra", nargs="*", default=[],
+                       help="additional files / indices / names per action")
     music.add_argument("--style", default="pop")
     music.add_argument("--title", default="")
     music.add_argument("--key", default="")
     music.add_argument("--seed", default="0")
+    music.add_argument("--name", default="",
+                       help="new name (playlist-rename)")
+    music.add_argument("--mode", default="",
+                       help="repeat mode (repeat)")
+    music.add_argument("--to", default="",
+                       help="destination index (move)")
+    music.add_argument("--limit", default="20",
+                       help="row limit (history/top/liked/playlist)")
+    music.add_argument("--desc", default="",
+                       help="playlist description (playlist-create)")
+    music.add_argument("--spotify", action="store_true",
+                       help="play: force Spotify — the target is a Spotify "
+                            "URI/link, or a search query for Spotify")
+    music.add_argument("--soundcloud", action="store_true",
+                       help="play: force SoundCloud — the target is a "
+                            "soundcloud.com link, or a search query")
     music.add_argument("--json", action="store_true", help="Output as JSON")
 
     exec_cmd = sub.add_parser("exec", aliases=CLI_ALIASES["exec"], help="run code in the sandbox")

@@ -377,6 +377,74 @@ class SpotifyConnector(Connector):
             },
         )
 
+    # ── track lookup ─────────────────────────────────────────
+
+    @staticmethod
+    def normalize_uri(target: str) -> str:
+        """Normalize anything Spotify-ish to a ``spotify:<type>:<id>`` URI.
+
+        Accepts canonical URIs (``spotify:track:...`` — also album,
+        playlist, episode, show, artist), ``open.spotify.com`` /
+        ``play.spotify.com`` links, and fails fast on anything else.
+        """
+        text = (target or "").strip()
+        if not text:
+            raise SpotifyError("empty Spotify target")
+        if text.startswith("spotify:"):
+            parts = text.split(":")
+            if len(parts) == 3 and parts[1] in (
+                    "track", "album", "playlist", "episode", "show",
+                    "artist") and parts[2]:
+                return text
+            raise SpotifyError(
+                f"{text!r} is not a valid Spotify URI — want "
+                "spotify:<track|album|playlist|episode|show|artist>:<id>"
+            )
+        parsed = urllib.parse.urlparse(text)
+        host = (parsed.hostname or "").lower()
+        if host in ("open.spotify.com", "play.spotify.com"):
+            segs = [s for s in parsed.path.split("/") if s]
+            # /track/<id>[/...] or /<locale>/track/<id>
+            for i, seg in enumerate(segs):
+                if seg in ("track", "album", "playlist", "episode",
+                           "show", "artist") and i + 1 < len(segs):
+                    return f"spotify:{seg}:{segs[i + 1]}"
+        raise SpotifyError(
+            f"{text!r} is not a Spotify URI or open.spotify.com link — "
+            "pass spotify:track:<id>, an open.spotify.com URL, or use "
+            "search() for a text query"
+        )
+
+    def get_track(self, track_id: str) -> dict[str, Any]:
+        """One track's metadata (``GET /v1/tracks/{id}``).
+
+        Accepts a bare id, a ``spotify:track:`` URI, or an
+        open.spotify.com link.
+        """
+        uri = self.normalize_uri(track_id)
+        if not uri.startswith("spotify:track:"):
+            raise SpotifyError(
+                f"{track_id!r} is not a track — get_track needs a track "
+                "id/URI/link"
+            )
+        tid = uri.split(":")[2]
+        data = self._api("GET", f"/v1/tracks/{tid}")
+        return self._summarize_track(data)
+
+    @staticmethod
+    def _summarize_track(raw: dict[str, Any]) -> dict[str, Any]:
+        artists = [a.get("name", "") for a in raw.get("artists", [])]
+        return {
+            "id": raw.get("id", ""),
+            "uri": raw.get("uri", ""),
+            "name": raw.get("name", ""),
+            "artists": artists,
+            "album": (raw.get("album") or {}).get("name", ""),
+            "duration_ms": raw.get("duration_ms", 0),
+            "url": (raw.get("external_urls") or {}).get("spotify", ""),
+            "explicit": bool(raw.get("explicit", False)),
+        }
+
     # ── playlists (confirmation-gated) ───────────────────────────
 
     def create_playlist(
