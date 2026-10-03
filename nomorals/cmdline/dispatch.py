@@ -16,6 +16,7 @@ from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
 from .commands.book import _cmd_book
 from .commands.briefing import _cmd_briefing
+from .commands.builders import _cmd_build
 from .commands.captcha import _cmd_captcha
 from .commands.cards import _cmd_cards
 from .commands.browse import _cmd_browse
@@ -357,6 +358,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_captcha(args, context)
         if args.command == "bet":
             return _cmd_bet(args, context)
+        if args.command == "build":
+            return _cmd_build(args, context)
         if args.command == "weather":
             return _cmd_weather(args, context)
         if args.command == "vision":
