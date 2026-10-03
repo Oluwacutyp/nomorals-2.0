@@ -1161,12 +1161,12 @@ class DevonAgent:
         def _job() -> None:
             try:
                 from ..missions.mission import MissionStore
-                from ..missions.runner import MissionRunner
+                from ..missions.wiring import wired_runner
 
                 store = MissionStore(context.db)
                 mission = store.create_new(structured, name=name,
                                            metadata=brief_meta)
-                MissionRunner(context, store=store).run(
+                wired_runner(context, store=store).run(
                     mission, max_iterations=0)
             except Exception as exc:  # noqa: BLE001 - a mission must not crash the thread
                 _log.exception("devon-spawned mission failed: %s", exc)

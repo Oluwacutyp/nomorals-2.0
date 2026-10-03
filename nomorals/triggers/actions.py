@@ -129,14 +129,14 @@ def execute_command(trigger: Trigger, engine: Any) -> dict[str, Any]:
 
 def default_start_mission(goal: str, max_iterations: int,
                           engine: Any) -> dict[str, Any]:
-    """Start a mission through the existing MissionRunner."""
-    from ..missions.runner import MissionRunner
+    """Start a mission through the wired MissionRunner (os hook attached)."""
+    from ..missions.wiring import wired_runner
 
     context = engine.context
     if context is None:
         raise TriggerError(
             "mission action needs an engine context (none bound)")
-    runner = MissionRunner(context, milestones=False)
+    runner = wired_runner(context, milestones=False)
     result = runner.start(goal, max_iterations=max_iterations)
     return {"mission_id": getattr(result, "mission_id", ""),
             "status": getattr(result, "status", ""),

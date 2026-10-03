@@ -12,24 +12,27 @@ from ..emit import _emit
 
 
 def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
-    from ...missions import IdempotencyStore, MissionRunner, MissionStore
+    from ...missions import IdempotencyStore, MissionStore
+    from ...missions.wiring import wired_runner
 
     store = MissionStore(context.db)
     # Idempotency on the retry path: a step that already completed is never
     # re-executed on resume/retry — its stored outcome is replayed instead —
     # so a crash between a step's side effects and its checkpoint cannot
     # duplicate them. Failed steps stay retryable.
-    runner = MissionRunner(context, store=store,
-                           idempotency=IdempotencyStore(context.db))
+    runner = wired_runner(context, store=store,
+                          idempotency=IdempotencyStore(context.db))
     reflect = not args.no_reflect
 
     if args.start:
+        acceptance = _acceptance_from_args(args)
         result = runner.start(
             args.start,
             max_iterations=args.max_iterations,
             budget_wall=args.budget_wall,
             budget_tokens=args.budget_tokens,
             reflect=reflect,
+            acceptance=acceptance,
         )
         _emit(args, result.to_dict(), _render_result(result))
         return 0 if result.ok else 1
@@ -106,6 +109,18 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
         print(f"  spent:      {mission.spent_wall:.1f}s / {mission.spent_tokens} tokens")
         print(f"  completed:  {mission.state.get('completed_steps') or []}")
         print(f"  checkpoints: {[c.label for c in history]}")
+        acc = mission.acceptance
+        if acc:
+            n_crit = len(acc.get("criteria") or [])
+            req = acc.get("required_artifact_types") or []
+            print(f"  acceptance: {n_crit} criteria"
+                  + (f", requires artifact types: {', '.join(req)}" if req else ""))
+            ver = mission.state.get("verification")
+            if isinstance(ver, dict):
+                verdict = "PASSED" if ver.get("passed") else "FAILED"
+                failed = ver.get("required_criteria_failed") or []
+                extra = f" (failed: {', '.join(failed)})" if failed else ""
+                print(f"  verification: {verdict}{extra}")
         if mission.status in ("running", "paused"):
             print(f"  resumable: yes — `nm missions --resume {mission.id}`")
         return 0
@@ -135,6 +150,40 @@ def _cmd_missions(args: argparse.Namespace, context: Any) -> int:
             ckpt = f" (checkpoint: {point.label or point.id})" if point else ""
             print(f"  ↺ {mission.id}{ckpt}")
     return 0
+
+
+def _acceptance_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Build acceptance criteria from ``--accept`` / ``--require-artifact``.
+
+    Returns None when neither flag was given. Bad JSON or a malformed spec
+    is a usage error (exit 2) — criteria are validated before the mission
+    is created, never after it ran.
+    """
+    from ...core.errors import ValidationError
+    from ...missions import normalize_acceptance
+
+    raw = (getattr(args, "accept", "") or "").strip()
+    required_types = [t for t in (getattr(args, "require_artifact", "") or []) if t]
+    if not raw and not required_types:
+        return None
+    data: dict[str, Any] = {}
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"missions: --accept is not valid JSON: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+        if not isinstance(data, dict):
+            print("missions: --accept must be a JSON object", file=sys.stderr)
+            raise SystemExit(2)
+    merged = dict(data)
+    merged["required_artifact_types"] = list(
+        merged.get("required_artifact_types") or []) + required_types
+    try:
+        return normalize_acceptance(merged)
+    except ValidationError as exc:
+        print(f"missions: bad acceptance spec: {exc}", file=sys.stderr)
+        raise SystemExit(2)
 
 
 def _render_result(result: Any) -> str:

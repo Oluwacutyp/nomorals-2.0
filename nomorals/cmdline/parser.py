@@ -318,6 +318,16 @@ def _parser() -> argparse.ArgumentParser:
     missions.add_argument("--budget-wall", type=float, default=0.0)
     missions.add_argument("--budget-tokens", type=int, default=0)
     missions.add_argument("--no-reflect", action="store_true")
+    missions.add_argument("--accept", default="",
+                          help="acceptance criteria as JSON for --start, e.g. "
+                               "'{\"criteria\": [{\"name\": \"quality\", \"spec\": "
+                               "{\"metric\": \"quality\", \"gte\": 0.8}}]}' — the "
+                               "mission is verified through VERIFYING before it "
+                               "may complete")
+    missions.add_argument("--require-artifact", action="append", default=[],
+                          metavar="TYPE",
+                          help="require an artifact TYPE at acceptance "
+                               "(repeatable; --start only)")
     missions.add_argument("--pause", default="", help="pause a mission by id (cross-process)")
     missions.add_argument("--cancel", default="", help="cancel a mission by id (terminal)")
     missions.add_argument("--resume-status", default="",
