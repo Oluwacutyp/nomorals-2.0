@@ -127,6 +127,95 @@ NO_TITLE_HTML = """\
 </body></html>
 """
 
+DETAIL_LABELED_LOCATION_HTML = """\
+<html><head><title>Honda Accord 2018 - Cars - Jiji.ng</title>
+<meta name="description" content="Clean Honda Accord."/>
+</head><body>
+<h1>Honda Accord 2018</h1>
+<div class="price">&#8358;6,200,000</div>
+<p>Location: Lekki, Lagos</p>
+<p>Seller: Adaeze Motors</p>
+</body></html>
+"""
+
+DETAIL_CLASS_LOCATION_HTML = """\
+<html><head><title>iPhone 13 Pro - Phones - Jiji.ng</title>
+<meta name="description" content="UK used iPhone 13 Pro."/>
+</head><body>
+<h1>iPhone 13 Pro 256GB</h1>
+<div class="price">&#8358;650,000</div>
+<div class="ad-location">Ikeja, Lagos</div>
+</body></html>
+"""
+
+DETAIL_GEO_LOCATION_HTML = """\
+<html><head><title>Toyota Corolla 2016 - Cars - Jiji.ng</title>
+<meta name="description" content="Neatly used Toyota Corolla."/>
+</head><body>
+<h1>Toyota Corolla 2016</h1>
+<div class="price">&#8358;5,100,000</div>
+<p>Neatly used Toyota Corolla 2016 for sale in Surulere, Lagos. First body, buy and drive.</p>
+</body></html>
+"""
+
+DETAIL_META_LOCATION_HTML = """\
+<html><head><title>MacBook Pro 2021 - Laptops - Jiji.ng</title>
+<meta name="description" content="MacBook Pro 2021 for sale in Wuse 2, Abuja. Barely used."/>
+</head><body>
+<h1>MacBook Pro 2021</h1>
+<div class="price">&#8358;1,800,000</div>
+<p>Barely used laptop, serious buyers only.</p>
+</body></html>
+"""
+
+
+class JijiDetailLocationTests(unittest.TestCase):
+    def test_labeled_location_line(self) -> None:
+        detail = parse_listing_detail(
+            DETAIL_LABELED_LOCATION_HTML,
+            "https://jiji.ng/lagos/cars/honda-accord-2018-XY98zz77.html")
+        self.assertEqual(detail["location"], "Lekki, Lagos")
+
+    def test_location_class_element(self) -> None:
+        detail = parse_listing_detail(
+            DETAIL_CLASS_LOCATION_HTML,
+            "https://jiji.ng/lagos/phones/iphone-13-pro-9z8y7x6w.html")
+        self.assertEqual(detail["location"], "Ikeja, Lagos")
+
+    def test_geo_fallback_in_description_block(self) -> None:
+        detail = parse_listing_detail(
+            DETAIL_GEO_LOCATION_HTML,
+            "https://jiji.ng/lagos/cars/toyota-corolla-2016-AB12cd34.html")
+        # not the whole noisy sentence — just the place
+        self.assertEqual(detail["location"], "Surulere, Lagos")
+
+    def test_geo_fallback_from_meta_description(self) -> None:
+        detail = parse_listing_detail(
+            DETAIL_META_LOCATION_HTML,
+            "https://jiji.ng/abuja/laptops/macbook-pro-2021-9z8y7x6w.html")
+        self.assertEqual(detail["location"], "Wuse 2, Abuja")
+
+    def test_no_location_stays_empty(self) -> None:
+        detail = parse_listing_detail(
+            DETAIL_HTML,
+            "https://jiji.ng/lagos/cars/toyota-camry-2015-se-AB12cd34.html")
+        self.assertEqual(detail["location"], "")
+
+    def test_clean_area_trims_noise(self) -> None:
+        from nomorals.connectors.jiji import _clean_area
+        self.assertEqual(
+            _clean_area("Toyota Camry 2015 for sale in Lekki"), "Lekki")
+        self.assertEqual(_clean_area("Lekki Phase 1"), "Lekki Phase 1")
+        self.assertEqual(_clean_area("Wuse 2"), "Wuse 2")
+        self.assertEqual(_clean_area("surulere"), "")
+
+    def test_card_location_skips_date_lines(self) -> None:
+        from nomorals.connectors.jiji import _split_card_text
+        price, title, location = _split_card_text(
+            "Toyota Camry 2015 SE\n₦4,500,000\n12 September 2026\nLekki, Lagos")
+        self.assertEqual(price, "₦4,500,000")
+        self.assertEqual(location, "Lekki, Lagos")
+
 
 class FakeRenderedTab:
     """Stand-in for RenderedTab: canned rendered HTML per URL."""

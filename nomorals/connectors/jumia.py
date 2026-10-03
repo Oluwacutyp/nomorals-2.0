@@ -309,6 +309,51 @@ class JumiaConnector(Connector):
             f"jumia cannot resume checkpoint stage {stage!r}"
         )
 
+    # ── capability map ─────────────────────────────────────────
+
+    def capabilities(self) -> dict[str, Any]:
+        """Exactly what this connector can and cannot do, in one place.
+
+        Jumia publishes no buyer-side API at all, so this is the honest
+        contract: seller operations via the Vendor Center API, nothing
+        shopper-side. Callers (and the owner) should check this instead
+        of guessing.
+        """
+        return {
+            "side": "seller",
+            "auth": "oauth2 self-authorization (client_id + refresh token, "
+                    "minted in the Vendor Center UI)",
+            "can": {
+                "shops": "list shops in the mastershop (/shops)",
+                "orders": "list/filter orders, fetch order items, list "
+                          "shipment providers per item",
+                "order_processing": "cancel order items, pack packages "
+                                    "(v1/v2), mark ready-to-ship, print "
+                                    "shipping labels",
+                "catalog": "list products, brands, categories, attribute "
+                           "sets (GPM)",
+                "feeds": "submit product feeds (create/update/stock/price/"
+                         "status) and check feed processing status",
+            },
+            "cannot": {
+                "buyer_product_search": "no buyer product-search API "
+                                        "exists — Jumia publishes no public "
+                                        "search/catalog endpoint for shoppers",
+                "buyer_checkout": "no cart or order-placement API — "
+                                  "checkout is web/mobile-app only",
+                "price_tracking": "no price-history endpoint",
+                "consignment": "GPM /consignment-order is FBJ-shop only "
+                               "and is not implemented here",
+                "token_minting": "refresh tokens can only be generated in "
+                                 "the Vendor Center UI, never via the API",
+            },
+            "notes": (
+                "Rate limits: 200 requests/minute, 4 requests/second per "
+                "mastershop (HTTP 429). Mutating order endpoints need the "
+                "VC - Order Manager role."
+            ),
+        }
+
     # ── shops ──────────────────────────────────────────────────
 
     def list_shops(self, *, master_shop: bool = False) -> list[dict[str, Any]]:

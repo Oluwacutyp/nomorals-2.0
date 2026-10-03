@@ -371,11 +371,16 @@ class MonoReadTests(unittest.TestCase):
 
     def test_poll_statement_pdf(self) -> None:
         conn, http = _mono_connected(linked=True)
-        http.route("GET", "/accounts/acc_123/statement/job_1", FakeResponse(200, {
-            "status": "successful",
-            "data": {"status": "completed", "url": "https://x/y.pdf"}}))
+        # poll path per Mono's official SDK: /statement/jobs/{job_id}
+        http.route("GET", "/accounts/acc_123/statement/jobs/job_1",
+                   FakeResponse(200, {
+                       "status": "successful",
+                       "data": {"status": "completed",
+                                "url": "https://x/y.pdf"}}))
         result = conn.poll_statement_pdf("acc_123", "job_1")
         self.assertEqual(result["status"]["status"], "completed")
+        _m, url, _p, _h = http.calls[-1]
+        self.assertTrue(url.endswith("/statement/jobs/job_1"), url)
 
     def test_sync_data(self) -> None:
         conn, http = _mono_connected(linked=True)
@@ -1211,6 +1216,25 @@ class PlaidTransferTests(unittest.TestCase):
             self.assertEqual(body["account_id"], "acc_1")
             self.assertEqual(body["amount"], "25.00")
             self.assertEqual(body["type"], "debit")
+            self.assertNotIn("idempotency_key", body)
+
+    def test_authorization_idempotency_key(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/transfer/authorization/create",
+                       FakeResponse(200, {
+                           "authorization_id": "auth_123",
+                           "request_id": "r"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                conn.create_transfer_authorization(
+                    account_id="acc_1", type="debit", amount="25.00",
+                    idempotency_key="auth-key-1")
+            body = http.last_post_body()
+            self.assertEqual(body["idempotency_key"], "auth-key-1")
 
     def test_authorization_bad_amount(self) -> None:
         import tempfile
@@ -1381,11 +1405,62 @@ class PlaidPaymentTests(unittest.TestCase):
             from unittest import mock
             with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
                 result = conn.create_payment(
-                    "rec_1", "invoice-42", 100.00, currency="GBP")
+                    "rec_1", "invoice42", 100.00, currency="GBP")
             self.assertEqual(result["payment_id"], "pay_1")
             body = http.last_post_body()
             self.assertEqual(body["amount"]["value"], 100.00)
             self.assertEqual(body["amount"]["currency"], "GBP")
+
+    def test_payment_create_sends_user_id(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/payment_initiation/payment/create",
+                       FakeResponse(200, {
+                           "payment_id": "pay_1", "status": "pending"}))
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                conn.create_payment(
+                    "rec_1", "invoice42", 100.00, user_id="usr_9")
+            body = http.last_post_body()
+            self.assertEqual(body["user_id"], "usr_9")
+
+    def test_payment_create_user(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, http = next(gen)
+            http.route("POST", "/user/create",
+                       FakeResponse(200, {"user_id": "usr_9"}))
+            result = conn.create_payment_user(
+                "Devon Owner", email="owner@example.com")
+            self.assertEqual(result["user_id"], "usr_9")
+            body = http.last_post_body()
+            self.assertEqual(body["email_address"], "owner@example.com")
+
+    def test_payment_create_user_needs_contact(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            with self.assertRaises(ConnectorError):
+                conn.create_payment_user("Devon Owner")
+
+    def test_payment_rejects_bad_reference(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = _plaid_with_item_and_audit(tmp)
+            conn, _http = next(gen)
+            import os
+            from unittest import mock
+            with mock.patch.dict(os.environ, {"DEVON_AUDIT_DIR": tmp}):
+                # hyphen: Plaid requires alphanumeric, 1-18 chars
+                with self.assertRaises(ConnectorError):
+                    conn.create_payment("rec_1", "invoice-42", 10.00)
+                with self.assertRaises(ConnectorError):
+                    conn.create_payment("rec_1", "x" * 19, 10.00)
 
     def test_payment_idempotent(self) -> None:
         import tempfile

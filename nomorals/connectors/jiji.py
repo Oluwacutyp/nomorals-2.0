@@ -79,6 +79,159 @@ class JijiError(ConnectorError):
     """A Jiji page load or parse failed."""
 
 
+#: Nigerian states + FCT, for the geography fallback in detail-page
+#: location extraction (Jiji ad pages always carry the ad's location,
+#: but the exact label/markup varies).
+_NG_STATES = frozenset({
+    "Abia", "Adamawa", "Akwa Ibom", "Anambra", "Bauchi", "Bayelsa",
+    "Benue", "Borno", "Cross River", "Delta", "Ebonyi", "Edo", "Ekiti",
+    "Enugu", "Gombe", "Imo", "Jigawa", "Kaduna", "Kano", "Katsina",
+    "Kebbi", "Kogi", "Kwara", "Lagos", "Nasarawa", "Niger", "Ogun",
+    "Ondo", "Osun", "Oyo", "Plateau", "Rivers", "Sokoto", "Taraba",
+    "Yobe", "Zamfara", "FCT", "Abuja", "Federal Capital Territory",
+})
+
+#: labeled location lines on ad pages, e.g. "Location: Lekki, Lagos"
+_LOCATION_LABEL_RE = re.compile(
+    r"(?:^|[\s>•·|])(?:ad\s+)?location\s*:\s*(.+)$"
+    r"|(?:^|[\s>•·|])address\s*:\s*(.+)$",
+    re.IGNORECASE,
+)
+
+#: alternation of Nigerian state names, longest-first so "Cross River"
+#: wins over a prefix collision
+_STATE_ALT = "|".join(
+    sorted((re.escape(s) for s in _NG_STATES), key=len, reverse=True)
+)
+
+#: "Area, State" geography, e.g. "Lekki Phase 1, Lagos" or "Ikeja, Lagos"
+_LOCATION_GEO_RE = re.compile(
+    rf"\b([A-Z][\w\-\s']{{1,40}}?),\s*({_STATE_ALT})\b"
+)
+
+
+class _LocationClassCollector(HTMLParser):
+    """Text of elements whose class or id mentions "location".
+
+    Jiji ad pages render the ad's area in a location-labeled element; its
+    exact tag varies, so this matches on the attribute instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.texts: list[str] = []
+        self._depth = 0
+        self._chunks: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if self._depth:
+            self._depth += 1
+            return
+        attrs_d = dict(attrs)
+        hay = f"{attrs_d.get('class', '')} {attrs_d.get('id', '')}".lower()
+        if "location" in hay:
+            self._depth = 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._depth:
+            self._depth -= 1
+            if self._depth == 0:
+                text = " ".join("".join(self._chunks).split())
+                if text:
+                    self.texts.append(text)
+                self._chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._depth:
+            self._chunks.append(data)
+
+
+def _clean_area(raw: str) -> str:
+    """Reduce a noisy "Area" match to the trailing place name.
+
+    Anchors on the LAST capitalized word ("Lekki" in "for sale in
+    Lekki"), keeps capitalized/digit words before it ("Lekki Phase 1")
+    and short lowercase/digit words after it ("Lekki phase 1"). Returns
+    "" when nothing place-like survives.
+    """
+    words = [w.strip(" -'") for w in (raw or "").split()]
+    words = [w for w in words if w]
+    if not words:
+        return ""
+    anchor = -1
+    for i in range(len(words) - 1, -1, -1):
+        if words[i][0].isupper():
+            anchor = i
+            break
+    if anchor < 0:
+        return ""
+    start = anchor
+    while start > 0 and (
+        words[start - 1][0].isupper() or words[start - 1][0].isdigit()
+    ):
+        start -= 1
+    end = anchor
+    while end + 1 < len(words) and (
+        words[end + 1][0].isdigit()
+        or (words[end + 1][0].islower() and len(words[end + 1]) <= 5)
+    ):
+        end += 1
+    return " ".join(words[start:end + 1])
+
+
+def _geo_location(text: str) -> str:
+    """Pull "Area, State" out of free text; "" when none matches.
+
+    When several candidates match, the shortest cleaned area wins.
+    """
+    best = ""
+    for match in _LOCATION_GEO_RE.finditer(text or ""):
+        area = _clean_area(match.group(1))
+        if not area:
+            continue
+        candidate = f"{area}, {match.group(2)}"
+        if not best or len(area) < len(best.split(",", 1)[0]):
+            best = candidate
+    return best
+
+
+def _extract_detail_location(
+    html: str, blocks: list[str], meta_description: str
+) -> str:
+    """The ad's location from a detail page, best effort.
+
+    Layers, first hit wins: (1) labeled "Location:"/"Address:" lines,
+    (2) elements whose class/id mentions location, (3) "Area, State"
+    geography scanned over block texts and the meta description.
+    Returns "" when the page genuinely carries no location.
+    """
+    for block in blocks:
+        match = _LOCATION_LABEL_RE.search(block)
+        if match:
+            value = (match.group(1) or match.group(2) or "").strip()
+            if value:
+                return value
+    collector = _LocationClassCollector()
+    try:
+        collector.feed(html or "")
+    except Exception as exc:  # noqa: BLE001 - malformed HTML must not kill the parse
+        _log.warning("jiji: location HTML parse hit malformed markup: %s", exc)
+    for text in collector.texts:
+        cleaned = text.strip()
+        if cleaned:
+            return cleaned
+    candidates = list(blocks)
+    if meta_description:
+        candidates.append(meta_description)
+    for text in candidates:
+        geo = _geo_location(text)
+        if geo:
+            return geo
+    return ""
+
+
 # ── price parsing ────────────────────────────────────────────────────
 
 
@@ -206,12 +359,25 @@ def is_listing_url(url: str) -> bool:
     return bool(re.search(r"\d", segments[-1]))
 
 
+#: lines that are metadata rather than places — never chosen as a card
+#: location (dates, phone numbers, "posted x ago" markers)
+_NON_PLACE_RE = re.compile(
+    r"(\d{1,2}\s+[A-Za-z]+\s+\d{4}"  # 12 March 2026
+    r"|\d{4}-\d{2}-\d{2}"  # 2026-03-12
+    r"|\d{2,}/\d{2,}(/\d{2,})?"  # 12/03/2026
+    r"|\+?\d[\d\s\-()]{7,}"  # phone-ish digit runs
+    r"|\b(ago|yesterday|today)\b)",
+    re.IGNORECASE,
+)
+
+
 def _split_card_text(text: str) -> tuple[str, str, str]:
     """Split a card's text into (price_text, title, location), best effort.
 
     The price line is the line carrying ₦ or a no-price marker; the title is
     the longest remaining line; the location is the longest short remaining
-    line (Jiji cards print location under the title, e.g. "Lekki, Lagos").
+    line (Jiji cards print location under the title, e.g. "Lekki, Lagos"),
+    skipping date/phone/metadata lines that are never places.
     """
     lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
     price_text = ""
@@ -224,8 +390,12 @@ def _split_card_text(text: str) -> tuple[str, str, str]:
             rest.append(line)
     title = max(rest, key=len, default="")
     rest_wo_title = [ln for ln in rest if ln != title]
-    location = max((ln for ln in rest_wo_title if len(ln) <= 60),
-                   key=len, default="")
+    location = max(
+        (ln for ln in rest_wo_title
+         if len(ln) <= 60 and not _NON_PLACE_RE.search(ln)),
+        key=len,
+        default="",
+    )
     return price_text, title, location
 
 
@@ -452,13 +622,17 @@ def parse_listing_detail(html: str, url: str) -> dict[str, Any]:
             seller = seller_match.group(1).strip()
             break
 
+    location = _extract_detail_location(
+        html, blocks, meta.meta_description
+    )
+
     return {
         "title": h1.title,
         "price_ngn": parse_price_ngn(price_text),
         "price_text": price_text,
         "description": meta.meta_description,
         "seller": seller,
-        "location": "",
+        "location": location,
         "images": imgs.images[:20],
         "posted_date": posted,
         "url": url,

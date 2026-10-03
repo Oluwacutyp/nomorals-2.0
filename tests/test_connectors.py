@@ -494,19 +494,28 @@ class GitBackedTests(unittest.TestCase):
                        capture_output=True, check=True, timeout=30)
         _git("remote", "add", "origin", f"file://{bare}", cwd=self.src)
         result = self.conn.push_code(self.src, "octocat/nw", branch="main")
-        # file:// needs no auth; push should succeed (or fail only for a
-        # real git reason, reported honestly in the payload)
-        self.assertIn("pushed", result)
-        if result["pushed"]:
-            out = subprocess.run(
-                ["git", "--git-dir", str(bare), "rev-parse", "main"],
-                capture_output=True, text=True, timeout=30)
-            src_head = subprocess.run(
-                ["git", "-C", str(self.src), "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=30).stdout.strip()
-            self.assertEqual(out.stdout.strip(), src_head)
-        else:
-            self.assertTrue(result["output"].strip())
+        # file:// needs no auth; push succeeds and fail-fast never fires
+        self.assertTrue(result["pushed"])
+        self.assertEqual(result["branch"], "main")
+        out = subprocess.run(
+            ["git", "--git-dir", str(bare), "rev-parse", "main"],
+            capture_output=True, text=True, timeout=30)
+        src_head = subprocess.run(
+            ["git", "-C", str(self.src), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        self.assertEqual(out.stdout.strip(), src_head)
+
+    def test_push_code_raises_on_git_failure(self) -> None:
+        # pushing a branch that does not exist locally exits non-zero —
+        # push_code must raise, never return {"pushed": False}
+        bare = self.tmp / "remote2.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)],
+                       capture_output=True, check=True, timeout=30)
+        _git("remote", "add", "origin", f"file://{bare}", cwd=self.src)
+        with self.assertRaises(GitHubError) as ctx:
+            self.conn.push_code(self.src, "octocat/nw",
+                                branch="ghost-branch-nope")
+        self.assertIn("failed", str(ctx.exception))
 
     def test_push_code_rejects_non_repo(self) -> None:
         notrepo = self.tmp / "notrepo"

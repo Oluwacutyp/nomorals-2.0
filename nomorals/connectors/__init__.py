@@ -7,8 +7,10 @@ provisioning (repos, webhooks, keys, releases, ...).
 Adding a service: subclass :class:`Connector`, decorate with
 :func:`register_connector`, and it appears in ``nm connectors list``.
 Shipped: GitHub, Mono (NG bank data), Plaid (US/EU bank data), virtual
-cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse —
-the framework is deliberately service-agnostic so more slot in.
+cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse,
+Telegram Bot API, Discord Bot API, Gmail, Google Drive, Paystack (NG
+payments), Binance spot — the framework is deliberately service-agnostic
+so more slot in.
 """
 
 from __future__ import annotations
@@ -43,9 +45,17 @@ from .registry import (
     register_connector,
 )
 from .virtualcards import VirtualCardsConnector
+from .binance import BinanceConnector, BinanceError
+from .discord import DiscordConnector, DiscordError
+from .drive import DriveConnector, DriveError
+from .gmail import GmailConnector, GmailError
+from .paystack import PaystackConnector, PaystackError
+from .telegram import TelegramConnector, TelegramError
 
 __all__ = [
     "AuthMethod",
+    "BinanceConnector",
+    "BinanceError",
     "CheckpointKind",
     "CheckpointState",
     "CheckpointStore",
@@ -53,8 +63,14 @@ __all__ = [
     "ConnectorError",
     "ConnectorStatus",
     "ConnectResult",
+    "DiscordConnector",
+    "DiscordError",
+    "DriveConnector",
+    "DriveError",
     "GitHubConnector",
     "GitHubError",
+    "GmailConnector",
+    "GmailError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
     "JijiConnector",
@@ -63,8 +79,12 @@ __all__ = [
     "KongaConnector",
     "KongaError",
     "MonoConnector",
+    "PaystackConnector",
+    "PaystackError",
     "PlaidConnector",
     "ProxyPoolConnector",
+    "TelegramConnector",
+    "TelegramError",
     "VirtualCardsConnector",
     "create_connector",
     "device_flow_token",
