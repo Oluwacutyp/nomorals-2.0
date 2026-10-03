@@ -74,7 +74,13 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
             image_url=image_url, image_bytes=image_bytes,
             action=args.v3_action, min_score=args.min_score)
         try:
-            result = solve(challenge, backend=args.backend, settings=settings)
+            # Solver on by default; --no-solver or NM_CAPTCHA_SOLVER=0 disables.
+            import os as _os
+            solver_on = args.solver_enabled
+            if solver_on is None:
+                solver_on = _os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0"
+            result = solve(challenge, backend=args.backend, settings=settings,
+                           solver_enabled=solver_on)
         except CaptchaError as exc:
             print(f"captcha solve failed: {exc}", file=sys.stderr)
             return 1

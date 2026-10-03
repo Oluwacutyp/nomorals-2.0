@@ -466,13 +466,30 @@ def backend_for(name: str, **kwargs: Any) -> CaptchaBackend:
 
 
 def solve(challenge: CaptchaChallenge, backend: str = "auto",
-          settings: Any = None, **backend_kwargs: Any) -> SolveResult:
+          settings: Any = None, solver_enabled: bool = True,
+          **backend_kwargs: Any) -> SolveResult:
     """Solve one challenge through the named backend, audit-logging it.
 
     The audit entry carries kind, domain, sitekey, timestamp, backend,
     outcome — never the API key, never page content.
+
+    When backend="auto" (default) and solver_enabled=True (default):
+    tries the service backend first; if it fails, falls back to takeover
+    (owner solves by hand). Set solver_enabled=False to skip the service
+    and go straight to takeover.
     """
-    solver = backend_for(backend, **backend_kwargs)
+    backend_name = (backend or "auto").lower()
+    # Resolve auto: service if enabled and key available, else takeover.
+    # If service fails, fall back to takeover.
+    fallback_to_takeover = False
+    if backend_name == "auto":
+        if solver_enabled and ServiceBackend(**backend_kwargs).available():
+            backend_name = "service"
+            fallback_to_takeover = True
+        else:
+            backend_name = "takeover"
+
+    solver = backend_for(backend_name, **backend_kwargs)
     started = time.time()
     try:
         result = solver.solve(challenge)
@@ -491,6 +508,21 @@ def solve(challenge: CaptchaChallenge, backend: str = "auto",
             "error": "internal solver failure",
         }, settings)
         raise
+
+    # Fallback: service failed → takeover (owner solves by hand).
+    if not ok and fallback_to_takeover:
+        _audit({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": challenge.kind, "domain": challenge.domain,
+            "sitekey": challenge.sitekey, "backend": solver.name,
+            "ok": False, "takeover": False,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "error": f"service failed, falling back to takeover: {detail[:200]}",
+        }, settings)
+        takeover = TakeoverBackend(**backend_kwargs)
+        result = takeover.solve(challenge)
+        ok, detail = result.ok, result.detail
+
     _audit({
         "ts": datetime.now(timezone.utc).isoformat(),
         "kind": challenge.kind, "domain": challenge.domain,

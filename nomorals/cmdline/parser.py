@@ -743,6 +743,12 @@ def _parser() -> argparse.ArgumentParser:
                          help="reCAPTCHA v3 action name")
     c_solve.add_argument("--min-score", type=float, default=0.3,
                          help="reCAPTCHA v3 score floor")
+    c_solve.add_argument("--solver", dest="solver_enabled",
+                         action="store_true", default=None,
+                         help="use the solving service (default: on)")
+    c_solve.add_argument("--no-solver", dest="solver_enabled",
+                         action="store_false",
+                         help="skip the service, go straight to takeover")
     c_solve.add_argument("--json", action="store_true",
                          help="output as JSON")
 
