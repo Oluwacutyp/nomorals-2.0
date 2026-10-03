@@ -89,7 +89,10 @@ def _resolve_watermark_logos(context: Any,
 
 
 VIDEO_ACTIONS = {"trim", "concat", "transcode", "extract_frames",
-                 "extract_audio", "make_gif", "burn_subtitles"}
+                 "extract_audio", "make_gif", "burn_subtitles",
+                 "speed", "fade", "overlay_text",
+                 "transition", "effect", "speed_ramp",
+                 "ducking", "mix_audio"}
 
 
 def _dispatch_video(action: dict[str, Any], src: Path,
@@ -128,6 +131,42 @@ def _dispatch_video(action: dict[str, Any], src: Path,
             from ..media_edit.images import MediaEditError
             raise MediaEditError("burn_subtitles needs a 'subtitles' file")
         return videos.burn_subtitles(src, _sandbox(context, sub), **kw)
+    if name == "speed":
+        return videos.speed(src, kw.pop("factor", 1.0), **kw)
+    if name == "fade":
+        return videos.fade(src, kw.pop("fade_in", 0.0),
+                            kw.pop("fade_out", 0.0), **kw)
+    if name == "overlay_text":
+        return videos.overlay_text(src, kw.pop("text", ""), **kw)
+    if name == "transition":
+        other = kw.pop("other", None)
+        if not other:
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError(
+                "transition needs an 'other' clip (second video)")
+        return videos.transition(src, _sandbox(context, other), **kw)
+    if name == "effect":
+        return videos.effect(src, kw.pop("preset", "grayscale"), **kw)
+    if name == "speed_ramp":
+        segments = kw.pop("segments", None)
+        if not segments:
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError(
+                "speed_ramp needs a 'segments' list of "
+                "[start, end, factor] triples")
+        return videos.speed_ramp(src, segments, **kw)
+    if name == "ducking":
+        music = kw.pop("music", None)
+        if not music:
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError("ducking needs a 'music' audio file")
+        return videos.ducking(src, _sandbox(context, music), **kw)
+    if name == "mix_audio":
+        audio = kw.pop("audio", None)
+        if not audio:
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError("mix_audio needs an 'audio' file")
+        return videos.mix_audio(src, _sandbox(context, audio), **kw)
     raise AssertionError("unreachable")
 
 

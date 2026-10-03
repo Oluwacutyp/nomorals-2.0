@@ -84,8 +84,120 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
                 gen_op["seed"] = args.seed
             if args.mask:
                 gen_op["mask"] = [int(v) for v in args.mask.split(",")]
+            if args.negative_prompt:
+                gen_op["negative_prompt"] = args.negative_prompt
+            if args.steps is not None:
+                gen_op["steps"] = args.steps
+            if args.guidance is not None:
+                gen_op["guidance_scale"] = args.guidance
+            if args.backend:
+                gen_op["backend"] = args.backend
+            if args.width is not None:
+                gen_op["width"] = args.width
+            if args.height is not None:
+                gen_op["height"] = args.height
             result = _media_call(context, "studio_run", source=args.file,
                                  ops=[gen_op])
+        elif action == "generate":
+            from ...media_edit.generate import op_txt2img
+            # txt2img needs no source image; call the op directly.
+            out = op_txt2img(
+                args.prompt,
+                seed=args.seed,
+                backend=args.backend,
+                negative_prompt=args.negative_prompt,
+                steps=args.steps,
+                guidance_scale=args.guidance,
+                width=args.width,
+                height=args.height,
+                style=args.style,
+                aspect=args.aspect,
+                quality=args.quality,
+                n=args.n or 1,
+            )
+            # Save PNGs next to the invocation dir (or --out path).
+            import io as _io
+            outs = out if isinstance(out, list) else [out]
+            paths = []
+            for i, img in enumerate(outs):
+                if args.out and len(outs) == 1:
+                    dest = Path(args.out)
+                elif args.out:
+                    dest = Path(args.out).with_stem(
+                        f"{Path(args.out).stem}_{i}")
+                else:
+                    dest = Path(f"generated_{int(time.time())}_{i}.png")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                buf = _io.BytesIO()
+                img.save(buf, format="PNG")
+                dest.write_bytes(buf.getvalue())
+                paths.append(str(dest))
+            result = {"images": paths, "count": len(paths)}
+        elif action == "upscale":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "upscale", "scale": args.scale}])
+        elif action == "img2img":
+            i2i_op: dict[str, Any] = {
+                "op": "img2img", "prompt": args.prompt,
+                "strength": args.strength}
+            if args.seed is not None:
+                i2i_op["seed"] = args.seed
+            if args.style:
+                i2i_op["style"] = args.style
+            if args.negative_prompt:
+                i2i_op["negative_prompt"] = args.negative_prompt
+            if args.steps is not None:
+                i2i_op["steps"] = args.steps
+            if args.guidance is not None:
+                i2i_op["guidance_scale"] = args.guidance
+            if args.backend:
+                i2i_op["backend"] = args.backend
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[i2i_op])
+        elif action == "inpaint":
+            inp_op: dict[str, Any] = {
+                "op": "inpaint", "prompt": args.prompt,
+                "mask": [int(v) for v in args.mask.split(",")]}
+            if args.seed is not None:
+                inp_op["seed"] = args.seed
+            if args.negative_prompt:
+                inp_op["negative_prompt"] = args.negative_prompt
+            if args.steps is not None:
+                inp_op["steps"] = args.steps
+            if args.guidance is not None:
+                inp_op["guidance_scale"] = args.guidance
+            if args.backend:
+                inp_op["backend"] = args.backend
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[inp_op])
+        elif action == "outpaint":
+            outp_op: dict[str, Any] = {
+                "op": "outpaint", "prompt": args.prompt,
+                "top": args.top, "right": args.right,
+                "bottom": args.bottom, "left": args.left}
+            if args.seed is not None:
+                outp_op["seed"] = args.seed
+            if args.negative_prompt:
+                outp_op["negative_prompt"] = args.negative_prompt
+            if args.steps is not None:
+                outp_op["steps"] = args.steps
+            if args.guidance is not None:
+                outp_op["guidance_scale"] = args.guidance
+            if args.backend:
+                outp_op["backend"] = args.backend
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[outp_op])
+        elif action == "bg-remove":
+            bg_op: dict[str, Any] = {"op": "bg_remove", "mode": args.mode}
+            if args.chroma_color:
+                bg_op["chroma_color"] = args.chroma_color
+            if args.tolerance is not None:
+                bg_op["tolerance"] = args.tolerance
+            result = _media_call(context, "studio_run", source=args.file,
+                                 ops=[bg_op])
+        elif action == "layer":
+            return _cmd_studio_layer(args, as_json)
         elif action == "template":
             params: dict[str, Any] = {}
             for kv in args.param or []:
@@ -304,4 +416,127 @@ def _cmd_media_convert(args: argparse.Namespace, context: Any) -> int:
         print(f"original untouched: {result['input']}")
     if result.get("job_id") and args.wait:
         return _cmd_media_wait(args, context, result["job_id"], as_json)
+    return 0
+
+
+def _load_stack(stack_file: str) -> Any:
+    """Load a LayerStack from its JSON file (fail fast if missing/bad)."""
+    from ...media_edit.layers import LayerStack
+    p = Path(stack_file)
+    if not p.exists():
+        raise RuntimeError(f"no such layer stack: {stack_file} "
+                           f"(create one with: nm studio layer new W H "
+                           f"--stack {stack_file})")
+    try:
+        data = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"bad layer stack {stack_file}: {exc}") from exc
+    return LayerStack.from_dict(data)
+
+
+def _save_stack(stack: Any, stack_file: str) -> None:
+    p = Path(stack_file)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(stack.to_dict(), indent=2))
+
+
+def _cmd_studio_layer(args: argparse.Namespace, as_json: bool) -> int:
+    """Route `nm studio layer <action>` to LayerStack."""
+    from ...media_edit.layers import LayerStack
+    action = args.layer_action
+    try:
+        if action == "new":
+            stack = LayerStack((args.width, args.height), bg=args.bg)
+            _save_stack(stack, args.stack)
+            result: dict[str, Any] = {
+                "stack": args.stack, "canvas": [args.width, args.height],
+                "layers": 0}
+        else:
+            stack = _load_stack(args.stack)
+            if action == "add-image":
+                kw: dict[str, Any] = {}
+                if args.name:
+                    kw["name"] = args.name
+                kw["opacity"] = args.opacity
+                kw["blend"] = args.blend
+                if args.position:
+                    kw["position"] = tuple(
+                        int(v) for v in args.position.split(","))
+                if args.scale is not None:
+                    kw["scale"] = args.scale
+                lid = stack.add_image(args.image, **kw)
+                _save_stack(stack, args.stack)
+                result = {"stack": args.stack, "added": lid}
+            elif action == "add-text":
+                kw = {}
+                if args.name:
+                    kw["name"] = args.name
+                lid = stack.add_text(
+                    args.text, font_size=args.size, color=args.color,
+                    position=args.position, opacity=args.opacity,
+                    blend=args.blend, **kw)
+                _save_stack(stack, args.stack)
+                result = {"stack": args.stack, "added": lid}
+            elif action == "add-shape":
+                kw = {}
+                if args.name:
+                    kw["name"] = args.name
+                if args.box:
+                    kw["box"] = [int(v) for v in args.box.split(",")]
+                lid = stack.add_shape(
+                    args.shape, fill=args.fill, opacity=args.opacity,
+                    blend=args.blend, **kw)
+                _save_stack(stack, args.stack)
+                result = {"stack": args.stack, "added": lid}
+            elif action == "list":
+                result = {"stack": args.stack,
+                          "layers": stack.layer_info()}
+            elif action == "set":
+                lid = args.id
+                if args.opacity is not None:
+                    stack.set_opacity(lid, args.opacity)
+                if args.blend:
+                    stack.set_blend(lid, args.blend)
+                if args.visible is not None:
+                    v = args.visible.lower() not in ("0", "false", "no")
+                    stack.set_visible(lid, v)
+                if args.move:
+                    x, y = (int(v) for v in args.move.split(","))
+                    stack.move(lid, x, y)
+                if args.rename:
+                    stack.rename(lid, args.rename)
+                _save_stack(stack, args.stack)
+                result = {"stack": args.stack, "updated": lid}
+            elif action == "remove":
+                stack.remove(args.id)
+                _save_stack(stack, args.stack)
+                result = {"stack": args.stack, "removed": args.id}
+            elif action == "flatten":
+                flat = stack.flatten()
+                dest = Path(args.out) if args.out else Path(
+                    args.stack).with_name(
+                        f"{Path(args.stack).stem}_flat.png")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                flat.convert("RGB").save(dest)
+                result = {"stack": args.stack, "output": str(dest),
+                          "size": list(flat.size)}
+            else:
+                print(f"unknown layer action: {action}", file=sys.stderr)
+                return 2
+    except RuntimeError as exc:
+        print(f"layer failed: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+    elif action == "list":
+        for info in result["layers"]:
+            print(f"{info['id']:12} {info['name'][:20]:20} "
+                  f"{info['type']:8} op={info['opacity']:.2f} "
+                  f"blend={info['blend']} "
+                  f"{'visible' if info['visible'] else 'hidden'}")
+    elif action == "flatten":
+        print(f"wrote {result['output']} "
+              f"({result['size'][0]}x{result['size'][1]})")
+    else:
+        print(json.dumps(result, default=str))
     return 0
