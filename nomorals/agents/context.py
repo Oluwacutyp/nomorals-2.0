@@ -183,10 +183,7 @@ def build_context(
     settings = settings or get_settings()
     # Ensure data directories exist before the database tries to open.
     # (Fresh installs and new profiles won't have them yet.)
-    try:
-        settings.ensure_dirs()
-    except Exception:
-        pass  # ensure_dirs is best-effort; Database will raise the real error
+    settings.ensure_dirs()
     database = db or Database(
         settings.db_path,
         wal=settings.storage.wal,

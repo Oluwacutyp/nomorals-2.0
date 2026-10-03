@@ -1022,6 +1022,11 @@ def load_settings(
         for key, value in overrides.items():
             _apply_dotted(merged, key, value)
 
+    # 6b. Path fields must never be empty — an empty template value would
+    # resolve to the current directory instead of the real data home.
+    if not merged.get("home", "").strip():
+        merged["home"] = "~/.nomorals"
+
     settings = _build(Settings, merged)
     _heal_retired_urls(settings)
     _validate(settings)
