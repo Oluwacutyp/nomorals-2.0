@@ -14,9 +14,18 @@ A book in the library is the raw material every other system can draw on:
 ``ingest`` splits a book into chapters (markdown headings, ``Chapter N``
 style headers, or a sensible chunker when neither is present) and indexes
 every chapter.  ``search`` runs a real FTS5 BM25 query across ALL books
-and returns ranked passages with context.  When the runtime lacks FTS5 the
-searcher falls back to an in-memory BM25 — same interface, same results
-shape, still real search.
+and returns ranked passages with context — each hit carries full
+provenance (book, author, chapter, chapter number, ingest time, match
+source) so federated search (``nm search``) can cite it precisely.  When
+the runtime lacks FTS5 the searcher falls back to an in-memory BM25 —
+same interface, same results shape, still real search.
+
+Formats: ``.txt``/``.md`` read directly; ``.pdf``, ``.epub``, ``.docx``,
+``.html``/``.htm`` are extracted through ``nomorals.documents`` parsers.
+
+Beyond holding books, the library is a reading companion: per-book
+reading progress (remember where you left off), bookmarks, annotations,
+collections/shelves, tags, and star ratings — all in the same SQLite db.
 """
 from __future__ import annotations
 
@@ -32,6 +41,12 @@ from typing import Any
 __all__ = ["Library", "LibraryError", "IngestResult", "SearchHit"]
 
 _WORD = re.compile(r"[A-Za-z0-9']+")
+
+# ingest paths: plain text reads straight off disk; everything else goes
+# through the nomorals.documents parsers (pdf, epub, docx, html).
+_TEXT_EXTS = (".txt", ".md", ".markdown", ".text")
+_DOC_EXTS = (".pdf", ".epub", ".docx", ".html", ".htm")
+_INGEST_EXTS = _TEXT_EXTS + _DOC_EXTS
 
 
 class LibraryError(ValueError):
@@ -69,6 +84,9 @@ class SearchHit:
     passage: str
     source: str  # "fts5" | "bm25-memory"
     book_slug: str = ""
+    author: str = ""
+    chapter_number: int = 0
+    ingested_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +96,9 @@ class SearchHit:
             "passage": self.passage,
             "source": self.source,
             "book_slug": self.book_slug,
+            "author": self.author,
+            "chapter_number": self.chapter_number,
+            "ingested_at": self.ingested_at,
         }
 
 
@@ -233,6 +254,35 @@ class Library:
             " slug TEXT PRIMARY KEY, title TEXT, author TEXT, "
             " source_file TEXT, chapters INTEGER, words INTEGER, "
             " strategy TEXT, ingested_at REAL)")
+        # ── reading state + curation (progress, bookmarks, notes,
+        #    collections, tags, ratings) ──────────────────────────────
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS reading_progress ("
+            " slug TEXT PRIMARY KEY, chapter INTEGER, offset_chars INTEGER, "
+            " updated_at REAL)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS bookmarks ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, "
+            " chapter INTEGER, offset_chars INTEGER, label TEXT, "
+            " created_at REAL)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS annotations ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, "
+            " chapter INTEGER, offset_chars INTEGER, quote TEXT, "
+            " note TEXT, created_at REAL)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS collections ("
+            " name TEXT PRIMARY KEY, created_at REAL)")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS collection_books ("
+            " collection TEXT, slug TEXT, added_at REAL, "
+            " PRIMARY KEY (collection, slug))")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS book_tags ("
+            " slug TEXT, tag TEXT, PRIMARY KEY (slug, tag))")
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS ratings ("
+            " slug TEXT PRIMARY KEY, stars INTEGER, rated_at REAL)")
         row = con.execute(
             "SELECT value FROM meta WHERE key = 'fts5'").fetchone()
         if row is None:
@@ -286,11 +336,25 @@ class Library:
         p = Path(path).expanduser()
         if not p.exists():
             raise LibraryError(f"file not found: {p}")
-        if p.suffix.lower() not in (".txt", ".md", ".markdown", ".text"):
+        suffix = p.suffix.lower()
+        if suffix not in _INGEST_EXTS:
             raise LibraryError(
-                f"unsupported type {p.suffix!r} — give a .txt or .md "
-                "(for PDFs: nm pdf text <file> first)")
-        raw = p.read_text(encoding="utf-8", errors="replace")
+                f"unsupported type {p.suffix!r} — supported: "
+                + " ".join(_INGEST_EXTS))
+        if suffix in _TEXT_EXTS:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+            doc_title, doc_author = "", ""
+        else:
+            # pdf / epub / docx / html — reuse the documents engine
+            from ..documents.model import full_text
+            from ..documents.parsers import parse_path
+
+            try:
+                doc = parse_path(p)
+            except Exception as exc:  # noqa: BLE001 - wrap, don't leak
+                raise LibraryError(f"could not extract text from {p.name}: {exc}") from exc
+            raw = full_text(doc)
+            doc_title, doc_author = doc.title, doc.author
         if len(raw) > max_chars:
             raw = raw[:max_chars]
         if len(raw.strip()) < 200:
@@ -300,10 +364,10 @@ class Library:
         if not chapters:
             raise LibraryError("could not cut the file into chapters")
 
-        book_title = title.strip()
+        book_title = title.strip() or doc_title.strip()
         if not book_title:
             book_title = self._guess_title(raw, p)
-        book_author = author.strip()
+        book_author = author.strip() or doc_author.strip()
         if not book_author:
             book_author = self._guess_author(raw, book_title, p)
         slug = self._slug(book_title, p.stem)
@@ -432,13 +496,18 @@ class Library:
             rows = con.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []
+        meta = {r[0]: (r[1] or "", r[2] or 0.0)
+                for r in con.execute(
+                    "SELECT slug, author, ingested_at FROM books")}
         hits = []
         for slug, title, chapter, number, text, score in rows:
+            author, ingested = meta.get(slug, ("", 0.0))
             hits.append(SearchHit(
                 book=title, title=title, chapter=self._chapter_label(chapter, number),
                 score=score, passage=self._context_window(text, fts_query,
                                                            context_chars),
-                source="fts5", book_slug=slug))
+                source="fts5", book_slug=slug, author=author,
+                chapter_number=int(number or 0), ingested_at=ingested))
         return hits
 
     @staticmethod
@@ -510,11 +579,18 @@ class Library:
                 s += idf * f * (len(toks) and 1.0)
             scored.append((s, slug, title, chapter, number, text))
         scored.sort(key=lambda x: -x[0])
-        return [SearchHit(
-            book=title, title=title, chapter=self._chapter_label(ch, num),
-            score=s, passage=self._context_window(text, query),
-            source="bm25-memory", book_slug=slug)
-            for s, slug, title, ch, num, text in scored[:top]]
+        meta = {r[0]: (r[1] or "", r[2] or 0.0)
+                for r in con.execute(
+                    "SELECT slug, author, ingested_at FROM books")}
+        out = []
+        for s, slug, title, ch, num, text in scored[:top]:
+            author, ingested = meta.get(slug, ("", 0.0))
+            out.append(SearchHit(
+                book=title, title=title, chapter=self._chapter_label(ch, num),
+                score=s, passage=self._context_window(text, query, context_chars),
+                source="bm25-memory", book_slug=slug, author=author,
+                chapter_number=int(num or 0), ingested_at=ingested))
+        return out
 
     # ── read ──────────────────────────────────────────────────────────
     def read(self, slug: str, chapter: int = 0, limit: int = 4000) -> dict[str, Any]:
@@ -536,6 +612,8 @@ class Library:
             out["words"] = ch["words"]
             out["text"] = text[:limit]
             out["truncated"] = len(text) > limit
+            # reading a chapter is reading — remember where they left off
+            self.set_progress(slug, ch["number"], 0)
         return out
 
     def load(self, slug: str) -> dict[str, Any]:
@@ -561,6 +639,30 @@ class Library:
                 "ingested": time.strftime(
                     "%Y-%m-%d", time.localtime(meta.get("ingested_at", 0))),
             })
+        # enrich with curation state (ratings, tags, progress) — one query set
+        con, _ = self._connect()
+        try:
+            ratings = {r[0]: r[1] for r in con.execute(
+                "SELECT slug, stars FROM ratings")}
+            tag_rows = con.execute(
+                "SELECT slug, tag FROM book_tags ORDER BY tag").fetchall()
+            prog_rows = con.execute(
+                "SELECT slug, chapter FROM reading_progress").fetchall()
+        finally:
+            con.close()
+        tags: dict[str, list[str]] = {}
+        for slug, tag in tag_rows:
+            tags.setdefault(slug, []).append(tag)
+        chapters_by_slug = {b["slug"]: b["chapters"] for b in out}
+        for b in out:
+            slug = b["slug"]
+            b["rating"] = ratings.get(slug, 0)
+            b["tags"] = tags.get(slug, [])
+            prog = next((p for p in prog_rows if p[0] == slug), None)
+            total = max(1, chapters_by_slug.get(slug, 0))
+            b["progress_percent"] = (
+                round(100.0 * min(int(prog[1]), total) / total, 1)
+                if prog else 0.0)
         return out
 
     def drop(self, slug: str) -> dict[str, Any]:
@@ -578,6 +680,380 @@ class Library:
         con, fts5 = self._connect()
         self._reindex_all(con, fts5)
         con.execute("DELETE FROM books WHERE slug = ?", (slug,))
+        # drop the reading state too — no orphaned progress/bookmarks/notes
+        for table in ("reading_progress", "bookmarks", "annotations",
+                      "collection_books", "book_tags", "ratings"):
+            con.execute(f"DELETE FROM {table} WHERE slug = ?", (slug,))
         con.commit()
         con.close()
         return {"dropped": slug}
+
+    # ── reading progress ──────────────────────────────────────────────
+    def set_progress(self, slug: str, chapter: int, offset_chars: int = 0) -> dict[str, Any]:
+        """Remember where the owner left off: chapter + char offset."""
+        b = self.load(slug)  # fail fast on unknown slugs
+        total = max(1, len(b["chapters"]))
+        chapter = max(1, min(int(chapter), total))
+        offset_chars = max(0, int(offset_chars))
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO reading_progress"
+                "(slug, chapter, offset_chars, updated_at) VALUES (?,?,?,?)",
+                (slug, chapter, offset_chars, time.time()))
+            con.commit()
+        finally:
+            con.close()
+        return self.get_progress(slug)
+
+    def get_progress(self, slug: str) -> dict[str, Any]:
+        b = self.load(slug)
+        total = len(b["chapters"])
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT chapter, offset_chars, updated_at FROM reading_progress"
+                " WHERE slug = ?", (slug,)).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return {"slug": slug, "title": b["title"], "started": False,
+                    "chapter": 0, "chapter_title": "", "offset_chars": 0,
+                    "percent": 0.0, "chapters": total, "updated_at": 0.0}
+        ch_no = max(1, min(int(row[0]), max(1, total)))
+        title = b["chapters"][ch_no - 1]["title"] if 1 <= ch_no <= total else ""
+        return {"slug": slug, "title": b["title"], "started": True,
+                "chapter": ch_no, "chapter_title": title,
+                "offset_chars": int(row[1]),
+                "percent": round(100.0 * ch_no / max(1, total), 1),
+                "chapters": total, "updated_at": row[2]}
+
+    def resume(self, slug: str) -> dict[str, Any]:
+        """Where you left off, plus the next chapter to read."""
+        prog = self.get_progress(slug)
+        b = self.load(slug)
+        total = len(b["chapters"])
+        if not prog["started"]:
+            nxt: dict[str, Any] = {"number": 1,
+                                   "title": b["chapters"][0]["title"] if total else ""}
+            hint = f"not started — begin at chapter 1: {nxt['title']!r}"
+        elif prog["chapter"] >= total:
+            nxt = {"number": total, "title": b["chapters"][-1]["title"]}
+            hint = "finished — last chapter read"
+        else:
+            ch = b["chapters"][prog["chapter"]]
+            nxt = {"number": ch["number"], "title": ch["title"],
+                   "words": ch["words"]}
+            hint = (f"continue at chapter {ch['number']}: {ch['title']!r} "
+                    f"({prog['percent']}% through)")
+        return {"progress": prog, "next": nxt, "hint": hint}
+
+    # ── bookmarks ─────────────────────────────────────────────────────
+    def _check_chapter(self, slug: str, chapter: int) -> dict[str, Any]:
+        b = self.load(slug)
+        total = len(b["chapters"])
+        chapter = int(chapter)
+        if not 1 <= chapter <= total:
+            raise LibraryError(
+                f"chapter {chapter} out of range for {slug!r} (1–{total})")
+        return b
+
+    def add_bookmark(self, slug: str, chapter: int, offset_chars: int = 0,
+                     label: str = "") -> dict[str, Any]:
+        self._check_chapter(slug, chapter)
+        offset_chars = max(0, int(offset_chars))
+        con, _ = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT INTO bookmarks(slug, chapter, offset_chars, label, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (slug, int(chapter), offset_chars, label.strip()[:200],
+                 time.time()))
+            con.commit()
+            bid = cur.lastrowid
+        finally:
+            con.close()
+        return {"id": bid, "slug": slug, "chapter": int(chapter),
+                "offset_chars": offset_chars, "label": label.strip()}
+
+    def list_bookmarks(self, slug: str = "") -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            if slug:
+                rows = con.execute(
+                    "SELECT id, slug, chapter, offset_chars, label, created_at"
+                    " FROM bookmarks WHERE slug = ? ORDER BY chapter, offset_chars",
+                    (slug,)).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT id, slug, chapter, offset_chars, label, created_at"
+                    " FROM bookmarks ORDER BY created_at DESC").fetchall()
+        finally:
+            con.close()
+        return [{"id": r[0], "slug": r[1], "chapter": r[2],
+                 "offset_chars": r[3], "label": r[4], "created_at": r[5]}
+                for r in rows]
+
+    def remove_bookmark(self, bookmark_id: int) -> dict[str, Any]:
+        con, _ = self._connect()
+        try:
+            cur = con.execute("DELETE FROM bookmarks WHERE id = ?",
+                              (int(bookmark_id),))
+            con.commit()
+            if cur.rowcount == 0:
+                raise LibraryError(f"no bookmark {bookmark_id}")
+        finally:
+            con.close()
+        return {"removed": int(bookmark_id)}
+
+    # ── annotations / notes ───────────────────────────────────────────
+    def add_note(self, slug: str, chapter: int, offset_chars: int = 0,
+                 quote: str = "", note: str = "") -> dict[str, Any]:
+        self._check_chapter(slug, chapter)
+        note = (note or "").strip()
+        if not note:
+            raise LibraryError("note text is required")
+        con, _ = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT INTO annotations(slug, chapter, offset_chars, quote, note, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (slug, int(chapter), max(0, int(offset_chars)),
+                 (quote or "").strip()[:2000], note[:4000], time.time()))
+            con.commit()
+            nid = cur.lastrowid
+        finally:
+            con.close()
+        return {"id": nid, "slug": slug, "chapter": int(chapter),
+                "offset_chars": max(0, int(offset_chars)),
+                "quote": (quote or "").strip()[:2000], "note": note}
+
+    def list_notes(self, slug: str = "") -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            if slug:
+                rows = con.execute(
+                    "SELECT id, slug, chapter, offset_chars, quote, note, created_at"
+                    " FROM annotations WHERE slug = ? ORDER BY chapter, offset_chars",
+                    (slug,)).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT id, slug, chapter, offset_chars, quote, note, created_at"
+                    " FROM annotations ORDER BY created_at DESC").fetchall()
+        finally:
+            con.close()
+        return [{"id": r[0], "slug": r[1], "chapter": r[2],
+                 "offset_chars": r[3], "quote": r[4], "note": r[5],
+                 "created_at": r[6]} for r in rows]
+
+    def remove_note(self, note_id: int) -> dict[str, Any]:
+        con, _ = self._connect()
+        try:
+            cur = con.execute("DELETE FROM annotations WHERE id = ?",
+                              (int(note_id),))
+            con.commit()
+            if cur.rowcount == 0:
+                raise LibraryError(f"no note {note_id}")
+        finally:
+            con.close()
+        return {"removed": int(note_id)}
+
+    # ── collections / shelves ─────────────────────────────────────────
+    @staticmethod
+    def _clean_collection(name: str) -> str:
+        name = (name or "").strip()[:80]
+        if not name:
+            raise LibraryError("collection name is required")
+        return name
+
+    def create_collection(self, name: str) -> dict[str, Any]:
+        name = self._clean_collection(name)
+        con, _ = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT OR IGNORE INTO collections(name, created_at) VALUES (?,?)",
+                (name, time.time()))
+            con.commit()
+            created = cur.rowcount > 0
+        finally:
+            con.close()
+        return {"collection": name, "created": created}
+
+    def delete_collection(self, name: str) -> dict[str, Any]:
+        name = self._clean_collection(name)
+        con, _ = self._connect()
+        try:
+            cur = con.execute("DELETE FROM collections WHERE name = ?", (name,))
+            con.execute("DELETE FROM collection_books WHERE collection = ?", (name,))
+            con.commit()
+            if cur.rowcount == 0:
+                raise LibraryError(f"no collection {name!r}")
+        finally:
+            con.close()
+        return {"deleted": name}
+
+    def add_to_collection(self, name: str, slug: str) -> dict[str, Any]:
+        name = self._clean_collection(name)
+        self.load(slug)  # fail fast on unknown books
+        con, _ = self._connect()
+        try:
+            row = con.execute("SELECT 1 FROM collections WHERE name = ?",
+                              (name,)).fetchone()
+            if row is None:
+                raise LibraryError(
+                    f"no collection {name!r} — create it first")
+            con.execute(
+                "INSERT OR IGNORE INTO collection_books(collection, slug, added_at)"
+                " VALUES (?,?,?)", (name, slug, time.time()))
+            con.commit()
+        finally:
+            con.close()
+        return {"collection": name, "added": slug}
+
+    def remove_from_collection(self, name: str, slug: str) -> dict[str, Any]:
+        name = self._clean_collection(name)
+        con, _ = self._connect()
+        try:
+            cur = con.execute(
+                "DELETE FROM collection_books WHERE collection = ? AND slug = ?",
+                (name, slug))
+            con.commit()
+            if cur.rowcount == 0:
+                raise LibraryError(
+                    f"{slug!r} is not in collection {name!r}")
+        finally:
+            con.close()
+        return {"collection": name, "removed": slug}
+
+    def list_collections(self) -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT c.name, c.created_at, COUNT(cb.slug)"
+                " FROM collections c LEFT JOIN collection_books cb"
+                " ON cb.collection = c.name"
+                " GROUP BY c.name ORDER BY c.name").fetchall()
+        finally:
+            con.close()
+        return [{"name": r[0], "books": r[2], "created_at": r[1]} for r in rows]
+
+    def shelf(self, name: str) -> dict[str, Any]:
+        """Every book on a collection shelf, with progress + rating."""
+        name = self._clean_collection(name)
+        con, _ = self._connect()
+        try:
+            if con.execute("SELECT 1 FROM collections WHERE name = ?",
+                           (name,)).fetchone() is None:
+                raise LibraryError(f"no collection {name!r}")
+            slugs = [r[0] for r in con.execute(
+                "SELECT slug FROM collection_books WHERE collection = ?"
+                " ORDER BY added_at", (name,)).fetchall()]
+        finally:
+            con.close()
+        books = []
+        for slug in slugs:
+            try:
+                meta = self.load(slug)
+            except LibraryError:
+                continue
+            prog = self.get_progress(slug)
+            books.append({"slug": slug, "title": meta.get("title", ""),
+                          "author": meta.get("author", ""),
+                          "words": meta.get("total_words", 0),
+                          "rating": self.get_rating(slug),
+                          "tags": self.get_tags(slug),
+                          "progress_percent": prog["percent"]})
+        return {"collection": name, "books": books}
+
+    # ── tags ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _clean_tags(tags: list[str] | str) -> list[str]:
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",")]
+        out = []
+        for t in tags or []:
+            t = str(t).strip().lower()[:40]
+            if t and t not in out:
+                out.append(t)
+        return out
+
+    def set_tags(self, slug: str, tags: list[str] | str) -> dict[str, Any]:
+        """Replace the book's tags (empty list clears them)."""
+        self.load(slug)
+        tags = self._clean_tags(tags)
+        con, _ = self._connect()
+        try:
+            con.execute("DELETE FROM book_tags WHERE slug = ?", (slug,))
+            con.executemany("INSERT INTO book_tags(slug, tag) VALUES (?,?)",
+                            [(slug, t) for t in tags])
+            con.commit()
+        finally:
+            con.close()
+        return {"slug": slug, "tags": tags}
+
+    def get_tags(self, slug: str) -> list[str]:
+        self.load(slug)
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT tag FROM book_tags WHERE slug = ? ORDER BY tag",
+                (slug,)).fetchall()
+        finally:
+            con.close()
+        return [r[0] for r in rows]
+
+    def list_tags(self) -> list[dict[str, Any]]:
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT tag, COUNT(slug) FROM book_tags GROUP BY tag"
+                " ORDER BY COUNT(slug) DESC, tag").fetchall()
+        finally:
+            con.close()
+        return [{"tag": r[0], "books": r[1]} for r in rows]
+
+    def books_with_tag(self, tag: str) -> list[dict[str, Any]]:
+        tag = (tag or "").strip().lower()
+        if not tag:
+            raise LibraryError("tag is required")
+        con, _ = self._connect()
+        try:
+            slugs = [r[0] for r in con.execute(
+                "SELECT slug FROM book_tags WHERE tag = ?", (tag,)).fetchall()]
+        finally:
+            con.close()
+        out = []
+        for slug in slugs:
+            try:
+                meta = self.load(slug)
+            except LibraryError:
+                continue
+            out.append({"slug": slug, "title": meta.get("title", ""),
+                        "author": meta.get("author", "")})
+        return out
+
+    # ── ratings ───────────────────────────────────────────────────────
+    def rate(self, slug: str, stars: int) -> dict[str, Any]:
+        self.load(slug)
+        stars = int(stars)
+        if not 1 <= stars <= 5:
+            raise LibraryError(f"rating must be 1–5 stars, got {stars}")
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO ratings(slug, stars, rated_at)"
+                " VALUES (?,?,?)", (slug, stars, time.time()))
+            con.commit()
+        finally:
+            con.close()
+        return {"slug": slug, "stars": stars}
+
+    def get_rating(self, slug: str) -> int:
+        self.load(slug)
+        con, _ = self._connect()
+        try:
+            row = con.execute(
+                "SELECT stars FROM ratings WHERE slug = ?", (slug,)).fetchone()
+        finally:
+            con.close()
+        return int(row[0]) if row else 0

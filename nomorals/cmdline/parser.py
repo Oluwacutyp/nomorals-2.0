@@ -39,6 +39,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "autonomy": ["auto"],
     "bet": ["bt"],
     "book": ["bk"],
+    "books": ["library", "lib"],
     "build": ["bld"],
     "captcha": ["cap"],
     "cards": ["cd"],
@@ -1241,6 +1242,42 @@ def _parser() -> argparse.ArgumentParser:
     book.add_argument("--words", type=int, default=2000, help="Words per chapter")
     book.add_argument("--no-research", action="store_true", help="Skip research phase")
     book.add_argument("--slug", default="", help="Book slug")
+    books = sub.add_parser("books", aliases=CLI_ALIASES["books"],
+                           help="Book library: ingest, search, read, bookmarks, collections")
+    books.add_argument("action", nargs="?", default="list",
+                       choices=["list", "ingest", "search", "read", "drop",
+                                "resume", "progress", "bookmark", "note",
+                                "shelf", "tag", "rate"],
+                       help="Action to perform")
+    books.add_argument("target", nargs="?", default="",
+                       help="book slug / file path / query / collection name, per action")
+    books.add_argument("--title", default="", help="ingest: book title")
+    books.add_argument("--author", default="", help="ingest: book author")
+    books.add_argument("--chapter", type=int, default=0,
+                       help="read/progress/bookmark/note: chapter number "
+                            "(progress: set when given, else get)")
+    books.add_argument("--offset", type=int, default=0,
+                       help="progress/bookmark/note: char offset into the chapter")
+    books.add_argument("--limit", type=int, default=8, help="search: max hits")
+    books.add_argument("--label", default="", help="bookmark: short label")
+    books.add_argument("--quote", default="", help="note: quoted passage")
+    books.add_argument("--note-text", default="",
+                       help="note: the annotation text")
+    books.add_argument("--name", default="", help="(unused — use target)")
+    books.add_argument("--create", action="store_true", help="shelf: create")
+    books.add_argument("--delete", action="store_true", help="shelf: delete")
+    books.add_argument("--add", default="", help="shelf: add book slug")
+    books.add_argument("--remove", default="", help="shelf: remove book slug")
+    books.add_argument("--set", default=None,
+                       help="tag: replace tags (comma-separated; empty clears)")
+    books.add_argument("--find", default="",
+                       help="list/tag: filter by tag")
+    books.add_argument("--stars", type=int, default=0,
+                       help="rate: 1-5 stars (omit to read current)")
+    books.add_argument("--id", type=int, default=0,
+                       help="bookmark/note: id to remove")
+    books.add_argument("--list", dest="list", action="store_true",
+                       help="bookmark/note/shelf/tag: list instead of add")
     hub = sub.add_parser("hub", aliases=CLI_ALIASES["hub"], help="MediaHub: one-call media orchestrator (song/video/podcast)")
     hub.add_argument("mode", nargs="?", default="status",
                      choices=["song", "video", "podcast", "status", "styles"],

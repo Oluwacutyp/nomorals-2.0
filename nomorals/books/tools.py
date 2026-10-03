@@ -7,6 +7,17 @@
     book_run     the whole pipeline: create → write → build → send
     book_status  progress of one book
     book_list    everything on disk
+
+    Library (the owner's existing books):
+    library_ingest    add a book file (.txt/.md/.pdf/.epub/.docx/.html)
+    library_search    full-text search across all books
+    library_read      read a chapter (marks reading progress)
+    library_progress  get/set reading progress, or resume where you left off
+    library_bookmark  add/list/remove bookmarks
+    library_note      add/list/remove annotations & notes
+    library_shelf     collections: create/delete/add/remove/list/show
+    library_tag       tag a book, list tags, find books by tag
+    library_rate      1–5 star rating per book
 """
 
 from __future__ import annotations
@@ -180,13 +191,15 @@ def register(registry: Any) -> None:
     @registry.register(
         "library_ingest",
         description=(
-            "Add an existing book file (.txt/.md) to the library: split into "
-            "chapters, index every passage for full-text search. Use when the "
-            "owner points at a book they want the system to know."
+            "Add an existing book file to the library: split into chapters, "
+            "index every passage for full-text search. Formats: .txt/.md "
+            "read directly; .pdf/.epub/.docx/.html extracted via the documents "
+            "engine. Use when the owner points at a book they want the system "
+            "to know."
         ),
         capability=Capability.FS_READ,
         parameters={
-            "path": "str — path to the .txt/.md book file",
+            "path": "str — path to the book file",
             "title": "str (optional) — else guessed from the file",
             "author": "str (optional)",
         },
@@ -217,7 +230,8 @@ def register(registry: Any) -> None:
         "library_read",
         description=(
             "Read a chapter (or the chapter outline) of an ingested book. "
-            "Without a chapter number returns the table of contents."
+            "Without a chapter number returns the table of contents. "
+            "Reading a chapter updates the book's reading progress."
         ),
         capability=Capability.FS_READ,
         parameters={
@@ -227,3 +241,182 @@ def register(registry: Any) -> None:
     )
     def library_read(slug: str, *, chapter: int = 0) -> dict[str, Any]:
         return _library().read(slug, chapter=chapter)
+
+    @registry.register(
+        "library_progress",
+        description=(
+            "Reading progress for a book. action=get returns where the owner "
+            "left off; set records it (chapter + char offset); resume returns "
+            "the progress plus the next chapter to read."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — get | set | resume",
+            "slug": "str — the book slug",
+            "chapter": "int (optional, for set) — chapter number",
+            "offset": "int (optional, 0, for set) — char offset into the chapter",
+        },
+    )
+    def library_progress(action: str, slug: str, *, chapter: int = 0,
+                         offset: int = 0) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "set":
+            if chapter < 1:
+                raise ValueError("progress set needs chapter >= 1")
+            return lib.set_progress(slug, chapter, offset)
+        if act == "resume":
+            return lib.resume(slug)
+        if act == "get":
+            return lib.get_progress(slug)
+        raise ValueError(f"unknown progress action {action!r} — get | set | resume")
+
+    @registry.register(
+        "library_bookmark",
+        description=(
+            "Bookmarks in an ingested book. action=add saves one (chapter + "
+            "offset + label); list shows them (all books, or one slug); "
+            "remove deletes by id."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — add | list | remove",
+            "slug": "str (optional) — the book slug",
+            "chapter": "int (optional, for add) — chapter number",
+            "offset": "int (optional, 0, for add) — char offset",
+            "label": "str (optional, for add) — short label",
+            "id": "int (optional, for remove) — bookmark id",
+        },
+    )
+    def library_bookmark(action: str, *, slug: str = "", chapter: int = 0,
+                         offset: int = 0, label: str = "",
+                         id: int = 0) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "add":
+            if not slug or chapter < 1:
+                raise ValueError("bookmark add needs slug and chapter")
+            return lib.add_bookmark(slug, chapter, offset, label)
+        if act == "list":
+            return {"bookmarks": lib.list_bookmarks(slug)}
+        if act == "remove":
+            if id < 1:
+                raise ValueError("bookmark remove needs id")
+            return lib.remove_bookmark(id)
+        raise ValueError(f"unknown bookmark action {action!r} — add | list | remove")
+
+    @registry.register(
+        "library_note",
+        description=(
+            "Annotations/notes on an ingested book. action=add saves one "
+            "(chapter + offset + quoted passage + the note); list shows them; "
+            "remove deletes by id."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — add | list | remove",
+            "slug": "str (optional) — the book slug",
+            "chapter": "int (optional, for add) — chapter number",
+            "offset": "int (optional, 0, for add) — char offset",
+            "quote": "str (optional, for add) — the passage being annotated",
+            "note": "str (for add) — the annotation text",
+            "id": "int (optional, for remove) — note id",
+        },
+    )
+    def library_note(action: str, *, slug: str = "", chapter: int = 0,
+                     offset: int = 0, quote: str = "", note: str = "",
+                     id: int = 0) -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "add":
+            if not slug or chapter < 1:
+                raise ValueError("note add needs slug and chapter")
+            return lib.add_note(slug, chapter, offset, quote=quote, note=note)
+        if act == "list":
+            return {"notes": lib.list_notes(slug)}
+        if act == "remove":
+            if id < 1:
+                raise ValueError("note remove needs id")
+            return lib.remove_note(id)
+        raise ValueError(f"unknown note action {action!r} — add | list | remove")
+
+    @registry.register(
+        "library_shelf",
+        description=(
+            "Book collections/shelves. create makes one; add/remove put books "
+            "on it; list shows all shelves; show lists the books on a shelf "
+            "with progress and ratings; delete removes the shelf (not books)."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — create | delete | add | remove | list | show",
+            "name": "str (optional) — collection name",
+            "slug": "str (optional, for add/remove) — the book slug",
+        },
+    )
+    def library_shelf(action: str, *, name: str = "",
+                      slug: str = "") -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "create":
+            return lib.create_collection(name)
+        if act == "delete":
+            return lib.delete_collection(name)
+        if act == "add":
+            return lib.add_to_collection(name, slug)
+        if act == "remove":
+            return lib.remove_from_collection(name, slug)
+        if act == "list":
+            return {"collections": lib.list_collections()}
+        if act == "show":
+            return lib.shelf(name)
+        raise ValueError(
+            f"unknown shelf action {action!r} — create | delete | add | remove | list | show")
+
+    @registry.register(
+        "library_tag",
+        description=(
+            "Tags on library books. set replaces a book's tags (comma string "
+            "or list); get shows a book's tags; list shows every tag with "
+            "counts; books finds every book with a tag."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — set | get | list | books",
+            "slug": "str (for set/get) — the book slug",
+            "tags": "str | list (for set) — tags, comma-separated or a list",
+            "tag": "str (for books) — the tag to search",
+        },
+    )
+    def library_tag(action: str, *, slug: str = "", tags: Any = "",
+                    tag: str = "") -> dict[str, Any]:
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "set":
+            return lib.set_tags(slug, tags)
+        if act == "get":
+            return {"slug": slug, "tags": lib.get_tags(slug)}
+        if act == "list":
+            return {"tags": lib.list_tags()}
+        if act == "books":
+            return {"tag": tag, "books": lib.books_with_tag(tag)}
+        raise ValueError(
+            f"unknown tag action {action!r} — set | get | list | books")
+
+    @registry.register(
+        "library_rate",
+        description=(
+            "Star rating for a library book, 1–5. Re-rating replaces the "
+            "old rating. Pass stars=0 to read the current rating."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str — the book slug",
+            "stars": "int — 1–5 to rate, 0 to read the current rating",
+        },
+    )
+    def library_rate(slug: str, *, stars: int = 0) -> dict[str, Any]:
+        lib = _library()
+        if stars == 0:
+            return {"slug": slug, "stars": lib.get_rating(slug)}
+        return lib.rate(slug, stars)

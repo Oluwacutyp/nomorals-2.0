@@ -43,6 +43,7 @@ _ZIP_MAGIC = b"PK\x03\x04"
 
 _EXTENSIONS = {
     ".pdf": "pdf",
+    ".epub": "epub",
     ".docx": "docx",
     ".xlsx": "xlsx",
     ".pptx": "pptx",
@@ -57,6 +58,7 @@ _EXTENSIONS = {
 
 _MIMES = {
     "application/pdf": "pdf",
+    "application/epub+zip": "epub",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
@@ -103,10 +105,12 @@ def _promote_title(doc: Document) -> None:
 
 
 def _sniff_zip(data: bytes) -> str:
-    """Identify the OOXML flavour inside a ZIP archive."""
+    """Identify the flavour inside a ZIP archive (EPUB or OOXML)."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             names = set(archive.namelist())
+            if "META-INF/container.xml" in names or "mimetype" in names:
+                return "epub"
             try:
                 types_xml = archive.read("[Content_Types].xml").decode("utf-8", "replace")
             except KeyError:
@@ -119,7 +123,107 @@ def _sniff_zip(data: bytes) -> str:
                     return fmt
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"not a readable ZIP archive: {exc}") from exc
-    raise DocumentError("ZIP archive is not a recognized Office document (docx/xlsx/pptx)")
+    raise DocumentError("ZIP archive is not a recognized document (epub/docx/xlsx/pptx)")
+
+
+def _epub_opf_path(archive: zipfile.ZipFile, names: set[str]) -> str:
+    """Locate the OPF package file via META-INF/container.xml."""
+    if "META-INF/container.xml" in names:
+        try:
+            container = archive.read("META-INF/container.xml").decode(
+                "utf-8", "replace")
+            root = ET.fromstring(container)
+        except ET.ParseError:
+            root = None  # fall through to the .opf filename scan
+        if root is not None:
+            for el in root.iter():
+                if el.tag.endswith("rootfile"):
+                    path = el.get("full-path", "")
+                    if path:
+                        return path
+    for name in sorted(names):
+        if name.lower().endswith(".opf"):
+            return name
+    raise DocumentError("EPUB has no OPF package file")
+
+
+def _parse_epub(data: bytes, doc: Document) -> Document:
+    """EPUB: spine-ordered XHTML → markdown sections.
+
+    Reads META-INF/container.xml for the OPF, then walks the spine in
+    reading order, converting each XHTML content document with the same
+    HTML→markdown machinery used for plain HTML files.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DocumentError(f"EPUB is not a readable ZIP: {exc}") from exc
+    with archive:
+        names = set(archive.namelist())
+        opf_path = _epub_opf_path(archive, names)
+        try:
+            opf_xml = archive.read(opf_path).decode("utf-8", "replace")
+            opf = ET.fromstring(opf_xml)
+        except (ET.ParseError, KeyError) as exc:
+            raise DocumentError(f"EPUB package file unreadable: {exc}") from exc
+        base = opf_path.rpartition("/")[0]
+        prefix = f"{base}/" if base else ""
+
+        def _text(tag: str) -> str:
+            for el in opf.iter():
+                if el.tag.endswith(tag) and el.text and el.text.strip():
+                    return el.text.strip()
+            return ""
+
+        title = _text("title")
+        creator = _text("creator")
+        manifest: dict[str, str] = {}
+        for el in opf.iter():
+            if el.tag.endswith("manifest"):
+                for item in el:
+                    iid = item.get("id", "")
+                    href = item.get("href", "")
+                    if iid and href:
+                        manifest[iid] = href
+                break
+        spine: list[str] = []
+        for el in opf.iter():
+            if el.tag.endswith("spine"):
+                for ref in el:
+                    iid = ref.get("idref", "")
+                    if iid in manifest:
+                        spine.append(manifest[iid])
+                break
+        if not spine:
+            raise DocumentError("EPUB spine is empty — no readable content")
+
+        markdown_parts: list[str] = []
+        for href in spine:
+            name = prefix + href
+            if name not in names:
+                continue
+            raw = archive.read(name)
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            try:
+                root = parse_html(text)
+            except Exception:  # noqa: BLE001 - one bad page must not kill the book
+                continue
+            bodies = root.find_all("body")
+            md = node_to_markdown(bodies[0] if bodies else root)
+            if md.strip():
+                markdown_parts.append(md.strip())
+        if not markdown_parts:
+            raise DocumentError("EPUB has no readable content")
+        if title:
+            doc.title = title
+        if creator:
+            doc.author = creator
+        doc.sections = _parse_markdown_sections("\n\n".join(markdown_parts))
+        _promote_title(doc)
+        return doc
 
 
 def _sniff(data: bytes, filename: str, mime: str) -> str:
@@ -478,6 +582,7 @@ def _parse_txt(data: bytes, doc: Document) -> Document:
 
 _PARSERS: dict[str, Callable[..., Document]] = {
     "pdf": _parse_pdf,
+    "epub": _parse_epub,
     "docx": _parse_docx,
     "xlsx": _parse_xlsx,
     "pptx": _parse_pptx,
