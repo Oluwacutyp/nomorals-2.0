@@ -63,6 +63,17 @@ LAYERS: dict[str, int] = {
     # commerce queued). Peers of integrations; own their auth + vault creds.
     "connectors": 5,
     "workspace": 5,
+    # mesh/: phone-to-cloud worker mesh (nodes/heartbeats/task dispatch).
+    # L5 organ; wraps storage.queue, reaches only downward.
+    "mesh": 5,
+    # sync/: multi-device state replication (LWW). L5 organ; owns its store.
+    "sync": 5,
+    # power/: battery/thermal-aware scheduling. L5 organ; wraps os.resources
+    # and storage.queue, reaches only downward.
+    "power": 5,
+    # stream/: SSE streaming API for dashboards. L5 organ; serves os.timeline
+    # events over stdlib HTTP, reaches only downward.
+    "stream": 5,
     # missions sits *with* agents, not above: the dependency is genuinely
     # bidirectional (the runner needs agents; Devon needs the runner), so a
     # strict hierarchy here was fiction.  Peers at the same layer may import
