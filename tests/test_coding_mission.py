@@ -214,6 +214,8 @@ class RollbackTests(unittest.TestCase):
 
 class BisectTests(unittest.TestCase):
     def setUp(self):
+        if not shutil.which("git"):
+            self.skipTest("git not available")
         self.fx = FixtureRepo(with_git=True)
         self.addCleanup(self.fx.cleanup)
         self.fx.write("flag.txt", "ok\n")

@@ -149,6 +149,10 @@ class QueryTests(unittest.TestCase):
 
 class PlotTests(unittest.TestCase):
     def setUp(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed")
         self.tmp = tempfile.TemporaryDirectory()
         self.ws = DataWorkspace(Path(self.tmp.name) / "ws")
         self.ws.load("d", _csv(Path(self.tmp.name) / "d.csv"))
