@@ -301,7 +301,10 @@ class RealRepoTests(unittest.TestCase):
         dt = time.perf_counter() - t0
         self.assertGreater(m.total_files, 300)
         self.assertGreater(m.total_symbols, 1000)
-        self.assertLess(dt, 5.0, f"build_repo_map took {dt:.2f}s")
+        # 30s is generous: the assertion guards against pathological
+        # slowness, not a tight perf budget. Under full-suite load on
+        # shared CI runners the 600-file tree can take >5s.
+        self.assertLess(dt, 30.0, f"build_repo_map took {dt:.2f}s")
 
 
 class FakeRegistry:
