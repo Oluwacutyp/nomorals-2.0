@@ -621,7 +621,14 @@ def _parser() -> argparse.ArgumentParser:
                      "[--saturation F] [--contrast F] [--vignette F]\n"
                      "nm studio text <file> \"<text>\" [--position POS] [--size N]\n"
                      "nm studio ai <file> \"<instruction>\" [--strength F] "
-                     "[--seed N] [--mask l,t,r,b]\n"
+                     "[--seed N] [--mask l,t,r,b] [--negative-prompt T] "
+                     "[--steps N] [--guidance F] [--backend B] "
+                     "[--width W] [--height H]\n"
+                     "nm studio generate \"<prompt>\" [--seed N] "
+                     "[--negative-prompt T] [--steps N] [--guidance F] "
+                     "[--backend B] [--width W] [--height H] [--n N] "
+                     "[--out FILE]\n"
+                     "nm studio upscale <file> [--scale F]\n"
                      "nm studio template <name> [--param k=v ...] [--wait]\n"
                      "nm studio project save <file> <project> --ops JSON\n"
                      "nm studio project render <project> [--wait]\n"
@@ -670,7 +677,48 @@ def _parser() -> argparse.ArgumentParser:
     s_ai.add_argument("--seed", type=int, default=None)
     s_ai.add_argument("--mask", default=None,
                       help="region as l,t,r,b (or omit for full image)")
+    s_ai.add_argument("--negative-prompt", default=None,
+                      help="negative prompt (what to avoid)")
+    s_ai.add_argument("--steps", type=int, default=None,
+                      help="inference steps")
+    s_ai.add_argument("--guidance", type=float, default=None,
+                      help="guidance scale")
+    s_ai.add_argument("--backend", default=None,
+                      help="hf|diffusers|auto (default auto)")
+    s_ai.add_argument("--width", type=int, default=None,
+                      help="output width")
+    s_ai.add_argument("--height", type=int, default=None,
+                      help="output height")
     _s_json(s_ai)
+
+    s_gen = studio_sub.add_parser("generate", help="text-to-image "
+                                  "('a sunset over mountains')")
+    s_gen.add_argument("prompt", help="text prompt for generation")
+    s_gen.add_argument("--seed", type=int, default=None)
+    s_gen.add_argument("--negative-prompt", default=None,
+                       help="negative prompt (what to avoid)")
+    s_gen.add_argument("--steps", type=int, default=None,
+                       help="inference steps")
+    s_gen.add_argument("--guidance", type=float, default=None,
+                       help="guidance scale")
+    s_gen.add_argument("--backend", default=None,
+                       help="hf|diffusers|auto (default auto)")
+    s_gen.add_argument("--width", type=int, default=None,
+                       help="output width")
+    s_gen.add_argument("--height", type=int, default=None,
+                       help="output height")
+    s_gen.add_argument("--n", type=int, default=1,
+                       help="number of images to generate")
+    s_gen.add_argument("--out", default=None,
+                       help="output file (workspace-relative)")
+    _s_json(s_gen)
+
+    s_upscale = studio_sub.add_parser("upscale", help="upscale an image "
+                                      "(Lanczos)")
+    s_upscale.add_argument("file", help="image file (workspace-relative)")
+    s_upscale.add_argument("--scale", type=float, default=2.0,
+                           help="scale factor (default 2.0)")
+    _s_json(s_upscale)
 
     s_tmpl = studio_sub.add_parser("template", help="build a template project")
     s_tmpl.add_argument("name", help="podcast-clip, quote-card, "

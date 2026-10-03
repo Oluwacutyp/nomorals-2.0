@@ -333,6 +333,140 @@ def trim(src: str | os.PathLike[str],
             "start": s, "end": e, "bytes": out.stat().st_size}
 
 
+def speed(src: str | os.PathLike[str],
+          factor: float,
+          *,
+          out_dir: str | os.PathLike[str] | None = None,
+          suffix: str = "sped",
+          ext: str = ".mp4",
+          timeout: float = FFMPEG_TIMEOUT,
+          progress_cb: Callable[[float], None] | None = None) -> dict[str, Any]:
+    """Change playback speed. factor > 1 = faster, 0 < factor < 1 = slower.
+
+    Video via setpts, audio via atempo (chained for extreme factors).
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    if factor <= 0:
+        raise MediaEditError(f"speed factor must be > 0, got {factor}")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    duration = info.get("duration") or 0
+    # atempo supports 0.5–100; chain for out-of-range factors.
+    atempo_chain = []
+    f = factor
+    while f > 100:
+        atempo_chain.append("atempo=100")
+        f /= 100
+    while f < 0.5:
+        atempo_chain.append("atempo=0.5")
+        f /= 0.5
+    atempo_chain.append(f"atempo={f}")
+    atempo = ",".join(atempo_chain)
+    vf = f"setpts=PTS/{factor}"
+    args = ["-i", str(p), "-vf", vf, "-af", atempo,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "aac", str(out)]
+    run_ffmpeg(args, timeout=timeout, progress_cb=progress_cb,
+               duration=duration / factor if duration else None)
+    return {"input": str(p), "output": str(out), "factor": factor,
+            "bytes": out.stat().st_size}
+
+
+def fade(src: str | os.PathLike[str],
+         fade_in: float = 0.0,
+         fade_out: float = 0.0,
+         *,
+         out_dir: str | os.PathLike[str] | None = None,
+         suffix: str = "faded",
+         ext: str = ".mp4",
+         timeout: float = FFMPEG_TIMEOUT,
+         progress_cb: Callable[[float], None] | None = None) -> dict[str, Any]:
+    """Fade video+audio in from black / out to black.
+
+    fade_in/fade_out in seconds; 0 disables that end.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    if fade_in < 0 or fade_out < 0:
+        raise MediaEditError("fade durations must be >= 0")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    duration = info.get("duration") or 0
+    vf_parts = []
+    af_parts = []
+    if fade_in > 0:
+        vf_parts.append(f"fade=t=in:st=0:d={fade_in}")
+        af_parts.append(f"afade=t=in:st=0:d={fade_in}")
+    if fade_out > 0:
+        st = max(0, duration - fade_out) if duration else 0
+        vf_parts.append(f"fade=t=out:st={st}:d={fade_out}")
+        af_parts.append(f"afade=t=out:st={st}:d={fade_out}")
+    args = ["-i", str(p)]
+    if vf_parts:
+        args += ["-vf", ",".join(vf_parts)]
+    if af_parts:
+        args += ["-af", ",".join(af_parts)]
+    args += ["-c:v", "libx264", "-preset", "fast", "-crf", "20",
+             "-c:a", "aac", str(out)]
+    run_ffmpeg(args, timeout=timeout, progress_cb=progress_cb,
+               duration=duration or None)
+    return {"input": str(p), "output": str(out),
+            "fade_in": fade_in, "fade_out": fade_out,
+            "bytes": out.stat().st_size}
+
+
+def overlay_text(src: str | os.PathLike[str],
+                 text: str,
+                 *,
+                 position: str = "bottom",
+                 fontsize: int = 48,
+                 fontcolor: str = "white",
+                 start: float | None = None,
+                 end: float | None = None,
+                 out_dir: str | os.PathLike[str] | None = None,
+                 suffix: str = "captioned",
+                 ext: str = ".mp4",
+                 timeout: float = FFMPEG_TIMEOUT,
+                 progress_cb: Callable[[float], None] | None = None
+                 ) -> dict[str, Any]:
+    """Burn text onto video with ffmpeg drawtext.
+
+    position: top|bottom|center. start/end (seconds) limit visibility.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    _check_size(p)
+    if not text:
+        raise MediaEditError("overlay_text needs text")
+    out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
+    info = video_probe(p)
+    duration = info.get("duration") or 0
+    # Position presets.
+    y_map = {"top": "y=40", "bottom": "y=h-th-40", "center": "y=(h-th)/2"}
+    y = y_map.get(position, y_map["bottom"])
+    # Escape for drawtext.
+    safe = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    dt = f"drawtext=text='{safe}':fontsize={fontsize}:fontcolor={fontcolor}"
+    dt += ":x=(w-text_w)/2:" + y
+    if start is not None or end is not None:
+        s = start or 0
+        e = end if end is not None else 999999
+        dt += f":enable='between(t,{s},{e})'"
+    args = ["-i", str(p), "-vf", dt,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "copy", str(out)]
+    run_ffmpeg(args, timeout=timeout, progress_cb=progress_cb,
+               duration=duration or None)
+    return {"input": str(p), "output": str(out), "text": text,
+            "bytes": out.stat().st_size}
+
+
 def concat(sources: list[str | os.PathLike[str]], *,
            out_dir: str | os.PathLike[str] | None = None,
            suffix: str = "joined", ext: str = ".mp4",

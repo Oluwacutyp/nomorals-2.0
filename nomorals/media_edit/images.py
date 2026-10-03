@@ -276,6 +276,26 @@ def op_flip(img: Any, direction: str = "horizontal") -> Any:
     raise MediaEditError(f"unknown flip direction {direction!r}")
 
 
+def op_blur(img: Any, radius: float = 2.0) -> Any:
+    """Gaussian blur. radius=0 is a no-op (returns a copy)."""
+    from PIL import ImageFilter
+    if radius < 0:
+        raise MediaEditError(f"blur radius must be >= 0, got {radius}")
+    if radius == 0:
+        return img.copy()
+    return img.filter(ImageFilter.GaussianBlur(radius))
+
+
+def op_border(img: Any, width: int = 10, color: str = "black") -> Any:
+    """Add a solid-color border/frame around the image."""
+    from PIL import ImageOps
+    if width < 0:
+        raise MediaEditError(f"border width must be >= 0, got {width}")
+    if width == 0:
+        return img.copy()
+    return ImageOps.expand(img, border=int(width), fill=color)
+
+
 # ---------------------------------------------------------------------------
 # enhance ops
 # ---------------------------------------------------------------------------
@@ -567,6 +587,7 @@ def op_meme(img: Any, *, top: str = "", bottom: str = "",
 
 OP_ALLOWLIST = {
     "resize", "crop", "rotate", "flip",
+    "blur", "border",
     "enhance", "thumbnail",
     "annotate_text", "annotate_shape",
     "stack", "grid", "meme",
@@ -578,6 +599,8 @@ _OP_FUNCS = {
     "crop": op_crop,
     "rotate": op_rotate,
     "flip": op_flip,
+    "blur": op_blur,
+    "border": op_border,
     "enhance": op_enhance,
     "thumbnail": op_thumbnail,
     "annotate_text": op_annotate_text,

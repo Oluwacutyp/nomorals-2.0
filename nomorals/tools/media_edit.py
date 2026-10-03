@@ -89,7 +89,8 @@ def _resolve_watermark_logos(context: Any,
 
 
 VIDEO_ACTIONS = {"trim", "concat", "transcode", "extract_frames",
-                 "extract_audio", "make_gif", "burn_subtitles"}
+                 "extract_audio", "make_gif", "burn_subtitles",
+                 "speed", "fade", "overlay_text"}
 
 
 def _dispatch_video(action: dict[str, Any], src: Path,
@@ -128,6 +129,13 @@ def _dispatch_video(action: dict[str, Any], src: Path,
             from ..media_edit.images import MediaEditError
             raise MediaEditError("burn_subtitles needs a 'subtitles' file")
         return videos.burn_subtitles(src, _sandbox(context, sub), **kw)
+    if name == "speed":
+        return videos.speed(src, kw.pop("factor", 1.0), **kw)
+    if name == "fade":
+        return videos.fade(src, kw.pop("fade_in", 0.0),
+                            kw.pop("fade_out", 0.0), **kw)
+    if name == "overlay_text":
+        return videos.overlay_text(src, kw.pop("text", ""), **kw)
     raise AssertionError("unreachable")
 
 

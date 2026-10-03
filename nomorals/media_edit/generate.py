@@ -59,7 +59,8 @@ DEFAULT_DIFFUSERS_MODEL = "timbrooks/instruct-pix2pix"
 # ---------------------------------------------------------------------------
 
 class GenerativeBackend:
-    """edit(image, instruction, ...) -> new PIL image."""
+    """edit(image, instruction, ...) -> new PIL image.
+    generate(prompt, ...) -> new PIL image (text-to-image)."""
 
     name = "base"
 
@@ -69,7 +70,20 @@ class GenerativeBackend:
              seed: int | None = None,
              negative_prompt: str | None = None,
              steps: int | None = None,
-             guidance_scale: float | None = None) -> Any:
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
+        raise NotImplementedError
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        """Text-to-image. Returns a list of PIL images (length n)."""
         raise NotImplementedError
 
     def describe(self) -> str:
@@ -143,7 +157,9 @@ class HFInferenceBackend(GenerativeBackend):
              seed: int | None = None,
              negative_prompt: str | None = None,
              steps: int | None = None,
-             guidance_scale: float | None = None) -> Any:
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
             raise GenerativeEditError("generative edit needs an instruction")
         client = self._client()
@@ -156,6 +172,10 @@ class HFInferenceBackend(GenerativeBackend):
             params["num_inference_steps"] = int(steps)
         if guidance_scale:
             params["guidance_scale"] = float(guidance_scale)
+        if width:
+            params["width"] = int(width)
+        if height:
+            params["height"] = int(height)
         _log.info("generative edit via hf model=%s instruction=%.60r",
                   self.model, instruction)
         try:
@@ -167,6 +187,51 @@ class HFInferenceBackend(GenerativeBackend):
             raise GenerativeEditError(
                 f"HF inference failed for model {self.model!r}: {exc}") from exc
         return _apply_mask(image, result, mask)
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        """Text-to-image via huggingface_hub.InferenceClient.text_to_image."""
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-image needs a prompt")
+        if n < 1:
+            raise GenerativeEditError("n must be >= 1")
+        client = self._client()
+        params: dict[str, Any] = {}
+        if seed is not None:
+            params["seed"] = int(seed)
+        if negative_prompt:
+            params["negative_prompt"] = negative_prompt
+        if steps:
+            params["num_inference_steps"] = int(steps)
+        if guidance_scale:
+            params["guidance_scale"] = float(guidance_scale)
+        if width:
+            params["width"] = int(width)
+        if height:
+            params["height"] = int(height)
+        _log.info("text-to-image via hf model=%s n=%d prompt=%.60r",
+                  self.model, n, prompt)
+        out: list[Any] = []
+        try:
+            for i in range(n):
+                # Vary seed per image in batch when a seed is given.
+                p = dict(params)
+                if seed is not None and n > 1:
+                    p["seed"] = int(seed) + i
+                result = client.text_to_image(
+                    prompt, model=self.model, **p)
+                out.append(result)
+        except Exception as exc:
+            raise GenerativeEditError(
+                f"HF text-to-image failed for model {self.model!r}: {exc}"
+            ) from exc
+        return out
 
     def describe(self) -> str:
         return (f"generative backend 'hf' (model={self.model}, "
@@ -225,7 +290,9 @@ class DiffusersBackend(GenerativeBackend):
              seed: int | None = None,
              negative_prompt: str | None = None,
              steps: int | None = None,
-             guidance_scale: float | None = None) -> Any:
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
             raise GenerativeEditError("generative edit needs an instruction")
         import torch
@@ -238,6 +305,10 @@ class DiffusersBackend(GenerativeBackend):
             kwargs["num_inference_steps"] = int(steps)
         if guidance_scale:
             kwargs["guidance_scale"] = float(guidance_scale)
+        if width:
+            kwargs["width"] = int(width)
+        if height:
+            kwargs["height"] = int(height)
         generator = torch.Generator().manual_seed(int(seed)) \
             if seed is not None else None
         try:
@@ -248,6 +319,57 @@ class DiffusersBackend(GenerativeBackend):
                 f"diffusers edit failed for model {self.model!r}: {exc}"
             ) from exc
         return _apply_mask(image, result, mask)
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        """Text-to-image via diffusers AutoPipelineForText2Image."""
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-image needs a prompt")
+        if n < 1:
+            raise GenerativeEditError("n must be >= 1")
+        import torch
+        try:
+            from diffusers import AutoPipelineForText2Image
+        except ImportError as exc:
+            raise GenerativeEditError(
+                "text-to-image needs diffusers: pip install diffusers torch"
+            ) from exc
+        device = self.device or ("cuda" if torch.cuda.is_available()
+                                 else "cpu")
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        _log.info("loading diffusers txt2img model %s on %s", self.model,
+                  device)
+        pipe = AutoPipelineForText2Image.from_pretrained(
+            self.model, torch_dtype=dtype, use_safetensors=True)
+        pipe = pipe.to(device)
+        kwargs: dict[str, Any] = {}
+        if negative_prompt:
+            kwargs["negative_prompt"] = negative_prompt
+        if steps:
+            kwargs["num_inference_steps"] = int(steps)
+        if guidance_scale:
+            kwargs["guidance_scale"] = float(guidance_scale)
+        if width:
+            kwargs["width"] = int(width)
+        if height:
+            kwargs["height"] = int(height)
+        if n > 1:
+            kwargs["num_images_per_prompt"] = n
+        generators = [torch.Generator().manual_seed(int(seed) + i)
+                      for i in range(n)] if seed is not None else None
+        try:
+            result = pipe(prompt, generator=generators, **kwargs).images
+        except Exception as exc:
+            raise GenerativeEditError(
+                f"diffusers txt2img failed for model {self.model!r}: {exc}"
+            ) from exc
+        return list(result)
 
     def describe(self) -> str:
         return f"generative backend 'diffusers' (model={self.model})"
@@ -327,7 +449,9 @@ def op_generative_edit(img: Any, instruction: str, *,
                        backend: str | None = None,
                        negative_prompt: str | None = None,
                        steps: int | None = None,
-                       guidance_scale: float | None = None) -> Any:
+                       guidance_scale: float | None = None,
+                       width: int | None = None,
+                       height: int | None = None) -> Any:
     """AI instruction edit as a chain op. ``mask``: (l,t,r,b) box, a mask
     image path, or a PIL L image — serializable forms survive project
     save/load; re-runs the backend on render (non-destructive)."""
@@ -336,13 +460,49 @@ def op_generative_edit(img: Any, instruction: str, *,
     m = _as_mask(img.size, mask) if mask is not None else None
     return be.edit(img, instruction, mask=m, strength=strength, seed=seed,
                    negative_prompt=negative_prompt, steps=steps,
-                   guidance_scale=guidance_scale)
+                   guidance_scale=guidance_scale, width=width, height=height)
+
+
+def op_txt2img(prompt: str, *,
+               seed: int | None = None,
+               backend: str | None = None,
+               negative_prompt: str | None = None,
+               steps: int | None = None,
+               guidance_scale: float | None = None,
+               width: int | None = None,
+               height: int | None = None,
+               n: int = 1) -> Any:
+    """Text-to-image as a chain op. Returns a single PIL image (n=1) or a
+    list of PIL images (n>1)."""
+    be = get_backend(backend)
+    images = be.generate(prompt, seed=seed, negative_prompt=negative_prompt,
+                         steps=steps, guidance_scale=guidance_scale,
+                         width=width, height=height, n=n)
+    return images[0] if n == 1 else images
+
+
+def op_upscale(img: Any, scale: float = 2.0) -> Any:
+    """Upscale an image with high-quality Lanczos resampling.
+
+    Pure PIL — no model, no network. A stepping stone to a real
+    super-resolution backend; genuinely useful for enlarging generations.
+    """
+    Image = _require_pillow()
+    if scale <= 0:
+        raise MediaEditError(f"upscale scale must be > 0, got {scale}")
+    w, h = img.size
+    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    return img.resize((nw, nh), Image.LANCZOS)
 
 
 def _register() -> None:
     from . import images as _images
     _images._OP_FUNCS["generative_edit"] = op_generative_edit
     _images.OP_ALLOWLIST.add("generative_edit")
+    _images._OP_FUNCS["txt2img"] = op_txt2img
+    _images.OP_ALLOWLIST.add("txt2img")
+    _images._OP_FUNCS["upscale"] = op_upscale
+    _images.OP_ALLOWLIST.add("upscale")
 
 
 _register()

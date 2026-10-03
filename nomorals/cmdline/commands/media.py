@@ -84,8 +84,50 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
                 gen_op["seed"] = args.seed
             if args.mask:
                 gen_op["mask"] = [int(v) for v in args.mask.split(",")]
+            if args.negative_prompt:
+                gen_op["negative_prompt"] = args.negative_prompt
+            if args.steps is not None:
+                gen_op["steps"] = args.steps
+            if args.guidance is not None:
+                gen_op["guidance_scale"] = args.guidance
+            if args.backend:
+                gen_op["backend"] = args.backend
+            if args.width is not None:
+                gen_op["width"] = args.width
+            if args.height is not None:
+                gen_op["height"] = args.height
             result = _media_call(context, "studio_run", source=args.file,
                                  ops=[gen_op])
+        elif action == "generate":
+            from ...media_edit.generate import op_txt2img
+            # txt2img needs no source image; call the op directly.
+            out = op_txt2img(
+                args.prompt,
+                seed=args.seed,
+                backend=args.backend,
+                negative_prompt=args.negative_prompt,
+                steps=args.steps,
+                guidance_scale=args.guidance,
+                width=args.width,
+                height=args.height,
+                n=args.n or 1,
+            )
+            # Save to workspace artifacts.
+            from ...core.artifacts import save_artifact
+            import io as _io
+            outs = out if isinstance(out, list) else [out]
+            paths = []
+            for i, img in enumerate(outs):
+                buf = _io.BytesIO()
+                img.save(buf, format="PNG")
+                name = args.out or f"generated_{i}.png"
+                p = save_artifact(name, buf.getvalue(), context=context)
+                paths.append(str(p))
+            result = {"images": paths, "count": len(paths)}
+        elif action == "upscale":
+            result = _media_call(
+                context, "studio_run", source=args.file,
+                ops=[{"op": "upscale", "scale": args.scale}])
         elif action == "template":
             params: dict[str, Any] = {}
             for kv in args.param or []:
