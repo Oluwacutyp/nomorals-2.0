@@ -11,6 +11,7 @@ from ..version import __version__
 # renders this table. Aliases never collide with a canonical command name.
 CLI_ALIASES: dict[str, list[str]] = {
     "status": ["st"],
+    "session": ["sess"],
     "mind": ["m"],
     "doctor": ["dr"],
     "config": ["cfg"],
@@ -337,6 +338,21 @@ def _parser() -> argparse.ArgumentParser:
                      "cannot be read prints 'unavailable' instead of fake zeros."),
     )
     status_p.add_argument("--json", action="store_true", help="Output as JSON")
+
+    session_p = sub.add_parser(
+        "session",
+        aliases=CLI_ALIASES["session"],
+        help="OS sessions: one session per chat, across all surfaces",
+        description=("nm session list [--json]\n"
+                     "nm session show <id> [--json]\n"
+                     "nm session end <id>\n"
+                     "Every surface (Telegram, WhatsApp, Discord, CLI) attaches\n"
+                     "to one OS Session per chat — memory, persona, and gating\n"
+                     "are keyed off the session, not the platform."),
+    )
+    session_p.add_argument("task", nargs="*", default=[],
+                           help="verb and arguments (list|show|end)")
+    session_p.add_argument("--json", action="store_true", help="Output as JSON")
 
     mind_p = sub.add_parser(
         "mind",
