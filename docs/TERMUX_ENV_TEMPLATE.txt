@@ -48,6 +48,11 @@ NM_CHAT_TELEGRAM_BOT_ENABLED=1
 NM_CHAT_TELEGRAM_BOT_TOKEN=       # from @BotFather
 NM_CHAT_TELEGRAM_BOT_CHATS=       # empty = all chats
 
+# ---------- DISCORD ----------
+NM_CHAT_DISCORD_ENABLED=0
+NM_CHAT_DISCORD_TOKEN=            # from https://discord.com/developers/applications
+NM_CHAT_DISCORD_WEBHOOK=
+
 # ---------- WEBHOOK (for chat integrations) ----------
 NM_CHAT_WEBHOOK_ENABLED=0
 NM_CHAT_WEBHOOK_HOST=
