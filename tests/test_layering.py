@@ -62,6 +62,12 @@ LAYERS: dict[str, int] = {
     # connectors: service adapters (GitHub first; finance/cards/proxies/
     # commerce queued). Peers of integrations; own their auth + vault creds.
     "connectors": 5,
+    # datasci/ is the data-science workspace (pandas datasets, queries,
+    # plots as artifacts): a service organ at L4, reaching only downward.
+    "datasci": 4,
+    # plugins/ is the plugin package model (manifests, registry, sandboxed
+    # loading): a service organ at L4 beside skills, reaching only downward.
+    "plugins": 4,
     "workspace": 5,
     # missions sits *with* agents, not above: the dependency is genuinely
     # bidirectional (the runner needs agents; Devon needs the runner), so a

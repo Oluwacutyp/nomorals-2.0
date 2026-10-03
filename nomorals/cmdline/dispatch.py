@@ -22,6 +22,7 @@ from .commands.browse import _cmd_browse
 from .commands.code import _cmd_code
 from .commands.doc import _cmd_doc
 from .commands.data import _cmd_data
+from .commands.datasci import _cmd_datasci
 from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
 from .commands.exec import _cmd_apps, _cmd_exec
 from .commands.finance import _cmd_finance
@@ -45,6 +46,7 @@ from .commands.owner import _cmd_owner
 from .commands.partner import _cmd_reason, _cmd_workspace
 from .commands.power import _cmd_power
 from .commands.project import _cmd_project
+from .commands.plugin import _cmd_plugin
 from .commands.queue import _cmd_queue
 from .commands.recover import _cmd_recover
 from .commands.repo import _cmd_repo
@@ -214,6 +216,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_models(args, context)
         if args.command == "data":
             return _cmd_data(args, context)
+        if args.command == "datasci":
+            return _cmd_datasci(args, context)
         if args.command == "tools":
             return _cmd_tools(args, context)
         if args.command == "memory":
@@ -318,6 +322,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_skill(args, context)
         if args.command == "project":
             return _cmd_project(args, context)
+        if args.command == "plugin":
+            return _cmd_plugin(args, context)
         if args.command == "mission":
             return _cmd_mission(args, context)
         if args.command == "kg":
