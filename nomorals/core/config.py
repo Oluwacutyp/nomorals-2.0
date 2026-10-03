@@ -772,8 +772,21 @@ _ENV_MAP: dict[str, str] = {
 }
 
 
+# Sentinel for "env var was set but empty" — callers treat this as "not set"
+# and fall back to defaults instead of crashing on template placeholders.
+_EMPTY: Any = object()
+
+
 def _coerce(value: str, target: type) -> Any:
-    """Convert a string from env/TOML into the declared field type."""
+    """Convert a string from env/TOML into the declared field type.
+
+    Empty/whitespace-only strings mean "not set" for non-string types —
+    returns the _EMPTY sentinel so callers can fall back to defaults
+    instead of crashing on template placeholders like ``NM_FLOAT=``.
+    String fields keep empty strings as-is (valid value, no crash).
+    """
+    if target is not str and not value.strip():
+        return _EMPTY
     if target is bool:
         return value.strip().lower() in {"1", "true", "yes", "on", "y"}
     if target is int:
@@ -937,14 +950,8 @@ def load_settings(
     # 1. defaults
     merged: dict[str, Any] = _settings_to_dict(Settings())
 
-    # 2. profile (may itself be overridden by env, so read profile first)
-    profile = environ.get("NM_PROFILE", merged.get("profile", "workstation"))
-    if profile not in PROFILES:
-        raise ConfigError(
-            f"unknown profile {profile!r}; expected one of {sorted(PROFILES)}"
-        )
-    merged = _deep_merge(merged, PROFILES[profile])
-    merged["profile"] = profile
+    # 2. profile — resolved AFTER .env loading (step 4) so env files can set
+    # NM_PROFILE. See step 4b below.
 
     # 3. TOML config file
     candidates: list[Path] = []
@@ -969,14 +976,28 @@ def load_settings(
             if env_path.is_file():
                 break
 
-    # 5. environment variables
+    # 4b. profile — resolved here (after .env) so env files can set NM_PROFILE.
+    # Empty string = not set (fresh template placeholder) → fall back to default.
+    profile = environ.get("NM_PROFILE") or merged.get("profile", "workstation")
+    if profile not in PROFILES:
+        raise ConfigError(
+            f"unknown profile {profile!r}; expected one of {sorted(PROFILES)}"
+        )
+    merged = _deep_merge(merged, PROFILES[profile])
+    merged["profile"] = profile
+
+    # 5. environment variables (NM_PROFILE already resolved; skip it here)
     for key, value in environ.items():
+        if key == "NM_PROFILE":
+            continue
         if key in _ENV_MAP:
             dotted = _ENV_MAP[key]
             # Coerce value to proper type based on field definition
             field_type = _find_field_type(Settings, dotted)
             if field_type is not None:
                 value = _coerce(value, field_type)
+                if value is _EMPTY:
+                    continue  # empty env var = not set, keep default
             _apply_dotted(merged, dotted, value)
             continue
         if not key.startswith(_ENV_PREFIX):
@@ -992,6 +1013,8 @@ def load_settings(
         field_type = _find_field_type(Settings, dotted)
         if field_type is not None:
             value = _coerce(value, field_type)
+            if value is _EMPTY:
+                continue  # empty env var = not set, keep default
         _apply_dotted(merged, dotted, value)
 
     # 6. explicit overrides
