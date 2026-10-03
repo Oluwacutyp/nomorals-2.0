@@ -100,10 +100,11 @@ class _ForwardProxyHandler(_QuietHandler):
         # can be unresponsive for tens of seconds (fd/GIL pressure from
         # thousands of tests). Retry with backoff before giving up with
         # 502 — a 502 here must mean genuinely unreachable, not a slow
-        # test double.
+        # test double. Total retry budget stays well under the caller's
+        # health-check timeout (10s): 6 attempts, backoff capped at 1s.
         body = b"bad gateway"
         code = 502
-        for attempt in range(10):
+        for attempt in range(6):
             try:
                 with urllib.request.urlopen(
                     self.path, timeout=10
@@ -112,7 +113,7 @@ class _ForwardProxyHandler(_QuietHandler):
                     code = int(upstream.status)
                 break
             except Exception:  # noqa: BLE001 - test double, retry then 502
-                time.sleep(min(0.2 * (2 ** attempt), 2.0))
+                time.sleep(min(0.2 * (2 ** attempt), 1.0))
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
