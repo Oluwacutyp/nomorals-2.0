@@ -1538,17 +1538,24 @@ def _parser() -> argparse.ArgumentParser:
 
     bet = sub.add_parser("bet", aliases=CLI_ALIASES["bet"],
         help="sports bet analyst: ensemble ML, value + Kelly staking (analysis only)",
-        description=("nm bet analyze --home H --away A [--league L] "
-                     "[--odds H D A]\n"
+        description=("nm bet analyze [--home H --away A | --league L] "
+                     "[--odds H D A] [--top N]\n"
+                     "  (no --home/--away: fetch upcoming fixtures from the\n"
+                     "   majors and analyze the most interesting)\n"
                      "nm bet bankroll [--set AMOUNT]\n"
                      "nm bet backtest [--n N] [--seed S]\n"
                      "nm bet record --home H --away A --score HG-AG [--league L]"),
     )
     bet_sub = bet.add_subparsers(dest="bet_action", required=True)
     b_an = bet_sub.add_parser("analyze", help="ensemble analysis of a match")
-    b_an.add_argument("--home", required=True)
-    b_an.add_argument("--away", required=True)
-    b_an.add_argument("--league", default="GEN")
+    b_an.add_argument("--home", default=None,
+                      help="home team (omit to auto-fetch upcoming fixtures)")
+    b_an.add_argument("--away", default=None,
+                      help="away team (omit to auto-fetch upcoming fixtures)")
+    b_an.add_argument("--league", default="GEN",
+                      help="league filter for fixture mode (e.g. epl, laliga)")
+    b_an.add_argument("--top", type=int, default=3,
+                      help="matches to analyze in fixture mode (default 3)")
     b_an.add_argument("--odds", nargs=3, type=float, metavar=("H", "D", "A"),
                       help="bookmaker odds: home draw away")
     b_an.add_argument("--bookmaker", default="cli")

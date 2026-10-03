@@ -880,6 +880,225 @@ class FootballDataFetcher(OddsFetcher):
         return out
 
 
+def _american_to_decimal(raw: Any) -> Optional[float]:
+    """Convert American moneyline odds to decimal.  '+650' -> 7.5.
+
+    Returns None on missing/garbage input so callers can skip the
+    snapshot instead of crashing.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lstrip("+")
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if v == 0:
+        return None
+    if v > 0:
+        return 1.0 + v / 100.0
+    return 1.0 + 100.0 / abs(v)
+
+
+def _espn_moneyline_odds(moneyline: dict, side: str) -> Optional[float]:
+    """Decimal odds for home/away/draw from an ESPN moneyline block."""
+    side_d = moneyline.get(side) or {}
+    for key in ("close", "open"):
+        dec = _american_to_decimal((side_d.get(key) or {}).get("odds"))
+        if dec:
+            return dec
+    return None
+
+
+class EspnFetcher(OddsFetcher):
+    """ESPN scoreboard API — keyless, stdlib-only.
+
+    Covers the major European leagues + Champions League via ESPN's
+    public scoreboard endpoints.  No API key, no signup.  Best-effort:
+    per-league failures are skipped; if nothing comes back at all the
+    first network error is re-raised so callers can degrade gracefully.
+    """
+    name = "espn"
+
+    BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+
+    # espn code -> (display name, aliases)
+    MAJOR_LEAGUES: dict = {
+        "eng.1": ("Premier League",
+                  ("epl", "premier", "premierleague", "prem", "england")),
+        "esp.1": ("La Liga",
+                  ("laliga", "la_liga", "spain")),
+        "ger.1": ("Bundesliga",
+                  ("bundesliga", "germany")),
+        "ita.1": ("Serie A",
+                  ("seriea", "serie_a", "italy")),
+        "fra.1": ("Ligue 1",
+                  ("ligue1", "ligue_1", "france")),
+        "uefa.champions": ("Champions League",
+                           ("ucl", "champions", "championsleague", "cl")),
+    }
+
+    @classmethod
+    def _norm(cls, text: str) -> str:
+        return (text or "").strip().lower().replace(" ", "").replace("-", "") \
+            .replace("_", "").replace(".", "")
+
+    @classmethod
+    def resolve_league(cls, text: str) -> Optional[str]:
+        """Map a friendly league name/alias to an ESPN code, else None."""
+        t = cls._norm(text)
+        if not t:
+            return None
+        for code, (display, aliases) in cls.MAJOR_LEAGUES.items():
+            if t in (cls._norm(code), cls._norm(display)):
+                return code
+            if t in aliases:
+                return code
+        return None
+
+    @classmethod
+    def league_display(cls, code: str) -> str:
+        info = cls.MAJOR_LEAGUES.get(code)
+        return info[0] if info else code
+
+    def available(self) -> tuple:
+        return (True, "keyless")
+
+    def _scoreboard(self, code: str) -> dict:
+        return _http_json(f"{self.BASE}/{code}/scoreboard")
+
+    @staticmethod
+    def _parse_event(ev: dict, league_display: str) -> Optional[tuple]:
+        """Parse one ESPN event -> (Fixture, [OddsSnapshot]) or None."""
+        state = ((ev.get("status") or {}).get("type") or {}).get("state", "")
+        if state and state != "pre":
+            return None  # only upcoming fixtures are analyzable
+        comps = ev.get("competitions") or []
+        if not comps:
+            return None
+        comp = comps[0]
+        home = away = None
+        for c in comp.get("competitors", []) or []:
+            name = ((c.get("team") or {}).get("displayName") or "").strip()
+            if not name:
+                continue
+            if c.get("homeAway") == "home":
+                home = name
+            elif c.get("homeAway") == "away":
+                away = name
+        if not home or not away:
+            return None
+        fx = Fixture(home=home, away=away, league=league_display,
+                     date=str(ev.get("date", "")))
+        snaps: list = []
+        for odd in comp.get("odds", []) or []:
+            ml = odd.get("moneyline") or {}
+            h = _espn_moneyline_odds(ml, "home")
+            d = _espn_moneyline_odds(ml, "draw")
+            a = _espn_moneyline_odds(ml, "away")
+            if h and d and a:
+                provider = ((odd.get("provider") or {}).get("displayName")
+                            or "ESPN")
+                snaps.append(OddsSnapshot(bookmaker=f"ESPN/{provider}",
+                                          home=h, draw=d, away=a))
+        return (fx, snaps)
+
+    def fetch(self, league: str = "", limit: int = 20) -> list:
+        """Return [(Fixture, [OddsSnapshot])], soonest first.
+
+        ``league``: '' = all major leagues; otherwise a friendly name,
+        alias ('epl'), or raw ESPN code.
+        """
+        if league:
+            codes = [self.resolve_league(league) or league]
+        else:
+            codes = list(self.MAJOR_LEAGUES)
+        out: list = []
+        errors: list = []
+        for code in codes:
+            try:
+                data = self._scoreboard(code)
+            except Exception as exc:  # noqa: BLE001 - one league down
+                errors.append(exc)     # shouldn't kill the rest
+                continue
+            display = self.league_display(code)
+            for ev in data.get("events", []) or []:
+                parsed = self._parse_event(ev, display)
+                if parsed:
+                    out.append(parsed)
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
+        if not out and errors:
+            raise RuntimeError(f"fixture feed unreachable: {errors[0]}")
+        out.sort(key=lambda pair: pair[0].date or "9")
+        return out[:limit]
+
+
+def rank_fixtures(entries: list, analyst: "EnsembleAnalyst",
+                  top_n: int = 5) -> list:
+    """Rank upcoming fixtures by 'interest': big teams + competitive.
+
+    score = min(elo_h, elo_a) - 0.25 * |elo_h - elo_a| — two strong,
+    evenly-matched sides first.  Cold start (all Elo 1500) degrades to
+    date order.  Returns [(Fixture, [OddsSnapshot])].
+    """
+    scored = []
+    for fx, snaps in entries:
+        eh = analyst.elo.rating(fx.home)
+        ea = analyst.elo.rating(fx.away)
+        score = min(eh, ea) - 0.25 * abs(eh - ea)
+        scored.append((score, fx.date or "9", fx, snaps))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    n = max(1, int(top_n or 1))
+    return [(fx, snaps) for _, _, fx, snaps in scored[:n]]
+
+
+def fixture_digest(store: BetStore, league_text: str = "",
+                   top_n: int = 3, min_edge: float = 0.04) -> str:
+    """Fetch upcoming fixtures (keyless) and analyze the most interesting.
+
+    ``league_text``: '' = all major leagues; otherwise a league alias
+    ('epl') or name.  Returns a rendered multi-match digest, or a short
+    human-readable error string when the feed is unreachable/empty.
+    """
+    fetcher = EspnFetcher()
+    code = ""
+    note = ""
+    if league_text and league_text.strip().upper() != "GEN":
+        code = EspnFetcher.resolve_league(league_text) or ""
+        if not code:
+            note = (f"(unknown league {league_text.strip()!r} — "
+                    f"showing all majors)\n")
+    try:
+        entries = fetcher.fetch(league=code, limit=20)
+    except Exception:  # noqa: BLE001 - offline / feed down
+        return ("couldn't reach the fixture feed (offline?) — "
+                "try manual mode, e.g. /bet analyze Arsenal vs Chelsea")
+    if not entries:
+        return ("no upcoming fixtures found — "
+                "try manual mode, e.g. /bet analyze Arsenal vs Chelsea")
+    picks = rank_fixtures(entries, store.analyst, top_n=top_n)
+    blocks = []
+    for fx, snaps in picks:
+        an = store.analyst.analyze(
+            fx.home, fx.away, league=fx.league, odds=snaps,
+            fixtures=store.fixtures(), fixture=fx, min_edge=min_edge)
+        date_s = fx.date[:10] if fx.date else ""
+        head = f"\U0001F4C5 {fx.home} vs {fx.away}  ({fx.league}" + \
+            (f", {date_s}" if date_s else "") + ")"
+        if snaps:
+            o = snaps[0]
+            head += (f"\nmarket odds: {o.home:.2f} / {o.draw:.2f} / "
+                     f"{o.away:.2f} ({o.bookmaker})")
+        blocks.append(head + "\n" + render_analysis(an))
+    digest = "\n\n".join(blocks)
+    return note + digest if note else digest
+
+
 # ── synthetic history (tests, demos, cold-start training) ───────────────────
 
 def synthetic_history(n: int = 400, seed: int = 7, teams: int = 12,

@@ -11,8 +11,8 @@ from typing import Any
 def _cmd_bet(args: argparse.Namespace, context: Any) -> int:
     """Route `nm bet` subcommands.  Analysis only — never places bets."""
     from ...agents.sports_bet import (BetStore, Fixture, OddsSnapshot, backtest,
-                                    render_analysis, render_backtest,
-                                    synthetic_history)
+                                    fixture_digest, render_analysis,
+                                    render_backtest, synthetic_history)
 
     store = BetStore()
     action = args.bet_action
@@ -46,6 +46,11 @@ def _cmd_bet(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if action == "analyze":
+        if not args.home or not args.away:
+            # fixture mode: fetch upcoming fixtures & analyze the best ones
+            print(fixture_digest(store, league_text=args.league or "",
+                                 top_n=args.top, min_edge=args.min_edge))
+            return 0
         snaps = []
         if args.odds:
             h, d, a = args.odds

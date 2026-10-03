@@ -9,6 +9,34 @@ from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 _log = get_logger(__name__)
 
 
+def _pop_opt(toks: list, *names: str) -> tuple:
+    """Pop ``--name value`` / ``--name=value`` from a token list.
+
+    Returns (value, remaining_tokens).  Last occurrence wins.
+    """
+    out: list = []
+    val = None
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        hit = False
+        for nm in names:
+            if t == nm and i + 1 < len(toks):
+                val = toks[i + 1]
+                i += 2
+                hit = True
+                break
+            if t.startswith(nm + "="):
+                val = t.split("=", 1)[1]
+                i += 1
+                hit = True
+                break
+        if not hit:
+            out.append(t)
+            i += 1
+    return val, out
+
+
 class RuntimeGamesMixin:
     """RuntimeGamesMixin for :class:`PartnerRuntime`."""
 
@@ -709,6 +737,7 @@ class RuntimeGamesMixin:
         """The ensemble-ML sports bet analyst.
 
         /bet analyze <home> vs <away> [h d a] [--league L]
+        /bet analyze [league] [--top N]  — auto-fetch upcoming fixtures
         /bet bankroll [set <amount>]
         /bet backtest [n] [--seed S]
         /bet record <home> <away> <hg>-<ag> [--league L]
@@ -726,6 +755,8 @@ class RuntimeGamesMixin:
             return (
                 "/bet analyze <home> vs <away> [home_odds draw_odds away_odds] "
                 "[--league L]\n"
+                "/bet analyze [league] [--top N] — fetch upcoming fixtures "
+                "from the majors & analyze the best ones\n"
                 "/bet bankroll [set <amount>]  — the paper bankroll\n"
                 "/bet backtest [n] [--seed S]  — walk-forward backtest on "
                 "synthetic history\n"
@@ -797,21 +828,31 @@ class RuntimeGamesMixin:
                     f"(elo {elo_h:.0f} / {elo_a:.0f})")
 
         if verb == "analyze":
-            league = "GEN"
-            if "--league" in rest:
-                toks = rest.split()
-                try:
-                    league = toks[toks.index("--league") + 1]
-                except IndexError:  # noqa: E103 - missing --league value keeps default GEN
-                    pass
-                rest = " ".join(t for i, t in enumerate(toks)
-                                if t != "--league" and
-                                (i == 0 or toks[i - 1] != "--league"))
+            from ..sports_bet import fixture_digest
+            toks = rest.split()
+            league_raw, toks = _pop_opt(toks, "--league")
+            top_raw, toks = _pop_opt(toks, "--top", "--n")
+            league = league_raw or "GEN"
+            try:
+                top_n = max(1, min(10, int(top_raw))) if top_raw else 3
+            except (TypeError, ValueError):
+                top_n = 3
+            rest = " ".join(toks)
             import re as _re
             m = _re.split(r"\s+vs\.?\s+", rest, maxsplit=1, flags=_re.I)
             if len(m) < 2:
-                return ("usage: /bet analyze <home> vs <away> "
-                        "[home_odds draw_odds away_odds]")
+                # fixture mode: no "<home> vs <away>" given
+                text = rest.strip()
+                if text:
+                    # maybe a bare league alias, e.g. "/bet analyze epl"
+                    from ..sports_bet import EspnFetcher
+                    if not EspnFetcher.resolve_league(text):
+                        return ("usage: /bet analyze <home> vs <away> "
+                                "[home_odds draw_odds away_odds]\n"
+                                "   or: /bet analyze [league] [--top N] "
+                                "(fetches upcoming fixtures)")
+                    league = text
+                return fixture_digest(store, league_text=league, top_n=top_n)
             home = m[0].strip()
             tail2 = m[1].strip().split()
             away_parts: list = []

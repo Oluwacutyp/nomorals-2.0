@@ -378,5 +378,280 @@ class AbstractBaseTests(unittest.TestCase):
         self.assertEqual(f.available(), (True, "ok"))
 
 
+class AmericanOddsTests(unittest.TestCase):
+    def test_positive(self):
+        self.assertEqual(sb._american_to_decimal("+650"), 7.5)
+        self.assertEqual(sb._american_to_decimal("390"), 4.9)
+
+    def test_negative(self):
+        self.assertAlmostEqual(sb._american_to_decimal("-260"), 1.3846,
+                               places=3)
+
+    def test_garbage_returns_none(self):
+        for bad in (None, "", "  ", "xx", "0", "+0"):
+            self.assertIsNone(sb._american_to_decimal(bad), bad)
+
+
+class EspnLeagueTests(unittest.TestCase):
+    def test_aliases(self):
+        cases = {"epl": "eng.1", "EPL": "eng.1", "Premier League": "eng.1",
+                 "laliga": "esp.1", "La Liga": "esp.1",
+                 "bundesliga": "ger.1", "serie a": "ita.1",
+                 "ligue1": "fra.1", "ucl": "uefa.champions",
+                 "Champions League": "uefa.champions"}
+        for text, code in cases.items():
+            self.assertEqual(sb.EspnFetcher.resolve_league(text), code, text)
+
+    def test_unknown_and_empty(self):
+        self.assertIsNone(sb.EspnFetcher.resolve_league("nope"))
+        self.assertIsNone(sb.EspnFetcher.resolve_league(""))
+        self.assertIsNone(sb.EspnFetcher.resolve_league("  "))
+
+    def test_display_names(self):
+        self.assertEqual(sb.EspnFetcher.league_display("eng.1"),
+                         "Premier League")
+        self.assertEqual(sb.EspnFetcher.league_display("xx"), "xx")
+
+    def test_available_keyless(self):
+        self.assertEqual(sb.EspnFetcher().available(), (True, "keyless"))
+
+    def test_major_leagues_cover_six(self):
+        self.assertEqual(len(sb.EspnFetcher.MAJOR_LEAGUES), 6)
+
+
+_SAMPLE_ESPN_EVENT = {
+    "date": "2026-10-10T11:30Z",
+    "name": "Leeds United at Arsenal",
+    "status": {"type": {"state": "pre"}},
+    "competitions": [{
+        "competitors": [
+            {"homeAway": "home", "team": {"displayName": "Arsenal"}},
+            {"homeAway": "away", "team": {"displayName": "Leeds United"}},
+        ],
+        "odds": [{
+            "provider": {"displayName": "DraftKings"},
+            "moneyline": {
+                "home": {"close": {"odds": "-260"},
+                         "open": {"odds": "-340"}},
+                "draw": {"close": {"odds": "+390"},
+                         "open": {"odds": "+425"}},
+                "away": {"close": {"odds": "+650"},
+                         "open": {"odds": "+800"}},
+            },
+        }],
+    }],
+}
+
+
+class EspnParseTests(unittest.TestCase):
+    def test_parse_event(self):
+        parsed = sb.EspnFetcher._parse_event(_SAMPLE_ESPN_EVENT,
+                                             "Premier League")
+        self.assertIsNotNone(parsed)
+        fx, snaps = parsed
+        self.assertEqual(fx.home, "Arsenal")
+        self.assertEqual(fx.away, "Leeds United")
+        self.assertEqual(fx.league, "Premier League")
+        self.assertEqual(fx.date, "2026-10-10T11:30Z")
+        self.assertFalse(fx.played)
+        self.assertEqual(len(snaps), 1)
+        o = snaps[0]
+        self.assertEqual(o.bookmaker, "ESPN/DraftKings")
+        self.assertAlmostEqual(o.home, 1.3846, places=3)
+        self.assertEqual(o.draw, 4.9)
+        self.assertEqual(o.away, 7.5)
+
+    def test_skips_finished(self):
+        ev = dict(_SAMPLE_ESPN_EVENT)
+        ev = {**ev, "status": {"type": {"state": "post"}}}
+        self.assertIsNone(sb.EspnFetcher._parse_event(ev, "Premier League"))
+
+    def test_skips_missing_teams(self):
+        ev = {**_SAMPLE_ESPN_EVENT,
+              "competitions": [{"competitors": [], "odds": []}]}
+        self.assertIsNone(sb.EspnFetcher._parse_event(ev, "Premier League"))
+
+    def test_open_odds_fallback(self):
+        import copy
+        ev = copy.deepcopy(_SAMPLE_ESPN_EVENT)
+        ml = ev["competitions"][0]["odds"][0]["moneyline"]
+        for side in ml.values():
+            del side["close"]  # only open remains
+        _, snaps = sb.EspnFetcher._parse_event(ev, "Premier League")
+        self.assertAlmostEqual(snaps[0].home, 1.2941, places=3)
+
+
+def _canned_entries():
+    fx1 = sb.Fixture(home="Giants A", away="Giants B", league="Premier League",
+                     date="2026-10-10T12:00Z")
+    fx2 = sb.Fixture(home="Minnows A", away="Minnows B", league="La Liga",
+                     date="2026-10-09T12:00Z")
+    fx3 = sb.Fixture(home="Giants A", away="Minnows A", league="Serie A",
+                     date="2026-10-11T12:00Z")
+    o = sb.OddsSnapshot(bookmaker="ESPN/Test", home=2.0, draw=3.2, away=3.4)
+    return [(fx1, [o]), (fx2, [o]), (fx3, [o])]
+
+
+class RankFixturesTests(unittest.TestCase):
+    def test_big_even_matchup_first(self):
+        an = sb.EnsembleAnalyst()
+        an.elo.ratings.update({"Giants A": 1900.0, "Giants B": 1880.0,
+                               "Minnows A": 1400.0, "Minnows B": 1380.0})
+        picks = sb.rank_fixtures(_canned_entries(), an, top_n=3)
+        self.assertEqual(picks[0][0].home, "Giants A")
+        self.assertEqual(picks[0][0].away, "Giants B")
+        # mismatch (giant vs minnow) ranks below the minnow derby
+        self.assertEqual(picks[1][0].home, "Minnows A")
+        self.assertEqual(picks[2][0].home, "Giants A")
+        self.assertEqual(picks[2][0].away, "Minnows A")
+
+    def test_top_n_respected(self):
+        an = sb.EnsembleAnalyst()
+        picks = sb.rank_fixtures(_canned_entries(), an, top_n=2)
+        self.assertEqual(len(picks), 2)
+
+    def test_cold_start_falls_back_to_date_order(self):
+        an = sb.EnsembleAnalyst()  # all Elo 1500
+        picks = sb.rank_fixtures(_canned_entries(), an, top_n=3)
+        dates = [fx.date for fx, _ in picks]
+        self.assertEqual(dates, sorted(dates))
+
+
+class FixtureDigestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["NOMORALS_BET_DIR"] = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(os.environ.pop, "NOMORALS_BET_DIR", None)
+
+    def _store(self):
+        return sb.BetStore()
+
+    def test_digest_renders_picks(self):
+        from unittest import mock
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()):
+            out = sb.fixture_digest(self._store(), top_n=2)
+        self.assertIn("Giants A vs Giants B", out)
+        self.assertIn("Minnows A vs Minnows B", out)
+        self.assertIn("market odds:", out)
+        self.assertIn("ensemble", out)
+
+    def test_digest_offline_message(self):
+        from unittest import mock
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               side_effect=RuntimeError("boom")):
+            out = sb.fixture_digest(self._store())
+        self.assertIn("couldn't reach the fixture feed", out)
+        self.assertIn("/bet analyze", out)
+
+    def test_digest_empty_message(self):
+        from unittest import mock
+        with mock.patch.object(sb.EspnFetcher, "fetch", return_value=[]):
+            out = sb.fixture_digest(self._store())
+        self.assertIn("no upcoming fixtures", out)
+
+    def test_digest_unknown_league_note(self):
+        from unittest import mock
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()) as m:
+            out = sb.fixture_digest(self._store(), league_text="xx-league",
+                                    top_n=1)
+        self.assertIn("unknown league", out)
+        m.assert_called_once_with(league="", limit=20)
+
+    def test_digest_league_alias_passed_through(self):
+        from unittest import mock
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()) as m:
+            sb.fixture_digest(self._store(), league_text="epl", top_n=1)
+        m.assert_called_once_with(league="eng.1", limit=20)
+
+
+class ChatFixtureModeTests(unittest.TestCase):
+    def _rt(self):
+        from nomorals.agents.partner_runtime import PartnerRuntime
+        return PartnerRuntime.__new__(PartnerRuntime)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["NOMORALS_BET_DIR"] = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(os.environ.pop, "NOMORALS_BET_DIR", None)
+
+    def test_analyze_no_args_fetches_fixtures(self):
+        from unittest import mock
+        rt = self._rt()
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()):
+            out = rt._control_bet("analyze", "t")
+        self.assertIn("Giants A vs Giants B", out)
+        self.assertNotIn("usage:", out)
+
+    def test_analyze_league_alias(self):
+        from unittest import mock
+        rt = self._rt()
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()) as m:
+            out = rt._control_bet("analyze epl", "t")
+        self.assertIn("Giants A vs Giants B", out)
+        m.assert_called_once_with(league="eng.1", limit=20)
+
+    def test_analyze_top_flag(self):
+        from unittest import mock
+        rt = self._rt()
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               return_value=_canned_entries()):
+            out = rt._control_bet("analyze --top 1", "t")
+        # cold start: all Elo 1500 -> date order, Minnows (10-09) first
+        self.assertIn("Minnows A vs Minnows B", out)
+        self.assertNotIn("Giants A vs Giants B", out)
+
+    def test_analyze_garbage_still_usage(self):
+        rt = self._rt()
+        out = rt._control_bet("analyze frobnicate", "t")
+        self.assertIn("usage:", out)
+
+    def test_analyze_manual_mode_unchanged(self):
+        rt = self._rt()
+        out = rt._control_bet("analyze Alpha vs Beta 2.00 3.40 3.80", "t")
+        self.assertIn("Alpha vs Beta", out)
+        self.assertIn("ensemble", out)
+
+    def test_analyze_offline_graceful(self):
+        from unittest import mock
+        rt = self._rt()
+        with mock.patch.object(sb.EspnFetcher, "fetch",
+                               side_effect=RuntimeError("down")):
+            out = rt._control_bet("analyze", "t")
+        self.assertIn("couldn't reach the fixture feed", out)
+
+
+class CliFixtureTests(unittest.TestCase):
+    def test_nm_bet_analyze_fixture_mode(self):
+        import io
+        import argparse
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from nomorals.cli import _cmd_bet
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["NOMORALS_BET_DIR"] = d
+            try:
+                args = argparse.Namespace(
+                    bet_action="analyze", home=None, away=None,
+                    league="GEN", odds=None, bookmaker="cli",
+                    min_edge=0.04, top=2)
+                with mock.patch.object(sb.EspnFetcher, "fetch",
+                                        return_value=_canned_entries()):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        rc = _cmd_bet(args, None)
+                self.assertEqual(rc, 0)
+                out = buf.getvalue()
+                self.assertIn("Giants A vs Giants B", out)
+            finally:
+                del os.environ["NOMORALS_BET_DIR"]
+
+
 if __name__ == "__main__":
     unittest.main()
