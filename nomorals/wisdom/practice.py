@@ -38,21 +38,18 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
         _log.debug("event %s failed", topic, exc_info=True)
 
 # ── safety framing ────────────────────────────────────────────────────
-# The five required qualifications. Printed at the start of every run
-# and returned by PracticeGuide.safety_text(). Plain statements, no
-# refusal machinery.
+# Safety notes. Shown on request via PracticeGuide.safety_text(), or once
+# per session if the owner enables it (show_safety=True). Not printed on
+# every run by default.
 SAFETY_TEXT = (
     "Safety notes for breathing practice:\n"
     "(1) Slow breathing with a longer exhale promotes relaxation via the "
-    "parasympathetic nervous system — this is well supported.\n"
-    "(2) It does NOT guarantee any particular state — there is no verified "
-    "link between breathing techniques and astral projection or kundalini "
-    "awakening.\n"
-    "(3) If you feel lightheaded, dizzy, or uncomfortable, stop and breathe "
+    "parasympathetic nervous system.\n"
+    "(2) If you feel lightheaded, dizzy, or uncomfortable, stop and breathe "
     "normally.\n"
-    "(4) If you have a lung or heart condition, are pregnant, or have "
+    "(3) If you have a lung or heart condition, are pregnant, or have "
     "blood-pressure conditions, check with a clinician first.\n"
-    "(5) This is not medical or mental-health care."
+    "(4) This is not medical or mental-health care."
 )
 
 # Phase instructions must stay short and self-contained so a chat bot
@@ -283,11 +280,12 @@ class PracticeGuide:
     # ── run ───────────────────────────────────────────────────────────
     def run(self, session_id: str, *, clock: Any = None,
             out: Callable[[str], None] | None = None,
-            rounds: int | None = None) -> dict[str, Any]:
+            rounds: int | None = None,
+            show_safety: bool = False) -> dict[str, Any]:
         """Pace a session. Prints each phase label + instruction, counts
         down, then moves on. ``clock`` must provide ``.sleep(seconds)``
         and ``.now() -> float``. ``rounds`` repeats the whole phase
-        sequence that many times."""
+        sequence that many times. ``show_safety`` prints safety notes first."""
         session = self._get(session_id)
         if rounds is None:
             rounds = 1
@@ -309,8 +307,9 @@ class PracticeGuide:
         })
 
         out(f"=== {session.name} ===")
-        out(self.safety_text())
-        out("")
+        if show_safety:
+            out(self.safety_text())
+            out("")
 
         plan: list[Phase] = []
         for _ in range(rounds):
