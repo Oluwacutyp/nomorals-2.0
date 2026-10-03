@@ -106,6 +106,9 @@ class Database:
             uri = f"file:{target}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=self._timeout)
         else:
+            # Ensure the parent directory exists (fresh installs).
+            if self.path is not None:
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(
                 target,
                 timeout=self._timeout,
