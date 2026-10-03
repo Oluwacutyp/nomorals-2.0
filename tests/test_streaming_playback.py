@@ -23,13 +23,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+import nomorals.media.playback as pb
 from nomorals.connectors.spotify import SpotifyError
 from nomorals.core.errors import ToolError
 from nomorals.media.playback import Backend, PlaybackEngine
 from nomorals.storage.db import Database
-
-import nomorals.media.playback as pb
-
 
 # ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -248,7 +246,7 @@ class AddStreamingTests(StreamingBase):
         self.assertIn("not wired", str(ctx.exception))
 
     def test_add_spotify_garbage_fails_fast(self) -> None:
-        with self.assertRaises(Exception):
+        with self.assertRaises(SpotifyError):
             self.eng.add("spotify:track:")
 
     def test_add_soundcloud_track(self) -> None:

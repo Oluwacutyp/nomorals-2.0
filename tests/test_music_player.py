@@ -29,12 +29,11 @@ from unittest import mock
 
 from nomorals.core.errors import ToolError
 from nomorals.media import MediaHub
-from nomorals.media.library import MusicLibrary, read_metadata
 from nomorals.media import library as lib_mod
-from nomorals.media.playback import Backend, PlaybackEngine
 from nomorals.media import playback as pb_mod
+from nomorals.media.library import MusicLibrary, read_metadata
+from nomorals.media.playback import Backend, PlaybackEngine
 from nomorals.storage.db import Database
-
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -582,7 +581,7 @@ class MpvSyncTests(PlayerBase):
                  "time-pos": None, "volume": 80}
         with mock.patch.object(eng, "_mpv_alive", return_value=True), \
              mock.patch.object(eng, "_mpv_get_props", return_value=props):
-            st = eng.status()
+            eng.status()
         self.assertEqual(eng._state["position"], 0)
         self.assertEqual(MusicLibrary(self.ctx).history(), [])
 
@@ -989,9 +988,9 @@ class OfflineDegradationTests(PlayerBase):
         eng = self._sc_queue()
         with mock.patch.object(
                 eng, "_start_one",
-                side_effect=ToolError("soundcloud resolve failed: offline")):
-            with self.assertRaises(ToolError) as cm:
-                eng.play(0)
+                side_effect=ToolError("soundcloud resolve failed: offline")), \
+                self.assertRaises(ToolError) as cm:
+            eng.play(0)
         self.assertIn("nothing in the queue is playable", str(cm.exception))
         self.assertIn("dead link", str(cm.exception))
 
@@ -1025,9 +1024,9 @@ class OfflineDegradationTests(PlayerBase):
              mock.patch.object(eng, "_mpv_ipc", return_value=True), \
              mock.patch.object(
                  eng, "_soundcloud_play_url",
-                 side_effect=ToolError("soundcloud resolve failed: gone")):
-            with self.assertRaises(ToolError):
-                eng._mpv_play_at(1)
+                 side_effect=ToolError("soundcloud resolve failed: gone")), \
+             self.assertRaises(ToolError):
+            eng._mpv_play_at(1)
 
     def test_adapter_failures_become_tool_errors(self) -> None:
         fake_sc = mock.Mock()

@@ -10,7 +10,6 @@ from typing import Any
 from unittest import mock
 
 from nomorals.accounts.vault import CredentialVault
-from nomorals.connectors.base import ConnectorError
 from nomorals.connectors.registry import get_connector
 from nomorals.connectors.soundcloud import (
     SoundCloudConnector,
@@ -171,18 +170,18 @@ class DiscoveryTests(unittest.TestCase):
         conn, http = _soundcloud()
         http.route("GET", "https://soundcloud.com",
                    FakeResponse(500, {"error": "boom"}))
-        with mock.patch.dict(os.environ, self._env(), clear=True):
-            with self.assertRaises(SoundCloudError) as ctx:
-                conn._client_id()
+        with mock.patch.dict(os.environ, self._env(), clear=True), \
+                self.assertRaises(SoundCloudError) as ctx:
+            conn._client_id()
         self.assertIn("SOUNDCLOUD_CLIENT_ID", str(ctx.exception))
 
     def test_discovery_no_bundles_is_clear(self) -> None:
         conn, http = _soundcloud()
         http.route("GET", "https://soundcloud.com",
                    FakeResponse(200, text="<html>no scripts here</html>"))
-        with mock.patch.dict(os.environ, self._env(), clear=True):
-            with self.assertRaises(SoundCloudError) as ctx:
-                conn._client_id()
+        with mock.patch.dict(os.environ, self._env(), clear=True), \
+                self.assertRaises(SoundCloudError) as ctx:
+            conn._client_id()
         self.assertIn("layout changed", str(ctx.exception))
 
 
@@ -468,9 +467,8 @@ class RetryTests(unittest.TestCase):
         conn, http = _soundcloud()
         http.route("GET", "/search/tracks", FakeResponse(401, {}))
         with mock.patch.dict(os.environ, {"SOUNDCLOUD_CLIENT_ID": CID},
-                             clear=False):
-            with self.assertRaises(SoundCloudError) as ctx:
-                conn.search_tracks("midnight")
+                             clear=False), self.assertRaises(SoundCloudError) as ctx:
+            conn.search_tracks("midnight")
         self.assertIn("revoked", str(ctx.exception))
 
     def test_429_is_clear(self) -> None:
@@ -479,9 +477,9 @@ class RetryTests(unittest.TestCase):
         http.route("GET", "/search/tracks", FakeResponse(429, {}))
         env = dict(os.environ)
         env.pop("SOUNDCLOUD_CLIENT_ID", None)
-        with mock.patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(SoundCloudError) as ctx:
-                conn.search_tracks("midnight")
+        with mock.patch.dict(os.environ, env, clear=True), \
+                self.assertRaises(SoundCloudError) as ctx:
+            conn.search_tracks("midnight")
         self.assertIn("rate limit", str(ctx.exception))
 
 

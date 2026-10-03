@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import os
 import re
-import urllib.parse
 from typing import Any
 
 from ..core.logging_setup import get_logger

@@ -290,9 +290,8 @@ class TokenRefreshTests(unittest.TestCase):
         http.route("POST", "accounts.spotify.com/api/token",
                    FakeResponse(400, {"error": "invalid_grant"}))
         with mock.patch.dict(os.environ,
-                             {"SPOTIFY_CLIENT_SECRET": "csecret"}):
-            with self.assertRaises(SpotifyError):
-                conn.get_me()
+                             {"SPOTIFY_CLIENT_SECRET": "csecret"}), self.assertRaises(SpotifyError):
+            conn.get_me()
 
 
 class LibraryTests(unittest.TestCase):

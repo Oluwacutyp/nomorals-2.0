@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from typing import Any
+
 from ..emit import _emit
 
 
@@ -167,9 +168,7 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
                 v = call("player", action="play_spotify", target=t)
             elif force_soundcloud or src == "soundcloud":
                 v = call("player", action="play_soundcloud", target=t)
-            elif src == "url":
-                v = _play_added(call, args, [t], context)
-            elif _looks_like_file(context, t):
+            elif src == "url" or _looks_like_file(context, t):
                 v = _play_added(call, args, [t], context)
             else:
                 # bare text: keyless SoundCloud search — works with no
