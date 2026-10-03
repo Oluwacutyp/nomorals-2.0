@@ -23,6 +23,7 @@ unrelated — this module is deliberately named ``morning_briefing.py``.
 
 from __future__ import annotations
 
+import abc
 import json
 import time
 from dataclasses import dataclass, field
@@ -263,14 +264,19 @@ class CoinGeckoMarketProvider:
 
 # ── section providers ────────────────────────────────────────────────────
 
-class _Provider:
-    """Base: ``collect(ctx, since) -> BriefingSection | None``."""
+class _Provider(abc.ABC):
+    """Base: ``collect(ctx, since) -> BriefingSection | None``.
+
+    Abstract — subclass and implement :meth:`collect`.  Instantiating
+    the base directly fails fast instead of blowing up at briefing time.
+    """
     name = "base"
     title = "Base"
     priority = 999
 
+    @abc.abstractmethod
     def collect(self, ctx: Any, since: float) -> BriefingSection | None:
-        raise NotImplementedError
+        """Build this provider's briefing section, or None to omit it."""
 
 
 def _watcher_store(ctx: Any) -> Any | None:

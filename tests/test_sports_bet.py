@@ -343,5 +343,40 @@ class CliTests(unittest.TestCase):
                 del os.environ["NOMORALS_BET_DIR"]
 
 
+class AbstractBaseTests(unittest.TestCase):
+    """_Base and OddsFetcher are real abstract interfaces: the bases fail
+    fast on instantiation, and every concrete model/fetcher still works."""
+
+    def test_base_model_not_instantiable(self):
+        with self.assertRaises(TypeError):
+            sb._Base()
+
+    def test_all_builtin_models_instantiable(self):
+        subs = [c for c in vars(sb).values()
+                if isinstance(c, type) and issubclass(c, sb._Base)
+                and c is not sb._Base]
+        self.assertGreater(len(subs), 0)
+        for cls in subs:
+            cls()  # must not raise: each overrides probs
+
+    def test_odds_fetcher_base_not_instantiable(self):
+        with self.assertRaises(TypeError):
+            sb.OddsFetcher()
+
+    def test_all_builtin_fetchers_instantiable(self):
+        subs = [c for c in vars(sb).values()
+                if isinstance(c, type) and issubclass(c, sb.OddsFetcher)
+                and c is not sb.OddsFetcher]
+        self.assertGreater(len(subs), 0)
+        for cls in subs:
+            inst = cls()  # must not raise: each overrides fetch
+            self.assertTrue(hasattr(inst, "fetch"))
+
+    def test_manual_fetcher_still_works(self):
+        f = sb.ManualFetcher()
+        self.assertEqual(f.fetch(), [])
+        self.assertEqual(f.available(), (True, "ok"))
+
+
 if __name__ == "__main__":
     unittest.main()
