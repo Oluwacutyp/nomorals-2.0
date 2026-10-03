@@ -39,6 +39,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "autonomy": ["auto"],
     "bet": ["bt"],
     "book": ["bk"],
+    "build": ["bld"],
     "captcha": ["cap"],
     "cards": ["cd"],
     "cipher": ["cip"],
@@ -1439,7 +1440,50 @@ def _parser() -> argparse.ArgumentParser:
     apps.add_argument("--features", default="", help="comma-separated feature list")
     apps.add_argument("--title", default="")
     apps.add_argument("--port", default="")
+    apps.add_argument("--verify", dest="verify", action="store_true",
+                      default=True,
+                      help="runtime-verify the built app (default)")
+    apps.add_argument("--no-verify", dest="verify", action="store_false",
+                      help="skip runtime verification")
     apps.add_argument("--json", action="store_true", help="Output as JSON")
+
+    build_cmd = sub.add_parser("build", aliases=CLI_ALIASES["build"],
+                               help="scaffold -> verify (-> deliver) a builder template project")
+    bsub = build_cmd.add_subparsers(dest="build_action")
+    bsub.add_parser("kinds", help="list scaffold template kinds")
+    b_verify = bsub.add_parser(
+        "verify",
+        help="scaffold a template and run the full verify lifecycle "
+             "(install, tests, serve+smoke, export)")
+    b_verify.add_argument("kind", help="template kind (see: nm build kinds)")
+    b_verify.add_argument("name", help="project name")
+    b_verify.add_argument("--dest", default=".",
+                          help="directory to scaffold into (default: .)")
+    b_verify.add_argument("--export-dir", default="",
+                          help="where the export archive lands")
+    b_verify.add_argument("--startup-timeout", type=float, default=10.0,
+                          help="seconds to wait for the served app")
+    b_verify.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    b_deliver = bsub.add_parser(
+        "deliver",
+        help="scaffold, verify, zip, and deliver a project to a chat")
+    b_deliver.add_argument("kind", help="template kind (see: nm build kinds)")
+    b_deliver.add_argument("name", help="project name")
+    b_deliver.add_argument("--dest", default=".",
+                           help="directory to scaffold into (default: .)")
+    b_deliver.add_argument("--to", default="", metavar="platform:chat",
+                           help="send the zip to this chat, e.g. telegram:123456")
+    b_deliver.add_argument("--platform", default="",
+                           help="platform when --to is a bare chat id")
+    b_deliver.add_argument("--caption", default="",
+                           help="caption for the sent archive")
+    b_deliver.add_argument("--export-dir", default="",
+                           help="where the zip archive lands")
+    b_deliver.add_argument("--startup-timeout", type=float, default=10.0,
+                           help="seconds to wait for the served app")
+    b_deliver.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     # Connector commands
     connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")

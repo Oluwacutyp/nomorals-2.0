@@ -145,6 +145,11 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.integrations.sentinel_bridge": 2,  # vendored-sentinel bridge
     "nomorals.integrations.market_data": 2,     # keyless market-data plumbing (imports only core)
     "nomorals.integrations.naija_shopping": 4,   # shopping adapter (uses tools)
+    # Thin tool-registry bridge for the builders organ: its only job is to
+    # expose builders/app_builder's register() hook under the name the
+    # tool registry's register_builtins() imports.  An entry-point-layer
+    # (L7) adapter, like builders_proxy.
+    "nomorals.tools.build_app": 7,
 }
 
 #: Grandfathered upward imports.  Each entry is an (importer, target) dotted

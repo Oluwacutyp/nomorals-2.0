@@ -107,6 +107,7 @@ def run_project_tests(result: ScaffoldResult, timeout: float = 120.0) -> BuildSt
 
 def build_and_verify(kind: str, name: str, dest: str | Path, *,
                      policy: Policy | None = None,
+                     confirmation: str | None = None,
                      export_dir: str | Path | None = None,
                      startup_timeout: float = 10.0) -> BuildReport:
     """Scaffold ``kind``/``name`` into ``dest`` and verify the full lifecycle.
@@ -116,6 +117,10 @@ def build_and_verify(kind: str, name: str, dest: str | Path, *,
     export + verify_export.  Every step's outcome lands in the report;
     nothing raises except a catastrophic scaffold failure, which is
     itself captured as a failed step.
+
+    ``confirmation`` is forwarded to :func:`install_deps`: mint it with
+    ``policy.issue_confirmation(Capability.EXEC_INSTALL)`` when the
+    policy's ``exec.install`` rule requires confirmation.
     """
     started = time.monotonic()
     report = BuildReport(kind=kind, name=name)
@@ -139,7 +144,8 @@ def build_and_verify(kind: str, name: str, dest: str | Path, *,
     # 2. install deps (policy-gated; denial is a report entry, not a crash)
     step_started = time.monotonic()
     try:
-        install = install_deps(result.project_dir, policy=policy)
+        install = install_deps(result.project_dir, policy=policy,
+                               confirmation=confirmation)
         report.steps.append(BuildStep("install_deps", install.ok, install.detail,
                                       time.monotonic() - step_started))
     except Exception as exc:  # noqa: BLE001

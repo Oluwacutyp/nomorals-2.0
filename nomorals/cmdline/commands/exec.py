@@ -52,6 +52,8 @@ def _cmd_apps(args: argparse.Namespace, context: Any) -> int:
         kwargs["name"] = name
     if getattr(args, "port", ""):
         kwargs["port"] = int(args.port)
+    if action == "build":
+        kwargs["verify"] = bool(getattr(args, "verify", True))
     out = tools.call("build_app", **kwargs)
     if not out.ok:
         print(f"apps: {out.error}", file=sys.stderr)
@@ -59,11 +61,19 @@ def _cmd_apps(args: argparse.Namespace, context: Any) -> int:
     value = out.value
     if action == "build":
         v = value.get("validation") or {}
+        runtime = v.get("runtime") or {}
+        if runtime:
+            rv = ("runtime: " + ("OK" if runtime.get("ok") else "FAILED")
+                  + (f" ({runtime['detail']})" if runtime.get("detail") else "")
+                  + (" [skipped]" if runtime.get("skipped") else ""))
+        else:
+            rv = "runtime: not run"
         _emit(args, value,
               f"built {name} [{kwargs['stack']}] — "
               f"{len(value.get('files') or [])} files, "
-              f"validation: {'OK' if v.get('ok') else 'FAILED'}"
-              + ("" if v.get("ok") else f" — {v.get('output', '')[:300]}"))
+              f"validation: {'OK' if v.get('ok') else 'FAILED'}, {rv}"
+              + ("" if v.get("ok") else
+                 f" — failed: {v.get('failed', '')!r}"[:300]))
         return 0 if v.get("ok", True) else 1
     if action == "list":
         lines = [f"  {a.get('name')} [{a.get('stack')}] {a.get('path', '')}"

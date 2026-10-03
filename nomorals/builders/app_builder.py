@@ -35,11 +35,14 @@ Registered as the ``build_app`` tool.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import py_compile
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -1502,7 +1505,7 @@ _TEMPLATES: dict[str, Callable[[dict], dict[str, str]]] = {
 
 
 class AppBuilder:
-    """Scaffold + validate runnable applications."""
+    """Scaffold + validate + runtime-verify runnable applications."""
 
     role = "builder"
 
@@ -1523,7 +1526,20 @@ class AppBuilder:
             for s in STACKS
         ]
 
-    def build(self, spec: dict[str, Any]) -> dict[str, Any]:
+    def build(self, spec: dict[str, Any], *,
+              verify: bool = True) -> dict[str, Any]:
+        """Generate the app, statically validate it, and runtime-verify it.
+
+        ``verify=True`` (default) actually runs the built app: server
+        stacks are started on a free port and hit on their health path,
+        ``cli-python`` gets a ``--help`` smoke run, ``go-cli`` gets a
+        real ``go build`` + run.  The outcome lands in
+        ``validation["runtime"]``; a verification failure makes
+        ``validation["ok"]`` False but never raises -- the report tells
+        the truth about what was built.  Stacks that cannot be verified
+        offline (missing deps, no node_modules, needs a bot token) record
+        an honest ``skipped`` entry instead of a fake pass.
+        """
         name = str(spec.get("name") or "").strip()
         if not name:
             raise ToolError("build needs a name")
@@ -1592,16 +1608,135 @@ class AppBuilder:
         written.append("manifest.json")
 
         validated, failed = self._validate(app_dir, stack)
+        runtime = self._runtime_verify(app_dir, stack) if verify else None
+        validation: dict[str, Any] = {
+            "ok": not failed and (runtime is None or runtime["ok"]),
+            "validated": validated,
+            "failed": failed,
+        }
+        if runtime is not None:
+            validation["runtime"] = runtime
+            manifest["validation"] = validation
+            (app_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8")
         return {
             "app": slug,
             "stack": stack,
             "dir": str(app_dir),
             "files": written,
             "run": manifest["run"],
-            "validation": {"ok": not failed,
-                           "validated": validated,
-                           "failed": failed},
+            "validation": validation,
         }
+
+    def _runtime_verify(self, app_dir: Path, stack: str) -> dict[str, Any]:
+        """Actually run the built app and prove it answers.  Never raises.
+
+        Server stacks are started with the same command
+        :meth:`serve` uses, hit on the stack's health path, then
+        stopped.  Stacks that cannot be verified offline (missing
+        deps, no node_modules, needs a bot token) return an honest
+        ``skipped`` entry instead of a fake pass.
+        """
+        started = time.time()
+
+        def done(ok: bool, detail: str,
+                 skipped: bool = False) -> dict[str, Any]:
+            return {"ok": ok, "skipped": skipped, "detail": detail,
+                    "elapsed": round(time.time() - started, 3)}
+
+        if stack == "bot-telegram":
+            return done(True, "not verifiable offline: needs BOT_TOKEN "
+                              "and network access to Telegram",
+                        skipped=True)
+
+        if stack == "cli-python":
+            entry = next((p for p in sorted(app_dir.glob("*.py"))
+                          if p.name != "__init__.py"), None)
+            if entry is None:
+                return done(False, "no python entrypoint found")
+            try:
+                proc = subprocess.run(
+                    [sys.executable, entry.name, "--help"],
+                    cwd=str(app_dir), stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                return done(False, "--help timed out after 30s")
+            except OSError as exc:
+                return done(False, f"could not spawn: {exc}")
+            if proc.returncode != 0:
+                return done(
+                    False, f"--help exited {proc.returncode}: "
+                           f"{(proc.stderr or proc.stdout).strip()[:300]}")
+            return done(True, "--help exited 0")
+
+        if stack == "go-cli":
+            if not shutil.which("go"):
+                return done(True, "go toolchain not installed",
+                            skipped=True)
+            tmp = Path(tempfile.mkdtemp(prefix="nm-build-verify-"))
+            binary = tmp / "app"
+            try:
+                build_proc = subprocess.run(
+                    ["go", "build", "-o", str(binary), "."],
+                    cwd=str(app_dir), capture_output=True, text=True,
+                    timeout=120)
+                if build_proc.returncode != 0:
+                    return done(
+                        False, "go build failed: "
+                               f"{(build_proc.stderr or build_proc.stdout).strip()[:300]}")
+                run_proc = subprocess.run(
+                    [str(binary), "list"], cwd=str(tmp),
+                    stdin=subprocess.DEVNULL, capture_output=True,
+                    text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                return done(False, "go build/run timed out")
+            except OSError as exc:
+                return done(False, f"could not run go: {exc}")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            if run_proc.returncode != 0:
+                return done(
+                    False, "built binary 'list' exited "
+                           f"{run_proc.returncode}: "
+                           f"{(run_proc.stderr or run_proc.stdout).strip()[:300]}")
+            return done(True, "go build ok, built binary 'list' exited 0")
+
+        # server stacks from here on
+        missing = _missing_deps(stack)
+        if missing:
+            return done(True, f"missing runtime deps: {', '.join(missing)} "
+                              "-- install them, then verify with the serve "
+                              "action", skipped=True)
+        if stack in ("express", "react-vite", "nextjs") and \
+                not (app_dir / "node_modules").exists():
+            return done(True, "node_modules not installed -- run npm install "
+                              "first, then verify with the serve action",
+                        skipped=True)
+        if stack == "django":
+            try:
+                mig = subprocess.run(
+                    [sys.executable, "manage.py", "migrate", "--noinput"],
+                    cwd=str(app_dir), capture_output=True, text=True,
+                    timeout=120)
+            except subprocess.TimeoutExpired:
+                return done(False, "manage.py migrate timed out after 120s")
+            except OSError as exc:
+                return done(False, f"could not run migrate: {exc}")
+            if mig.returncode != 0:
+                return done(False, "manage.py migrate failed: "
+                                   f"{(mig.stderr or mig.stdout).strip()[-400:]}")
+
+        port = _free_port(0)
+        path = _health_path(stack)
+        try:
+            with _run_server(app_dir, stack, port):
+                health = _wait_for_http(port, stack, timeout=20.0, path=path)
+        except ToolError as exc:
+            return done(False, f"could not start server: {exc}")
+        if health.get("ok"):
+            return done(True, f"GET {path} -> {health.get('status')}")
+        return done(False,
+                   f"health check failed: {health.get('error', 'unknown')}")
 
     def _validate(self, app_dir: Path, stack: str):
         validated, failed = [], []
@@ -1956,6 +2091,44 @@ class AppBuilder:
         return {"deployments": out, "count": len(out)}
 
 
+@contextlib.contextmanager
+def _run_server(app_dir: Path, stack: str, port: int):
+    """Start a stack app on ``port``; kill the whole process group on exit.
+
+    Uses the exact same command :meth:`AppBuilder.serve` would run, but
+    stays in-process (no kv bookkeeping) so build-time verification
+    leaves no detached servers behind.
+    """
+    cmd, env = _serve_command(stack, app_dir, port)
+    full_env = dict(os.environ)
+    full_env.update(env)
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(app_dir), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, env=full_env)
+    except OSError as exc:
+        raise ToolError(f"could not spawn {' '.join(cmd)}: {exc}")
+    try:
+        yield proc
+    finally:
+        if proc.poll() is None:
+            import signal
+
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):  # noqa: E103 - process already gone; kill is best-effort
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):  # noqa: E103 - process already gone; kill is best-effort
+                    pass
+                proc.wait(timeout=5)
+
+
 def _pid_alive(pid: int) -> bool:
     if not pid:
         return False
@@ -2065,7 +2238,7 @@ def _find_child_pid(app_dir: Path, cmd: list[str]) -> int | None:
 
 def _wait_for_http(port: int, stack: str, *, timeout: float = 20.0,
                    path: str = "", tls: bool = False) -> dict[str, Any]:
-    from .core.http import HttpClient
+    from ..core.http import HttpClient
 
     scheme = "https" if tls else "http"
     # a self-signed local cert is the EXPECTED identity for tls deploys —
@@ -2090,7 +2263,7 @@ def _wait_for_http(port: int, stack: str, *, timeout: float = 20.0,
 def _quick_http(port: int, path: str = "/", *, tls: bool = False) -> dict[str, Any] | None:
     if not port:
         return None
-    from .core.http import HttpClient
+    from ..core.http import HttpClient
 
     scheme = "https" if tls else "http"
     try:
@@ -2126,7 +2299,7 @@ def register(registry: Any) -> None:
             "static|flask|fastapi|express|react-vite|cli-python|django|"
             "nextjs|bot-telegram|go-cli. Params: "
             "action=build (name, stack, title, description, features "
-            "(comma-separated), port, overwrite) | stacks | list | info "
+            "(comma-separated), port, overwrite, verify=true) | stacks | list | info "
             "(name) | serve (name, port) — starts the server detached, "
             "health-checks it, returns a live URL + log path | stop "
             "(name) | served (what's running) | deploy (name, host, "
@@ -2134,7 +2307,12 @@ def register(registry: Any) -> None:
             "reverse proxy; tls serves HTTPS (self-signed cert "
             "generated + cached per app) | stop_deploy "
             "(name) | deployed (what's proxying). Generated code is "
-            "validated (py_compile/node --check/JSON) with a "
+            "validated (py_compile/node --check/JSON); with verify=true "
+            "(default) the built app is also runtime-verified — server "
+            "stacks are started and health-checked, cli-python gets a "
+            "--help smoke run, go-cli gets a real go build. The outcome "
+            "lands in validation['runtime'] (honest 'skipped' when a "
+            "stack can't be verified offline). Result includes a "
             "manifest.json + run instructions."
         ),
         capability=Capability.FS_WRITE,
@@ -2144,7 +2322,7 @@ def register(registry: Any) -> None:
                   features: str = "", port: int = 0,
                   overwrite: bool = False, domain: str = "",
                   path: str = "", host: str = "0.0.0.0",
-                  tls: bool = False) -> dict[str, Any]:
+                  tls: bool = False, verify: bool = True) -> dict[str, Any]:
         b = AppBuilder(context)
         if action == "stacks":
             return {"stacks": list(STACKS)}
@@ -2179,4 +2357,4 @@ def register(registry: Any) -> None:
         spec = {"name": name, "stack": stack, "title": title,
                 "description": description, "features": feats,
                 "port": int(port or 0), "overwrite": overwrite}
-        return b.build(spec)
+        return b.build(spec, verify=verify)
