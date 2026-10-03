@@ -7,8 +7,8 @@ provisioning (repos, webhooks, keys, releases, ...).
 Adding a service: subclass :class:`Connector`, decorate with
 :func:`register_connector`, and it appears in ``nm connectors list``.
 Shipped: GitHub, Mono (NG bank data), Plaid (US/EU bank data), virtual
-cards (Flutterwave), proxy pool, Jumia seller API — the framework is
-deliberately service-agnostic so more slot in.
+cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse —
+the framework is deliberately service-agnostic so more slot in.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ from .checkpoints import (
     request_human_action,
 )
 from .github import GitHubConnector, GitHubError
+from .jiji import JijiConnector, JijiError
 from .jumia import JumiaConnector
+from .konga import KongaConnector, KongaError
 from .mono import MonoConnector
 from .plaid import PlaidConnector
 from .proxypool import ProxyPoolConnector
@@ -55,7 +57,11 @@ __all__ = [
     "GitHubError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
+    "JijiConnector",
+    "JijiError",
     "JumiaConnector",
+    "KongaConnector",
+    "KongaError",
     "MonoConnector",
     "PlaidConnector",
     "ProxyPoolConnector",
