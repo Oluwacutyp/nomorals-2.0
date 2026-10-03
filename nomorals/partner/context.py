@@ -107,6 +107,37 @@ class PartnerContextBuilder:
         return "\n".join(lines) if lines else ""
 
     @staticmethod
+    def _capabilities_block() -> str:
+        """Live connector catalog — so she knows what she can link/use.
+
+        Deferred import: connectors is a peer layer and the registry is
+        populated at import time; building the block lazily keeps prompt
+        assembly free of import cycles and import-time cost.
+        """
+        try:
+            from ..connectors.registry import list_connectors
+        except Exception:  # noqa: BLE001 — connectors unavailable
+            return ""
+        try:
+            infos = list_connectors()
+        except Exception:  # noqa: BLE001
+            return ""
+        if not infos:
+            return ""
+        lines = ["Services you can link, use, and act on (connectors):"]
+        for info in infos[:36]:
+            name = str(info.get("name") or info.get("id") or "").strip()
+            if not name:
+                continue
+            desc = str(info.get("description") or "").strip().split("\n")[0][:90]
+            lines.append(f"  - {name}" + (f": {desc}" if desc else ""))
+        lines.append(
+            "When the owner asks to link, connect, or use one of these, "
+            "act on it through the connector — never claim you can't."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
     def _output_contract(short_reply: bool, max_chars: int) -> str:
         mode = (
             f"You are answering in a short burst: at most a few words. 'k', 'mhm', 'wym?' "
@@ -177,6 +208,7 @@ class PartnerContextBuilder:
             ("memory", self._memory_block(memories)),
             ("continuity", self._continuity_block(continuity_lines)),
             ("background", self._background_block(background_lines)),
+            ("capabilities", self._capabilities_block()),
             ("platform", platform_note),
             ("output", self._output_contract(short_reply, max_chars)),
         ]

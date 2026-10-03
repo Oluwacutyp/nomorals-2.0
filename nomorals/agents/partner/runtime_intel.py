@@ -3,9 +3,92 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable
 from ...core.text import truncate
+
+
+#: natural-language duration: "in the next 2 minutes", "for 1 hour", "next 30s"
+_NL_DURATION_RE = re.compile(
+    r"\b(?:in\s+the\s+next|for(?:\s+the\s+next)?|next)\s+"
+    r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b",
+    re.I,
+)
+#: natural-language interval: "every 30 seconds", "each 5 min"
+_NL_INTERVAL_RE = re.compile(
+    r"\bevery\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b",
+    re.I,
+)
+#: leading verbs to strip: "watch btc", "monitor eth price", "track gold"
+_NL_LEAD_VERB_RE = re.compile(
+    r"^(?:please\s+)?(?:watch|monitor|track|keep\s+(?:an\s+)?eye\s+on|follow)\b\s*",
+    re.I,
+)
+#: trailing filler words that describe the watch, not the target
+_NL_FILLER_RE = re.compile(
+    r"\s+(movement|movements|changes?|updates?|activity)$", re.I)
+
+_TIME_UNIT_S = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+}
+
+
+def _nl_seconds(amount: str, unit: str) -> float:
+    unit = unit.lower().rstrip("s")
+    # normalize plurals: "seconds" -> "second" etc. via prefix match
+    for key, mult in _TIME_UNIT_S.items():
+        if key.startswith(unit) or unit.startswith(key):
+            return float(amount) * mult
+    return float(amount) * 60.0
+
+
+def parse_monitor_nl(tail: str) -> dict[str, Any] | None:
+    """Parse natural-language monitor requests.
+
+    "btc price movement in the next 2 minutes"
+      → {"target": "btc price", "duration_s": 120.0, "interval_s": 30.0}
+    "watch eth every 30 seconds"
+      → {"target": "eth", "interval_s": 30.0}
+    Returns None when the text doesn't look like a monitor request.
+    """
+    text = (tail or "").strip()
+    if not text or text.startswith("/"):
+        return None
+    # must contain a monitor-ish verb or a duration/interval phrase
+    has_verb = bool(_NL_LEAD_VERB_RE.search(text))
+    dur_m = _NL_DURATION_RE.search(text)
+    int_m = _NL_INTERVAL_RE.search(text)
+    if not (has_verb or dur_m or int_m):
+        return None
+
+    duration_s = _nl_seconds(dur_m.group(1), dur_m.group(2)) if dur_m else 0.0
+    interval_s = _nl_seconds(int_m.group(1), int_m.group(2)) if int_m else 0.0
+
+    # strip verb, duration phrase, interval phrase → target
+    # (remove by matched text, not offsets — offsets shift after each cut)
+    target = _NL_LEAD_VERB_RE.sub("", text)
+    if dur_m:
+        target = target.replace(dur_m.group(0), " ")
+    if int_m:
+        target = target.replace(int_m.group(0), " ")
+    target = _NL_FILLER_RE.sub("", target)
+    target = re.sub(r"\s+", " ", target).strip(" -–—:,.")
+    # re-apply filler strip after whitespace normalization (trailing
+    # space from phrase removal blocks the $-anchored filler regex)
+    target = _NL_FILLER_RE.sub("", target).strip()
+
+    if not target or len(target) < 2:
+        return None
+    # default interval: frequent enough to catch movement inside the
+    # duration, clamped to the monitor's 30s minimum
+    if not interval_s:
+        interval_s = max(30.0, min(duration_s / 4.0, 300.0)) if duration_s else 300.0
+    return {"target": target, "duration_s": duration_s,
+            "interval_s": interval_s}
 
 class RuntimeIntelMixin:
     """RuntimeIntelMixin for :class:`PartnerRuntime`."""
@@ -331,6 +414,22 @@ class RuntimeIntelMixin:
         if tail == "status":
             st = agent.status()
             return f"{st['enabled']}/{st['total']} monitors active"
+        # natural language fallback: "btc price movement in the next 2 minutes"
+        nl = parse_monitor_nl(tail)
+        if nl:
+            info = agent.add(nl["target"], interval=nl["interval_s"])
+            dur = nl["duration_s"]
+            dur_note = ""
+            if dur:
+                if dur >= 3600:
+                    dur_note = f" for the next {dur/3600:.0f}h"
+                elif dur >= 60:
+                    dur_note = f" for the next {dur/60:.0f}m"
+                else:
+                    dur_note = f" for the next {dur:.0f}s"
+            return (f"watching {nl['target']} ({info['kind']}, every "
+                    f"{info['interval_s']:.0f}s{dur_note}) — "
+                    f"I'll alert you on change")
         return "usage: /monitor add <target> [every Ns] | list | tick | rm <ref>"
 
     def _control_cipher(self, tail: str) -> str:
