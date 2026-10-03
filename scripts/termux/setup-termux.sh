@@ -8,7 +8,7 @@ echo "=== Devon Termux Setup ==="
 # 1. Base packages
 echo "[1/5] Installing base packages..."
 pkg update -y
-pkg install -y python git curl wget ffmpeg python-numpy
+pkg install -y python git curl wget ffmpeg python-numpy tzdata
 # python-numpy from pkg is prebuilt — pip would try to compile from source and fail
 
 # 2. Python dependencies (core only — no heavy ML on phone)

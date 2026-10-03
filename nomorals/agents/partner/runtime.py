@@ -103,7 +103,6 @@ class PartnerRuntime(
         self._owner_chats = _key_set(partner_cfg.owner_chats)
         self._book_busy: set[str] = set()  # slugs with a book pipeline running
         self._apply_persisted_mode()
-        self._adopt_power_mode()
 
         if self.gateway is None:
             from ...social.chat import build_adapters
@@ -130,6 +129,12 @@ class PartnerRuntime(
         # Tools that deliver files into chats (file_send, report_publish)
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
+
+        # Power mode persists across restarts: re-widen on boot if unlocked.
+        # Runs AFTER the gateway exists — calling it earlier hit
+        # `'NoneType' object has no attribute 'set_rate_limit'` on boots
+        # where no gateway was injected.
+        self._adopt_power_mode()
 
     def _tuned_autonomy_caps(self) -> tuple[int, int]:
         """Daily proactive-volume caps, scaled by the profile's mission
@@ -825,6 +830,11 @@ class PartnerRuntime(
 
     def _adopt_power_mode(self) -> None:
         """Power mode persists across restarts: re-widen on boot if unlocked."""
+        if self.gateway is None:
+            # Defensive: the gateway is built in __init__ before this runs,
+            # but never crash boot on a None gateway — just skip the widen.
+            _log.warning("power-mode restore skipped: gateway not ready")
+            return
         try:
             from ..power import power_mode_for
 

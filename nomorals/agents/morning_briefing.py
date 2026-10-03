@@ -1031,29 +1031,23 @@ def ensure_briefing_job(context: Any) -> dict[str, Any]:
 
 
 def _today_str(context: Any) -> str:
-    from zoneinfo import ZoneInfo
     from datetime import datetime
-    try:
-        tz = ZoneInfo(_owner_tz(context))
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("UTC")
+    from ..core.tz import safe_zoneinfo
+    tz = safe_zoneinfo(_owner_tz(context))
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
 def check_catchup(context: Any) -> dict[str, Any]:
     """Boot-time catch-up: if Devon was down at briefing time, deliver
     exactly ONE late briefing on next startup — never a backlog."""
-    from zoneinfo import ZoneInfo
     from datetime import datetime
 
     today = _today_str(context)
     if latest_briefing(context, today):
         return {"catchup": False, "reason": "already delivered"}
     # only catch up if briefing time has already passed today
-    try:
-        tz = ZoneInfo(_owner_tz(context))
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("UTC")
+    from ..core.tz import safe_zoneinfo
+    tz = safe_zoneinfo(_owner_tz(context))
     now = datetime.now(tz)
     hh, mm = briefing_time(context).split(":")[:2]
     if (now.hour, now.minute) < (int(hh), int(mm)):
