@@ -93,7 +93,14 @@ jobs:
             echo "NM_RUN_INTEGRATION is set on the runner; refusing to run the offline suite with it" >&2
             exit 1
           fi
-          python3 -m unittest discover -s tests
+          # NB: GitHub runs this under `bash -e`; capture the exit code with
+          # `||` so a failing suite doesn't skip the failure report below.
+          python3 -m unittest discover -s tests > /tmp/suite.log 2>&1 || CODE=$?
+          echo "=== SUITE SUMMARY ==="
+          grep -E "^(Ran|OK|FAILED)" /tmp/suite.log || true
+          echo "=== FAILURES (first 30) ==="
+          grep -E "^(FAIL|ERROR):" /tmp/suite.log | head -30 || true
+          exit ${CODE:-0}
 
   # ── Advisory hygiene: informational only. continue-on-error + an explicit
   # exit 0 mean this job can NEVER block the operator's push, even if every
