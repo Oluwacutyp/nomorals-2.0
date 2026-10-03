@@ -188,7 +188,7 @@ class TestSongArtifacts(unittest.TestCase):
 
 
 class TestForgeDynamic(unittest.TestCase):
-    def test_create_infers_chapters_and_title(self):
+    def test_create_defaults_organic_and_grows(self):
         from nomorals.books.forge import BookForge
 
         class FakeSettings:
@@ -207,11 +207,42 @@ class TestForgeDynamic(unittest.TestCase):
                                 research=False)
             # title is cleaned, not the raw prompt
             self.assertNotIn("write me", book.title.lower())
-            # chapters inferred (novel → more than the old fixed 8)
-            self.assertGreater(len(book.chapters), 8)
+            # organic: no count decided up front — just the opening arc
+            self.assertTrue(book.organic)
+            self.assertFalse(book.concluded)
+            self.assertEqual(len(book.chapters), 3)
+            self.assertEqual(book.chapters_written, 0)
             # slug comes from the clean title
             self.assertNotIn("write-me-a-novel-about-a-voyage-to-mars",
                              book.slug)
+            # writing grows the book until the topic is covered —
+            # no count was ever decided; the size emerged from the content
+            result = forge.write_all(book.slug)
+            self.assertTrue(result["complete"])
+            self.assertTrue(result["concluded"])
+            self.assertGreaterEqual(result["total_chapters"], 5)
+            self.assertEqual(result["chapters_written"],
+                             result["total_chapters"])
+
+    def test_explicit_chapters_stays_count_based(self):
+        from nomorals.books.forge import BookForge
+
+        class FakeSettings:
+            def __init__(self, d):
+                self.workspace_dir = d
+
+        class FakeCtx:
+            router = None
+
+            def __init__(self, d):
+                self.settings = FakeSettings(d)
+
+        with tempfile.TemporaryDirectory() as d:
+            forge = BookForge(FakeCtx(d))
+            book = forge.create("a guide to sourdough", chapters=5,
+                                research=False)
+            self.assertFalse(book.organic)
+            self.assertEqual(len(book.chapters), 5)
 
 
 if __name__ == "__main__":

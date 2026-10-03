@@ -165,8 +165,8 @@ class RuntimeSearchMixin:
                 return f"sent {r['slug']} to {parts[2]}:{parts[3]}"
 
             # ── new book ────────────────────────────────────────────────────
-            # chapters: explicit number wins, otherwise inferred from the topic
-            from ...books.forge import infer_chapter_count
+            # chapters: explicit number wins, otherwise the book grows
+            # organically as it is written (no count decided up front)
             chapters = 0
             if parts and parts[-1].isdigit():
                 chapters = max(3, min(int(parts[-1]), 24))
@@ -175,8 +175,8 @@ class RuntimeSearchMixin:
                 topic = query
             if not topic:
                 return ("usage: /book <topic> [chapters] — e.g. /book eBPF for system security 8\n"
-                        "it researches the topic, plans chapters, writes them, builds a real "
-                        "pdf, and sends it here when done. /book list · /book status")
+                        "without a number the book grows organically: chapters emerge as it's "
+                        "written until the topic is covered. /book list · /book status")
             slug = slugify(topic)
             with self._queue_guard:
                 if slug in self._book_busy:
@@ -185,7 +185,7 @@ class RuntimeSearchMixin:
 
             chat = self._ref_from_key(chat_key)
             chapter_note = (f"{chapters} chapters" if chapters
-                            else "chapters inferred from the topic")
+                            else "grows organically as it's written")
             try:
                 self.gateway.send(
                     chat.platform, chat,
@@ -204,20 +204,22 @@ class RuntimeSearchMixin:
                     except BookError as exc:
                         self._notify(chat, f"⚠️ book failed: {exc}")
                         return
-                    # mid-run note at the half-chapter mark, so a long book
-                    # doesn't look dead (chapters can take real minutes)
-                    half = max(1, len(book.chapters) // 2)
+                    # progress notes at milestones so a long book doesn't look
+                    # dead (chapters can take real minutes; organic books
+                    # keep growing, so milestones beat a fixed halfway mark)
                     written = 0
+                    next_milestone = 2
                     while True:
                         r = forge.write_next(slug)
                         written += 1
                         if r.get("done") and not r.get("chapter"):
                             break
-                        if written == half:
+                        if written >= next_milestone:
                             self._notify(chat, (
-                                f"✍️ {title[:60]} — halfway: "
-                                f"{r.get('chapters_written', written)}/{r.get('total_chapters', len(book.chapters))} "
-                                f"chapters, {r.get('total_words', 0)} words so far."))
+                                f"✍️ {title[:60]} — {r.get('chapters_written', written)} "
+                                f"chapters, {r.get('total_words', 0)} words so far. "
+                                f"{'still growing…' if r.get('organic') and not r.get('concluded') else ''}"))
+                            next_milestone += 6
                     built = forge.build(slug)
                     caption = (f"📕 {title} — {built.get('chapters_written')} chapters, "
                                f"{built.get('words')} words, {built.get('pages')} pages")

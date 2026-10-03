@@ -37,10 +37,12 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
             words_per_chapter=int(getattr(args, "words", 0) or 0),
             research=not getattr(args, "no_research", False),
         )
+        plan_note = (f"({len(book.chapters)} chapters planned)"
+                     if not book.organic
+                     else "(organic — grows as it's written)")
         _emit(args, {"slug": book.slug, "title": book.display_title,
-                      "chapters": len(book.chapters)},
-              f"created {book.slug} — “{book.display_title}” "
-              f"({len(book.chapters)} chapters planned)")
+                      "chapters": len(book.chapters), "organic": book.organic},
+              f"created {book.slug} — “{book.display_title}” {plan_note}")
         return 0
 
     if action == "run":

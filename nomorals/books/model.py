@@ -61,6 +61,11 @@ class Chapter:
     text: str = ""
     status: str = STATUS_PLAN
     words: int = 0
+    #: which coverage item this chapter addresses (organic books).  The
+    #: seed chapters use "__intro__" / "__foundations__"; the closing arc
+    #: uses "__synthesis__" / "__mastery__".  Lets the continuation
+    #: assessment know what is already covered without fuzzy matching.
+    coverage: str = ""
 
     def __post_init__(self) -> None:
         self.words = count_words(self.text)
@@ -77,6 +82,7 @@ class Chapter:
             "text": self.text,
             "status": self.status,
             "words": self.words,
+            "coverage": self.coverage,
         }
 
     @classmethod
@@ -88,6 +94,7 @@ class Chapter:
             text=str(d.get("text", "")),
             status=str(d.get("status", STATUS_PLAN)),
             words=int(d.get("words", 0)),
+            coverage=str(d.get("coverage", "")),
         )
 
 
@@ -101,9 +108,21 @@ class Book:
     genre: str = ""
     description: str = ""
     chapters: list[Chapter] = field(default_factory=list)
-    target_words: int = 1200  # per chapter
+    target_words: int = 1200  # per chapter — a soft guide, never a quota
     status: str = STATUS_PLAN
     notes: str = ""
+    #: organic mode: the book grows as it is written.  No chapter count is
+    #: ever decided up front — chapters emerge from continuation
+    #: assessments until the topic is genuinely covered.  Set when the book
+    #: is created without an explicit chapter count.
+    organic: bool = False
+    #: the continuation assessment decided the book is complete.  Only
+    #: meaningful in organic mode.
+    concluded: bool = False
+    #: ordered coverage map for the heuristic continuation path
+    #: (content key terms + aspects).  The book is done when every item is
+    #: covered and the closing arc is written.
+    coverage: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -122,7 +141,15 @@ class Book:
 
     @property
     def complete(self) -> bool:
-        return bool(self.chapters) and all(c.status == STATUS_WRITTEN for c in self.chapters)
+        if not self.chapters:
+            return False
+        all_written = all(c.status == STATUS_WRITTEN for c in self.chapters)
+        if self.organic:
+            # organic books are done when the author (continuation
+            # assessment) says the topic is covered AND everything planned
+            # is written — the outline keeps growing until then.
+            return self.concluded and all_written
+        return all_written
 
     def chapter(self, number: int) -> Chapter:
         for c in self.chapters:
@@ -153,6 +180,9 @@ class Book:
             "target_words": self.target_words,
             "status": self.status,
             "notes": self.notes,
+            "organic": self.organic,
+            "concluded": self.concluded,
+            "coverage": list(self.coverage),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -171,6 +201,9 @@ class Book:
             target_words=int(d.get("target_words", 1200)),
             status=str(d.get("status", STATUS_PLAN)),
             notes=str(d.get("notes", "")),
+            organic=bool(d.get("organic", False)),
+            concluded=bool(d.get("concluded", False)),
+            coverage=[str(x) for x in d.get("coverage", [])],
             created_at=float(d.get("created_at", time.time())),
             updated_at=float(d.get("updated_at", time.time())),
         )

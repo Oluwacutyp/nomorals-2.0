@@ -262,9 +262,6 @@ class BookForge:
         topic = (topic or "").strip()
         if not topic:
             raise BookError("a book needs a topic")
-        # dynamic: infer chapter count + clean title when not given
-        n_chapters = int(chapters) if chapters else infer_chapter_count(
-            topic, self.context)
         clean = (title or "").strip() or clean_title(topic, self.context)
         slug = slugify(clean or topic)
         if self._json_path(slug).exists():
@@ -272,24 +269,35 @@ class BookForge:
                 f"book {slug!r} already exists — load it (nm book write {slug}) or "
                 "pass a different title"
             )
-        # dynamic: chapter length scales with book size (short books get
-        # meatier chapters; long books get tighter ones)
-        wpc = int(words_per_chapter) if words_per_chapter else (
-            1500 if n_chapters <= 6 else (1000 if n_chapters <= 12 else 800))
+        explicit = int(chapters) if chapters else 0
+        organic = explicit <= 0
+        # target_words is a soft length guide, never a quota: chapters run
+        # as long as their material needs
+        wpc = int(words_per_chapter) if words_per_chapter else 1000
         book = Book(
             topic=topic, slug=slug, title=clean, subtitle=subtitle.strip(),
             author=author.strip(), genre=genre.strip(), description=description.strip(),
             target_words=max(300, wpc),
         )
         book._context = self.context  # type: ignore[attr-defined]
+        book.organic = organic
         if notes.strip():
             book.notes = notes.strip()[:_NOTES_CAP]
         elif research:
             book.notes = self.research_topic(topic)
-        outline_mod.make_outline(book, n_chapters=n_chapters,
-                                 context=self.context)
+        if organic:
+            # no count is ever decided: plant the opening arc and let the
+            # book grow chapter by chapter as it is written
+            book.coverage = outline_mod.coverage_map(topic)
+            outline_mod.seed_outline(book, context=self.context)
+            _log.info("book created (organic): %s — seed of %d chapters, "
+                      "grows as written", slug, len(book.chapters))
+        else:
+            outline_mod.make_outline(book, n_chapters=max(3, min(explicit, 24)),
+                                     context=self.context)
+            _log.info("book created: %s (%d chapters planned)", slug,
+                      len(book.chapters))
         self.save(book)
-        _log.info("book created: %s (%d chapters planned)", slug, len(book.chapters))
         return book
 
     def research_topic(self, topic: str, *, pages: int = 4) -> str:
@@ -321,9 +329,20 @@ class BookForge:
 
     # ── stage 2: write ─────────────────────────────────────────────────────
     def plan(self, slug: str) -> Book:
-        """(Re)generate the outline for an existing book (keeps written chapters
-        only when the chapter count still fits; otherwise re-plans from zero)."""
+        """(Re)generate the outline for an existing book.
+
+        Count-based books keep the old behavior (re-plan N chapters).
+        Organic books get a fresh continuation assessment — the outline
+        extends (or the book concludes) from what is actually written.
+        """
         book = self.load(slug)
+        if book.organic:
+            decision = outline_mod.assess_continuation(book,
+                                                       context=self.context)
+            self.save(book)
+            _log.info("organic plan %s: %s (added %d chapters)", slug,
+                      decision["reason"], len(decision["added"]))
+            return book
         n = len(book.chapters) or infer_chapter_count(book.topic, self.context)
         outline_mod.make_outline(book, n_chapters=n,
                                  context=self.context)
@@ -331,26 +350,52 @@ class BookForge:
         return book
 
     def write_next(self, slug: str) -> dict[str, Any]:
-        """Write the next unwritten chapter (resumable unit)."""
+        """Write the next unwritten chapter (resumable unit).
+
+        Organic books: after each chapter the continuation assessment
+        decides what comes next — the outline grows (or the book
+        concludes) from the actual content, never from a preset count.
+        """
         book = self.load(slug)
         chapter = book.next_unwritten()
         if chapter is None:
-            book.status = STATUS_WRITTEN
-            self.save(book)
-            return {"slug": slug, "done": True, "total_words": book.total_words}
+            if book.organic and not book.concluded:
+                # seed fully written but the book hasn't been judged yet —
+                # grow the outline before calling it done
+                decision = outline_mod.assess_continuation(
+                    book, context=self.context)
+                self.save(book)
+                chapter = book.next_unwritten()
+                if chapter is None:
+                    book.status = STATUS_WRITTEN
+                    self.save(book)
+                    return {"slug": slug, "done": True,
+                            "total_words": book.total_words,
+                            "organic": True, "concluded": book.concluded,
+                            "note": decision["reason"]}
+            else:
+                book.status = STATUS_WRITTEN
+                self.save(book)
+                return {"slug": slug, "done": True,
+                        "total_words": book.total_words,
+                        "organic": book.organic, "concluded": book.concluded}
         prev_tail = ""
         for c in book.chapters:
             if c.number < chapter.number and c.status == STATUS_WRITTEN:
                 prev_tail = c.text
         started = time.time()
         write_mod.write_chapter(book, chapter, context=self.context)
+        decision: dict[str, Any] | None = None
+        if book.organic and not book.concluded:
+            decision = outline_mod.assess_continuation(book,
+                                                       context=self.context)
         self.save(book)
         if book.complete:
             book.status = STATUS_WRITTEN
             self.save(book)
         _log.info("chapter %d/%d written for %s (%d words)",
                   chapter.number, len(book.chapters), slug, chapter.words)
-        return {
+        out: dict[str, Any] = {
             "slug": slug,
             "done": book.complete,
             "chapter": chapter.number,
@@ -358,13 +403,31 @@ class BookForge:
             "chapter_words": chapter.words,
             "total_words": book.total_words,
             "seconds": round(time.time() - started, 2),
+            "organic": book.organic,
+            "concluded": book.concluded,
         }
+        if decision is not None:
+            out["continuation"] = decision["reason"]
+            out["chapters_added"] = decision["added"]
+        return out
 
     def write_all(self, slug: str, *, limit: int = 0) -> dict[str, Any]:
-        """Write every unwritten chapter (or up to ``limit`` of them)."""
+        """Write every unwritten chapter (or up to ``limit`` of them).
+
+        Organic books keep growing via continuation assessments until the
+        topic is covered — the loop ends on ``book.complete``, with a
+        hard iteration backstop so a pathological assessment can never
+        spin forever.
+        """
         book = self.load(slug)
         written = 0
+        guard = 0
         while not book.complete and (limit == 0 or written < limit):
+            guard += 1
+            if guard > outline_mod.MAX_ORGANIC_CHAPTERS + 10:
+                book.concluded = True
+                self.save(book)
+                break
             r = self.write_next(slug)
             if r.get("done"):
                 break
@@ -373,6 +436,8 @@ class BookForge:
         return {
             "slug": slug,
             "complete": book.complete,
+            "concluded": book.concluded,
+            "organic": book.organic,
             "written_now": written,
             "chapters_written": book.chapters_written,
             "total_chapters": len(book.chapters),
