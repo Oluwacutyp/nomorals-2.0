@@ -141,6 +141,9 @@ class MediaHub:
                     out["playback"] = self.playback.play()
                 except ToolError as exc:
                     out["playback"] = {"status": "error", "error": str(exc)}
+            elif play:
+                out["playback"] = {"status": "skipped",
+                                   "reason": "no MIDI file was produced"}
             return out
         if mode in ("video", "podcast"):
             found = self.find_video(query or want, max_results=max_results,

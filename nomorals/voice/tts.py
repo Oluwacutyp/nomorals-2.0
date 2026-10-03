@@ -948,6 +948,63 @@ class UniversalTTS:
         return available_backends()[0] if available_backends() else ""
 
     # -- synthesis ------------------------------------------------------------
+
+    #: legacy sound tags (TagProcessor.SOUND_TAGS) → canonical burst names,
+    #: so the director renderers can consume parsed segments losslessly.
+    _SOUND_TO_CANONICAL = {
+        "laughs": "laugh", "sighs": "sigh", "gasps": "gasp",
+        "chuckles": "chuckle", "giggles": "giggle",
+        "clears_throat": "clearthroat",
+    }
+
+    def _segments_to_canonical(self, segments: List[Segment]) -> str:
+        """Parsed segments → canonical director markup.
+
+        Re-inserts the tags TagProcessor parsed out (emotion opens, sound
+        tags, pauses) so the per-backend director renderers can translate
+        them into each backend's native vocabulary. Legacy sound tags
+        (``[laughs]``) are normalized to canonical burst names
+        (``[laugh]``) first.
+        """
+        parts: list[str] = []
+        for seg in segments:
+            if seg.tags == ["_sound_"]:
+                burst = seg.text.strip("[]").lower()
+                parts.append(f"[{self._SOUND_TO_CANONICAL.get(burst, burst)}]")
+            else:
+                opens = " ".join(f"[{t}]" for t in seg.tags)
+                parts.append(f"{opens} {seg.text}".strip())
+            if seg.pause_after_ms:
+                parts.append(f"[pause:{seg.pause_after_ms}]")
+        return " ".join(parts)
+
+    def _render_native(self, backend: Any,
+                       segments: List[Segment]) -> tuple[str, str]:
+        """Render parsed segments in the backend's native vocabulary.
+
+        Returns ``(text, instruct)`` — ``instruct`` is only non-empty for
+        CosyVoice's instruct mode. Backends with no dedicated renderer
+        keep the legacy Bark-format path.
+        """
+        from .director import (render_bark, render_cosyvoice, render_dia,
+                               render_fish, render_orpheus)
+
+        name = getattr(backend, "name", "")
+        if name == "bark":
+            return self.tag_processor.to_bark_format(segments), ""
+        canonical = self._segments_to_canonical(segments)
+        if name == "cosyvoice":
+            return render_cosyvoice(canonical)
+        if name == "dia":
+            return render_dia(canonical), ""
+        if name == "orpheus":
+            return render_orpheus(canonical), ""
+        if name == "hf-endpoint" and getattr(
+                backend, "_is_fish", lambda: False)():
+            return render_fish(canonical), ""
+        # a native-tag backend with no dedicated renderer: Bark format
+        return self.tag_processor.to_bark_format(segments), ""
+
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
               out_path: str = "", mood: str = "", mood_level: int = 5) -> dict:
         """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV."""
@@ -958,9 +1015,10 @@ class UniversalTTS:
         segments = self.tag_processor.parse(text)
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 
+        instruct = ""
         if backend.supports_native_tags:
-            final_text = self.tag_processor.to_bark_format(segments)
-            audio = backend.synthesize(final_text, voice)
+            final_text, instruct = self._render_native(backend, segments)
+            audio = backend.synthesize(final_text, voice, instruct=instruct)
             audio = self._insert_pauses(audio, [], text, sample_rate)
         else:
             clean_text, pause_points = \
