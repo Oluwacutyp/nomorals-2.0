@@ -89,8 +89,36 @@ INFLIGHT_ACQUIRE_TIMEOUT_S = 30.0
 #: times total (1 retry) with ``_DISPATCH_RETRY_BACKOFF_S`` between
 #: attempts. Organ-level failures are the organ's own job note, not
 #: retries — so a retry never re-runs minutes of heavy work.
+#:
+#: Dynamic per the owner's principle: read-only intents retry more freely;
+#: write intents (side effects) retry conservatively. See
+#: ``_dispatch_budget()``.
 _DISPATCH_MAX_ATTEMPTS = 2
 _DISPATCH_RETRY_BACKOFF_S = 1.0
+
+#: Intent kinds whose dispatch is read-only (safe to retry more).
+_DISPATCH_READONLY_KINDS = frozenset({
+    "research", "status", "browse", "game", "owner", "fastchat",
+})
+
+#: Intent kinds with side effects (retry conservatively).
+_DISPATCH_WRITE_KINDS = frozenset({
+    "build", "account", "mission", "download", "multi",
+})
+
+
+def _dispatch_budget(intent_kind: str) -> tuple[int, float]:
+    """Dynamic retry budget: (max_attempts, base_backoff_s).
+
+    Read-only dispatches get an extra attempt; write dispatches stay at
+    the conservative default so a transient setup crash doesn't duplicate
+    side effects. Backoff grows exponentially per attempt at the call site.
+    """
+    if intent_kind in _DISPATCH_READONLY_KINDS:
+        return (3, 0.5)
+    if intent_kind in _DISPATCH_WRITE_KINDS:
+        return (2, 1.0)
+    return (_DISPATCH_MAX_ATTEMPTS, _DISPATCH_RETRY_BACKOFF_S)
 
 # ── the game catalogue (the games organ owns the rules — here is the map) ──
 
@@ -796,6 +824,32 @@ def _status_intent(text: str) -> Intent | None:
     return None
 
 
+def _confidence_bands(cands: list["Intent"]) -> tuple[float, float]:
+    """Dynamic confidence thresholds: (strong_bar, check_lo).
+
+    The bar for "strong" rises when the field is crowded (many candidates
+    need clearer winners); the model-check band widens when the top two
+    are close (a tight race deserves a second opinion). Returns
+    (strong_threshold, model_check_low_bound).
+    """
+    n = len(cands)
+    # base: 0.8 strong, 0.5 check-lo — the historical defaults
+    strong_bar = 0.8
+    check_lo = 0.5
+    if n >= 4:
+        # crowded field: demand clearer winners
+        strong_bar = 0.85
+    elif n <= 2:
+        # sparse field: slightly more permissive
+        strong_bar = 0.75
+    if n >= 2:
+        gap = cands[0].confidence - cands[1].confidence
+        if gap < 0.1:
+            # tight race: widen the model-check band downward
+            check_lo = 0.4
+    return (strong_bar, check_lo)
+
+
 def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     """Deterministic intent pass.  Returns every candidate, best first."""
     cands: list[Intent] = []
@@ -889,6 +943,10 @@ class CoreMind:
         self._inflight_now = 0  # gauge: sends currently holding a slot
         self._send_started = 0  # sends that took a slot
         self._send_shed = 0  # sends rejected by the bound
+        # ── agent loop integration ──────────────────────────────────────
+        # The formal six-step loop (nomorals/agents/agent_loop.py) records
+        # each decision here so verification can recover the intent kind.
+        self._route_log: list[dict[str, str]] = []
 
     # ── continuity (state file + memory) ────────────────────────────────────
     def _load_state(self) -> dict[str, Any]:
@@ -1114,6 +1172,12 @@ class CoreMind:
         if db is None:
             return
         router_telemetry.record_route(db, intent.route or intent.kind)
+        # agent loop: keep the last decisions in memory for verification
+        try:
+            self._route_log.append({"kind": intent.kind, "route": intent.route or ""})
+            del self._route_log[:-20]
+        except Exception:  # noqa: BLE001
+            pass
 
     def record_plan_error(self, error: str, route: str = "") -> None:
         """Persist the latest plan failure (with timestamp) for ``nm mind``.
@@ -1133,12 +1197,16 @@ class CoreMind:
         if not cands:
             return Intent("chat", 1.0, route="brain", why="no goal signal")
         best = cands[0]
+        # dynamic thresholds: the bar for "strong" rises with more
+        # candidates (crowded field needs clearer winners), and the
+        # model-check band widens when the top two are close.
+        strong_bar, check_lo = _confidence_bands(cands)
         # two strong distinct signals → a multi-part goal for the orchestrator
-        strong = {c.kind for c in cands if c.confidence >= 0.8}
+        strong = {c.kind for c in cands if c.confidence >= strong_bar}
         if len(strong) >= 2 and _MULTI_JOINERS.search(text):
             return Intent("multi", 0.8, target=text.strip()[:400], route="orchestrator",
                           why=f"{len(strong)} intent classes: {', '.join(sorted(strong))}")
-        if 0.5 <= best.confidence < 0.8 and allow_model and best.kind not in ("game",):
+        if check_lo <= best.confidence < strong_bar and allow_model and best.kind not in ("game",):
             model = self._model_check(text, best)
             if model is not None:
                 return model
@@ -1179,12 +1247,28 @@ class CoreMind:
         STRUCTURAL GATE: anything that is not the owner's own DM returns
         None immediately — in non-owner chats, commands are the only
         trigger, and no launch path exists for natural language.
+
+        This is the formal six-step agent loop
+        (nomorals/agents/agent_loop.py):
+        1. context pack → 2. goal inference → 3. plan → 4. execute →
+        5. verify → 6. reply (at the call site).
         """
         if not text or not text.strip():
             return None
         if not self._is_owner_dm(message, chat_key):
             return None
         text = text.strip()
+
+        # step 1 — context pack (cheap, local, never raises). Built once
+        # and available to every step below; the origin stamp travels with
+        # any WORK job so notify/deliver returns to this chat.
+        try:
+            from .agent_loop import build_loop_context
+            loop_ctx = build_loop_context(
+                message, mind=self, runtime=self.runtime, chat_key=chat_key)
+            loop_ctx.is_owner_dm = True
+        except Exception:  # noqa: BLE001 - pack is best-effort
+            loop_ctx = None
 
         # an open clarification? this message may be the answer
         pending = self._get_pending(chat_key)
@@ -1199,7 +1283,11 @@ class CoreMind:
             # not an answer — clear the stale question and fall through
             self._clear_pending(chat_key)
 
-        live_game = self._live_game(chat_key)
+        # step 1 reuse: live game comes from the context pack when built
+        live_game = (getattr(loop_ctx, "live_game", None)
+                     if loop_ctx is not None else None)
+        if live_game is None:
+            live_game = self._live_game(chat_key)
         # wave F1 stream 2: the fast path sits ABOVE the heavy path.
         # Trivial chat (greetings, time/date, chitchat, thanks, farewells,
         # bare acks) gets a deterministic reply right here — no router
@@ -1223,7 +1311,61 @@ class CoreMind:
             question = self._question_for(intent)
             self._set_pending(chat_key, intent, question)
             return question
-        return self._dispatch(intent, chat_key, message) or None
+        # step 5 of the formal agent loop: verify the organ actually did
+        # the work — a fake success becomes an honest failure, never green.
+        reply = self._dispatch(intent, chat_key, message) or None
+        try:
+            from .agent_loop import verify_dispatch
+            _ok, reply = verify_dispatch(intent.kind, reply)
+        except Exception:  # noqa: BLE001 - verification never breaks routing
+            pass
+        return reply
+
+    def _dispatch_from_loop(self, loop_ctx: Any, text: str, *,
+                            message: Any) -> str | None:
+        """Steps 2–4 of the formal agent loop (nomorals/agents/agent_loop.py).
+
+        Takes a LoopContext built by ``build_loop_context`` and runs goal
+        inference → plan → execute. Verification (step 5) and reply (step 6)
+        happen at the call site via ``verify_dispatch``.
+        """
+        chat_key = getattr(loop_ctx, "chat_key", "")
+        # an open clarification? this message may be the answer
+        pending = self._get_pending(chat_key)
+        if pending is not None:
+            if _RE_CANCEL.match(text):
+                self._clear_pending(chat_key)
+                return "ok — scrapped. what's next?"
+            resolved = self._pending_resolves(pending, text)
+            if resolved is not None:
+                self._clear_pending(chat_key)
+                return self._dispatch(resolved, chat_key, message) or None
+            self._clear_pending(chat_key)
+
+        live_game = getattr(loop_ctx, "live_game", None)
+        # fast path for trivial chat — same as handle()
+        fast = fast_path(text)
+        if fast is not None:
+            reply, why = fast
+            self._record_route(Intent("fastchat", 1.0, route="fastchat",
+                                     why=why))
+            return reply
+
+        intent = self.decide(text, live_game=live_game, allow_model=True)
+        if intent.kind == "chat":
+            return None
+        if intent.action == "ask":
+            question = self._question_for(intent)
+            self._set_pending(chat_key, intent, question)
+            return question
+        # step 5 of the formal agent loop: verify before returning
+        reply = self._dispatch(intent, chat_key, message) or None
+        try:
+            from .agent_loop import verify_dispatch
+            _ok, reply = verify_dispatch(intent.kind, reply)
+        except Exception:  # noqa: BLE001 - verification never breaks routing
+            pass
+        return reply
 
     def _is_owner_dm(self, message: Any, chat_key: str) -> bool:
         """The structural gate: owner's own DMs (or the console) only.
@@ -1302,13 +1444,16 @@ class CoreMind:
         # reports its own failures as replies, never as raises.
         reply: str | None = None
         attempts = 0
+        # dynamic retry budget: read-only organs retry more freely,
+        # write organs stay conservative (no duplicated side effects)
+        max_attempts, base_backoff = _dispatch_budget(intent.kind)
         while True:
             attempts += 1
             try:
                 reply = fn(intent, job_id, chat_key, message)
                 break
             except Exception as exc:  # noqa: BLE001
-                if attempts >= _DISPATCH_MAX_ATTEMPTS:
+                if attempts >= max_attempts:
                     _log.exception("coremind dispatch failed for %s",
                                    intent.kind)
                     self._job_done(
@@ -1317,11 +1462,13 @@ class CoreMind:
                         f"{str(exc)[:200]}")
                     return (f"that route just failed: {str(exc)[:160]} — "
                             "/mind status shows the detail.")
+                # exponential backoff: base * 2^(attempts-1)
+                backoff = base_backoff * (2 ** (attempts - 1))
                 _log.warning("coremind dispatch attempt %d/%d for %s failed "
-                             "(%s) — retrying once",
-                             attempts, _DISPATCH_MAX_ATTEMPTS, intent.kind,
-                             exc)
-                time.sleep(_DISPATCH_RETRY_BACKOFF_S)
+                             "(%s) — retrying in %.1fs",
+                             attempts, max_attempts, intent.kind,
+                             exc, backoff)
+                time.sleep(backoff)
         if isinstance(reply, _AsyncStarted):
             # The background thread owns this job now and finalizes it via
             # _job_done when the organ finishes — do not mark it done here
