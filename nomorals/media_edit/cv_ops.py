@@ -2725,7 +2725,7 @@ def _parse_cube_lists(text):
         elif key not in ("LUT_3D_INPUT_RANGE",):
             try:
                 entries.append([float(parts[0]), float(parts[1]), float(parts[2])])
-            except (ValueError, IndexError):
+            except (ValueError, IndexError):  # noqa: S110 - skip malformed LUT lines
                 pass
     if size is None:
         raise MediaEditError("cube_lut: missing LUT_3D_SIZE")
