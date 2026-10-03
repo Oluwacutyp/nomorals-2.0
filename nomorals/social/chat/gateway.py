@@ -92,7 +92,15 @@ class ChatGateway:
         us_chats: set[str] | None = None,
         clock: Callable[[], float] = time.time,
         adapter_builder: Callable[[str], ChatAdapter | None] | None = None,
+        session_bridge: Any = None,
     ) -> None:
+        """Create the gateway.
+
+        ``session_bridge`` is an optional ``os.SessionBridge`` (injected —
+        this module is L4 and must not import ``os``/L6). When present,
+        every inbound message is attached to its OS Session before the
+        brain's handler runs (``message.meta["os_session_id"]``).
+        """
         if not adapters:
             raise ValueError("ChatGateway needs at least one adapter")
         self.adapters = dict(adapters)
@@ -100,6 +108,8 @@ class ChatGateway:
         #: Lazy factory for hot-starting a platform that was skipped at boot
         #: (dependency installed since, credentials added, …).
         self._adapter_builder = adapter_builder
+        #: Optional os.SessionBridge (L6), injected to keep layering clean.
+        self.session_bridge = session_bridge
         self.db = db
         self.dry_run = dry_run
         self.clock = clock
@@ -277,6 +287,19 @@ class ChatGateway:
                 _log.warning("rate limit: dropping inbound from %s (>%s/h in this chat)",
                              message.chat.key, window.limit)
                 return
+        # Attach the OS Session (when a bridge is injected): every surface
+        # shares one Session per chat, so memory/persona/missions are keyed
+        # off the session, not the platform. Never drops the message.
+        if self.session_bridge is not None:
+            try:
+                session = self.session_bridge.session_for_message(
+                    message, is_owner=is_owner)
+                message.meta["os_session_id"] = session.id
+                message.meta["os_gating_mode"] = session.state.get(
+                    "gating_mode", "")
+            except Exception:  # noqa: BLE001 — session attach never drops
+                _log.debug("session attach failed for %s", message.chat.key,
+                           exc_info=True)
         handler = self._inbound
         if handler is not None:
             _log.info("gateway: dispatching inbound %s to the brain", message.chat.key)

@@ -64,6 +64,7 @@ from .commands.serve import _cmd_serve
 from .commands.skills import _cmd_skill_pkg
 from .commands.snapshot import _cmd_snapshot
 from .commands.status import _cmd_status
+from .commands.session import _cmd_session
 from .commands.swarm import _cmd_swarm
 from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
@@ -101,29 +102,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _attach_cli_session(context: Any) -> None:
     """Best-effort: create-or-reuse the CLI's os.Session and stash it.
 
-    Reuses the latest active ``cli``/``owner`` session when one exists,
-    otherwise creates a fresh one via
-    :class:`nomorals.os.session.SessionStore`. The session is stashed on
-    ``context.extras["os_session"]`` for commands to use. Never raises and
-    never changes any command's behavior — any failure here is logged at
-    debug and skipped.
+    Delegates to :class:`nomorals.os.session_bridge.SessionBridge` so the
+    CLI and chat surfaces share one session-resolution path. The session is
+    stashed on ``context.extras["os_session"]`` for commands to use. Never
+    raises and never changes any command's behavior — any failure here is
+    logged at debug and skipped.
     """
     try:
-        from ..os.session import SessionStore
+        from ..os.session_bridge import SessionBridge
 
         db = getattr(context, "db", None)
-        store = SessionStore(db=db) if db is not None else SessionStore()
-        session = None
-        try:
-            active = [s for s in store.list_active()
-                      if getattr(s, "frontend", "") == "cli"
-                      and getattr(s, "principal", "") == "owner"]
-            if active:
-                session = active[-1]
-        except Exception:  # noqa: BLE001 - reuse is optional; fall to create
-            _log.debug("listing active os sessions failed", exc_info=True)
-        if session is None:
-            session = store.create(frontend="cli", principal="owner")
+        bridge = SessionBridge(db=db)
+        session = bridge.session_for_cli(principal="owner")
         extras = getattr(context, "extras", None)
         if isinstance(extras, dict):
             extras["os_session"] = session
@@ -252,6 +242,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_deliver(args, context)
         if args.command == "status":
             return _cmd_status(args, context)
+        if args.command == "session":
+            return _cmd_session(args, context)
         if args.command == "mind":
             return _cmd_mind(args, context)
 
