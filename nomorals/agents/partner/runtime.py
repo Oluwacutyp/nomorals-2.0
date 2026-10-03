@@ -55,7 +55,15 @@ class PartnerRuntime(
         gateway: ChatGateway | None = None,
         brain: PartnerBrain | None = None,
         dry_run: bool = False,
+        session_bridge: Any = None,
     ) -> None:
+        """Create the runtime.
+
+        ``session_bridge`` is an optional ``os.SessionBridge`` (injected —
+        this module is L5 and must not import ``os``/L6). When present it is
+        passed to the ChatGateway so every inbound message is attached to
+        its OS Session before the brain runs.
+        """
         self.context = context
         self.settings = context.settings
         self.brain = brain or PartnerBrain(context)
@@ -67,6 +75,14 @@ class PartnerRuntime(
         self.mind = CoreMind(context, runtime=self)
         self.gateway = gateway
         self.dry_run = dry_run
+        #: Optional os.SessionBridge (L6), injected to keep layering clean.
+        #: Also published on context.extras so CLI/tools can reach it.
+        self._session_bridge = session_bridge
+        if session_bridge is not None:
+            try:
+                context.extras["session_bridge"] = session_bridge
+            except Exception:  # noqa: BLE001 - extras is best-effort
+                pass
         partner_cfg = self.settings.partner
 
         # Profile-aware: the chat pool follows the runtime tune (phone →
@@ -108,6 +124,7 @@ class PartnerRuntime(
                 owner_chats=owner_chats,
                 us_chats=us_chats,
                 adapter_builder=self._build_adapter,
+                session_bridge=self._session_bridge,
             )
 
         # Tools that deliver files into chats (file_send, report_publish)
