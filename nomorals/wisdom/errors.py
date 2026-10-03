@@ -37,3 +37,11 @@ class PracticeError(WisdomError):
 
 class HistoryError(WisdomError):
     """The timeline dataset is invalid or a query is malformed."""
+
+
+class EmbeddingError(WisdomError):
+    """An embedding backend is unavailable or failed to encode text."""
+
+
+class VectorStoreError(WisdomError):
+    """The semantic vector index is corrupt, stale, or unusable."""

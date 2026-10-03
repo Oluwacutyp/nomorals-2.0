@@ -417,6 +417,30 @@ def build_persona_mix(
 # ── Colab training script ───────────────────────────────────────────────────
 
 
+#: Inline probe shipped into the generated Colab script (the GPU box has
+#: no `nomorals`).  Enables Liger-Kernel's fused Triton kernels — free,
+#: up to 60% less VRAM and ~20% faster steps on a free T4 — ONLY when
+#: the package is importable AND this trl build's SFTConfig accepts the
+#: flag (an old trl would raise TypeError on an unknown kwarg).
+_COLAB_LIGER_SETUP = '''
+# LIGER-KERNEL (free memory): fused Triton kernels — RMSNorm, RoPE,
+# SwiGLU, and the fused linear cross-entropy that deletes the single
+# biggest allocation in the step (the BxSxV logits tensor).  Probe, do
+# not assume: enable only when importable + this trl accepts the flag.
+import inspect as _inspect
+_LIGER_SFT_EXTRA = {}
+try:
+    import liger_kernel  # noqa: F401
+    from trl import SFTConfig as _SFTConfig
+    if "use_liger_kernel" in _inspect.signature(_SFTConfig.__init__).parameters:
+        _LIGER_SFT_EXTRA = {"use_liger_kernel": True}
+except Exception:
+    pass
+print("liger-kernel:", "ON (fused kernels)" if _LIGER_SFT_EXTRA
+      else "off — pip install liger-kernel for ~60% less VRAM")
+'''
+
+
 def write_colab_script(
     out_base: str | Path,
     *,
@@ -465,6 +489,8 @@ MAX_STEPS = 6000         # per-session bound (~3-4 h); None = whole epoch
 SAVE_STEPS = 500
 
 # !pip install -q transformers peft trl accelerate bitsandbytes datasets
+# OPTIONAL but free: liger-kernel — fused Triton kernels, up to 60% less
+# VRAM and ~20% faster steps on a free T4 (pip install liger-kernel)
 
 from datasets import Dataset
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -502,6 +528,7 @@ def apply_chat(texts):
     return out
 
 <PICK_CHECKPOINT>
+<LIGER_SETUP>
 trainer = SFTTrainer(
     model=model,
     train_dataset=data,
@@ -511,6 +538,7 @@ trainer = SFTTrainer(
     max_seq_length=SEQ_LEN,
     peft_config=peft,
     args=SFTConfig(
+        **_LIGER_SFT_EXTRA,
         output_dir=OUT,
         per_device_train_batch_size=BATCH,
         gradient_accumulation_steps=GRAD_ACCUM,
@@ -577,6 +605,8 @@ print("   (groq/hf stay automatic fallbacks when the local server is down)")
     script = script.replace("<train_file>", train_file)
     # the GPU box has no `nomorals` — the checkpoint picker ships inline
     script = script.replace("<PICK_CHECKPOINT>", EMBEDDED_PICKER)
+    # the liger probe ships inline for the same reason
+    script = script.replace("<LIGER_SETUP>", _COLAB_LIGER_SETUP)
     target = out_base.with_name(out_base.name + ".colab_finetune.py")
     target.write_text(script, encoding="utf-8")
     return str(target)

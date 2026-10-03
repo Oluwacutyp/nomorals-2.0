@@ -1,13 +1,30 @@
 """The federated query path: fan out, merge, dedupe, rank, filter.
 
 Ranking scheme (the contract, kept in sync with ``model.py``):
+
+``fusion="legacy"`` (default) —
 1. Each source scores in its own native scale, so raw scores are
    min-max normalized *per source* into [0, 1] (a single-hit source
    normalizes to 1.0).
 2. Hits sort by normalized score, descending.
 3. Ties break on canonical source order (``memory, wisdom, books, docs,
-   code, timeline`` — personal knowledge first), then newer timestamps
-   first (undated hits sort last), then title. Deterministic.
+   code, timeline, web_*`` — personal knowledge first), then newer
+   timestamps first (undated hits sort last), then title. Deterministic.
+
+``fusion="rrf"`` — reciprocal rank fusion across sources instead: each
+source's native rank order contributes ``1 / (60 + rank)`` per hit,
+summed across every source that returned it (see
+``model.reciprocal_rank_fusion``). RRF scores are comparable *across*
+sources without assuming anything about native scales, which is why it
+is the right fusion for heterogeneous web backends mixed with local
+indexes. Dedupe folds into the fusion; type/date filters and the
+deterministic tie-break still apply afterwards.
+
+Fan-out: sequential by default; ``parallel=True`` searches sources on a
+thread pool (one worker per source, capped at 8). Probes always run
+sequentially first (they are cheap and never touch the network), and
+results/errors are collected in canonical source order — so failure
+semantics and ``sources_searched`` order are identical either way.
 
 Filters: ``--type`` keeps only matching result types; ``--since`` /
 ``--before`` drop hits whose timestamp falls outside the range. Hits
@@ -25,6 +42,7 @@ response records exactly which sources were searched.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,6 +55,7 @@ from .model import (
     dedupe_results,
     normalize_scores,
     rank_results,
+    reciprocal_rank_fusion,
 )
 from .sources import (
     SourceAdapter,
@@ -100,6 +119,24 @@ def _split_types(types: list[str] | None) -> list[str]:
     return out
 
 
+def _search_one(
+    name: str,
+    adapter: SourceAdapter,
+    query: str,
+    per_source: int,
+    since_ts: float | None,
+    before_ts: float | None,
+) -> list[SearchResult]:
+    """Search one already-probed source. A mid-search error raises
+    ``SearchError`` naming the source (fail fast, real cause chained)."""
+    try:
+        return adapter.search(
+            query, limit=per_source, since=since_ts, before=before_ts
+        )
+    except Exception as exc:
+        raise SearchError(f"source {name!r} failed: {exc}") from exc
+
+
 def federated_search(
     query: str,
     *,
@@ -113,16 +150,27 @@ def federated_search(
     doc_index_path: str | None = None,
     timeline: Any = None,
     adapters: dict[str, SourceAdapter] | None = None,
+    fusion: str = "legacy",
+    parallel: bool = False,
 ) -> SearchResponse:
     """Run ``query`` across the selected sources and return merged results.
 
     ``sources`` defaults to every known source; unknown names raise
     :class:`UnknownSourceError` listing the valid ones. ``adapters``
     (prebuilt, for tests/programmatic use) overrides adapter construction.
+    ``fusion`` is ``"legacy"`` (per-source min-max normalize, the historic
+    contract) or ``"rrf"`` (reciprocal rank fusion across sources).
+    ``parallel=True`` fans the source searches out on a thread pool while
+    preserving canonical order and failure semantics.
     """
     query = (query or "").strip()
     if not query:
         raise SearchError("search query must not be empty")
+
+    if fusion not in ("legacy", "rrf"):
+        raise SearchError(
+            f"unknown fusion mode: {fusion!r}; valid: 'legacy', 'rrf'"
+        )
 
     names = list(sources) if sources else valid_source_names()
     valid = valid_source_names()
@@ -155,27 +203,57 @@ def federated_search(
             raise SearchError(f"no adapter built for source {name!r}")
 
     response = SearchResponse(query=query)
-    merged: list[SearchResult] = []
     per_source = max(limit * 2, 10)
 
+    # Probes run sequentially first: they are cheap, never touch the
+    # network, and keep sources_skipped deterministic under parallel.
+    searchable: list[str] = []
     for name in names:
-        adapter = adapters[name]
-        note = adapter.probe()
+        note = adapters[name].probe()
         if note is not None:
             response.sources_skipped[name] = note
-            continue
-        try:
-            hits = adapter.search(
-                query, limit=per_source, since=since_ts, before=before_ts
-            )
-        except Exception as exc:
-            raise SearchError(f"source {name!r} failed: {exc}") from exc
-        normalize_scores(hits)
-        merged.extend(hits)
-        response.sources_searched.append(name)
+        else:
+            searchable.append(name)
 
-    kept, dropped = dedupe_results(merged)
-    response.deduped = dropped
+    def _run(name: str) -> list[SearchResult]:
+        return _search_one(
+            name, adapters[name], query, per_source, since_ts, before_ts
+        )
+
+    per_source_hits: list[list[SearchResult]] = []
+    if parallel and searchable:
+        with ThreadPoolExecutor(
+            max_workers=min(len(searchable), 8),
+            thread_name_prefix="search",
+        ) as pool:
+            futures = {name: pool.submit(_run, name) for name in searchable}
+            # Collect in canonical order: the first error in source order
+            # is the one that surfaces, exactly like the sequential path.
+            for name in searchable:
+                try:
+                    hits = futures[name].result()
+                except Exception:
+                    for f in futures.values():
+                        f.cancel()
+                    raise
+                per_source_hits.append(hits)
+                response.sources_searched.append(name)
+    else:
+        for name in searchable:
+            per_source_hits.append(_run(name))
+            response.sources_searched.append(name)
+
+    if fusion == "rrf":
+        merged, dropped = reciprocal_rank_fusion(per_source_hits)
+        response.deduped = dropped
+        kept = merged
+    else:
+        merged = []
+        for hits in per_source_hits:
+            normalize_scores(hits)
+            merged.extend(hits)
+        kept, dropped = dedupe_results(merged)
+        response.deduped = dropped
 
     if wanted_types:
         wanted = set(wanted_types)
@@ -192,5 +270,7 @@ def federated_search(
         "sources_skipped": dict(response.sources_skipped),
         "result_count": len(response.hits),
         "deduped": response.deduped,
+        "fusion": fusion,
+        "parallel": parallel,
     })
     return response

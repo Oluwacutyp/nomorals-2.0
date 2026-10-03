@@ -31,6 +31,7 @@ from ..storage.repository import Repository
 from ..storage.vectors import VectorStore
 from .base import DEFAULT_WEIGHTS, MemoryKind, MemoryRecord, normalize_scores, score_memory
 from .embeddings import Embedder
+from .vector_backends import VectorBackend, select_vector_backend
 
 __all__ = ["MemoryManager"]
 
@@ -80,7 +81,17 @@ class MemoryManager:
         *,
         embedder: Embedder | None = None,
         weights: dict[str, float] | None = None,
+        vector_backend: str | None = None,
     ) -> None:
+        """``vector_backend`` selects the semantic-recall vector store:
+
+        ``"auto"`` (default) takes the first available backend in quality
+        order — sqlite-vec → usearch → legacy — so a box with ``sqlite-vec``
+        installed gets exact in-database KNN and every other box keeps the
+        zero-dependency legacy store. A named backend that is not installed
+        fails fast with the ``pip install`` command. ``"legacy"`` pins the
+        historical behaviour exactly.
+        """
         self.context = context
         self.db: Database = context.db
         settings = getattr(context, "settings", None)
@@ -106,6 +117,14 @@ class MemoryManager:
         self.repo = Repository(self.db, "memories", json_columns=("metadata",))
         self.vectors = VectorStore(self.db)
         self.fts = FTSIndex(self.db, "memories_fts", columns=["content"])
+        # Semantic-recall substrate. The legacy store instance is shared with
+        # the backend when "legacy" is selected, so introspection stays coherent.
+        self.semantic: VectorBackend = select_vector_backend(
+            self.db,
+            preference=vector_backend or "auto",
+            owner_type="memory",
+            vectors=self.vectors,
+        )
         self.embedder = embedder or Embedder(
             provider=getattr(getattr(settings, "embedding", None), "provider", "hashing") if settings else "hashing",
             model=getattr(getattr(settings, "embedding", None), "model", "") if settings else "",
@@ -165,7 +184,7 @@ class MemoryManager:
             self.repo.create(row, commit=False)
             if index:
                 vector = self.embedder.embed(content)
-                embedding_id = self.vectors.put(vector, owner_type="memory", owner_id=record_id)
+                embedding_id = self.semantic.put(vector, record_id)
                 self.db.execute(
                     "UPDATE memories SET embedding_id = ? WHERE id = ?", (embedding_id, record_id)
                 )
@@ -197,8 +216,8 @@ class MemoryManager:
         vectors = self.embedder.embed_many([c for c, _ in materialized])
         with self.db.transaction():
             self.repo.create_many(rows)
-            self.vectors.put_many(
-                [(vectors[i], "memory", ids[i]) for i in range(len(ids))]
+            self.semantic.put_many(
+                [(vectors[i], ids[i]) for i in range(len(ids))]
             )
             self.fts.put_many(
                 (self._rowid(ids[i]), [materialized[i][0]]) for i in range(len(ids))
@@ -255,7 +274,7 @@ class MemoryManager:
 
         # Semantic pass: over-fetch, because the merge re-ranks.
         vector = self.embedder.embed(query)
-        for hit in self.vectors.search(vector, limit=limit * 6, owner_type="memory"):
+        for hit in self.semantic.search(vector, limit=limit * 6):
             semantic_scores[hit.owner_id] = hit.score
             candidates[hit.owner_id] = hit.owner_id  # placeholder, resolved below
 
@@ -371,13 +390,13 @@ class MemoryManager:
             return 0
         count = self.repo.update(record_id, payload)
         if "content" in payload:
-            self.vectors.delete_owner("memory", record_id)
-            self.vectors.put(self.embedder.embed(payload["content"]), owner_type="memory", owner_id=record_id)
+            self.semantic.delete_owner(record_id)
+            self.semantic.put(self.embedder.embed(payload["content"]), record_id)
             self._index_text(record_id, payload["content"])
         return count
 
     def forget(self, record_id: str) -> int:
-        self.vectors.delete_owner("memory", record_id)
+        self.semantic.delete_owner(record_id)
         rowid = self._rowid(record_id)
         if rowid:
             self.fts.delete(rowid)
@@ -580,7 +599,8 @@ class MemoryManager:
         return {
             **self.stats,
             "records": self.repo.count(),
-            "vectors": self.vectors.count(),
+            "vectors": self.semantic.count(),
+            "vector_backend": self.semantic.name,
             "fts_documents": self.fts.count(),
             "by_kind": self.counts_by_kind(),
             "weights": dict(self.weights),

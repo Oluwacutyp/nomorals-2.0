@@ -18,7 +18,19 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         from .mock import MockProvider
 
         return MockProvider(**kwargs)
-    if kind in {"openai", "openai_compat", "vllm", "ollama", "lmstudio", "openrouter", "groq"}:
+    if kind in {"ollama", "ollama_native"}:
+        from .ollama import OllamaProvider
+
+        return OllamaProvider(**kwargs)
+    if kind == "groq":
+        from .groq import GroqProvider
+
+        return GroqProvider(**kwargs)
+    if kind == "openrouter":
+        from .openrouter import OpenRouterProvider
+
+        return OpenRouterProvider(**kwargs)
+    if kind in {"openai", "openai_compat", "vllm", "lmstudio", "ollama_compat"}:
         from .openai_compat import OpenAICompatProvider
 
         return OpenAICompatProvider(**kwargs)
@@ -36,7 +48,8 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
         return OCRProvider(**kwargs)
     raise ValueError(
         "unknown provider "
-        f"{kind!r}; expected mock | openai_compat | hf_serverless | llama_cpp | ocr"
+        f"{kind!r}; expected mock | ollama | groq | openrouter | openai_compat | "
+        "hf_serverless | llama_cpp | ocr"
     )
 
 

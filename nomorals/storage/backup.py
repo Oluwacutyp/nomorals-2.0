@@ -86,6 +86,9 @@ class BackupManager:
     include_blobs: bool = False
     blob_dir: str | os.PathLike[str] | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
+    #: Optional blob store (S3-compatible or local) receiving every scheduled
+    #: backup via :meth:`push_to_s3` — the offsite leg of the 3-2-1 story.
+    offsite_store: Any = None
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory).expanduser()
@@ -482,6 +485,52 @@ class BackupManager:
         shutil.rmtree(workdir, ignore_errors=True)
         return result
 
+    def push_to_s3(self, store: Any, *, backup: BackupInfo | None = None) -> dict[str, Any]:
+        """Upload a backup (and its blob sidecar, if any) to a blob store.
+
+        ``store`` is anything with the blob API — an
+        :class:`~nomorals.storage.s3blob.S3BlobStore` for the offsite leg, or
+        the local :class:`~nomorals.storage.blob.BlobStore`; build it with
+        :func:`~nomorals.storage.s3blob.open_blob_store`. Uploads are
+        content-addressed, so re-pushing the same backup is a dedup hit, not a
+        second copy. The store's returned SHA-256 is checked against the
+        manifest's — a mismatch fails fast instead of recording a phantom
+        offsite copy. Returns a result dict mirroring :meth:`push_to_git`.
+        """
+        target = backup or self.latest()
+        if target is None:
+            return {"pushed": False, "reason": "no backup to push"}
+        objects: list[dict[str, Any]] = []
+
+        def _ship(path: str | os.PathLike[str], name: str, mime: str, expected_sha: str) -> None:
+            info = store.put_file(path, mime=mime)
+            if info.sha256 != expected_sha:
+                raise StorageError(
+                    f"offsite upload corrupted {name}: "
+                    f"store sha256 {info.sha256} != manifest {expected_sha}"
+                )
+            objects.append({"file": name, "sha256": info.sha256, "size": info.size})
+
+        _ship(
+            target.path,
+            target.name,
+            "application/gzip" if str(target.path).endswith(".gz") else "application/octet-stream",
+            target.sha256,
+        )
+        if target.blob_name:
+            sidecar = self.directory / target.blob_name
+            if sidecar.is_file():
+                _ship(sidecar, target.blob_name, "application/gzip", target.blob_sha256)
+            else:
+                _log.warning("blob sidecar %s missing; shipping database only", target.blob_name)
+        _log.info("backup pushed to blob store: %s (%d objects)", target.name, len(objects))
+        return {
+            "pushed": True,
+            "backup": target.name,
+            "sha256": target.sha256,
+            "objects": objects,
+        }
+
     # ── scheduled backups ────────────────────────────────────────────────────
     def backup_if_due(self, interval_seconds: float) -> BackupInfo | None:
         """Create a backup only if the newest one is older than ``interval_seconds``."""
@@ -499,6 +548,8 @@ class BackupManager:
                 self.backup_if_due(interval_seconds)
                 if self.git_repo:
                     self.push_to_git()
+                if self.offsite_store is not None:
+                    self.push_to_s3(self.offsite_store)
             except Exception as exc:  # noqa: BLE001 - a scheduler must never die
                 _log.error("scheduled backup failed: %s", exc)
             for _ in range(int(max(1, interval_seconds / 5))):

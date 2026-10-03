@@ -287,12 +287,37 @@ class CanonCorpus:
 
     # ── ask ───────────────────────────────────────────────────────────
     def ask(self, query: str, *, top: int = 5,
-            tradition: str = "") -> Answer:
-        """Search the corpus; every hit carries provenance."""
+            tradition: str = "", mode: str = "keyword") -> Answer:
+        """Search the corpus; every hit carries provenance.
+
+        ``mode`` selects the retrieval path:
+
+        - ``"keyword"`` (default) — the existing FTS5/BM25 lexical search.
+        - ``"semantic"`` — dense-vector cosine search over passage
+          embeddings (requires :meth:`build_semantic_index` first).
+        - ``"hybrid"`` — reciprocal-rank fusion of keyword + semantic.
+        """
         query = (query or "").strip()
         if not query:
             raise CorpusError("ask() needs a non-empty query")
-        hits = self.library.search(query, top=top)
+        if mode not in ("keyword", "semantic", "hybrid"):
+            raise CorpusError(
+                f"unknown ask() mode {mode!r} "
+                "(expected 'keyword', 'semantic', or 'hybrid')")
+        passages: list[ProvenanceHit] = []
+        if mode == "keyword":
+            hits = self.library.search(query, top=top)
+            passages = self._to_provenance(hits, tradition)
+        else:
+            passages = self._ask_semantic(query, top=top,
+                                          tradition=tradition,
+                                          hybrid=mode == "hybrid")
+        synthesis = self._synthesize(query, passages)
+        return Answer(query=query, passages=passages, synthesis=synthesis)
+
+    def _to_provenance(self, hits: Any,
+                       tradition: str) -> list[ProvenanceHit]:
+        """Map raw search hits to provenance-carrying passages."""
         passages: list[ProvenanceHit] = []
         for h in hits:
             # The corpus slug is embedded as "[slug]" at the title start.
@@ -315,8 +340,178 @@ class CanonCorpus:
                 score=h.score,
                 canon_status=entry.canon_status if entry else "",
             ))
-        synthesis = self._synthesize(query, passages)
-        return Answer(query=query, passages=passages, synthesis=synthesis)
+        return passages
+
+    # ── semantic search ─────────────────────────────────────────────
+    def _embed_backend(self, name: str = "") -> Any:
+        """Best available embedding backend (lazy, cached per name)."""
+        from .embeddings import auto_backend
+        cache = self.__dict__.setdefault("_backend_cache", {})
+        key = name.strip().lower() or "auto"
+        if key not in cache:
+            cache[key] = auto_backend("" if key == "auto" else key)
+        return cache[key]
+
+    def _vector_index(self, backend: Any) -> Any:
+        from .vectorstore import open_index
+        return open_index(str(self._wisdom_root() / "vectors.db"), backend)
+
+    def _iter_passages(self) -> list[tuple[str, str]]:
+        """All (passage_key, text) pairs in the library.
+
+        Key is ``"<book_slug>#<chapter_number>"`` — stable across DB
+        rebuilds, unlike rowids. Works for both the FTS5 and the plain
+        passages table.
+        """
+        import sqlite3
+        con = sqlite3.connect(self.library.db_path())
+        try:
+            rows = con.execute(
+                "SELECT book_slug, number, text FROM passages").fetchall()
+        finally:
+            con.close()
+        return [(f"{slug}#{int(num)}", text or "")
+                for slug, num, text in rows]
+
+    def _passage_rows(self, keys: list[str]) -> dict[str, Any]:
+        """Fetch library rows for vector-hit keys → SearchHit-shaped rows."""
+        import sqlite3
+        from types import SimpleNamespace
+        if not keys:
+            return {}
+        con = sqlite3.connect(self.library.db_path())
+        try:
+            out: dict[str, Any] = {}
+            for key in keys:
+                if "#" not in key:
+                    continue
+                slug, _, num = key.rpartition("#")
+                try:
+                    number = int(num)
+                except ValueError:
+                    continue
+                row = con.execute(
+                    "SELECT book_slug, book_title, chapter, number, text "
+                    "FROM passages WHERE book_slug = ? AND number = ?",
+                    (slug, number)).fetchone()
+                if row:
+                    out[key] = SimpleNamespace(
+                        book=row[0], title=row[1], chapter=row[2],
+                        chapter_number=row[3], passage=row[4], score=0.0)
+            return out
+        finally:
+            con.close()
+
+    def _semantic_search(self, query: str, *, top: int) -> list[Any]:
+        """Vector KNN → SearchHit-shaped rows ordered by cosine."""
+        backend = self._embed_backend()
+        try:
+            index = self._vector_index(backend)
+        except Exception as exc:
+            raise CorpusError(
+                f"semantic search unavailable: {exc}; run "
+                f"build_semantic_index() first") from exc
+        try:
+            if index.count() == 0:
+                raise CorpusError(
+                    "semantic index is empty; run build_semantic_index() "
+                    "after ingesting texts")
+            qvec = backend.embed_one(query)
+            hits = index.search(qvec, top=top)
+        finally:
+            index.close()
+        rows = self._passage_rows([k for k, _ in hits])
+        ordered = []
+        for key, cosine in hits:
+            row = rows.get(key)
+            if row is None:
+                continue
+            row.score = cosine
+            ordered.append(row)
+        return ordered
+
+    def _ask_semantic(self, query: str, *, top: int,
+                      tradition: str, hybrid: bool) -> list[ProvenanceHit]:
+        sem_hits = self._semantic_search(query, top=top * 2 if hybrid else top)
+        if not hybrid:
+            return self._to_provenance(sem_hits, tradition)
+        from .hybrid import fuse_hits
+        kw_hits = self.library.search(query, top=top * 2)
+        fused = fuse_hits(
+            kw_hits, sem_hits,
+            key_fn=lambda h: (
+                h.title or h.book, h.chapter_number, h.passage[:64]),
+            top=top * 2)
+        return self._to_provenance(fused[:top], tradition)
+
+    def build_semantic_index(self, backend_name: str = "", *,
+                             rebuild: bool = False,
+                             progress: Any = None) -> dict[str, Any]:
+        """Embed every library passage and (re)build the vector index.
+
+        ``backend_name`` forces one provider (``""`` = best available).
+        Idempotent-ish: skipped only when an identical index already
+        exists *and* ``rebuild`` is False. Returns a status dict.
+        """
+        backend = self._embed_backend(backend_name)
+        from .vectorstore import VectorStoreError, open_index
+        path = str(self._wisdom_root() / "vectors.db")
+        pairs = self._iter_passages()
+        if not pairs:
+            raise CorpusError(
+                "no passages to index; ingest texts first")
+        # An existing index built by the same backend+dim is only
+        # skipped when the passage set is unchanged.
+        try:
+            index = open_index(path, backend)
+        except VectorStoreError:
+            if not rebuild:
+                raise
+            Path(path).unlink(missing_ok=True)
+            index = open_index(path, backend)
+        try:
+            if not rebuild and index.count() == len(pairs):
+                return self.semantic_index_status()
+            keys = [k for k, _ in pairs]
+            texts = [t for _, t in pairs]
+            n = index.build(keys, texts, backend, progress=progress)
+        finally:
+            index.close()
+        status = self.semantic_index_status()
+        status["vectors"] = n
+        return status
+
+    def semantic_index_status(self) -> dict[str, Any]:
+        """Backend, engine, and vector counts for the semantic index."""
+        import sqlite3
+        from .embeddings import available_backends
+        path = self._wisdom_root() / "vectors.db"
+        status: dict[str, Any] = {
+            "built": False,
+            "backend": "",
+            "engine": "",
+            "vectors": 0,
+            "available_backends": available_backends(),
+        }
+        if not path.is_file():
+            return status
+        con = sqlite3.connect(str(path))
+        try:
+            meta = dict(con.execute(
+                "SELECT key, value FROM meta").fetchall())
+            count = con.execute(
+                "SELECT COUNT(*) FROM vectors").fetchone()[0]
+        except Exception:
+            return status
+        finally:
+            con.close()
+        status.update({
+            "built": True,
+            "backend": meta.get("backend", ""),
+            "engine": meta.get("engine", ""),
+            "vectors": int(count),
+        })
+        return status
 
     @staticmethod
     def _synthesize(query: str, passages: list[ProvenanceHit]) -> str:

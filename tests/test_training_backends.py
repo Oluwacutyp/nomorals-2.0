@@ -68,8 +68,11 @@ def _corpus(n: int = 10) -> list[Example]:
 
 
 class RegistryTests(unittest.TestCase):
-    def test_known_backends_are_the_three_implemented(self) -> None:
-        self.assertEqual(set(KNOWN_BACKENDS), {"native", "unsloth", "llama_factory"})
+    def test_known_backends_are_the_five_implemented(self) -> None:
+        self.assertEqual(
+            set(KNOWN_BACKENDS),
+            {"native", "unsloth", "llama_factory", "axolotl", "mlx"},
+        )
 
     def test_default_backend_is_native(self) -> None:
         self.assertIs(get_backend("").name, "native")

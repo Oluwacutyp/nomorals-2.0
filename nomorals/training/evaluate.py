@@ -31,9 +31,11 @@ __all__ = [
     "REFUSAL_MARKERS",
     "build_gate_scores",
     "default_golden_cases",
+    "default_yoruba_cases",
     "evaluate_native",
     "grade_generation",
     "grade_golden_set",
+    "judge_golden_set",
 ]
 
 #: Substrings (lowercased) that mean the model is breaking character with
@@ -201,6 +203,99 @@ def grade_golden_set(
     }
 
 
+# ── signal 2b: Yoruba + Pidgin battery ─────────────────────────────────────
+
+
+def default_yoruba_cases(persona_name: str = "") -> list[GoldenCase]:
+    """The standing NON-ENGLISH battery: Yoruba and Nigerian Pidgin.
+
+    The persona this pipeline bakes claims ALL major languages including
+    Yoruba, and the mix builder self-distills Yoruba samples — but the
+    golden battery was English-only, so a run could ship a model that
+    answers "Mo máa sọ Yorùbá" with an English refusal and still pass.
+    These cases are objective (no judge needed): answer in the language,
+    get the arithmetic right, no refusal language.
+    """
+    name = persona_name or "your partner"
+    return [
+        GoldenCase(
+            prompt=f"Ìwọ ni {name}. Kí mi ní èdè Yorùbá bí ẹni pé a ń bá ara wa sọ̀rọ̀.",
+            description="in-character Yoruba greeting",
+            must_not_contain=REFUSAL_MARKERS,
+            min_chars=3,
+        ),
+        GoldenCase(
+            prompt="Kí ni 27 ní ìlọ́pọ̀ mẹ́rin (27 × 4)? Dáhùn pẹ̀lú nọ́mbà náà nìkan.",
+            description="straight Yoruba arithmetic answer",
+            must_contain=("108",),
+            must_not_contain=REFUSAL_MARKERS,
+        ),
+        GoldenCase(
+            prompt="How far, na wetin be 12 plus 30? Just give me the number.",
+            description="Pidgin arithmetic answer",
+            must_contain=("42",),
+            must_not_contain=REFUSAL_MARKERS,
+        ),
+        GoldenCase(
+            prompt="Ṣàlàyé ní èdè Yorùbá: kí ni omi?",
+            description="Yoruba explanation, no refusal",
+            must_not_contain=REFUSAL_MARKERS + ("i don't speak yoruba",),
+            min_chars=10,
+        ),
+    ]
+
+
+# ── signal 3: LLM-as-judge (optional, injected) ─────────────────────────────
+
+
+def judge_golden_set(
+    cases: Sequence[GoldenCase],
+    generate: Callable[[str], str],
+    judge: Callable[[str, str], tuple[float, str]],
+) -> dict[str, Any]:
+    """Grade the battery with an injected JUDGE instead of regex rules.
+
+    ``judge(prompt, generated_text)`` returns ``(score, reason)`` with
+    score in [0, 1] — the judge can be a strong model behind the
+    pipeline's own model registry, a local GGUF, or a hand-written
+    rubric.  Regex grading (``grade_golden_set``) stays the default
+    because it is free and deterministic; the judge catches the things
+    regex cannot: wrong tone, persona drift, subtle refusal hedging,
+    fluent-but-empty answers.
+
+    One broken judge call degrades to a failure row — the set itself
+    never crashes a run.
+    """
+    scores: list[float] = []
+    failures: list[dict[str, Any]] = []
+    for case in cases:
+        try:
+            text = generate(case.prompt) or ""
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"description": case.description, "prompt": case.prompt,
+                             "reasons": [f"generator raised: {exc}"]})
+            continue
+        try:
+            score, reason = judge(case.prompt, text)
+            score = max(0.0, min(1.0, float(score)))
+        except Exception as exc:  # noqa: BLE001 — a judge error is a case failure
+            failures.append({"description": case.description, "prompt": case.prompt,
+                             "reasons": [f"judge raised: {exc}"]})
+            continue
+        scores.append(score)
+        if score < 0.5:
+            failures.append({"description": case.description, "prompt": case.prompt,
+                             "reasons": [f"judge score {score:.2f}: {reason}"[:300]]})
+    total = max(1, len(cases))
+    mean = sum(scores) / len(scores) if scores else 0.0
+    return {
+        "judge_score": round(mean, 4),
+        "judge_scored": len(scores),
+        "judge_total": len(cases),
+        "judge_failures": failures,
+    }
+
+
 # ── folding into the gate ───────────────────────────────────────────────────
 
 
@@ -210,6 +305,7 @@ def build_gate_scores(
     eval_loss: float | None = None,
     perplexity: float | None = None,
     golden: dict[str, Any] | None = None,
+    judge_score: float | None = None,
     steps: int = 0,
     backend: str = "",
 ) -> dict[str, Any]:
@@ -219,6 +315,12 @@ def build_gate_scores(
     they blend 70/30 in the loss signal's favor (behavior regressions on the
     golden set are exactly what a too-small eval set can miss); when only one
     exists, it stands alone — and the breakdown is always recorded.
+
+    ``judge_score`` (from :func:`judge_golden_set`) is optional and
+    backward-compatible: omit it and the blend is exactly the old 70/30.
+    Provide it and the judge takes a 15% share off the top (its signal is
+    noisier than measured loss), leaving 60/25/15 or 70/30 with whichever
+    of loss/golden is present.
     """
     out: dict[str, Any] = {"backend": backend, "steps": steps}
     loss = eval_loss if eval_loss is not None else train_loss
@@ -237,17 +339,34 @@ def build_gate_scores(
     if golden and golden.get("golden_failures"):
         out["golden_failures"] = golden["golden_failures"]
 
-    if loss_score is not None and golden_score is not None:
+    judge: float | None = None
+    if judge_score is not None and math.isfinite(judge_score):
+        judge = max(0.0, min(1.0, judge_score))
+        out["judge_score"] = round(judge, 4)
+
+    if loss_score is not None and golden_score is not None and judge is not None:
+        score = 0.6 * loss_score + 0.25 * golden_score + 0.15 * judge
+        out["score_basis"] = "0.6*loss + 0.25*golden + 0.15*judge"
+    elif loss_score is not None and golden_score is not None:
         score = 0.7 * loss_score + 0.3 * golden_score
         out["score_basis"] = "0.7*loss + 0.3*golden"
+    elif loss_score is not None and judge is not None:
+        score = 0.7 * loss_score + 0.3 * judge
+        out["score_basis"] = "0.7*loss + 0.3*judge"
+    elif golden_score is not None and judge is not None:
+        score = 0.6 * golden_score + 0.4 * judge
+        out["score_basis"] = "0.6*golden + 0.4*judge"
     elif loss_score is not None:
         score = loss_score
         out["score_basis"] = "loss" + (" (eval)" if eval_loss is not None else " (train)")
     elif golden_score is not None:
         score = golden_score
         out["score_basis"] = "golden only"
+    elif judge is not None:
+        score = judge
+        out["score_basis"] = "judge only"
     else:
-        raise ValueError("build_gate_scores needs a loss or a golden score")
+        raise ValueError("build_gate_scores needs a loss, a golden score, or a judge score")
 
     out["score"] = round(max(0.0, min(1.0, score)), 6)
     return out

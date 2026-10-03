@@ -236,6 +236,64 @@ FREE_DATASET_CATALOG: list[dict[str, Any]] = [
         ),
         "verified": True,
     },
+    # ── universal-upgrade wave (verified live 2026-10-03) ──
+    {
+        "name": "finetome-100k",
+        "id": "mlabonne/FineTome-100k",
+        "kind": "sft",
+        "normalize": "m4",
+        "license": "apache-2.0 (repo untagged — mlabonne release line; check HF page)",
+        "size": "100K instruction conversations (verified 2026-10-03)",
+        "use": (
+            "re-filtered instruction mix (FineWeb-Edu classifier over "
+            "The-Tome) — dense, high-signal general SFT; the dataset "
+            "axolotl's own docs use as the example"
+        ),
+        "verified": True,
+    },
+    {
+        "name": "openmathinstruct-2",
+        "id": "nvidia/OpenMathInstruct-2",
+        "kind": "math",
+        "normalize": "openmath",
+        "license": "cc-by-4.0",
+        "size": "~13.9M problem/solution pairs (verified 2026-10-03)",
+        "use": (
+            "math reasoning at scale: problem → generated solution, with "
+            "expected_answer carried for verification — the free math "
+            "layer the catalog was missing"
+        ),
+        "verified": True,
+    },
+    {
+        "name": "open-thoughts-114k",
+        "id": "open-thoughts/OpenThoughts-114k",
+        "kind": "reasoning",
+        "normalize": "thoughts",
+        "license": "apache-2.0",
+        "size": "113,957 reasoning traces (verified 2026-10-03)",
+        "use": (
+            "long-thinking reasoning traces (system preamble + "
+            "conversations) — teaches the model to think before answering; "
+            "the free reasoning layer"
+        ),
+        "verified": True,
+    },
+    {
+        "name": "fineweb-edu",
+        "id": "HuggingFaceFW/fineweb-edu",
+        "kind": "pretrain",
+        "normalize": "fineweb",
+        "license": "odc-by",
+        "size": "~1.5B educational web documents (verified 2026-10-03)",
+        "use": (
+            "the best free pretraining corpus (educational-filtered Common "
+            "Crawl) — for continued pretraining / native-backend base "
+            "training. NOT SFT data: sample small (mobile-data friendly "
+            "default still applies)"
+        ),
+        "verified": True,
+    },
 ]
 
 
@@ -557,6 +615,62 @@ def _norm_generic(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _norm_openmath(row: dict[str, Any]) -> dict[str, Any] | None:
+    """nvidia/OpenMathInstruct-2: problem → generated_solution pairs.
+
+    `expected_answer` is carried along so the pipeline (or the golden
+    battery) can VERIFY a generated solution instead of just reading it.
+    """
+    problem = str(row.get("problem") or "").strip()
+    solution = str(row.get("generated_solution") or "").strip()
+    if not problem or not solution:
+        return None
+    return {
+        "instruction": problem,
+        "input": "",
+        "output": solution,
+        "answer": str(row.get("expected_answer") or "").strip(),
+        "source": str(row.get("problem_source") or ""),
+    }
+
+
+def _norm_thoughts(row: dict[str, Any]) -> dict[str, Any] | None:
+    """open-thoughts/OpenThoughts-114k: a `system` preamble (the long-
+    thinking instruction) plus ShareGPT `conversations`.  The system
+    text survives as a real system turn — apply_persona replaces it
+    downstream, which is exactly the point."""
+    conv_raw = row.get("conversations")
+    if not isinstance(conv_raw, list) or len(conv_raw) < 2:
+        return None
+    conv: list[dict[str, str]] = []
+    system = str(row.get("system") or "").strip()
+    if system:
+        conv.append({"from": "system", "value": system})
+    for item in conv_raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("from") or item.get("role") or "").lower()
+        text = str(item.get("value") or item.get("content") or "").strip()
+        if not text:
+            continue
+        conv.append({"from": "gpt" if role in {"assistant", "gpt"}
+                     else "system" if role == "system" else "human",
+                     "value": text})
+    if len(conv) < 2:
+        return None
+    return {"conversations": conv}
+
+
+def _norm_fineweb(row: dict[str, Any]) -> dict[str, Any] | None:
+    """HuggingFaceFW/fineweb-edu: raw documents for continued
+    pretraining.  ``decode_example`` sniffs ``{"text": ...}`` as the
+    ``pretrain`` kind — this is NOT SFT data."""
+    text = str(row.get("text") or "").strip()
+    if len(text) < 200:
+        return None
+    return {"text": text}
+
+
 _NORMALIZERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "alpaca": _norm_alpaca,
     "dolly": _norm_dolly,
@@ -569,6 +683,9 @@ _NORMALIZERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "hermes": _norm_hermes,
     "ultra": _norm_ultra,
     "yoruba": _norm_yoruba,
+    "openmath": _norm_openmath,
+    "thoughts": _norm_thoughts,
+    "fineweb": _norm_fineweb,
     "generic": _norm_generic,
 }
 

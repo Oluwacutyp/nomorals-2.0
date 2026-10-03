@@ -3,14 +3,26 @@
 Port of the owner's universal_tts.py (from the main branch upload),
 integrated with the framework:
 
-- Backends: **Bark** (best tag/non-speech support), **XTTS v2** (best
-  cloning quality, NON-COMMERCIAL CPML license), **Kokoro** (lightest,
-  CPU-friendly, Apache-2.0 — commercial OK), **CosyVoice** (multilingual
-  + instruction-driven paralinguistics: laughter, breaths, emphasis —
-  MIT, fetched from HuggingFace), **Orpheus** (LLM-class expressivity,
-  native ``<laugh>``/``<sigh>``/``<cough>`` tags, zero-shot cloning —
+- Backends: **Chatterbox** (best free cloning — MIT, blind-test
+  winner vs ElevenLabs, 23 languages, native ``[laugh]``/``[chuckle]``/
+  ``[cough]`` tags on Turbo/Nano, Nano runs 3× realtime on CPU),
+  **F5-TTS** (highest-fidelity single-shot cloning — MIT code but
+  CC-BY-NC pretrained checkpoints), **OmniVoice** (600+ languages,
+  Apache-2.0, RTF 0.025), **Qwen3-TTS** (expressive Apache-2.0,
+  native ``[laugh]``/``[sigh]`` tags, 0.6B CPU-friendly), **Bark**
+  (best tag/non-speech support), **XTTS v2** (best cloning quality,
+  NON-COMMERCIAL CPML license), **Kokoro** (lightest, CPU-friendly,
+  Apache-2.0 — commercial OK), **Piper** (best on-device phone TTS,
+  ONNX/CPU, MIT), **CosyVoice** (multilingual + instruction-driven
+  paralinguistics: laughter, breaths, emphasis — MIT, fetched from
+  HuggingFace), **Orpheus** (LLM-class expressivity, native
+  ``<laugh>``/``<sigh>``/``<cough>`` tags, zero-shot cloning —
   Apache-2.0), **Dia** (nari-labs dialogue model, native ``(laughs)``
-  / ``(coughs)`` / ``(sneezes)`` non-verbals — Apache-2.0, GPU-only).
+  / ``(coughs)`` / ``(sneezes)`` non-verbals — Apache-2.0, GPU-only),
+  **hf-endpoint** (Fish Audio S2 via HF serverless, no local weights),
+  **system** (the OS's own speech service — ``say``/``espeak-ng``/
+  PowerShell System.Speech — pure stdlib, zero pip packages, dead-last
+  fallback so the module works with nothing installed).
   Each is lazy-imported; nothing breaks when a backend is not installed.
 - A tag system for emotion / pauses / non-speech sounds that the AI can
   use directly in its own text: [happy] [whisper] [laughs] [pause:300] …
@@ -28,12 +40,18 @@ integrated with the framework:
   backends themselves, never at import time.
 
 Install one backend on the phone:
+    pip install piper-tts                          # Piper (CPU, MIT)
+    python -m piper.download_voices en_US-lessac-medium
+    pip install kokoro                             # Kokoro (CPU)
+    pip install chatterbox-tts                     # Chatterbox (MIT)
+    pip install qwen-tts                           # Qwen3-TTS (0.6B)
+    pip install f5-tts                             # F5-TTS (needs ref clip)
+    pip install TTS                                # XTTS v2
+    pip install cosyvoice                          # CosyVoice
+    pip install orpheus-speech                     # Orpheus (GPU)
+    pip install omnivoice                          # OmniVoice (GPU)
     pip install git+https://github.com/suno-ai/bark.git   # Bark
-    pip install TTS                                       # XTTS v2
-    pip install kokoro                                    # Kokoro
-    pip install cosyvoice                                 # CosyVoice
-    pip install orpheus-speech                            # Orpheus (GPU)
-    nm voice fetch --backend cosyvoice                    # pull the weights
+    nm voice fetch --backend cosyvoice              # pull the weights
 """
 from __future__ import annotations
 
@@ -44,6 +62,7 @@ import os
 import re
 import shutil
 import struct
+import sys
 import wave
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -420,6 +439,11 @@ def mood_to_tagged_text(text: str, mood: str, mood_level: int) -> str:
 
 
 def _spec(name: str) -> bool:
+    # an already-imported module is definitionally installed
+    if name in sys.modules:
+        return True
+    if not name:  # e.g. "system": no pip package, probed separately
+        return False
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
@@ -427,23 +451,26 @@ def _spec(name: str) -> bool:
 
 
 def available_backends() -> list[str]:
-    """Which neural backends are actually installed (in preference order)."""
-    out = []
-    if _spec("bark"):
-        out.append("bark")
-    if _spec("TTS"):
-        out.append("xtts")
-    if _spec("kokoro"):
-        out.append("kokoro")
-    if _spec("cosyvoice"):
-        out.append("cosyvoice")
-    if _spec("orpheus_tts"):
-        out.append("orpheus")
-    if _spec("dia"):
-        out.append("dia")
-    if _spec("huggingface_hub"):
-        out.append("hf-endpoint")
-    return out
+    """Which backends are actually usable (in preference order).
+
+    Quality-first among the fully-free licenses: Chatterbox (MIT,
+    blind-test winner vs ElevenLabs) → F5-TTS → OmniVoice → Qwen3-TTS →
+    Orpheus → Dia → XTTS → CosyVoice → Kokoro → Piper → Bark →
+    hf-endpoint (cloud, needs no local weights) → system (the OS's own
+    speech service: pure stdlib, zero pip packages, dead last).
+    CPU-only boxes land on Kokoro or Piper; GPU boxes land on
+    Chatterbox; a bare box with espeak-ng/say still talks via system.
+    """
+    order = [("chatterbox", "chatterbox"), ("f5tts", "f5_tts"),
+             ("omnivoice", "omnivoice"), ("qwen3tts", "qwen_tts"),
+             ("orpheus", "orpheus_tts"), ("dia", "dia"), ("xtts", "TTS"),
+             ("cosyvoice", "cosyvoice"), ("kokoro", "kokoro"),
+             ("piper", "piper"), ("bark", "bark"),
+             ("hf-endpoint", "huggingface_hub")]
+    found = [name for name, spec in order if _spec(spec)]
+    if SystemTTSBackend.available():  # stdlib-only fallback, dead last
+        found.append("system")
+    return found
 
 
 class BarkBackend:
@@ -841,18 +868,661 @@ class HFEndpointBackend:
         return samples
 
 
+class ChatterboxBackend:
+    """Chatterbox (Resemble AI): the best FREE cloning TTS today, MIT.
+
+    Zero-shot cloning from ~5–10s of reference audio, 23 languages,
+    emotion ``exaggeration`` control — preferred over ElevenLabs in
+    blind Podonos evaluations (Turbo vs ElevenLabs Turbo v2.5).
+
+    Three variants, via the ``variant`` arg or ``CHATTERBOX_VARIANT``:
+
+    - ``multilingual`` (default): Chatterbox Multilingual V3 (500M),
+      per-voice ``language_id`` (en/fr/de/es/zh/…).
+    - ``turbo``: English only, distilled one-step decoder (~sub-200ms
+      latency), native paralinguistic tags ``[laugh]`` ``[chuckle]``
+      ``[cough]`` — the director's ``render_chatterbox`` speaks them.
+    - ``nano``: same as turbo at 110M — **3× realtime on 8 CPU cores**,
+      the on-device path when no GPU exists.
+
+    ``pip install chatterbox-tts`` (Python 3.11+). Weights auto-download
+    from HuggingFace on first use. ``CHATTERBOX_DEVICE`` overrides the
+    cuda/cpu auto-detect.
+    """
+
+    name = "chatterbox"
+    supports_cloning = True
+    sample_rate = 24000
+
+    _VARIANTS = ("multilingual", "turbo", "nano")
+
+    @property
+    def supports_native_tags(self) -> bool:
+        # turbo/nano speak [laugh]/[chuckle]/[cough] natively; the
+        # multilingual V3 model does not — the engine renders plain
+        # text for it instead
+        return self.variant in ("turbo", "nano")
+
+    def __init__(self, variant: str = "") -> None:
+        self.variant = (variant
+                        or os.environ.get("CHATTERBOX_VARIANT", "")
+                        or "multilingual").lower()
+        if self.variant not in self._VARIANTS:
+            raise ValueError(
+                f"unknown chatterbox variant {self.variant!r}; "
+                f"use one of {', '.join(self._VARIANTS)}")
+        self.device = os.environ.get("CHATTERBOX_DEVICE", "")
+        if not self.device:
+            try:
+                import torch
+
+                self.device = ("cuda" if torch.cuda.is_available()
+                               else "cpu")
+            except ImportError:
+                self.device = "cpu"
+        try:
+            if self.variant == "multilingual":
+                from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+                self.model = ChatterboxMultilingualTTS.from_pretrained(
+                    device=self.device, t3_model="v3")
+            else:
+                from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+                self.model = ChatterboxTurboTTS.from_pretrained(
+                    device=self.device, nano=(self.variant == "nano"))
+        except ImportError as exc:
+            raise RuntimeError(
+                "chatterbox backend needs: pip install chatterbox-tts "
+                "(Python 3.11+)") from exc
+        self.sample_rate = int(getattr(self.model, "sr", 24000) or 24000)
+
+    @staticmethod
+    def _language_id(voice: Optional[VoiceProfile]) -> str:
+        code = (voice.language if voice else "") or "en"
+        return code.replace("_", "-").split("-")[0].lower() or "en"
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if voice is not None:
+            voice.validate_for_cloning()
+        ref = voice.reference_audio_path if voice else None
+        kwargs: dict[str, Any] = {"exaggeration": 0.5, "cfg_weight": 0.5}
+        if self.variant == "multilingual":
+            out = self.model.generate(
+                text, language_id=self._language_id(voice),
+                audio_prompt_path=ref, **kwargs)
+        else:
+            out = self.model.generate(text, audio_prompt_path=ref, **kwargs)
+        try:
+            import torch
+
+            if isinstance(out, torch.Tensor):
+                out = out.detach().cpu().float().numpy()
+        except ImportError:
+            pass
+        try:
+            import numpy as np
+
+            return np.asarray(out, dtype=np.float32).reshape(-1)
+        except ImportError:
+            return [float(v) for v in out]
+
+
+class PiperBackend:
+    """Piper: the best FREE on-device TTS (phone/embedded CPU), MIT.
+
+    ONNX-runtime VITS voices — ~60MB per voice, RTF ≈ 0.28 on plain CPU
+    (3.6× realtime, no GPU, no network at inference), 22.05kHz output.
+    The no-GPU fallback that still sounds human on a phone.
+
+    Voice resolution: ``PIPER_VOICE`` (absolute ``.onnx`` path) wins;
+    else ``PIPER_VOICES_DIR`` plus ``VoiceProfile.preset_id`` as the
+    voice filename stem (``en_US-lessac-medium`` → the ``.onnx`` beside
+    it); else a ``en_US-lessac-medium.onnx`` / ``*.onnx`` found in
+    ``PIPER_VOICES_DIR`` or the fetch cache. Download voices with::
+
+        pip install piper-tts
+        python -m piper.download_voices en_US-lessac-medium
+
+    (espeak-ng phonemizer ships embedded with piper-tts.)
+    """
+
+    name = "piper"
+    supports_native_tags = False
+    supports_cloning = False
+
+    def __init__(self, voice_path: str = "") -> None:
+        try:
+            from piper import PiperVoice
+        except ImportError as exc:
+            raise RuntimeError(
+                "piper backend needs: pip install piper-tts") from exc
+        self._PiperVoice = PiperVoice
+        self._voices: dict[str, Any] = {}
+        self.sample_rate = 22050
+        self.voice_path = voice_path or self._find_default_voice()
+        if self.voice_path:
+            self._load_named("default", self.voice_path)
+        # without a voice file the backend loads lazily per profile —
+        # synthesis raises a helpful error only if no voice resolves
+
+    @staticmethod
+    def _search_dirs() -> list[str]:
+        from .fetch import default_cache_dir
+
+        dirs = [os.environ.get("PIPER_VOICES_DIR", ""),
+                default_cache_dir("piper")]
+        return [d for d in dirs if d]
+
+    @classmethod
+    def _find_default_voice(cls) -> str:
+        explicit = os.environ.get("PIPER_VOICE", "").strip()
+        if explicit and os.path.isfile(explicit):
+            return explicit
+        for directory in cls._search_dirs():
+            candidate = os.path.join(directory, "en_US-lessac-medium.onnx")
+            if os.path.isfile(candidate):
+                return candidate
+            try:
+                for entry in sorted(os.listdir(directory)):
+                    if entry.endswith(".onnx") and not entry.endswith(
+                            ".onnx.json"):
+                        return os.path.join(directory, entry)
+            except OSError:
+                continue
+        return ""
+
+    def _load_named(self, key: str, path: str) -> Any:
+        voice = self._PiperVoice.load(path)
+        self._voices[key] = voice
+        rate = getattr(getattr(voice, "config", None), "sample_rate", 0)
+        if rate:
+            self.sample_rate = int(rate)
+        return voice
+
+    def _resolve(self, voice: Optional[VoiceProfile]) -> Any:
+        if voice and voice.preset_id:
+            for directory in self._search_dirs():
+                candidate = os.path.join(
+                    directory, f"{voice.preset_id}.onnx")
+                if os.path.isfile(candidate):
+                    return self._voices.get(voice.preset_id) or \
+                        self._load_named(voice.preset_id, candidate)
+            # a named voice that does not resolve is a config error —
+            # never silently speak in a different voice
+            raise RuntimeError(
+                f"piper: no voice file for preset "
+                f"{voice.preset_id!r} — download one with "
+                f"'python -m piper.download_voices {voice.preset_id}' "
+                f"into PIPER_VOICES_DIR")
+        if "default" in self._voices:
+            return self._voices["default"]
+        raise RuntimeError(
+            "piper: no voice file found — download one with "
+            "'python -m piper.download_voices en_US-lessac-medium' "
+            "and set PIPER_VOICE or PIPER_VOICES_DIR")
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        pv = self._resolve(voice)
+        # preferred: raw int16 PCM chunks, no temp files
+        try:
+            raw = b"".join(pv.synthesize_stream_raw(text))
+        except AttributeError:
+            import io
+
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wav_file:
+                pv.synthesize(text, wav_file)
+            buf.seek(0)
+            with wave.open(buf, "rb") as wav_file:
+                raw = wav_file.readframes(wav_file.getnframes())
+        if not raw:
+            raise ValueError("piper produced no audio")
+        vals = struct.unpack("<%dh" % (len(raw) // 2), raw)
+        return [v / 32768.0 for v in vals]
+
+
+class F5TTSBackend:
+    """F5-TTS: highest-fidelity single-shot cloning, flow matching.
+
+    MIT code — but the **pretrained checkpoints are CC-BY-NC**
+    (Emilia-trained): research/personal use, NOT commercial products.
+    Needs a 5–15s reference clip (``VoiceProfile.reference_audio_path``)
+    — F5-TTS has no preset voices, so a voice without reference audio
+    raises a helpful error. ``voice.prompt_text`` is used as the
+    reference transcript when set; otherwise F5's own ASR transcribes
+    the clip (extra GPU memory/time).
+
+    ``pip install f5-tts``. ~3GB VRAM for the base model.
+    """
+
+    name = "f5tts"
+    supports_native_tags = False
+    supports_cloning = True
+    sample_rate = 24000
+
+    def __init__(self, model: str = "") -> None:
+        try:
+            from f5_tts.api import F5TTS
+        except ImportError as exc:
+            raise RuntimeError(
+                "f5tts backend needs: pip install f5-tts") from exc
+        self.model_id = (model or os.environ.get("F5TTS_MODEL", "")
+                         or "F5TTS_v1_Base")
+        self.model = F5TTS(model=self.model_id)
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if voice is not None:
+            voice.validate_for_cloning()
+        ref = voice.reference_audio_path if voice else None
+        if not ref:
+            raise RuntimeError(
+                "f5tts needs a voice with reference audio — register one "
+                "with upload_voice()/clone() first; F5-TTS has no preset "
+                "voices")
+        ref_text = (voice.prompt_text or "").strip() if voice else ""
+        if not ref_text:
+            _log.info("f5tts: no prompt_text — F5 will ASR the "
+                      "reference clip itself (needs extra GPU memory)")
+        wav, sr, _spec = self.model.infer(
+            ref_file=ref, ref_text=ref_text, gen_text=text)
+        self.sample_rate = int(sr or 24000)
+        try:
+            import numpy as np
+
+            return np.asarray(wav, dtype=np.float32).reshape(-1)
+        except ImportError:
+            return [float(v) for v in wav]
+
+
+class OmniVoiceBackend:
+    """OmniVoice (k2-fsa): 600+ languages, Apache-2.0, RTF ~0.025.
+
+    Diffusion-LM zero-shot TTS: cloning from 3–15s reference audio,
+    natural-language voice design ("female, low pitch, british accent"
+    via the ``instruct`` arg or the voice profile's ``description``),
+    native non-verbal symbols (``[laughter]`` ``[sigh]`` ``[sniff]`` —
+    see the director's ``render_omnivoice``), and multi-speaker
+    ``[Speaker_N]:`` scripts.
+
+    ``pip install omnivoice`` (+ torch). GPU recommended; CPU offload
+    is automatic. Model: ``k2-fsa/OmniVoice`` on HuggingFace
+    (override with ``OMNIVOICE_MODEL_ID``).
+    """
+
+    name = "omnivoice"
+    supports_native_tags = True
+    supports_cloning = True
+    sample_rate = 24000
+
+    def __init__(self, model_id: str = "") -> None:
+        try:
+            from omnivoice import OmniVoice
+        except ImportError as exc:
+            raise RuntimeError(
+                "omnivoice backend needs: pip install omnivoice") from exc
+        self.model_id = (model_id or os.environ.get("OMNIVOICE_MODEL_ID",
+                                                    "")
+                         or "k2-fsa/OmniVoice")
+        device_map = os.environ.get("OMNIVOICE_DEVICE_MAP", "") or "auto"
+        self.model = OmniVoice.from_pretrained(
+            self.model_id, device_map=device_map, dtype="auto")
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if voice is not None:
+            voice.validate_for_cloning()
+        ref = voice.reference_audio_path if voice else None
+        kwargs: dict[str, Any] = {}
+        if ref:
+            kwargs["ref_audio"] = ref
+            ref_text = (voice.prompt_text or "").strip() if voice else ""
+            if ref_text:
+                kwargs["ref_text"] = ref_text
+        design = instruct or (voice.description if voice else "")
+        if design:
+            kwargs["instruct"] = design
+        out = self.model.generate(text=text, **kwargs)
+        try:
+            import numpy as np
+
+            return np.asarray(out, dtype=np.float32).reshape(-1)
+        except ImportError:
+            return [float(v) for v in out]
+
+
+class Qwen3TTSBackend:
+    """Qwen3-TTS (Alibaba): expressive Apache-2.0 TTS, 0.6B / 1.7B.
+
+    Native paralinguistic tags (``[laugh]`` ``[sigh]`` ``[yawn]``
+    ``[wow]`` ``[giggle]`` ``[scoff]``) and per-line ``[emotion]``
+    switching — canonical markup is already its vocabulary — plus
+    instruction-driven style ("speak with great enthusiasm") through
+    the ``instruct`` arg, 10 languages, streaming-capable.
+
+    Two model flavors, picked automatically:
+
+    - voice **with** reference audio → the ``Base`` model
+      (default ``Qwen/Qwen3-TTS-12Hz-0.6B-Base``), 3s rapid cloning;
+    - voice **without** reference → the ``CustomVoice`` model, premium
+      preset speakers (``VoiceProfile.preset_id``, default "Vivian").
+
+    ``pip install qwen-tts`` (+ torch; flash-attn recommended on GPU).
+    The 0.6B is the most CPU-friendly expressive open model here.
+    """
+
+    name = "qwen3tts"
+    supports_native_tags = True    # inline [laugh]/[sigh]/… + [emotion]
+    supports_cloning = True        # via the Base model
+    sample_rate = 24000
+
+    _LANG_NAMES = {
+        "en": "English", "zh": "Chinese", "ja": "Japanese",
+        "ko": "Korean", "es": "Spanish", "fr": "French",
+        "de": "German", "it": "Italian", "pt": "Portuguese",
+        "ru": "Russian", "ar": "Arabic", "hi": "Hindi",
+    }
+
+    def __init__(self, model: str = "", base_model: str = "",
+                 custom_model: str = "") -> None:
+        try:
+            from qwen_tts import Qwen3TTSModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "qwen3tts backend needs: pip install qwen-tts") from exc
+        self._Qwen3TTSModel = Qwen3TTSModel
+        self.base_model_id = (base_model
+                              or os.environ.get("QWEN3_TTS_BASE_MODEL", "")
+                              or "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
+        self.custom_model_id = (custom_model or model
+                                or os.environ.get("QWEN3_TTS_MODEL", "")
+                                or "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        self.device_map = os.environ.get("QWEN3_TTS_DEVICE_MAP", "") or "auto"
+        self._models: dict[str, Any] = {}
+
+    def _load(self, kind: str) -> Any:
+        if kind not in self._models:
+            model_id = (self.base_model_id if kind == "base"
+                        else self.custom_model_id)
+            self._models[kind] = self._Qwen3TTSModel.from_pretrained(
+                model_id, device_map=self.device_map, dtype="auto")
+        return self._models[kind]
+
+    @classmethod
+    def _language(cls, voice: Optional[VoiceProfile]) -> str:
+        code = (voice.language if voice else "") or "en"
+        code = code.replace("_", "-").split("-")[0].lower()
+        return cls._LANG_NAMES.get(code, "Auto")
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if voice is not None:
+            voice.validate_for_cloning()
+        language = self._language(voice)
+        ref = voice.reference_audio_path if voice else None
+        if ref:
+            model = self._load("base")
+            ref_text = (voice.prompt_text or "").strip() if voice else ""
+            wavs, sr = model.generate_voice_clone(
+                text=text, language=language, ref_audio=ref,
+                ref_text=ref_text or " ")
+        else:
+            model = self._load("custom")
+            speaker = (voice.preset_id if voice and voice.preset_id
+                       else "Vivian")
+            kwargs: dict[str, Any] = {"instruct": instruct} if instruct \
+                else {}
+            wavs, sr = model.generate_custom_voice(
+                text=text, language=language, speaker=speaker, **kwargs)
+        self.sample_rate = int(sr or 24000)
+        first = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
+        try:
+            import numpy as np
+
+            return np.asarray(first, dtype=np.float32).reshape(-1)
+        except ImportError:
+            return [float(v) for v in first]
+
+
+def _resample_linear(samples: list, src_rate: int, dst_rate: int) -> list:
+    """Pure-Python linear resampler (stdlib only).
+
+    Normalizes whatever the OS speech service emits to the backend's
+    canonical rate.
+    """
+    if src_rate == dst_rate or not samples:
+        return list(samples)
+    ratio = src_rate / dst_rate
+    out_len = int(len(samples) / ratio)
+    out: list = []
+    for i in range(out_len):
+        pos = i * ratio
+        j = int(pos)
+        frac = pos - j
+        a = samples[j]
+        b = samples[j + 1] if j + 1 < len(samples) else a
+        out.append(a + (b - a) * frac)
+    return out
+
+
+def _extended80_to_float(data: bytes) -> float:
+    """IEEE 754 80-bit extended → float (AIFF sample rates)."""
+    import struct as _struct
+
+    if len(data) != 10:
+        raise ValueError("bad 80-bit extended float")
+    expon = _struct.unpack(">H", data[0:2])[0]
+    mant = int.from_bytes(data[2:10], "big")
+    if expon & 0x7FFF == 0 and mant == 0:
+        return 0.0
+    sign = -1.0 if expon & 0x8000 else 1.0
+    return sign * (mant / float(1 << 63)) * (2.0 ** ((expon & 0x7FFF)
+                                                   - 16383))
+
+
+def _aiff_to_wav_bytes(blob: bytes) -> bytes:
+    """AIFF/AIFF-C bytes → WAV bytes. Pure stdlib, no aifc.
+
+    macOS `say` writes AIFF-C with 'sowt' (little-endian) or plain AIFF
+    (big-endian); both are handled. Only uncompressed PCM is supported —
+    anything else fails fast with a clear error instead of garbage
+    audio.
+    """
+    import io
+    import struct as _struct
+
+    if len(blob) < 12 or blob[0:4] != b"FORM":
+        raise ValueError("not an AIFF file")
+    form_type = blob[8:12]
+    if form_type not in (b"AIFF", b"AIFC"):
+        raise ValueError(f"unsupported AIFF form type: {form_type!r}")
+
+    channels = width = rate = None
+    frames = b""
+    little = False
+    pos = 12
+    while pos + 8 <= len(blob):
+        ck_id = blob[pos:pos + 4]
+        ck_size = _struct.unpack(">I", blob[pos + 4:pos + 8])[0]
+        data = blob[pos + 8:pos + 8 + ck_size]
+        if ck_id == b"COMM":
+            channels = _struct.unpack(">h", data[0:2])[0]
+            width = _struct.unpack(">h", data[6:8])[0] // 8
+            rate = int(_extended80_to_float(data[8:18]))
+            if form_type == b"AIFC":
+                comp = data[18:22]
+                if comp == b"sowt":
+                    little = True
+                elif comp != b"NONE":
+                    raise ValueError(
+                        f"unsupported AIFF-C compression: {comp!r}")
+        elif ck_id == b"SSND":
+            offset = _struct.unpack(">I", data[0:4])[0]
+            frames = data[8 + offset:]
+        pos += 8 + ck_size + (ck_size & 1)  # chunks are even-padded
+    if channels is None or width is None or rate is None:
+        raise ValueError("AIFF missing COMM chunk")
+    if not frames:
+        raise ValueError("AIFF missing SSND chunk")
+    if width != 2:
+        raise ValueError(f"unsupported AIFF sample width: {width * 8}-bit")
+    if not little:
+        # big-endian → little-endian 16-bit swap
+        frames = b"".join(frames[i:i + 2][::-1]
+                          for i in range(0, len(frames) - 1, 2))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(frames)
+    return buf.getvalue()
+
+
+class SystemTTSBackend:
+    """The OS's own speech service — pure stdlib, zero pip packages.
+
+    macOS: `say` · Linux: `espeak-ng`/`espeak --stdout` · Windows:
+    PowerShell System.Speech. Dead last in auto mode: worst quality of
+    the lot, but it makes the module *work with nothing installed* —
+    the standing fallback behind every neural backend. Not cloning (no
+    consent gate); voice profiles' preset_id maps to the OS voice name
+    on macOS (`say -v`) and Windows (SelectVoice).
+    """
+
+    name = "system"
+    supports_native_tags = False
+    supports_cloning = False
+    sample_rate = 22050
+
+    _MISSING = ("system TTS: no OS speech service found — macOS ships "
+                "`say`; on Linux install espeak-ng (`apt install "
+                "espeak-ng`, Termux: `pkg install espeak-ng`); Windows "
+                "needs PowerShell")
+
+    def __init__(self, *, lang: Optional[str] = None) -> None:
+        self.lang = lang or os.environ.get("SYSTEM_TTS_LANG", "")
+        self._kind, self._exe = self.detect()
+
+    @staticmethod
+    def detect() -> tuple[Optional[str], Optional[str]]:
+        """(kind, executable) of the OS speech service, or (None, None)."""
+        plat = sys.platform
+        if plat == "darwin":
+            exe = shutil.which("say")
+            return ("say", exe) if exe else (None, None)
+        if plat.startswith("linux"):
+            for candidate in ("espeak-ng", "espeak"):
+                exe = shutil.which(candidate)
+                if exe:
+                    return ("espeak", exe)
+            return (None, None)
+        if plat == "win32":
+            exe = shutil.which("powershell") or shutil.which("pwsh")
+            return ("powershell", exe) if exe else (None, None)
+        return (None, None)
+
+    @classmethod
+    def available(cls) -> bool:
+        kind, _exe = cls.detect()
+        return kind is not None
+
+    # -- synthesis -----------------------------------------------------
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        if not self._exe:
+            raise RuntimeError(self._MISSING)
+        text = " ".join(str(text or "").split())
+        if not text:
+            return []
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="devon-system-tts-") as tmp:
+            if self._kind == "say":
+                blob = self._via_say(text, voice, tmp)
+            elif self._kind == "espeak":
+                blob = self._via_espeak(text)
+            elif self._kind == "powershell":
+                blob = self._via_powershell(text, voice, tmp)
+            else:  # pragma: no cover — detect() already failed above
+                raise RuntimeError(self._MISSING)
+        samples, rate = HFEndpointBackend._decode_wav(blob)
+        if rate != self.sample_rate:
+            samples = _resample_linear(samples, rate, self.sample_rate)
+        return samples
+
+    def _run(self, cmd: list) -> Any:
+        import subprocess
+
+        try:
+            return subprocess.run(cmd, check=True, capture_output=True,
+                                  timeout=180)
+        except FileNotFoundError:
+            raise RuntimeError(self._MISSING)
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "replace")[:300]
+            raise RuntimeError(f"system TTS ({self._kind}) failed: "
+                               f"{err or exc}")
+
+    def _via_say(self, text: str, voice: Optional[VoiceProfile],
+                 tmp: str) -> bytes:
+        out = os.path.join(tmp, "out.aiff")
+        cmd = [self._exe, "-o", out]
+        vname = voice.preset_id if voice and voice.preset_id else ""
+        if vname:
+            cmd += ["-v", vname]
+        cmd.append(text)
+        self._run(cmd)
+        with open(out, "rb") as fh:
+            return _aiff_to_wav_bytes(fh.read())
+
+    def _via_espeak(self, text: str) -> bytes:
+        cmd = [self._exe, "--stdout", "-s", "175"]
+        if self.lang:
+            cmd += ["-v", self.lang]
+        cmd.append(text)
+        return self._run(cmd).stdout
+
+    def _via_powershell(self, text: str, voice: Optional[VoiceProfile],
+                        tmp: str) -> bytes:
+        out = os.path.join(tmp, "out.wav")
+        vname = (voice.preset_id if voice and voice.preset_id
+                 else "").replace("'", "''")
+        select = f"$s.SelectVoice('{vname}');" if vname else ""
+        script = ("Add-Type -AssemblyName System.Speech;"
+                  "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                  f"{select}$s.SetOutputToWaveFile('{out}');"
+                  "$s.Speak(@\"\n" + text.replace('"', '""') + "\n\"@);"
+                  "$s.Dispose()")
+        self._run([self._exe, "-NoProfile", "-NonInteractive",
+                   "-Command", script])
+        with open(out, "rb") as fh:
+            return fh.read()
+
+
 _BACKENDS = {"bark": BarkBackend, "xtts": XTTSBackend,
              "kokoro": KokoroBackend, "cosyvoice": CosyVoiceBackend,
              "dia": DiaBackend, "orpheus": OrpheusBackend,
-             "hf-endpoint": HFEndpointBackend}
+             "hf-endpoint": HFEndpointBackend,
+             "chatterbox": ChatterboxBackend, "piper": PiperBackend,
+             "f5tts": F5TTSBackend, "omnivoice": OmniVoiceBackend,
+             "qwen3tts": Qwen3TTSBackend, "system": SystemTTSBackend}
 
 #: backend name → importable module proving it is installed. (This also
 #: fixes a latent KeyError: "hf-endpoint" was in _BACKENDS but missing
 #: from the old inline spec map.)
+#: "system" maps to None — it needs no pip package, only an OS speech
+#: service (see SystemTTSBackend.available()).
 _BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
                   "cosyvoice": "cosyvoice", "dia": "dia",
                   "orpheus": "orpheus_tts",
-                  "hf-endpoint": "huggingface_hub"}
+                  "hf-endpoint": "huggingface_hub",
+                  "chatterbox": "chatterbox", "piper": "piper",
+                  "f5tts": "f5_tts", "omnivoice": "omnivoice",
+                  "qwen3tts": "qwen_tts", "system": None}
 
 
 # ----------------------------------------------------
@@ -917,18 +1587,26 @@ class UniversalTTS:
             available = available_backends()
             if not available:
                 raise RuntimeError(
-                    "no neural TTS backend installed — pip install one of: "
-                    "kokoro (lightest, Apache-2.0) | TTS (XTTS v2, "
+                    "no TTS backend usable — pip install one of: "
+                    "chatterbox-tts (best free cloning, MIT) | piper-tts "
+                    "(phone/CPU, MIT) | kokoro (lightest, Apache-2.0) | "
+                    "qwen-tts (0.6B expressive, Apache-2.0) | f5-tts | "
+                    "omnivoice (600+ langs, Apache-2.0) | TTS (XTTS v2, "
                     "non-commercial) | cosyvoice (multilingual+paralinguistics, "
                     "MIT) | orpheus-speech (Orpheus, Apache-2.0, GPU) | "
                     "git+https://github.com/suno-ai/bark.git | "
-                    "git+https://github.com/nari-labs/dia.git (GPU-only)")
+                    "git+https://github.com/nari-labs/dia.git (GPU-only) — "
+                    "or install an OS speech service (espeak-ng) for the "
+                    "zero-dependency 'system' backend")
             wanted = available[0]
         if wanted not in _BACKENDS:
             raise RuntimeError(
                 f"unknown TTS backend {wanted!r}; use one of "
                 f"{', '.join(_BACKENDS)} or 'auto'")
-        if not _spec(_BACKEND_SPECS[wanted]):
+        if wanted == "system":
+            if not SystemTTSBackend.available():
+                raise RuntimeError(SystemTTSBackend._MISSING)
+        elif not _spec(_BACKEND_SPECS[wanted]):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is not installed on this machine")
         self._impl = _BACKENDS[wanted]()
@@ -982,8 +1660,10 @@ class UniversalTTS:
         CosyVoice's instruct mode. Backends with no dedicated renderer
         keep the legacy Bark-format path.
         """
-        from .director import (render_bark, render_cosyvoice, render_dia,
-                               render_fish, render_orpheus)
+        from .director import (render_bark, render_chatterbox, render_cosyvoice,
+                               render_dia, render_fish, render_for,
+                               render_omnivoice, render_orpheus,
+                               render_plain)
 
         name = getattr(backend, "name", "")
         if name == "bark":
@@ -995,6 +1675,21 @@ class UniversalTTS:
             return render_dia(canonical), ""
         if name == "orpheus":
             return render_orpheus(canonical), ""
+        if name == "chatterbox":
+            if getattr(backend, "supports_native_tags", False):
+                return render_chatterbox(canonical), ""
+            # multilingual V3 has no native paralinguistics: speakable
+            # words + onomatopoeia instead of Bark-format tags
+            text, _pauses = render_plain(canonical, speak_bursts=True)
+            return text, ""
+        if name == "omnivoice":
+            return render_omnivoice(canonical), ""
+        if name == "qwen3tts":
+            # native [laugh]/[sigh]/[yawn]/[wow]/[giggle]/[scoff] +
+            # [emotion] tags — canonical markup is already its
+            # vocabulary (render_for handles pause normalization)
+            text, _extra = render_for("qwen3tts", canonical)
+            return text, ""
         if name == "hf-endpoint" and getattr(
                 backend, "_is_fish", lambda: False)():
             return render_fish(canonical), ""
@@ -1054,15 +1749,20 @@ class UniversalTTS:
         - orpheus: angle-bracket emotion tags <laugh> <sigh> <cough>
         - cosyvoice: instruct tokens + emotion/rate instruction
         - bark: native paralinguistic tags
-        - xtts/kokoro/hf-endpoint: speakable words + onomatopoeia bursts
-          + spliced silence
+        - chatterbox: native paralinguistic tags (Turbo) or speakable
+          words + onomatopoeia (multilingual V3)
+        - omnivoice: native [laughter]/[sigh]/[sniff] markup
+        - qwen3tts: native [laugh]/[sigh]/[emotion] markup
+        - xtts/kokoro/piper/hf-endpoint/system: speakable words +
+          onomatopoeia bursts + spliced silence
 
         ``effect`` picks a named director house style (see
         ``director.EFFECT_PRESETS``). Returns the usual speak() dict plus
         ``script`` (the marked-up performance text) and ``cues``.
         """
-        from .director import (direct, render_bark, render_cosyvoice,
-                               render_dia, render_fish, render_orpheus,
+        from .director import (direct, render_bark, render_chatterbox,
+                               render_cosyvoice, render_dia, render_fish,
+                               render_for, render_omnivoice, render_orpheus,
                                render_plain)
 
         script = direct(text, mood=mood, intensity=intensity, seed=seed,
@@ -1081,6 +1781,17 @@ class UniversalTTS:
             final_text = render_dia(script)
         elif backend.name == "orpheus":
             final_text = render_orpheus(script)
+        elif backend.name == "chatterbox":
+            if getattr(backend, "supports_native_tags", False):
+                final_text = render_chatterbox(script)
+            else:
+                # multilingual V3: speakable words + onomatopoeia
+                final_text, pause_points = render_plain(script,
+                                                        speak_bursts=True)
+        elif backend.name == "omnivoice":
+            final_text = render_omnivoice(script)
+        elif backend.name == "qwen3tts":
+            final_text = render_for("qwen3tts", script)[0]
         elif backend.name == "fish" or (
                 backend.name == "hf-endpoint"
                 and getattr(backend, "_is_fish", lambda: False)()):

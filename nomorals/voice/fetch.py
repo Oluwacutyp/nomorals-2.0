@@ -16,6 +16,90 @@ __all__ = ["MODEL_REGISTRY", "default_cache_dir", "fetch_model"]
 #: default; ``nm voice fetch --repo`` can point at any other repo
 #: (mirrors, fine-tunes, your own uploads).
 MODEL_REGISTRY = {
+    "chatterbox": {
+        "hf_repo": "ResembleAI/chatterbox",
+        "license": "MIT",
+        "approx_size": "~2 GB (multilingual V3 500M); Nano 110M ~450 MB",
+        "notes": (
+            "The best free cloning TTS today: zero-shot cloning from "
+            "~5-10s of reference audio, 23 languages, emotion "
+            "exaggeration control — blind-test preferred over ElevenLabs. "
+            "Turbo (350M, English, one-step decoder, native [laugh]/"
+            "[chuckle]/[cough] tags) for voice agents; Nano (110M, 3x "
+            "realtime on 8 CPU cores) for on-device; Multilingual V3 for "
+            "global apps. Weights auto-download on first use."
+        ),
+        "alt_repos": [],
+    },
+    "piper": {
+        "hf_repo": "",
+        "license": "MIT",
+        "approx_size": "~60-100 MB per voice (.onnx + .onnx.json)",
+        "notes": (
+            "Best free on-device TTS: ONNX VITS voices, RTF ~0.28 on plain "
+            "CPU, 22.05kHz. Voices are NOT fetched by this tool — use "
+            "'python -m piper.download_voices en_US-lessac-medium' (part of "
+            "piper-tts) into PIPER_VOICES_DIR, or point PIPER_VOICE at a "
+            ".onnx file. Browse rhasspy/piper-voices for the voice list."
+        ),
+        "alt_repos": [],
+    },
+    "f5tts": {
+        "hf_repo": "SWivid/F5-TTS",
+        "license": "MIT code; pretrained checkpoints CC-BY-NC (Emilia)",
+        "approx_size": "~1-2 GB",
+        "notes": (
+            "Highest-fidelity single-shot cloning (flow matching), 5-15s "
+            "reference. Needs its own ASR pass when you don't know the "
+            "reference transcript. LICENSE CAVEAT: the pretrained weights "
+            "are CC-BY-NC (non-commercial) — fine for personal use, not "
+            "for products you sell."
+        ),
+        "alt_repos": [],
+    },
+    "omnivoice": {
+        "hf_repo": "k2-fsa/OmniVoice",
+        "license": "Apache-2.0",
+        "approx_size": "~1-2 GB (0.6B backbone)",
+        "notes": (
+            "k2-fsa diffusion-LM TTS: 600+ languages, zero-shot cloning "
+            "from 3-15s, natural-language voice design, native "
+            "[laughter]/[sigh]/[sniff] non-verbal symbols, multi-speaker "
+            "[Speaker_N]: scripts. RTF as low as 0.025 on GPU. Auto "
+            "CPU-offload."
+        ),
+        "alt_repos": [],
+    },
+    "qwen3tts": {
+        "hf_repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "license": "Apache-2.0",
+        "approx_size": "~1.2 GB (0.6B); ~3.5 GB (1.7B)",
+        "notes": (
+            "Qwen's expressive TTS: native [laugh]/[sigh]/[yawn]/[wow]/"
+            "[giggle]/[scoff] tags, per-line [emotion] switching, "
+            "instruction-driven style, 10 languages. The 0.6B is the most "
+            "CPU-friendly expressive open model found. The backend picks "
+            "Base (cloning) vs CustomVoice (preset speakers) "
+            "automatically; 'pip install qwen-tts'."
+        ),
+        "alt_repos": [
+            "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        ],
+    },
+    "parakeet": {
+        "hf_repo": "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        "license": "CC-BY-4.0 (commercial OK)",
+        "approx_size": "~640 MB (int8 ONNX)",
+        "notes": (
+            "NVIDIA Parakeet TDT 0.6B v3: the fastest free English "
+            "dictation (6.3% WER, built-in punctuation/casing, ~27ms/10s "
+            "GPU / ~0.3-0.5s CPU). Auto-downloaded by onnx-asr; this entry "
+            "exists for pinning/verification. English + 25 European "
+            "languages; faster-whisper covers the rest."
+        ),
+        "alt_repos": [],
+    },
     "cosyvoice": {
         "hf_repo": "FunAudioLLM/CosyVoice-3",
         "license": "MIT",
