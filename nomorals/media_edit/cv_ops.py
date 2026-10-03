@@ -42,6 +42,18 @@ from ..core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 
+def _imagemath_eval(expression, _imagemath_dict=None, **kwargs):
+    """Pillow-version-safe ImageMath.eval.
+
+    Pillow 12 removed ``ImageMath.eval``; ``unsafe_eval`` is its direct
+    replacement (same expression language). Older Pillow keeps ``eval``.
+    """
+    fn = getattr(ImageMath, "eval", None) or ImageMath.unsafe_eval
+    if _imagemath_dict is not None:
+        return fn(expression, **_imagemath_dict)
+    return fn(expression, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # backend resolution: best available wins, never a hard gate
 # ---------------------------------------------------------------------------
@@ -644,7 +656,7 @@ def _pencil_sketch_pillow(img: Any, blur_sigma: float,
     inv = ImageOps.invert(gray)
     blurred = inv.filter(ImageFilter.GaussianBlur(radius=float(blur_sigma)))
     s = max(1, int(round(shade)))  # ImageMath needs int constants
-    dodge = ImageMath.eval(
+    dodge = _imagemath_eval(
         "convert(min(a * %d / (256 - b), 255), 'L')" % s,
         a=gray, b=blurred)
     return dodge
@@ -2337,7 +2349,7 @@ def _local_threshold_map_pillow(gray, method, block_size, c):
     mean = gray.filter(ImageFilter.BoxBlur(rad))
     hi = gray.point([(i >> 4) ** 2 for i in range(256)])
     lo = gray.point([(i & 15) ** 2 for i in range(256)])
-    hl = ImageMath.eval(
+    hl = _imagemath_eval(
         "convert(a * b, 'L')",
         a=gray.point([i >> 4 for i in range(256)]),
         b=gray.point([i & 15 for i in range(256)]),
@@ -2345,26 +2357,26 @@ def _local_threshold_map_pillow(gray, method, block_size, c):
     m_hh = hi.filter(ImageFilter.BoxBlur(rad))
     m_ll = lo.filter(ImageFilter.BoxBlur(rad))
     m_hl = hl.filter(ImageFilter.BoxBlur(rad))
-    meansq = ImageMath.eval("a * 256 + b * 32 + c", a=m_hh, b=m_hl, c=m_ll)
-    var = ImageMath.eval("max(a - b * b, 0)", a=meansq, b=mean)
-    var8 = ImageMath.eval("convert(a / 256, 'L')", a=var)
+    meansq = _imagemath_eval("a * 256 + b * 32 + c", a=m_hh, b=m_hl, c=m_ll)
+    var = _imagemath_eval("max(a - b * b, 0)", a=meansq, b=mean)
+    var8 = _imagemath_eval("convert(a / 256, 'L')", a=var)
     std = var8.point([int((i * 256) ** 0.5) for i in range(256)])
     if method == "sauvola":
         # t = mean * (1 + k*(std/R - 1)), k=0.2, R=128
         #   = mean * (0.8 + std/640) = mean * (512 + std) / 640
-        tmap = ImageMath.eval(
+        tmap = _imagemath_eval(
             "convert(min(max(a * (512 + b) / 640, 0), 255), 'L')",
             a=mean, b=std,
         )
     else:  # niblack, k=-0.2 -> t = mean - std/5
-        tmap = ImageMath.eval(
+        tmap = _imagemath_eval(
             "convert(min(max(a - b / 5, 0), 255), 'L')", a=mean, b=std
         )
     if c:
-        tmap = ImageMath.eval(
+        tmap = _imagemath_eval(
             "convert(min(max(a - C, 0), 255), 'L')", a=tmap, C=int(c)
         )
-    return ImageMath.eval("convert((g > t) * 255, 'L')", g=gray, t=tmap)
+    return _imagemath_eval("convert((g > t) * 255, 'L')", g=gray, t=tmap)
 
 
 def _adaptive_threshold_pillow(gray, method, block_size, c=2):
@@ -2611,7 +2623,7 @@ def _dehaze_pillow(img, omega=0.95, t0=0.1):
     out = []
     for ch, ac in zip((r, g, b), A):
         ac_i = int(round(ac))
-        e = ImageMath.eval(
+        e = _imagemath_eval(
             "convert(min(max((c - A) * 255 / t + A, 0), 255), 'L')",
             c=ch, t=tmap, A=ac_i,
         )
@@ -2713,7 +2725,7 @@ def _parse_cube_lists(text):
         elif key not in ("LUT_3D_INPUT_RANGE",):
             try:
                 entries.append([float(parts[0]), float(parts[1]), float(parts[2])])
-            except (ValueError, IndexError):
+            except (ValueError, IndexError):  # noqa: S110 - skip malformed LUT lines
                 pass
     if size is None:
         raise MediaEditError("cube_lut: missing LUT_3D_SIZE")
@@ -2924,7 +2936,7 @@ def _clarity_pillow(img, amount, radius):
     k = int(round(amount * 100))
     out = []
     for ch, bh in zip(rgb.split(), base.split()):
-        e = ImageMath.eval(
+        e = _imagemath_eval(
             f"convert(min(max((a * 100 + {k} * (a - b)) / 100, 0), 255), 'L')",
             a=ch, b=bh,
         )
@@ -2944,10 +2956,10 @@ def _retouch_pillow(img, radius, amount):
     blended = Image.blend(low, slow, amount)
     out = []
     for ch, lh, bh in zip(rgb.split(), low.split(), blended.split()):
-        high = ImageMath.eval(
+        high = _imagemath_eval(
             "convert(min(max(a - b + 128, 0), 255), 'L')", a=ch, b=lh
         )
-        e = ImageMath.eval(
+        e = _imagemath_eval(
             "convert(min(max(a + b - 128, 0), 255), 'L')", a=bh, b=high
         )
         out.append(e)
@@ -3001,7 +3013,7 @@ def _seamless_clone_pillow(src, dst, center, mask_img, mix):
         lum = dst.convert("L")
         bands = []
         for ch in layer.split():
-            bands.append(ImageMath.eval(
+            bands.append(_imagemath_eval(
                 "convert(min(a * b / 128, 255), 'L')", a=ch, b=lum
             ))
         layer = Image.merge("RGB", bands)

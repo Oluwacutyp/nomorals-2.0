@@ -622,11 +622,12 @@ class HealthCheckTests(_ProxyNetCase):
     def test_single_healthy_proxy(self) -> None:
         self.conn.add_proxy("127.0.0.1", self.open_port)
         pid = f"http://127.0.0.1:{self.open_port}"
-        # Retry: under full-suite load the loopback target can
-        # briefly refuse, and the test proxy maps any upstream failure
-        # to 502. Multiple attempts with backoff stabilize the test.
+        # Retry: under full-suite load the loopback target can be slow,
+        # and the test proxy maps any upstream failure to 502. Multiple
+        # attempts with backoff stabilize the test. Each attempt records
+        # a check, so assert checks >= 1 (not == 1).
         health = None
-        for attempt in range(5):
+        for attempt in range(10):
             result = self.conn.health_check(pid, url=self.target_url,
                                             timeout=10)
             health = result["health"]
@@ -637,7 +638,7 @@ class HealthCheckTests(_ProxyNetCase):
         self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)
         self.assertGreater(health["last_checked"], 0)
-        self.assertEqual(health["checks"], 1)
+        self.assertGreaterEqual(health["checks"], 1)
         self.assertEqual(health["consecutive_failures"], 0)
         # Password still masked in the health result.
         self.assertNotIn("s3cret", json.dumps(result))

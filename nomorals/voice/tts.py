@@ -963,7 +963,7 @@ class ChatterboxBackend:
 
             if isinstance(out, torch.Tensor):
                 out = out.detach().cpu().float().numpy()
-        except ImportError:
+        except ImportError:  # noqa: S110 - torch optional; skip tensor conversion
             pass
         try:
             import numpy as np
