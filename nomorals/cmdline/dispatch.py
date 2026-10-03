@@ -15,6 +15,7 @@ from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
 from .commands.book import _cmd_book
+from .commands.account import _cmd_account
 from .commands.books import _cmd_books
 from .commands.briefing import _cmd_briefing
 from .commands.builders import _cmd_build
@@ -365,6 +366,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_voice(args, context)
         if args.command == "captcha":
             return _cmd_captcha(args, context)
+        if args.command == "account":
+            return _cmd_account(args, context)
         if args.command == "bet":
             return _cmd_bet(args, context)
         if args.command == "build":

@@ -937,9 +937,11 @@ class GitHubAccountFlowTests(unittest.TestCase):
 
 class CaptchaBoundaryTests(unittest.TestCase):
     def test_no_captcha_solving_machinery_in_package(self) -> None:
-        """Structural enforcement of the hard boundary: the connectors
+        """Structural enforcement of the boundary: the connectors
         package must contain no CAPTCHA-solving services, helpers, or
-        bypass code. The human checkpoint is the only path."""
+        bypass code. Solving lives in nomorals.tools.captcha and is
+        injected into account flows; the human checkpoint is the
+        fallback path when the solver is off or fails."""
         import nomorals.connectors as pkg
 
         banned = (
