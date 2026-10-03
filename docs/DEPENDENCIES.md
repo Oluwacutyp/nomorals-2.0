@@ -190,7 +190,9 @@ provide them.
 | `tesseract` | `nomorals/documents/ocr.py` (+ `llm/providers/ocr.py` probe); override path with `NM_OCR_BINARY` | `sudo apt install tesseract-ocr` | `brew install tesseract` |
 | `pdftoppm` (poppler) | `pdf2image` PDF page rendering (`documents/ocr.py`) | `sudo apt install poppler-utils` | `brew install poppler` |
 | `git` | `nomorals/codews/workspace.py`, backup versioning/push | `sudo apt install git` | `brew install git` |
-| `yt-dlp` (CLI) | `nomorals/core/verify.py` fallback when the module is absent | `pip install yt-dlp` or `sudo apt install yt-dlp` | `brew install yt-dlp` |
+| `yt-dlp` (CLI) | `nomorals/core/verify.py` fallback when the module is absent; `nomorals/media/playback.py` YouTube search fallback when the module is absent | `pip install yt-dlp` or `sudo apt install yt-dlp` | `brew install yt-dlp` |
+| `yt-dlp` (Python module) | `nomorals/media/playback.py` YouTube search + audio extraction (`play_youtube`, `/play youtube:`, `nm music play --youtube`); missing → honest error with install hint | `pip install yt-dlp` | `pip install yt-dlp` |
+| `fluidsynth` (CLI) | `nomorals/media/synth_backend.py` — studio-quality composed-song rendering on pc/vps/workstation profiles (with a soundfont); missing → pure-Python builtin synth | `sudo apt install fluidsynth` (soundfont: `nm music soundfont install` fetches GeneralUser GS, ~31 MB, free) | `brew install fluidsynth` |
 | `llama-server` | `nomorals/llm/local_server.py` — local GGUF inference | [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) (prebuilt binary) | same |
 | `bwrap` / `unshare` | `nomorals/execbox.py` sandbox isolation (bubblewrap preferred, namespaces fallback) | `sudo apt install bubblewrap` (`unshare` ships with `util-linux`) | not applicable — Linux-only |
 | `espeak-ng` / `pico2wave` | `nomorals/tools/audio.py` offline TTS fallback | `sudo apt install espeak-ng` / `libttspico-utils` | `say` is built in |

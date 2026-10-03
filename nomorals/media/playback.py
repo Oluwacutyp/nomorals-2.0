@@ -32,6 +32,11 @@ Spotify/SoundCloud adapters are *injected* (constructor kwargs, or the
   permalink; the stream URL is resolved fresh at play time through the
   injected SoundCloud adapter (progressive MP3 preferred, HLS fallback)
   and then played by whatever local backend is available, mpv included.
+* **YouTube** — queue items of kind ``youtube`` hold the watch URL.  The
+  audio is extracted once at play time (yt-dlp, optional dependency),
+  cached under the media dir by video id, and then played as a local
+  file.  No OAuth needed — but without yt-dlp this source fails
+  honestly instead of pretending.
 
     from nomorals.media.playback import PlaybackEngine
     p = PlaybackEngine(context, spotify=spotify_adapter,
@@ -40,6 +45,8 @@ Spotify/SoundCloud adapters are *injected* (constructor kwargs, or the
     p.play_spotify("never gonna give you up")   # Spotify search
     p.play_soundcloud("https://soundcloud.com/artist/track")
     p.play_soundcloud("synthwave mix")           # SoundCloud search
+    p.play_youtube("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    p.play_youtube("lofi hip hop radio")         # YouTube search (yt-dlp)
 
 Volume, position, and the mpv socket path persist in ``kv_store``.
 
@@ -65,6 +72,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import NoMoralsError, ToolError
@@ -161,13 +169,16 @@ class PlaybackEngine:
 
     @staticmethod
     def detect_source(target: str) -> str:
-        """Classify a target: spotify | soundcloud | url | file."""
+        """Classify a target: spotify | soundcloud | youtube | url | file."""
         low = (target or "").strip().lower()
         if low.startswith("spotify:") or "open.spotify.com" in low \
                 or "play.spotify.com" in low:
             return "spotify"
         if "soundcloud.com" in low:
             return "soundcloud"
+        if "youtube.com" in low or "youtu.be" in low \
+                or low.startswith("youtube:"):
+            return "youtube"
         if low.startswith(("http://", "https://")):
             return "url"
         return "file"
@@ -371,6 +382,9 @@ class PlaybackEngine:
             if source == "soundcloud":
                 added.extend(self._add_soundcloud(t, title=title))
                 continue
+            if source == "youtube":
+                added.extend(self._add_youtube(t, title=title))
+                continue
             kind = "url" if source == "url" else "file"
             if kind == "file":
                 from ..tools.filesystem import safe_path
@@ -504,6 +518,152 @@ class PlaybackEngine:
                 duration=(tr.get("duration_ms") or 0) / 1000.0)
         started = self.play(first)
         return {"tracks": len(tracks), "title": tracks[0]["title"],
+                **started}
+
+    # ── YouTube ───────────────────────────────────────────────────────
+    # No adapter needed: search and audio extraction go through yt-dlp
+    # (optional dependency).  Audio is downloaded once per video id and
+    # cached as a local file, so replays cost nothing.
+
+    @staticmethod
+    def _youtube_id(url: str) -> str:
+        import re
+        m = re.search(r"(?:v=|youtu\.be/|/shorts/|/embed/|youtube:)"
+                      r"([A-Za-z0-9_\-]{11})", url or "")
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _youtube_watch_url(video_id: str) -> str:
+        return f"https://www.youtube.com/watch?v={video_id}"
+
+    @classmethod
+    def _youtube_search_id(cls, query: str) -> str:
+        """Top YouTube video id for a query (yt-dlp ``ytsearch1:``).
+
+        Raises ToolError naming the missing dependency when yt-dlp is
+        absent — never a silent empty result.
+        """
+        query = (query or "").strip()
+        if not query:
+            raise ToolError("youtube search needs a query")
+        # python module first, CLI fallback
+        try:
+            import yt_dlp  # noqa: F401
+            has_module = True
+        except ImportError:
+            has_module = False
+        if has_module:
+            import yt_dlp
+            try:
+                with yt_dlp.YoutubeDL(
+                        {"quiet": True, "no_warnings": True,
+                         "skip_download": True}) as ydl:
+                    info = ydl.extract_info(f"ytsearch1:{query}",
+                                            download=False)
+            except Exception as exc:  # noqa: BLE001
+                raise ToolError(f"youtube search failed: {exc}") from exc
+            entries = ((info or {}).get("entries") or [])
+            if entries and entries[0].get("id"):
+                return str(entries[0]["id"])
+            raise ToolError(f'no YouTube results for "{query}"')
+        cli = shutil.which("yt-dlp")
+        if cli:
+            try:
+                proc = subprocess.run(
+                    [cli, "--print", "id", "--skip-download",
+                     f"ytsearch1:{query}"],
+                    capture_output=True, text=True, timeout=60)
+            except subprocess.TimeoutExpired as exc:
+                raise ToolError("youtube search timed out") from exc
+            vid = (proc.stdout or "").strip().splitlines()
+            vid = vid[0].strip() if vid else ""
+            if proc.returncode == 0 and vid:
+                return vid
+            raise ToolError(
+                f"youtube search failed: "
+                f"{(proc.stderr or '').strip()[-200:] or 'no results'}")
+        raise ToolError(
+            "youtube search needs yt-dlp (pip install yt-dlp) — "
+            "not installed here")
+
+    def _youtube_media_dir(self) -> str:
+        from ..tools.filesystem import safe_path
+        d = safe_path(self.context, "media")
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    def _youtube_audio(self, item: dict[str, Any]) -> str:
+        """Local audio file for a youtube queue item (download + cache).
+
+        Cached by video id under the media dir, so the second play of
+        the same video never re-downloads.
+        """
+        video_id = self._youtube_id(str(item.get("path", "")))
+        if not video_id:
+            raise ToolError(
+                f"can't parse a YouTube video id from {item.get('path')!r}")
+        media_dir = self._youtube_media_dir()
+        for ext in ("mp3", "m4a", "webm", "opus", "ogg", "wav"):
+            for cand in sorted(Path(media_dir).glob(f"*[{video_id}].{ext}")):
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return str(cand)
+        tools = getattr(self.context, "tools", None)
+        call = getattr(tools, "call", None) if tools else None
+        if call is None:
+            raise ToolError(
+                "youtube audio extraction needs the tool registry "
+                "(media_download) — and yt-dlp installed "
+                "(pip install yt-dlp)")
+        url = self._youtube_watch_url(video_id)
+        try:
+            out = call("media_download", url=url, audio_only=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"youtube audio download failed: {exc}") from exc
+        if not getattr(out, "ok", False):
+            raise ToolError(
+                f"youtube audio download failed: "
+                f"{getattr(out, 'error', 'unknown error')}")
+        value = out.value if isinstance(out.value, dict) else {}
+        path = str(value.get("path", ""))
+        if not path or not os.path.exists(path):
+            raise ToolError("youtube download reported success but "
+                            "produced no file")
+        return path
+
+    def _add_youtube(self, target: str, title: str = "") -> list[dict[str, Any]]:
+        """Enqueue a YouTube URL or search query (audio extracted at play)."""
+        target = (target or "").strip()
+        if target.lower().startswith("youtube:"):
+            query = target.split(":", 1)[1].strip()
+            video_id = self._youtube_search_id(query)
+            url = self._youtube_watch_url(video_id)
+            label = query
+        else:
+            video_id = self._youtube_id(target)
+            if video_id:
+                url = self._youtube_watch_url(video_id)
+                label = title or f"YouTube {video_id}"
+            else:
+                # bare query → keyless search
+                video_id = self._youtube_search_id(target)
+                url = self._youtube_watch_url(video_id)
+                label = title or target
+        return [self._enqueue(url, "youtube", label)]
+
+    def play_youtube(self, target: str) -> dict[str, Any]:
+        """Play a YouTube URL now, or a search query.
+
+        A bare query plays the top search result.  Audio is extracted
+        with yt-dlp on first play and cached, so replays are instant.
+        Fails fast with an honest message when yt-dlp is missing.
+        """
+        target = (target or "").strip()
+        if not target:
+            raise ToolError(
+                "play_youtube needs a youtube.com URL or a search query")
+        added = self._add_youtube(target)
+        started = self.play(len(self.queue()) - 1)
+        return {"video": added[0]["path"], "title": added[0]["title"],
                 **started}
 
     def _queue_rows(self) -> list[Any]:
@@ -788,11 +948,17 @@ class PlaybackEngine:
                 # still useful — resolve it. A resolution failure is fatal
                 # (fail fast): the track has no playable stream.
                 result["stream_url"] = self._soundcloud_play_url(item)
+            if item["kind"] == "youtube":
+                # same idea: the watch URL is the playable artifact here
+                result["watch_url"] = item["path"]
             return result
         path = item["path"]
         if item["kind"] == "soundcloud":
             # resolve fresh every play: stream URLs expire
             path = self._soundcloud_play_url(item)
+        if item["kind"] == "youtube":
+            # extract once, cache by video id, then play the local file
+            path = self._youtube_audio(item)
         play_item = dict(item, path=path)
         if self.backend.name == "mpv":
             ok, detail = self._mpv_play_at(index)
@@ -1256,7 +1422,10 @@ def register(registry: Any) -> None:
             "now-playing) | playlist_play (name) | playlist_save (name) | "
             "status. Spotify URIs/links and "
             "SoundCloud links queue as streaming items when the adapters "
-            "are wired (nm music wires them). mpv gives full transport + "
+            "are wired (nm music wires them); YouTube URLs queue as "
+            "youtube items (audio extracted via yt-dlp at play time). "
+            "play_spotify / play_soundcloud / play_youtube play a URI, "
+            "link, or search query immediately. mpv gives full transport + "
             "auto-advance; the queue persists across restarts."
         ),
         capability=Capability.FS_READ,
@@ -1292,6 +1461,12 @@ def register(registry: Any) -> None:
                     "player play_soundcloud needs a target: a "
                     "soundcloud.com link or a search query")
             return p.play_soundcloud(target)
+        if action == "play_youtube":
+            if not target.strip():
+                raise ToolError(
+                    "player play_youtube needs a target: a youtube.com "
+                    "URL or a search query (needs yt-dlp)")
+            return p.play_youtube(target)
         if action == "pause":
             return p.pause()
         if action == "resume":

@@ -2242,7 +2242,7 @@ def _parser() -> argparse.ArgumentParser:
     decode.add_argument("--json", action="store_true", help="Output as JSON")
     music = sub.add_parser("music", aliases=CLI_ALIASES["music"], help="Music player + generation")
     music.add_argument("action", nargs="?", default="styles",
-                       choices=["styles", "compose", "songs",
+                       choices=["styles", "compose", "songs", "soundfont",
                                 "play", "pause", "resume", "stop", "next",
                                 "prev", "status", "now", "queue", "add",
                                 "remove", "move", "clear", "shuffle",
@@ -2257,7 +2257,7 @@ def _parser() -> argparse.ArgumentParser:
                                 "top", "like",
                                 "unlike", "liked", "search", "stats"],
                        help=("styles | compose <topic> | songs [name] | "
-                             "play [n|files…] | pause | resume | stop | next | "
+                             "soundfont [status|install] | play [n|files…] | "
                              "prev | status | now | queue | add <files…> | "
                              "remove <n> | move <n> <m> | clear | "
                              "shuffle [on|off] | repeat [off|one|all] | "
@@ -2302,6 +2302,10 @@ def _parser() -> argparse.ArgumentParser:
     music.add_argument("--soundcloud", action="store_true",
                        help="play: force SoundCloud — the target is a "
                             "soundcloud.com link, or a search query")
+    music.add_argument("--youtube", action="store_true",
+                       help="play: force YouTube — the target is a "
+                            "youtube.com URL or a search query "
+                            "(needs yt-dlp)")
     music.add_argument("--json", action="store_true", help="Output as JSON")
 
     exec_cmd = sub.add_parser("exec", aliases=CLI_ALIASES["exec"], help="run code in the sandbox")

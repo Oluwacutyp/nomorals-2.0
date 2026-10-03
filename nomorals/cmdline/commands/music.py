@@ -15,33 +15,14 @@ from ..emit import _emit
 def _wire_streaming(context: Any) -> None:
     """Attach the Spotify/SoundCloud adapters to the context.
 
-    The ``player`` tool (``nomorals/media/playback.py``, L4) never
-    imports the connector layer (L5) — it reads these injected adapters
-    off the context instead. This is the L7 wiring point. Idempotent
-    per process; failures are reported, never fatal (local files still
-    play).
+    Delegates to :mod:`nomorals.connectors.wiring` so the CLI and the
+    chat runtime share one wiring implementation.
     """
-    if getattr(context, "spotify_adapter", None) is not None and \
-            getattr(context, "soundcloud_adapter", None) is not None:
-        return
-    from ...connectors.registry import create_connector
-    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
-    vault = None
-    if passphrase:
-        from ...accounts.vault import CredentialVault
-        vault = CredentialVault(context.db, master_passphrase=passphrase)
-    # SoundCloud is keyless — the connector never reads the vault, so a
-    # missing vault (locked) is fine for it.
-    try:
-        context.soundcloud_adapter = create_connector("soundcloud", vault)
-    except Exception as exc:  # noqa: BLE001 - streaming is optional
-        print(f"music: soundcloud wiring failed: {exc}", file=sys.stderr)
-    if vault is None:
-        return  # Spotify's OAuth tokens live in the vault — locked, skip
-    try:
-        context.spotify_adapter = create_connector("spotify", vault)
-    except Exception as exc:  # noqa: BLE001 - streaming is optional
-        print(f"music: spotify wiring failed: {exc}", file=sys.stderr)
+    from ...connectors.wiring import wire_streaming_adapters
+    result = wire_streaming_adapters(context)
+    for name, state in result.items():
+        if state != "ok":
+            print(f"music: {name} wiring {state}", file=sys.stderr)
 
 
 def _looks_like_file(context: Any, target: str) -> bool:
@@ -148,6 +129,48 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
                     f"  midi: {v.get('midi_path', '')}\n"
                     f"  melody: {str(v.get('melody_description', ''))[:160]}")
 
+    # ── synth backend ────────────────────────────────────────────────────
+    if action == "soundfont":
+        from ...media.synth_backend import (
+            choose_synth, find_soundfont, install_soundfont,
+            soundfont_offer)
+        sub = (topic or "").strip().lower()
+        if sub == "install":
+            offer = soundfont_offer()
+            print(f"downloading {offer['name']} (~{offer['size_mb']:.0f} MB)…",
+                  file=sys.stderr)
+            print(f"license: {offer['license']}", file=sys.stderr)
+
+            def _prog(msg: str) -> None:
+                print(f"\r  {msg}", end="", file=sys.stderr,
+                      flush=True)
+
+            try:
+                path = install_soundfont(progress=_prog)
+            except Exception as exc:  # noqa: BLE001 - honest failure
+                print(f"\nmusic: soundfont install failed: {exc}",
+                      file=sys.stderr)
+                return 1
+            print(f"\ninstalled: {path}", file=sys.stderr)
+            return show({"path": path, **offer},
+                        f"soundfont installed: {path}\n"
+                        f"compositions now render with FluidSynth "
+                        f"({offer['name']}).")
+        choice = choose_synth(context)
+        sf = find_soundfont()
+        lines = [f"synth backend: {choice.name}",
+                 f"  profile: {choice.profile or '(unknown)'}",
+                 f"  reason: {choice.reason}"]
+        lines.append(f"soundfont: {sf or '(none installed)'}")
+        if choice.note:
+            lines.append(f"note: {choice.note}")
+        if not sf:
+            offer = soundfont_offer()
+            lines.append(f"to unlock studio quality ({offer['name']}, "
+                         f"~{offer['size_mb']:.0f} MB): "
+                         f"{offer['install_command']}")
+        return show(choice.describe(), "\n".join(lines))
+
     # ── transport ──────────────────────────────────────────────────────────
     if action in ("play", "add", "pause", "resume", "stop", "next", "prev",
                   "status", "now"):
@@ -159,6 +182,7 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
         targets = [t for t in [topic, *extra] if t]
         force_spotify = bool(getattr(args, "spotify", False))
         force_soundcloud = bool(getattr(args, "soundcloud", False))
+        force_youtube = bool(getattr(args, "youtube", False))
         if not targets:
             v = call("player", action="play")
         elif len(targets) == 1 and targets[0].lstrip("-").isdigit():
@@ -170,11 +194,13 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
                 v = call("player", action="play_spotify", target=t)
             elif force_soundcloud or src == "soundcloud":
                 v = call("player", action="play_soundcloud", target=t)
+            elif force_youtube or src == "youtube":
+                v = call("player", action="play_youtube", target=t)
             elif src == "url" or _looks_like_file(context, t):
                 v = _play_added(call, args, [t], context)
             else:
                 # bare text: keyless SoundCloud search — works with no
-                # accounts wired at all (--spotify forces Spotify search)
+                # accounts wired at all (--spotify / --youtube force those)
                 v = call("player", action="play_soundcloud", target=t)
         else:
             v = _play_added(call, args, targets, context)

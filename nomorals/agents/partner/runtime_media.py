@@ -81,6 +81,10 @@ class RuntimeMediaMixin:
         n_lines = sum(len(sec.lyrics) for sec in song.sections)
         text = (f"🎵 “{song.title}”  [{song.style}, {song.key}, {song.tempo} bpm]\n"
                 f"{n_lines} lyric lines across {len(song.sections)} sections")
+        if song.synth_backend:
+            text += f"\nrendered with: {song.synth_backend}"
+        if song.synth_note:
+            text += f"\n💡 {song.synth_note}"
         # deliver the audio + the written score to this chat
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None:
@@ -119,10 +123,21 @@ class RuntimeMediaMixin:
         song title — never whitespace-split into word-paths.
 
         /play <workspace path to audio/midi>
-        /play <song title>   → resolved via workspace scan, then SoundCloud
+        /play <song title>   → resolved via workspace scan, then Spotify
+                              (when linked), SoundCloud, YouTube
+        /play spotify:<query>  → force Spotify (honest when not linked)
+        /play youtube:<query|url> → force YouTube (needs yt-dlp)
         /play queue|status|pause|…   (transport actions)
         """
         from ...media.playback import PlaybackEngine
+        from ...connectors.wiring import wire_streaming_adapters
+
+        # chat never wired these before (only `nm music` did) — share the
+        # same wiring so Spotify/SoundCloud work from the DM too.
+        try:
+            wire_streaming_adapters(self.context)
+        except Exception:  # noqa: BLE001 - wiring is best-effort
+            pass
 
         tail = (tail or "").strip()
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
@@ -134,6 +149,13 @@ class RuntimeMediaMixin:
         else:
             action, rest = "play", tail
         rest = (rest or "").strip()
+        # forced-source prefixes: "spotify:<query>" / "youtube:<query|url>"
+        forced: str = ""
+        low_rest = rest.lower()
+        if low_rest.startswith("spotify:") and not _looks_like_spotify_uri(rest):
+            forced, rest = "spotify", rest.split(":", 1)[1].strip()
+        elif low_rest.startswith("youtube:"):
+            forced, rest = "youtube", rest.split(":", 1)[1].strip()
         try:
             engine = PlaybackEngine(self.context)
             if action in ("play", "add"):
@@ -142,6 +164,14 @@ class RuntimeMediaMixin:
                     return (f"queue ({st['queue']}): "
                             + (f"now {st['current']}" if st["queue"] else "empty")
                             + "\n/play <song title, path, or url> to queue and play")
+                if forced == "spotify":
+                    return self._play_forced_spotify(engine, rest)
+                if forced == "youtube":
+                    try:
+                        res = engine.play_youtube(rest)
+                    except Exception as exc:  # noqa: BLE001
+                        return f"can't play {rest[:80]!r} from YouTube: {exc}"
+                    return self._fmt_started(res, engine)
                 query = self._play_query(self.context, rest)
                 try:
                     res = engine.add(query)
@@ -152,8 +182,9 @@ class RuntimeMediaMixin:
                 queue_len = len(engine.queue())
                 if not added:
                     return (f"couldn't find {rest[:80]!r} — not a file, "
-                            f"not on SoundCloud. /play <path-or-url> plays "
-                            f"directly.")
+                            f"nothing on Spotify/SoundCloud/YouTube. "
+                            f"/play <path-or-url> plays directly; "
+                            f"/play spotify:<query> forces Spotify.")
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
@@ -218,15 +249,60 @@ class RuntimeMediaMixin:
             return text
         return _resolve_play_title(context, text)
 
+    def _play_forced_spotify(self, engine: Any, query: str) -> str:
+        """`/play spotify:<query>` — Spotify only, honest when not linked."""
+        from ...connectors.wiring import (spotify_connector, spotify_linked,
+                                          spotify_link_help)
+        if not query:
+            return "play spotify:<what> — give me a song or artist to search."
+        if not spotify_linked(self.context):
+            return spotify_link_help()
+        try:
+            res = engine.play_spotify(query)
+        except Exception as exc:  # noqa: BLE001 - adapter's own message
+            return f"Spotify couldn't play {query[:80]!r}: {exc}"
+        return self._fmt_started(res, engine)
+
+    @staticmethod
+    def _fmt_started(res: dict[str, Any], engine: Any) -> str:
+        """One-line human summary of a play_* result."""
+        st = res.get("status", "")
+        cur = res.get("current", "") or res.get("title", "")
+        if isinstance(cur, dict):
+            cur = cur.get("title", "")
+        via = res.get("via", "")
+        if st == "playing":
+            return f"▶ playing “{cur}” [{res.get('backend', via or '?')}]"
+        if st == "no-backend":
+            out = f"queued (no audio backend): {cur}\n  {res.get('hint', '')}"
+            for key in ("stream_url", "watch_url"):
+                if res.get(key):
+                    out += f"\n  {key}: {res[key]}"
+            return out
+        return (f"status: {st} "
+                f"{res.get('error') or res.get('hint', '')}".rstrip())
+
     # ── end _control_play ────────────────────────────────────────────────
+
+
+def _looks_like_spotify_uri(text: str) -> bool:
+    """True for real Spotify URIs/links (not a `spotify:<query>` force)."""
+    t = (text or "").strip()
+    if t.startswith("spotify:"):
+        parts = t.split(":")
+        return len(parts) == 3 and bool(parts[2])
+    low = t.lower()
+    return "open.spotify.com" in low or "play.spotify.com" in low
 
 
 def _resolve_play_title(context: Any, title: str) -> str:
     """Resolve a bare song title to something playable.
 
     1. workspace scan — audio files whose filename matches the title
-    2. SoundCloud search (keyless) — top track's permalink URL
-    3. the raw title (the player will fail loudly, not silently)
+    2. Spotify search (only when linked) — top track's URI
+    3. SoundCloud search (keyless) — top track's permalink URL
+    4. YouTube search (needs yt-dlp) — top video's watch URL
+    5. the raw title (the player will fail loudly, not silently)
     """
     import os
     import re
@@ -266,7 +342,23 @@ def _resolve_play_title(context: Any, title: str) -> str:
                 return best[1]
     except Exception:  # noqa: BLE001 - scan is best-effort
         pass
-    # 2. SoundCloud search (keyless, auto client_id)
+    # 2. Spotify search — only when OAuth is actually linked; a locked
+    # vault or dead token just skips to the next source.
+    try:
+        from ...connectors.wiring import spotify_connector, spotify_linked
+        if spotify_linked(context):
+            sp = spotify_connector(context)
+            results = sp.search(query, types=["track"], limit=1)
+            items = ((results.get("tracks") or {}).get("items") or [])
+            if items:
+                top = items[0]
+                uri = str(top.get("uri") or
+                          f"spotify:track:{top.get('id', '')}")
+                if uri and uri != "spotify:track:":
+                    return uri
+    except Exception:  # noqa: BLE001 - search is best-effort
+        pass
+    # 3. SoundCloud search (keyless, auto client_id)
     try:
         from ...connectors import create_connector
         from ...accounts.vault import CredentialVault
@@ -281,7 +373,15 @@ def _resolve_play_title(context: Any, title: str) -> str:
                 return url
     except Exception:  # noqa: BLE001 - search is best-effort
         pass
-    # 3. give up honestly — the player reports the failure
+    # 4. YouTube search (keyless via yt-dlp; skipped when not installed)
+    try:
+        from ...media.playback import PlaybackEngine
+        video_id = PlaybackEngine._youtube_search_id(query)
+        if video_id:
+            return PlaybackEngine._youtube_watch_url(video_id)
+    except Exception:  # noqa: BLE001 - search is best-effort
+        pass
+    # 5. give up honestly — the player reports the failure
     return query
 
     def _control_video(self, tail: str) -> str:
