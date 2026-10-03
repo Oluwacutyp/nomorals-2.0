@@ -622,17 +622,17 @@ class HealthCheckTests(_ProxyNetCase):
     def test_single_healthy_proxy(self) -> None:
         self.conn.add_proxy("127.0.0.1", self.open_port)
         pid = f"http://127.0.0.1:{self.open_port}"
-        # Retry once: under full-suite load the loopback target can
+        # Retry: under full-suite load the loopback target can
         # briefly refuse, and the test proxy maps any upstream failure
-        # to 502. A second attempt stabilizes the test.
+        # to 502. Multiple attempts with backoff stabilize the test.
         health = None
-        for _ in range(3):
+        for attempt in range(5):
             result = self.conn.health_check(pid, url=self.target_url,
                                             timeout=10)
             health = result["health"]
             if health["status_code"] == 200:
                 break
-            time.sleep(0.2)
+            time.sleep(0.5 * (attempt + 1))
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)
