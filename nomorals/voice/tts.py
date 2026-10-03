@@ -486,7 +486,7 @@ class XTTSBackend:
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
                    *, instruct: str = "") -> Any:
         if voice:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
         # XTTS averages the speaker embedding over several reference
         # clips when given a list — multi-sample voices blend here.
         wavs = voice.reference_audios if voice else []
@@ -613,7 +613,7 @@ class CosyVoiceBackend:
         ref = voice.reference_audio_path if voice else None
         if ref:
             if voice is not None:
-                voice.validate_for_cloning()
+                voice.audit_clone(self.name)
             prompt_text = (voice.prompt_text if voice else "").strip()
             if not prompt_text:
                 raise ValueError(
@@ -663,7 +663,7 @@ class DiaBackend:
         ref = voice.reference_audio_path if voice else None
         if ref:
             if voice is not None:
-                voice.validate_for_cloning()
+                voice.audit_clone(self.name)
             try:
                 out = self.model.generate(text, audio_prompt=ref)
             except TypeError:
@@ -715,7 +715,7 @@ class OrpheusBackend:
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
                    *, instruct: str = "") -> Any:
         if voice is not None:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
         voice_id = (voice.preset_id if voice and voice.preset_id
                     else "tara")
         # generate_speech yields 16-bit mono PCM chunks at 24kHz
@@ -819,7 +819,7 @@ class HFEndpointBackend:
         if instruct:
             params["instruct"] = instruct
         if voice is not None:
-            voice.validate_for_cloning()
+            voice.audit_clone(self.name)
             if voice.preset_id:
                 params["speaker"] = voice.preset_id
             if voice.language:

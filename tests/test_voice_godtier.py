@@ -323,8 +323,7 @@ class VoiceCatalogueTests(unittest.TestCase):
     def test_clone_registers_profile_and_catalogue(self) -> None:
         from nomorals.voice import catalogue as catmod
         voice = self.cat.clone("narrator", self.ref,
-                               transcript="hello world",
-                               consent_confirmed=True)
+                               transcript="hello world")
         self.assertEqual("narrator", voice.name)
         profile = self.cat.library.get("narrator")
         self.assertIsNotNone(profile)
@@ -332,33 +331,25 @@ class VoiceCatalogueTests(unittest.TestCase):
         self.assertTrue(os.path.exists(
             os.path.join(self.tmp.name, "narrator.wav")))
 
-    def test_clone_without_consent_cannot_synthesize(self) -> None:
-        # Registration is allowed; the gate fires at synthesis time on
-        # cloning backends (VoiceProfile.validate_for_cloning).
+    def test_clone_without_consent_synthesizes(self) -> None:
+        # No consent gate: cloning works, audit-logged.
         _install_hf_stub()
         self.addCleanup(sys.modules.pop, "huggingface_hub", None)
         from nomorals.voice.tts import VoiceProfile
-        voice = self.cat.clone("noconsent", self.ref,
-                               consent_confirmed=False)
+        voice = self.cat.clone("noconsent", self.ref)
         profile = self.cat.library.get("noconsent")
         self.assertIsNotNone(profile)
         backend = HFEndpointBackend(model="x")
-        with self.assertRaises(PermissionError):
-            backend.synthesize("hello", profile)
-        # …but the consented twin speaks fine
-        ok_profile = VoiceProfile(
-            name="yesconsent", reference_audio_path=self.ref,
-            consent_confirmed=True)
-        out = backend.synthesize("hello", ok_profile)
+        out = backend.synthesize("hello", profile)
         self.assertTrue(len(out) > 0)
 
     def test_invalid_name_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            self.cat.clone("../evil", self.ref, consent_confirmed=True)
+            self.cat.clone("../evil", self.ref)
 
     def test_active_and_per_chat_switching(self) -> None:
-        self.cat.clone("a", self.ref, consent_confirmed=True)
-        self.cat.clone("b", self.ref, consent_confirmed=True)
+        self.cat.clone("a", self.ref)
+        self.cat.clone("b", self.ref)
         self.cat.set_active("a")
         self.assertEqual("a", self.cat.active_for_chat("chat:x").name)
         self.cat.set_chat_voice("chat:x", "b")
@@ -376,7 +367,7 @@ class VoiceCatalogueTests(unittest.TestCase):
 
     def test_persistence_roundtrip(self) -> None:
         from nomorals.voice.catalogue import default_catalogue
-        self.cat.clone("keeper", self.ref, consent_confirmed=True,
+        self.cat.clone("keeper", self.ref,
                        description="kept")
         self.cat.set_active("keeper")
         self.cat.set_chat_voice("chat:z", "keeper")
@@ -386,14 +377,14 @@ class VoiceCatalogueTests(unittest.TestCase):
         self.assertEqual("kept", cat2.get("keeper").description)
 
     def test_remove_cleans_overrides(self) -> None:
-        self.cat.clone("temp", self.ref, consent_confirmed=True)
+        self.cat.clone("temp", self.ref)
         self.cat.set_chat_voice("chat:q", "temp")
         self.assertTrue(self.cat.remove("temp"))
         self.assertNotIn("chat:q", self.cat.chat_overrides)
         self.assertFalse(self.cat.remove("temp"))
 
     def test_resolve_backend_and_profile(self) -> None:
-        self.cat.clone("v1", self.ref, consent_confirmed=True,
+        self.cat.clone("v1", self.ref,
                        backend="fish")
         self.cat.set_active("v1")
         profile, backend = self.cat.resolve("any-chat")
@@ -446,8 +437,8 @@ class ControlVoiceDispatchTests(unittest.TestCase):
     def test_list_shows_active_and_chat_override(self) -> None:
         from nomorals.voice.catalogue import default_catalogue
         cat = default_catalogue()
-        cat.clone("n1", self.ref, consent_confirmed=True)
-        cat.clone("n2", self.ref, consent_confirmed=True)
+        cat.clone("n1", self.ref)
+        cat.clone("n2", self.ref)
         self.rt._control_voice("use n2", "chat:x")
         reply = self.rt._control_voice("list", "chat:x")
         self.assertIn("n1", reply)
@@ -456,7 +447,7 @@ class ControlVoiceDispatchTests(unittest.TestCase):
 
     def test_rm_flow(self) -> None:
         from nomorals.voice.catalogue import default_catalogue
-        default_catalogue().clone("bye", self.ref, consent_confirmed=True)
+        default_catalogue().clone("bye", self.ref)
         self.assertIn("removed", self.rt._control_voice("rm bye", "chat:x"))
         self.assertIn("unknown voice",
                       self.rt._control_voice("rm bye", "chat:x"))

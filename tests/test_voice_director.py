@@ -156,23 +156,21 @@ class TestCosyVoiceBackend(unittest.TestCase):
         self.assertEqual(self.calls["instruct"][2], "Speak in a happy tone.")
         self.assertEqual(len(audio), 2205)
 
-    def test_zero_shot_cloning_needs_consent(self):
+    def test_zero_shot_cloning_no_consent_needed(self):
+        # No consent gate: cloning works, audit-logged.
         from nomorals.voice.tts import VoiceProfile
 
         backend = self._backend()
         voice = VoiceProfile(name="me", reference_audio_path="/tmp/me.wav",
-                             prompt_text="hello there",
-                             consent_confirmed=False)
-        with self.assertRaises(PermissionError):
-            backend.synthesize("hi", voice)
+                             prompt_text="hello there")
+        backend.synthesize("hi", voice)
 
     def test_zero_shot_cloning(self):
         from nomorals.voice.tts import VoiceProfile
 
         backend = self._backend()
         voice = VoiceProfile(name="me", reference_audio_path="/tmp/me.wav",
-                             prompt_text="hello there",
-                             consent_confirmed=True)
+                             prompt_text="hello there")
         backend.synthesize("hi there", voice)
         text, prompt_text, prompt_wav = self.calls["zero_shot"]
         self.assertEqual(text, "hi there")
@@ -183,8 +181,7 @@ class TestCosyVoiceBackend(unittest.TestCase):
         from nomorals.voice.tts import VoiceProfile
 
         backend = self._backend()
-        voice = VoiceProfile(name="me", reference_audio_path="/tmp/me.wav",
-                             consent_confirmed=True)
+        voice = VoiceProfile(name="me", reference_audio_path="/tmp/me.wav")
         with self.assertRaises(ValueError):
             backend.synthesize("hi", voice)
 

@@ -27,15 +27,13 @@ def _get_manager() -> Any:
 
 
 def register(registry: Any) -> None:
-    from .registry import Capability
-
     @registry.register(
         "side_chat",
         description=(
             "Manage persistent side conversation threads. Actions: create, "
             "list, history, archive, delete, search."
         ),
-        capability=Capability.MEMORY,
+        capability="memory",
         parameters={
             "action": "str — create|list|history|archive|delete|search",
             "thread_id": "str — thread id (history/archive/delete)",

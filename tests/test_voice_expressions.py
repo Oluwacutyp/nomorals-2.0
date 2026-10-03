@@ -289,17 +289,17 @@ class BackendPlumbingTest(unittest.TestCase):
             OrpheusBackend()
         self.assertIn("orpheus-speech", str(ctx.exception))
 
-    def test_orpheus_consent_gate(self):
+    def test_orpheus_no_consent_gate(self):
+        # Consent gate removed per audit: cloning works, audit-logged.
         _stub_module(
             "orpheus_tts",
             OrpheusModel=lambda model_name: types.SimpleNamespace(
                 generate_speech=lambda prompt, voice: [b"\x00\x01"]))
         from nomorals.voice.tts import OrpheusBackend
         backend = OrpheusBackend()
-        voice = VoiceProfile(name="v", reference_audio_path="/tmp/x.wav",
-                             consent_confirmed=False)
-        with self.assertRaises(PermissionError):
-            backend.synthesize("<laugh> hi", voice)
+        voice = VoiceProfile(name="v", reference_audio_path="/tmp/x.wav")
+        # Should NOT raise — no consent gate anymore
+        backend.synthesize("<laugh> hi", voice)
 
     def test_orpheus_synthesize_decodes_pcm(self):
         import struct as _struct
@@ -369,8 +369,7 @@ class MultiSampleCloningTest(unittest.TestCase):
         self._stub_xtts(captured)
         from nomorals.voice.tts import XTTSBackend
         backend = XTTSBackend()
-        voice = VoiceProfile(name="v", reference_audio_path="/tmp/a.wav",
-                             consent_confirmed=True)
+        voice = VoiceProfile(name="v", reference_audio_path="/tmp/a.wav")
         backend.synthesize("hi", voice)
         self.assertEqual(captured["speaker_wav"], "/tmp/a.wav")
 
@@ -380,8 +379,7 @@ class MultiSampleCloningTest(unittest.TestCase):
         from nomorals.voice.tts import XTTSBackend
         backend = XTTSBackend()
         voice = VoiceProfile(name="v", reference_audio_path="/tmp/a.wav",
-                             extra_samples=["/tmp/b.wav", "/tmp/c.wav"],
-                             consent_confirmed=True)
+                             extra_samples=["/tmp/b.wav", "/tmp/c.wav"])
         backend.synthesize("hi", voice)
         self.assertEqual(captured["speaker_wav"],
                          ["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"])
@@ -402,7 +400,7 @@ class VoiceLibrarySamplesTest(unittest.TestCase):
         lib = VoiceLibrary(tmp)
         src = os.path.join(tmp, "src.wav")
         write_wav(src, [0.0] * 240, 24000)
-        lib.upload_voice("me", src, consent_confirmed=True)
+        lib.upload_voice("me", src)
         lib.add_sample("me", src)
         lib.set_transcript("me", "hello world")
         # reload from disk

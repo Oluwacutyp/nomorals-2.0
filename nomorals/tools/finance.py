@@ -21,8 +21,6 @@ def _expert_class() -> Any:
 
 
 def register(registry: Any) -> None:
-    from .registry import Capability
-
     @registry.register(
         "finance_analyze",
         description=(
@@ -30,7 +28,7 @@ def register(registry: Any) -> None:
             "Args: symbol (e.g. BTC/USDT), market (crypto|stock|forex), "
             "timeframe (e.g. 1h, 1d)."
         ),
-        capability=Capability.NETWORK,
+        capability="network",
         parameters={
             "symbol": "str — trading symbol",
             "market": "str — crypto|stock|forex (default crypto)",
@@ -49,7 +47,7 @@ def register(registry: Any) -> None:
             "Get a trading signal for a symbol (long/short/neutral with "
             "confidence). Args: symbol, market, timeframe."
         ),
-        capability=Capability.NETWORK,
+        capability="network",
         parameters={
             "symbol": "str — crypto|stock|forex (default crypto)",
             "timeframe": "str — bar timeframe (default 1h)",
@@ -67,7 +65,7 @@ def register(registry: Any) -> None:
             "Backtest a strategy on historical data. Args: symbol, market, "
             "timeframe, strategy name."
         ),
-        capability=Capability.NETWORK,
+        capability="network",
         parameters={
             "symbol": "str — trading symbol",
             "market": "str — crypto|stock|forex (default crypto)",
