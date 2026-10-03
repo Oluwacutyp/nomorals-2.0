@@ -40,6 +40,35 @@ MAX_WORDS = 600
 MAX_PER_SOURCE = 3
 #: scheduler job name (idempotent by name)
 BRIEFING_JOB_NAME = "briefing"
+#: avg words assumed per rendered line when sizing adaptive section budgets
+_AVG_WORDS_PER_LINE = 18
+
+
+def adaptive_section_budget(ctx: Any, priorities: list[int]) -> list[int]:
+    """Per-section item budgets that adapt to the briefing, replacing the
+    old hardcoded ``[:8]``-style clips.
+
+    The owner's total word cap (``MAX_WORDS``) is converted to a line
+    budget and split across sections by engagement-adjusted priority —
+    alerts get the most room, self-check the least.  The owner can
+    override everything with the ``max_items_per_section`` briefing pref.
+    Floor/ceiling are anti-runaway safety bounds, not quality knobs.
+    """
+    n = len(priorities)
+    if n == 0:
+        return []
+    pref = _prefs(ctx).get("max_items_per_section")
+    if pref:
+        try:
+            flat = max(2, min(40, int(pref)))
+            return [flat] * n
+        except (TypeError, ValueError):
+            pass
+    slots = MAX_WORDS // _AVG_WORDS_PER_LINE
+    weights = [1.0 / max(1.0, p / 10.0) for p in priorities]
+    total = sum(weights) or 1.0
+    return [max(3, min(15, int(round(w / total * slots))))
+            for w in weights]
 
 
 # ── data ─────────────────────────────────────────────────────────────────
@@ -56,8 +85,9 @@ class BriefingSection:
 
     def render_text(self) -> str:
         head = f"— {self.title} —"
-        body = self.lines or [
-            f"• {i.get('title', '')}" for i in self.items[:8]]
+        # items are pre-clipped to the adaptive section budget by the
+        # composer; no fixed [:N] slice here
+        body = self.lines or [f"• {i.get('title', '')}" for i in self.items]
         return "\n".join([head, *body])
 
     def render_items(self) -> list[dict[str, Any]]:
@@ -128,13 +158,17 @@ def _prefs(context: Any) -> dict[str, Any]:
     """Unified briefing prefs: settings.briefing namespace first, then a
     JSON sidecar next to the workspace dir.  Counts only, no content."""
     out: dict[str, Any] = {"topics": [], "symbols": [],
-                           "pinned_sections": [], "time": "07:00"}
+                           "pinned_sections": [], "time": "07:00",
+                           "max_items_per_section": None}
     bs = _briefing_settings(context)
     if bs is not None and hasattr(bs, "__dict__"):
         for k in out:
             v = getattr(bs, k, None)
             if v:
-                out[k] = v if k == "time" else list(v)
+                if k == "max_items_per_section":
+                    out[k] = v  # scalar owner override, not a list
+                else:
+                    out[k] = v if k == "time" else list(v)
         return out
     try:
         from pathlib import Path
@@ -337,7 +371,7 @@ class OvernightAlertsProvider(_Provider):
             name=self.name, title=self.title, priority=self.priority,
             source="watchers",
             items=items,
-            lines=[f"• {i['title']}" for i in items[:8]])
+            lines=[f"• {i['title']}" for i in items])  # budget applied by composer
 
 
 class CalendarProvider(_Provider):
@@ -352,12 +386,12 @@ class CalendarProvider(_Provider):
         if not events:
             return None
         items = [{"id": f"cal-{n}", "title": e.get("title", ""),
-                  "body": e.get("when", "")} for n, e in enumerate(events[:8])]
+                  "body": e.get("when", "")} for n, e in enumerate(events)]  # budget applied by composer
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="calendar", items=items,
             lines=[f"• {e.get('when', '')} — {e.get('title', '')}"
-                   for e in events[:8]])
+                   for e in events])  # budget applied by composer
 
     def _today(self, ctx: Any) -> list[dict[str, Any]]:
         # try known calendar surfaces; all optional
@@ -469,7 +503,7 @@ class RepoProvider(_Provider):
             name=self.name, title=self.title, priority=self.priority,
             source="watchers:repo",
             items=items,
-            lines=[f"• {i['title']}" for i in items[:8]])
+            lines=[f"• {i['title']}" for i in items])  # budget applied by composer
 
 class NewsProvider(_Provider):
     """Top news FILTERED by the owner's explicit topics (settings list).
@@ -507,7 +541,7 @@ class NewsProvider(_Provider):
                     "source": src})
         if not picked:
             return None
-        picked = picked[:9]
+        # no fixed clip: the composer sizes this section adaptively
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="news",
@@ -538,13 +572,13 @@ class RoomsProvider(_Provider):
         if not dirty and not stale:
             return None
         items, lines = [], []
-        for r in dirty[:5]:
+        for r in dirty:  # budget applied by composer
             items.append({"id": f"room-{r.slug}", "title": r.title,
                           "body": f"dirty — crashed session, needs review "
                                   f"(blockers: {', '.join(r.blockers[:2])})",
                           "slug": r.slug})
             lines.append(f"• ⚠️ {r.title}: crashed session needs review")
-        for r in stale[:5]:
+        for r in stale:  # budget applied by composer
             items.append({"id": f"room-{r.slug}", "title": r.title,
                           "body": "idle > 30 days — archive?",
                           "slug": r.slug})
@@ -668,7 +702,7 @@ class ResearchProvider(_Provider):
             if hits:
                 verb = "implementing" if status == "approved" else "rejected"
                 lines.append(f"• {status}: {len(hits)} ({verb})")
-                for p in hits[:2]:
+                for p in hits:  # budget applied by composer
                     title = str(p.get("title") or p.get("id") or "")
                     lines.append(f"  - {title[:90]}")
         return BriefingSection(
@@ -769,6 +803,7 @@ class BriefingComposer:
                 sections.append(sec)
         sections = self._apply_engagement(ctx, sections)
         sections.sort(key=lambda s: s.priority)
+        self._apply_section_budgets(ctx, sections)
         briefing = Briefing(
             id=new_id("briefing"), date=date, sections=sections,
             generated_at=time.time(), generation_ms=0.0)
@@ -794,6 +829,20 @@ class BriefingComposer:
             if views >= 7 and followups / max(views, 1) < 0.2:
                 s.priority += 50  # sustained low engagement → demoted
         return sections
+
+    # -- adaptive section budgets: the owner's word cap, split by priority --
+    def _apply_section_budgets(self, ctx: Any,
+                               sections: list[BriefingSection]) -> None:
+        """Clip each section to its adaptive item budget (replaces the old
+        fixed ``[:8]``/``[:9]`` clips in the providers).  Busy sections on
+        quiet days can use the room empty sections leave behind."""
+        budgets = adaptive_section_budget(
+            ctx, [s.priority for s in sections])
+        for s, budget in zip(sections, budgets):
+            if len(s.lines) > budget:
+                s.lines = s.lines[:budget]
+            if len(s.items) > budget:
+                s.items = s.items[:budget]
 
     # -- length cap: drop lowest-priority sections first ------------------
     def _enforce_cap(self, briefing: Briefing) -> str:

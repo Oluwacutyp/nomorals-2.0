@@ -165,9 +165,11 @@ class RuntimeSearchMixin:
                 return f"sent {r['slug']} to {parts[2]}:{parts[3]}"
 
             # ── new book ────────────────────────────────────────────────────
-            chapters = 8
+            # chapters: explicit number wins, otherwise inferred from the topic
+            from ...books.forge import infer_chapter_count
+            chapters = 0
             if parts and parts[-1].isdigit():
-                chapters = max(3, min(int(parts[-1]), 16))
+                chapters = max(3, min(int(parts[-1]), 24))
                 topic = " ".join(parts[:-1]).strip()
             else:
                 topic = query
@@ -182,10 +184,12 @@ class RuntimeSearchMixin:
                 self._book_busy.add(slug)
 
             chat = self._ref_from_key(chat_key)
+            chapter_note = (f"{chapters} chapters" if chapters
+                            else "chapters inferred from the topic")
             try:
                 self.gateway.send(
                     chat.platform, chat,
-                    f"✍️ writing “{topic[:70]}” — {chapters} chapters. "
+                    f"✍️ writing “{topic[:70]}” — {chapter_note}. "
                     "research → outline → write → pdf → straight to this chat. "
                     "check progress: /book status " + slug,
                 )

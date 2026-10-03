@@ -22,6 +22,7 @@ from ...core.http import HttpClient
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
 from ...core.policy import Capability
+from ...search.adaptive import adaptive_result_limit
 from ...tools.web import RobotsCache, html_to_text
 from ..power import power_mode_for
 from . import curate, summarize as summarize_mod
@@ -105,12 +106,20 @@ class SearchEngine:
         self._robots = RobotsCache()
 
     # ── primitives ──────────────────────────────────────────────────────────
-    def search(self, query: str, max_results: int = 8, freshness: str = "") -> list[dict[str, str]]:
-        """Rank results from the keyless engine chain (web_search tool)."""
+    def search(self, query: str, max_results: int | None = None,
+               freshness: str = "") -> list[dict[str, str]]:
+        """Rank results from the keyless engine chain (web_search tool).
+
+        ``max_results`` defaults to an adaptive count inferred from the
+        query (see :mod:`nomorals.search.adaptive`): short factoid
+        queries get fewer hits, broad research questions get more.  An
+        explicit value always wins.
+        """
+        n = adaptive_result_limit(query) if max_results is None else max_results
         if self.context is None or getattr(self.context, "tools", None) is None:
             raise ToolError("search needs the tool registry (build the context with tools)")
         outcome = self.context.tools.call(
-            "web_search", query=query, max_results=max_results, freshness=freshness,
+            "web_search", query=query, max_results=n, freshness=freshness,
         )
         if not outcome.ok:
             raise ToolError(f"search failed: {outcome.error.message if outcome.error else 'unknown'}")

@@ -13,6 +13,7 @@ book and every chapter live on disk.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,146 @@ _log = get_logger(__name__)
 __all__ = ["BookForge"]
 
 _NOTES_CAP = 16000
+
+#: words that signal the user pasted a raw request instead of a title
+_REQUEST_PREFIXES = (
+    "write me a ", "write me an ", "write a ", "write an ",
+    "make me a ", "make me an ", "create a ", "create me a ",
+    "please write ", "please make ", "can you write ", "can you make ",
+    "i want a ", "i need a ", "give me a ",
+)
+
+#: genre hints → (min_chapters, max_chapters) for dynamic inference
+_GENRE_CHAPTER_HINTS = (
+    (("novel", "saga", "epic", "trilogy", "memoir", "autobiography"), (12, 24)),
+    (("story", "tale", "fable", "novella"), (6, 14)),
+    (("guide", "handbook", "manual", "course", "textbook"), (8, 16)),
+    (("essay", "pamphlet", "short", "brief", "quick"), (3, 6)),
+    (("poem", "poetry", "collection"), (8, 20)),
+)
+
+
+def clean_title(topic: str, context: Any = None) -> str:
+    """Turn a raw user request into a real book title.
+
+    "Write me a story or book to feel better my girlfriend has been acting
+    strange..." → "When She's Healing: A Partner's Guide Through Recovery"
+    """
+    raw = (topic or "").strip()
+    if not raw:
+        return "Untitled"
+    # model path: a real title from the live model
+    router = getattr(context, "router", None) if context is not None else None
+    if router is not None:
+        try:
+            from ..llm.base import Message, SamplingParams
+            response = router.chat(
+                [Message.system(
+                    "You are a book editor. Reply with ONLY a book title — "
+                    "no quotes, no explanation, no subtitle unless essential."),
+                 Message.user(
+                     f"Give this book a strong, specific title (max 8 words). "
+                     f"The book is about: {raw[:400]}")],
+                SamplingParams(temperature=0.5, max_tokens=40),
+            )
+            title = (getattr(response, "text", "") or "").strip().strip("\"'")
+            if response.ok and 3 <= len(title) <= 90 and "write me" not in title.lower():
+                return title
+        except Exception:  # noqa: BLE001 - heuristic fallback below
+            pass
+    # heuristic: strip request prefixes, take the core phrase, title-case it
+    lowered = raw.lower()
+    for prefix in _REQUEST_PREFIXES:
+        if lowered.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            lowered = raw.lower()
+            break
+    # strip leading medium words ("a story or book", "a book", "an essay", ...)
+    for medium in ("a story or book", "a book or story", "story or book",
+                   "book or story", "a story", "a book", "story", "book",
+                   "an essay", "essay", "a novel", "novel", "a guide", "guide",
+                   "a poem", "poem", "a memoir", "memoir"):
+        if lowered.startswith(medium):
+            raw = raw[len(medium):].strip()
+            lowered = raw.lower()
+            break
+    # drop emotional-framing clauses ("to feel better", "to cheer me up", ...)
+    raw = re.sub(r"\bto feel (better|good|happier)\b,?\s*", "",
+                 raw, flags=re.IGNORECASE).strip(" ,")
+    lowered = raw.lower()
+    # strip dangling topic introducers left behind ("about X", "on X")
+    for intro in ("about ", "on ", "for "):
+        if lowered.startswith(intro):
+            raw = raw[len(intro):].strip()
+            lowered = raw.lower()
+            break
+    # cut trailing rambling: keep up to the first sentence-ish boundary
+    # after a reasonable length, or the whole thing if short
+    core = re.split(r"[.!?]\s", raw, maxsplit=1)[0].strip()
+    if len(core) > 90:
+        # keep the most meaningful chunk: prefer the part after about/on/for
+        m = re.search(r"\b(about|on|for)\b(.{10,80})", core, re.IGNORECASE)
+        if m:
+            core = m.group(2).strip(" ,:-")
+        else:
+            core = core[:87].rsplit(" ", 1)[0]
+    core = core.strip(" ,.:-")
+    if not core:
+        return "Untitled"
+    # cap at ~8 words for a real title feel — never end on a dangling word
+    _DANGLING = {"a", "an", "the", "to", "of", "in", "on", "for", "with",
+                 "and", "or", "has", "have", "had", "is", "was", "be", "been"}
+    words = core.split()
+    if len(words) > 9:
+        cut = words[:9]
+        while len(cut) > 4 and cut[-1].lower().strip(".,") in _DANGLING:
+            cut = cut[:-1]
+        core = " ".join(cut).strip(" ,:-")
+        words = core.split()
+    # title case, but keep small words lowercase mid-title
+    small = {"a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with"}
+    words = core.split()
+    titled = [words[0].capitalize()] + [
+        w if w.lower() in small else w.capitalize() for w in words[1:]]
+    return " ".join(titled)
+
+
+def infer_chapter_count(topic: str, context: Any = None,
+                        *, default: int = 8) -> int:
+    """How many chapters does this book actually need?
+
+    Model-inferred when a live model is answering; otherwise a heuristic
+    based on genre hints and topic complexity.  Never blindly 8.
+    """
+    text = (topic or "").lower()
+    router = getattr(context, "router", None) if context is not None else None
+    if router is not None:
+        try:
+            from ..llm.base import Message, SamplingParams
+            response = router.chat(
+                [Message.system(
+                    "You are a book editor. Reply with ONLY an integer."),
+                 Message.user(
+                     f"How many chapters should a book on this topic have? "
+                     f"Short guide: 4-6. Standard book: 8-12. Novel/memoir: "
+                     f"14-20. Reply with just the number.\nTopic: {topic[:300]}")],
+                SamplingParams(temperature=0.2, max_tokens=8),
+            )
+            n = int(re.search(r"\d+", getattr(response, "text", "") or "").group())
+            if response.ok and 3 <= n <= 24:
+                return n
+        except Exception:  # noqa: BLE001 - heuristic fallback below
+            pass
+    # heuristic fallback
+    for keywords, (lo, hi) in _GENRE_CHAPTER_HINTS:
+        if any(k in text for k in keywords):
+            # scale within the band by topic richness
+            richness = len(set(re.findall(r"[a-z]{4,}", text)))
+            frac = min(1.0, richness / 25.0)
+            return lo + round((hi - lo) * frac)
+    # generic: 6 + 1 per 4 distinct content words, clamped to 5..12
+    richness = len(set(re.findall(r"[a-z]{4,}", text)))
+    return max(5, min(12, 6 + richness // 4))
 
 
 class BookForge:
@@ -113,31 +254,39 @@ class BookForge:
         author: str = "",
         genre: str = "",
         description: str = "",
-        chapters: int = 8,
-        words_per_chapter: int = 1200,
+        chapters: int = 0,
+        words_per_chapter: int = 0,
         research: bool = True,
         notes: str = "",
     ) -> Book:
         topic = (topic or "").strip()
         if not topic:
             raise BookError("a book needs a topic")
-        slug = slugify(title or topic)
+        # dynamic: infer chapter count + clean title when not given
+        n_chapters = int(chapters) if chapters else infer_chapter_count(
+            topic, self.context)
+        clean = (title or "").strip() or clean_title(topic, self.context)
+        slug = slugify(clean or topic)
         if self._json_path(slug).exists():
             raise BookError(
                 f"book {slug!r} already exists — load it (nm book write {slug}) or "
                 "pass a different title"
             )
+        # dynamic: chapter length scales with book size (short books get
+        # meatier chapters; long books get tighter ones)
+        wpc = int(words_per_chapter) if words_per_chapter else (
+            1500 if n_chapters <= 6 else (1000 if n_chapters <= 12 else 800))
         book = Book(
-            topic=topic, slug=slug, title=title.strip(), subtitle=subtitle.strip(),
+            topic=topic, slug=slug, title=clean, subtitle=subtitle.strip(),
             author=author.strip(), genre=genre.strip(), description=description.strip(),
-            target_words=max(300, int(words_per_chapter)),
+            target_words=max(300, wpc),
         )
         book._context = self.context  # type: ignore[attr-defined]
         if notes.strip():
             book.notes = notes.strip()[:_NOTES_CAP]
         elif research:
             book.notes = self.research_topic(topic)
-        outline_mod.make_outline(book, n_chapters=max(3, min(int(chapters), 16)),
+        outline_mod.make_outline(book, n_chapters=n_chapters,
                                  context=self.context)
         self.save(book)
         _log.info("book created: %s (%d chapters planned)", slug, len(book.chapters))
@@ -175,7 +324,8 @@ class BookForge:
         """(Re)generate the outline for an existing book (keeps written chapters
         only when the chapter count still fits; otherwise re-plans from zero)."""
         book = self.load(slug)
-        outline_mod.make_outline(book, n_chapters=max(3, len(book.chapters) or 8),
+        n = len(book.chapters) or infer_chapter_count(book.topic, self.context)
+        outline_mod.make_outline(book, n_chapters=n,
                                  context=self.context)
         self.save(book)
         return book
@@ -298,8 +448,8 @@ class BookForge:
         topic: str,
         *,
         title: str = "",
-        chapters: int = 8,
-        words_per_chapter: int = 1200,
+        chapters: int = 0,
+        words_per_chapter: int = 0,
         author: str = "",
         genre: str = "",
         research: bool = True,

@@ -13,6 +13,7 @@ from typing import Any
 from ..base import Agent
 from ...core.tasks import Task
 from ...core.policy import Capability
+from ...search.adaptive import adaptive_result_limit
 # Prompt 02: the role specs live in ..role_specs (this name is a package, so
 # the spec module could not be called roles.py); re-exported here so the
 # whole swarm API is importable from nomorals.agents.roles.
@@ -84,7 +85,9 @@ class ResearchAgent(RoleAgent):
     def work(self, task_input: Any) -> Any:
         goal = self._task_goal(task_input)
         self.check_cancelled()
-        search = self._call_tool("web_search", query=goal, max_results=6)
+        # adaptive breadth: the goal's own phrasing sets the result count
+        search = self._call_tool("web_search", query=goal,
+                                 max_results=adaptive_result_limit(goal))
         pages = []
         for hit in (search.get("results") or [])[:4]:
             self.check_cancelled()

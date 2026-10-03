@@ -33,8 +33,8 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
             return 2
         book = forge.create(
             topic,
-            chapters=int(getattr(args, "chapters", 5) or 5),
-            words_per_chapter=int(getattr(args, "words", 2000) or 2000),
+            chapters=int(getattr(args, "chapters", 0) or 0),
+            words_per_chapter=int(getattr(args, "words", 0) or 0),
             research=not getattr(args, "no_research", False),
         )
         _emit(args, {"slug": book.slug, "title": book.display_title,
@@ -56,8 +56,8 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
 
         result = forge.run(
             topic,
-            chapters=int(getattr(args, "chapters", 5) or 5),
-            words_per_chapter=int(getattr(args, "words", 2000) or 2000),
+            chapters=int(getattr(args, "chapters", 0) or 0),
+            words_per_chapter=int(getattr(args, "words", 0) or 0),
             research=not getattr(args, "no_research", False),
             on_chapter=_progress,
         )
