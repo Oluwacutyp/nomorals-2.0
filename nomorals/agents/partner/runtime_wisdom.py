@@ -26,11 +26,11 @@ class RuntimeWisdomMixin:
     # ── chat practice sessions (one manager per runtime) ──────────────
     def _wisdom_chat_manager(self):
         """Lazily-built :class:`WisdomChatManager` for this runtime."""
-        mgr = self.__dict__.get("_wisdom_chat_manager")
+        mgr = self.__dict__.get("_wisdom_chat_manager_inst")
         if mgr is None:
             from ...wisdom.chat_session import WisdomChatManager
             mgr = WisdomChatManager(self.context)
-            self.__dict__["_wisdom_chat_manager"] = mgr
+            self.__dict__["_wisdom_chat_manager_inst"] = mgr
         return mgr
 
     def _wisdom_incoming(self, chat_key: str, text: str):
