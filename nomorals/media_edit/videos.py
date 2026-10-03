@@ -60,11 +60,15 @@ def has_libass() -> bool:
 # time parsing / progress
 # ---------------------------------------------------------------------------
 
-_TIME_RE = re.compile(r"^(?:(\d+):)?(?:(\d{1,2}):)?(\d{1,2}(?:\.\d+)?)$")
+_TIME_RE = re.compile(r"^(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?)(?::(\d+(?:\.\d+)?))?)?$")
 
 
 def parse_time(value: str | float | int) -> float:
-    """'90' -> 90.0, '1:30' -> 90.0, '0:01:30.5' -> 90.5, 30 -> 30.0."""
+    """'90' -> 90.0, '1:30' -> 90.0, '0:01:30.5' -> 90.5, 30 -> 30.0.
+
+    Colon forms are interpreted by component count: 'M:SS' is
+    minutes:seconds, 'H:MM:SS' is hours:minutes:seconds.
+    """
     if isinstance(value, (int, float)):
         if value < 0:
             raise MediaEditError(f"negative timestamp {value}")
@@ -85,9 +89,19 @@ def parse_time(value: str | float | int) -> float:
             return secs
     m = _TIME_RE.match(text)
     if m:
-        hours = float(m.group(1) or 0)
-        minutes = float(m.group(2) or 0)
-        seconds = float(m.group(3))
+        parts = [float(p) for p in m.groups() if p is not None]
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            if minutes >= 60 or seconds >= 60:
+                raise MediaEditError(
+                    f"bad timestamp {value!r}: minutes/seconds must be < 60")
+        elif len(parts) == 2:
+            hours, minutes, seconds = 0.0, parts[0], parts[1]
+            if seconds >= 60:
+                raise MediaEditError(
+                    f"bad timestamp {value!r}: seconds must be < 60")
+        else:
+            hours, minutes, seconds = 0.0, 0.0, parts[0]
         return hours * 3600 + minutes * 60 + seconds
     raise MediaEditError(
         f"could not parse timestamp {value!r}; use seconds, 'MM:SS', or 'HH:MM:SS'")
@@ -510,6 +524,14 @@ def make_gif(src: str | os.PathLike[str], *,
             "seconds": run["seconds"], "fps": fps, "width": width}
 
 
+def _escape_filter_path(p: Path) -> str:
+    """Escape a file path for use inside an ffmpeg filter argument."""
+    text = str(p.resolve())
+    for ch in ("\\", "'", ":", ",", "[", "]", ";"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def burn_subtitles(src: str | os.PathLike[str],
                    subtitles: str | os.PathLike[str], *,
                    out_dir: str | os.PathLike[str] | None = None,
@@ -530,7 +552,8 @@ def burn_subtitles(src: str | os.PathLike[str],
     _check_size(p)
     out = _out(p, Path(out_dir) if out_dir else None, suffix, ext)
     info = video_probe(p)
-    run = run_ffmpeg(["-i", str(p), "-vf", f"subtitles={sub.resolve()}",
+    run = run_ffmpeg(["-i", str(p), "-vf",
+                      f"subtitles={_escape_filter_path(sub)}",
                       "-c:a", "copy", str(out)],
                      timeout=timeout, progress_cb=progress_cb,
                      duration=info.get("duration"))

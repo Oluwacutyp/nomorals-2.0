@@ -33,8 +33,7 @@ from typing import Any
 
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
-from ..core.midi import (MidiBuilder, generate_chord_bass, generate_melody,
-                         note_midi)
+from ..core.midi import (MidiBuilder, generate_chord_bass, generate_melody)
 from ..core.policy import Capability
 
 _log = get_logger(__name__)
@@ -569,17 +568,20 @@ class MusicCreator:
 
     def _model_lyrics(self, section: str, topic: str,
                       spec: StyleSpec) -> list[str]:
+        from ..llm.base import Message, SamplingParams
+
         router = self.context.router
         n = 8 if section == "verse" else 4
         prompt = (
             f"Write exactly {n} lines of {section} lyrics for a "
-            f"{spec.label} song about: {topic!r}. Style/mood: {spec.mood}. "
+            f"{spec.label} song about: {topic!r}. "
+            f"Style/mood: {', '.join(spec.palette)}. "
             "No titles, no labels, no markdown — just the lines, one per "
             "line. Make them rhyme and singable."
         )
         resp = router.chat(
-            [{"role": "user", "content": prompt}],
-            params={"temperature": 0.9})
+            [Message.user(prompt)],
+            SamplingParams(temperature=0.9))
         text = (getattr(resp, "text", "") or "").strip()
         lines = [ln.strip(" \t-•“”\"'") for ln in text.splitlines()
                  if ln.strip()]

@@ -1167,7 +1167,15 @@ def _segment_durations(segments: list[dict[str, Any]]) -> list[float]:
         e = parse_time(e) if e is not None else full
         if e <= s:
             raise MediaEditError(f"segment end ({e}) must be after start ({s})")
-        speed = float(seg.get("speed", 1.0) or 1.0)
+        raw_speed = seg.get("speed", 1.0)
+        try:
+            speed = float(raw_speed if raw_speed is not None else 1.0)
+        except (TypeError, ValueError):
+            raise MediaEditError(
+                f"bad segment speed {raw_speed!r}: must be a number") from None
+        if speed <= 0:
+            raise MediaEditError(
+                f"segment speed must be positive, got {raw_speed!r}")
         durs.append((e - s) / speed)
     return durs
 
@@ -1187,7 +1195,10 @@ def compile_video(segments: list[dict[str, Any]], *,
 
     Pure (no ffmpeg run): safe to unit-test. Returns {"inputs": [...],
     "filter_complex": str, "maps": [...], "extra_args": [...],
-    "duration": float, "needs_chapters_file": path|None}.
+    "duration": float, "preset": str, "preset_params": dict,
+    "v_label": str, "a_label": str,
+    "loop_inputs": {input_index: seconds} (still images needing -loop),
+    "chapters_file": path|None}.
     """
     from .videos import parse_time, video_probe
     if not segments:
@@ -1203,12 +1214,18 @@ def compile_video(segments: list[dict[str, Any]], *,
     inputs: list[str] = []
     fc: list[str] = []
     seg_durs = _segment_durations(segments)
+    # Still-image inputs (slideshow stills, title card, lower thirds) must
+    # be looped at render time — a single PNG frame would starve the
+    # segment filters. Maps input index -> loop duration in seconds.
+    loop_inputs: dict[int, float] = {}
+    full_timeline_loop: list[int] = []  # filled once total_dur is known
 
     # ---- per-segment normalization -------------------------------------
     for i, seg in enumerate(segments):
         inputs.append(str(seg["path"]))
         if seg.get("kind") == "image":
             dur = seg_durs[i]
+            loop_inputs[i] = dur
             fc.append(
                 f"[{i}:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
                 f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,"
@@ -1247,6 +1264,7 @@ def compile_video(segments: list[dict[str, Any]], *,
         _render_title_card(t_path, title)
         t_idx = len(inputs)
         inputs.append(str(t_path))
+        full_timeline_loop.append(t_idx)
         fade = min(0.5, t_dur / 4)
         fc.append(
             f"[{t_idx}:v]scale=1920:1080,fps=30,format=yuv420p,"
@@ -1294,6 +1312,7 @@ def compile_video(segments: list[dict[str, Any]], *,
         _render_lower_third(lt_path, lt)
         lt_idx = len(inputs)
         inputs.append(str(lt_path))
+        full_timeline_loop.append(lt_idx)
         start = float(lt.get("start", 1.0))
         dur = float(lt.get("duration", 4.0))
         fade = min(0.4, dur / 4)
@@ -1310,9 +1329,9 @@ def compile_video(segments: list[dict[str, Any]], *,
     # ---- timeline speed ramps -------------------------------------------
     for k, ramp in enumerate(speed_ramps):
         factor = float(ramp.get("factor", 1.0))
-        rs = float(ramp.get("start", 0.0))
-        re_ = ramp.get("end")
-        re_ = float(re_) if re_ is not None else total_dur
+        rs = parse_time(ramp.get("start") or 0)
+        re_raw = ramp.get("end")
+        re_ = parse_time(re_raw) if re_raw is not None else total_dur
         if not 0 <= rs < re_ <= total_dur:
             raise MediaEditError(
                 f"speed ramp [{rs}, {re_}] outside timeline 0..{total_dur:.1f}")
@@ -1338,8 +1357,9 @@ def compile_video(segments: list[dict[str, Any]], *,
     # ---- timeline trim ----------------------------------------------------
     if timeline_trim:
         ts, te = timeline_trim
-        ts = float(ts or 0.0)
-        te = float(te) if te is not None else total_dur
+        # EditStudio.cut() accepts "MM:SS" strings as well as seconds
+        ts = parse_time(ts) if ts is not None else 0.0
+        te = parse_time(te) if te is not None else total_dur
         if not 0 <= ts < te <= total_dur + 1e-6:
             raise MediaEditError("timeline trim out of range")
         fc.append(f"{v_out}trim={ts:.3f}:{te:.3f},setpts=PTS-STARTPTS[vt2]")
@@ -1365,6 +1385,10 @@ def compile_video(segments: list[dict[str, Any]], *,
                   f"dropout_transition=0[aout]")
         a_out = "[aout]"
 
+    # still-image overlays (title / lower thirds) loop the full timeline
+    for idx in full_timeline_loop:
+        loop_inputs[idx] = total_dur
+
     # ---- export preset ----------------------------------------------------
     preset_name = export if isinstance(export, str) else (export or {}).get("preset", "web-optimized")
     if preset_name not in EXPORT_PRESETS:
@@ -1384,6 +1408,10 @@ def compile_video(segments: list[dict[str, Any]], *,
                       f"decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
                       f"setsar=1[vpre]")
         v_final = "[vpre]"
+    # canonical final video label: every consumer (maps, gif path) uses
+    # this instead of assuming a preset-specific label exists
+    fc.append(f"{v_final}null[vout]")
+    v_final = "[vout]"
     maps = ["-map", v_final, "-map", a_final]
     extra = ["-shortest"] if duck else []
     chapters_file = None
@@ -1401,6 +1429,9 @@ def compile_video(segments: list[dict[str, Any]], *,
         "duration": round(total_dur, 3),
         "preset": preset_name,
         "preset_params": preset,
+        "v_label": v_final,
+        "a_label": a_final,
+        "loop_inputs": loop_inputs,
         "chapters_file": str(chapters_file) if chapters_file else None,
     }
 
@@ -1415,16 +1446,16 @@ def render_video_compiled(compiled: dict[str, Any],
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     preset = compiled["preset_params"]
+    loop_inputs = compiled.get("loop_inputs", {})
     args: list[str] = []
     for i, inp in enumerate(compiled["inputs"]):
-        if inp.lower().endswith(".png") and i < len(compiled["inputs"]):
-            # still images (title / lower thirds): loop them for the full
-            # timeline (a single PNG frame would starve fade/overlay filters)
-            if "studio-title" in inp or "studio-lt" in inp:
-                args += ["-loop", "1", "-framerate", "30",
-                         "-t", str(compiled["duration"]), "-i", inp]
-                continue
-        args += ["-i", inp]
+        if i in loop_inputs:
+            # still images (title card / lower thirds / slideshow stills):
+            # loop them so the segment filters never starve for frames
+            args += ["-loop", "1", "-framerate", "30",
+                     "-t", str(loop_inputs[i]), "-i", inp]
+        else:
+            args += ["-i", inp]
     # gif-preview is a special path (palette)
     if compiled["preset"] == "gif-preview":
         return _render_gif_preview(compiled, args, out, timeout=timeout,
@@ -1454,11 +1485,14 @@ def _render_gif_preview(compiled: dict[str, Any], input_args: list[str],
     preset = compiled["preset_params"]
     width = preset.get("width", 480)
     fps = preset.get("fps", 12)
+    v_label = compiled.get("v_label", "[vout]")
+    a_label = compiled.get("a_label", "[aout]")
     vf = (f"{compiled['filter_complex']};"
-          f"[vpre]fps={fps},scale={width}:-2:flags=lanczos,"
-          f"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse")
+          f"{a_label}anullsink;"  # gif has no audio: consume the chain
+          f"{v_label}fps={fps},scale={width}:-2:flags=lanczos,"
+          f"split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse[gout]")
     args = input_args + ["-filter_complex", vf,
-                         "-map", "[vpre]", str(out)]
+                         "-map", "[gout]", str(out)]
     run = run_ffmpeg(args, timeout=min(timeout, 300), progress_cb=progress_cb,
                      duration=compiled["duration"])
     return {"output": str(out), "bytes": out.stat().st_size,

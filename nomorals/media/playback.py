@@ -376,10 +376,25 @@ class PlaybackEngine:
         return self._mpv_ipc(sock_path, command)
 
     # ── non-mpv backends ──────────────────────────────────────────────────
+    def _kill_simple(self) -> None:
+        """Kill the simple-backend player process, if one is tracked.
+
+        Called before starting a new track so the old one never keeps
+        playing underneath (and its pid is never orphaned from state).
+        """
+        pid = int(self._state.get("player_pid", 0) or 0)
+        if pid:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone
+                pass
+            self._state.pop("player_pid", None)
+
     def _simple_start(self, item: dict[str, str]) -> tuple[bool, str]:
         if item["kind"] == "url" and not self.backend.urls:
             return False, (f"{self.backend.name} can't stream URLs — "
                            "install mpv or ffmpeg for that")
+        self._kill_simple()  # never stack a new track over a live one
         if self.backend.name == "aplay":
             cmd = [self.backend.binary, "-q", item["path"]]
         elif self.backend.name == "mpg123":
@@ -449,6 +464,9 @@ class PlaybackEngine:
         self._save_state()
         if self.backend.name == "mpv" and self._mpv_alive():
             self._mpv_transport(["playlist-next"])
+            self._state["playing"] = True
+            self._state["paused"] = False
+            self._save_state()
             return {"status": "next",
                     "current": q[self._state["position"]]["title"]}
         return self._start_at(self._state["position"])
@@ -463,6 +481,9 @@ class PlaybackEngine:
         if self.backend.name == "mpv":
             if self._mpv_alive():
                 self._mpv_transport(["playlist-prev"])
+                self._state["playing"] = True
+                self._state["paused"] = False
+                self._save_state()
                 return {"status": "prev",
                         "current": q[self._state["position"]]["title"]}
         return self._start_at(self._state["position"])
@@ -478,13 +499,7 @@ class PlaybackEngine:
                         break
                     time.sleep(0.1)
             self._state.pop("mpv_sock", None)
-        pid = int(self._state.get("player_pid", 0) or 0)
-        if pid:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):  # noqa: E103 - process already gone
-                pass
-            self._state.pop("player_pid", None)
+        self._kill_simple()
         self._state["playing"] = False
         self._state["paused"] = False
         self._save_state()
@@ -534,15 +549,15 @@ def register(registry: Any) -> None:
         description=(
             "Music playback: queue files/URLs and control the player. "
             "action=add (target[, target2…] via targets, title) | play "
-            "(index) | pause | resume | stop | seek (seconds) | volume "
-            "(0-100) | next | prev | queue | remove (index) | clear | "
-            "status. mpv gives full transport + auto-advance; the queue "
-            "persists across restarts."
+            "(index, -1 = current position) | pause | resume | stop | "
+            "seek (seconds) | volume (0-100) | next | prev | queue | remove "
+            "(index) | clear | status. mpv gives full transport + "
+            "auto-advance; the queue persists across restarts."
         ),
         capability=Capability.FS_READ,
     )
     def player(action: str = "status", target: str = "", targets: str = "",
-               title: str = "", index: int = 0, seconds: float = 0.0,
+               title: str = "", index: int = -1, seconds: float = 0.0,
                level: int = 80) -> dict[str, Any]:
         p = PlaybackEngine(context)
         if action == "add":
@@ -552,7 +567,9 @@ def register(registry: Any) -> None:
                 raise ToolError("player add needs target(s)")
             return p.add(*items, title=title)
         if action == "play":
-            return p.play(int(index) if index else None)
+            # index=-1 (the default) means "current position"; an explicit
+            # 0 must play queue item 0, so the sentinel is < 0, not falsy
+            return p.play(int(index) if int(index) >= 0 else None)
         if action == "pause":
             return p.pause()
         if action == "resume":

@@ -11,7 +11,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 
@@ -355,6 +355,56 @@ def _text_position(img: Any, text: str, font: Any, position: str,
     raise MediaEditError(f"unknown text position {position!r}")
 
 
+# ---------------------------------------------------------------------------
+# object locate hook ("circle the <thing>")
+# ---------------------------------------------------------------------------
+
+#: An object locator maps (image, description) -> (l, t, r, b) box or None.
+#: No locator is bundled (no vision model ships with this package); the
+#: tool layer resolves ``locate`` earlier with its own path-based hook,
+#: and direct engine users wire one here.
+_ObjectLocator = Callable[[Any, str],
+                           "tuple[int, int, int, int] | None"]
+_object_locators: list[_ObjectLocator] = []
+
+
+def register_object_locator(fn: _ObjectLocator) -> None:
+    """Register a vision object-locator for ``locate=`` annotations.
+
+    ``fn(image, description)`` returns an ``(l, t, r, b)`` box or None.
+    Locators run in registration order; the first non-None box wins.
+    """
+    if not callable(fn):
+        raise MediaEditError("object locator must be callable")
+    _object_locators.append(fn)
+
+
+def clear_object_locators() -> None:
+    """Remove all registered object locators (mainly for tests)."""
+    _object_locators.clear()
+
+
+def locate_object(img: Any, query: str) -> tuple[int, int, int, int] | None:
+    """Resolve ``query`` to an (l, t, r, b) box via registered locators.
+
+    Returns None when nothing is registered or no locator matched —
+    callers turn that into a clear MediaEditError, never a silent skip.
+    """
+    for fn in list(_object_locators):
+        try:
+            box = fn(img, query)
+        except Exception as exc:  # noqa: BLE001 - one bad locator
+            _log.warning("object locator %r failed: %s", fn, exc)
+            continue
+        if box:
+            l, t, r, b = (int(v) for v in box)
+            if r > l and b > t:
+                return (l, t, r, b)
+            _log.warning("object locator %r returned degenerate box %r",
+                         fn, box)
+    return None
+
+
 def op_annotate_text(img: Any, text: str, *,
                      position: str = "bottom",
                      font_size: int | None = None,
@@ -375,9 +425,30 @@ def op_annotate_text(img: Any, text: str, *,
 
 def op_annotate_shape(img: Any, shape: str, *,
                       box: tuple[int, int, int, int] | None = None,
+                      locate: str | None = None,
                       outline: str = "red", width: int = 4) -> Any:
     """Draw a rectangle, circle (ellipse), or arrow. ``box`` defaults to a
-    centered box covering the middle third."""
+    centered box covering the middle third.
+
+    ``locate`` names an object ("the login button") instead of a box: it is
+    resolved through a locator registered with
+    :func:`register_object_locator` (a vision model hook — none is bundled).
+    With no locator wired this fails fast with a clear error, never a
+    silent no-op or a TypeError."""
+    if locate is not None:
+        if box is not None:
+            raise MediaEditError("annotate_shape takes box= or locate=, "
+                                 "not both")
+        resolved = locate_object(img, locate)
+        if resolved is None:
+            raise MediaEditError(
+                f"cannot locate {locate!r}: "
+                + ("no object locator is registered — wire one with "
+                   "nomorals.media_edit.images.register_object_locator(), "
+                   "or pass an explicit box= instead."
+                   if not _object_locators else
+                   f"no registered locator found {locate!r} in the image"))
+        box = resolved
     from PIL import ImageDraw
     out = img.copy()
     draw = ImageDraw.Draw(out)
@@ -651,13 +722,25 @@ class WatermarkSpec:
     opacity: float = 0.85
     margin: int = 20
 
+    def apply(self, img: Any) -> Any:
+        """Composite this watermark spec onto ``img`` (pure)."""
+        return op_watermark(img, self.logo_path, position=self.position,
+                            scale=self.scale, opacity=self.opacity,
+                            margin=self.margin)
+
 
 def op_watermark(img: Any, logo: Any, *,
                  position: str = "bottom-right",
                  scale: float = 0.15,
                  opacity: float = 0.85,
                  margin: int = 20) -> Any:
-    """Composite a logo onto the image. ``logo`` is an Image or a path."""
+    """Composite a logo onto the image. ``logo`` is an Image, a path, or a
+    :class:`WatermarkSpec` (whose fields fill any unset kwargs)."""
+    if isinstance(logo, WatermarkSpec):
+        spec = logo
+        logo, position, scale, opacity, margin = (
+            spec.logo_path, spec.position, spec.scale, spec.opacity,
+            spec.margin)
     if isinstance(logo, (str, Path)):
         logo_img = load_image(logo)
     else:
