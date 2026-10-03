@@ -72,7 +72,13 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     with build_context(settings) as context:
-        runtime = PartnerRuntime(context)
+        # One OS Session per chat, across every platform (session_bridge):
+        # the gateway attaches message.meta["os_session_id"] on inbound so
+        # memory, persona, and missions key off the session, not the platform.
+        from nomorals.os.session_bridge import SessionBridge
+
+        bridge = SessionBridge(db=context.db)
+        runtime = PartnerRuntime(context, session_bridge=bridge)
         started = runtime.start()
         print(f"adapters started: {started}", flush=True)
         log.info("adapters started: %s", started)

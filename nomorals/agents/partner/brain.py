@@ -188,13 +188,17 @@ class PartnerBrain:
         """Inbound + outbound in one go (the no-presence fast path)."""
         self._persist_inbound(message)
         if reply_parts:
-            self._persist_outbound(message.chat, reply_parts, model)
+            self._persist_outbound(
+                message.chat, reply_parts, model,
+                session_id=message.meta.get("os_session_id") or message.chat.key)
 
     def _persist_inbound(self, message: ChatMessage) -> None:
         """The user's message — written the moment she READS it, even if the
         reply comes minutes later or not at all."""
         chat = message.chat
         db = self.context.db
+        # Session-scoped conversation id (falls back to chat.key).
+        conv_id = message.meta.get("os_session_id") or chat.key
         title = chat.title or chat.peer or chat.chat_id
         try:
             with db.transaction():
@@ -203,23 +207,25 @@ class PartnerBrain:
                        VALUES (?, ?, 'partner', ?, 0, ?)
                        ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at,
                                                     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE conversations.title END""",
-                    (chat.key, title, chat.platform, time.time()),
+                    (conv_id, title, chat.platform, time.time()),
                 )
                 db.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (ulid_now(), chat.key, "user", message.text, message.sender, "", time.time()),
+                    (ulid_now(), conv_id, "user", message.text, message.sender, "", time.time()),
                 )
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
 
-    def _persist_outbound(self, chat: ChatRef, reply_parts: list[str], model: str) -> None:
+    def _persist_outbound(self, chat: ChatRef, reply_parts: list[str], model: str,
+                          *, session_id: str = "") -> None:
         if not reply_parts:
             return
+        conv_id = session_id or chat.key
         try:
             with self.context.db.transaction():
                 self.context.db.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (ulid_now(), chat.key, "assistant", "\n".join(reply_parts), self.persona.name, model, time.time()),
+                    (ulid_now(), conv_id, "assistant", "\n".join(reply_parts), self.persona.name, model, time.time()),
                 )
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
@@ -283,6 +289,12 @@ class PartnerBrain:
         chat = message.chat
         flags = self._chat_flags(chat)
         is_owner = flags["is_owner"]
+        # OS Session: the gateway attaches message.meta["os_session_id"] when
+        # a SessionBridge is injected at boot. It is the canonical
+        # conversation scope — memory, history, and extraction key off it.
+        # Falls back to chat.key (identical scoping) when no bridge is wired.
+        session_id = message.meta.get("os_session_id") or chat.key
+        message.meta["os_session_id"] = session_id
 
         # 1. Advance time: decay, circadian energy, and the cost of silence.
         self.mood.tick()
@@ -354,6 +366,9 @@ class PartnerBrain:
 
     def _generate_and_persist(self, message: ChatMessage, flags: dict[str, Any]) -> list[str]:
         chat = message.chat
+        # Canonical session scope (set by handle_message; deliver_reply path
+        # ensures it too). Memory, history, and extraction key off this.
+        session_id = message.meta.get("os_session_id") or chat.key
         is_owner = flags["is_owner"]
 
         # Ownership-aware gating: the full version of her lives in the
@@ -380,8 +395,8 @@ class PartnerBrain:
         )
 
         # Generate.
-        history = self._history(chat.key, limit=self.settings.partner.history_window)
-        continuity = () if restricted else self._continuity_lines(chat.key)
+        history = self._history(session_id, limit=self.settings.partner.history_window)
+        continuity = () if restricted else self._continuity_lines(session_id)
         if is_owner:
             digest = self._reasoning_digest(message.text)
             if digest:
@@ -410,13 +425,13 @@ class PartnerBrain:
             note = getattr(bundle, "degraded_note", "") or "provider failover"
             _log.warning("reply to %s served degraded: %s", chat.key, note)
             parts = parts + [f"⏬ {note}"]
-        self._persist_outbound(chat, parts, bundle.model)
+        self._persist_outbound(chat, parts, bundle.model, session_id=session_id)
         self._note_reply(bundle, chat)
         self._log_training_pair(chat, message.text, "\n".join(parts), bundle.model,
                                 self.mood.current().label)
         self.relationship.save(self.context.db)
-        self._maybe_curate(chat.key, is_owner)
-        self._maybe_extract(message, chat.key, is_owner)
+        self._maybe_curate(session_id, is_owner)
+        self._maybe_extract(message, session_id, is_owner)
         return parts
 
     def note_fast_turn(self, message: "ChatMessage", reply_text: str) -> None:
@@ -432,7 +447,9 @@ class PartnerBrain:
             chat = message.chat
             is_owner = self._chat_flags(chat)["is_owner"]
             self._persist_inbound(message)
-            self._persist_outbound(chat, [reply_text], "fast-path")
+            self._persist_outbound(
+                chat, [reply_text], "fast-path",
+                session_id=message.meta.get("os_session_id") or chat.key)
             self._log_training_pair(chat, message.text, reply_text, "fast-path",
                                     self.mood.current().label)
             self.relationship.save(self.context.db)
