@@ -727,7 +727,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_TELEGRAM_BOT_CHATS": "chat.telegram_bot_chats",
     "NM_CHAT_DISCORD_ENABLED": "chat.discord_enabled",
     "NM_CHAT_DISCORD_TOKEN": "chat.discord_token",
-    "NM_CHAT_DISCORD_WEBHOOK": "chat.discord_webhook",
+    "NM_CHAT_DISCORD_WEBHOOK": "social.discord_webhook",
     "NM_CHAT_DISCORD_CHANNELS": "chat.discord_channels",
     "NM_CHAT_WEBHOOK_ENABLED": "chat.webhook_enabled",
     "NM_CHAT_WEBHOOK_HOST": "chat.webhook_host",
