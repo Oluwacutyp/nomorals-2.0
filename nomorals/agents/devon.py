@@ -25,6 +25,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -75,6 +76,7 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ("watch", "re-run an investigation on a schedule in the background (args: task, interval_minutes, passes)"),
     ("mission", "start a durable background mission for long work (args: goal, name)"),
     ("api", "call an external API connector: weather, fx, ip_info, github, wikipedia, http_api (args: name, params)"),
+    ("connector", "Devon's own service integrations: list them, show how to link one, live status (args: action=list|info|status, id e.g. spotify)"),
     ("db_tables", "list every table in the state database with row counts (no args)"),
     ("db_schema", "columns of one table (args: table)"),
     ("db_counts", "largest tables + total (no args)"),
@@ -121,6 +123,12 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ("proxy_schedule", "scheduled proxy re-checks on/off (args: enabled, every_minutes)"),
     ("proxy_rotate", "rotate the working proxy pool across requests: start/stop/status/next with failover+cooldown (args: action, strategy, cooldown_seconds, failover_seconds, max_age_hours)"),
     ("ssh_socks", "SSH server -> local SOCKS5 proxy: start/stop/status/list/urls/remove (args: action, name, host, port, user, password, key, local_port, auto_reconnect)"),
+    # media editing — use these, NEVER raw PIL/OpenCV scripts
+    ("media_edit", "edit an image from plain language: 'make it square', 'rotate 90', 'blur faces', 'caption ...' (args: source, instruction)"),
+    ("media_edit_video", "edit a video from plain language: 'trim the first 30s', 'extract the audio' (args: source, instruction)"),
+    ("media_probe", "probe an image/video file or URL: dimensions, duration, codec, format (args: source)"),
+    ("media_convert", "convert image/video to another format: webp, mp4, ... (args: source, format)"),
+    ("media_capability", "what this machine can do with media right now: backends, codecs, GPU (no args)"),
     # reasoning — explicit, auditable multi-step thought
     ("reason", "multi-strategy reasoning with a full auditable trace: cot | decompose | hypothesize | critique | tree | auto (args: goal, strategy, depth, use_tools, context, show_trace)"),
     ("reasoning_eval", "run the built-in reasoning eval (fixed task set) and score the active model 0-1 (args: limit)"),
@@ -384,6 +392,11 @@ class DevonAgent:
         if router is None:
             return [], "", "no-router"
         catalog = "\n".join(f"- {name}: {desc}" for name, desc in TOOL_CATALOG)
+        try:
+            from .orientation import repo_orientation_block
+            orientation = repo_orientation_block()
+        except Exception:  # noqa: BLE001 - orientation is a bonus
+            orientation = ""
         system = (
             "You are Devon, an autonomous engineering & debug agent running inside "
             "the NoMorals repo. You plan a short sequence of tool calls to answer the "
@@ -392,6 +405,7 @@ class DevonAgent:
             "Reply with ONLY JSON of the form "
             '{"steps":[{"tool":"<name>","args":{...},"why":"<short>"}]}. '
             "No prose outside the JSON."
+            + ("\n\n" + orientation if orientation else "")
         )
         mem_block = f"Prior memory (his earlier digests):\n{memory}\n\n" if memory else ""
         # task-type pre-classification (wave 65): tells the planner what KIND
@@ -669,11 +683,19 @@ class DevonAgent:
         if router is None:
             return "", ""
         mem_block = f"Your earlier digests:\n{memory}\n\n" if memory else ""
+        try:
+            from .orientation import repo_orientation_block
+            orientation = repo_orientation_block()
+        except Exception:  # noqa: BLE001 - orientation is a bonus
+            orientation = ""
         system = (
             "You are Devon, an autonomous dev agent. Summarize the tool output below into a "
             "short, plain-English answer (2-6 sentences, no markdown, no code blocks) that a "
             "person reading a chat bubble understands. State concretely what you checked and "
-            "what you found. If something failed or you couldn't verify it, say so. No filler."
+            "what you found. If something failed or you couldn't verify it, say so. No filler. "
+            "When the question is about Devon's own capabilities or integrations, ground your "
+            "answer in the repo orientation below — never claim a connector doesn't exist."
+            + ("\n\n" + orientation if orientation else "")
         )
         user = f"{mem_block}Task: {task}\n\nTool output:\n{observations[:6000]}"
         try:
@@ -1552,6 +1574,66 @@ class DevonAgent:
             return f"api: {getattr(result.error, 'message', result.error)}"
         return f"api {name}: " + json.dumps(result.value, default=str)[:2500]
 
+    def _tool_connector(self, args: dict[str, Any]) -> str:
+        """Devon's own service integrations — the planner's answer to
+        "how do I link X" / "does Devon support Y".  Reads the live
+        connector registry, never the filesystem, so it can never claim
+        a connector doesn't exist."""
+        from ..connectors import list_connectors, get_connector
+
+        action = str(args.get("action") or "list").strip().lower()
+        if action == "list":
+            infos = list_connectors()
+            lines = [f"{i['id']}: {i['name']} "
+                     f"[{'/'.join(i.get('auth_methods') or ['?'])}]"
+                     for i in infos]
+            return (f"{len(lines)} connectors "
+                    f"(nomorals/connectors/<id>.py):\n" + "\n".join(lines))
+        cid = str(args.get("id") or "").strip().lower()
+        if not cid:
+            return "connector needs an 'id' (e.g. spotify). action=list shows all."
+        try:
+            cls = get_connector(cid)
+        except Exception as exc:  # noqa: BLE001
+            return f"unknown connector {cid!r}: {exc}"
+        if action == "info":
+            desc = (cls.description or "").strip()
+            auth = ", ".join(m.value for m in cls.auth_methods)
+            prov = ", ".join(cls.PROVISIONABLE) or "nothing"
+            out = [f"{cls.name} ({cid}) — nomorals/connectors/{cid}.py",
+                   f"what: {desc[:400]}",
+                   f"auth: {auth}",
+                   f"can provision: {prov}"]
+            guide = ""
+            if hasattr(cls, "connect_instructions"):
+                try:
+                    guide = str(cls.connect_instructions(cls.__new__(cls))
+                                or "")
+                except Exception:  # noqa: BLE001
+                    guide = ""
+            if guide:
+                out.append(f"how to link:\n{guide[:1500]}")
+            else:
+                out.append(
+                    "how to link: say \"link {}\" — Devon drives the real "
+                    "{} flow and stores the credential in the vault "
+                    "(never ask for raw tokens in chat).".format(cid, auth))
+            return "\n".join(out)
+        if action == "status":
+            try:
+                from ..accounts.vault import CredentialVault
+                vault = CredentialVault(
+                    self.context.db,
+                    master_passphrase=os.environ.get(
+                        "NM_VAULT_PASSPHRASE", ""))
+                inst = cls(vault)
+                st = inst.status()
+                return (f"{cid} status: "
+                        + json.dumps(st, default=str)[:800])
+            except Exception as exc:  # noqa: BLE001
+                return f"{cid} status check failed: {exc}"
+        return f"unknown connector action {action!r} — use list|info|status"
+
     def _tool_db_tables(self, args: dict[str, Any]) -> str:
         result = self.context.tools.call("db_tables")
         if not result.ok:
@@ -1604,6 +1686,62 @@ class DevonAgent:
             except Exception:  # noqa: BLE001 - the file is still on disk
                 pass
         return f"spoken with {info.get('engine')}: {info.get('path')}{sent}"
+
+    def _tool_media_edit(self, args: dict[str, Any]) -> str:
+        """Image editing via the real media_edit organ — never raw PIL."""
+        source = str(args.get("source") or "").strip()
+        instruction = str(args.get("instruction") or "").strip()
+        if not source or not instruction:
+            return "media_edit needs 'source' (image path/URL) and 'instruction'"
+        result = self.context.tools.call(
+            "media_edit", image_path=source, instruction=instruction)
+        if not result.ok:
+            return f"media_edit: {getattr(result.error, 'message', result.error)}"
+        info = result.value or {}
+        return (f"edited → {info.get('output') or info.get('path') or '?'} "
+                f"[{info.get('summary') or info.get('ops') or ''}]")
+
+    def _tool_media_edit_video(self, args: dict[str, Any]) -> str:
+        source = str(args.get("source") or "").strip()
+        instruction = str(args.get("instruction") or "").strip()
+        if not source or not instruction:
+            return "media_edit_video needs 'source' and 'instruction'"
+        result = self.context.tools.call(
+            "media_edit_video", video_path=source, instruction=instruction)
+        if not result.ok:
+            return (f"media_edit_video: "
+                    f"{getattr(result.error, 'message', result.error)}")
+        info = result.value or {}
+        return f"edited video → {info.get('output') or info.get('path') or '?'}"
+
+    def _tool_media_probe(self, args: dict[str, Any]) -> str:
+        source = str(args.get("source") or "").strip()
+        if not source:
+            return "media_probe needs a 'source'"
+        result = self.context.tools.call("media_edit_probe", path=source)
+        if not result.ok:
+            return f"media_probe: {getattr(result.error, 'message', result.error)}"
+        return json.dumps(result.value, default=str)[:1200]
+
+    def _tool_media_convert(self, args: dict[str, Any]) -> str:
+        source = str(args.get("source") or "").strip()
+        fmt = str(args.get("format") or "").strip()
+        if not source or not fmt:
+            return "media_convert needs 'source' and 'format'"
+        result = self.context.tools.call(
+            "media_convert", path=source, format=fmt)
+        if not result.ok:
+            return (f"media_convert: "
+                    f"{getattr(result.error, 'message', result.error)}")
+        info = result.value or {}
+        return f"converted → {info.get('output') or info.get('path') or '?'}"
+
+    def _tool_media_capability(self, args: dict[str, Any]) -> str:
+        result = self.context.tools.call("media_capability")
+        if not result.ok:
+            return (f"media_capability: "
+                    f"{getattr(result.error, 'message', result.error)}")
+        return json.dumps(result.value, default=str)[:1500]
 
     def _tool_swarm(self, args: dict[str, Any]) -> str:
         from .swarm import SwarmAgent

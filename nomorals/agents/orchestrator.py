@@ -222,6 +222,18 @@ class MasterOrchestrator:
         )
         if context_hint:
             prompt = f"{prompt}\n\nContext: {context_hint}"
+        # Repo orientation for self-referential goals ("link Spotify",
+        # "where is the X code"): the decomposer must know Devon's real
+        # layout and connector catalog instead of guessing.
+        try:
+            import re as _re
+            from .orientation import repo_orientation_block
+            if _re.search(r"\b(devon|nomorals|connect|link|integrat|"
+                          r"connector|repo|codebase|spotify|github|gmail)\b",
+                          goal, _re.I):
+                prompt = f"{prompt}\n\n{repo_orientation_block()}"
+        except Exception:  # noqa: BLE001 — orientation is a bonus
+            pass
         # Prompt 01: lesson-memory injection at the planner choke point —
         # the decomposition sees known failure patterns before emitting steps.
         try:
