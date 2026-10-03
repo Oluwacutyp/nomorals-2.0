@@ -9,7 +9,8 @@ Adding a service: subclass :class:`Connector`, decorate with
 Shipped: GitHub, Mono (NG bank data), Plaid (US/EU bank data), virtual
 cards (Flutterwave), proxy pool, Jumia seller API, Konga buyer browse,
 Telegram Bot API, Discord Bot API, Gmail, Google Drive, Paystack (NG
-payments), Binance spot — the framework is deliberately service-agnostic
+payments), Binance spot, Coinbase Advanced Trade, Wise transfers, Notion,
+Google Calendar, Trello — the framework is deliberately service-agnostic
 so more slot in.
 """
 
@@ -46,11 +47,16 @@ from .registry import (
 )
 from .virtualcards import VirtualCardsConnector
 from .binance import BinanceConnector, BinanceError
+from .coinbase import CoinbaseConnector, CoinbaseError
 from .discord import DiscordConnector, DiscordError
 from .drive import DriveConnector, DriveError
+from .gcalendar import GCalendarConnector, GCalendarError
 from .gmail import GmailConnector, GmailError
+from .notion import NotionConnector, NotionError
 from .paystack import PaystackConnector, PaystackError
 from .telegram import TelegramConnector, TelegramError
+from .trello import TrelloConnector, TrelloError
+from .wise import WiseConnector, WiseError
 
 __all__ = [
     "AuthMethod",
@@ -59,6 +65,8 @@ __all__ = [
     "CheckpointKind",
     "CheckpointState",
     "CheckpointStore",
+    "CoinbaseConnector",
+    "CoinbaseError",
     "Connector",
     "ConnectorError",
     "ConnectorStatus",
@@ -67,6 +75,8 @@ __all__ = [
     "DiscordError",
     "DriveConnector",
     "DriveError",
+    "GCalendarConnector",
+    "GCalendarError",
     "GitHubConnector",
     "GitHubError",
     "GmailConnector",
@@ -79,13 +89,19 @@ __all__ = [
     "KongaConnector",
     "KongaError",
     "MonoConnector",
+    "NotionConnector",
+    "NotionError",
     "PaystackConnector",
     "PaystackError",
     "PlaidConnector",
     "ProxyPoolConnector",
     "TelegramConnector",
     "TelegramError",
+    "TrelloConnector",
+    "TrelloError",
     "VirtualCardsConnector",
+    "WiseConnector",
+    "WiseError",
     "create_connector",
     "device_flow_token",
     "get_connector",
