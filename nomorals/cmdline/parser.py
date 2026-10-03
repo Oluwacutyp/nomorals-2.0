@@ -1520,17 +1520,23 @@ def _parser() -> argparse.ArgumentParser:
 
     repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
         help="code workspace: branches, worktrees, patches, test/build",
-        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
-                     "nm repo branch <name> | nm repo switch <name>\n"
-                     "nm repo worktree <add|list|remove> [path] [branch]\n"
-                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
-                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\\n"
+                     "nm repo branch <name> | nm repo switch <name>\\n"
+                     "nm repo worktree <add|list|remove> [path] [branch] [--force]\\n"
+                     "nm repo patch review|apply|preview|record <file> [path] [--root DIR]\\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]\\n"
+                     "nm repo commit -m \"msg\" [paths...] | nm repo push|pull|fetch [remote] [branch]\\n"
+                     "nm repo stash <push|pop|list> [-m \"msg\"]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
     repo.add_argument("--root", default=".", help="repository root")
     repo.add_argument("--yes", action="store_true",
                       help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--force", action="store_true",
+                      help="worktree remove: discard dirty state")
+    repo.add_argument("--message", "-m", default="",
+                      help="commit message / stash message")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
 
     wisdom = sub.add_parser("wisdom", aliases=CLI_ALIASES["wisdom"],
@@ -1746,16 +1752,22 @@ def _parser() -> argparse.ArgumentParser:
 
     repo = sub.add_parser("repo", aliases=CLI_ALIASES["repo"],
         help="code workspace: branches, worktrees, patches, test/build",
-        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\n"
-                     "nm repo branch <name> | nm repo switch <name>\n"
-                     "nm repo worktree <add|list|remove> [path] [branch]\n"
-                     "nm repo patch review|apply|preview <diff-file> [--root DIR]\n"
-                     "nm repo test [selector] | nm repo build [target] [--root DIR]"),
+        description=("nm repo status|branches|diff [ref]|log [n] [--root DIR]\\n"
+                     "nm repo branch <name> | nm repo switch <name>\\n"
+                     "nm repo worktree <add|list|remove> [path] [branch] [--force]\\n"
+                     "nm repo patch review|apply|preview|record <file> [path] [--root DIR]\\n"
+                     "nm repo test [selector] | nm repo build [target] [--root DIR]\\n"
+                     "nm repo commit -m \"msg\" [paths...] | nm repo push|pull|fetch [remote] [branch]\\n"
+                     "nm repo stash <push|pop|list> [-m \"msg\"]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     repo.add_argument("task", nargs="*", default=[], help="verb and arguments")
     repo.add_argument("--root", default=".", help="repository root")
     repo.add_argument("--yes", action="store_true",
                       help="patch apply: write files (default is dry-run)")
+    repo.add_argument("--force", action="store_true",
+                      help="worktree remove: discard dirty state")
+    repo.add_argument("--message", "-m", default="",
+                      help="commit message / stash message")
     repo.add_argument("--json", action="store_true", help="Output as JSON")
 
