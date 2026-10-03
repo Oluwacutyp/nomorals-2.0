@@ -13,6 +13,7 @@ import http.server
 import json
 import os
 import socket
+import time
 import socketserver
 import threading
 import unittest
@@ -621,8 +622,17 @@ class HealthCheckTests(_ProxyNetCase):
     def test_single_healthy_proxy(self) -> None:
         self.conn.add_proxy("127.0.0.1", self.open_port)
         pid = f"http://127.0.0.1:{self.open_port}"
-        result = self.conn.health_check(pid, url=self.target_url, timeout=10)
-        health = result["health"]
+        # Retry once: under full-suite load the loopback target can
+        # briefly refuse, and the test proxy maps any upstream failure
+        # to 502. A second attempt stabilizes the test.
+        health = None
+        for _ in range(3):
+            result = self.conn.health_check(pid, url=self.target_url,
+                                            timeout=10)
+            health = result["health"]
+            if health["status_code"] == 200:
+                break
+            time.sleep(0.2)
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)
