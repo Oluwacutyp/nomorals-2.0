@@ -111,8 +111,8 @@ class ToolRegistry:
         import importlib as _importlib
 
         for _name in (
-            "archive", "attacker", "audio", "book", "browser",
-            "build_app", "captcha", "cards", "cipher", "code_executor", "compress",
+            "archive", "attacker", "audio", "browser",
+            "build_app", "captcha", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
             "filesend",
@@ -120,10 +120,10 @@ class ToolRegistry:
             "lint",
             "edit_loop",
             "error_scan",
-            "macros", "media", "media_edit", "media_pipeline", "metadata", "monitor",
-            "network", "osint", "osint_graph", "osint_people", "parsers",
-            "proxy", "proxylab", "pytest_runner", "run_code", "sandbox_code", "scriptgen",
-            "shell", "ssh_socks", "traindata", "vision", "web", "weather",
+            "macros", "media", "media_edit", "media_pipeline", "metadata",
+            "network", "osint", "osint_people", "parsers",
+            "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
+            "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "workspace",
             "trading",
             # the agent bridge registers last: agent modules own the real

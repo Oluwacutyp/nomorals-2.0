@@ -17,11 +17,12 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from ..integrations.naija_shopping import NaijaShoppingEngine
 
-__all__ = ["register"]
+__all__ = ["register", "init_deals_tool", "init_deal_hunter"]
 
 _log = get_logger(__name__)
 
 _engine: NaijaShoppingEngine | None = None
+_hunter: Any = None
 
 
 def _get_engine() -> NaijaShoppingEngine:
@@ -30,6 +31,23 @@ def _get_engine() -> NaijaShoppingEngine:
     if _engine is None:
         raise RuntimeError("NaijaShoppingEngine not initialized. Call init_deals_tool() first.")
     return _engine
+
+
+def _get_hunter() -> Any:
+    """Get or create the NaijaDealHunter singleton (price-drop alerts)."""
+    global _hunter
+    if _hunter is None:
+        raise RuntimeError(
+            "NaijaDealHunter not initialized. Call init_deal_hunter() first."
+        )
+    return _hunter
+
+
+def init_deal_hunter(hunter: Any) -> None:
+    """Initialize the deal hunter (price-drop monitoring/alerts)."""
+    global _hunter
+    _hunter = hunter
+    _log.info("Deal hunter initialized")
 
 
 def init_deals_tool(engine: NaijaShoppingEngine) -> None:
@@ -136,7 +154,54 @@ async def deals(action: str, **kwargs: Any) -> dict[str, Any]:
             "triggered_count": len(triggered),
             "triggered": [w.to_dict() for w in triggered],
         }
-    
+
+    elif action == "hunt":
+        # NaijaDealHunter: find deals with discount scoring
+        hunter = _get_hunter()
+        category = kwargs.get("category", "")
+        max_price = kwargs.get("max_price", float("inf"))
+        min_discount = kwargs.get("min_discount", 0)
+        deals_found = await hunter.find_deals(
+            category=category, max_price=max_price, min_discount=min_discount
+        )
+        return {
+            "action": "hunt",
+            "count": len(deals_found),
+            "deals": [d.to_dict() for d in deals_found],
+        }
+
+    elif action == "flash":
+        hunter = _get_hunter()
+        limit = kwargs.get("limit", 10)
+        sales = await hunter.find_flash_sales(limit=limit)
+        return {
+            "action": "flash",
+            "count": len(sales),
+            "sales": [s.to_dict() for s in sales],
+        }
+
+    elif action == "deal_alerts":
+        hunter = _get_hunter()
+        user_id = kwargs.get("user_id", "")
+        if user_id:
+            alerts = await hunter.get_user_alerts(user_id)
+        else:
+            alerts = await hunter.check_alerts()
+        return {
+            "action": "deal_alerts",
+            "count": len(alerts),
+            "alerts": [a.to_dict() for a in alerts],
+        }
+
+    elif action == "price_history":
+        hunter = _get_hunter()
+        url = kwargs.get("url", "")
+        history = await hunter.price_history(url)
+        return {
+            "action": "price_history",
+            "history": history.to_dict() if hasattr(history, "to_dict") else str(history),
+        }
+
     else:
         return {"error": f"Unknown action: {action}"}
 
@@ -150,8 +215,9 @@ def register(registry: Any) -> None:
         parameters={
             "action": {
                 "type": "string",
-                "enum": ["scan", "compare", "steals", "track", "watchlist", "check_watchlists"],
-                "description": "Action to perform (compare = cross-site cheapest-price comparison)",
+                "enum": ["scan", "compare", "steals", "track", "watchlist", "check_watchlists",
+                         "hunt", "flash", "deal_alerts", "price_history"],
+                "description": "Action to perform (compare = cross-site cheapest-price comparison; hunt/flash/deal_alerts/price_history use the DealHunter price-drop engine)",
             },
             "query": {"type": "string", "description": "Search query (for scan/compare)"},
             "sites": {"type": "array", "description": "Sites to scan (for scan/compare)"},

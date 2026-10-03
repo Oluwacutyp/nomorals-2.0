@@ -23,11 +23,43 @@ Each is deterministic, parameter-overridable, and scored the same way.
 from __future__ import annotations
 
 import logging
-import numpy as np
-import pandas as pd
 
 from .indicators import adx as _adx
 from .indicators import bollinger, donchian, ichimoku, macd as _macd
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 from .indicators import psar, rsi as _rsi, vwap
 from .math import atr, ema, ensure_ohlcv, rolling_zscore, sharpe
 
@@ -54,15 +86,15 @@ __all__ = [
 ]
 
 
-def _frame(signal: np.ndarray, confidence: np.ndarray, gate: np.ndarray,
-           index: pd.Index) -> pd.DataFrame:
+def _frame(signal: _np.ndarray, confidence: _np.ndarray, gate: _np.ndarray,
+           index: _pd.Index) -> _pd.DataFrame:
     """Build a validated signal frame."""
-    sig = pd.Series(np.sign(np.asarray(signal, dtype=float)), index=index)
-    conf = pd.Series(np.asarray(confidence, dtype=float), index=index
+    sig = _pd.Series(_np.sign(_np.asarray(signal, dtype=float)), index=index)
+    conf = _pd.Series(_np.asarray(confidence, dtype=float), index=index
                      ).fillna(0.0).clip(0.0, 1.0)
-    gt = pd.Series(np.asarray(gate, dtype=float), index=index
+    gt = _pd.Series(_np.asarray(gate, dtype=float), index=index
                    ).fillna(1.0).clip(0.0, 1.0)
-    return pd.DataFrame({"signal": sig, "confidence": conf, "gate": gt},
+    return _pd.DataFrame({"signal": sig, "confidence": conf, "gate": gt},
                         index=index)
 
 
@@ -79,7 +111,7 @@ class BaseStrategy:
             if k in self.params:
                 self.params[k] = v
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         raise NotImplementedError
 
     def describe(self) -> dict:
@@ -101,26 +133,26 @@ class TrendFollow(BaseStrategy):
     default_params = {"fast": 12, "slow": 26, "mom": 3, "rail_thr": 0.10,
                       "stretch_cap": 5.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         close = df["close"].astype(float)
         fast = ema(close, int(p["fast"]))
         slow = ema(close, int(p["slow"]))
         a = atr(df, 14) + 1e-9
         rail = (fast - slow) / a
-        mom = np.sign(close.pct_change(int(p["mom"])).fillna(0.0))
+        mom = _np.sign(close.pct_change(int(p["mom"])).fillna(0.0))
         thr = float(p["rail_thr"])
-        raw = np.where(rail > thr, 1.0, np.where(rail < -thr, -1.0, 0.0))
+        raw = _np.where(rail > thr, 1.0, _np.where(rail < -thr, -1.0, 0.0))
         signal = raw
         agree = (mom == raw) | (raw == 0.0)
-        confidence = np.clip(np.abs(rail) / (thr * 4.0 + 1e-9), 0.0, 1.0)
-        confidence = np.where(agree, confidence, confidence * 0.5)
+        confidence = _np.clip(_np.abs(rail) / (thr * 4.0 + 1e-9), 0.0, 1.0)
+        confidence = _np.where(agree, confidence, confidence * 0.5)
         stretch = (close - slow) / a
-        gate = np.clip(1.0 - np.abs(stretch) / float(p["stretch_cap"]), 0.0, 1.0)
+        gate = _np.clip(1.0 - _np.abs(stretch) / float(p["stretch_cap"]), 0.0, 1.0)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -136,27 +168,27 @@ class MeanReversion(BaseStrategy):
     kind = "meanrev"
     default_params = {"lookback": 20, "entry_z": 2.0, "exit_z": 0.5}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         close = df["close"].astype(float)
         z = rolling_zscore(close, int(p["lookback"])).to_numpy(dtype=float)
         entry_z, exit_z = float(p["entry_z"]), float(p["exit_z"])
-        signal = np.zeros(len(df))
+        signal = _np.zeros(len(df))
         state = 0.0
         for i in range(len(df)):
             if state == 0.0 and abs(z[i]) >= entry_z:
-                state = -float(np.sign(z[i]))
+                state = -float(_np.sign(z[i]))
             elif state != 0.0 and abs(z[i]) < exit_z:
                 state = 0.0
             signal[i] = state
-        confidence = np.clip(np.abs(z) / (entry_z * 1.5), 0.0, 1.0)
+        confidence = _np.clip(_np.abs(z) / (entry_z * 1.5), 0.0, 1.0)
         width = bollinger(df, int(p["lookback"]))["width"]
         wq = width.rolling(200, min_periods=20).rank(pct=True).fillna(0.5)
-        gate = np.clip(wq.to_numpy(dtype=float) / 0.25, 0.0, 1.0)
+        gate = _np.clip(wq.to_numpy(dtype=float) / 0.25, 0.0, 1.0)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -172,11 +204,11 @@ class Breakout(BaseStrategy):
     kind = "breakout"
     default_params = {"period": 20, "adx_period": 14, "adx_min": 18.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         close = df["close"].astype(float)
         ch = donchian(df, int(p["period"]))
@@ -185,7 +217,7 @@ class Breakout(BaseStrategy):
         lower = ch["lower"].to_numpy(dtype=float)
         mid = ch["mid"].to_numpy(dtype=float)
         px = close.to_numpy(dtype=float)
-        signal = np.zeros(len(df))
+        signal = _np.zeros(len(df))
         state = 0.0
         for i in range(len(df)):
             if state == 0.0:
@@ -198,11 +230,11 @@ class Breakout(BaseStrategy):
             elif state < 0 and (px[i] > mid[i] or px[i] > upper[i]):
                 state = 1.0 if px[i] > upper[i] else 0.0
             signal[i] = state
-        pen = np.where(signal > 0, (px - upper) / a,
-                       np.where(signal < 0, (lower - px) / a, 0.0))
-        confidence = np.clip(np.abs(pen) / 1.0, 0.15, 1.0) * (np.abs(signal) > 0)
+        pen = _np.where(signal > 0, (px - upper) / a,
+                       _np.where(signal < 0, (lower - px) / a, 0.0))
+        confidence = _np.clip(_np.abs(pen) / 1.0, 0.15, 1.0) * (_np.abs(signal) > 0)
         adx_v = _adx(df, int(p["adx_period"]))["adx"].to_numpy(dtype=float)
-        gate = np.clip(adx_v / float(p["adx_min"]), 0.0, 1.0)
+        gate = _np.clip(adx_v / float(p["adx_min"]), 0.0, 1.0)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -219,25 +251,25 @@ class Momentum(BaseStrategy):
     default_params = {"rsi_period": 14, "rsi_hi": 55.0, "rsi_lo": 45.0,
                       "adx_period": 14, "adx_min": 20.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         rsi_v = _rsi(df, int(p["rsi_period"])).to_numpy(dtype=float)
         hist = _macd(df)["hist"].to_numpy(dtype=float)
         bull = (rsi_v > float(p["rsi_hi"])) & (hist > 0)
         bear = (rsi_v < float(p["rsi_lo"])) & (hist < 0)
-        signal = np.where(bull, 1.0, np.where(bear, -1.0, 0.0))
-        hist_vol = pd.Series(np.abs(hist)).rolling(50, min_periods=10).mean(
+        signal = _np.where(bull, 1.0, _np.where(bear, -1.0, 0.0))
+        hist_vol = _pd.Series(_np.abs(hist)).rolling(50, min_periods=10).mean(
         ).bfill().fillna(1e-9).to_numpy(dtype=float)
         confidence = (
-            0.6 * np.clip(np.abs(rsi_v - 50.0) / 50.0, 0.0, 1.0)
-            + 0.4 * np.clip(np.abs(hist) / (hist_vol + 1e-12), 0.0, 1.0)
-        ) * (np.abs(signal) > 0)
+            0.6 * _np.clip(_np.abs(rsi_v - 50.0) / 50.0, 0.0, 1.0)
+            + 0.4 * _np.clip(_np.abs(hist) / (hist_vol + 1e-12), 0.0, 1.0)
+        ) * (_np.abs(signal) > 0)
         adx_v = _adx(df, int(p["adx_period"]))["adx"].to_numpy(dtype=float)
-        gate = np.clip(adx_v / float(p["adx_min"]), 0.0, 1.0)
+        gate = _np.clip(adx_v / float(p["adx_min"]), 0.0, 1.0)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -254,29 +286,29 @@ class IchimokuTrend(BaseStrategy):
     default_params = {"tenkan": 9, "kijun": 26, "senkou_b": 52,
                       "displacement": 26, "conf_scale": 3.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         ich = ichimoku(df, int(p["tenkan"]), int(p["kijun"]),
                        int(p["senkou_b"]), int(p["displacement"]))
         close = df["close"].astype(float)
-        cloud_top = np.maximum(ich["senkou_a"], ich["senkou_b"])
-        cloud_bot = np.minimum(ich["senkou_a"], ich["senkou_b"])
+        cloud_top = _np.maximum(ich["senkou_a"], ich["senkou_b"])
+        cloud_bot = _np.minimum(ich["senkou_a"], ich["senkou_b"])
         tenkan_s = ich["tenkan"].to_numpy(dtype=float)
         kijun_s = ich["kijun"].to_numpy(dtype=float)
         px = close.to_numpy(dtype=float)
         bull = (px > cloud_top.to_numpy(dtype=float)) & (tenkan_s > kijun_s)
         bear = (px < cloud_bot.to_numpy(dtype=float)) & (tenkan_s < kijun_s)
-        signal = np.where(bull, 1.0, np.where(bear, -1.0, 0.0))
+        signal = _np.where(bull, 1.0, _np.where(bear, -1.0, 0.0))
         cloud_mid = ((cloud_top + cloud_bot) / 2.0).to_numpy(dtype=float)
         a = atr(df, 14).to_numpy(dtype=float) + 1e-9
-        dist = np.abs(px - cloud_mid) / a
-        confidence = np.clip(dist / float(p["conf_scale"]), 0.0, 1.0) \
-            * (np.abs(signal) > 0)
-        gate = np.ones(len(df))
+        dist = _np.abs(px - cloud_mid) / a
+        confidence = _np.clip(dist / float(p["conf_scale"]), 0.0, 1.0) \
+            * (_np.abs(signal) > 0)
+        gate = _np.ones(len(df))
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -296,30 +328,30 @@ class VwapBounce(BaseStrategy):
     default_params = {"entry_z": 1.5, "exit_z": 0.4, "adx_period": 14,
                       "adx_lo": 20.0, "adx_hi": 35.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         v = vwap(df).to_numpy(dtype=float)
         px = df["close"].astype(float).to_numpy(dtype=float)
         a = atr(df, 14).to_numpy(dtype=float) + 1e-9
         z = (px - v) / a
         entry_z, exit_z = float(p["entry_z"]), float(p["exit_z"])
-        signal = np.zeros(len(df))
+        signal = _np.zeros(len(df))
         state = 0.0
         for i in range(len(df)):
             if state == 0.0 and abs(z[i]) >= entry_z:
-                state = -float(np.sign(z[i]))
+                state = -float(_np.sign(z[i]))
             elif state != 0.0 and abs(z[i]) < exit_z:
                 state = 0.0
             signal[i] = state
-        confidence = np.clip(np.abs(z) / (entry_z * 1.5), 0.0, 1.0) \
-            * (np.abs(signal) > 0)
+        confidence = _np.clip(_np.abs(z) / (entry_z * 1.5), 0.0, 1.0) \
+            * (_np.abs(signal) > 0)
         adx_v = _adx(df, int(p["adx_period"]))["adx"].to_numpy(dtype=float)
         lo, hi = float(p["adx_lo"]), float(p["adx_hi"])
-        gate = np.clip((hi - adx_v) / (hi - lo + 1e-12), 0.15, 1.0)
+        gate = _np.clip((hi - adx_v) / (hi - lo + 1e-12), 0.15, 1.0)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -341,11 +373,11 @@ class RsiDivergence(BaseStrategy):
                       "min_gap": 10, "min_rsi_delta": 4.0,
                       "rsi_lo": 40.0, "rsi_hi": 60.0}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         lookback = max(20, int(p["lookback"]))
         min_gap = max(3, int(p["min_gap"]))
@@ -355,16 +387,16 @@ class RsiDivergence(BaseStrategy):
         px = df["close"].astype(float).to_numpy(dtype=float)
         rsi_v = _rsi(df, int(p["rsi_period"])).to_numpy(dtype=float)
         n = len(df)
-        raw = np.zeros(n)
-        conf = np.zeros(n)
+        raw = _np.zeros(n)
+        conf = _np.zeros(n)
         half = lookback // 2
         for i in range(lookback, n):
             w0, w1 = i - lookback, i
             mid = w0 + half
-            p1_lo = w0 + int(np.argmin(px[w0:mid]))
-            p2_lo = mid + int(np.argmin(px[mid:w1]))
-            p1_hi = w0 + int(np.argmax(px[w0:mid]))
-            p2_hi = mid + int(np.argmax(px[mid:w1]))
+            p1_lo = w0 + int(_np.argmin(px[w0:mid]))
+            p2_lo = mid + int(_np.argmin(px[mid:w1]))
+            p1_hi = w0 + int(_np.argmax(px[w0:mid]))
+            p2_hi = mid + int(_np.argmax(px[mid:w1]))
             bull = (p2_lo - p1_lo >= min_gap and px[p2_lo] < px[p1_lo]
                     and rsi_v[p2_lo] - rsi_v[p1_lo] >= min_delta
                     and rsi_v[p2_lo] <= rsi_lo)
@@ -373,20 +405,20 @@ class RsiDivergence(BaseStrategy):
                     and rsi_v[p2_hi] >= rsi_hi)
             if bull:
                 raw[i] = 1.0
-                conf[i] = np.clip(
+                conf[i] = _np.clip(
                     (rsi_v[p2_lo] - rsi_v[p1_lo]) / 10.0, 0.25, 1.0)
             elif bear:
                 raw[i] = -1.0
-                conf[i] = np.clip(
+                conf[i] = _np.clip(
                     (rsi_v[p1_hi] - rsi_v[p2_hi]) / 10.0, 0.25, 1.0)
-        signal = np.zeros(n)
-        confidence = np.zeros(n)
+        signal = _np.zeros(n)
+        confidence = _np.zeros(n)
         for i in range(n):
             if raw[i] != 0.0:
                 end = min(n, i + hold)
                 signal[i:end] = raw[i]
                 confidence[i:end] = conf[i]
-        gate = np.ones(n)
+        gate = _np.ones(n)
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -404,11 +436,11 @@ class BollingerSqueeze(BaseStrategy):
     default_params = {"period": 20, "mult": 2.0, "squeeze_pct": 0.20,
                       "rank_window": 200, "confirm": 10, "max_hold": 30}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         bb = bollinger(df, int(p["period"]), float(p["mult"]))
         width = bb["width"]
@@ -421,13 +453,13 @@ class BollingerSqueeze(BaseStrategy):
             pct=True).fillna(0.5)
         squeezed = (rank <= float(p["squeeze_pct"])).to_numpy(dtype=float)
         confirm = max(1, int(p["confirm"]))
-        recent_squeeze = pd.Series(squeezed, index=df.index).rolling(
+        recent_squeeze = _pd.Series(squeezed, index=df.index).rolling(
             confirm, min_periods=1).max().to_numpy(dtype=float) > 0
         px = df["close"].astype(float).to_numpy(dtype=float)
         upper = bb["upper"].to_numpy(dtype=float)
         lower = bb["lower"].to_numpy(dtype=float)
         mid = bb["mid"].to_numpy(dtype=float)
-        signal = np.zeros(len(df))
+        signal = _np.zeros(len(df))
         state = 0.0
         held = 0
         for i in range(len(df)):
@@ -444,11 +476,11 @@ class BollingerSqueeze(BaseStrategy):
                     state, held = 0.0, 0
             signal[i] = state
         a = atr(df, 14).to_numpy(dtype=float) + 1e-9
-        pen = np.where(signal > 0, (px - mid) / a,
-                       np.where(signal < 0, (mid - px) / a, 0.0))
-        confidence = np.clip(np.abs(pen) / 1.0, 0.15, 1.0) \
-            * (np.abs(signal) > 0)
-        gate = np.ones(len(df))
+        pen = _np.where(signal > 0, (px - mid) / a,
+                       _np.where(signal < 0, (mid - px) / a, 0.0))
+        confidence = _np.clip(_np.abs(pen) / 1.0, 0.15, 1.0) \
+            * (_np.abs(signal) > 0)
+        gate = _np.ones(len(df))
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -464,19 +496,19 @@ class SarReversal(BaseStrategy):
     kind = "trend"
     default_params = {"accel": 0.02, "max_accel": 0.20}
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         if len(df) < 10:
-            return _frame(np.zeros(len(df)), np.zeros(len(df)),
-                          np.ones(len(df)), df.index)
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
         p = self.params
         sar = psar(df, float(p["accel"]), float(p["max_accel"])
                    ).to_numpy(dtype=float)
         px = df["close"].astype(float).to_numpy(dtype=float)
-        signal = np.sign(px - sar)
+        signal = _np.sign(px - sar)
         a = atr(df, 14).to_numpy(dtype=float) + 1e-9
-        confidence = np.clip(np.abs(px - sar) / (2.0 * a), 0.0, 1.0)
-        gate = np.ones(len(df))
+        confidence = _np.clip(_np.abs(px - sar) / (2.0 * a), 0.0, 1.0)
+        gate = _np.ones(len(df))
         return _frame(signal, confidence, gate, df.index)
 
 
@@ -511,15 +543,15 @@ def get_strategy(name: str, **overrides) -> BaseStrategy:
     return STRATEGIES[key](**overrides)
 
 
-def run_zoo(names: list[str], df: pd.DataFrame,
-            params: dict | None = None) -> dict[str, pd.DataFrame]:
+def run_zoo(names: list[str], df: _pd.DataFrame,
+            params: dict | None = None) -> dict[str, _pd.DataFrame]:
     """Run many strategies; failures are isolated per strategy.
 
     Returns ``{name: signal-frame}`` for the strategies that produced a
     well-formed frame. Unknown names and crashing strategies are skipped.
     """
     params = params or {}
-    out: dict[str, pd.DataFrame] = {}
+    out: dict[str, _pd.DataFrame] = {}
     for n in names:
         try:
             strat = get_strategy(n, **params.get(n, {}))
@@ -533,29 +565,29 @@ def run_zoo(names: list[str], df: pd.DataFrame,
     return out
 
 
-def quick_score(sig: pd.DataFrame, close: pd.Series,
+def quick_score(sig: _pd.DataFrame, close: _pd.Series,
                 periods: int = 252) -> dict:
     """Strategy quality from sign returns: Sharpe, hit-rate, turnover."""
     px = close.astype(float)
     rets = px.pct_change().fillna(0.0).to_numpy()
-    pos = np.sign(sig["signal"].to_numpy(dtype=float))
-    pos = np.roll(pos, 1)
+    pos = _np.sign(sig["signal"].to_numpy(dtype=float))
+    pos = _np.roll(pos, 1)
     pos[0] = 0.0
     strat_rets = pos * rets
     w = sig["confidence"].to_numpy(dtype=float) * sig["gate"].to_numpy(dtype=float)
-    strat_rets = strat_rets * np.clip(w, 0, 1)
-    active = strat_rets[np.abs(pos) > 0]
+    strat_rets = strat_rets * _np.clip(w, 0, 1)
+    active = strat_rets[_np.abs(pos) > 0]
     return {
-        "sharpe": sharpe(pd.Series(strat_rets), periods),
-        "hit_rate": float(np.mean(active > 0)) if len(active) else 0.0,
-        "turnover": float(np.mean(np.abs(np.diff(pos)) > 0)) if len(pos) > 1 else 0.0,
-        "exposure": float(np.mean(np.abs(pos))),
-        "trades": int(np.sum(np.abs(np.diff(pos)) > 0) if len(pos) > 1 else 0),
+        "sharpe": sharpe(_pd.Series(strat_rets), periods),
+        "hit_rate": float(_np.mean(active > 0)) if len(active) else 0.0,
+        "turnover": float(_np.mean(_np.abs(_np.diff(pos)) > 0)) if len(pos) > 1 else 0.0,
+        "exposure": float(_np.mean(_np.abs(pos))),
+        "trades": int(_np.sum(_np.abs(_np.diff(pos)) > 0) if len(pos) > 1 else 0),
     }
 
 
-def rank_strategies(frames: dict[str, pd.DataFrame], close: pd.Series,
-                    periods: int = 252, min_trades: int = 5) -> pd.DataFrame:
+def rank_strategies(frames: dict[str, _pd.DataFrame], close: _pd.Series,
+                    periods: int = 252, min_trades: int = 5) -> _pd.DataFrame:
     """Rank strategy frames by Sharpe penalized for turnover.
 
     Returns a DataFrame indexed by strategy name with columns
@@ -573,8 +605,8 @@ def rank_strategies(frames: dict[str, pd.DataFrame], close: pd.Series,
             continue
     cols = ["name", "sharpe", "hit_rate", "turnover", "exposure", "trades"]
     if not rows:
-        return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows).set_index("name")
+        return _pd.DataFrame(columns=cols)
+    df = _pd.DataFrame(rows).set_index("name")
     df = df[df["trades"] >= min_trades]
     if df.empty:
         return df

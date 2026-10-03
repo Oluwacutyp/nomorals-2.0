@@ -10,8 +10,40 @@ from __future__ import annotations
 import math as _math
 import random
 
-import numpy as np
-import pandas as pd
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
+
 
 __all__ = [
     "OHLCV",
@@ -37,7 +69,7 @@ __all__ = [
 OHLCV = ("open", "high", "low", "close", "volume")
 
 
-def ensure_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_ohlcv(df: _pd.DataFrame) -> _pd.DataFrame:
     """Validate a frame, sort the index, coerce dtypes, drop empty rows."""
     if df is None or len(df) == 0:
         raise ValueError("empty dataframe")
@@ -58,17 +90,17 @@ def ensure_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def ema(s: pd.Series, span: int) -> pd.Series:
+def ema(s: _pd.Series, span: int) -> _pd.Series:
     """Exponential moving average (Wilder/recursive, ``adjust=False``)."""
     return s.astype(float).ewm(span=max(2, int(span)), adjust=False).mean()
 
 
-def sma(s: pd.Series, window: int) -> pd.Series:
+def sma(s: _pd.Series, window: int) -> _pd.Series:
     """Simple moving average (min_periods=1 so the head is usable)."""
     return s.astype(float).rolling(max(2, int(window)), min_periods=1).mean()
 
 
-def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+def rsi(close: _pd.Series, period: int = 14) -> _pd.Series:
     """Wilder RSI in [0, 100].
 
     Recursive Wilder smoothing (``ewm(alpha=1/period, adjust=False)``), seeded
@@ -89,16 +121,16 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return out.bfill().fillna(50.0).rename(f"rsi_{period}")
 
 
-def true_range(df: pd.DataFrame) -> pd.Series:
+def true_range(df: _pd.DataFrame) -> _pd.Series:
     """True range: max(high-low, |high-prev_close|, |low-prev_close|)."""
     h = df["high"].astype(float)
     l = df["low"].astype(float)
     c = df["close"].astype(float)
     pc = c.shift(1)
-    return pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    return _pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
 
 
-def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+def atr(df: _pd.DataFrame, n: int = 14) -> _pd.Series:
     """Average true range (Wilder smoothing). Never NaN, floored at 1e-9."""
     tr = true_range(df)
     return (
@@ -110,7 +142,7 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     )
 
 
-def rolling_zscore(s: pd.Series, window: int) -> pd.Series:
+def rolling_zscore(s: _pd.Series, window: int) -> _pd.Series:
     """Distance from the rolling mean in rolling standard deviations."""
     m = s.rolling(window, min_periods=max(2, window // 4)).mean()
     sd = (
@@ -123,7 +155,7 @@ def rolling_zscore(s: pd.Series, window: int) -> pd.Series:
     return ((s - m) / (sd + 1e-12)).fillna(0.0)
 
 
-def rolling_quantile(s: pd.Series, q: float, window: int) -> pd.Series:
+def rolling_quantile(s: _pd.Series, q: float, window: int) -> _pd.Series:
     """Rolling q-quantile, forward/back filled (adaptive thresholds)."""
     return (
         s.rolling(window, min_periods=max(5, window // 5))
@@ -133,49 +165,49 @@ def rolling_quantile(s: pd.Series, q: float, window: int) -> pd.Series:
     )
 
 
-def log_returns(close: pd.Series) -> pd.Series:
+def log_returns(close: _pd.Series) -> _pd.Series:
     """Log returns, first value 0."""
     c = close.astype(float)
-    return np.log(c / c.shift(1)).fillna(0.0)
+    return _np.log(c / c.shift(1)).fillna(0.0)
 
 
-def sharpe(returns: pd.Series, periods: int = 252) -> float:
+def sharpe(returns: _pd.Series, periods: int = 252) -> float:
     """Annualized Sharpe ratio (0 when undefined)."""
-    r = np.asarray(returns, dtype=float)
+    r = _np.asarray(returns, dtype=float)
     if len(r) < 3:
         return 0.0
-    sd = float(np.std(r, ddof=1))
+    sd = float(_np.std(r, ddof=1))
     if sd <= 1e-12:
         return 0.0
-    return float(np.mean(r) / sd * _math.sqrt(periods))
+    return float(_np.mean(r) / sd * _math.sqrt(periods))
 
 
-def sortino(returns: pd.Series, periods: int = 252) -> float:
+def sortino(returns: _pd.Series, periods: int = 252) -> float:
     """Annualized Sortino ratio (downside deviation only; 0 when undefined)."""
-    r = np.asarray(returns, dtype=float)
+    r = _np.asarray(returns, dtype=float)
     if len(r) < 3:
         return 0.0
     dn = r[r < 0]
-    if len(dn) < 2 or float(np.std(dn)) <= 1e-12:
+    if len(dn) < 2 or float(_np.std(dn)) <= 1e-12:
         return 0.0
-    return float(np.mean(r) / float(np.std(dn)) * _math.sqrt(periods))
+    return float(_np.mean(r) / float(_np.std(dn)) * _math.sqrt(periods))
 
 
-def max_drawdown(equity: pd.Series) -> dict:
+def max_drawdown(equity: _pd.Series) -> dict:
     """Max drawdown (negative fraction) plus peak/trough bar indices."""
-    eq = np.asarray(equity, dtype=float)
+    eq = _np.asarray(equity, dtype=float)
     if len(eq) == 0:
         return {"max_dd": 0.0, "peak": 0, "trough": 0}
-    peak = np.maximum.accumulate(eq)
-    dd = np.where(peak > 0, (eq - peak) / peak, 0.0)
-    trough = int(np.argmin(dd))
-    peak_i = int(np.argmax(eq[: trough + 1])) if trough else 0
+    peak = _np.maximum.accumulate(eq)
+    dd = _np.where(peak > 0, (eq - peak) / peak, 0.0)
+    trough = int(_np.argmin(dd))
+    peak_i = int(_np.argmax(eq[: trough + 1])) if trough else 0
     return {"max_dd": float(dd[trough]), "peak": peak_i, "trough": trough}
 
 
-def profit_factor(returns: pd.Series) -> float:
+def profit_factor(returns: _pd.Series) -> float:
     """Gross profit / gross loss (inf when no losses, 0 when nothing)."""
-    r = np.asarray(returns, dtype=float)
+    r = _np.asarray(returns, dtype=float)
     gains = float(r[r > 0].sum())
     losses = float(-r[r < 0].sum())
     if losses <= 1e-12:
@@ -192,14 +224,14 @@ def softmax(d: dict) -> dict:
     if not d:
         return {}
     keys = list(d.keys())
-    v = np.array([float(d[k]) for k in keys], dtype=float)
-    v = v - float(np.max(v))
-    e = np.exp(np.clip(v, -50, 50))
+    v = _np.array([float(d[k]) for k in keys], dtype=float)
+    v = v - float(_np.max(v))
+    e = _np.exp(_np.clip(v, -50, 50))
     s = float(e.sum()) or 1.0
     return {k: float(e[i] / s) for i, k in enumerate(keys)}
 
 
-def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+def resample_ohlcv(df: _pd.DataFrame, rule: str) -> _pd.DataFrame:
     """Resample bars to a higher timeframe (e.g. '4h', '1D')."""
     agg = {"open": "first", "high": "max", "low": "min", "close": "last",
            "volume": "sum"}
@@ -210,4 +242,4 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 def seed_all(seed: int = 42) -> None:
     """Seed stdlib random + numpy (deterministic synthetic data / tests)."""
     random.seed(seed)
-    np.random.seed(seed % (2 ** 32 - 1))
+    _np.random.seed(seed % (2 ** 32 - 1))

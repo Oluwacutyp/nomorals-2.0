@@ -7,10 +7,42 @@ trade plans and position sizing. Pure numpy/pandas — no exchange needed.
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 
 from .math import clamp
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 __all__ = ["RiskManager", "position_size", "PROFILES"]
 
@@ -85,7 +117,7 @@ class RiskManager:
                               0.001, self.kelly_cap * self.base_risk * 10)
             risk_frac = clamp(risk_frac, 0.001, 0.05)
         elif method == "vol_target" and realized_vol:
-            sig = max(1e-6, float(realized_vol)) * np.sqrt(periods_per_year)
+            sig = max(1e-6, float(realized_vol)) * _np.sqrt(periods_per_year)
             risk_frac = clamp(self.vol_target / sig, 0.05, 2.0) \
                 * self.base_risk * 4
             risk_frac = clamp(risk_frac, 0.001, 0.05)
@@ -149,7 +181,7 @@ class RiskManager:
             throttle = 0.0
         else:
             x = (depth - soft) / (abs(self.max_dd) - soft + 1e-12)
-            throttle = float(0.5 + 0.5 * np.cos(np.pi * x))
+            throttle = float(0.5 + 0.5 * _np.cos(_np.pi * x))
         return {"drawdown": float(dd), "day_return": float(day),
                 "throttle": throttle, "halted": self.halted}
 

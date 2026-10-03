@@ -8,10 +8,42 @@ minus the keyed loaders (ccxt / yfinance), which Devon covers keylessly in
 from __future__ import annotations
 
 import logging
-import numpy as np
-import pandas as pd
 
 from .math import ensure_ohlcv, resample_ohlcv
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 
 _log = logging.getLogger(__name__)
@@ -26,48 +58,48 @@ __all__ = [
 
 
 def make_synthetic(n: int = 2000, seed: int = 42, start: str = "2022-01-01",
-                   freq: str = "h", regimes: bool = True) -> pd.DataFrame:
+                   freq: str = "h", regimes: bool = True) -> _pd.DataFrame:
     """Regime-switching geometric random walk with OHLCV microstructure.
 
     Deterministic for a given ``seed`` — the standard fixture for tests and
     for exercising the pipeline with no network.
     """
-    rng = np.random.default_rng(seed)
+    rng = _np.random.default_rng(seed)
     if regimes and n >= 300:
-        cuts = np.linspace(0, n, 7).astype(int)
+        cuts = _np.linspace(0, n, 7).astype(int)
         drifts = [0.0012, -0.0004, 0.0002, 0.0018, -0.0011, 0.0005]
         vols = [0.008, 0.016, 0.006, 0.011, 0.022, 0.009]
-        rets = np.zeros(n)
+        rets = _np.zeros(n)
         for i in range(6):
             a, b = cuts[i], cuts[i + 1]
             rets[a:b] = drifts[i] + rng.normal(0, vols[i], b - a)
     else:
         rets = 0.0004 + rng.normal(0, 0.01, n)
-    close = 100.0 * np.exp(np.cumsum(rets))
+    close = 100.0 * _np.exp(_np.cumsum(rets))
     noise_o = rng.normal(0, 0.0015, n)
     open_ = close * (1 + noise_o)
-    spread = np.abs(rng.normal(0.0, 0.004, n))
-    high = np.maximum(open_, close) * (1 + spread)
-    low = np.minimum(open_, close) * (1 - spread)
-    base_vol = 5000 + 3000 * np.abs(rets) / (np.abs(rets).mean() + 1e-9)
-    vol = np.abs(base_vol + rng.normal(0, 800, n))
-    idx = pd.date_range(start, periods=n, freq=freq)
-    return pd.DataFrame(
+    spread = _np.abs(rng.normal(0.0, 0.004, n))
+    high = _np.maximum(open_, close) * (1 + spread)
+    low = _np.minimum(open_, close) * (1 - spread)
+    base_vol = 5000 + 3000 * _np.abs(rets) / (_np.abs(rets).mean() + 1e-9)
+    vol = _np.abs(base_vol + rng.normal(0, 800, n))
+    idx = _pd.date_range(start, periods=n, freq=freq)
+    return _pd.DataFrame(
         {"open": open_, "high": high, "low": low, "close": close,
          "volume": vol},
         index=idx,
     )
 
 
-def clean_ohlcv(df: pd.DataFrame, max_gap_bars: int = 5) -> pd.DataFrame:
+def clean_ohlcv(df: _pd.DataFrame, max_gap_bars: int = 5) -> _pd.DataFrame:
     """Repair bad bars: fix high/low inversions, fill small time gaps."""
     df = ensure_ohlcv(df).copy()
     df.loc[df["high"] < df[["open", "low", "close"]].max(axis=1), "high"] = \
         df[["open", "low", "close"]].max(axis=1)
     df.loc[df["low"] > df[["open", "high", "close"]].min(axis=1), "low"] = \
         df[["open", "high", "close"]].min(axis=1)
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.asfreq(pd.infer_freq(df.index) or "h")
+    if isinstance(df.index, _pd.DatetimeIndex):
+        df = df.asfreq(_pd.infer_freq(df.index) or "h")
         df[["open", "high", "low", "close"]] = df[
             ["open", "high", "low", "close"]].ffill(limit=max_gap_bars)
         df["volume"] = df["volume"].fillna(0.0)
@@ -75,7 +107,7 @@ def clean_ohlcv(df: pd.DataFrame, max_gap_bars: int = 5) -> pd.DataFrame:
     return ensure_ohlcv(df)
 
 
-def split_embargo(df: pd.DataFrame, test_frac: float = 0.25,
+def split_embargo(df: _pd.DataFrame, test_frac: float = 0.25,
                   embargo_bars: int = 20):
     """Chronological train/test split with an embargo gap (no leakage)."""
     df = ensure_ohlcv(df)
@@ -86,7 +118,7 @@ def split_embargo(df: pd.DataFrame, test_frac: float = 0.25,
     return train, test
 
 
-def multi_timeframe(df: pd.DataFrame, rules=("4h", "1D")) -> dict:
+def multi_timeframe(df: _pd.DataFrame, rules=("4h", "1D")) -> dict:
     """Base frame plus resampled higher-timeframe views."""
     out = {"base": ensure_ohlcv(df)}
     for r in rules:
@@ -98,6 +130,6 @@ def multi_timeframe(df: pd.DataFrame, rules=("4h", "1D")) -> dict:
     return out
 
 
-def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+def resample(df: _pd.DataFrame, rule: str) -> _pd.DataFrame:
     """Resample bars to a higher timeframe (e.g. '4h', '1D')."""
     return resample_ohlcv(df, rule)

@@ -1,0 +1,83 @@
+"""finance — agent tools for market analysis via FinancialExpert.
+
+Wraps :class:`nomorals.agents.financial_expert.FinancialExpert` so LLM
+agents and chat have a finance tool surface (previously only the
+``nm finance`` CLI existed).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+__all__ = ["register"]
+
+
+def register(registry: Any) -> None:
+    from .registry import Capability
+
+    @registry.register(
+        "finance_analyze",
+        description=(
+            "Analyze a symbol: regime, indicators, trade idea. "
+            "Args: symbol (e.g. BTC/USDT), market (crypto|stock|forex), "
+            "timeframe (e.g. 1h, 1d)."
+        ),
+        capability=Capability.NETWORK,
+        parameters={
+            "symbol": "str — trading symbol",
+            "market": "str — crypto|stock|forex (default crypto)",
+            "timeframe": "str — bar timeframe (default 1h)",
+        },
+    )
+    def finance_analyze(context: Any, symbol: str, market: str = "crypto",
+                        timeframe: str = "1h") -> dict[str, Any]:
+        from ..agents.financial_expert import FinancialExpert
+
+        expert = FinancialExpert(context)
+        report = expert.analyze(symbol, market=market, timeframe=timeframe)
+        return report.to_dict() if hasattr(report, "to_dict") else {"result": str(report)}
+
+    @registry.register(
+        "finance_signal",
+        description=(
+            "Get a trading signal for a symbol (long/short/neutral with "
+            "confidence). Args: symbol, market, timeframe."
+        ),
+        capability=Capability.NETWORK,
+        parameters={
+            "symbol": "str — trading symbol",
+            "market": "str — crypto|stock|forex (default crypto)",
+            "timeframe": "str — bar timeframe (default 1h)",
+        },
+    )
+    def finance_signal(context: Any, symbol: str, market: str = "crypto",
+                       timeframe: str = "1h") -> dict[str, Any]:
+        from ..agents.financial_expert import FinancialExpert
+
+        expert = FinancialExpert(context)
+        sig = expert.signal(symbol, market=market, timeframe=timeframe)
+        return sig.to_dict() if hasattr(sig, "to_dict") else {"result": str(sig)}
+
+    @registry.register(
+        "finance_backtest",
+        description=(
+            "Backtest a strategy on historical data. Args: symbol, market, "
+            "timeframe, strategy name."
+        ),
+        capability=Capability.NETWORK,
+        parameters={
+            "symbol": "str — trading symbol",
+            "market": "str — crypto|stock|forex (default crypto)",
+            "timeframe": "str — bar timeframe (default 1h)",
+            "strategy": "str — strategy name (default trend)",
+        },
+    )
+    def finance_backtest(context: Any, symbol: str, market: str = "crypto",
+                         timeframe: str = "1h",
+                         strategy: str = "trend") -> dict[str, Any]:
+        from ..agents.financial_expert import FinancialExpert
+
+        expert = FinancialExpert(context)
+        summary = expert.backtest(symbol, market=market, timeframe=timeframe,
+                                  strategy=strategy)
+        return summary.to_dict() if hasattr(summary, "to_dict") else {"result": str(summary)}

@@ -9,11 +9,43 @@ warmup (warmup is backfilled, never forward-leaked).
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 
 from .math import atr as _atr
 from .math import ema, ensure_ohlcv, rsi as _rsi, sma, true_range
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 __all__ = [
     "rsi",
@@ -38,27 +70,27 @@ __all__ = [
 ]
 
 
-def rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def rsi(df: _pd.DataFrame, period: int = 14) -> _pd.Series:
     """Wilder RSI of close, in [0, 100]."""
     df = ensure_ohlcv(df)
     return _rsi(df["close"], period)
 
 
-def macd(df: pd.DataFrame, fast: int = 12, slow: int = 26,
-         signal: int = 9) -> pd.DataFrame:
+def macd(df: _pd.DataFrame, fast: int = 12, slow: int = 26,
+         signal: int = 9) -> _pd.DataFrame:
     """MACD line, signal line and histogram (EMA-based, adjust=False)."""
     df = ensure_ohlcv(df)
     close = df["close"].astype(float)
     line = ema(close, fast) - ema(close, slow)
     sig = ema(line, signal)
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"macd": line, "signal": sig, "hist": line - sig}, index=df.index
     )
     return out.bfill().fillna(0.0)
 
 
-def bollinger(df: pd.DataFrame, period: int = 20,
-              mult: float = 2.0) -> pd.DataFrame:
+def bollinger(df: _pd.DataFrame, period: int = 20,
+              mult: float = 2.0) -> _pd.DataFrame:
     """Bollinger bands (population std, ddof=0) plus %B and bandwidth."""
     df = ensure_ohlcv(df)
     close = df["close"].astype(float)
@@ -69,7 +101,7 @@ def bollinger(df: pd.DataFrame, period: int = 20,
     lower = mid - mult * sd
     width = upper - lower
     pct_b = ((close - lower) / (width + 1e-12)).clip(0.0, 1.0)
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"upper": upper, "mid": mid, "lower": lower, "pct_b": pct_b,
          "width": width},
         index=df.index,
@@ -77,7 +109,7 @@ def bollinger(df: pd.DataFrame, period: int = 20,
     return out.fillna(0.0)
 
 
-def stochastic(df: pd.DataFrame, k: int = 14, d: int = 3) -> pd.DataFrame:
+def stochastic(df: _pd.DataFrame, k: int = 14, d: int = 3) -> _pd.DataFrame:
     """Stochastic oscillator: %K in [0, 100] and its SMA %D."""
     df = ensure_ohlcv(df)
     k = max(2, int(k))
@@ -87,18 +119,18 @@ def stochastic(df: pd.DataFrame, k: int = 14, d: int = 3) -> pd.DataFrame:
     ll = low.rolling(k, min_periods=1).min()
     pct_k = 100.0 * (close - ll) / ((hh - ll) + 1e-12)
     pct_d = sma(pct_k, max(2, int(d)))
-    out = pd.DataFrame({"k": pct_k.clip(0, 100), "d": pct_d.clip(0, 100)},
+    out = _pd.DataFrame({"k": pct_k.clip(0, 100), "d": pct_d.clip(0, 100)},
                        index=df.index)
     return out.bfill().fillna(50.0)
 
 
-def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def atr(df: _pd.DataFrame, period: int = 14) -> _pd.Series:
     """Average true range (Wilder smoothing)."""
     df = ensure_ohlcv(df)
     return _atr(df, period)
 
 
-def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+def adx(df: _pd.DataFrame, period: int = 14) -> _pd.DataFrame:
     """Wilder ADX with +DI / -DI. ADX in [0, 100]; DI in [0, 100]."""
     df = ensure_ohlcv(df)
     period = max(2, int(period))
@@ -118,7 +150,7 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     adx_s = dx.ewm(alpha=1.0 / period, adjust=False).mean()
     flat = atr_s < 1e-9
     adx_s = adx_s.mask(flat, 0.0)
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"adx": adx_s.clip(0, 100), "plus_di": plus_di.clip(0, 100),
          "minus_di": minus_di.clip(0, 100)},
         index=df.index,
@@ -126,30 +158,30 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     return out.bfill().fillna(0.0)
 
 
-def obv(df: pd.DataFrame) -> pd.Series:
+def obv(df: _pd.DataFrame) -> _pd.Series:
     """On-balance volume: cumulative signed volume."""
     df = ensure_ohlcv(df)
     close = df["close"].astype(float)
     vol = df["volume"].astype(float)
-    direction = np.sign(close.diff().fillna(0.0))
+    direction = _np.sign(close.diff().fillna(0.0))
     return (direction * vol).cumsum().rename("obv")
 
 
-def donchian(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+def donchian(df: _pd.DataFrame, period: int = 20) -> _pd.DataFrame:
     """Donchian channel: rolling highest high / lowest low and midline."""
     df = ensure_ohlcv(df)
     period = max(2, int(period))
     high, low = df["high"].astype(float), df["low"].astype(float)
     upper = high.rolling(period, min_periods=1).max()
     lower = low.rolling(period, min_periods=1).min()
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"upper": upper, "mid": (upper + lower) / 2.0, "lower": lower},
         index=df.index,
     )
     return out.bfill().ffill()
 
 
-def vwap(df: pd.DataFrame, anchor: str = "day") -> pd.Series:
+def vwap(df: _pd.DataFrame, anchor: str = "day") -> _pd.Series:
     """Volume-weighted average price, anchored per calendar day.
 
     VWAP = cumulative(typical_price * volume) / cumulative(volume), reset
@@ -164,7 +196,7 @@ def vwap(df: pd.DataFrame, anchor: str = "day") -> pd.Series:
     vol = df["volume"].astype(float).clip(lower=0.0)
     pv = (tp * vol).cumsum()
     cumvol = vol.cumsum()
-    if anchor == "day" and isinstance(df.index, pd.DatetimeIndex):
+    if anchor == "day" and isinstance(df.index, _pd.DatetimeIndex):
         day = df.index.floor("D")
         cumvol = vol.groupby(day).cumsum()
         pv = (tp * vol).groupby(day).cumsum()
@@ -175,9 +207,9 @@ def vwap(df: pd.DataFrame, anchor: str = "day") -> pd.Series:
     return out.fillna(tp).rename("vwap")
 
 
-def ichimoku(df: pd.DataFrame, tenkan: int = 9, kijun: int = 26,
+def ichimoku(df: _pd.DataFrame, tenkan: int = 9, kijun: int = 26,
              senkou_b_period: int = 52, displacement: int = 26
-             ) -> pd.DataFrame:
+             ) -> _pd.DataFrame:
     """Ichimoku Cloud: tenkan, kijun, senkou A/B (shifted forward), chikou.
 
     The cloud (senkou A/B) is plotted ``displacement`` bars ahead and the
@@ -200,7 +232,7 @@ def ichimoku(df: pd.DataFrame, tenkan: int = 9, kijun: int = 26,
     senkou_b = ((high.rolling(sb_p, min_periods=1).max()
                  + low.rolling(sb_p, min_periods=1).min()) / 2.0).shift(disp)
     chikou = close.shift(-disp)
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"tenkan": tenkan_s, "kijun": kijun_s, "senkou_a": senkou_a,
          "senkou_b": senkou_b, "chikou": chikou},
         index=df.index,
@@ -208,8 +240,8 @@ def ichimoku(df: pd.DataFrame, tenkan: int = 9, kijun: int = 26,
     return out.bfill().ffill()
 
 
-def psar(df: pd.DataFrame, accel: float = 0.02,
-         max_accel: float = 0.20) -> pd.Series:
+def psar(df: _pd.DataFrame, accel: float = 0.02,
+         max_accel: float = 0.20) -> _pd.Series:
     """Wilder Parabolic SAR: iterative, bounded acceleration.
 
     In an uptrend the SAR trails below price (never above the prior two
@@ -222,7 +254,7 @@ def psar(df: pd.DataFrame, accel: float = 0.02,
     high = df["high"].astype(float).to_numpy()
     low = df["low"].astype(float).to_numpy()
     n = len(df)
-    sar = np.empty(n)
+    sar = _np.empty(n)
     # Seed long; the first bars self-correct on the first flip.
     long = True
     ep = high[0]
@@ -254,10 +286,10 @@ def psar(df: pd.DataFrame, accel: float = 0.02,
                 if low[i] < ep:
                     ep = low[i]
                     af = min(af + step, cap)
-    return pd.Series(sar, index=df.index, name="psar")
+    return _pd.Series(sar, index=df.index, name="psar")
 
 
-def cci(df: pd.DataFrame, period: int = 20) -> pd.Series:
+def cci(df: _pd.DataFrame, period: int = 20) -> _pd.Series:
     """Commodity Channel Index: (TP - SMA_TP) / (0.015 * mean deviation).
 
     Flat markets (zero deviation) yield 0. Values beyond ±100 mark
@@ -273,7 +305,7 @@ def cci(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return out.mask(md < 1e-12, 0.0).bfill().fillna(0.0).rename(f"cci_{period}")
 
 
-def williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def williams_r(df: _pd.DataFrame, period: int = 14) -> _pd.Series:
     """Williams %R in [-100, 0]: close relative to the highest high."""
     df = ensure_ohlcv(df)
     period = max(2, int(period))
@@ -289,7 +321,7 @@ def williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
 _FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 
 
-def fibonacci(df: pd.DataFrame, period: int = 120) -> dict:
+def fibonacci(df: _pd.DataFrame, period: int = 120) -> dict:
     """Fibonacci retracement levels for the last ``period`` bars.
 
     Finds the swing high/low of the window and returns the classic ratios
@@ -310,8 +342,8 @@ def fibonacci(df: pd.DataFrame, period: int = 120) -> dict:
     return levels
 
 
-def keltner(df: pd.DataFrame, period: int = 20, atr_period: int = 10,
-            mult: float = 2.0) -> pd.DataFrame:
+def keltner(df: _pd.DataFrame, period: int = 20, atr_period: int = 10,
+            mult: float = 2.0) -> _pd.DataFrame:
     """Keltner channel: EMA(``period``) ± ``mult`` * ATR(``atr_period``).
 
     The EMA basis makes Keltner tighter than Bollinger in calm markets and
@@ -321,7 +353,7 @@ def keltner(df: pd.DataFrame, period: int = 20, atr_period: int = 10,
     close = df["close"].astype(float)
     mid = ema(close, max(2, int(period)))
     band = float(mult) * _atr(df, max(2, int(atr_period)))
-    out = pd.DataFrame(
+    out = _pd.DataFrame(
         {"upper": mid + band, "mid": mid, "lower": mid - band},
         index=df.index,
     )

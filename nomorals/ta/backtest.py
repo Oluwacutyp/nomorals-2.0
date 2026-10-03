@@ -10,22 +10,54 @@ fast approximation for research loops.
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 
 from .data import split_embargo
 from .math import atr, ensure_ohlcv, max_drawdown, profit_factor, sharpe, sortino
 from .signals import fuse_all
 from .strategies import run_zoo
 
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
+
 __all__ = ["EventBacktester", "VectorBacktester", "walk_forward",
            "periods_per_year"]
 
 
-def periods_per_year(index: pd.Index) -> int:
+def periods_per_year(index: _pd.Index) -> int:
     """Infer annualization from bar spacing (fallback: 252)."""
     try:
-        if isinstance(index, pd.DatetimeIndex) and len(index) > 5:
+        if isinstance(index, _pd.DatetimeIndex) and len(index) > 5:
             dt = (index[-1] - index[0]).total_seconds() / max(1, len(index) - 1)
             if dt <= 0:
                 return 252
@@ -50,12 +82,12 @@ class EventBacktester:
         self.latency_bars = latency_bars
         self.max_leverage = max_leverage
 
-    def _funding_per_bar(self, df: pd.DataFrame) -> float:
+    def _funding_per_bar(self, df: _pd.DataFrame) -> float:
         if not self.funding_8h_bps:
             return 0.0
         try:
             idx = df.index
-            if isinstance(idx, pd.DatetimeIndex) and len(idx) > 5:
+            if isinstance(idx, _pd.DatetimeIndex) and len(idx) > 5:
                 dt_h = ((idx[-1] - idx[0]).total_seconds()
                         / max(1, len(idx) - 1) / 3600.0)
                 if dt_h > 0:
@@ -64,16 +96,16 @@ class EventBacktester:
             pass
         return 0.0
 
-    def run(self, df: pd.DataFrame, position: pd.Series,
+    def run(self, df: _pd.DataFrame, position: _pd.Series,
             fraction: float = 1.0) -> dict:
         """Simulate ``position`` (-1..1 target exposure) bar by bar."""
         df = ensure_ohlcv(df)
         pos = (position.reindex(df.index).fillna(0.0).clip(-1, 1)
                .to_numpy(dtype=float))
         if self.latency_bars > 0:
-            pos = np.roll(pos, self.latency_bars)
+            pos = _np.roll(pos, self.latency_bars)
             pos[: self.latency_bars] = 0.0
-        pos = np.clip(pos * fraction, -self.max_leverage, self.max_leverage)
+        pos = _np.clip(pos * fraction, -self.max_leverage, self.max_leverage)
         close = df["close"].to_numpy(dtype=float)
         a = atr(df).to_numpy(dtype=float)
         spread = close * (self.spread_bps / 1e4)
@@ -90,16 +122,16 @@ class EventBacktester:
                 cash -= abs(units * px) * fpb
             equity = cash + units * px
             tgt_units = equity * pos[i] / px if px > 0 else 0.0
-            prev_sign = float(np.sign(units))
+            prev_sign = float(_np.sign(units))
             if abs(tgt_units - units) > 1e-12:
-                side = float(np.sign(tgt_units - units))
+                side = float(_np.sign(tgt_units - units))
                 trade_px = px + side * (spread[i] + slip[i])
                 delta = tgt_units - units
                 cost = abs(delta * trade_px) * fee
                 cash -= delta * trade_px + cost
                 traded += abs(delta * trade_px)
                 units = tgt_units
-                new_sign = float(np.sign(units))
+                new_sign = float(_np.sign(units))
                 if prev_sign == 0.0 and new_sign != 0.0:
                     entry_px, entry_units, entry_cost = trade_px, units, cost
                 elif prev_sign != 0.0 and new_sign == 0.0:
@@ -120,16 +152,16 @@ class EventBacktester:
         if units != 0.0 and entry_px is not None:
             pnl = (close[-1] - entry_px) * entry_units - entry_cost
             trades.append({"pnl": float(pnl), "bars": 0,
-                           "side": float(np.sign(units))})
-        return self._metrics(df, np.array(eq), trades, traded, expos)
+                           "side": float(_np.sign(units))})
+        return self._metrics(df, _np.array(eq), trades, traded, expos)
 
     def _metrics(self, df, eq, trades, traded, expos) -> dict:
-        eq_s = pd.Series(eq, index=df.index)
+        eq_s = _pd.Series(eq, index=df.index)
         rets = eq_s.pct_change().fillna(0.0)
         ppy = periods_per_year(df.index)
         years = max(1e-9, len(df) / ppy)
         cagr = float((eq[-1] / self.cash) ** (1 / years) - 1) if eq[-1] > 0 else -1.0
-        pnls = np.array([t["pnl"] for t in trades], dtype=float)
+        pnls = _np.array([t["pnl"] for t in trades], dtype=float)
         wins = pnls[pnls > 0]
         return {
             "final_equity": float(eq[-1]),
@@ -139,12 +171,12 @@ class EventBacktester:
             "sortino": sortino(rets, ppy),
             "max_dd": float(max_drawdown(eq_s)["max_dd"]),
             "profit_factor": profit_factor(rets),
-            "win_rate": float(np.mean(pnls > 0)) if len(pnls) else 0.0,
-            "expectancy": float(np.mean(pnls) / self.cash) if len(pnls) else 0.0,
+            "win_rate": float(_np.mean(pnls > 0)) if len(pnls) else 0.0,
+            "expectancy": float(_np.mean(pnls) / self.cash) if len(pnls) else 0.0,
             "trades": int(len(pnls)),
             "avg_win": float(wins.mean() / self.cash) if len(wins) else 0.0,
             "turnover": float(traded / (self.cash + 1e-12)),
-            "exposure": float(np.mean(expos)) if expos else 0.0,
+            "exposure": float(_np.mean(expos)) if expos else 0.0,
             "equity": eq_s,
             "trade_pnls": pnls,
         }
@@ -157,40 +189,40 @@ class VectorBacktester:
         self.fee_bps = fee_bps
         self.latency_bars = latency_bars
 
-    def run(self, df: pd.DataFrame, position: pd.Series) -> dict:
+    def run(self, df: _pd.DataFrame, position: _pd.Series) -> dict:
         df = ensure_ohlcv(df)
         rets = df["close"].pct_change().fillna(0.0).to_numpy(dtype=float)
         pos = (position.reindex(df.index).fillna(0.0).clip(-1, 1)
                .to_numpy(dtype=float))
-        pos = np.roll(pos, self.latency_bars)
+        pos = _np.roll(pos, self.latency_bars)
         pos[: self.latency_bars] = 0.0
-        turnover = np.abs(np.diff(pos, prepend=0.0))
+        turnover = _np.abs(_np.diff(pos, prepend=0.0))
         costs = turnover * (self.fee_bps / 1e4)
         strat = pos * rets - costs
-        eq = 100_000.0 * np.exp(np.cumsum(np.log1p(np.clip(strat, -0.99, None))))
-        eq_s = pd.Series(eq, index=df.index)
+        eq = 100_000.0 * _np.exp(_np.cumsum(_np.log1p(_np.clip(strat, -0.99, None))))
+        eq_s = _pd.Series(eq, index=df.index)
         ppy = periods_per_year(df.index)
         return {
             "total_return": float(eq[-1] / eq[0] - 1),
-            "sharpe": sharpe(pd.Series(strat), ppy),
-            "sortino": sortino(pd.Series(strat), ppy),
+            "sharpe": sharpe(_pd.Series(strat), ppy),
+            "sortino": sortino(_pd.Series(strat), ppy),
             "max_dd": float(max_drawdown(eq_s)["max_dd"]),
             "turnover": float(turnover.mean()),
-            "exposure": float(np.mean(np.abs(pos))),
+            "exposure": float(_np.mean(_np.abs(pos))),
             "equity": eq_s,
         }
 
 
-def _committee_position(df: pd.DataFrame, names: list[str]) -> pd.Series:
+def _committee_position(df: _pd.DataFrame, names: list[str]) -> _pd.Series:
     """Fused committee position for a set of strategy names."""
     frames = run_zoo(names, df)
     if not frames:
-        return pd.Series(0.0, index=df.index, name="position")
+        return _pd.Series(0.0, index=df.index, name="position")
     fused = fuse_all(frames, min_agreement=0.0)
     return fused["position"]
 
 
-def walk_forward(df: pd.DataFrame, names: list[str] | None = None,
+def walk_forward(df: _pd.DataFrame, names: list[str] | None = None,
                  n_splits: int = 4, embargo_bars: int = 20,
                  backtester: EventBacktester | None = None) -> dict:
     """Embargoed walk-forward: run the committee on each test fold.
@@ -226,8 +258,8 @@ def walk_forward(df: pd.DataFrame, names: list[str] | None = None,
         })
     if not folds:
         return {"folds": [], "n_folds": 0}
-    rets = np.array([f["total_return"] for f in folds])
-    sharpes = np.array([f["sharpe"] for f in folds])
+    rets = _np.array([f["total_return"] for f in folds])
+    sharpes = _np.array([f["sharpe"] for f in folds])
     return {
         "folds": folds,
         "n_folds": len(folds),

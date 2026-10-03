@@ -9,10 +9,42 @@ flicker.
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
 
 from .math import atr, ensure_ohlcv, rolling_quantile
+
+
+# ── lazy optional deps ──────────────────────────────────────────────────
+# numpy/pandas are optional. The package imports without them; functions
+# that need them raise TAError with a clear install hint.
+
+class TAError(Exception):
+    """Raised when a TA operation cannot be completed."""
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None  # type: ignore[assignment]
+    _HAS_NUMPY = False
+
+try:
+    import pandas as _pd
+    _HAS_PANDAS = True
+except ImportError:
+    _pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
+
+def _require_numpy() -> None:
+    if not _HAS_NUMPY:
+        raise TAError("numpy is required for this operation: pip install nomorals[ta]")
+
+
+def _require_pandas() -> None:
+    if not _HAS_PANDAS:
+        raise TAError("pandas is required for this operation: pip install nomorals[ta]")
+
+
 
 __all__ = ["LABELS", "CODES", "RegimeDetector"]
 
@@ -20,22 +52,22 @@ LABELS = ("TREND_UP", "TREND_DOWN", "RANGE", "SQUEEZE", "PANIC")
 CODES = {name: i for i, name in enumerate(LABELS)}
 
 
-def _r2_trend(close: pd.Series, window: int) -> pd.Series:
+def _r2_trend(close: _pd.Series, window: int) -> _pd.Series:
     """Signed R² of a rolling log-price linear fit (trend strength × sign)."""
-    x = np.arange(window, dtype=float)
+    x = _np.arange(window, dtype=float)
 
     def _r2(v):
         if len(v) < 8:
             return 0.0
-        y = np.asarray(v, dtype=float)
-        if float(np.std(y)) <= 1e-12:
+        y = _np.asarray(v, dtype=float)
+        if float(_np.std(y)) <= 1e-12:
             return 0.0
         xx = x[-len(y):]
-        a, b = np.polyfit(xx, y, 1)
+        a, b = _np.polyfit(xx, y, 1)
         pred = a * xx + b
-        ss_res = float(np.sum((y - pred) ** 2))
-        ss_tot = float(np.sum((y - y.mean()) ** 2)) + 1e-12
-        return float(max(0.0, 1.0 - ss_res / ss_tot)) * float(np.sign(a) or 1.0)
+        ss_res = float(_np.sum((y - pred) ** 2))
+        ss_tot = float(_np.sum((y - y.mean()) ** 2)) + 1e-12
+        return float(max(0.0, 1.0 - ss_res / ss_tot)) * float(_np.sign(a) or 1.0)
 
     return (
         close.rolling(window, min_periods=max(8, window // 3))
@@ -44,12 +76,12 @@ def _r2_trend(close: pd.Series, window: int) -> pd.Series:
     )
 
 
-def _efficiency(close: pd.Series, window: int) -> pd.Series:
+def _efficiency(close: _pd.Series, window: int) -> _pd.Series:
     """Kaufman-style efficiency ratio, signed by net direction."""
     net = close.diff(window).abs()
     path = close.diff().abs().rolling(window, min_periods=5).sum()
     er = (net / (path + 1e-12)).fillna(0.0)
-    direction = np.sign(close.diff(window).fillna(0.0))
+    direction = _np.sign(close.diff(window).fillna(0.0))
     return er * direction
 
 
@@ -63,12 +95,12 @@ class RegimeDetector:
         self.cal_window = cal_window
         self.hysteresis = hysteresis
 
-    def features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def features(self, df: _pd.DataFrame) -> _pd.DataFrame:
         df = ensure_ohlcv(df)
         close = df["close"]
-        logc = np.log(close.clip(lower=1e-9))
+        logc = _np.log(close.clip(lower=1e-9))
         w = self.feature_window
-        f = pd.DataFrame(index=df.index)
+        f = _pd.DataFrame(index=df.index)
         f["trend_r2"] = _r2_trend(logc, w)
         f["efficiency"] = _efficiency(close, w)
         rets = close.pct_change().fillna(0.0)
@@ -94,22 +126,22 @@ class RegimeDetector:
         )
         return f.fillna(0.0)
 
-    def _raw_label(self, f: pd.DataFrame, sq: float, pq: float,
-                   tq: float) -> pd.Series:
+    def _raw_label(self, f: _pd.DataFrame, sq: float, pq: float,
+                   tq: float) -> _pd.Series:
         tr = f["trend_r2"].to_numpy()
         er = f["efficiency"].to_numpy()
         wq = f["width_q"].to_numpy()
         vq = f["vol_q"].to_numpy()
-        labels = np.full(len(f), CODES["RANGE"], dtype=int)
-        trend = (np.abs(tr) > tq) & (np.abs(er) > 0.25)
+        labels = _np.full(len(f), CODES["RANGE"], dtype=int)
+        trend = (_np.abs(tr) > tq) & (_np.abs(er) > 0.25)
         labels[trend & (tr > 0)] = CODES["TREND_UP"]
         labels[trend & (tr < 0)] = CODES["TREND_DOWN"]
         labels[(wq < sq) & (~trend)] = CODES["SQUEEZE"]
         labels[vq > pq] = CODES["PANIC"]
-        return pd.Series(labels, index=f.index)
+        return _pd.Series(labels, index=f.index)
 
-    def fit(self, df: pd.DataFrame, squeeze_q: float = 0.15,
-            panic_q: float = 0.95, trend_q: float = 0.45) -> pd.DataFrame:
+    def fit(self, df: _pd.DataFrame, squeeze_q: float = 0.15,
+            panic_q: float = 0.95, trend_q: float = 0.45) -> _pd.DataFrame:
         """Full regime frame: features + hysteresis-smoothed label + probs."""
         f = self.features(df)
         raw = self._raw_label(f, squeeze_q, panic_q, trend_q)
@@ -125,17 +157,17 @@ class RegimeDetector:
         out = f.copy()
         out["regime"] = lab
         out["label"] = [LABELS[int(c)] for c in lab]
-        tr = np.abs(f["trend_r2"].to_numpy())
-        out["p_trend"] = np.clip((tr - trend_q) / (1 - trend_q + 1e-9), 0, 1)
-        out["p_squeeze"] = np.clip(
+        tr = _np.abs(f["trend_r2"].to_numpy())
+        out["p_trend"] = _np.clip((tr - trend_q) / (1 - trend_q + 1e-9), 0, 1)
+        out["p_squeeze"] = _np.clip(
             (squeeze_q - f["width_q"].to_numpy()) / (squeeze_q + 1e-9), 0, 1)
-        out["p_panic"] = np.clip(
+        out["p_panic"] = _np.clip(
             (f["vol_q"].to_numpy() - panic_q) / (1 - panic_q + 1e-9), 0, 1)
-        out["p_range"] = np.clip(
+        out["p_range"] = _np.clip(
             1 - out[["p_trend", "p_squeeze", "p_panic"]].max(axis=1), 0, 1)
         return out
 
-    def current(self, df: pd.DataFrame, **kw) -> dict:
+    def current(self, df: _pd.DataFrame, **kw) -> dict:
         """Regime snapshot at the last bar, with a lookback label mix."""
         frame = self.fit(df, **kw)
         last = frame.iloc[-1]
@@ -154,7 +186,7 @@ class RegimeDetector:
             "mix_lookback": {k: float(v) for k, v in counts.items()},
         }
 
-    def transition_alert(self, df: pd.DataFrame, **kw) -> dict:
+    def transition_alert(self, df: _pd.DataFrame, **kw) -> dict:
         """Did the regime just change? Flags squeeze→expansion and panic onset."""
         frame = self.fit(df, **kw)
         if len(frame) < 10:
