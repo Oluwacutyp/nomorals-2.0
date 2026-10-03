@@ -363,9 +363,9 @@ class Scheduler:
             )
         # alert the owner — durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
-        # not page every run); successes still go through the notifier's
-        # dedupe choke point.
-        alert = True
+        # not page every run); successes are silent — the owner doesn't
+        # need a ping for every routine tick.
+        alert = not ok
         if not ok and prev_failed:
             alert = False  # still failing — the owner already knows
         if alert:
