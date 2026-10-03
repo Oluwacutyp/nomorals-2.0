@@ -146,6 +146,10 @@ class Tab:
     def markdown(self, max_chars: int = 40000) -> dict[str, Any]:
         return self._delegate("markdown", max_chars=max_chars)
 
+    def html(self, max_chars: int = 2_000_000) -> dict[str, Any]:
+        """Raw page HTML (un-parsed markup; includes ld+json scripts)."""
+        return self._delegate("html", max_chars=max_chars)
+
     def links(self) -> dict[str, Any]:
         return self._delegate("links")
 
