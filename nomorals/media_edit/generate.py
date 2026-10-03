@@ -36,6 +36,7 @@ without explicit configuration.
 
 from __future__ import annotations
 
+import difflib
 import os
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,19 @@ STYLES: dict[str, str] = {
     "product": "commercial product photography, studio lighting, clean background",
 }
 
+def _resolve_image_style(style: str) -> str:
+    """Resolve an image style name with fuzzy matching. Never hard-fails
+    on close matches — returns the canonical style key."""
+    key = (style or "").strip().lower()
+    if key in STYLES:
+        return key
+    matches = difflib.get_close_matches(key, list(STYLES.keys()), n=1, cutoff=0.6)
+    if matches:
+        return matches[0]
+    raise GenerativeEditError(
+        f"unknown style {style!r}; use: {sorted(STYLES)}")
+
+
 ASPECT_RATIOS: dict[str, tuple[int, int]] = {
     "1:1": (1024, 1024),
     "16:9": (1344, 768),
@@ -105,9 +119,7 @@ def _resolve_gen_params(prompt: str,
     names fail fast.
     """
     if style is not None:
-        if style not in STYLES:
-            raise GenerativeEditError(
-                f"unknown style {style!r}; use: {sorted(STYLES)}")
+        style = _resolve_image_style(style)
         prompt = f"{prompt}, {STYLES[style]}"
     if aspect is not None:
         if aspect not in ASPECT_RATIOS:
@@ -742,9 +754,7 @@ def op_img2img(img: Any, prompt: str, *,
     """
     be = get_backend(backend)
     if style is not None:
-        if style not in STYLES:
-            raise GenerativeEditError(
-                f"unknown style {style!r}; use: {sorted(STYLES)}")
+        style = _resolve_image_style(style)
         prompt = f"{prompt}, {STYLES[style]}"
     return be.img2img(img, prompt, strength=strength, seed=seed,
                       negative_prompt=negative_prompt, steps=steps,

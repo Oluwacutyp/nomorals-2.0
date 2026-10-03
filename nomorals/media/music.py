@@ -35,6 +35,7 @@ Registered as the ``music_writer`` tool.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import random
 import re
@@ -443,6 +444,27 @@ def resolve_style(name: str) -> StyleSpec:
     for k, v in STYLE_ALIASES.items():
         if k in key or key in k:
             return STYLES[v]
+    # Fuzzy match: "dream" -> "ambient", "hip hop" -> "hiphop", etc.
+    # Also try matching against style names with spaces removed.
+    candidates = list(STYLES.keys()) + list(STYLE_ALIASES.keys())
+    matches = difflib.get_close_matches(key, candidates, n=1, cutoff=0.6)
+    if matches:
+        matched = matches[0]
+        if matched in STYLES:
+            return STYLES[matched]
+        return STYLES[STYLE_ALIASES[matched]]
+    # Vibe-word fallback: map common mood words to the closest style.
+    _VIBE_MAP = {
+        "dream": "ambient", "dreamy": "ambient", "sleep": "ambient",
+        "chill": "lofi", "relax": "lofi", "calm": "ambient",
+        "party": "dancehall", "club": "edm", "dance": "edm",
+        "sad": "blues", "happy": "pop", "love": "rnb",
+        "worship": "gospel", "church": "gospel",
+        "street": "drill", "hard": "drill",
+    }
+    for vibe, style_key in _VIBE_MAP.items():
+        if vibe in key or key in vibe:
+            return STYLES[style_key]
     raise ToolError(f"unknown style {name!r} — choose from "
                     f"{sorted(STYLES)}")
 
