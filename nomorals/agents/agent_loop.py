@@ -277,23 +277,65 @@ def run_loop(
 ) -> tuple[str | None, LoopContext]:
     """Run the full six-step loop for one inbound owner-DM message.
 
+    THE single entry point — ``CoreMind.handle`` delegates here after its
+    structural gate.  There is no second path.
+
     Returns (reply_or_None, context). ``None`` reply means "fall through to
     the companion conversation path" — not an error.
     """
-    # 1 — context pack
+    # 1 — context pack (cheap, local, never raises)
     ctx = build_loop_context(message, mind=mind, runtime=runtime,
                              chat_key=chat_key)
     ctx.is_owner_dm = True  # run_loop is only called past the owner-DM gate
+    ctx.text = text or ""
+    ctx.text_len = len(ctx.text)
 
-    # 2 — goal inference (fast path + decide live inside mind.handle today;
-    #     kept here as the explicit seam for the next refactor)
-    # 3 — plan, 4 — execute: delegated to the mind's dispatch
-    reply = mind._dispatch_from_loop(ctx, text, message=message)
+    # an open clarification? this message may be the answer
+    pending = mind._get_pending(chat_key)
+    if pending is not None:
+        from .coremind import _RE_CANCEL
+        if _RE_CANCEL.match(text):
+            mind._clear_pending(chat_key)
+            return "ok — scrapped. what's next?", ctx
+        resolved = mind._pending_resolves(pending, text)
+        if resolved is not None:
+            mind._clear_pending(chat_key)
+            reply = mind._dispatch(resolved, chat_key, message) or None
+            ok, reply = verify_dispatch(resolved.kind, reply)
+            return reply, ctx
+        # not an answer — clear the stale question and fall through
+        mind._clear_pending(chat_key)
 
-    # 5 — verify
-    # (intent kind is recovered from the job the dispatch just recorded)
-    kind = _last_intent_kind(mind)
-    ok, reply = verify_dispatch(kind, reply)
+    # 2 — goal inference, 3 — plan, 4 — execute
+    from .coremind import fast_path, Intent
+    live_game = ctx.live_game
+    if live_game is None:
+        try:
+            live_game = mind._live_game(chat_key)
+        except Exception:  # noqa: BLE001
+            live_game = None
+    # fast path for trivial chat sits ABOVE the heavy path — no router
+    # model call, no swarms, no research loops for greetings/thanks.
+    fast = fast_path(text)
+    if fast is not None:
+        reply, why = fast
+        try:
+            mind._record_route(Intent("fastchat", 1.0, route="fastchat", why=why))
+        except Exception:  # noqa: BLE001
+            pass
+        return reply, ctx
+
+    intent = mind.decide(text, live_game=live_game, allow_model=True)
+    if intent.kind == "chat":
+        return None, ctx
+    if intent.action == "ask":
+        question = mind._question_for(intent)
+        mind._set_pending(chat_key, intent, question)
+        return question, ctx
+    reply = mind._dispatch(intent, chat_key, message) or None
+
+    # 5 — verify: fake success becomes honest failure, never green
+    _ok, reply = verify_dispatch(intent.kind, reply)
 
     # 6 — reply happens at the call site (gateway.send to ctx.origin())
     return reply, ctx

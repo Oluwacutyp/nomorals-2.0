@@ -53,29 +53,109 @@ def clean_title(topic: str, context: Any = None) -> str:
 
     "Write me a story or book to feel better my girlfriend has been acting
     strange..." → "When She's Healing: A Partner's Guide Through Recovery"
+
+    Online-first: the model path is ALWAYS attempted when a model is usable
+    (power state full/degraded), with one retry on weak output.  The heuristic
+    below is the offline last resort, not a co-equal option.
     """
     raw = (topic or "").strip()
     if not raw:
         return "Untitled"
-    # model path: a real title from the live model
+    # model path: a real title from the live model — tried first, retried once
+    try:
+        from ..llm.power import model_usable
+        _usable = model_usable(context)
+    except Exception:  # noqa: BLE001
+        _usable = False
     router = getattr(context, "router", None) if context is not None else None
-    if router is not None:
+    if _usable and router is not None:
+        title = _model_title(raw, router)
+        if title:
+            return title
+    # offline last resort
+    return _heuristic_title(raw)
+
+
+def _model_title(raw: str, router: Any) -> str:
+    """Ask the live model for a title.  Two attempts, strict validation."""
+    from ..llm.base import Message, SamplingParams
+
+    prompts = [
+        ("You are a bestselling book editor. Reply with ONLY the title — "
+         "no quotes, no explanation, no subtitle unless essential. "
+         "Make it specific, evocative, and human.",
+         f"Give this book a strong title (max 8 words). It is about: {raw[:400]}"),
+        ("You are a book editor. Reply with ONLY a short punchy book title.",
+         f"Title for a book about: {raw[:300]}"),
+    ]
+    for system, user in prompts:
         try:
-            from ..llm.base import Message, SamplingParams
             response = router.chat(
-                [Message.system(
-                    "You are a book editor. Reply with ONLY a book title — "
-                    "no quotes, no explanation, no subtitle unless essential."),
-                 Message.user(
-                     f"Give this book a strong, specific title (max 8 words). "
-                     f"The book is about: {raw[:400]}")],
-                SamplingParams(temperature=0.5, max_tokens=40),
+                [Message.system(system), Message.user(user)],
+                SamplingParams(temperature=0.6, max_tokens=40),
             )
-            title = (getattr(response, "text", "") or "").strip().strip("\"'")
-            if response.ok and 3 <= len(title) <= 90 and "write me" not in title.lower():
-                return title
-        except Exception:  # noqa: BLE001 - heuristic fallback below
-            pass
+        except Exception:  # noqa: BLE001
+            continue
+        title = (getattr(response, "text", "") or "").strip().strip("\"'“”")
+        # strip common model prefixes
+        title = re.sub(r"^(title|book title)\s*:\s*", "", title, flags=re.I).strip()
+        low = title.lower()
+        if (getattr(response, "ok", False) and 3 <= len(title) <= 90
+                and "write me" not in low and "make me" not in low
+                and "as an ai" not in low and "i'm sorry" not in low
+                and len(title.split()) <= 12):
+            return title
+    return ""
+
+
+#: (relationship words, emotional themes) → title template parts
+_THEME_RELATIONSHIPS = (
+    "girlfriend", "boyfriend", "wife", "husband", "partner", "fiance",
+    "fiancée", "spouse", "lover",
+)
+_THEME_EMOTIONS = {
+    "trust": "Trust", "distrust": "Trust", "cheat": "Trust",
+    "feel better": "Healing", "healing": "Healing", "hurt": "Healing",
+    "strange": "Understanding", "distant": "Closeness", "cold": "Closeness",
+    "fight": "Conflict", "argu": "Conflict", "breakup": "Letting Go",
+    "break up": "Letting Go", "operation": "Recovery", "surgery": "Recovery",
+    "sick": "Recovery", "grief": "Grief", "loss": "Grief", "death": "Grief",
+    "anxious": "Calm", "anxiety": "Calm", "stress": "Calm",
+    "love": "Love", "marriage": "Marriage", "wedding": "Marriage",
+}
+
+
+def _theme_title(raw: str) -> str:
+    """Build a genuine title from emotional/relationship themes.
+
+    "write me a book to feel better, my girlfriend has been acting strange
+    after her operation and I can't trust her" → "Healing Together: Trust
+    and Recovery in Your Relationship"
+    """
+    low = (raw or "").lower()
+    rel = next((w for w in _THEME_RELATIONSHIPS if w in low), "")
+    themes: list[str] = []
+    for key, label in _THEME_EMOTIONS.items():
+        if key in low and label not in themes:
+            themes.append(label)
+    if not rel or not themes:
+        return ""
+    main = themes[0]
+    rest = [t for t in themes[1:] if t != main]
+    if rest:
+        sub = f"{rest[0]} in Your Relationship"
+    else:
+        sub = "A Partner's Guide"
+    connector = "Together" if main in ("Healing", "Recovery", "Understanding") else "Again"
+    return f"{main} {connector}: {sub}"
+
+
+def _heuristic_title(raw: str) -> str:
+    """Offline last-resort title cleaner (used only when no model is usable)."""
+    # theme-first: emotional/support requests get a real title, not a truncation
+    themed = _theme_title(raw)
+    if themed:
+        return themed
     # heuristic: strip request prefixes, take the core phrase, title-case it
     lowered = raw.lower()
     for prefix in _REQUEST_PREFIXES:
@@ -131,6 +211,73 @@ def clean_title(topic: str, context: Any = None) -> str:
     titled = [words[0].capitalize()] + [
         w if w.lower() in small else w.capitalize() for w in words[1:]]
     return " ".join(titled)
+
+
+def plan_book(topic: str, notes: str, context: Any,
+              *, genre: str = "") -> dict[str, Any] | None:
+    """One model call for the whole book plan: title + chapter count + outline.
+
+    Replaces 3 sequential round-trips (title, count, outline) with a single
+    call.  Returns {"title": str, "chapters": [{"title":..., "beats":[...]}]}
+    or None when the model isn't usable / the response is bad.
+    """
+    try:
+        from ..llm.power import model_usable
+        if not model_usable(context):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    router = getattr(context, "router", None)
+    if router is None:
+        return None
+    try:
+        import json as _json
+        from ..llm.base import Message, SamplingParams
+        prompt = (
+            f"You are planning a book. Topic: {topic[:400]}\n"
+            f"Genre/tone: {genre or 'practical non-fiction'}\n"
+            f"Research notes (may be empty):\n{(notes or '(none)')[:4000]}\n\n"
+            "Decide how many chapters this book truly needs (let the content "
+            "decide — a focused guide might need 5, a memoir 15; never pad, "
+            "never truncate) and outline them.\n\n"
+            "Reply with ONLY a JSON object, no prose, no fences:\n"
+            '{"title": "<strong specific book title, max 10 words>", '
+            '"chapters": [{"title": "<chapter title>", '
+            '"beats": ["<4-6 section beats>"]}]}'
+        )
+        response = router.chat(
+            [Message.system(
+                "You are a bestselling book editor. Reply with ONLY the "
+                "requested JSON."),
+             Message.user(prompt)],
+            SamplingParams(temperature=0.5, max_tokens=3000),
+        )
+        text = (getattr(response, "text", "") or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if not getattr(response, "ok", False) or start == -1 or end <= start:
+            return None
+        plan = _json.loads(text[start:end + 1])
+        title = str(plan.get("title", "")).strip().strip("\"'")
+        raw_chapters = plan.get("chapters") or []
+        if not title or not isinstance(raw_chapters, list) or not raw_chapters:
+            return None
+        chapters = []
+        for item in raw_chapters[:24]:
+            if not isinstance(item, dict):
+                continue
+            ct = str(item.get("title", "")).strip()
+            beats = [str(b).strip() for b in (item.get("beats") or [])
+                     if str(b).strip()]
+            if ct:
+                chapters.append({"title": ct, "beats": beats[:8]})
+        if len(chapters) < 3:
+            return None
+        low = title.lower()
+        if "write me" in low or "as an ai" in low:
+            return None
+        return {"title": title, "chapters": chapters}
+    except Exception:  # noqa: BLE001 - caller falls back to separate calls
+        return None
 
 
 def infer_chapter_count(topic: str, context: Any = None,
@@ -262,10 +409,25 @@ class BookForge:
         topic = (topic or "").strip()
         if not topic:
             raise BookError("a book needs a topic")
-        # dynamic: infer chapter count + clean title when not given
-        n_chapters = int(chapters) if chapters else infer_chapter_count(
-            topic, self.context)
-        clean = (title or "").strip() or clean_title(topic, self.context)
+        book_notes = notes.strip()[:_NOTES_CAP] if notes.strip() else ""
+        if not book_notes and research:
+            book_notes = self.research_topic(topic)
+        # online-first: ONE model call plans title + chapter count + outline.
+        # Falls back to the separate steps (title → count → outline) when the
+        # model isn't usable or the plan is bad.
+        plan = None
+        if not (title or "").strip() and not chapters:
+            plan = plan_book(topic, book_notes, self.context, genre=genre)
+        if plan is not None:
+            clean = plan["title"]
+            planned = plan["chapters"]
+            n_chapters = len(planned)
+        else:
+            planned = None
+            # dynamic: infer chapter count + clean title when not given
+            n_chapters = int(chapters) if chapters else infer_chapter_count(
+                topic, self.context)
+            clean = (title or "").strip() or clean_title(topic, self.context)
         slug = slugify(clean or topic)
         if self._json_path(slug).exists():
             raise BookError(
@@ -282,12 +444,17 @@ class BookForge:
             target_words=max(300, wpc),
         )
         book._context = self.context  # type: ignore[attr-defined]
-        if notes.strip():
-            book.notes = notes.strip()[:_NOTES_CAP]
-        elif research:
-            book.notes = self.research_topic(topic)
-        outline_mod.make_outline(book, n_chapters=n_chapters,
-                                 context=self.context)
+        book.notes = book_notes
+        if planned is not None:
+            # the unified plan already has title + outline — apply directly
+            from .model import Chapter
+            book.chapters = [
+                Chapter(number=i + 1, title=c["title"], beats=c["beats"])
+                for i, c in enumerate(planned)
+            ]
+        else:
+            outline_mod.make_outline(book, n_chapters=n_chapters,
+                                     context=self.context)
         self.save(book)
         _log.info("book created: %s (%d chapters planned)", slug, len(book.chapters))
         return book

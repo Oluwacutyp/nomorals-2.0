@@ -228,6 +228,11 @@ class RuntimeMetaMixin:
             return f"could not build the {provider} router: {exc}"
         self.brain.responder.router = new_router
         self.context.router = new_router
+        try:
+            from ...llm.power import invalidate as _invalidate_power
+            _invalidate_power(self.context)
+        except Exception:  # noqa: BLE001 - power cache is best-effort
+            pass
         _log.info("model switched live: provider=%s chain=%s", provider, chain)
         return f"model switched — now: {self._model_status_line()}"
 

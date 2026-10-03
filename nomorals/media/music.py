@@ -761,6 +761,10 @@ class Song:
     audio_path: str = ""
     score_pdf_path: str = ""
     seed: int = 0
+    #: melody notes for staff notation: (midi_pitch, start_beat, dur_beats)
+    melody_notes: list[tuple[int, float, float]] = field(default_factory=list)
+    #: per-bar (bar_index, chord_symbol, section_name) for the notation
+    notation_bars: list[tuple[int, str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1307,6 +1311,23 @@ class MusicCreator:
         b.add_notes(b.chords, parts["chords"])
         b.add_notes(bass_tr, parts["bass"])
         b.add_notes(drum_tr, parts["drums"])
+        # capture notation data for the staff renderer
+        try:
+            song.melody_notes = [
+                (int(e.note), float(e.start), float(e.duration))
+                for e in parts["melody"]
+            ]
+            bars: list[tuple[int, str, str]] = []
+            bar = 0
+            for s in song.sections:
+                prog = list(s.chords) or ["I", "V", "vi", "IV"]
+                prog = (prog * ((s.bars // len(prog)) + 1))[:s.bars]
+                for i, chord in enumerate(prog):
+                    bars.append((bar + i, str(chord), s.name))
+                bar += s.bars
+            song.notation_bars = bars
+        except Exception:  # noqa: BLE001 - notation data is best-effort
+            pass
         return b.write(str(target))
 
     def _render_audio(self, song: Song, workdir: str) -> str:
@@ -1325,20 +1346,35 @@ class MusicCreator:
                          seed=song.seed ^ 0xA071)
 
     def _write_score_pdf(self, song: Song, workdir: str) -> str:
-        """Render the lead sheet (chords + lyrics + arrangement) to PDF."""
+        """Render the score to PDF: real staff notation when melody data is
+        available, otherwise the chord/lyric lead sheet."""
         from ..tools.filesystem import safe_path
-        from ..core.pdf import render_pdf
 
         base = safe_path(self.context, (workdir or "music").strip("/"))
         base.mkdir(parents=True, exist_ok=True)
         target = base / f"{_slugify(song.title)}-score.pdf"
 
-        data = render_pdf(
-            song.to_score_markdown(),
-            title=f"{song.title} — Score",
-            headings=True,
-            toc=False,
-        )
+        data = None
+        if song.melody_notes:
+            try:
+                from .notation import render_score_pdf
+                subtitle = (f"{song.style.title()} · Key of {song.key} "
+                            f"{song.mode} · {song.tempo} BPM")
+                data = render_score_pdf(song.title, subtitle,
+                                        song.melody_notes,
+                                        song.notation_bars,
+                                        tempo=song.tempo)
+            except Exception as exc:  # noqa: BLE001 - fall back to lead sheet
+                _log.warning("staff notation failed: %s", exc)
+                data = None
+        if data is None:
+            from ..core.pdf import render_pdf
+            data = render_pdf(
+                song.to_score_markdown(),
+                title=f"{song.title} — Score",
+                headings=True,
+                toc=False,
+            )
         target.write_bytes(data)
         return str(target)
 
