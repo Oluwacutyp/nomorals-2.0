@@ -30,6 +30,7 @@ from .checkpoints import (
     request_human_action,
 )
 from .github import GitHubConnector, GitHubError
+from .jiji import JijiConnector, JijiError
 from .jumia import JumiaConnector
 from .mono import MonoConnector
 from .plaid import PlaidConnector
@@ -55,6 +56,8 @@ __all__ = [
     "GitHubError",
     "HumanCheckpoint",
     "HumanCheckpointPending",
+    "JijiConnector",
+    "JijiError",
     "JumiaConnector",
     "MonoConnector",
     "PlaidConnector",

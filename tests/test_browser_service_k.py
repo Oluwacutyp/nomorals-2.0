@@ -1,18 +1,22 @@
 """Browser service (nomorals/browser): sessions, tabs, history, downloads,
-persistence round-trip, screenshot fail-fast."""
+persistence round-trip, screenshot fail-fast, rendered (playwright) tabs."""
 
+import contextlib
 import http.server
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nomorals.browser import (
     BrowserError,
     BrowserService,
     DownloadResult,
+    RenderedTab,
     ScreenshotResult,
     SessionHandle,
     Tab,
@@ -314,6 +318,229 @@ class TestBrowserService(unittest.TestCase):
         self.svc.open_session("shot3")
         with self.assertRaises(BrowserError):
             self.svc.screenshot("no-such-tab")
+
+
+# ── rendered tabs (playwright-backed; always mocked — never a real browser) ──
+
+
+class _FakePage:
+    def __init__(self):
+        self.url = ""
+        self.goto_calls = []
+        self.body_text = "rendered body text"
+        self.page_html = "<html><body>rendered</body></html>"
+        self.eval_result = []
+        self.closed = False
+
+    def goto(self, url, **kwargs):
+        self.goto_calls.append((url, kwargs))
+        self.url = url
+
+    def title(self):
+        return "Fake Title"
+
+    def inner_text(self, selector):
+        return self.body_text
+
+    def eval_on_selector_all(self, selector, js):
+        return self.eval_result
+
+    def content(self):
+        return self.page_html
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, page, **kwargs):
+        self._page = page
+        self.kwargs = kwargs
+        self.saved_path = None
+
+    def new_page(self):
+        return self._page
+
+    def storage_state(self, path=None):
+        self.saved_path = path
+
+    def close(self):
+        pass
+
+
+class _FakeBrowser:
+    def __init__(self, context):
+        self._context = context
+        self.context_kwargs = None
+        self.closed = False
+
+    def new_context(self, **kwargs):
+        self.context_kwargs = kwargs
+        return self._context
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeChromium:
+    def __init__(self, browser):
+        self._browser = browser
+        self.launch_kwargs = None
+
+    def launch(self, **kwargs):
+        self.launch_kwargs = kwargs
+        return self._browser
+
+
+class _FakeSyncPlaywright:
+    def __init__(self, chromium):
+        self.chromium = chromium
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+@contextlib.contextmanager
+def _mocked_playwright(page):
+    """Patch sys.modules + find_spec so RenderedTab uses fakes, never a
+    real Chromium. Yields (instances, context, browser, chromium)."""
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    chromium = _FakeChromium(browser)
+    instances = []
+
+    def factory():
+        inst = _FakeSyncPlaywright(chromium)
+        instances.append(inst)
+        return inst
+
+    sync_api = mock.MagicMock()
+    sync_api.sync_playwright = factory
+    pw_pkg = mock.MagicMock()
+    with mock.patch.dict(sys.modules, {"playwright": pw_pkg,
+                                       "playwright.sync_api": sync_api}), \
+            mock.patch("importlib.util.find_spec", return_value=object()):
+        yield instances, context, browser, chromium
+
+
+class TestRenderedTabs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+
+    def test_open_rendered_tab_fail_fast_without_playwright(self):
+        with mock.patch("importlib.util.find_spec", return_value=None):
+            with self.assertRaises(BrowserError) as ctx:
+                self.svc.open_rendered_tab("s", "https://example.com/")
+        self.assertIn("pip install playwright", str(ctx.exception))
+
+    def test_open_rendered_tab_empty_session_name_raises(self):
+        with self.assertRaises(BrowserError):
+            self.svc.open_rendered_tab("  ")
+
+    def test_open_rendered_tab_navigate_and_shapes(self):
+        page = _FakePage()
+        with _mocked_playwright(page) as (instances, context, browser, chromium):
+            tab = self.svc.open_rendered_tab("sess1", "https://example.com/")
+            self.assertIsInstance(tab, RenderedTab)
+            # headless chromium launched lazily, exactly once
+            self.assertEqual(chromium.launch_kwargs, {"headless": True})
+            self.assertTrue(instances[0].started)
+            url, kwargs = page.goto_calls[0]
+            self.assertEqual(url, "https://example.com/")
+            self.assertEqual(kwargs.get("wait_until"), "domcontentloaded")
+            self.assertEqual(tab.url, "https://example.com/")
+            self.assertEqual(tab.title, "Fake Title")
+            self.assertEqual(len(tab.history), 1)
+            # text() shape matches Tab.text()
+            txt = tab.text()
+            self.assertEqual(txt["url"], "https://example.com/")
+            self.assertEqual(txt["text"], "rendered body text")
+            self.assertIn("chars", txt)
+            self.assertIn("truncated", txt)
+            # links() shape matches Tab.links(): absolute, http(s), deduped
+            page.eval_result = [
+                {"text": "Ad One",
+                 "href": "https://jiji.ng/lagos/cars/ad-1a2b3c.html"},
+                {"text": "Dup",
+                 "href": "https://jiji.ng/lagos/cars/ad-1a2b3c.html#frag"},
+                {"text": "JS", "href": "javascript:void(0)"},
+            ]
+            links = tab.links()
+            self.assertEqual(links["count"], 1)
+            self.assertEqual(
+                links["links"][0]["url"],
+                "https://jiji.ng/lagos/cars/ad-1a2b3c.html")
+            self.assertEqual(links["links"][0]["text"], "Ad One")
+            # html() exposes the rendered DOM for structured parsing
+            self.assertIn("rendered", tab.html()["html"])
+            # registry helpers
+            self.assertIs(self.svc.find_rendered_tab(tab.tab_id), tab)
+            listed = self.svc.list_rendered_tabs()
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["session_name"], "sess1")
+
+    def test_rendered_tab_cookies_persist_per_session(self):
+        page = _FakePage()
+        expected = os.path.join(self.tmp, "data", "cookies", "sessA",
+                                "playwright-storage.json")
+        with _mocked_playwright(page) as (instances, context, browser, chromium):
+            tab = self.svc.open_rendered_tab("sessA", "https://example.com/")
+            # no storage file on first open -> plain context
+            self.assertEqual(browser.context_kwargs, {})
+            self.svc.close_rendered_tab(tab.tab_id)
+            # closing persists storage_state into the session's cookie dir
+            self.assertEqual(context.saved_path, expected)
+            self.assertTrue(instances[0].stopped)
+            self.assertTrue(browser.closed)
+            # second open of the same session loads the persisted state
+            Path(expected).parent.mkdir(parents=True, exist_ok=True)
+            Path(expected).write_text('{"cookies": []}')
+        with _mocked_playwright(_FakePage()) as (i2, context2, browser2, c2):
+            tab2 = self.svc.open_rendered_tab("sessA")
+            tab2.navigate("https://example.com/")
+            self.assertEqual(browser2.context_kwargs.get("storage_state"),
+                             expected)
+            self.svc.close_rendered_tab(tab2.tab_id)
+
+    def test_open_rendered_tab_navigate_failure_cleans_up(self):
+        page = _FakePage()
+
+        def boom(url, **kwargs):
+            raise RuntimeError("network down")
+
+        page.goto = boom
+        with _mocked_playwright(page):
+            with self.assertRaises(BrowserError) as ctx:
+                self.svc.open_rendered_tab("s", "https://example.com/")
+            self.assertIn("navigate", str(ctx.exception))
+            self.assertEqual(self.svc.list_rendered_tabs(), [])
+
+    def test_text_before_navigate_raises(self):
+        with _mocked_playwright(_FakePage()):
+            tab = self.svc.open_rendered_tab("s")
+            with self.assertRaises(BrowserError):
+                tab.text()
+            self.svc.close_rendered_tab(tab.tab_id)
+
+    def test_close_rendered_tab_unknown_raises(self):
+        with self.assertRaises(BrowserError):
+            self.svc.close_rendered_tab("no-such-tab")
+
+    def test_close_session_closes_rendered_tabs(self):
+        with _mocked_playwright(_FakePage()) as (instances, context, browser, chromium):
+            tab = self.svc.open_rendered_tab("sessB", "https://example.com/")
+            self.svc.open_session("sessB")
+            self.svc.close_session("sessB")
+            self.assertTrue(browser.closed)
+            self.assertEqual(self.svc.list_rendered_tabs(), [])
+            self.assertIsNone(self.svc.find_rendered_tab(tab.tab_id))
 
 
 if __name__ == "__main__":
