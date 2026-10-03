@@ -541,6 +541,11 @@ class FinancialExpert:
             "mean_reversion": "z-score fade with hysteresis + squeeze guard",
             "breakout": "Donchian breakout, ADX-confirmed",
             "momentum": "RSI + MACD agreement, ADX-gated",
+            "ichimoku_trend": "price vs Ichimoku cloud + tenkan/kijun",
+            "vwap_bounce": "fade VWAP deviations, ADX-gated",
+            "rsi_divergence": "RSI/price divergence reversals at extremes",
+            "bollinger_squeeze": "volatility-squeeze release breakouts",
+            "sar_reversal": "Parabolic SAR stop-and-reverse",
         }
         out = []
         for name in ta_strategies.list_strategies():

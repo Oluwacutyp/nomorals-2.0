@@ -11,6 +11,11 @@ the zoo with four canonical, independently understandable strategies:
 - ``mean_reversion`` — z-score fade with hysteresis and squeeze guard
 - ``breakout`` — Donchian breakout with ADX confirmation gate
 - ``momentum`` — RSI + MACD agreement, ADX-gated
+- ``ichimoku_trend`` — ride price above/below the Ichimoku cloud
+- ``vwap_bounce`` — fade ATR-normalized deviations from session VWAP
+- ``rsi_divergence`` — RSI/price divergence reversals (swing confirmation)
+- ``bollinger_squeeze`` — volatility-squeeze release breakouts
+- ``sar_reversal`` — Parabolic SAR regime flips with ATR-scaled confidence
 
 Each is deterministic, parameter-overridable, and scored the same way.
 """
@@ -22,8 +27,8 @@ import numpy as np
 import pandas as pd
 
 from .indicators import adx as _adx
-from .indicators import bollinger, donchian, macd as _macd
-from .indicators import rsi as _rsi
+from .indicators import bollinger, donchian, ichimoku, macd as _macd
+from .indicators import psar, rsi as _rsi, vwap
 from .math import atr, ema, ensure_ohlcv, rolling_zscore, sharpe
 
 
@@ -35,6 +40,11 @@ __all__ = [
     "MeanReversion",
     "Breakout",
     "Momentum",
+    "IchimokuTrend",
+    "VwapBounce",
+    "RsiDivergence",
+    "BollingerSqueeze",
+    "SarReversal",
     "STRATEGIES",
     "list_strategies",
     "get_strategy",
@@ -231,11 +241,255 @@ class Momentum(BaseStrategy):
         return _frame(signal, confidence, gate, df.index)
 
 
+class IchimokuTrend(BaseStrategy):
+    """Ride price above/below the Ichimoku cloud.
+
+    Long while price sits above the cloud with tenkan above kijun; short
+    on the mirror. Cloud distance, ATR-normalized, scales confidence so
+    deep cloud breaks size up and thin whipsaws stay small.
+    """
+
+    name = "IchimokuTrend"
+    kind = "trend"
+    default_params = {"tenkan": 9, "kijun": 26, "senkou_b": 52,
+                      "displacement": 26, "conf_scale": 3.0}
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(np.zeros(len(df)), np.zeros(len(df)),
+                          np.ones(len(df)), df.index)
+        p = self.params
+        ich = ichimoku(df, int(p["tenkan"]), int(p["kijun"]),
+                       int(p["senkou_b"]), int(p["displacement"]))
+        close = df["close"].astype(float)
+        cloud_top = np.maximum(ich["senkou_a"], ich["senkou_b"])
+        cloud_bot = np.minimum(ich["senkou_a"], ich["senkou_b"])
+        tenkan_s = ich["tenkan"].to_numpy(dtype=float)
+        kijun_s = ich["kijun"].to_numpy(dtype=float)
+        px = close.to_numpy(dtype=float)
+        bull = (px > cloud_top.to_numpy(dtype=float)) & (tenkan_s > kijun_s)
+        bear = (px < cloud_bot.to_numpy(dtype=float)) & (tenkan_s < kijun_s)
+        signal = np.where(bull, 1.0, np.where(bear, -1.0, 0.0))
+        cloud_mid = ((cloud_top + cloud_bot) / 2.0).to_numpy(dtype=float)
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        dist = np.abs(px - cloud_mid) / a
+        confidence = np.clip(dist / float(p["conf_scale"]), 0.0, 1.0) \
+            * (np.abs(signal) > 0)
+        gate = np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
+class VwapBounce(BaseStrategy):
+    """Fade ATR-normalized deviations from session VWAP.
+
+    Price tends to snap back toward the day's volume-weighted mean, so the
+    strategy sells strength (|z| > entry_z) and buys weakness, holding the
+    fade with hysteresis until price returns near VWAP (|z| < exit_z).
+    Confidence scales with the extremity of the deviation; the gate
+    throttles the fade when ADX says the market is strongly trending —
+    fading a raging trend's VWAP deviation is how fades get run over.
+    """
+
+    name = "VwapBounce"
+    kind = "meanrev"
+    default_params = {"entry_z": 1.5, "exit_z": 0.4, "adx_period": 14,
+                      "adx_lo": 20.0, "adx_hi": 35.0}
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(np.zeros(len(df)), np.zeros(len(df)),
+                          np.ones(len(df)), df.index)
+        p = self.params
+        v = vwap(df).to_numpy(dtype=float)
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        z = (px - v) / a
+        entry_z, exit_z = float(p["entry_z"]), float(p["exit_z"])
+        signal = np.zeros(len(df))
+        state = 0.0
+        for i in range(len(df)):
+            if state == 0.0 and abs(z[i]) >= entry_z:
+                state = -float(np.sign(z[i]))
+            elif state != 0.0 and abs(z[i]) < exit_z:
+                state = 0.0
+            signal[i] = state
+        confidence = np.clip(np.abs(z) / (entry_z * 1.5), 0.0, 1.0) \
+            * (np.abs(signal) > 0)
+        adx_v = _adx(df, int(p["adx_period"]))["adx"].to_numpy(dtype=float)
+        lo, hi = float(p["adx_lo"]), float(p["adx_hi"])
+        gate = np.clip((hi - adx_v) / (hi - lo + 1e-12), 0.15, 1.0)
+        return _frame(signal, confidence, gate, df.index)
+
+
+class RsiDivergence(BaseStrategy):
+    """RSI/price divergence reversals.
+
+    Scans each bar's trailing window for the textbook pattern: price makes
+    a lower low (higher high) while RSI makes a higher low (lower high).
+    Divergences only count at RSI extremes (oversold for bullish,
+    overbought for bearish) — mid-range RSI wiggles in a trend are noise,
+    not exhaustion. A confirmed divergence emits ±1 for ``hold`` bars.
+    This is a sparse, high-conviction pattern — most bars carry no signal
+    by design.
+    """
+
+    name = "RsiDivergence"
+    kind = "reversal"
+    default_params = {"rsi_period": 14, "lookback": 60, "hold": 5,
+                      "min_gap": 10, "min_rsi_delta": 4.0,
+                      "rsi_lo": 40.0, "rsi_hi": 60.0}
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(np.zeros(len(df)), np.zeros(len(df)),
+                          np.ones(len(df)), df.index)
+        p = self.params
+        lookback = max(20, int(p["lookback"]))
+        min_gap = max(3, int(p["min_gap"]))
+        hold = max(1, int(p["hold"]))
+        min_delta = float(p["min_rsi_delta"])
+        rsi_lo, rsi_hi = float(p["rsi_lo"]), float(p["rsi_hi"])
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        rsi_v = _rsi(df, int(p["rsi_period"])).to_numpy(dtype=float)
+        n = len(df)
+        raw = np.zeros(n)
+        conf = np.zeros(n)
+        half = lookback // 2
+        for i in range(lookback, n):
+            w0, w1 = i - lookback, i
+            mid = w0 + half
+            p1_lo = w0 + int(np.argmin(px[w0:mid]))
+            p2_lo = mid + int(np.argmin(px[mid:w1]))
+            p1_hi = w0 + int(np.argmax(px[w0:mid]))
+            p2_hi = mid + int(np.argmax(px[mid:w1]))
+            bull = (p2_lo - p1_lo >= min_gap and px[p2_lo] < px[p1_lo]
+                    and rsi_v[p2_lo] - rsi_v[p1_lo] >= min_delta
+                    and rsi_v[p2_lo] <= rsi_lo)
+            bear = (p2_hi - p1_hi >= min_gap and px[p2_hi] > px[p1_hi]
+                    and rsi_v[p1_hi] - rsi_v[p2_hi] >= min_delta
+                    and rsi_v[p2_hi] >= rsi_hi)
+            if bull:
+                raw[i] = 1.0
+                conf[i] = np.clip(
+                    (rsi_v[p2_lo] - rsi_v[p1_lo]) / 10.0, 0.25, 1.0)
+            elif bear:
+                raw[i] = -1.0
+                conf[i] = np.clip(
+                    (rsi_v[p1_hi] - rsi_v[p2_hi]) / 10.0, 0.25, 1.0)
+        signal = np.zeros(n)
+        confidence = np.zeros(n)
+        for i in range(n):
+            if raw[i] != 0.0:
+                end = min(n, i + hold)
+                signal[i:end] = raw[i]
+                confidence[i:end] = conf[i]
+        gate = np.ones(n)
+        return _frame(signal, confidence, gate, df.index)
+
+
+class BollingerSqueeze(BaseStrategy):
+    """Volatility-squeeze release breakouts.
+
+    A squeeze is when bandwidth sits in the bottom ``squeeze_pct`` of its
+    trailing range — energy compressing. When a squeeze was present within
+    the last ``confirm`` bars and price breaks the band, follow the break;
+    exit on a midline cross or after ``max_hold`` bars.
+    """
+
+    name = "BollingerSqueeze"
+    kind = "breakout"
+    default_params = {"period": 20, "mult": 2.0, "squeeze_pct": 0.20,
+                      "rank_window": 200, "confirm": 10, "max_hold": 30}
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(np.zeros(len(df)), np.zeros(len(df)),
+                          np.ones(len(df)), df.index)
+        p = self.params
+        bb = bollinger(df, int(p["period"]), float(p["mult"]))
+        width = bb["width"]
+        rw = max(50, int(p["rank_window"]))
+        # Smooth the width before ranking: raw bandwidth jitters with
+        # micro-variation, which makes the percentile rank meaningless in
+        # uniformly calm markets.
+        smooth = width.rolling(5, min_periods=1).mean()
+        rank = smooth.rolling(rw, min_periods=max(20, rw // 4)).rank(
+            pct=True).fillna(0.5)
+        squeezed = (rank <= float(p["squeeze_pct"])).to_numpy(dtype=float)
+        confirm = max(1, int(p["confirm"]))
+        recent_squeeze = pd.Series(squeezed, index=df.index).rolling(
+            confirm, min_periods=1).max().to_numpy(dtype=float) > 0
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        upper = bb["upper"].to_numpy(dtype=float)
+        lower = bb["lower"].to_numpy(dtype=float)
+        mid = bb["mid"].to_numpy(dtype=float)
+        signal = np.zeros(len(df))
+        state = 0.0
+        held = 0
+        for i in range(len(df)):
+            if state == 0.0:
+                if recent_squeeze[i] and px[i] > upper[i]:
+                    state, held = 1.0, 0
+                elif recent_squeeze[i] and px[i] < lower[i]:
+                    state, held = -1.0, 0
+            else:
+                held += 1
+                if held >= int(p["max_hold"]) \
+                        or (state > 0 and px[i] < mid[i]) \
+                        or (state < 0 and px[i] > mid[i]):
+                    state, held = 0.0, 0
+            signal[i] = state
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        pen = np.where(signal > 0, (px - mid) / a,
+                       np.where(signal < 0, (mid - px) / a, 0.0))
+        confidence = np.clip(np.abs(pen) / 1.0, 0.15, 1.0) \
+            * (np.abs(signal) > 0)
+        gate = np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
+class SarReversal(BaseStrategy):
+    """Parabolic SAR regime flips: long above the SAR, short below.
+
+    The SAR is a trailing stop by construction, so the flip is the trade:
+    signal = sign(close - SAR) every bar. Confidence scales with the
+    SAR distance in ATR units — wide separation means a strong regime.
+    """
+
+    name = "SarReversal"
+    kind = "trend"
+    default_params = {"accel": 0.02, "max_accel": 0.20}
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(np.zeros(len(df)), np.zeros(len(df)),
+                          np.ones(len(df)), df.index)
+        p = self.params
+        sar = psar(df, float(p["accel"]), float(p["max_accel"])
+                   ).to_numpy(dtype=float)
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        signal = np.sign(px - sar)
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        confidence = np.clip(np.abs(px - sar) / (2.0 * a), 0.0, 1.0)
+        gate = np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
 STRATEGIES: dict[str, type[BaseStrategy]] = {
     "trend_follow": TrendFollow,
     "mean_reversion": MeanReversion,
     "breakout": Breakout,
     "momentum": Momentum,
+    "ichimoku_trend": IchimokuTrend,
+    "vwap_bounce": VwapBounce,
+    "rsi_divergence": RsiDivergence,
+    "bollinger_squeeze": BollingerSqueeze,
+    "sar_reversal": SarReversal,
 }
 
 

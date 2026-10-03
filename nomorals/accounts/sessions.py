@@ -28,12 +28,18 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..core.cipher import CipherError
+from ..core.errors import NoMoralsError, NotFound
 from ..core.logging_setup import get_logger
 from .vault import Credential, CredentialVault
 
-__all__ = ["SessionManager", "Session", "OAuthToken"]
+__all__ = ["SessionManager", "Session", "OAuthToken", "SessionInvalid"]
 
 _log = get_logger(__name__)
+
+
+class SessionInvalid(NoMoralsError):
+    """Raised when a session is missing, expired, or otherwise unusable."""
 
 
 @dataclass
@@ -167,45 +173,68 @@ class SessionManager:
         """Generate session cache key."""
         return f"{service}/{username}"
     
-    def get_session(self, service: str, username: str) -> Session:
-        """Get or create a session for a service.
-        
-        Args:
-            service: Service name
-            username: Username or identifier
-            
-        Returns:
-            Session object
+    def _load_session(
+        self, service: str, username: str
+    ) -> Session | None:
+        """Load a session from cache/database WITHOUT touching it.
+
+        The returned session keeps its stored ``last_used``, so callers
+        can judge staleness honestly.
         """
         key = self._session_key(service, username)
-        
-        # Check cache first
         if key in self._sessions:
-            session = self._sessions[key]
-            session.touch()
-            return session
-        
-        # Try to load from database
+            return self._sessions[key]
         row = self.vault.db.query_one(
             "SELECT * FROM sessions WHERE service = ? AND username = ?",
             (service, username)
         )
-        
         if row:
-            session = Session.from_dict(json.loads(row["session_data"]))
+            session = Session.from_dict(
+                json.loads(self._decrypt_session_data(row["session_data"]))
+            )
             self._sessions[key] = session
-            session.touch()
             return session
-        
-        # Create new session
-        session = Session(service=service, username=username)
-        self._sessions[key] = session
+        return None
+
+    def get_session(self, service: str, username: str) -> Session:
+        """Get or create a session for a service.
+
+        Lenient by design: a stored-but-stale session is refreshed via
+        touch (use :meth:`get_valid_session` for the strict variant).
+
+        Args:
+            service: Service name
+            username: Username or identifier
+
+        Returns:
+            Session object
+        """
+        key = self._session_key(service, username)
+        session = self._load_session(service, username)
+        if session is None:
+            session = Session(service=service, username=username)
+            self._sessions[key] = session
+        session.touch()
         self._save_session(session)
-        
         return session
     
+    def _encrypt_session_data(self, plaintext: str) -> str:
+        """Encrypt serialized session data (may hold OAuth tokens)."""
+        return self.vault.encrypt_blob(plaintext, purpose="sessions")
+
+    def _decrypt_session_data(self, blob: str) -> str:
+        """Decrypt session data, accepting legacy plaintext rows.
+
+        Rows written before encryption existed are read as-is and
+        re-saved encrypted on the next touch.
+        """
+        try:
+            return self.vault.decrypt_blob(blob, purpose="sessions")
+        except CipherError:
+            return blob  # legacy plaintext row
+
     def _save_session(self, session: Session) -> None:
-        """Persist session to database."""
+        """Persist session to database (session_data encrypted at rest)."""
         with self.vault.db.transaction():
             self.vault.db.execute("""
                 INSERT OR REPLACE INTO sessions (service, username, session_data, created_at, last_used)
@@ -213,7 +242,7 @@ class SessionManager:
             """, (
                 session.service,
                 session.username,
-                json.dumps(session.to_dict()),
+                self._encrypt_session_data(json.dumps(session.to_dict())),
                 session.created_at,
                 session.last_used,
             ))
@@ -229,6 +258,58 @@ class SessionManager:
         self._sessions[key] = session
         self._save_session(session)
     
+    def get_valid_session(self, service: str, username: str) -> Session:
+        """Get the session, failing fast when it is expired/invalid.
+
+        Unlike :meth:`get_session` (which happily returns a stale
+        session), this raises :class:`SessionInvalid` when the session
+        would not authenticate — expired OAuth token or 24h of
+        inactivity.
+
+        Raises:
+            SessionInvalid: Session is not usable
+        """
+        session = self._load_session(service, username)
+        if session is None:
+            # Nothing stored: create a fresh, valid session.
+            return self.get_session(service, username)
+        if not session.is_valid():
+            if (session.oauth_token is not None
+                    and session.oauth_token.is_expired()):
+                raise SessionInvalid(
+                    f"OAuth token expired for {service}/{username} — "
+                    "refresh it (ensure_oauth_token) or re-authenticate"
+                )
+            raise SessionInvalid(
+                f"Session expired for {service}/{username} "
+                "(24h inactivity) — re-authenticate"
+            )
+        session.touch()
+        self._save_session(session)
+        return session
+
+    def auth_headers(self, service: str, username: str) -> dict[str, str]:
+        """Build request headers for an authenticated call.
+
+        Merges the session's stored headers with an ``Authorization``
+        bearer header when a valid OAuth token is present.
+
+        Args:
+            service: Service name
+            username: Username or identifier
+
+        Returns:
+            Dict of header name -> value
+        """
+        session = self.get_session(service, username)
+        headers = dict(session.headers)
+        token = session.oauth_token
+        if token is not None and not token.is_expired():
+            headers.setdefault(
+                "Authorization", f"{token.token_type} {token.access_token}"
+            )
+        return headers
+
     def set_cookies(self, service: str, username: str, cookies: dict[str, str]) -> None:
         """Set cookies for a session.
         
@@ -258,16 +339,26 @@ class SessionManager:
         service: str,
         username: str,
         token: OAuthToken,
+        *,
+        auto_refresh: dict[str, str] | None = None,
     ) -> None:
         """Set OAuth token for a session.
-        
+
         Args:
             service: Service name
             username: Username or identifier
             token: OAuthToken object
+            auto_refresh: Optional refresh configuration
+                (``token_url``, ``client_id``, ``client_secret``,
+                ``refresh_token``). Stored in session metadata so
+                :meth:`ensure_oauth_token` can refresh automatically.
+                Omit the client secret when the flow doesn't need it;
+                the session row is encrypted at rest.
         """
         session = self.get_session(service, username)
         session.oauth_token = token
+        if auto_refresh is not None:
+            session.metadata["oauth_auto_refresh"] = dict(auto_refresh)
         self.update_session(session)
         
         # Also store in vault for persistence
@@ -280,6 +371,49 @@ class SessionManager:
             expires_at=token.expires_at,
         )
     
+    def ensure_oauth_token(
+        self,
+        service: str,
+        username: str,
+    ) -> OAuthToken | None:
+        """Return a usable OAuth token, refreshing it if needed.
+
+        * No token stored → returns None.
+        * Token valid → returned as-is.
+        * Token expired and an ``auto_refresh`` config was stored with
+          :meth:`set_oauth_token` → refreshed via the token endpoint
+          and the new token returned.
+        * Token expired without refresh config → raises
+          :class:`SessionInvalid`.
+
+        Raises:
+            SessionInvalid: Token expired and cannot be refreshed
+        """
+        session = self.get_session(service, username)
+        token = session.oauth_token
+        if token is None:
+            return None
+        if not token.is_expired():
+            return token
+        cfg = session.metadata.get("oauth_auto_refresh") or {}
+        missing = [k for k in ("token_url", "client_id")
+                   if not cfg.get(k)]
+        refresh_token = token.refresh_token or cfg.get("refresh_token", "")
+        if missing or not refresh_token:
+            raise SessionInvalid(
+                f"OAuth token expired for {service}/{username} and no "
+                f"usable refresh configuration is stored "
+                f"(missing: {', '.join(missing) or 'refresh_token'})"
+            )
+        return self.refresh_oauth_token(
+            service,
+            username,
+            refresh_token,
+            cfg["client_id"],
+            cfg.get("client_secret", ""),
+            cfg["token_url"],
+        )
+
     def refresh_oauth_token(
         self,
         service: str,
@@ -358,22 +492,36 @@ class SessionManager:
                 "DELETE FROM sessions WHERE service = ? AND username = ?",
                 (service, username)
             )
-        
+
+        # Drop the encrypted OAuth copy kept in the vault, if any.
+        try:
+            self.vault.delete(f"{service}_oauth", username)
+        except NotFound:
+            _log.debug("no vault OAuth copy for %s/%s", service, username)
+
         _log.info(f"Cleared session: {service}/{username}")
     
-    def list_sessions(self) -> list[Session]:
-        """List all active sessions.
-        
+    def list_sessions(self, *, valid_only: bool = False) -> list[Session]:
+        """List stored sessions.
+
+        Args:
+            valid_only: If True, only sessions that would still
+                authenticate (unexpired token, recent activity)
+
         Returns:
-            List of Session objects
+            List of Session objects, most-recently-used first
         """
         rows = self.vault.db.query("SELECT * FROM sessions ORDER BY last_used DESC")
         sessions = []
-        
+
         for row in rows:
-            session = Session.from_dict(json.loads(row["session_data"]))
+            session = Session.from_dict(
+                json.loads(self._decrypt_session_data(row["session_data"]))
+            )
+            if valid_only and not session.is_valid():
+                continue
             sessions.append(session)
-        
+
         return sessions
     
     def cleanup_expired(self) -> int:

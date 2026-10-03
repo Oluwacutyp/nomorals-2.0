@@ -1,9 +1,10 @@
 """Canonical technical indicators with exact, textbook math.
 
 A small, hand-written set (RSI, MACD, Bollinger, Stochastic, ATR, ADX, OBV,
-Donchian) — each independently verifiable — instead of Sentinel's
-auto-generated indicator zoo. All outputs are aligned to ``df.index`` and
-free of NaNs after warmup (warmup is backfilled, never forward-leaked).
+Donchian, VWAP, EMA/SMA via ``math``, Ichimoku, Parabolic SAR, CCI,
+Williams %R, Fibonacci retracements, Keltner) — each independently
+verifiable. All outputs are aligned to ``df.index`` and free of NaNs after
+warmup (warmup is backfilled, never forward-leaked).
 """
 
 from __future__ import annotations
@@ -23,6 +24,17 @@ __all__ = [
     "adx",
     "obv",
     "donchian",
+    # Re-exported from math (no duplication): the series-level primitives
+    # everything here is built on.
+    "ema",
+    "sma",
+    "vwap",
+    "ichimoku",
+    "psar",
+    "cci",
+    "williams_r",
+    "fibonacci",
+    "keltner",
 ]
 
 
@@ -132,6 +144,185 @@ def donchian(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
     lower = low.rolling(period, min_periods=1).min()
     out = pd.DataFrame(
         {"upper": upper, "mid": (upper + lower) / 2.0, "lower": lower},
+        index=df.index,
+    )
+    return out.bfill().ffill()
+
+
+def vwap(df: pd.DataFrame, anchor: str = "day") -> pd.Series:
+    """Volume-weighted average price, anchored per calendar day.
+
+    VWAP = cumulative(typical_price * volume) / cumulative(volume), reset
+    at each new day when ``df`` has a DatetimeIndex (the standard session
+    anchor; for 24/7 crypto this is the UTC-day VWAP). With any other index
+    the anchor is the whole series. Volume must be nonzero within an
+    anchor; flat-zero-volume stretches inherit the last good VWAP.
+    """
+    df = ensure_ohlcv(df)
+    tp = (df["high"].astype(float) + df["low"].astype(float)
+          + df["close"].astype(float)) / 3.0
+    vol = df["volume"].astype(float).clip(lower=0.0)
+    pv = (tp * vol).cumsum()
+    cumvol = vol.cumsum()
+    if anchor == "day" and isinstance(df.index, pd.DatetimeIndex):
+        day = df.index.floor("D")
+        cumvol = vol.groupby(day).cumsum()
+        pv = (tp * vol).groupby(day).cumsum()
+    out = pv / (cumvol + 1e-12)
+    out = out.mask(cumvol < 1e-12).ffill().bfill()
+    # All-zero volume (e.g. synthetic no-volume feeds): fall back to the
+    # typical price so the series stays dense and price-sensible.
+    return out.fillna(tp).rename("vwap")
+
+
+def ichimoku(df: pd.DataFrame, tenkan: int = 9, kijun: int = 26,
+             senkou_b_period: int = 52, displacement: int = 26
+             ) -> pd.DataFrame:
+    """Ichimoku Cloud: tenkan, kijun, senkou A/B (shifted forward), chikou.
+
+    The cloud (senkou A/B) is plotted ``displacement`` bars ahead and the
+    chikou (lagging) line ``displacement`` bars behind, per the textbook
+    definition. NaN displacement edges are backfilled so the frame stays
+    dense; signal logic should use current-bar columns only.
+    """
+    df = ensure_ohlcv(df)
+    high, low = df["high"].astype(float), df["low"].astype(float)
+    close = df["close"].astype(float)
+    tenkan_p = max(2, int(tenkan))
+    kijun_p = max(2, int(kijun))
+    sb_p = max(2, int(senkou_b_period))
+    disp = max(0, int(displacement))
+    tenkan_s = (high.rolling(tenkan_p, min_periods=1).max()
+                + low.rolling(tenkan_p, min_periods=1).min()) / 2.0
+    kijun_s = (high.rolling(kijun_p, min_periods=1).max()
+               + low.rolling(kijun_p, min_periods=1).min()) / 2.0
+    senkou_a = ((tenkan_s + kijun_s) / 2.0).shift(disp)
+    senkou_b = ((high.rolling(sb_p, min_periods=1).max()
+                 + low.rolling(sb_p, min_periods=1).min()) / 2.0).shift(disp)
+    chikou = close.shift(-disp)
+    out = pd.DataFrame(
+        {"tenkan": tenkan_s, "kijun": kijun_s, "senkou_a": senkou_a,
+         "senkou_b": senkou_b, "chikou": chikou},
+        index=df.index,
+    )
+    return out.bfill().ffill()
+
+
+def psar(df: pd.DataFrame, accel: float = 0.02,
+         max_accel: float = 0.20) -> pd.Series:
+    """Wilder Parabolic SAR: iterative, bounded acceleration.
+
+    In an uptrend the SAR trails below price (never above the prior two
+    lows); a close through the SAR flips the regime. ``accel`` seeds the
+    step, doubling per new extreme up to ``max_accel``.
+    """
+    df = ensure_ohlcv(df)
+    step = float(max(1e-4, accel))
+    cap = float(max(step, max_accel))
+    high = df["high"].astype(float).to_numpy()
+    low = df["low"].astype(float).to_numpy()
+    n = len(df)
+    sar = np.empty(n)
+    # Seed long; the first bars self-correct on the first flip.
+    long = True
+    ep = high[0]
+    af = step
+    sar[0] = low[0]
+    for i in range(1, n):
+        raw = sar[i - 1] + af * (ep - sar[i - 1])
+        if long:
+            if low[i] < raw:
+                # Penetrated the raw SAR: flip to short at the extreme.
+                long = False
+                sar[i] = ep
+                ep = low[i]
+                af = step
+            else:
+                sar[i] = min(raw, low[i - 1], low[i])
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + step, cap)
+        else:
+            if high[i] > raw:
+                # Penetrated the raw SAR: flip to long at the extreme.
+                long = True
+                sar[i] = ep
+                ep = high[i]
+                af = step
+            else:
+                sar[i] = max(raw, high[i - 1], high[i])
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + step, cap)
+    return pd.Series(sar, index=df.index, name="psar")
+
+
+def cci(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    """Commodity Channel Index: (TP - SMA_TP) / (0.015 * mean deviation).
+
+    Flat markets (zero deviation) yield 0. Values beyond ±100 mark
+    statistically unusual prices for the lookback.
+    """
+    df = ensure_ohlcv(df)
+    period = max(2, int(period))
+    tp = (df["high"].astype(float) + df["low"].astype(float)
+          + df["close"].astype(float)) / 3.0
+    tp_sma = tp.rolling(period, min_periods=1).mean()
+    md = (tp - tp_sma).abs().rolling(period, min_periods=1).mean()
+    out = (tp - tp_sma) / (0.015 * (md + 1e-12))
+    return out.mask(md < 1e-12, 0.0).bfill().fillna(0.0).rename(f"cci_{period}")
+
+
+def williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Williams %R in [-100, 0]: close relative to the highest high."""
+    df = ensure_ohlcv(df)
+    period = max(2, int(period))
+    high, low = df["high"].astype(float), df["low"].astype(float)
+    close = df["close"].astype(float)
+    hh = high.rolling(period, min_periods=1).max()
+    ll = low.rolling(period, min_periods=1).min()
+    out = -100.0 * (hh - close) / ((hh - ll) + 1e-12)
+    return out.clip(-100.0, 0.0).bfill().fillna(-50.0).rename(
+        f"williams_r_{period}")
+
+
+_FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+
+
+def fibonacci(df: pd.DataFrame, period: int = 120) -> dict:
+    """Fibonacci retracement levels for the last ``period`` bars.
+
+    Finds the swing high/low of the window and returns the classic ratios
+    as ``{"ratio_label": price}`` plus ``swing_high`` / ``swing_low``.
+    Level prices are direction-agnostic (from swing low up to swing high);
+    traders pick the leg that matches the current trend.
+    """
+    df = ensure_ohlcv(df)
+    period = max(2, min(int(period), len(df)))
+    win = df.iloc[-period:]
+    swing_high = float(win["high"].max())
+    swing_low = float(win["low"].min())
+    span = swing_high - swing_low
+    levels = {"swing_high": swing_high, "swing_low": swing_low}
+    for r in _FIB_RATIOS:
+        label = f"{r * 100:.1f}%"
+        levels[label] = swing_low + r * span
+    return levels
+
+
+def keltner(df: pd.DataFrame, period: int = 20, atr_period: int = 10,
+            mult: float = 2.0) -> pd.DataFrame:
+    """Keltner channel: EMA(``period``) ± ``mult`` * ATR(``atr_period``).
+
+    The EMA basis makes Keltner tighter than Bollinger in calm markets and
+    the ATR width makes it adaptive to volatility regime changes.
+    """
+    df = ensure_ohlcv(df)
+    close = df["close"].astype(float)
+    mid = ema(close, max(2, int(period)))
+    band = float(mult) * _atr(df, max(2, int(atr_period)))
+    out = pd.DataFrame(
+        {"upper": mid + band, "mid": mid, "lower": mid - band},
         index=df.index,
     )
     return out.bfill().ffill()

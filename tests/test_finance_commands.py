@@ -97,15 +97,17 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(rep.regime_label, "TREND_UP")
         self.assertGreater(rep.bias, 0.5)
         self.assertEqual(rep.position_now, 1.0)
-        self.assertEqual(rep.n_strategies, 4)
+        self.assertEqual(rep.n_strategies, 9)
         self.assertEqual(rep.bars, 600)
         names = [s["name"] for s in rep.strategies]
         # ranked = committee members with >= 5 round-trips; the rest still vote
-        self.assertTrue(0 < len(names) <= 4)
+        self.assertTrue(0 < len(names) <= 9)
         self.assertEqual(sorted(names), sorted(set(names)))
         for n in names:
-            self.assertIn(n, ["breakout", "mean_reversion", "momentum",
-                              "trend_follow"])
+            self.assertIn(n, ["bollinger_squeeze", "breakout",
+                              "ichimoku_trend", "mean_reversion", "momentum",
+                              "rsi_divergence", "sar_reversal", "trend_follow",
+                              "vwap_bounce"])
         # stop distance stored as a fraction — the summary must read ~1%, not ~100%
         self.assertLess(rep.stop_distance_pct, 1.0)
         text = rep.summary_text()
@@ -154,8 +156,9 @@ class BacktestExpertTests(unittest.TestCase):
     def test_strategies_registry(self):
         rows = _expert().strategies()
         self.assertEqual([r["name"] for r in rows],
-                         ["breakout", "mean_reversion", "momentum",
-                          "trend_follow"])
+                         ["bollinger_squeeze", "breakout", "ichimoku_trend",
+                          "mean_reversion", "momentum", "rsi_divergence",
+                          "sar_reversal", "trend_follow", "vwap_bounce"])
         for r in rows:
             self.assertTrue(r["blurb"])
             self.assertTrue(r["params"])

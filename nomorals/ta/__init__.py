@@ -14,11 +14,12 @@ permutations with no evidence of edge), the QuantumEngine glue over that zoo,
 the ccxt live broker, and the old CLI. Quality over quantity.
 """
 
-from . import backtest, data, indicators, math, meta, pipeline, regime, risk, signals, strategies
+from . import backtest, data, feeds, indicators, math, meta, pipeline, regime, risk, signals, strategies
 
 __all__ = [
     "backtest",
     "data",
+    "feeds",
     "indicators",
     "math",
     "meta",

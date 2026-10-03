@@ -108,8 +108,18 @@ class Goal:
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Goal":
-        deps = [d for d in str(row.get("depends_on", "") or "").split(",")
-                if d.strip()]
+        raw = str(row.get("depends_on", "") or "").strip()
+        if raw in ("", "[]"):
+            deps: list[str] = []
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                deps = [str(d) for d in parsed if str(d).strip()]
+            else:
+                deps = [d for d in raw.split(",") if d.strip()]
         return cls(id=row["id"], title=row["title"],
                    description=row.get("description", ""),
                    status=row.get("status", "active"),
@@ -724,6 +734,86 @@ class GoalSystem:
         self.db.execute("UPDATE agent_goals SET status='abandoned', "
                         "updated_at=? WHERE id=?", (time.time(), goal_id))
         return self.get(goal_id)
+
+    def update(self, goal_id: str, *, title: str | None = None,
+               description: str | None = None,
+               priority: int | None = None) -> Goal | None:
+        """Edit a goal's title / description / priority in place.
+
+        Returns None when the goal does not exist.
+        """
+        goal = self.get(goal_id)
+        if goal is None:
+            return None
+        updates: dict[str, Any] = {}
+        if title is not None:
+            title = title.strip()
+            if not title:
+                raise ValueError("goal title must not be empty")
+            updates["title"] = title[:400]
+        if description is not None:
+            updates["description"] = description[:2000]
+        if priority is not None:
+            updates["priority"] = int(priority)
+        if updates:
+            updates["updated_at"] = time.time()
+            set_clause = ", ".join(f"{k}=?" for k in updates)
+            self.db.execute(
+                f"UPDATE agent_goals SET {set_clause} WHERE id=?",
+                (*updates.values(), goal_id))
+        return self.get(goal_id)
+
+    def delete(self, goal_id: str) -> bool:
+        """Hard-delete a goal, its steps, and dangling dependency references.
+
+        Returns False when the goal does not exist.
+        """
+        goal = self.get(goal_id)
+        if goal is None:
+            return False
+        self.db.execute("DELETE FROM agent_goal_steps WHERE goal_id=?", (goal_id,))
+        self.db.execute("DELETE FROM agent_goals WHERE id=?", (goal_id,))
+        # scrub the deleted id out of other goals' dependency lists
+        for other in self.list():
+            if goal_id in other.depends_on:
+                self.remove_dependency(other.id, goal_id)
+        return True
+
+    def replan(self, goal_id: str, *, reason: str = "") -> Goal | None:
+        """Throw away every unfinished step and re-decompose from scratch.
+
+        Unlike :meth:`adapt` (which surgically replaces the pending tail),
+        ``replan`` wipes all non-done steps and rebuilds the full plan from
+        the goal's current title/description.  Done steps and their results
+        are kept and fed to the planner as context.
+        """
+        goal = self.get(goal_id)
+        if goal is None:
+            return None
+        done = [s for s in goal.steps if s.status == "done"]
+        context = ("Already done: "
+                   + "; ".join(s.description[:80] for s in done[-8:])
+                   + (f"\nReason for replan: {reason[:200]}" if reason else ""))
+        new_plan = self._decompose(goal.title, goal.description + "\n" + context)
+        if not new_plan:
+            new_plan = [f"Clarify what '{goal.title[:60]}' requires",
+                        f"Produce the deliverable for {goal.title[:60]}",
+                        f"Verify the result against {goal.title[:60]}"]
+        now = time.time()
+        self.db.execute(
+            "DELETE FROM agent_goal_steps WHERE goal_id=? AND status!='done'",
+            (goal_id,))
+        base = len(done)
+        for i, step in enumerate(new_plan[:24]):
+            self._add_step(goal_id, base + i, str(step)[:400])
+        self.db.execute(
+            "UPDATE agent_goals SET strategy=?, updated_at=? WHERE id=?",
+            ((reason or "full replan")[:300], now, goal_id))
+        goal = self.get(goal_id)
+        if goal is not None:
+            self._recompute_progress(goal)
+            return self.get(goal_id)
+        return None
 
     def complete(self, goal_id: str) -> Goal | None:
         now = time.time()

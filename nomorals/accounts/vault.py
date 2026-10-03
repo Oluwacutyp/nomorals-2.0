@@ -48,7 +48,6 @@ _KDF_ITERATIONS = 100_000
 
 _log = get_logger(__name__)
 
-
 @dataclass
 class Credential:
     """A stored credential with metadata."""
@@ -154,24 +153,98 @@ class CredentialVault:
                 CREATE INDEX IF NOT EXISTS idx_credentials_tags
                 ON credentials(tags)
             """)
+            # Named identity profiles and their credential membership.
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS account_profiles (
+                    name TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS profile_credentials (
+                    profile_name TEXT NOT NULL,
+                    credential_id INTEGER NOT NULL,
+                    added_at REAL NOT NULL,
+                    PRIMARY KEY (profile_name, credential_id)
+                )
+            """)
+            self.db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_profile_credentials_cred
+                ON profile_credentials(credential_id)
+            """)
     
     def _encrypt_password(self, password: str, credential_id: int) -> str:
-        """Encrypt password with a key derived from master + credential ID."""
+        """Encrypt password with a key derived from master + credential ID.
+
+        The secret is JSON-wrapped first so empty strings (used by
+        password-less credentials like disposable emails) still produce
+        a non-empty ciphertext — the cipher rejects empty payloads.
+        """
         # Derive a unique key for this credential
         salt = f"credential-{credential_id}".encode()
         key = derive_key(self._master_key, salt=salt,
                          iterations=_KDF_ITERATIONS)
-        encrypted = aes_encrypt(password.encode(), key=key)
+        encrypted = aes_encrypt(json.dumps(password).encode(), key=key)
         return encrypted
-    
+
     def _decrypt_password(self, encrypted: str, credential_id: int) -> str:
         """Decrypt password with a key derived from master + credential ID."""
         salt = f"credential-{credential_id}".encode()
         key = derive_key(self._master_key, salt=salt,
                          iterations=_KDF_ITERATIONS)
-        decrypted = aes_decrypt(encrypted, key=key)
-        return decrypted.decode("utf-8")
-    
+        decrypted = aes_decrypt(encrypted, key=key).decode("utf-8")
+        try:
+            return json.loads(decrypted)
+        except ValueError:
+            # Rows written before JSON-wrapping: raw plaintext.
+            return decrypted
+
+    def encrypt_blob(self, plaintext: str, *, purpose: str) -> str:
+        """Encrypt an opaque blob (session data, token payloads, ...).
+
+        Uses a purpose-scoped key derived from the vault master key.
+        Other organs (sessions, connectors) use this so secrets never
+        sit in plaintext in their own tables.
+
+        Args:
+            plaintext: Text to encrypt
+            purpose: Key-separation label (e.g. "sessions")
+
+        Returns:
+            Self-describing encrypted blob string
+        """
+        if not purpose:
+            raise ValueError("purpose must be a non-empty label")
+        key = derive_key(
+            self._master_key,
+            salt=f"nomorals-vault-blob:{purpose}".encode(),
+            iterations=_KDF_ITERATIONS,
+        )
+        return aes_encrypt(plaintext.encode("utf-8"), key=key)
+
+    def decrypt_blob(self, blob: str, *, purpose: str) -> str:
+        """Decrypt a blob produced by :meth:`encrypt_blob`.
+
+        Args:
+            blob: Encrypted blob string
+            purpose: The same label used at encryption time
+
+        Returns:
+            Decrypted plaintext
+
+        Raises:
+            CipherError: If the blob is tampered or the purpose is wrong
+        """
+        key = derive_key(
+            self._master_key,
+            salt=f"nomorals-vault-blob:{purpose}".encode(),
+            iterations=_KDF_ITERATIONS,
+        )
+        return aes_decrypt(blob, key=key).decode("utf-8")
+
     def store(
         self,
         service: str,
@@ -293,15 +366,20 @@ class CredentialVault:
         # Decrypt password
         password = self._decrypt_password(row["password_encrypted"], row["id"])
         
-        # Update usage if requested
+        # Update usage if requested; the returned object reflects
+        # the post-increment values.
+        use_count = row["use_count"]
+        last_used = row["last_used"]
         if mark_used:
             now = time.time()
+            use_count += 1
+            last_used = now
             with self.db.transaction():
                 self.db.execute("""
                     UPDATE credentials SET last_used = ?, use_count = use_count + 1
                     WHERE id = ?
                 """, (now, row["id"]))
-        
+
         return Credential(
             id=row["id"],
             service=row["service"],
@@ -313,8 +391,8 @@ class CredentialVault:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             expires_at=row["expires_at"],
-            last_used=row["last_used"],
-            use_count=row["use_count"],
+            last_used=last_used,
+            use_count=use_count,
             is_active=bool(row["is_active"]),
         )
     
@@ -376,61 +454,279 @@ class CredentialVault:
     
     def delete(self, service: str, username: str) -> None:
         """Delete a credential.
-        
+
+        Also removes it from every profile it belongs to.
+
         Args:
             service: Service name
             username: Username or identifier
+
+        Raises:
+            NotFound: If the credential doesn't exist
         """
         with self.db.transaction():
-            self.db.execute(
+            cur = self.db.execute(
                 "DELETE FROM credentials WHERE service = ? AND username = ?",
                 (service, username)
             )
+            if cur.rowcount == 0:
+                raise NotFound(f"Credential not found: {service}/{username}")
+            # Manual cascade: drop profile memberships whose credential is gone.
+            self.db.execute(
+                """DELETE FROM profile_credentials WHERE credential_id NOT IN
+                   (SELECT id FROM credentials)"""
+            )
         _log.info(f"Deleted credential: {service}/{username}")
-    
+
     def deactivate(self, service: str, username: str) -> None:
         """Deactivate a credential without deleting it.
-        
+
         Args:
             service: Service name
             username: Username or identifier
+
+        Raises:
+            NotFound: If the credential doesn't exist
         """
         with self.db.transaction():
-            self.db.execute("""
+            cur = self.db.execute("""
                 UPDATE credentials SET is_active = 0, updated_at = ?
                 WHERE service = ? AND username = ?
             """, (time.time(), service, username))
+            if cur.rowcount == 0:
+                raise NotFound(f"Credential not found: {service}/{username}")
         _log.info(f"Deactivated credential: {service}/{username}")
-    
+
     def rotate(self, service: str, username: str, new_password: str) -> Credential:
-        """Rotate a credential's password/key.
-        
+        """Rotate a credential's secret in place.
+
+        Only the secret and ``updated_at`` change — tags, metadata,
+        credential type and expiry are preserved (a full :meth:`store`
+        would reset them).
+
         Args:
             service: Service name
             username: Username or identifier
-            new_password: New password/key
-            
+            new_password: New password/key/token
+
         Returns:
             Updated Credential object
+
+        Raises:
+            NotFound: If the credential doesn't exist
         """
-        return self.store(service, username, new_password)
-    
+        row = self.db.query_one(
+            "SELECT id FROM credentials WHERE service = ? AND username = ?",
+            (service, username)
+        )
+        if not row:
+            raise NotFound(f"Credential not found: {service}/{username}")
+        encrypted = self._encrypt_password(new_password, row["id"])
+        with self.db.transaction():
+            self.db.execute(
+                """UPDATE credentials
+                   SET password_encrypted = ?, updated_at = ?
+                   WHERE id = ?""",
+                (encrypted, time.time(), row["id"]),
+            )
+        _log.info(f"Rotated credential: {service}/{username}")
+        return self.get(service, username)
+
+    # ── identity profiles ──────────────────────────────────────────
+
+    def create_profile(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> AccountProfile:
+        """Create a named identity profile.
+
+        A profile groups credentials that belong to one identity
+        (the owner's own, or a bot persona) so multi-service flows can
+        pull "everything for X" in one call.
+
+        Args:
+            name: Unique profile name
+            description: Human description
+            metadata: Extra profile metadata
+
+        Returns:
+            The new (empty) AccountProfile
+
+        Raises:
+            StorageError: If a profile with this name already exists
+        """
+        name = name.strip()
+        if not name:
+            raise ValueError("profile name must not be empty")
+        now = time.time()
+        with self.db.transaction():
+            existing = self.db.query_one(
+                "SELECT name FROM account_profiles WHERE name = ?", (name,)
+            )
+            if existing:
+                raise StorageError(f"Profile already exists: {name!r}")
+            self.db.execute(
+                """INSERT INTO account_profiles
+                   (name, description, metadata, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name, description, json.dumps(metadata or {}), now, now),
+            )
+        _log.info(f"Created account profile: {name}")
+        return self.get_profile(name)
+
+    def delete_profile(self, name: str) -> None:
+        """Delete a profile and its credential memberships (not the credentials).
+
+        Raises:
+            NotFound: If the profile doesn't exist
+        """
+        with self.db.transaction():
+            self.db.execute(
+                "DELETE FROM profile_credentials WHERE profile_name = ?",
+                (name,),
+            )
+            cur = self.db.execute(
+                "DELETE FROM account_profiles WHERE name = ?", (name,)
+            )
+            if cur.rowcount == 0:
+                raise NotFound(f"Profile not found: {name!r}")
+        _log.info(f"Deleted account profile: {name}")
+
+    def list_profiles(self) -> list[AccountProfile]:
+        """List all profiles with their credentials."""
+        rows = self.db.query(
+            "SELECT name FROM account_profiles ORDER BY name"
+        )
+        return [self.get_profile(r["name"]) for r in rows]
+
+    def add_to_profile(self, profile_name: str, service: str, username: str) -> None:
+        """Attach a credential to a profile.
+
+        Raises:
+            NotFound: If the profile or the credential doesn't exist
+        """
+        profile = self.db.query_one(
+            "SELECT name FROM account_profiles WHERE name = ?", (profile_name,)
+        )
+        if not profile:
+            raise NotFound(f"Profile not found: {profile_name!r}")
+        cred = self.db.query_one(
+            "SELECT id FROM credentials WHERE service = ? AND username = ?",
+            (service, username),
+        )
+        if not cred:
+            raise NotFound(f"Credential not found: {service}/{username}")
+        with self.db.transaction():
+            self.db.execute(
+                """INSERT OR IGNORE INTO profile_credentials
+                   (profile_name, credential_id, added_at)
+                   VALUES (?, ?, ?)""",
+                (profile_name, cred["id"], time.time()),
+            )
+            self.db.execute(
+                "UPDATE account_profiles SET updated_at = ? WHERE name = ?",
+                (time.time(), profile_name),
+            )
+        _log.info(f"Added {service}/{username} to profile {profile_name!r}")
+
+    def remove_from_profile(
+        self, profile_name: str, service: str, username: str
+    ) -> None:
+        """Detach a credential from a profile.
+
+        Raises:
+            NotFound: If the profile or the credential doesn't exist
+        """
+        cred = self.db.query_one(
+            "SELECT id FROM credentials WHERE service = ? AND username = ?",
+            (service, username),
+        )
+        if not cred:
+            raise NotFound(f"Credential not found: {service}/{username}")
+        with self.db.transaction():
+            cur = self.db.execute(
+                """DELETE FROM profile_credentials
+                   WHERE profile_name = ? AND credential_id = ?""",
+                (profile_name, cred["id"]),
+            )
+            if cur.rowcount == 0:
+                # Distinguish "no such profile" from "not a member".
+                profile = self.db.query_one(
+                    "SELECT name FROM account_profiles WHERE name = ?",
+                    (profile_name,),
+                )
+                if not profile:
+                    raise NotFound(f"Profile not found: {profile_name!r}")
+                raise NotFound(
+                    f"Credential {service}/{username} is not in profile "
+                    f"{profile_name!r}"
+                )
+
+    def profiles_of(self, service: str, username: str) -> list[str]:
+        """Names of all profiles containing this credential."""
+        cred = self.db.query_one(
+            "SELECT id FROM credentials WHERE service = ? AND username = ?",
+            (service, username),
+        )
+        if not cred:
+            raise NotFound(f"Credential not found: {service}/{username}")
+        rows = self.db.query(
+            """SELECT profile_name FROM profile_credentials
+               WHERE credential_id = ? ORDER BY profile_name""",
+            (cred["id"],),
+        )
+        return [r["profile_name"] for r in rows]
+
     def get_profile(self, profile_name: str) -> AccountProfile:
-        """Get an account profile by name.
-        
+        """Get an account profile with its associated credentials.
+
+        Passwords are masked (``"***"``), same as :meth:`list_all`.
+
         Args:
             profile_name: Name of the profile
-            
+
         Returns:
             AccountProfile with associated credentials
+
+        Raises:
+            NotFound: If the profile doesn't exist
         """
-        # For now, just return a profile with all credentials
-        # In the future, profiles could be stored separately
-        credentials = self.list_all(active_only=True)
-        
+        row = self.db.query_one(
+            "SELECT * FROM account_profiles WHERE name = ?", (profile_name,)
+        )
+        if not row:
+            raise NotFound(f"Profile not found: {profile_name!r}")
+        cred_rows = self.db.query(
+            """SELECT c.* FROM credentials c
+               JOIN profile_credentials pc ON pc.credential_id = c.id
+               WHERE pc.profile_name = ?
+               ORDER BY c.service, c.username""",
+            (profile_name,),
+        )
+        credentials = [
+            Credential(
+                id=r["id"],
+                service=r["service"],
+                username=r["username"],
+                password="***",
+                credential_type=r["credential_type"],
+                tags=json.loads(r["tags"]),
+                metadata=json.loads(r["metadata"]),
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+                expires_at=r["expires_at"],
+                last_used=r["last_used"],
+                use_count=r["use_count"],
+                is_active=bool(r["is_active"]),
+            )
+            for r in cred_rows
+        ]
         return AccountProfile(
-            name=profile_name,
-            description=f"Profile: {profile_name}",
+            name=row["name"],
+            description=row["description"] or "",
             credentials=credentials,
-            metadata={},
+            metadata=json.loads(row["metadata"] or "{}"),
         )

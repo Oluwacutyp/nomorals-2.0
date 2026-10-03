@@ -171,9 +171,12 @@ class FusionTests(unittest.TestCase):
 class StrategyTests(unittest.TestCase):
     def test_registry_and_unknown(self):
         names = st.list_strategies()
-        self.assertEqual(names, ["breakout", "mean_reversion", "momentum",
-                                "trend_follow"])
-        self.assertEqual(st.list_strategies("trend"), ["trend_follow"])
+        self.assertEqual(names, ["bollinger_squeeze", "breakout",
+                                "ichimoku_trend", "mean_reversion", "momentum",
+                                "rsi_divergence", "sar_reversal",
+                                "trend_follow", "vwap_bounce"])
+        self.assertEqual(st.list_strategies("trend"),
+                         ["ichimoku_trend", "sar_reversal", "trend_follow"])
         with self.assertRaises(KeyError):
             st.get_strategy("nope")
 
@@ -326,7 +329,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(-1.0 <= res["bias"] <= 1.0)
         self.assertTrue(0.0 <= res["agreement"] <= 1.0)
         self.assertIn(res["position_now"], (-1.0, 0.0, 1.0))
-        self.assertEqual(res["n_strategies"], 4)
+        self.assertEqual(res["n_strategies"], 9)
         self.assertEqual(res["bars"], 600)
 
     def test_analyze_deterministic(self):

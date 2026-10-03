@@ -19,6 +19,7 @@ from .exec import _cmd_apps, _cmd_exec
 from .finance import _cmd_finance
 from .games import _cmd_arena, _cmd_simulate, _cmd_skill, _cmd_trial
 from .goal import _cmd_goal
+from .idea import _cmd_idea
 from .golden import _cmd_golden
 from .hub import _cmd_hub
 from .improve import _cmd_improve, _inbox_obj
@@ -141,6 +142,7 @@ __all__ = [
     "_cmd_skill",
     "_cmd_simulate",
     "_cmd_goal",
+    "_cmd_idea",
     "_cmd_hub",
     "_inbox_obj",
     "_cmd_improve",
