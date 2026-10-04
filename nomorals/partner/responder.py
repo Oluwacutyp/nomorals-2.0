@@ -71,7 +71,13 @@ class Signal:
     note: str = ""
 
     def compiled(self) -> re.Pattern[str]:
-        return re.compile(self.pattern, re.IGNORECASE)
+        # Cache the compiled pattern on the instance. The dataclass is
+        # frozen, so we go through object.__setattr__ once.
+        cached = self.__dict__.get("_compiled")
+        if cached is None:
+            cached = re.compile(self.pattern, re.IGNORECASE)
+            object.__setattr__(self, "_compiled", cached)
+        return cached
 
 
 #: Ordered: more specific signals first; a message can fire several, but the
