@@ -351,14 +351,15 @@ class ChatAdapter(ABC):
                     path = os.path.join(dirpath, fname)
                     try:
                         st = os.stat(path)
-                    except OSError:
+                    except OSError as exc:
+                        _log.debug("media prune: stat failed for %s: %s", path, exc)
                         continue
                     if st.st_mtime < cutoff:
                         try:
                             os.unlink(path)
                             removed += 1
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            _log.debug("media prune: unlink failed for %s: %s", path, exc)
                     else:
                         entries.append((st.st_mtime, st.st_size, path))
             cap_bytes = max_total_mb * 1024 * 1024
@@ -373,8 +374,8 @@ class ChatAdapter(ABC):
                             os.unlink(path)
                             removed += 1
                             total -= _size
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            _log.debug("media prune: unlink failed for %s: %s", path, exc)
             if removed:
                 _log.info("adapter %s: pruned %d stale media file(s) from %s",
                           self.name, removed, root)

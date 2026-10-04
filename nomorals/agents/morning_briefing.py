@@ -62,8 +62,9 @@ def adaptive_section_budget(ctx: Any, priorities: list[int]) -> list[int]:
         try:
             flat = max(2, min(40, int(pref)))
             return [flat] * n
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            _log.debug("invalid max_items_per_section pref %r (%s); using defaults",
+                       pref, exc)
     slots = MAX_WORDS // _AVG_WORDS_PER_LINE
     weights = [1.0 / max(1.0, p / 10.0) for p in priorities]
     total = sum(weights) or 1.0

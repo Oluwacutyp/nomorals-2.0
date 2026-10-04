@@ -193,10 +193,8 @@ class Database:
         if conn is None:
             return
         with self._all_lock:
-            try:
+            if conn in self._all_connections:
                 self._all_connections.remove(conn)
-            except ValueError:  # pragma: no cover - already released/closed
-                pass
         try:
             conn.close()
         except sqlite3.Error:  # pragma: no cover - close is best-effort here

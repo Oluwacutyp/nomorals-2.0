@@ -161,7 +161,7 @@ def _parse_retry_after(headers: Mapping[str, str] | None) -> float:
         try:
             return max(0.0, float(raw))
         except ValueError:
-            pass
+            _log.debug("retry-after %r is not seconds; trying HTTP date", raw)
         try:
             from datetime import datetime, timezone
             from email.utils import parsedate_to_datetime

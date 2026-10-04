@@ -1365,8 +1365,9 @@ def _apply_game_attributes_rename(db: object) -> None:
     try:
         rows = ex("PRAGMA table_info(game_stats)").fetchall()
         cols = {str(r[1]) for r in rows}
-    except Exception:
-        pass
+    except Exception as exc:
+        from ..core.logging_setup import get_logger
+        get_logger(__name__).debug("game_stats schema probe failed: %s", exc)
     if "strength" in cols:
         # RPG table won the race — move it aside.
         ex("ALTER TABLE game_stats RENAME TO game_attributes")

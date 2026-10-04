@@ -25,6 +25,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "FIELD_MARKER",
     "FieldNotFound",
@@ -208,8 +212,8 @@ def clear_marker(page: Any) -> None:
         return
     try:
         evaluate(_CLEAR_JS)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("clear_nm_field_marker failed (best-effort): %s", exc)
 
 
 def describe_fields(page: Any) -> list[dict[str, Any]]:
