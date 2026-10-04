@@ -984,15 +984,17 @@ class GameEngine:
                             self.store.consume_item(p, "coin_charm")
                     except Exception:  # noqa: BLE001
                         _log.debug("booster apply failed", exc_info=True)
-                    self.store.record_outcome(
+                    prof_after = self.store.record_outcome(
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
                     msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
-                    # streak milestones: 5/10/15/… wins in a row get
-                    # fanfare — the tiered bonus keeps growing with them.
-                    if won is True and streak_after >= 5 and streak_after % 5 == 0:
+                    # streak milestones: use the streak from the profile
+                    # record_outcome just wrote (not the pre-read estimate
+                    # above) so the fanfare matches the stored streak.
+                    stored_streak = prof_after.streak if prof_after else streak_after
+                    if won is True and stored_streak >= 5 and stored_streak % 5 == 0:
                         msgs.append(
-                            f"🔥 {streak_after}-win streak! the bonus "
+                            f"🔥 {stored_streak}-win streak! the bonus "
                             f"tiers keep paying richer.")
                     # record to leaderboard if score > 0
                     if score > 0:

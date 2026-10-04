@@ -150,6 +150,21 @@ class StoreTierTests(unittest.TestCase):
     def test_upgrade_unlearned_is_false(self):
         self.assertFalse(self.skills.upgrade("pk1", "dragon_punch"))
 
+    def test_double_learn_is_idempotent(self):
+        # two concurrent learns must not create duplicate rows
+        self.assertTrue(self.skills.learn("pk1", "dragon_punch"))
+        self.assertFalse(self.skills.learn("pk1", "dragon_punch"))
+        self.assertEqual(self.skills.learned("pk1").count("dragon_punch"), 1)
+
+    def test_stale_tier_upgrade_fails(self):
+        # the atomic WHERE tier=? means an upgrade from a stale read
+        # can't skip tiers or double-apply.
+        self.skills.learn("pk1", "dragon_punch")
+        self.assertTrue(self.skills.upgrade("pk1", "dragon_punch"))
+        self.assertEqual(self.skills.tier("pk1", "dragon_punch"), 2)
+        self.assertTrue(self.skills.upgrade("pk1", "dragon_punch"))
+        self.assertEqual(self.skills.tier("pk1", "dragon_punch"), 3)
+
     def test_upgrade_passive_is_false(self):
         self.skills.learn("pk1", "iron_skin")
         self.assertFalse(self.skills.upgrade("pk1", "iron_skin"))

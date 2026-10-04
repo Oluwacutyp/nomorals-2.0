@@ -210,48 +210,86 @@ class StatStore:
         Returns (points_added, updated_stats). The stats block is the
         freshly-saved state — callers should use it directly instead of
         doing a separate read that might hit a transient failure.
+
+        Atomic: the UPDATE only applies when level_applied still matches
+        what we read, so two concurrent grants can't double-count the
+        same levels.
         """
         level = max(1, int(level))
+        self._ensure()
+        if self.db is None:
+            return 0, StatBlock()
+        # ensure a row exists (idempotent)
+        try:
+            self.db.execute(
+                "INSERT OR IGNORE INTO game_stats (id, player_key, "
+                "level_applied) VALUES (?, ?, 1)",
+                (new_id(), player_key))
+        except Exception:  # noqa: BLE001
+            pass
         stats = self.get(player_key)
         if level <= stats.level_applied:
             return 0, stats
         new_levels = level - stats.level_applied
         points = new_levels * POINTS_PER_LEVEL
-        stats.unspent += points
-        stats.level_applied = level
-        self._save(player_key, stats)
-        # Re-read to verify the save persisted; fall back to the
-        # in-memory stats if the read fails (transient DB issue).
         try:
-            verified = self.get(player_key)
-            # If the read shows our points, use it; otherwise trust
-            # the in-memory state we just saved.
-            if verified.unspent >= stats.unspent:
-                return points, verified
+            cursor = self.db.execute(
+                "UPDATE game_stats SET unspent = unspent + ?, "
+                "level_applied = ?, updated_at = ? "
+                "WHERE player_key = ? AND level_applied = ?",
+                (points, level, time.time(), player_key,
+                 stats.level_applied))
+            # rowcount 0 = someone else applied these levels first.
+            # (None cursor = mock DB in tests — trust the write.)
+            if cursor is not None and getattr(cursor, "rowcount", 1) == 0:
+                # someone else applied these levels first — re-read
+                return 0, self.get(player_key)
         except Exception:  # noqa: BLE001
-            _log.debug("grant verification read failed", exc_info=True)
-        return points, stats
+            _log.warning("grant_level_points failed", exc_info=True)
+            return 0, stats
+        return points, self.get(player_key)
 
     # ── spending ───────────────────────────────────────────────────────────
     def spend(self, player_key: str, name: str,
               points: int = 1, stats: "StatBlock | None" = None) -> tuple[bool, str]:
-        """Spend unspent points on one attribute."""
+        """Spend unspent points on one attribute.
+
+        Atomic: the UPDATE only fires when unspent still covers the
+        spend, so two concurrent spends can't double-spend the same
+        points. The optional ``stats`` is used for the display message
+        only, never trusted for the balance check.
+        """
         name = (name or "").strip().lower()
         if name not in STAT_NAMES:
             return False, (f"unknown attribute — choose from "
                            f"{', '.join(STAT_NAMES)}.")
         points = max(1, int(points))
-        if stats is None:
-            stats = self.get(player_key)
-        if stats.unspent < points:
-            return False, (f"only {stats.unspent} unspent point(s) — "
-                           f"level up to earn more.")
-        stats.unspent -= points
-        setattr(stats, name, int(getattr(stats, name)) + points)
-        self._save(player_key, stats)
-        total = int(getattr(stats, name))
-        return True, (f"{name.capitalize()} +{points} → {total} "
-                      f"({stats.unspent} unspent left).")
+        self._ensure()
+        if self.db is None:
+            return False, "stats storage is unavailable."
+        try:
+            before = self.get(player_key)
+            cursor = self.db.execute(
+                f"UPDATE game_stats SET {name} = {name} + ?, "
+                f"unspent = unspent - ?, updated_at = ? "
+                f"WHERE player_key = ? AND unspent >= ?",
+                (points, points, time.time(), player_key, points))
+            # rowcount 0 = insufficient funds (or a concurrent spend won).
+            if cursor is not None and getattr(cursor, "rowcount", 1) == 0:
+                cur = self.get(player_key)
+                return False, (f"only {cur.unspent} unspent point(s) — "
+                               f"level up to earn more.")
+            fresh = self.get(player_key)
+            # None cursor = mock DB: verify the spend actually landed.
+            if fresh.unspent >= before.unspent:
+                return False, (f"only {fresh.unspent} unspent point(s) — "
+                               f"level up to earn more.")
+            total = int(getattr(fresh, name))
+            return True, (f"{name.capitalize()} +{points} → {total} "
+                          f"({fresh.unspent} unspent left).")
+        except Exception:  # noqa: BLE001
+            _log.warning("stat spend failed", exc_info=True)
+            return False, "couldn't spend the points — try again."
 
     def _save(self, player_key: str, stats: StatBlock) -> None:
         self._ensure()

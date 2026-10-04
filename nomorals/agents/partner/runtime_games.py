@@ -312,19 +312,27 @@ class RuntimeGamesMixin:
             ok, msg = gear.repair(player.key, ref)
             if not ok:
                 return msg
-            # msg is "DisplayName|cost" — deduct coins, then apply
+            # msg is "DisplayName|cost" — deduct coins atomically, then apply.
+            # spend_coins re-checks the balance inside its lock, so a stale
+            # prof.coins read can't let two concurrent repairs overspend.
             try:
                 name, cost_s = msg.rsplit("|", 1)
                 cost = int(cost_s)
             except ValueError:
                 return msg
-            if prof.coins < cost:
-                return (f"repairing {name} costs {cost}c — "
-                        f"you have {prof.coins}c.")
             inst = gear.find(player.key, ref)
             if inst is None:
                 return "lost track of that piece — try again."
-            store.add_coins(player, -cost, f"repair:{inst.slug}")
+            # re-verify the piece still needs repair (durability may have
+            # changed since the cost was computed)
+            if inst.durability >= inst.max_durability:
+                return f"{inst.display_name()} is already at full."
+            new_balance = store.spend_coins(player, cost,
+                                            f"repair:{inst.slug}")
+            if new_balance is None:
+                prof_now = store.get(player.key)
+                return (f"repairing {name} costs {cost}c — "
+                        f"you have {prof_now.coins}c.")
             if gear.apply_repair(inst.id):
                 return f"🔧 {name} — good as new, {cost}c."
             # repair failed after taking coins — refund, never lose coins
@@ -611,20 +619,12 @@ class RuntimeGamesMixin:
                                     gear_stat_bonuses)
         engine = self._game_engine()
         store = StatStore(engine.db)
-        # top up any pending level-up points first
-        new_pts = 0
-        try:
-            from ...games.progression import level_for_xp
-            prof = engine.store.get(player.key)
-            new_pts, stats = store.grant_level_points(
-                player.key, level_for_xp(prof.xp))
-        except Exception:  # noqa: BLE001
-            new_pts = 0
-            stats = store.get(player.key)
+        # Display-only: points are granted at the actual level-up event
+        # in the game engine, never here. This just shows the current
+        # state.
+        stats = store.get(player.key)
         tail = (tail or "").strip().lower()
         lines: list[str] = []
-        if new_pts:
-            lines.append(f"📊 +{new_pts} attribute point(s) from leveling!")
         if not tail or tail in ("show", "list"):
             gear_bonus = {n: 0 for n in STAT_NAMES}
             try:

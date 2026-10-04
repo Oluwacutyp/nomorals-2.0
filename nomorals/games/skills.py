@@ -592,6 +592,17 @@ class SkillStore:
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_game_skills_player "
                 "ON game_skills(player_key)")
+            # one row per player+skill — guards against double-learn races
+            # (two concurrent /skill learn must not create duplicates or
+            # double-charge; the second INSERT becomes a no-op).
+            try:
+                self.db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_game_skills_player_slug "
+                    "ON game_skills(player_key, slug)")
+            except Exception:  # noqa: BLE001 - e.g. pre-existing dupes
+                _log.debug("game_skills unique index failed",
+                           exc_info=True)
             # tier column for skill upgrades (older rows default to 1)
             try:
                 self.db.execute(
@@ -653,23 +664,35 @@ class SkillStore:
 
     def upgrade(self, player_key: str, slug: str) -> bool:
         """Raise a learned skill one tier. False if not learned, maxed,
-        or the skill has no upgrades."""
+        or the skill has no upgrades.
+
+        Atomic: the UPDATE only fires when the row is still at the tier
+        we read, so two concurrent upgrades can't both succeed on the
+        same tier (the loser sees rowcount 0 and the caller refunds).
+        """
         if slug not in SKILL_CATALOG:
             return False
         defn = SKILL_CATALOG[slug]
         if max_tier(defn) < 2:
             return False
         self._ensure()
-        if self.db is None or not self.has(player_key, slug):
+        if self.db is None:
             return False
         cur = self.tier(player_key, slug)
         if cur >= max_tier(defn):
             return False
+        # learned check folded into the UPDATE's rowcount: if the player
+        # never learned it, no row matches and rowcount is 0.
         try:
-            self.db.execute(
+            cursor = self.db.execute(
                 "UPDATE game_skills SET tier = ? "
-                "WHERE player_key = ? AND slug = ?",
-                (cur + 1, player_key, slug))
+                "WHERE player_key = ? AND slug = ? AND tier = ?",
+                (cur + 1, player_key, slug, cur))
+            # None cursor = mock DB in tests — verify via re-read.
+            if cursor is None:
+                return self.tier(player_key, slug) == cur + 1
+            if cursor.rowcount == 0:
+                return False
             # tier III mastery earns an achievement
             if cur + 1 >= 3:
                 try:
@@ -684,18 +707,24 @@ class SkillStore:
 
     # ── writes ─────────────────────────────────────────────────────────────
     def learn(self, player_key: str, slug: str) -> bool:
-        """Record a learned skill. Idempotent — False if already known."""
+        """Record a learned skill. Idempotent — False if already known.
+
+        Atomic: INSERT OR IGNORE on the (player_key, slug) unique index,
+        so two concurrent learns can't double-insert (or double-charge —
+        the caller refunds when this returns False).
+        """
         if slug not in SKILL_CATALOG:
             return False
         self._ensure()
-        if self.has(player_key, slug):
-            return False
         try:
-            self.db.execute(
-                "INSERT INTO game_skills (id, player_key, slug, learned_at) "
+            cursor = self.db.execute(
+                "INSERT OR IGNORE INTO game_skills (id, player_key, slug, learned_at) "
                 "VALUES (?, ?, ?, ?)",
                 (new_id(), player_key, slug, time.time()))
-            return True
+            # None cursor = mock DB in tests — verify via has().
+            if cursor is None:
+                return self.has(player_key, slug)
+            return cursor.rowcount > 0
         except Exception:  # noqa: BLE001
             _log.warning("game_skills learn failed", exc_info=True)
             return False
