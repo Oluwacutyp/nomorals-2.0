@@ -1274,6 +1274,24 @@ CREATE INDEX IF NOT EXISTS idx_game_gear_player ON game_gear(player_key);
 """
 
 
+_V71_TRIAL_ASSIST_RUNS = """
+-- Trial assist runs: durable background-signup state. A restart can
+-- never silently swallow a run — rows not in a terminal state are
+-- marked interrupted + reported on the next boot.
+CREATE TABLE IF NOT EXISTS trial_assist_runs (
+    run_id     TEXT PRIMARY KEY,
+    platform   TEXT NOT NULL DEFAULT '',
+    chat_key   TEXT NOT NULL DEFAULT '',
+    started    REAL NOT NULL DEFAULT 0,
+    state      TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_trial_assist_runs_state
+    ON trial_assist_runs(state);
+"""
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2325,6 +2343,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(70, "game_players_xp_column",
               sql="ALTER TABLE game_players ADD COLUMN xp "
                   "INTEGER NOT NULL DEFAULT 0;"),
+    Migration(71, "trial_assist_runs", sql=_V71_TRIAL_ASSIST_RUNS),
 )
 
 

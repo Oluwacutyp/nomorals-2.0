@@ -36,6 +36,31 @@ _DELIVERY_ORDER = ("whatsapp", "telegram")
 #: max concurrent background assist runs — browser signups are heavy.
 _ASSIST_MAX_INFLIGHT = 2
 
+#: terminal assist-run states.  Any row in ``trial_assist_runs`` whose
+#: state is *not* in this set was in flight when the process died and
+#: gets marked ``interrupted`` + reported on the next boot.
+_ASSIST_TERMINAL_STATES = frozenset({"done", "failed", "interrupted"})
+
+#: durable assist-run state — the table is created here (IF NOT EXISTS)
+#: and again in the migrations so fresh and upgraded DBs both have it.
+_ASSIST_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS trial_assist_runs (
+    run_id     TEXT PRIMARY KEY,
+    platform   TEXT NOT NULL DEFAULT '',
+    chat_key   TEXT NOT NULL DEFAULT '',
+    started    REAL NOT NULL DEFAULT 0,
+    state      TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_trial_assist_runs_state
+    ON trial_assist_runs(state);
+"""
+
+#: terminal runs older than this are pruned on load — status history,
+#: not an archive.
+_ASSIST_RUN_TTL = 7 * 24 * 3600
+
 #: kv_store key where the latest grabbed temp number is stashed so
 #: ``/trial sms code`` can poll it without the owner pasting JSON around.
 TEMP_SMS_KV_KEY = "trial.temp_sms"
@@ -79,8 +104,18 @@ class TrialFlow:
         # bounded background assist runs (browser signups are heavy)
         self._assist_sem = threading.Semaphore(_ASSIST_MAX_INFLIGHT)
         self._assist_lock = threading.Lock()
-        #: run_id -> {platform, started, state, note}
+        #: run_id -> {platform, chat_key, started, state, note}
         self._assist_runs: dict[str, dict[str, Any]] = {}
+        # durable assist-run state: runs survive a bot restart so the
+        # owner can still see what happened and get the report.
+        self._ensure_assist_runs_table()
+        self._load_assist_runs()
+        self._maybe_recover_assist_runs()
+
+    # one recovery pass per process — the first TrialFlow use after boot
+    # marks in-flight runs interrupted and reports them; later instances
+    # just read the (now terminal) rows.
+    _assist_recovery_done: bool = False
 
     # ── research (what a single signup needs) ────────────────────────────────
     def start(self, platform: str) -> str:
@@ -151,10 +186,14 @@ class TrialFlow:
         with self._assist_lock:
             self._assist_runs[run_id] = {
                 "platform": platform.lower(),
+                "chat_key": chat_key or "",
                 "started": time.time(),
                 "state": "starting",
                 "note": "",
             }
+        # durable before the thread starts — a restart from here on
+        # still reports the run instead of swallowing it.
+        self._persist_assist_run(run_id)
         thread = threading.Thread(
             target=self._assist_run,
             args=(run_id, platform, chat_key, dict(identity)),
@@ -173,8 +212,7 @@ class TrialFlow:
     def _assist_run(self, run_id: str, platform: str, chat_key: str,
                     identity: dict[str, str]) -> None:
         """Background body of :meth:`assist` — runs the real creator."""
-        with self._assist_lock:
-            self._assist_runs[run_id]["state"] = "running"
+        self._set_assist_run_state(run_id, "running")
         note = ""
         ok = False
         try:
@@ -231,19 +269,200 @@ class TrialFlow:
         with self._assist_lock:
             self._assist_runs[run_id].update(
                 state="done" if ok else "failed", note=note)
+        self._persist_assist_run(run_id)
         self._notify_owner(f"trial assist — {platform}", note, chat_key)
 
+    # ── durable assist-run state ──────────────────────────────────────────
+    #
+    # Background signups outlive the chat turn that started them; the
+    # rows in ``trial_assist_runs`` outlive the process.  A restart can
+    # never silently swallow a run: anything not in a terminal state is
+    # marked ``interrupted`` and reported once via the durable notifier.
+
+    def _ensure_assist_runs_table(self) -> None:
+        if self.db is None:
+            return
+        try:
+            self.db.executescript(_ASSIST_RUNS_DDL)
+        except Exception:  # noqa: BLE001 - table is best-effort
+            _log.debug("trial assist runs table unavailable")
+
+    def _set_assist_run_state(self, run_id: str, state: str,
+                              note: str = "") -> None:
+        with self._assist_lock:
+            run = self._assist_runs.get(run_id)
+            if run is None:
+                return
+            run["state"] = state
+            if note:
+                run["note"] = note
+        self._persist_assist_run(run_id)
+
+    def _persist_assist_run(self, run_id: str) -> None:
+        """Write one run row. Never holds the lock while touching the DB."""
+        if self.db is None:
+            return
+        with self._assist_lock:
+            run = dict(self._assist_runs.get(run_id, {}))
+        if not run:
+            return
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO trial_assist_runs"
+                " (run_id, platform, chat_key, started, state, note,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, str(run.get("platform", "")),
+                 str(run.get("chat_key", "")),
+                 float(run.get("started", 0) or 0),
+                 str(run.get("state", "")),
+                 str(run.get("note", ""))[:2000], time.time()),
+            )
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            _log.debug("trial assist run persist failed for %s", run_id)
+
+    def _load_assist_runs(self) -> None:
+        """Reload persisted runs; prune terminal runs older than the TTL."""
+        if self.db is None:
+            return
+        try:
+            rows = self.db.query(
+                "SELECT run_id, platform, chat_key, started, state, note"
+                " FROM trial_assist_runs ORDER BY started")
+        except Exception:  # noqa: BLE001
+            return
+        cutoff = time.time() - _ASSIST_RUN_TTL
+        terminal = ", ".join(f"'{s}'"
+                             for s in sorted(_ASSIST_TERMINAL_STATES))
+        with self._assist_lock:
+            for row in rows or []:
+                rid = str(row.get("run_id") or "")
+                if not rid or rid in self._assist_runs:
+                    continue
+                self._assist_runs[rid] = {
+                    "platform": str(row.get("platform") or ""),
+                    "chat_key": str(row.get("chat_key") or ""),
+                    "started": float(row.get("started") or 0),
+                    "state": str(row.get("state") or ""),
+                    "note": str(row.get("note") or ""),
+                }
+        try:
+            self.db.execute(
+                "DELETE FROM trial_assist_runs WHERE started < ?"
+                f" AND state IN ({terminal})",
+                (cutoff,),
+            )
+        except Exception:  # noqa: BLE001 - pruning is best-effort
+            _log.debug("trial assist run prune failed")
+
+    def _maybe_recover_assist_runs(self) -> None:
+        """One recovery pass per process, on first use after boot."""
+        cls = type(self)
+        if cls._assist_recovery_done:
+            return
+        cls._assist_recovery_done = True
+        try:
+            recovered = cls.recover_interrupted_runs(self.context,
+                                                     self.gateway)
+        except Exception:  # noqa: BLE001 - recovery must not break init
+            _log.exception("trial assist recovery failed")
+            return
+        if recovered:
+            # keep the in-memory view consistent with the rows just
+            # marked interrupted in the DB.
+            with self._assist_lock:
+                for item in recovered:
+                    run = self._assist_runs.get(item.get("run_id", ""))
+                    if run is not None and run.get("state") not in (
+                            _ASSIST_TERMINAL_STATES):
+                        run["state"] = "interrupted"
+                        run["note"] = (
+                            "⚠️ interrupted by a bot restart — rerun: "
+                            f"/trial assist {run.get('platform') or '?'}")
+
+    @classmethod
+    def recover_interrupted_runs(
+        cls, context: Any, gateway: Any = None
+    ) -> list[dict[str, Any]]:
+        """Mark in-flight runs as interrupted and report them. Never raises.
+
+        Called once per process (first TrialFlow use, plus the runtime
+        startup hook) so a restart never silently swallows a background
+        signup.  Each interrupted run gets a terminal ``interrupted``
+        state and one honest report through the durable notifier — even
+        with no live gateway the row persists for later redelivery.
+        Returns the recovered runs (``run_id``/``platform``).
+        """
+        cls._assist_recovery_done = True
+        recovered: list[dict[str, Any]] = []
+        db = getattr(context, "db", None)
+        if db is None:
+            return recovered
+        try:
+            db.executescript(_ASSIST_RUNS_DDL)
+            terminal = ", ".join(f"'{s}'"
+                                 for s in sorted(_ASSIST_TERMINAL_STATES))
+            rows = db.query(
+                "SELECT run_id, platform, chat_key, started"
+                " FROM trial_assist_runs WHERE state NOT IN"
+                f" ({terminal}) ORDER BY started")
+        except Exception:  # noqa: BLE001
+            return recovered
+        notifier = None
+        for row in rows or []:
+            rid = str(row.get("run_id") or "")
+            platform = str(row.get("platform") or "?")
+            note = (
+                "⚠️ the assisted signup for "
+                f"{platform} was interrupted by a bot restart — I don't "
+                "know how far the signup got before the process died. "
+                "Check the site directly, then rerun if needed:\n"
+                f"  /trial assist {platform}"
+            )
+            try:
+                db.execute(
+                    "UPDATE trial_assist_runs SET state='interrupted',"
+                    " note=?, updated_at=? WHERE run_id=?",
+                    (note, time.time(), rid),
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("trial run interrupt-mark failed for %s", rid)
+            recovered.append({"run_id": rid, "platform": platform})
+            try:
+                if notifier is None:
+                    from ..notifier import Notifier
+
+                    gw = gateway
+                    if gw is None:
+                        gw = getattr(context, "gateway", None)
+                    notifier = Notifier(context, gateway=gw)
+                notifier.publish("trial",
+                                 f"trial assist interrupted — {platform}",
+                                 note, force=True)
+            except Exception:  # noqa: BLE001 - reporting must not crash
+                _log.exception("trial interrupt report failed for %s", rid)
+        return recovered
+
     def assist_status(self) -> str:
-        """Status of background assist runs (``/trial status``)."""
+        """Status of background assist runs (``/trial status``).
+
+        Reads the durable run table, so runs from before a restart show
+        up too — interrupted ones say so honestly instead of vanishing.
+        """
         with self._assist_lock:
             runs = list(self._assist_runs.items())
         if not runs:
             return "no assisted signups yet — /trial assist <platform> to start one."
         lines = ["assisted signups:"]
-        for run_id, run in sorted(runs, key=lambda kv: kv[1].get("started", 0)):
+        ordered = sorted(runs, key=lambda kv: kv[1].get("started", 0))
+        if len(ordered) > 10:
+            lines.append(f"  (showing latest 10 of {len(ordered)})")
+            ordered = ordered[-10:]
+        for run_id, run in ordered:
             when = time.strftime("%H:%M", time.localtime(run.get("started", 0)))
+            state = run.get("state") or "?"
+            marker = " ⚠️" if state == "interrupted" else ""
             lines.append(
-                f"  {run.get('platform')} [{run.get('state')}] started {when}"
+                f"  {run.get('platform')} [{state}]{marker} started {when}"
             )
             note = str(run.get("note") or "")
             if note:

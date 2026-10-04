@@ -761,6 +761,17 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
+        # Trial assist: background signups killed by a restart are marked
+        # interrupted and reported once, so no run silently disappears.
+        # Idempotent — only non-terminal rows are touched.
+        if not self.dry_run:
+            try:
+                from ..trial import TrialFlow
+
+                TrialFlow.recover_interrupted_runs(
+                    self.context, gateway=self.gateway)
+            except Exception as exc:  # noqa: BLE001 - recovery is optional
+                _log.warning("trial assist recovery failed: %s", exc)
         return started
 
     def _arena_notify(self, text: str) -> None:

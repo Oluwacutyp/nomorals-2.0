@@ -871,8 +871,39 @@ class AccountCreator:
         return account
 
     async def _create_tempmail(self, username: str) -> CreatedAccount:
-        """Create a TempMail disposable email account."""
-        email = f"{username}@tempmail.com"
+        """Create a TempMail address via tempmail.plus (no-key REST API).
+
+        The inbox is address-derived — no signup call needed — so the
+        address is usable immediately and pollable via
+        :meth:`tempmail_inbox` / :meth:`check_disposable_inbox`.
+        """
+        import asyncio
+        import re
+        import secrets
+        import urllib.parse
+
+        local = re.sub(r"[^a-z0-9._-]", "", (username or "").lower())[:24]
+        if len(local) < 3:
+            local = "devon" + secrets.token_hex(4)
+        email = f"{local}@mailto.plus"
+        # verify the API is reachable before storing the credential
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(
+                None, self._tempmail_request,
+                "/api/mails?email=" + urllib.parse.quote(email))
+            if not data.get("result", True):
+                raise RuntimeError("tempmail.plus rejected the address")
+        except Exception as exc:  # noqa: BLE001 - provider down, report it
+            _log.warning("tempmail.plus address check failed: %s", exc)
+            return CreatedAccount(
+                service="email_tempmail",
+                username=email,
+                password="",
+                email="",
+                status="failed",
+                notes=f"tempmail.plus error: {exc}",
+            )
 
         cred = self.vault.store(
             service="email_tempmail",
@@ -890,10 +921,72 @@ class AccountCreator:
             email=email,
             status="created",
             credential=cred,
-            notes="Disposable email via TempMail",
+            notes="Disposable email via tempmail.plus (no-key API)"
+                  " - poll inbox with check_disposable_inbox",
         )
         self._creation_history.append(account)
         return account
+
+    # -- tempmail.plus (real REST API, no key needed) -------------------
+
+    _TEMPMAILPLUS_API = "https://tempmail.plus"
+
+    def _tempmail_request(self, path: str,
+                          timeout: float = 15) -> dict:
+        """Synchronous tempmail.plus API call (called from async via executor)."""
+        import json
+        import urllib.request
+        req = urllib.request.Request(
+            f"{self._TEMPMAILPLUS_API}{path}",
+            headers={"User-Agent": "Devon/1.0",
+                     "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return json.loads(body) if body.strip() else {}
+
+    def tempmail_inbox(self, address: str, limit: int = 10) -> list[dict]:
+        """Poll a tempmail.plus inbox. Returns newest-first message dicts."""
+        import urllib.parse
+        try:
+            data = self._tempmail_request(
+                "/api/mails?email=" + urllib.parse.quote(address or ""))
+        except Exception as exc:  # noqa: BLE001 - poll never crashes
+            _log.warning("tempmail.plus inbox poll failed: %s", exc)
+            return []
+        if not data.get("result", True):
+            return []
+        out = []
+        for m in (data.get("mail_list") or [])[:limit]:
+            out.append({
+                "id": m.get("mail_id"),
+                "from": m.get("from_mail", ""),
+                "subject": m.get("subject", ""),
+                "date": m.get("time", ""),
+                "intro": "",
+            })
+        return out
+
+    def tempmail_read(self, address: str,
+                      message_id: str | int) -> dict:
+        """Fetch one full tempmail.plus message (body included)."""
+        import urllib.parse
+        try:
+            data = self._tempmail_request(
+                f"/api/mails/{message_id}?email="
+                + urllib.parse.quote(address or ""))
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("tempmail.plus message read failed: %s", exc)
+            return {}
+        if not data.get("result", True):
+            return {}
+        return {
+            "id": data.get("mail_id", message_id),
+            "from": data.get("from_mail") or data.get("from", ""),
+            "subject": data.get("subject", ""),
+            "date": data.get("date", ""),
+            "text": data.get("text", ""),
+            "html": data.get("html", ""),
+        }
 
     # -- mail.tm (real REST API, no key needed) ---------------------
 
@@ -1135,6 +1228,9 @@ class AccountCreator:
             if provider == "guerrilla":
                 return self._guerrilla_inbox(
                     str(meta.get("sid_token", "")), limit=limit)
+            if provider == "tempmail":
+                return self.tempmail_inbox(credential.username,
+                                           limit=limit)
         except Exception as exc:  # noqa: BLE001 - inbox poll never crashes
             _log.warning("inbox poll failed for %s: %s", provider, exc)
         return []

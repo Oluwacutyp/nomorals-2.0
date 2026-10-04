@@ -785,5 +785,122 @@ class SessionTests(unittest.TestCase):
                        expires_at=time.time() - 1).is_expired())
 
 
+# ── tempmail.plus (no-key REST API) ─────────────────────────────────────
+
+
+class TempmailTests(unittest.TestCase):
+    """tempmail provider: real @mailto.plus addresses + inbox polling.
+
+    Offline by design — the HTTP helper is mocked; one test file does a
+    live smoke check separately (not here).
+    """
+
+    def setUp(self):
+        self.vault = _vault()
+        self.creator = AccountCreator(self.vault)
+        self.ok_payload = {
+            "result": True,
+            "mail_list": [
+                {"mail_id": 101, "from_mail": "noreply@example.com",
+                 "subject": "Your code is 482910",
+                 "time": "2026-10-04 06:10:00"},
+                {"mail_id": 102, "from_mail": "x@y.com",
+                 "subject": "Welcome", "time": "2026-10-04 06:11:00"},
+            ],
+        }
+
+    def test_create_mints_real_mailto_plus_address(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value={"result": True, "mail_list": []}):
+            account = asyncio.run(
+                self.creator.create_account("tempmail",
+                                            username="Test User!"))
+        self.assertEqual(account.status, "created")
+        self.assertEqual(account.email, "testuser@mailto.plus")
+        cred = self.vault.get("email_tempmail", "testuser@mailto.plus")
+        self.assertEqual(cred.credential_type, "disposable_email")
+        self.assertEqual(cred.metadata.get("provider"), "tempmail")
+
+    def test_create_randomizes_short_username(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value={"result": True, "mail_list": []}):
+            account = asyncio.run(
+                self.creator.create_account("tempmail", username="ab"))
+        self.assertEqual(account.status, "created")
+        self.assertTrue(account.email.endswith("@mailto.plus"))
+        self.assertGreater(len(account.email.split("@")[0]), 3)
+
+    def test_create_api_down_reports_failure(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                side_effect=RuntimeError("boom")):
+            account = asyncio.run(
+                self.creator.create_account("tempmail",
+                                            username="someone"))
+        self.assertEqual(account.status, "failed")
+        self.assertIn("boom", account.notes)
+
+    def test_inbox_parses_mail_list(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value=self.ok_payload):
+            msgs = self.creator.tempmail_inbox("someone@mailto.plus")
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["id"], 101)
+        self.assertEqual(msgs[0]["from"], "noreply@example.com")
+        self.assertEqual(msgs[0]["subject"], "Your code is 482910")
+        self.assertEqual(msgs[0]["date"], "2026-10-04 06:10:00")
+
+    def test_inbox_respects_limit(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value=self.ok_payload):
+            msgs = self.creator.tempmail_inbox("someone@mailto.plus",
+                                               limit=1)
+        self.assertEqual(len(msgs), 1)
+
+    def test_inbox_never_crashes(self):
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                side_effect=RuntimeError("net down")):
+            self.assertEqual(
+                self.creator.tempmail_inbox("someone@mailto.plus"), [])
+
+    def test_read_returns_full_message(self):
+        detail = {"result": True, "mail_id": 101,
+                  "from_mail": "noreply@example.com", "subject": "code",
+                  "date": "2026-10-04", "text": "Your code is 482910",
+                  "html": "<b>482910</b>"}
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value=detail):
+            msg = self.creator.tempmail_read("someone@mailto.plus", 101)
+        self.assertEqual(msg["text"], "Your code is 482910")
+        self.assertEqual(msg["html"], "<b>482910</b>")
+        self.assertEqual(msg["from"], "noreply@example.com")
+
+    def test_check_disposable_inbox_dispatches_tempmail(self):
+        self.vault.store("email_tempmail", "someone@mailto.plus", "",
+                         credential_type="disposable_email",
+                         metadata={"provider": "tempmail"})
+        cred = self.vault.get("email_tempmail", "someone@mailto.plus")
+        with mock.patch.object(
+                AccountCreator, "_tempmail_request",
+                return_value=self.ok_payload) as req:
+            msgs = self.creator.check_disposable_inbox(cred, limit=5)
+        self.assertEqual(len(msgs), 2)
+        called_url = req.call_args[0][0]
+        self.assertIn("someone%40mailto.plus", called_url)
+
+    def test_check_disposable_inbox_unknown_provider_empty(self):
+        self.vault.store("email_tempmail", "ghost@mailto.plus", "",
+                         credential_type="disposable_email",
+                         metadata={"provider": "nope"})
+        cred = self.vault.get("email_tempmail", "ghost@mailto.plus")
+        self.assertEqual(self.creator.check_disposable_inbox(cred), [])
+
+
 if __name__ == "__main__":
     unittest.main()
