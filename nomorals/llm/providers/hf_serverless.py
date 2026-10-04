@@ -31,12 +31,14 @@ from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, mes
 
 
 # Curated fallback models for the intelligent router
-# These are verified to be available on HF Inference API
+# These should be models commonly available on HF Inference API.
+# The live catalog (fetch_catalog) is the primary source; this list
+# is only used if the catalog API is unreachable.
 ROUTER_FALLBACK_MODELS = [
-    "Sao10K/L3-8B-Stheno-v3.2",
-    "Qwen/Qwen3-8B",
-    "meta-llama/Llama-3.2-3B-Instruct",
-    "microsoft/Phi-3.5-mini-instruct",
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "google/gemma-2-9b-it",
 ]
 
 SERVERLESS_URL = "https://api-inference.huggingface.co"
@@ -93,13 +95,42 @@ class HFServerlessProvider(LLMProvider):
         # describe_image routes pixels to the configured vision model.
         return {"chat", "complete", "embed", "vision"}
 
-    @staticmethod
-    def fetch_catalog() -> list[dict[str, Any]]:
-        """Fetch the catalog of available models."""
-        return [
-            {"model_id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
-            for m in ROUTER_FALLBACK_MODELS
-        ]
+    def fetch_catalog(self) -> list[dict[str, Any]]:
+        """Fetch the live catalog of available models from the HF router API."""
+        try:
+            # Query the live models endpoint — this is the source of truth
+            # for which models are actually hosted on hf-inference.
+            url = "https://router.huggingface.co/v1/models"
+            resp = self.http.get(url, timeout=15.0)
+            if not resp.ok:
+                # Fall back to curated list if API fails
+                return [
+                    {"id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
+                    for m in ROUTER_FALLBACK_MODELS
+                ]
+            data = resp.json()
+            models = data.get("data", []) if isinstance(data, dict) else []
+            # Normalize to the format _discover_catalog_model expects
+            result = []
+            for m in models:
+                if isinstance(m, dict) and m.get("id"):
+                    result.append({
+                        "id": m["id"],
+                        "providers": m.get("providers", []),
+                    })
+            if result:
+                return result
+            # Empty catalog, fall back to curated list
+            return [
+                {"id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
+                for m in ROUTER_FALLBACK_MODELS
+            ]
+        except Exception:
+            # Network failure, fall back to curated list
+            return [
+                {"id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
+                for m in ROUTER_FALLBACK_MODELS
+            ]
 
     @property
     def _is_dedicated_endpoint(self) -> bool:
