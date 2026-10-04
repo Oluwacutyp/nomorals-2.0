@@ -569,16 +569,23 @@ class BattleArenaGame(MultiGame):
     def _skill_note(self, room) -> str:
         """One-liner listing learned skills at battle start."""
         try:
-            from ..skills import SKILL_CATALOG
+            from ..skills import SKILL_CATALOG, effective_def
         except Exception:  # noqa: BLE001
             return ""
         slugs: list[str] = []
+        pkey = ""
         for p in room.humans:
+            pkey = p.key
             slugs = room.state.get("skills", {}).get(p.key, [])
             break
         if not slugs:
             return ""
-        names = [SKILL_CATALOG[s].name for s in slugs if s in SKILL_CATALOG]
+        tiers = room.state.get("skill_tiers", {}).get(pkey, {})
+        names = []
+        for s_ in slugs:
+            if s_ not in SKILL_CATALOG:
+                continue
+            names.append(effective_def(s_, tiers.get(s_, 1)).name)
         return "🥋 skills: " + ", ".join(names) + " — cast with skill <name>."
 
     def _gear_note(self, room) -> str:
@@ -751,14 +758,16 @@ class BattleArenaGame(MultiGame):
         """Cast a learned active skill. Returns the result message, or
         None if the ref isn't a usable skill (so the caller can fall
         through to the move list)."""
-        from ..skills import SKILL_CATALOG, resolve_skill
+        from ..skills import SKILL_CATALOG, effective_def, resolve_skill
         s = room.state
         y = s["you"]
         defn = resolve_skill(ref)
         if defn is None or defn.kind != "active":
             return None
         learned: list[str] = []
+        pkey = getattr(player, "key", "")
         for p in room.humans:
+            pkey = p.key
             learned = s.get("skills", {}).get(p.key, [])
             break
         if defn.slug not in learned:
@@ -768,6 +777,9 @@ class BattleArenaGame(MultiGame):
                     if known else "you haven't learned any skills yet — "
                     "/skill to see the school.")
             return f"you don't know {defn.name}. {hint}"
+        # upgrades fight: fold the player's tier into the blueprint
+        tier = s.get("skill_tiers", {}).get(pkey, {}).get(defn.slug, 1)
+        defn = effective_def(defn, tier)
         cd = s.setdefault("skill_cd", {})
         if int(cd.get(defn.slug, 0)) > 0:
             return (f"{defn.name} is recovering — "
@@ -781,9 +793,17 @@ class BattleArenaGame(MultiGame):
             y["dodge_next"] = True
             msg = ("you melt into shadow — the house's next attack "
                    "will miss.")
+            if defn.counter_mult:
+                parts = [self._hit(room, "you", "house", mind,
+                                   mult=defn.counter_mult)]
+                win = self._check(room)
+                if win:
+                    parts.append(win)
+                msg += " You strike from the dark! " + " ".join(parts)
         elif defn.slug == "war_cry":
             y["atk"] += defn.atk_buff
             y["warcry_turns"] = defn.buff_turns
+            y["warcry_amt"] = defn.atk_buff
             msg = (f"you ROAR — +{defn.atk_buff} attack for "
                    f"{defn.buff_turns} turns!")
         elif defn.slug == "second_wind":

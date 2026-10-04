@@ -3,7 +3,7 @@
 Fighters are plain dicts with the battle-arena shape::
 
     {"hp", "max_hp", "atk", "def", "potions", "defending", "shield",
-     "focused", "fury_cd", "dodge_next", "warcry_turns", ...}
+     "focused", "fury_cd", "dodge_next", "warcry_turns", "warcry_amt", ...}
 
 Everything here is pure (no I/O, no store): games own their messages,
 gear wear, and state layout; this module owns the numbers so the three
@@ -22,7 +22,7 @@ def new_fighter(hp: int = 50, atk: int = 10, dfn: int = 5) -> dict[str, Any]:
     return {"hp": hp, "max_hp": hp, "atk": atk, "def": dfn,
             "potions": 1, "defending": False, "shield": False,
             "focused": False, "fury_cd": 0, "dodge_next": False,
-            "warcry_turns": 0,
+            "warcry_turns": 0, "warcry_amt": 0,
             "combo_every": 0, "combo_count": 0, "combo_name": ""}
 
 
@@ -85,6 +85,9 @@ def tick_fighter(fighter: dict[str, Any],
     if int(fighter.get("warcry_turns", 0)) > 0:
         fighter["warcry_turns"] = int(fighter["warcry_turns"]) - 1
         if int(fighter["warcry_turns"]) <= 0:
-            fighter["atk"] = max(1, int(fighter["atk"]) - 3)
+            # fade the buff that was actually applied (3 for base War Cry;
+            # older saves / hand-built fighters carry no amount)
+            amt = int(fighter.pop("warcry_amt", 0) or 3)
+            fighter["atk"] = max(1, int(fighter["atk"]) - amt)
             notes.append("the war cry fades — your attack settles.")
     return notes

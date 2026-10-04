@@ -466,8 +466,11 @@ class GameEngine:
         # learned battle skills, so combat games apply them store-free
         try:
             from .skills import SkillStore
-            room.state.setdefault("skills", {})[key] = \
-                SkillStore(self.db).learned(key)
+            store = SkillStore(self.db)
+            room.state.setdefault("skills", {})[key] = store.learned(key)
+            # skill upgrade tiers, so battles use the fighting stats
+            room.state.setdefault("skill_tiers", {})[key] = \
+                store.tiers(key)
         except Exception:  # noqa: BLE001
             _log.debug("skills mirror failed", exc_info=True)
 

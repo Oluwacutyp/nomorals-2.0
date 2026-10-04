@@ -354,20 +354,23 @@ class RuntimeGamesMixin:
         return "\n".join(lines)
 
     def _control_skills(self, tail: str, *, player: Any = None) -> str:
-        """Learnable battle skills: /skill | /skill learn <name>.
+        """Learnable battle skills: /skill | /skill learn <name> |
+        /skill upgrade <name>.
 
         Skills persist in ``game_skills`` — learned once, yours forever.
         Active skills are cast in the arena with ``skill <name>``;
         passives apply automatically every battle.  Learning costs
-        coins and may require a player level.
+        coins and may require a player level.  The exciting actives
+        can be upgraded through tiers (II, III) — stronger hits,
+        shorter cooldowns, new effects.
         """
         from ..features import feature_enabled
         if not feature_enabled(self.context, "games"):
             return "games are off. /features games on"
         if player is None:
             return "no player here — run this from the chat where you play."
-        from ...games.skills import (SKILL_CATALOG, SkillStore,
-                                     resolve_skill)
+        from ...games.skills import (SKILL_CATALOG, SkillStore, tier_name,
+                                     effective_def, max_tier, resolve_skill)
         from ...games.progression import level_for_xp
         engine = self._game_engine()
         store = engine.store
@@ -375,6 +378,7 @@ class RuntimeGamesMixin:
         prof = store.get(player.key)
         level = level_for_xp(prof.xp)
         learned = skills.learned(player.key)
+        tiers = skills.tiers(player.key)
         tail = (tail or "").strip()
 
         def _skill_line(defn: Any) -> str:
@@ -387,6 +391,8 @@ class RuntimeGamesMixin:
                 extra = f" · heals {int(defn.heal_pct * 100)}% HP"
             if defn.dodge:
                 extra = " · dodges next attack"
+            if defn.counter_mult:
+                extra += f" · {defn.counter_mult:g}× counter"
             if defn.atk_buff:
                 extra = f" · +{defn.atk_buff} atk {defn.buff_turns}t"
             if defn.def_bonus:
@@ -400,10 +406,25 @@ class RuntimeGamesMixin:
             if defn.ignore_def_pct:
                 extra = (f" · ignores {int(defn.ignore_def_pct * 100)}% "
                          f"def")
+            up = " ⬆️" if max_tier(defn) > 1 else ""
             lock = "" if level >= defn.level_req else " 🔒"
-            return (f"{kind} {defn.name} [{defn.slug}]{lock}\n"
+            return (f"{kind} {defn.name} [{defn.slug}]{up}{lock}\n"
                     f"   {defn.school} · {defn.desc}\n"
                     f"   lvl {defn.level_req}+ · {defn.cost}c{cd}{extra}")
+
+        def _learned_line(slug: str) -> str:
+            defn = SKILL_CATALOG.get(slug)
+            if not defn:
+                return ""
+            tier = tiers.get(slug, 1)
+            eff = effective_def(defn, tier)
+            tag = "active" if defn.kind == "active" else "passive"
+            nxt = ""
+            if tier < max_tier(defn):
+                up = defn.tiers[tier - 1]
+                nxt_name = tier_name(defn, tier + 1)
+                nxt = (f" → ⬆️ {nxt_name} ({up.cost}c, lvl {up.level_req}+)")
+            return f"  ✅ {eff.name} ({tag}){nxt}"
 
         if not tail or tail.lower() in ("list", "show"):
             lines = [f"🥋 {player.name}'s skills — level {level}, "
@@ -411,12 +432,12 @@ class RuntimeGamesMixin:
             if learned:
                 lines.append("learned:")
                 for slug in learned:
-                    defn = SKILL_CATALOG.get(slug)
-                    if defn:
-                        lines.append(f"  ✅ {defn.name} "
-                                     f"({'active' if defn.kind == 'active' else 'passive'})")
+                    line = _learned_line(slug)
+                    if line:
+                        lines.append(line)
                 lines.append("cast actives in the arena with "
-                             "skill <name>.")
+                             "skill <name>; upgrade with "
+                             "/skill upgrade <name>.")
             else:
                 lines.append("no skills learned yet.")
             avail = [d for s, d in SKILL_CATALOG.items() if s not in learned]
@@ -428,34 +449,67 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
 
         parts = tail.split(None, 1)
-        if parts[0].lower() != "learn" or len(parts) < 2:
-            return "usage: /skill  ·  /skill learn <name>"
+        verb = parts[0].lower()
+        if verb not in ("learn", "upgrade") or len(parts) < 2:
+            return ("usage: /skill  ·  /skill learn <name>  ·  "
+                    "/skill upgrade <name>")
         defn = resolve_skill(parts[1])
         if defn is None:
             return (f"no such skill {parts[1]!r} — /skill lists the "
                     f"school.")
-        if defn.slug in learned:
-            return f"you already know {defn.name}."
-        if level < defn.level_req:
-            return (f"{defn.name} needs level {defn.level_req} — "
+        if verb == "learn":
+            if defn.slug in learned:
+                return f"you already know {defn.name}."
+            if level < defn.level_req:
+                return (f"{defn.name} needs level {defn.level_req} — "
+                        f"you're level {level}.")
+            if prof.coins < defn.cost:
+                return (f"{defn.name} costs {defn.cost}c — "
+                        f"you have {prof.coins}c.")
+            new_balance = store.spend_coins(player, defn.cost,
+                                            f"skill:{defn.slug}")
+            if new_balance is None:
+                return "couldn't take the coins — try again."
+            if not skills.learn(player.key, defn.slug):
+                # charged but not recorded — refund, never lose coins
+                store.add_coins(player, defn.cost,
+                                f"skill-refund:{defn.slug}")
+                return "learning failed — coins refunded."
+            up = (" ⬆️ upgradeable — /skill upgrade later"
+                  if max_tier(defn) > 1 else "")
+            use = ("cast it in the arena with "
+                   f"skill {defn.slug}." if defn.kind == "active"
+                   else "it's passive — always on in the arena.")
+            return (f"🥋 learned {defn.name}! ({defn.school} school){up} — "
+                    f"{new_balance}c left. {use}")
+        # ── upgrade ──
+        if defn.slug not in learned:
+            return (f"you haven't learned {defn.name} yet — "
+                    f"/skill learn {defn.slug} first.")
+        cur = tiers.get(defn.slug, 1)
+        top = max_tier(defn)
+        if cur >= top:
+            return f"{defn.name} is already at max tier."
+        up = defn.tiers[cur - 1]
+        nxt_name = tier_name(defn, cur + 1)
+        if level < up.level_req:
+            return (f"{nxt_name} needs level {up.level_req} — "
                     f"you're level {level}.")
-        if prof.coins < defn.cost:
-            return (f"{defn.name} costs {defn.cost}c — "
+        if prof.coins < up.cost:
+            return (f"{nxt_name} costs {up.cost}c to forge — "
                     f"you have {prof.coins}c.")
-        new_balance = store.spend_coins(player, defn.cost,
-                                        f"skill:{defn.slug}")
+        new_balance = store.spend_coins(player, up.cost,
+                                        f"skill-up:{defn.slug}:{cur + 1}")
         if new_balance is None:
             return "couldn't take the coins — try again."
-        if not skills.learn(player.key, defn.slug):
-            # charged but not recorded — refund, never lose coins
-            store.add_coins(player, defn.cost,
-                            f"skill-refund:{defn.slug}")
-            return "learning failed — coins refunded."
-        use = ("cast it in the arena with "
-               f"skill {defn.slug}." if defn.kind == "active"
-               else "it's passive — always on in the arena.")
-        return (f"🥋 learned {defn.name}! ({defn.school} school) — "
-                f"{new_balance}c left. {use}")
+        if not skills.upgrade(player.key, defn.slug):
+            store.add_coins(player, up.cost,
+                            f"skill-up-refund:{defn.slug}")
+            return "the upgrade failed — coins refunded."
+        more = (" — maxed out! 🏆" if cur + 1 >= top
+                else " — more power waits at the next tier.")
+        return (f"⬆️ {defn.name} → {nxt_name}! {up.desc} "
+                f"({new_balance}c left){more}")
 
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:

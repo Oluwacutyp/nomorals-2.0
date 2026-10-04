@@ -200,7 +200,7 @@ class _ArenaCombat:
                     me_name: str, foe_name: str,
                     foe_key: str | None = None) -> str | None:
         """Cast a learned active skill. None = not a usable skill ref."""
-        from ..skills import SKILL_CATALOG, resolve_skill
+        from ..skills import SKILL_CATALOG, effective_def, resolve_skill
         s = room.state
         me = s["fighters"][seat]
         defn = resolve_skill(ref)
@@ -214,6 +214,9 @@ class _ArenaCombat:
                     if known else "you haven't learned any skills yet — "
                     "/skill to see the school.")
             return f"you don't know {defn.name}. {hint}"
+        # upgrades fight: fold the player's tier into the blueprint
+        tier = s.get("skill_tiers", {}).get(player.key, {}).get(defn.slug, 1)
+        defn = effective_def(defn, tier)
         cd = s.setdefault("skill_cd", {}).setdefault(seat, {})
         if int(cd.get(defn.slug, 0)) > 0:
             return (f"{defn.name} is recovering — "
@@ -225,9 +228,16 @@ class _ArenaCombat:
         if defn.slug == "shadow_step":
             me["dodge_next"] = True
             msg = f"{me_name} melts into shadow — the next attack misses."
+            if defn.counter_mult:
+                pm, rep = self._strike_msg(
+                    room, mind, seat, foe_seat, me_name, foe_name,
+                    atk_key=player.key, dfn_key=foe_key,
+                    mult=defn.counter_mult)
+                msg += f" A strike from the dark! {pm}"
         elif defn.slug == "war_cry":
             me["atk"] += defn.atk_buff
             me["warcry_turns"] = defn.buff_turns
+            me["warcry_amt"] = defn.atk_buff
             msg = (f"{me_name} ROARS — +{defn.atk_buff} attack for "
                    f"{defn.buff_turns} turns!")
         elif defn.slug == "second_wind":
