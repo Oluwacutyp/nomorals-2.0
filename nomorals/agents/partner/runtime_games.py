@@ -335,9 +335,10 @@ class RuntimeGamesMixin:
                         f"you have {prof_now.coins}c.")
             if gear.apply_repair(inst.id):
                 return f"🔧 {name} — good as new, {cost}c."
-            # repair failed after taking coins — refund, never lose coins
+            # repair failed after taking coins — refund, never lose coins.
+            # (False also means a concurrent repair already fixed it.)
             store.add_coins(player, cost, f"repair-refund:{inst.slug}")
-            return f"repair failed — {cost}c refunded."
+            return f"repair didn't go through — {cost}c refunded."
 
         return f"unknown gear command {cmd!r}."
 

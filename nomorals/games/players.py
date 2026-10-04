@@ -125,28 +125,68 @@ class PlayerStore:
     can't both pass the affordability check on a stale read — the
     classic double-spend.  SQLite serializes the writes anyway, but the
     Python-side check has to be atomic with the write.
+
+    The lock is class-level (shared by every PlayerStore instance in
+    this process) because stores are constructed ad-hoc in several
+    places (engine, gear migration, handlers) — a per-instance lock
+    would not serialize two stores wrapping the same database.
     """
+
+    _LOCK = threading.RLock()
 
     def __init__(self, db: Any) -> None:
         self.db = db
-        self._lock = threading.RLock()
+        self._lock = PlayerStore._LOCK
 
     # ── reads ────────────────────────────────────────────────────────────────
     def get(self, key: str, *, name: str = "", platform: str = "") -> Profile:
-        """Fetch a profile, creating a fresh one on first sight."""
-        row = None
-        try:
-            row = self.db.query_one(
-                "SELECT * FROM game_players WHERE player_key = ?", (key,)
-            )
-        except Exception:  # noqa: BLE001
-            _log.debug("game_players read failed", exc_info=True)
-        if row is not None:
-            return Profile.from_row(row)
-        prof = Profile(key=key, name=name, platform=platform)
-        if key != AI_PLAYER:
-            self._upsert(prof)
-        return prof
+        """Fetch a profile, creating a fresh one on first sight.
+
+        Row creation is atomic (INSERT OR IGNORE under the store lock)
+        so two threads racing to create the same player can't clobber
+        each other's subsequent writes with a stale xp=0 profile.
+        """
+        with self._lock:
+            row = None
+            try:
+                row = self.db.query_one(
+                    "SELECT * FROM game_players WHERE player_key = ?", (key,)
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("game_players read failed", exc_info=True)
+            if row is not None:
+                return Profile.from_row(row)
+            prof = Profile(key=key, name=name, platform=platform)
+            if key != AI_PLAYER and self.db is not None:
+                try:
+                    with self.db.transaction():
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO game_players (player_key, "
+                            "platform, display, coins, points, wins, losses, "
+                            "draws, streak, best_streak, games_played, xp, "
+                            "per_game, items, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                prof.key, prof.platform, prof.name, prof.coins,
+                                prof.points, prof.wins, prof.losses, prof.draws,
+                                prof.streak, prof.best_streak, prof.games_played,
+                                prof.xp, json.dumps(prof.per_game),
+                                json.dumps(prof.items), prof.created_at,
+                                prof.updated_at,
+                            ),
+                        )
+                except Exception:  # noqa: BLE001
+                    _log.debug("game_players create failed", exc_info=True)
+                # Re-read: another thread may have created it first.
+                try:
+                    row = self.db.query_one(
+                        "SELECT * FROM game_players WHERE player_key = ?", (key,)
+                    )
+                except Exception:  # noqa: BLE001
+                    row = None
+                if row is not None:
+                    return Profile.from_row(row)
+            return prof
 
     def all(self, limit: int = 500) -> list[Profile]:
         try:
@@ -159,6 +199,34 @@ class PlayerStore:
         return [Profile.from_row(r) for r in rows]
 
     # ── writes ───────────────────────────────────────────────────────────────
+    def add_xp(self, player_key: str, amount: int) -> int:
+        """Atomically add XP. Returns the new XP total.
+
+        Single UPDATE — two concurrent awards can't lose one.  Creates
+        the row first if the player is new.
+        """
+        amount = max(0, int(amount))
+        with self._lock:
+            self.get(player_key)  # ensure the row exists
+            try:
+                with self.db.transaction():
+                    self.db.execute(
+                        "UPDATE game_players SET xp = xp + ?, "
+                        "updated_at = ? WHERE player_key = ?",
+                        (amount, time.time(), player_key),
+                    )
+            except Exception:  # noqa: BLE001
+                _log.debug("game_players add_xp failed", exc_info=True)
+                return 0
+            try:
+                row = self.db.query_one(
+                    "SELECT xp FROM game_players WHERE player_key = ?",
+                    (player_key,),
+                )
+                return int(row["xp"]) if row else 0
+            except Exception:  # noqa: BLE001
+                return 0
+
     def record_outcome(self, player: Player, *, won: bool | None,
                        game: str, points: int = 0, coins: int = 0,
                        score: int = 0) -> Profile:

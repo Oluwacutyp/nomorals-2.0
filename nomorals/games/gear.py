@@ -518,6 +518,9 @@ class GearStore:
 
         Unbreakable pieces (the Cutyp legacy set) ignore wear entirely —
         they can never lose durability or break.
+
+        Single atomic UPDATE — no read-modify-write, so two concurrent
+        battles wearing the same piece can't lose a decrement.
         """
         if self.db is None or amount <= 0:
             return False, False
@@ -533,11 +536,20 @@ class GearStore:
                 if defn is not None and defn.unbreakable:
                     return True, False
                 before = int(row["durability"])
-                after = max(0, before - amount)
-                self.db.execute(
-                    "UPDATE game_gear SET durability = ?, equipped = "
-                    "CASE WHEN ? <= 0 THEN 0 ELSE equipped END "
-                    "WHERE id = ?", (after, after, instance_id))
+                if before <= 0:
+                    return True, False
+                cur = self.db.execute(
+                    "UPDATE game_gear SET durability = max(0, durability - ?), "
+                    "equipped = CASE WHEN durability - ? <= 0 THEN 0 "
+                    "ELSE equipped END WHERE id = ? AND durability > 0",
+                    (amount, amount, instance_id))
+                if cur.rowcount == 0:
+                    # another writer already wore it to 0
+                    return True, False
+                after_row = self.db.query_one(
+                    "SELECT durability FROM game_gear WHERE id = ?",
+                    (instance_id,))
+                after = int(after_row["durability"]) if after_row else 0
                 return True, before > 0 and after == 0
         except Exception:  # noqa: BLE001
             _log.debug("gear wear failed", exc_info=True)
@@ -562,16 +574,22 @@ class GearStore:
         return True, f"{inst.display_name()}|{cost}"
 
     def apply_repair(self, instance_id: str) -> bool:
-        """Set durability back to max (after the caller took coins)."""
-        inst = self.get(instance_id)
-        if inst is None or self.db is None:
+        """Set durability back to max (after the caller took coins).
+
+        Conditional: only repairs when durability is actually below max.
+        Returns False when another concurrent repair already fixed it —
+        the caller must refund in that case instead of double-charging.
+        """
+        if self.db is None:
             return False
+        self._ensure()
         try:
             with self.db.transaction():
-                self.db.execute(
+                cur = self.db.execute(
                     "UPDATE game_gear SET durability = max_durability "
-                    "WHERE id = ?", (instance_id,))
-            return True
+                    "WHERE id = ? AND durability < max_durability",
+                    (instance_id,))
+                return cur.rowcount > 0
         except Exception:  # noqa: BLE001
             _log.debug("gear repair failed", exc_info=True)
             return False
@@ -614,28 +632,34 @@ class GearStore:
         try:
             from .players import PlayerStore
             store = PlayerStore(self.db)
-            prof = store.get(player_key)
+            # Hold the (process-wide) store lock for the whole
+            # read-modify-upsert so a concurrent game finish can't
+            # slip a profile write between our read and our write.
+            with store._lock:
+                prof = store.get(player_key)
+                moved = 0
+                changed = False
+                for legacy_slug, gear_slug in LEGACY_GEAR_MAP.items():
+                    count = int(prof.items.get(legacy_slug) or 0)
+                    for _ in range(max(0, count)):
+                        try:
+                            self.grant(player_key, gear_slug)
+                            moved += 1
+                        except Exception:  # noqa: BLE001
+                            break
+                    if count > 0:
+                        prof.items.pop(legacy_slug, None)
+                        changed = True
+                if changed:
+                    try:
+                        # _upsert re-takes the (reentrant) lock; the write
+                        # itself is one transaction.
+                        store._write(prof)
+                    except Exception:  # noqa: BLE001
+                        _log.debug("legacy gear migration save failed",
+                                   exc_info=True)
         except Exception:  # noqa: BLE001
             return 0
-        moved = 0
-        changed = False
-        for legacy_slug, gear_slug in LEGACY_GEAR_MAP.items():
-            count = int(prof.items.get(legacy_slug) or 0)
-            for _ in range(max(0, count)):
-                try:
-                    self.grant(player_key, gear_slug)
-                    moved += 1
-                except Exception:  # noqa: BLE001
-                    break
-            if count > 0:
-                prof.items.pop(legacy_slug, None)
-                changed = True
-        if changed:
-            try:
-                store._upsert(prof)
-            except Exception:  # noqa: BLE001
-                _log.debug("legacy gear migration save failed",
-                           exc_info=True)
         if moved:
             _log.info("migrated %d legacy gear items for %s", moved,
                       player_key)

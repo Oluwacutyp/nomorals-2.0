@@ -18,7 +18,7 @@ Attributes grow two ways:
 2. **Gear** can carry attribute bonuses (a warlord's belt grants
    strength, a sage's robe grants intelligence).
 
-Storage: ``game_stats`` holds base attributes + unspent points per
+Storage: ``game_attributes`` holds base attributes + unspent points per
 player.  Gear bonuses are folded in at battle setup, never stored.
 """
 from __future__ import annotations
@@ -150,7 +150,7 @@ def describe_stats(stats: StatBlock,
 
 
 class StatStore:
-    """Persistent per-player RPG attributes. Backed by ``game_stats``.
+    """Persistent per-player RPG attributes. Backed by ``game_attributes``.
 
     Level-up points are granted at the actual level-up event in the
     game engine (see ``engine.py`` award path). The grant is idempotent:
@@ -171,7 +171,7 @@ class StatStore:
             return
         try:
             self.db.execute(
-                "CREATE TABLE IF NOT EXISTS game_stats ("
+                "CREATE TABLE IF NOT EXISTS game_attributes ("
                 "id TEXT PRIMARY KEY, player_key TEXT NOT NULL UNIQUE, "
                 "strength INTEGER NOT NULL DEFAULT 0, "
                 "stamina INTEGER NOT NULL DEFAULT 0, "
@@ -181,10 +181,10 @@ class StatStore:
                 "level_applied INTEGER NOT NULL DEFAULT 1, "
                 "updated_at REAL NOT NULL DEFAULT 0)")
             self.db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_game_stats_player "
-                "ON game_stats(player_key)")
+                "CREATE INDEX IF NOT EXISTS idx_game_attributes_player "
+                "ON game_attributes(player_key)")
         except Exception:  # noqa: BLE001
-            _log.debug("game_stats ensure failed", exc_info=True)
+            _log.debug("game_attributes ensure failed", exc_info=True)
 
     # ── reads ──────────────────────────────────────────────────────────────
     def get(self, player_key: str) -> StatBlock:
@@ -195,7 +195,7 @@ class StatStore:
         try:
             rows = self.db.query(
                 "SELECT strength, stamina, mana, intelligence, unspent, "
-                "level_applied FROM game_stats WHERE player_key = ?",
+                "level_applied FROM game_attributes WHERE player_key = ?",
                 (player_key,))
             if rows:
                 r = rows[0]
@@ -205,7 +205,7 @@ class StatStore:
                     unspent=r["unspent"],
                     level_applied=r["level_applied"])
         except Exception:  # noqa: BLE001
-            _log.debug("game_stats read failed", exc_info=True)
+            _log.debug("game_attributes read failed", exc_info=True)
         return StatBlock()
 
     # ── level-up grants ────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ class StatStore:
         # ensure a row exists (idempotent)
         try:
             self.db.execute(
-                "INSERT OR IGNORE INTO game_stats (id, player_key, "
+                "INSERT OR IGNORE INTO game_attributes (id, player_key, "
                 "level_applied) VALUES (?, ?, 1)",
                 (new_id(), player_key))
         except Exception:  # noqa: BLE001
@@ -240,7 +240,7 @@ class StatStore:
         points = new_levels * POINTS_PER_LEVEL
         try:
             cursor = self.db.execute(
-                "UPDATE game_stats SET unspent = unspent + ?, "
+                "UPDATE game_attributes SET unspent = unspent + ?, "
                 "level_applied = ?, updated_at = ? "
                 "WHERE player_key = ? AND level_applied = ?",
                 (points, level, time.time(), player_key,
@@ -276,7 +276,7 @@ class StatStore:
         try:
             before = self.get(player_key)
             cursor = self.db.execute(
-                f"UPDATE game_stats SET {name} = {name} + ?, "
+                f"UPDATE game_attributes SET {name} = {name} + ?, "
                 f"unspent = unspent - ?, updated_at = ? "
                 f"WHERE player_key = ? AND unspent >= ?",
                 (points, points, time.time(), player_key, points))
@@ -303,7 +303,7 @@ class StatStore:
             return
         try:
             self.db.execute(
-                "INSERT INTO game_stats (id, player_key, strength, stamina, "
+                "INSERT INTO game_attributes (id, player_key, strength, stamina, "
                 "mana, intelligence, unspent, level_applied, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_key) DO UPDATE SET "
@@ -316,4 +316,4 @@ class StatStore:
                  stats.mana, stats.intelligence, stats.unspent,
                  stats.level_applied, time.time()))
         except Exception:  # noqa: BLE001
-            _log.warning("game_stats save failed", exc_info=True)
+            _log.warning("game_attributes save failed", exc_info=True)

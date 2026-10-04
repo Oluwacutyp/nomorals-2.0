@@ -222,13 +222,26 @@ class TitleStore:
         if title_id not in self.unlocked(player_key):
             return False
         try:
-            self.db.execute(
-                "UPDATE game_titles SET active = 0 WHERE player_key = ?",
-                (player_key,))
-            self.db.execute(
-                "UPDATE game_titles SET active = 1 "
-                "WHERE player_key = ? AND title_id = ?",
-                (player_key, title_id))
+            # Both UPDATEs must land together — otherwise two concurrent
+            # set_active calls can leave two titles active.
+            txn = getattr(self.db, "transaction", None)
+            if txn is None:  # mock DBs in tests
+                self.db.execute(
+                    "UPDATE game_titles SET active = 0 WHERE player_key = ?",
+                    (player_key,))
+                self.db.execute(
+                    "UPDATE game_titles SET active = 1 "
+                    "WHERE player_key = ? AND title_id = ?",
+                    (player_key, title_id))
+            else:
+                with txn():
+                    self.db.execute(
+                        "UPDATE game_titles SET active = 0 WHERE player_key = ?",
+                        (player_key,))
+                    self.db.execute(
+                        "UPDATE game_titles SET active = 1 "
+                        "WHERE player_key = ? AND title_id = ?",
+                        (player_key, title_id))
             return True
         except Exception:  # noqa: BLE001
             _log.debug("game_titles set_active failed", exc_info=True)

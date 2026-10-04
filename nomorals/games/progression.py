@@ -108,6 +108,10 @@ def award_xp(store: Any, player: Any, amount: int,
     ``levels_gained`` holds every level crossed (usually 0-1 entries;
     several on a big award).  Never raises — progression must never
     break a game finish.
+
+    The increment is a single atomic UPDATE (``PlayerStore.add_xp``),
+    so two games finishing at once can't lose one award — the old
+    read-modify-write-upsert could.
     """
     amount = max(0, int(amount))
     try:
@@ -116,13 +120,18 @@ def award_xp(store: Any, player: Any, amount: int,
     except Exception:  # noqa: BLE001
         return 1, []
     old_level = level_for_xp(prof.xp)
-    prof.xp = max(0, int(prof.xp) + amount)
+    add_xp = getattr(store, "add_xp", None)
     try:
-        prof.updated_at = time.time()
-        store._upsert(prof)
+        if callable(add_xp):
+            new_xp = add_xp(player.key, amount)
+        else:  # pragma: no cover — legacy stores without add_xp
+            prof.xp = max(0, int(prof.xp) + amount)
+            prof.updated_at = time.time()
+            store._upsert(prof)
+            new_xp = prof.xp
     except Exception:  # noqa: BLE001
         return old_level, []
-    new_level = level_for_xp(prof.xp)
+    new_level = level_for_xp(new_xp)
     gained = list(range(old_level + 1, new_level + 1))
     return new_level, gained
 

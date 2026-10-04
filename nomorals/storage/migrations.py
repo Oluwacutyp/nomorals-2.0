@@ -1349,6 +1349,46 @@ CREATE INDEX IF NOT EXISTS idx_game_titles_player
 """
 
 
+def _apply_game_attributes_rename(db: object) -> None:
+    """Fix the game_stats table-name collision.
+
+    ``nomorals/games/stats.py`` (RPG attributes) and the achievements
+    per-game stats both used the table name ``game_stats`` with
+    incompatible schemas — whichever CREATE ran first broke the other
+    module.  The RPG table is now ``game_attributes``; this migration
+    moves any existing RPG rows over and ensures the per-game
+    ``game_stats`` table exists with its canonical schema.
+    """
+    ex = db.execute
+    # Does game_stats currently hold the RPG schema? (strength column)
+    cols = set()
+    try:
+        rows = ex("PRAGMA table_info(game_stats)").fetchall()
+        cols = {str(r[1]) for r in rows}
+    except Exception:
+        pass
+    if "strength" in cols:
+        # RPG table won the race — move it aside.
+        ex("ALTER TABLE game_stats RENAME TO game_attributes")
+    # Canonical per-game stats table (achievements/mastery).
+    ex(
+        "CREATE TABLE IF NOT EXISTS game_stats ("
+        "player_key TEXT NOT NULL, game_name TEXT NOT NULL, "
+        "games_played INTEGER NOT NULL DEFAULT 0, "
+        "games_won INTEGER NOT NULL DEFAULT 0, "
+        "total_score INTEGER NOT NULL DEFAULT 0, "
+        "best_score INTEGER NOT NULL DEFAULT 0, "
+        "total_time REAL NOT NULL DEFAULT 0, "
+        "created_at REAL NOT NULL DEFAULT 0, "
+        "updated_at REAL NOT NULL DEFAULT 0, "
+        "PRIMARY KEY (player_key, game_name))"
+    )
+    ex(
+        "CREATE INDEX IF NOT EXISTS idx_game_stats_player "
+        "ON game_stats(player_key)"
+    )
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2404,6 +2444,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(72, "trial_sms_watches", sql=_V72_TRIAL_SMS_WATCHES),
     Migration(73, "game_skills", sql=_V73_GAME_SKILLS),
     Migration(74, "game_titles", sql=_V74_GAME_TITLES),
+    Migration(75, "game_attributes_rename", fn=_apply_game_attributes_rename),
 )
 
 

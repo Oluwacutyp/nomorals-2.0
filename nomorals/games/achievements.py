@@ -280,33 +280,29 @@ def get_player_rank(db: Database, game_name: str, player_key: str) -> int | None
 
 def update_game_stats(db: Database, player_key: str, game_name: str,
                       won: bool, score: int, duration: float = 0.0) -> None:
-    """Update a player's stats for a game. Called on game end."""
+    """Update a player's stats for a game. Called on game end.
+
+    Single atomic upsert — two games finishing at once can't lose one
+    from the counts (the old SELECT-then-UPDATE could).
+    """
     now = time.time()
-    # Insert or update the stat row
-    cursor = db.execute(
-        "SELECT games_played, games_won, total_score, best_score, total_time "
-        "FROM game_stats WHERE player_key = ? AND game_name = ?",
-        (player_key, game_name),
-    )
-    row = cursor.fetchone()
-    if row:
-        played, wins, total_score, best_score, total_time = row
-        db.execute(
-            "UPDATE game_stats SET games_played = ?, games_won = ?, "
-            "total_score = ?, best_score = ?, total_time = ?, updated_at = ? "
-            "WHERE player_key = ? AND game_name = ?",
-            (played + 1, wins + (1 if won else 0),
-             total_score + score, max(best_score, score),
-             total_time + duration, now, player_key, game_name),
-        )
-    else:
+    try:
         db.execute(
             "INSERT INTO game_stats (player_key, game_name, games_played, "
-            "games_won, total_score, best_score, total_time, created_at, updated_at) "
-            "VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)",
+            "games_won, total_score, best_score, total_time, created_at, "
+            "updated_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(player_key, game_name) DO UPDATE SET "
+            "games_played = games_played + 1, "
+            "games_won = games_won + excluded.games_won, "
+            "total_score = total_score + excluded.total_score, "
+            "best_score = max(best_score, excluded.best_score), "
+            "total_time = total_time + excluded.total_time, "
+            "updated_at = excluded.updated_at",
             (player_key, game_name, 1 if won else 0,
              score, score, duration, now, now),
         )
+    except Exception:  # noqa: BLE001
+        _log.debug("game_stats update failed", exc_info=True)
 
 
 def get_game_stats(db: Database, player_key: str) -> list[dict[str, Any]]:
