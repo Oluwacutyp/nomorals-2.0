@@ -1292,6 +1292,32 @@ CREATE INDEX IF NOT EXISTS idx_trial_assist_runs_state
 """
 
 
+_V72_TRIAL_SMS_WATCHES = """
+-- Trial SMS watches: durable background verification-code watch state.
+-- /trial sms code returns immediately and polls in the background; a
+-- restart must not silently swallow the watch. Rows still in
+-- 'watching' when the process died are resumed (deadline not passed)
+-- or closed as timed-out (deadline passed) on the next boot, and the
+-- owner is told either way. number_info pins the exact temp number the
+-- watch was started for, so a newer grabbed number can't hijack it.
+CREATE TABLE IF NOT EXISTS trial_sms_watches (
+    watch_id    TEXT PRIMARY KEY,
+    number      TEXT NOT NULL DEFAULT '',
+    number_info TEXT NOT NULL DEFAULT '',
+    chat_key    TEXT NOT NULL DEFAULT '',
+    started     REAL NOT NULL DEFAULT 0,
+    deadline    REAL NOT NULL DEFAULT 0,
+    timeout     REAL NOT NULL DEFAULT 0,
+    state       TEXT NOT NULL DEFAULT '',
+    code        TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_trial_sms_watches_state
+    ON trial_sms_watches(state);
+"""
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2344,6 +2370,7 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql="ALTER TABLE game_players ADD COLUMN xp "
                   "INTEGER NOT NULL DEFAULT 0;"),
     Migration(71, "trial_assist_runs", sql=_V71_TRIAL_ASSIST_RUNS),
+    Migration(72, "trial_sms_watches", sql=_V72_TRIAL_SMS_WATCHES),
 )
 
 

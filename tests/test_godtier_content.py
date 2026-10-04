@@ -8,39 +8,64 @@ anti-repeat where the user would notice loops.
 
 import random
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 
-class MusicPoolTests(unittest.TestCase):
-    def setUp(self):
-        from nomorals.media import music as m
-        self.m = m
 
-    def test_pool_sizes(self):
-        m = self.m
-        self.assertGreaterEqual(len(m._VERB_BANK), 40)
-        self.assertGreaterEqual(len(m._IMAGERY), 40)
-        self.assertGreaterEqual(len(m._EMOTION), 24)
-        self.assertGreaterEqual(len(m._LINE_TEMPLATES), 20)
-        self.assertGreaterEqual(len(m._HOOK_TEMPLATES), 10)
-        self.assertGreaterEqual(len(m._RHYME_GROUPS), 30)
+@pytest.fixture
+def music_module():
+    from nomorals.media import music as m
+    return m
 
-    def test_no_duplicates(self):
-        m = self.m
+
+@pytest.fixture
+def music_ctx(tmp_path):
+    """Compose context rooted at pytest's tmp_path.
+
+    Regression guard: ``MusicCreator`` resolves its workdir through
+    ``safe_path``, which falls back to ``<cwd>/workspace`` when the
+    context has no settings — that used to spray .mid/.wav/-score.pdf
+    files into the repo's ``workspace/music/`` on every test run.
+    """
+    return SimpleNamespace(
+        router=None,
+        settings=SimpleNamespace(workspace_dir=str(tmp_path)),
+    )
+
+
+@pytest.fixture
+def music_creator(music_ctx):
+    from nomorals.media.music import MusicCreator
+    return MusicCreator(music_ctx)
+
+
+class TestMusicPools:
+    def test_pool_sizes(self, music_module):
+        m = music_module
+        assert len(m._VERB_BANK) >= 40
+        assert len(m._IMAGERY) >= 40
+        assert len(m._EMOTION) >= 24
+        assert len(m._LINE_TEMPLATES) >= 20
+        assert len(m._HOOK_TEMPLATES) >= 10
+        assert len(m._RHYME_GROUPS) >= 30
+
+    def test_no_duplicates(self, music_module):
+        m = music_module
         for name in ("_VERB_BANK", "_IMAGERY", "_EMOTION", "_LINE_TEMPLATES",
                      "_HOOK_TEMPLATES"):
             pool = getattr(m, name)
-            self.assertEqual(len(pool), len(set(pool)), name)
+            assert len(pool) == len(set(pool)), name
 
-    def test_templates_format(self):
+    def test_templates_format(self, music_module):
         slots = dict(verb="run", ing="running", topic_short="midnight",
                      em="quiet", imagery="neon rain", noun="spark")
-        for t in self.m._LINE_TEMPLATES + self.m._HOOK_TEMPLATES:
-            self.assertTrue(t.format(**slots), t)
+        for t in music_module._LINE_TEMPLATES + music_module._HOOK_TEMPLATES:
+            assert t.format(**slots), t
 
-    def test_compose_seeded_and_varied(self):
-        from nomorals.media.music import MusicCreator
-        mc = MusicCreator(SimpleNamespace(router=None))
+    def test_compose_seeded_and_varied(self, music_creator):
+        mc = music_creator
         a = mc.compose("midnight city", style="lofi", seed=42,
                        with_midi=False)
         b = mc.compose("midnight city", style="lofi", seed=42,
@@ -51,23 +76,40 @@ class MusicPoolTests(unittest.TestCase):
         def lines(s):
             return [ln for sec in s.sections for ln in sec.lyrics]
 
-        self.assertEqual(lines(a), lines(b))
-        self.assertNotEqual(lines(a), lines(c))
-        self.assertTrue(lines(a))
+        assert lines(a) == lines(b)
+        assert lines(a) != lines(c)
+        assert lines(a)
 
-    def test_section_avoids_imagery_repeats(self):
+    def test_section_avoids_imagery_repeats(self, music_creator,
+                                            music_module):
         # the engine tracks used imagery per section; with 48 images a
         # 16-line verse should not lean on the same image twice
-        from nomorals.media.music import MusicCreator
-        mc = MusicCreator(SimpleNamespace(router=None))
-        song = mc.compose("ocean drive", style="hiphop", seed=7,
-                          with_midi=False)
+        song = music_creator.compose("ocean drive", style="hiphop", seed=7,
+                                     with_midi=False)
         verse = next(s for s in song.sections if s.name == "verse")
         hits = []
-        for img in self.m._IMAGERY:
+        for img in music_module._IMAGERY:
             if any(img in ln.lower() for ln in verse.lyrics):
                 hits.append(img)
-        self.assertEqual(len(hits), len(set(hits)))
+        assert len(hits) == len(set(hits))
+
+    def test_compose_artifacts_stay_in_tmp_workspace(self, music_creator,
+                                                     tmp_path):
+        # even with_midi=False the audio render drops the .mid it
+        # synthesizes from, plus .wav and -score.pdf — all of them must
+        # land under tmp_path, never the repo's workspace/music/.
+        song = music_creator.compose("midnight city", style="lofi", seed=42,
+                                     with_midi=False)
+        audio = Path(song.audio_path)
+        assert audio.is_file(), audio
+        assert tmp_path in audio.parents, audio
+        music_dir = audio.parent
+        stems = {p.stem.replace("-score", "") for p in music_dir.iterdir()}
+        assert len(stems) >= 1, list(music_dir.iterdir())
+        suffixes = {p.suffix for p in music_dir.iterdir()}
+        # the synth's side-effect midi + rendered audio + score pdf
+        assert ".mid" in suffixes, sorted(suffixes)
+        assert ".wav" in suffixes, sorted(suffixes)
 
 
 class NewsFeedTests(unittest.TestCase):

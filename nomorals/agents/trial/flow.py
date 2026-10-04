@@ -61,9 +61,52 @@ CREATE INDEX IF NOT EXISTS idx_trial_assist_runs_state
 #: not an archive.
 _ASSIST_RUN_TTL = 7 * 24 * 3600
 
+#: terminal sms-watch states.  Any row in ``trial_sms_watches`` whose
+#: state is *not* in this set was watching when the process died and
+#: gets resumed (deadline still ahead) or closed as timed-out on the
+#: next boot — never silently dropped.
+_SMS_WATCH_TERMINAL_STATES = frozenset({"done", "timeout", "interrupted"})
+
+#: durable sms-watch state — the table is created here (IF NOT EXISTS)
+#: and again in the migrations so fresh and upgraded DBs both have it.
+_SMS_WATCHES_DDL = """
+CREATE TABLE IF NOT EXISTS trial_sms_watches (
+    watch_id    TEXT PRIMARY KEY,
+    number      TEXT NOT NULL DEFAULT '',
+    number_info TEXT NOT NULL DEFAULT '',
+    chat_key    TEXT NOT NULL DEFAULT '',
+    started     REAL NOT NULL DEFAULT 0,
+    deadline    REAL NOT NULL DEFAULT 0,
+    timeout     REAL NOT NULL DEFAULT 0,
+    state       TEXT NOT NULL DEFAULT '',
+    code        TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_trial_sms_watches_state
+    ON trial_sms_watches(state);
+"""
+
+#: terminal watches older than this are pruned on load — watch history,
+#: not an archive.
+_SMS_WATCH_TTL = 7 * 24 * 3600
+
 #: kv_store key where the latest grabbed temp number is stashed so
 #: ``/trial sms code`` can poll it without the owner pasting JSON around.
 TEMP_SMS_KV_KEY = "trial.temp_sms"
+
+
+def _format_sms_poll_result(info: dict[str, Any], code: str,
+                            timeout: float) -> str:
+    """One phrasing for a finished SMS poll, blocking or background."""
+    number = info.get("masked") or info.get("number") or "?"
+    if code:
+        return f"📩 verification code: {code}"
+    return (
+        f"no code arrived on {number} within {timeout:.0f}s — "
+        "the site may not have sent one yet. "
+        "try again: /trial sms code"
+    )
 
 
 def active_delivery_platforms(gateway: Any) -> list[str]:
@@ -111,11 +154,25 @@ class TrialFlow:
         self._ensure_assist_runs_table()
         self._load_assist_runs()
         self._maybe_recover_assist_runs()
+        # durable sms-watch state: same treatment — a restart must not
+        # silently swallow a background verification-code watch.
+        self._sms_lock = threading.Lock()
+        #: watch_id -> {number, number_info, chat_key, started,
+        #:              deadline, timeout, state, code, note}
+        self._sms_watches: dict[str, dict[str, Any]] = {}
+        self._ensure_sms_watches_table()
+        self._load_sms_watches()
+        self._maybe_recover_sms_watches()
 
     # one recovery pass per process — the first TrialFlow use after boot
     # marks in-flight runs interrupted and reports them; later instances
     # just read the (now terminal) rows.
     _assist_recovery_done: bool = False
+
+    # one sms-watch recovery pass per process — the first TrialFlow use
+    # after boot resumes live watches / closes expired ones; later
+    # instances just read the rows.
+    _sms_recovery_done: bool = False
 
     # ── research (what a single signup needs) ────────────────────────────────
     def start(self, platform: str) -> str:
@@ -450,24 +507,351 @@ class TrialFlow:
         """
         with self._assist_lock:
             runs = list(self._assist_runs.items())
-        if not runs:
+        watch_lines = self._sms_watch_status_lines()
+        if not runs and not watch_lines:
             return "no assisted signups yet — /trial assist <platform> to start one."
-        lines = ["assisted signups:"]
-        ordered = sorted(runs, key=lambda kv: kv[1].get("started", 0))
+        lines = []
+        if runs:
+            lines.append("assisted signups:")
+            ordered = sorted(runs, key=lambda kv: kv[1].get("started", 0))
+            if len(ordered) > 10:
+                lines.append(f"  (showing latest 10 of {len(ordered)})")
+                ordered = ordered[-10:]
+            for run_id, run in ordered:
+                when = time.strftime("%H:%M",
+                                     time.localtime(run.get("started", 0)))
+                state = run.get("state") or "?"
+                marker = " ⚠️" if state == "interrupted" else ""
+                lines.append(
+                    f"  {run.get('platform')} [{state}]{marker} started {when}"
+                )
+                note = str(run.get("note") or "")
+                if note:
+                    lines.append(f"    {note[:220]}")
+        lines.extend(watch_lines)
+        return "\n".join(lines)
+
+    # ── durable sms-watch state ─────────────────────────────────────────
+    #
+    # A verification-code watch outlives the chat turn that started it;
+    # the rows in ``trial_sms_watches`` outlive the process.  A restart
+    # can never silently swallow a watch: anything still ``watching``
+    # past its deadline is closed as ``timeout`` and reported once via
+    # the durable notifier; anything still inside its deadline is
+    # re-armed for the remaining time, because the pinned number info
+    # is all a fresh poll thread needs.
+
+    def _ensure_sms_watches_table(self) -> None:
+        if self.db is None:
+            return
+        try:
+            self.db.executescript(_SMS_WATCHES_DDL)
+        except Exception:  # noqa: BLE001 - table is best-effort
+            _log.debug("trial sms watches table unavailable")
+
+    def _register_sms_watch(self, watch_id: str, info: dict[str, Any],
+                            chat_key: str, started: float,
+                            timeout: float) -> None:
+        number = info.get("masked") or info.get("number") or "?"
+        with self._sms_lock:
+            self._sms_watches[watch_id] = {
+                "number": str(number),
+                "number_info": dict(info),
+                "chat_key": str(chat_key or ""),
+                "started": started,
+                "deadline": started + timeout,
+                "timeout": timeout,
+                "state": "watching",
+                "code": "",
+                "note": "",
+            }
+        self._persist_sms_watch(watch_id)
+
+    def _set_sms_watch_state(self, watch_id: str, state: str, *,
+                             code: str = "", note: str = "") -> None:
+        with self._sms_lock:
+            watch = self._sms_watches.get(watch_id)
+            if watch is None:
+                return
+            watch["state"] = state
+            if code:
+                watch["code"] = code
+            if note:
+                watch["note"] = note
+        self._persist_sms_watch(watch_id)
+
+    def _persist_sms_watch(self, watch_id: str) -> None:
+        """Write one watch row. Never holds the lock while touching the DB."""
+        if self.db is None:
+            return
+        with self._sms_lock:
+            watch = dict(self._sms_watches.get(watch_id, {}))
+        if not watch:
+            return
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO trial_sms_watches"
+                " (watch_id, number, number_info, chat_key, started,"
+                "  deadline, timeout, state, code, note, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (watch_id, str(watch.get("number", "")),
+                 json.dumps(watch.get("number_info") or {}),
+                 str(watch.get("chat_key", "")),
+                 float(watch.get("started", 0) or 0),
+                 float(watch.get("deadline", 0) or 0),
+                 float(watch.get("timeout", 0) or 0),
+                 str(watch.get("state", "")),
+                 str(watch.get("code", "")),
+                 str(watch.get("note", ""))[:2000], time.time()),
+            )
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            _log.debug("trial sms watch persist failed for %s", watch_id)
+
+    def _load_sms_watches(self) -> None:
+        """Reload persisted watches; prune terminal ones older than the TTL."""
+        if self.db is None:
+            return
+        try:
+            rows = self.db.query(
+                "SELECT watch_id, number, number_info, chat_key, started,"
+                " deadline, timeout, state, code, note"
+                " FROM trial_sms_watches ORDER BY started")
+        except Exception:  # noqa: BLE001
+            return
+        cutoff = time.time() - _SMS_WATCH_TTL
+        terminal = ", ".join(f"'{s}'"
+                             for s in sorted(_SMS_WATCH_TERMINAL_STATES))
+        with self._sms_lock:
+            for row in rows or []:
+                wid = str(row.get("watch_id") or "")
+                if not wid or wid in self._sms_watches:
+                    continue
+                try:
+                    info = json.loads(row.get("number_info") or "{}")
+                except Exception:  # noqa: BLE001 - corrupt row, keep going
+                    info = {}
+                self._sms_watches[wid] = {
+                    "number": str(row.get("number") or ""),
+                    "number_info": info if isinstance(info, dict) else {},
+                    "chat_key": str(row.get("chat_key") or ""),
+                    "started": float(row.get("started") or 0),
+                    "deadline": float(row.get("deadline") or 0),
+                    "timeout": float(row.get("timeout") or 0),
+                    "state": str(row.get("state") or ""),
+                    "code": str(row.get("code") or ""),
+                    "note": str(row.get("note") or ""),
+                }
+        try:
+            self.db.execute(
+                "DELETE FROM trial_sms_watches WHERE started < ?"
+                f" AND state IN ({terminal})",
+                (cutoff,),
+            )
+        except Exception:  # noqa: BLE001 - pruning is best-effort
+            _log.debug("trial sms watch prune failed")
+
+    def _maybe_recover_sms_watches(self) -> None:
+        """One recovery pass per process, on first use after boot."""
+        cls = type(self)
+        if cls._sms_recovery_done:
+            return
+        cls._sms_recovery_done = True
+        try:
+            resumed = cls.recover_interrupted_watches(self.context,
+                                                      self.gateway)
+        except Exception:  # noqa: BLE001 - recovery must not break init
+            _log.exception("trial sms watch recovery failed")
+            return
+        if resumed:
+            # keep the in-memory view consistent with the rows the
+            # recovery pass just re-armed or closed.
+            with self._sms_lock:
+                for item in resumed:
+                    watch = self._sms_watches.get(item.get("watch_id", ""))
+                    if watch is None:
+                        continue
+                    watch["state"] = item.get("state", watch.get("state"))
+                    if item.get("note"):
+                        watch["note"] = item["note"]
+
+    @classmethod
+    def recover_interrupted_watches(
+        cls, context: Any, gateway: Any = None
+    ) -> list[dict[str, Any]]:
+        """Resume or close watches killed by a restart. Never raises.
+
+        Called once per process (first TrialFlow use, plus the runtime
+        startup hook).  Watches still inside their deadline are re-armed
+        for the remaining time on a fresh daemon thread — the pinned
+        number info is everything the poll needs.  Watches past their
+        deadline are closed as ``timeout`` with an honest note.  Both
+        paths report once through the durable notifier, so even with no
+        live gateway the row persists for later redelivery.
+        Returns the recovered watches (``watch_id``/``state``/``note``).
+        """
+        cls._sms_recovery_done = True
+        recovered: list[dict[str, Any]] = []
+        db = getattr(context, "db", None)
+        if db is None:
+            return recovered
+        try:
+            db.executescript(_SMS_WATCHES_DDL)
+            rows = db.query(
+                "SELECT watch_id, number, number_info, chat_key, started,"
+                " deadline, timeout FROM trial_sms_watches"
+                " WHERE state='watching' ORDER BY started")
+        except Exception:  # noqa: BLE001
+            return recovered
+        now = time.time()
+        notifier = None
+
+        def _notifier() -> Any:
+            nonlocal notifier
+            if notifier is None:
+                from ..notifier import Notifier
+
+                gw = gateway
+                if gw is None:
+                    gw = getattr(context, "gateway", None)
+                notifier = Notifier(context, gateway=gw)
+            return notifier
+
+        def _finish(watch_id: str, state: str, code: str,
+                    note: str) -> None:
+            try:
+                db.execute(
+                    "UPDATE trial_sms_watches SET state=?, code=?, note=?,"
+                    " updated_at=? WHERE watch_id=?",
+                    (state, code, note[:2000], time.time(), watch_id),
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("trial sms watch close failed for %s", watch_id)
+
+        for row in rows or []:
+            wid = str(row.get("watch_id") or "")
+            number = str(row.get("number") or "?")
+            chat_key = str(row.get("chat_key") or "")
+            try:
+                info = json.loads(row.get("number_info") or "{}")
+            except Exception:  # noqa: BLE001
+                info = {}
+            if not isinstance(info, dict):
+                info = {}
+            deadline = float(row.get("deadline") or 0)
+            timeout = float(row.get("timeout") or 0)
+            if deadline <= now:
+                note = (
+                    f"⌛ the sms code watch on {number} expired while the "
+                    "bot was restarting — no code arrived in time. "
+                    "The number may still work; start a fresh watch:\n"
+                    "  /trial sms code"
+                )
+                _finish(wid, "timeout", "", note)
+                recovered.append({"watch_id": wid, "state": "timeout",
+                                  "note": note})
+                try:
+                    _notifier().publish(
+                        "trial", f"sms code watch expired — {number}",
+                        note, force=True)
+                except Exception:  # noqa: BLE001 - reporting never crashes
+                    _log.exception("sms watch timeout report failed: %s",
+                                   wid)
+                continue
+            # still inside the deadline — re-arm for the remaining time.
+            remaining = max(1.0, deadline - now)
+            note = (
+                f"🔄 resumed after a bot restart — still watching {number} "
+                f"for another {remaining:.0f}s."
+            )
+            try:
+                db.execute(
+                    "UPDATE trial_sms_watches SET note=?, updated_at=?"
+                    " WHERE watch_id=?",
+                    (note[:2000], time.time(), wid),
+                )
+            except Exception:  # noqa: BLE001
+                _log.debug("trial sms watch resume-mark failed: %s", wid)
+            recovered.append({"watch_id": wid, "state": "watching",
+                              "note": note})
+            try:
+                _notifier().publish(
+                    "trial", f"sms code watch resumed — {number}",
+                    note, force=True)
+            except Exception:  # noqa: BLE001 - reporting never crashes
+                _log.exception("sms watch resume report failed: %s", wid)
+
+            def _resumed(info: dict = dict(info), wid: str = wid,
+                         number: str = number, chat_key: str = chat_key,
+                         remaining: float = remaining,
+                         note: str = note) -> None:
+                from ...accounts.temp_sms import wait_code
+
+                code = ""
+                error = ""
+                try:
+                    code = wait_code(info, timeout=remaining)
+                except Exception as exc:  # noqa: BLE001 - close honestly
+                    error = str(exc)
+                    _log.exception("resumed sms watch poll failed: %s",
+                                   wid)
+                finally:
+                    try:
+                        from ...storage.db import release_thread_connection
+
+                        release_thread_connection(db)
+                    except Exception:  # noqa: BLE001 - best-effort
+                        pass
+                if code:
+                    result = f"📩 verification code: {code}"
+                    _finish(wid, "done", code, result)
+                elif error:
+                    result = (f"⚠️ the resumed sms code watch on {number} "
+                              f"errored: {error}. try again: /trial sms code")
+                    _finish(wid, "timeout", "", result)
+                else:
+                    result = (
+                        f"no code arrived on {number} within "
+                        f"{remaining:.0f}s of the resumed watch — the site "
+                        "may not have sent one yet. try again: "
+                        "/trial sms code"
+                    )
+                    _finish(wid, "timeout", "", result)
+                try:
+                    _notifier().publish(
+                        "trial", f"sms code watch — {number}",
+                        result, force=True)
+                except Exception:  # noqa: BLE001 - reporting never crashes
+                    _log.exception("resumed sms watch report failed: %s",
+                                   wid)
+
+            thread = threading.Thread(target=_resumed,
+                                      name="trial-sms-watch-resumed",
+                                      daemon=True)
+            thread.start()
+        return recovered
+
+    def _sms_watch_status_lines(self) -> list[str]:
+        """Watch section for ``/trial status`` — reads the durable table."""
+        with self._sms_lock:
+            watches = list(self._sms_watches.items())
+        if not watches:
+            return []
+        lines = ["sms code watches:"]
+        ordered = sorted(watches, key=lambda kv: kv[1].get("started", 0))
         if len(ordered) > 10:
             lines.append(f"  (showing latest 10 of {len(ordered)})")
             ordered = ordered[-10:]
-        for run_id, run in ordered:
-            when = time.strftime("%H:%M", time.localtime(run.get("started", 0)))
-            state = run.get("state") or "?"
-            marker = " ⚠️" if state == "interrupted" else ""
-            lines.append(
-                f"  {run.get('platform')} [{state}]{marker} started {when}"
-            )
-            note = str(run.get("note") or "")
+        for _watch_id, watch in ordered:
+            when = time.strftime("%H:%M",
+                                 time.localtime(watch.get("started", 0)))
+            state = watch.get("state") or "?"
+            lines.append(f"  {watch.get('number')} [{state}] started {when}")
+            note = str(watch.get("note") or "")
             if note:
                 lines.append(f"    {note[:220]}")
-        return "\n".join(lines)
+            elif watch.get("code"):
+                lines.append(f"    code: {watch.get('code')}")
+        return lines
 
     def _notify_owner(self, title: str, body: str, chat_key: str = "") -> None:
         """Deliver a background-run report to the owner. Never raises."""
@@ -524,13 +908,7 @@ class TrialFlow:
         from ...accounts.temp_sms import wait_code
 
         code = wait_code(info, sender_hint=sender_hint, timeout=timeout)
-        if code:
-            return f"📩 verification code: {code}"
-        return (
-            f"no code arrived on {info.get('masked') or info.get('number')} "
-            f"within {timeout:.0f}s — the site may not have sent one yet. "
-            "try again: /trial sms code"
-        )
+        return _format_sms_poll_result(info, code, timeout)
 
     def temp_sms_code_async(self, chat_key: str = "",
                             timeout: float = 180) -> str:
@@ -538,32 +916,62 @@ class TrialFlow:
 
         Returns immediately; the code (or a timeout note) is reported to
         the owner's chat when it lands.  The chat thread never blocks.
+
+        The watch is durable: its row in ``trial_sms_watches`` pins the
+        exact temp number grabbed (a newer ``/trial sms`` can't hijack
+        it) and a restart resumes live watches or closes expired ones
+        instead of silently dropping them.
         """
         info = self._load_temp_number()
         if not info:
             return "no temp number stashed — grab one first: /trial sms [country]"
         number = info.get("masked") or info.get("number") or "?"
+        watch_id = new_id()
+        started = time.time()
+        self._register_sms_watch(watch_id, info, chat_key, started, timeout)
 
-        def _watch() -> None:
-            try:
-                result = self.temp_sms_code(timeout=timeout)
-            finally:
-                try:
-                    from ...storage.db import release_thread_connection
-
-                    release_thread_connection(self.db)
-                except Exception:  # noqa: BLE001 - cleanup is best-effort
-                    pass
-            self._notify_owner(f"sms code watch — {number}", result,
-                               chat_key)
-
-        thread = threading.Thread(target=_watch, name="trial-sms-watch",
-                                  daemon=True)
+        thread = threading.Thread(
+            target=self._run_sms_watch,
+            args=(watch_id, dict(info), chat_key, str(number), timeout),
+            name="trial-sms-watch",
+            daemon=True,
+        )
         thread.start()
         return (
             f"👀 watching {number} for a verification code "
             f"(up to {timeout:.0f}s) — I'll ping you here the moment one lands."
         )
+
+    def _run_sms_watch(self, watch_id: str, info: dict[str, Any],
+                       chat_key: str, number: str, timeout: float) -> None:
+        """Background poll for one watch. Pins ``info`` — never re-reads
+        the kv_store, so a newer grabbed number can't hijack the watch."""
+        from ...accounts.temp_sms import wait_code
+
+        code = ""
+        try:
+            code = wait_code(info, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - the watch must close honestly
+            _log.exception("sms watch poll failed for %s", watch_id)
+            result = (f"⚠️ the sms code watch on {number} errored: {exc}. "
+                      "try again: /trial sms code")
+            self._set_sms_watch_state(watch_id, "timeout", note=result)
+            self._notify_owner(f"sms code watch — {number}", result,
+                               chat_key)
+            return
+        finally:
+            try:
+                from ...storage.db import release_thread_connection
+
+                release_thread_connection(self.db)
+            except Exception:  # noqa: BLE001 - cleanup is best-effort
+                pass
+        result = _format_sms_poll_result(info, code, timeout)
+        self._set_sms_watch_state(
+            watch_id, "done" if code else "timeout",
+            code=code or "", note=result)
+        self._notify_owner(f"sms code watch — {number}", result,
+                           chat_key)
 
     def _stash_temp_number(self, info: dict[str, Any]) -> None:
         if self.db is None:

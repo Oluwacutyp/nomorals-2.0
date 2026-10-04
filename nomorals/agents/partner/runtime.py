@@ -764,11 +764,16 @@ class PartnerRuntime(
         # Trial assist: background signups killed by a restart are marked
         # interrupted and reported once, so no run silently disappears.
         # Idempotent — only non-terminal rows are touched.
+        # Trial SMS watches: background verification-code watches killed
+        # by a restart are resumed (deadline ahead) or closed as
+        # timed-out, and reported once — same guarantee as assist runs.
         if not self.dry_run:
             try:
                 from ..trial import TrialFlow
 
                 TrialFlow.recover_interrupted_runs(
+                    self.context, gateway=self.gateway)
+                TrialFlow.recover_interrupted_watches(
                     self.context, gateway=self.gateway)
             except Exception as exc:  # noqa: BLE001 - recovery is optional
                 _log.warning("trial assist recovery failed: %s", exc)

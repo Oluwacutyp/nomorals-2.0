@@ -55,6 +55,12 @@ class SigtermHelperTests(unittest.TestCase):
 
         from nomorals.core.shutdown import install_sigterm_as_interrupt
 
+        # Isolate from whatever other tests left installed: pin a known
+        # pre-state on the main thread first.  Full-suite runs used to
+        # flake here when an earlier test left the devon handler
+        # installed — the worker then short-circuited on the
+        # "already installed" check and returned True instead of False.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         results: list[bool] = []
         t = threading.Thread(
             target=lambda: results.append(install_sigterm_as_interrupt()),
@@ -64,7 +70,31 @@ class SigtermHelperTests(unittest.TestCase):
         # Generous join: under a loaded full-suite run a short timeout can
         # expire from CPU starvation, not from the helper misbehaving.
         t.join(timeout=60)
+        self.assertFalse(t.is_alive(), "worker thread hung")
         self.assertEqual(results, [False])
+        # the worker must not touch the process-global handler
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+    def test_off_main_thread_reports_already_installed(self) -> None:
+        # Companion isolation case: when the devon handler IS already
+        # installed on the main thread, a worker correctly reports the
+        # mapping in effect (True) without reinstalling anything.
+        import threading
+
+        from nomorals.core.shutdown import install_sigterm_as_interrupt
+
+        self.assertTrue(install_sigterm_as_interrupt())
+        installed = signal.getsignal(signal.SIGTERM)
+        results: list[bool] = []
+        t = threading.Thread(
+            target=lambda: results.append(install_sigterm_as_interrupt()),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=60)
+        self.assertFalse(t.is_alive(), "worker thread hung")
+        self.assertEqual(results, [True])
+        self.assertIs(signal.getsignal(signal.SIGTERM), installed)
 
 
 class BrokerLearningOrderTests(unittest.TestCase):

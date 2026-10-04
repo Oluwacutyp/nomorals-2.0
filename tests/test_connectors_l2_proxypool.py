@@ -100,26 +100,38 @@ class _ForwardProxyHandler(_QuietHandler):
         # can be slow to accept connections. Retry briefly, then fail
         # fast with 502 — the client retries, which beats one very long
         # stall that would trip the caller's own timeout instead.
+        # The whole budget stays under the client's typical 5s timeout so
+        # the caller gets a definitive 200/502, not a client-side timeout.
         body = b"bad gateway"
         code = 502
-        for _ in range(3):
+        for attempt in range(5):
             try:
                 with urllib.request.urlopen(
-                    self.path, timeout=3
+                    self.path, timeout=0.8
                 ) as upstream:
                     body = upstream.read()
                     code = int(upstream.status)
                 break
             except Exception:  # noqa: BLE001 - test double, retry then 502
-                time.sleep(0.1)
+                time.sleep(min(0.1 * (2 ** attempt), 0.5))
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
 
-def _serve(handler_cls: type, **attrs: object) -> http.server.ThreadingHTTPServer:
-    server = http.server.ThreadingHTTPServer(
+class _TestHTTPServer(http.server.ThreadingHTTPServer):
+    # Default backlog is 5 — under a loaded full-suite run loopback
+    # connects get refused while the acceptor is busy.  A deeper queue
+    # lets the fake target ride out the burst instead of 502ing.
+    # (Class attribute: TCPServer reads it in server_bind(), so it must
+    # be set before __init__ runs — instance assignment after would not
+    # take effect.)
+    request_queue_size = 64
+
+
+def _serve(handler_cls: type, **attrs: object) -> _TestHTTPServer:
+    server = _TestHTTPServer(
         ("127.0.0.1", 0), handler_cls
     )
     for key, value in attrs.items():
@@ -633,11 +645,19 @@ class HealthCheckTests(_ProxyNetCase):
         # Retry: under full-suite load the loopback target can be slow.
         # A slow probe either times out (health_check RAISES
         # ProxyPoolError — it does not return an unhealthy dict) or comes
-        # back 502 while the fake upstream recovers. Retry both outcomes;
-        # each attempt records a check, so assert checks >= 1 (not == 1).
+        # back 502 while the fake upstream recovers (a completed HTTP
+        # response still counts the proxy healthy, but this test wants
+        # end-to-end 200).  Retry both outcomes on a wall-clock budget
+        # rather than a fixed attempt count: under load each attempt can
+        # burn its whole 5s timeout, so attempt-count budgets exhaust
+        # while the target just needs a few more seconds.
+        # Each attempt records a check, so assert checks >= 1 (not == 1).
+        deadline = time.monotonic() + 90
         health: dict | None = None
         result: dict | None = None
-        for attempt in range(12):
+        attempts = 0
+        while time.monotonic() < deadline:
+            attempts += 1
             try:
                 result = self.conn.health_check(pid, url=self.target_url,
                                                 timeout=5)
@@ -647,11 +667,13 @@ class HealthCheckTests(_ProxyNetCase):
             health = result["health"]
             if health["status_code"] == 200:
                 break
-            time.sleep(0.5 * (attempt + 1))
+            time.sleep(0.5)
         self.assertIsNotNone(health, "proxy never became healthy")
         assert health is not None and result is not None
+        self.assertEqual(health["status_code"], 200,
+                         f"budget exhausted after {attempts} attempts; "
+                         f"last health: {health}")
         self.assertEqual(health["status"], "healthy")
-        self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)
         self.assertGreater(health["last_checked"], 0)
         self.assertGreaterEqual(health["checks"], 1)
