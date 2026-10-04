@@ -656,23 +656,29 @@ class HealthCheckTests(_ProxyNetCase):
         health: dict | None = None
         result: dict | None = None
         attempts = 0
+        last_error = ""
         while time.monotonic() < deadline:
             attempts += 1
             try:
                 result = self.conn.health_check(pid, url=self.target_url,
                                                 timeout=5)
-            except ProxyPoolError:
+            except ProxyPoolError as exc:
+                # remember the reason: if the budget exhausts on
+                # ProxyPoolError every time, the message below shows WHY
+                # instead of just "never became healthy".
+                last_error = str(exc)
                 time.sleep(0.5)
                 continue
             health = result["health"]
             if health["status_code"] == 200:
                 break
             time.sleep(0.5)
-        self.assertIsNotNone(health, "proxy never became healthy")
+        self.assertIsNotNone(health,
+                             f"proxy never became healthy: {last_error}")
         assert health is not None and result is not None
         self.assertEqual(health["status_code"], 200,
                          f"budget exhausted after {attempts} attempts; "
-                         f"last health: {health}")
+                         f"last health: {health}; last error: {last_error}")
         self.assertEqual(health["status"], "healthy")
         self.assertGreaterEqual(health["latency_ms"], 0)
         self.assertGreater(health["last_checked"], 0)

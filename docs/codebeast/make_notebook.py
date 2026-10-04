@@ -205,6 +205,24 @@ if _dropped:
     print(f"⚠️ this transformers doesn't accept {_dropped} — skipping")
 args = {k: v for k, v in args.items() if k in _valid}
 
+def _fmt(examples):
+    # Unsloth calls this on ONE row and demands a LIST of strings back;
+    # TRL-style callers pass a whole batch dict. Handle every shape so the
+    # probe `isinstance(formatting_func(next(iter(ds))), list)` passes and
+    # real mapping still yields one rendered string per conversation.
+    if isinstance(examples, dict):
+        msgs = examples.get("messages", [])
+    else:  # list of row dicts
+        convos = [r.get("messages", []) for r in examples]
+        return [tokenizer.apply_chat_template(
+            c, tokenize=False, add_generation_prompt=False) for c in convos]
+    if msgs and isinstance(msgs[0], dict):
+        convos = [msgs]      # single row: messages IS the conversation
+    else:
+        convos = msgs        # batch: messages is a list of conversations
+    return [tokenizer.apply_chat_template(
+        c, tokenize=False, add_generation_prompt=False) for c in convos]
+
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
@@ -213,10 +231,7 @@ trainer = SFTTrainer(
     # Newer Unsloth/TRL *requires* formatting_func when there is no plain
     # text column. Our data has a "messages" column -> render it through
     # the model's chat template into text.
-    formatting_func=lambda examples: {"text": [
-        tokenizer.apply_chat_template(c, tokenize=False,
-                                      add_generation_prompt=False)
-        for c in examples["messages"]]},
+    formatting_func=_fmt,
     max_seq_length=SEQ_LEN,
     args=TrainingArguments(**args),
 )
