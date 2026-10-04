@@ -723,7 +723,14 @@ class PartnerBrain:
         if not isinstance(existing, list):
             existing = []
         now = time.time()
-        fresh = [loop for loop in existing if isinstance(loop, dict) and now - float(loop.get("ts", 0)) < 48 * 3600]
+
+        def _safe_ts(loop: dict) -> float:
+            try:
+                return float(loop.get("ts", 0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        fresh = [loop for loop in existing if isinstance(loop, dict) and now - _safe_ts(loop) < 48 * 3600]
         for text in new_loops if isinstance(new_loops, list) else []:
             if not isinstance(text, str) or not text.strip():
                 continue
