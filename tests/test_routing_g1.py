@@ -84,7 +84,7 @@ class _RuntimeStub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
 
-    def _control_arena(self, tail: str, chat_key: str = "") -> str:
+    def _control_arena(self, tail: str, chat_key: str = "", **kwargs) -> str:
         self.calls.append(("arena", tail, chat_key))
         return "arena-ok"
 

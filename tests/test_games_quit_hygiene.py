@@ -222,9 +222,12 @@ class RelayQuitHygieneTests(unittest.TestCase):
     def test_quit_after_natural_finish_clears_relay(self):
         inv = self.engine.relay.create_invite("t:finA", ADA, "ttt")
         relay = self.engine.relay.accept_invite(inv.code, "t:finB", BOB)
-        # play until the engine finishes the game
-        for sq in ("1", "2", "4", "3", "7"):
-            self.engine.relay.relay_move("t:finA", sq, ADA)
+        # play until the engine finishes the game (ADA and BOB alternate)
+        moves = [("t:finA", "1", ADA), ("t:finB", "2", BOB),
+                 ("t:finA", "4", ADA), ("t:finB", "3", BOB),
+                 ("t:finA", "7", ADA)]
+        for chat, sq, player in moves:
+            self.engine.relay.relay_move(chat, sq, player)
             if self.engine.live(relay.virtual_chat) is None:
                 break
         self._assert_relay_clean()

@@ -924,19 +924,21 @@ class TakeoverNotifyTests(unittest.TestCase):
     def test_takeover_notifies_owner(self):
         seen = {}
 
-        def _fake_notify(context, kind, title, body, **kw):
-            seen.update(kind=kind, title=title, body=body)
-            return {"delivered": True}
+        class _FakeNotifier:
+            def notify(self, context, kind, title, body, **kw):
+                seen.update(kind=kind, title=title, body=body)
+                return {"delivered": True}
+
+        class _FakeContext:
+            notifier = _FakeNotifier()
 
         ch = cap.CaptchaChallenge(
             kind=cap.CaptchaKind.RECAPTCHA_V2, sitekey="K",
             page_url="https://example.com/login")
         with mock.patch.object(cap, "_notify_takeover",
                                wraps=cap._notify_takeover) as wrapped:
-            with mock.patch("nomorals.agents.notifier.notify",
-                            _fake_notify):
-                result = cap.solve(ch, backend="takeover",
-                                   notify_owner=True)
+            result = cap.solve(ch, backend="takeover",
+                               notify_owner=True, context=_FakeContext())
         self.assertTrue(result.takeover)
         self.assertTrue(wrapped.called)
         self.assertEqual("captcha", seen["kind"])
