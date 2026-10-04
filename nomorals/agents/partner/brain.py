@@ -386,7 +386,8 @@ class PartnerBrain:
 
         # Media, memory, background.
         media_notes = self._media_notes(message)
-        memories = () if restricted else self.responder.recall(message.text, limit=5)
+        _origin = f"chat:{message.chat.key}" if message.chat else ""
+        memories = () if restricted else self.responder.recall(message.text, limit=5, origin=_origin)
         romantic = is_owner and self.relationship.is_romantic()
         background_lines = self.background.context(
             message.text,

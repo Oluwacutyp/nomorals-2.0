@@ -820,11 +820,11 @@ class PartnerResponder:
         return [pick], used
 
     # ── convenience: recall shared memories for a message ───────────────────
-    def recall(self, text: str, limit: int = 5) -> list[str]:
+    def recall(self, text: str, limit: int = 5, origin: str = "") -> list[str]:
         if self.memory is None or not text.strip():
             return []
         try:
-            result = self.memory.recall(text, limit=limit)
+            result = self.memory.recall(text, limit=limit, origin=origin)
             return [r.content for r in result.records if r.score > 0.05][:limit]
         except Exception as exc:  # noqa: BLE001 - memory must never break a reply
             _log.warning("memory recall failed: %s", exc)

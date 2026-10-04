@@ -249,11 +249,16 @@ class MemoryManager:
         include_expired: bool = False,
         include_private: bool = False,
         tags: str = "",
+        origin: str = "",
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
         ``tags`` (comma-separated) keeps only records carrying ALL of the
         requested tags — the tag lane the /remember command populates.
+
+        ``origin`` (e.g. "chat:tg:123") boosts memories from the same
+        origin — session-relevant memories rank higher, but global
+        knowledge is still accessible (boost, not filter).
 
         Private-marked records are excluded unless ``include_private`` is
         set — proactive recall and training pipelines never see them.
@@ -321,6 +326,10 @@ class MemoryManager:
                 half_life_seconds=self.half_life,
                 now=now,
             )
+            # Session boost: memories from the same origin (chat) rank higher.
+            # This is a boost, not a filter — global knowledge stays accessible.
+            if origin and record.origin == origin:
+                record.score = min(1.0, record.score + 0.15)
             if record.score >= min_score:
                 scored.append(record)
 
