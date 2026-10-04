@@ -25,6 +25,8 @@ Operational notes that matter:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import re
 import time
@@ -859,13 +861,17 @@ class TelegramBotAdapter(ChatAdapter):
                 updates = self._api("getUpdates", offset=self._offset,
                                     timeout=self.poll_timeout,
                                     allowed_updates=["message", "edited_message",
-                                                     "channel_post"])
+                                                     "channel_post", "callback_query"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 _log.debug("telegram-bot poll failed: %s", exc)
                 self._stopped.wait(5)
                 continue
             for update in updates:
                 self._offset = max(self._offset, update.get("update_id", 0) + 1)
+                # Callback queries (inline button taps) get their own path.
+                if "callback_query" in update:
+                    self._handle_callback(update["callback_query"], handler)
+                    continue
                 message = self._convert(update)
                 if message is not None:
                     self._deliver(handler, message)
@@ -916,6 +922,77 @@ class TelegramBotAdapter(ChatAdapter):
             meta={"update_id": update.get("update_id")},
         )
 
+    # ── inline buttons ──────────────────────────────────────────────────
+    def _sign_callback(self, data: str) -> str:
+        """HMAC-sign callback data to prevent spoofing."""
+        sig = hmac.new(self.token.encode(), data.encode(),
+                       hashlib.sha256).hexdigest()[:16]
+        return f"{data}|{sig}"
+
+    def _verify_callback(self, signed: str) -> str | None:
+        """Verify signature, return the original data or None."""
+        if "|" not in signed:
+            return None
+        data, sig = signed.rsplit("|", 1)
+        expected = hmac.new(self.token.encode(), data.encode(),
+                            hashlib.sha256).hexdigest()[:16]
+        if not hmac.compare_digest(sig, expected):
+            return None
+        return data
+
+    def _handle_callback(self, query: dict[str, Any],
+                         handler: IncomingHandler) -> None:
+        """Process an inline button tap as a synthetic command message."""
+        query_id = query.get("id", "")
+        sender = query.get("from") or {}
+        if sender.get("is_bot"):
+            self._answer_callback(query_id)
+            return
+        # Owner gate: only the owner can trigger button actions.
+        msg = query.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        if self.chat_allow and chat_id not in self.chat_allow:
+            _log.info("telegram-bot: ignoring callback from %s — not in allowlist",
+                      chat_id)
+            self._answer_callback(query_id, text="Not authorized")
+            return
+        signed = query.get("data", "")
+        data = self._verify_callback(signed)
+        if data is None:
+            _log.warning("telegram-bot: ignoring callback with bad signature")
+            self._answer_callback(query_id, text="Invalid button")
+            return
+        self._answer_callback(query_id)
+        # Deliver as a synthetic "/" command so the normal command
+        # pipeline (owner gating, parsing, dispatch) handles it.
+        kind = _BOT_CHAT_TYPES.get(chat.get("type", ""), ChatKind.DM)
+        who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
+        message = ChatMessage(
+            chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
+                         title=chat.get("title", "") or who, peer=who),
+            incoming=True,
+            text=data if data.startswith("/") else f"/{data}",
+            sender=who,
+            media=[],
+            reply_to="",
+            mentioned=False,
+            ts=time.time(),
+            message_id=f"cb_{query_id}",
+            meta={"callback_query": True, "is_owner": True},
+        )
+        self._deliver(handler, message)
+
+    def _answer_callback(self, query_id: str, text: str = "") -> None:
+        """Dismiss the button's loading spinner, optionally with a toast."""
+        try:
+            params: dict[str, Any] = {"callback_query_id": query_id}
+            if text:
+                params["text"] = text[:200]
+            self._api("answerCallbackQuery", **params)
+        except Exception as exc:  # noqa: BLE001 - non-fatal
+            _log.debug("telegram-bot: answerCallbackQuery failed: %s", exc)
+
     def _inbound_media(self, msg: dict[str, Any], kind: str) -> list[MediaRef]:
         """Download the largest attached file, when the gates allow it."""
         file_id, fkind, fname = "", "", ""
@@ -961,7 +1038,8 @@ class TelegramBotAdapter(ChatAdapter):
         return [MediaRef(path=str(dest), kind=fkind, name=fname)]
 
     # ── outbound ──────────────────────────────────────────────────────────
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         started = time.perf_counter()
         last_id = ""
         try:
@@ -976,6 +1054,17 @@ class TelegramBotAdapter(ChatAdapter):
                     params_base["reply_parameters"] = {"message_id": int(reply_to)}
                 except (TypeError, ValueError) as e:
                     _log.debug("dropping bad reply_to %r: %s", reply_to, e)
+            # Inline keyboard: [[(label, callback_data), ...], ...]
+            # Callback data is HMAC-signed to prevent spoofing.
+            if buttons:
+                keyboard = []
+                for row in buttons:
+                    krow = []
+                    for label, data in row:
+                        krow.append({"text": label,
+                                     "callback_data": self._sign_callback(data)})
+                    keyboard.append(krow)
+                params_base["reply_markup"] = {"inline_keyboard": keyboard}
             for chunk in _chunk_text(text, self.MAX_TEXT):
                 result = self._api("sendMessage", text=chunk, **params_base)
                 last_id = str(result.get("message_id", ""))
