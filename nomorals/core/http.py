@@ -51,11 +51,22 @@ class HttpResponse:
 
     @property
     def text(self) -> str:
-        return self.body.decode("utf-8", errors="replace")
+        # Respect the charset from Content-Type if present; fall back to
+        # UTF-8. Only use errors="replace" as a last resort — silent
+        # replacement corrupts non-UTF-8 responses (e.g. OpenRouter).
+        charset = "utf-8"
+        ctype = self.headers.get("content-type", "")
+        if "charset=" in ctype:
+            charset = ctype.split("charset=")[-1].split(";")[0].strip().strip('"')
+        try:
+            return self.body.decode(charset, errors="strict")
+        except (UnicodeDecodeError, LookupError):
+            _log.warning("http: response not decodable as %s, using replace", charset)
+            return self.body.decode(charset, errors="replace")
 
     def json(self) -> Any:
         try:
-            return json.loads(self.body.decode("utf-8", errors="replace"))
+            return json.loads(self.text)
         except json.JSONDecodeError as exc:
             raise RequestError(
                 f"response was not valid JSON: {exc}",
