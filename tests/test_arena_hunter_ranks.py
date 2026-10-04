@@ -33,7 +33,9 @@ class HunterRankTest(unittest.TestCase):
         self.assertEqual(BattleArenaGame.house_rank_for(8), ("B", 3))
         self.assertEqual(BattleArenaGame.house_rank_for(12), ("A", 4))
         self.assertEqual(BattleArenaGame.house_rank_for(16), ("S", 5))
-        self.assertEqual(BattleArenaGame.house_rank_for(99), ("S", 5))
+        self.assertEqual(BattleArenaGame.house_rank_for(20), ("SS", 6))
+        self.assertEqual(BattleArenaGame.house_rank_for(25), ("X", 7))
+        self.assertEqual(BattleArenaGame.house_rank_for(99), ("X", 7))
 
     def test_e_rank_mirrors_small_share(self) -> None:
         room = make_game({"level": 1, "max_hp": 20, "atk": 4, "def": 2})
@@ -56,22 +58,44 @@ class HunterRankTest(unittest.TestCase):
         self.assertEqual(room.state["house_skill"], 3)
 
     def test_s_rank_is_near_mirror(self) -> None:
-        room = make_game({"level": 20, "max_hp": 100, "atk": 20, "def": 10})
+        room = make_game({"level": 18, "max_hp": 100, "atk": 20, "def": 10})
         h = room.state["house"]
         self.assertEqual(h["max_hp"], 50 + 90 + 24)
         self.assertEqual(room.state["house_rank"], "S")
         self.assertEqual(room.state["house_skill"], 5)
 
+    def test_ss_rank_scales_higher(self) -> None:
+        room = make_game({"level": 22, "max_hp": 100, "atk": 20, "def": 10})
+        h = room.state["house"]
+        # SS: 95% share + flat (32 hp, 4 atk, 4 def)
+        self.assertEqual(h["max_hp"], 50 + 95 + 32)
+        self.assertEqual(h["atk"], 10 + 19 + 4)
+        self.assertEqual(room.state["house_rank"], "SS")
+        self.assertEqual(room.state["house_skill"], 6)
+
+    def test_x_rank_is_full_mirror(self) -> None:
+        room = make_game({"level": 30, "max_hp": 100, "atk": 20, "def": 10})
+        h = room.state["house"]
+        # X: 100% share + flat (40 hp, 5 atk, 5 def) — the ultimate wall
+        self.assertEqual(h["max_hp"], 50 + 100 + 40)
+        self.assertEqual(h["atk"], 10 + 20 + 5)
+        self.assertEqual(room.state["house_rank"], "X")
+        self.assertEqual(room.state["house_skill"], 7)
+
     def test_house_never_fully_mirrors_bonus(self) -> None:
         # the mirrored *share* stays below 1.0 at every rank — your own
-        # progression is always the bigger number
-        for lvl in (1, 5, 10, 16, 30):
+        # progression is always the bigger number — except X-rank, the
+        # full mirror, which is meant to be the ultimate wall.
+        for lvl in (1, 5, 10, 16, 20):
             room = make_game({"level": lvl, "max_hp": 60, "atk": 12,
                               "def": 6})
             _n, _m, share, _fh, _fa, _fd = BattleArenaGame.HUNTER_RANKS[
                 room.state["house_skill"]]
             self.assertLess(share, 1.0)
             self.assertLess(int(60 * share), 60)
+        # X-rank is the exception: a true 1.0 mirror
+        _n, _m, share, _fh, _fa, _fd = BattleArenaGame.HUNTER_RANKS[7]
+        self.assertEqual(share, 1.0)
 
     def test_s_rank_is_a_wall(self) -> None:
         # Solo Leveling rule: at S-rank the hunter out-stats you raw.

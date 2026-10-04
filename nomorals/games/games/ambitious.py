@@ -474,6 +474,8 @@ class BattleArenaGame(MultiGame):
         ("B", 8, 0.70, 12, 2, 1),
         ("A", 12, 0.80, 16, 2, 2),
         ("S", 16, 0.90, 24, 3, 3),
+        ("SS", 20, 0.95, 32, 4, 4),
+        ("X", 25, 1.00, 40, 5, 5),
     )
 
     @classmethod
@@ -664,8 +666,8 @@ class BattleArenaGame(MultiGame):
                 h["def"] = max(0, int(h["def"] * 0.9))
 
     #: win-XP multiplier per hunter rank — harder opponents pay more.
-    #: E×1.0 → S×1.75, so climbing is always worth it.
-    RANK_XP_MULT = (1.0, 1.15, 1.3, 1.45, 1.6, 1.75)
+    #: E×1.0 → X×2.25, so climbing is always worth it.
+    RANK_XP_MULT = (1.0, 1.15, 1.3, 1.45, 1.6, 1.75, 2.0, 2.25)
 
     def xp_reward(self, won: bool | None, room, player) -> int:
         """Rich arena XP: wins pay, losses still move the bar, and clean
@@ -695,7 +697,7 @@ class BattleArenaGame(MultiGame):
         if s.get("brutal_finish") == "you":
             total += 10
         # the opponent's strength sets the stakes
-        rank_idx = max(0, min(5, int(s.get("house_skill", 0))))
+        rank_idx = max(0, min(7, int(s.get("house_skill", 0))))
         total = int(round(total * self.RANK_XP_MULT[rank_idx]))
         you_pow = int(s.get("player_power", 0))
         foe_pow = int(s.get("house_power", 0))

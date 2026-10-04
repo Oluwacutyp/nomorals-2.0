@@ -27,6 +27,8 @@ GRADE_POOLS: dict[int, tuple[str, ...]] = {
     3: ("epic",),                   # B
     4: ("epic", "legendary"),       # A
     5: ("legendary",),              # S
+    6: ("legendary",),              # SS
+    7: ("legendary", "myth"),       # X — legends forge their own myth
 }
 
 #: enemy-only myth gear — myth-forged, but never the Cutyp legacy set.
@@ -71,17 +73,21 @@ SKILL_COUNTS: dict[int, int] = {
     3: 2,
     4: 2,
     5: 3,
+    6: 3,   # SS
+    7: 4,   # X
 }
 
 #: potion count by rank — veterans pack more.
 POTIONS: dict[int, int] = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 2, 5: 3,
+    6: 4, 7: 5,
 }
 
 #: chance a C+-rank enemy rolls a matched set (storm/shadow) instead
 #: of random pieces — set combos aren't the player's toy alone.
 SET_CHANCE: dict[int, float] = {
     0: 0.0, 1: 0.0, 2: 0.25, 3: 0.40, 4: 0.50, 5: 0.60,
+    6: 0.70, 7: 0.80,
 }
 
 ENEMY_SKILL_POOL = (
@@ -100,6 +106,7 @@ ENEMY_EXCLUSIVE_POOL = (
 #: skill count.  E–C hunters fight clean; B+ fight dirty.
 ENEMY_EXCLUSIVE_COUNTS: dict[int, int] = {
     0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 2,
+    6: 2, 7: 3,
 }
 
 _ENEMY_FIRST = (
@@ -114,6 +121,8 @@ _ENEMY_TITLES: dict[int, tuple[str, ...]] = {
     3: ("the Warlord", "the Crimson Edge", "the Nightmare"),
     4: ("the Executioner", "the Hollow Blade", "the Dreadnought"),
     5: ("the Render", "the World-Eater", "the Unbroken"),
+    6: ("the Calamity", "the Stormborn", "the Twice-Crowned"),
+    7: ("the Annihilator", "the End of Legends", "the Absolute"),
 }
 
 #: titles reserved for myth-foe hunters — S-rank killers who rose to
@@ -131,15 +140,15 @@ def roll_enemy_name(rng: random.Random, rank_idx: int,
     Myth-foe hunters (spawned against myth-equipped players) take a
     darker title — the player knows this one is different.
     """
-    rank_idx = max(0, min(5, int(rank_idx)))
-    titles = (_MYTH_FOE_TITLES if myth_foe and rank_idx == 5
+    rank_idx = max(0, min(7, int(rank_idx)))
+    titles = (_MYTH_FOE_TITLES if myth_foe and rank_idx >= 5
               else _ENEMY_TITLES[rank_idx])
     return (f"{rng.choice(_ENEMY_FIRST)} "
             f"{rng.choice(titles)}")
 
 
 def _gear_pool(rank_idx: int) -> tuple[str, ...]:
-    return GRADE_POOLS[max(0, min(5, int(rank_idx)))]
+    return GRADE_POOLS[max(0, min(7, int(rank_idx)))]
 
 
 def roll_enemy_gear(rng: random.Random,
@@ -156,8 +165,15 @@ def roll_enemy_gear(rng: random.Random,
     Cutyp legacy set itself is never wielded by the house.
     """
     from .gear import GEAR_CATALOG
-    rank_idx = max(0, min(5, int(rank_idx)))
-    if myth_foe and rank_idx == 5:
+    rank_idx = max(0, min(7, int(rank_idx)))
+    if myth_foe and rank_idx >= 5:
+        return {
+            "weapon": dict(rng.choice(MYTH_FOE_WEAPONS)),
+            "armor": dict(rng.choice(MYTH_FOE_ARMORS)),
+        }
+    # X-rank legends forge their own myth — half the time they skip
+    # the set roll and go straight for myth-forged kit.
+    if rank_idx == 7 and rng.random() < 0.5:
         return {
             "weapon": dict(rng.choice(MYTH_FOE_WEAPONS)),
             "armor": dict(rng.choice(MYTH_FOE_ARMORS)),
@@ -174,8 +190,20 @@ def roll_enemy_gear(rng: random.Random,
     armors = [d for d in GEAR_CATALOG.values()
               if d.slot == "armor" and d.grade in pool
               and not d.set_name and not d.unbreakable]
-    weapon = rng.choice(weapons).to_dict() if weapons else None
-    armor = rng.choice(armors).to_dict() if armors else None
+    # X-rank forges its own myth: supplement the catalog pool with the
+    # enemy-only myth kit when the grade pool includes myth.
+    if "myth" in pool:
+        myth_weapons = [dict(w) for w in MYTH_FOE_WEAPONS]
+        myth_armors = [dict(a) for a in MYTH_FOE_ARMORS]
+        weapon_pool = ([d.to_dict() for d in weapons] + myth_weapons
+                       if weapons else myth_weapons)
+        armor_pool = ([d.to_dict() for d in armors] + myth_armors
+                      if armors else myth_armors)
+        weapon = rng.choice(weapon_pool) if weapon_pool else None
+        armor = rng.choice(armor_pool) if armor_pool else None
+    else:
+        weapon = rng.choice(weapons).to_dict() if weapons else None
+        armor = rng.choice(armors).to_dict() if armors else None
     out: dict[str, dict[str, Any]] = {}
     if weapon:
         out["weapon"] = weapon
@@ -194,7 +222,7 @@ def roll_enemy_skills(rng: random.Random,
     (S-rank vs a myth-equipped player) roll a third forbidden art:
     they came to kill a legend, and they brought everything.
     """
-    rank_idx = max(0, min(5, int(rank_idx)))
+    rank_idx = max(0, min(7, int(rank_idx)))
     skills: dict[str, int] = {}
     count = SKILL_COUNTS[rank_idx]
     if count > 0:
@@ -210,7 +238,7 @@ def roll_enemy_skills(rng: random.Random,
             skills[slug] = tier
     # forbidden techniques: B+ hunters fight dirty
     xcount = ENEMY_EXCLUSIVE_COUNTS[rank_idx]
-    if myth_foe and rank_idx == 5:
+    if myth_foe and rank_idx >= 5:
         xcount = 3
     if xcount > 0:
         xpicks = rng.sample(ENEMY_EXCLUSIVE_POOL,
@@ -245,14 +273,14 @@ def roll_enemy(rng: random.Random, rank_idx: int,
     extra forbidden technique.  The Cutyp legacy set itself is never
     wielded by the house.
     """
-    rank_idx = max(0, min(5, int(rank_idx)))
+    rank_idx = max(0, min(7, int(rank_idx)))
     enemy: dict[str, Any] = {
         "name": roll_enemy_name(rng, rank_idx, myth_foe=myth_foe),
         "rank_idx": rank_idx,
         "gear": roll_enemy_gear(rng, rank_idx, myth_foe=myth_foe),
         "skills": roll_enemy_skills(rng, rank_idx, myth_foe=myth_foe),
         "potions": POTIONS[rank_idx],
-        "myth_foe": myth_foe and rank_idx == 5,
+        "myth_foe": myth_foe and rank_idx >= 5,
     }
     if player_power > 0:
         from .power import fighter_power
@@ -270,7 +298,7 @@ def roll_enemy(rng: random.Random, rank_idx: int,
         power = _with_gear(enemy["gear"])
         if power < player_power * 0.85:
             enemy["gear"] = roll_enemy_gear(
-                rng, min(5, rank_idx + 1), myth_foe=myth_foe)
+                rng, min(7, rank_idx + 1), myth_foe=myth_foe)
         elif power > player_power * 1.25:
             enemy["gear"] = roll_enemy_gear(
                 rng, max(0, rank_idx - 1), myth_foe=myth_foe)

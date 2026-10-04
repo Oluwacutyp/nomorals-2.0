@@ -339,6 +339,28 @@ class MythFoeTest(unittest.TestCase):
         for piece in gear.values():
             self.assertNotEqual(piece["grade"], "myth")
 
+    def test_ss_and_x_rank_gear_pools(self) -> None:
+        from nomorals.games.enemies import GRADE_POOLS
+        self.assertEqual(GRADE_POOLS[6], ("legendary",))
+        self.assertIn("myth", GRADE_POOLS[7])
+
+    def test_x_rank_rolls_myth_natively(self) -> None:
+        # X-rank hunters forge their own myth — no player myth required
+        rng = random.Random(7)
+        saw_myth = False
+        for _ in range(20):
+            gear = roll_enemy_gear(rng, 7)
+            if any(p["grade"] == "myth" for p in gear.values()):
+                saw_myth = True
+                break
+        self.assertTrue(saw_myth, "X-rank should sometimes roll myth gear")
+
+    def test_ss_x_rank_skill_counts(self) -> None:
+        from nomorals.games.enemies import SKILL_COUNTS, ENEMY_EXCLUSIVE_COUNTS
+        self.assertEqual(SKILL_COUNTS[6], 3)
+        self.assertEqual(SKILL_COUNTS[7], 4)
+        self.assertEqual(ENEMY_EXCLUSIVE_COUNTS[7], 3)
+
     def test_myth_foe_flag_on_enemy(self) -> None:
         rng = random.Random(7)
         enemy = roll_enemy(rng, 5, 4000,
