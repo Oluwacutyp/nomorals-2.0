@@ -50,7 +50,7 @@
 ### The training math (honest)
 - 3.8B QLoRA on T4 ≈ **2,500–4,000 tokens/sec** with Unsloth.
 - 500K rows × ~390 tokens ≈ **195M tokens ≈ 14–22 GPU-hours** → **under one week** of free quota, across 2–4 sessions.
-- Each `MAX_STEPS=6000` session ≈ 2–3 hrs ≈ ~50K rows. Then checkpoint → resume.
+- Each session trains TARGET_ROWS=120K rows (`MAX_STEPS=15000` ≈ 6–8 hrs, fits Kaggle's 9-hr cap). Checkpoint → resume next session for the next slice.
 
 ### Surviving session ends
 1. Checkpoints land every **500 steps** in `/kaggle/working/codebeast_run/checkpoints`.
