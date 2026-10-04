@@ -857,6 +857,10 @@ class BattleArenaGame(MultiGame):
         # and the truly excessive kills (brutal finishes)
         if dst == "you":
             s["dmg_taken"] = int(s.get("dmg_taken", 0)) + raw
+            # track the lowest HP for comeback achievements
+            cur_hp = d["hp"]
+            if "lowest_hp" not in s or cur_hp < s["lowest_hp"]:
+                s["lowest_hp"] = cur_hp
         hp_before = d["hp"] + raw  # strike already applied
         if d["hp"] <= 0 and raw >= 2 * max(1, hp_before):
             s["brutal_finish"] = src
@@ -952,6 +956,7 @@ class BattleArenaGame(MultiGame):
                 y["shield"] = True
                 return "the shield is up — it will take one fatal hit."
             y["hp"] = min(y["max_hp"], y["hp"] + 30)
+            s["potions_used"] = int(s.get("potions_used", 0)) + 1
             return "the potion drinks down — +30 HP."
         # ── gear: resolve against the mirrored closet ──
         closet = s.get("gear_closet", {}).get(player.key, [])

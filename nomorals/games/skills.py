@@ -494,6 +494,13 @@ class SkillStore:
                 "UPDATE game_skills SET tier = ? "
                 "WHERE player_key = ? AND slug = ?",
                 (cur + 1, player_key, slug))
+            # tier III mastery earns an achievement
+            if cur + 1 >= 3:
+                try:
+                    from .achievements import unlock_achievement
+                    unlock_achievement(self.db, player_key, "arena_tier3")
+                except Exception:  # noqa: BLE001
+                    pass
             return True
         except Exception:  # noqa: BLE001
             _log.warning("game_skills upgrade failed", exc_info=True)

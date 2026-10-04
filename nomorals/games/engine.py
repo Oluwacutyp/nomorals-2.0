@@ -1129,10 +1129,28 @@ class GameEngine:
         elif game_name == "arena":
             if won:
                 grant("arena_win")
+                # myth-forged full set: check equipped gear
+                try:
+                    from .gear import GEAR_CATALOG
+                    worn = self.gear.equipped(player.key)
+                    if len(worn) >= 2 and all(
+                            GEAR_CATALOG.get(i.slug) is not None
+                            and GEAR_CATALOG[i.slug].grade == "myth"
+                            for i in worn.values()):
+                        grant("arena_myth_set")
+                except Exception:  # noqa: BLE001
+                    pass
                 if room.state.get("crit_kill_by") == "you":
                     grant("arena_crit_kill")
-                if room.state.get("house_rank") == "S":
+                rank = room.state.get("house_rank")
+                if rank == "S":
                     grant("arena_s_rank")
+                elif rank == "SS":
+                    grant("arena_ss_rank")
+                elif rank == "X":
+                    grant("arena_x_rank")
+                if room.state.get("myth_foe"):
+                    grant("arena_myth_foe")
                 if int(room.state.get("dmg_taken", 0)) <= 0:
                     grant("arena_flawless")
                 you_pow = int(room.state.get("player_power", 0))
@@ -1143,11 +1161,31 @@ class GameEngine:
                     grant("arena_skill_kill")
                 if room.state.get("brutal_finish") == "you":
                     grant("arena_brutal")
+                # comeback: won from below 20% HP
+                you = room.state.get("you", {})
+                max_hp = int(you.get("max_hp", 1))
+                lowest = int(room.state.get("lowest_hp", max_hp))
+                if lowest < max_hp * 0.2:
+                    grant("arena_comeback")
+                # purist: no potions used
+                if int(room.state.get("potions_used", 0)) <= 0:
+                    grant("arena_no_potion")
                 if prof is not None:
                     if prof.streak >= 5:
                         grant("arena_streak_5")
                     if prof.streak >= 10:
                         grant("arena_streak_10")
+                    if prof.streak >= 15:
+                        grant("arena_streak_15")
+                    if prof.streak >= 20:
+                        grant("arena_streak_20")
+                    if prof.streak >= 25:
+                        grant("arena_streak_25")
+                    try:
+                        if int(prof.wins) >= 100:
+                            grant("arena_100_wins")
+                    except Exception:  # noqa: BLE001
+                        pass
             # witnessing a forbidden technique counts win or lose
             if room.state.get("enemy_skill_cast"):
                 grant("arena_forbidden")
