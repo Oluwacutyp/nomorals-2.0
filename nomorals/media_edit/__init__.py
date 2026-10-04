@@ -27,8 +27,12 @@ from .images import (
 )
 from .studio import EditStudio, build_template, list_templates, studio_presets
 from .layers import LayerStack
-# Registers the OpenCV / scikit-image image ops into the engine.
-from . import cv_ops  # noqa: F401
+# Registers the Pillow advanced image ops into the engine.
+try:
+    from . import cv_ops  # noqa: F401
+    _cv_ops_error = None
+except ImportError as _exc:  # zero-deps default: package imports fine
+    _cv_ops_error = _exc
 from .generate import (
     GenerativeBackend,
     GenerativeEditError,
@@ -90,8 +94,10 @@ except ImportError as _exc:  # zero-deps default: package imports fine
 
 
 def __getattr__(name: str):
-    # PEP 562: accessing a cv_video name without OpenCV installed raises
-    # the original helpful ImportError instead of AttributeError.
+    # PEP 562: accessing a missing optional dependency raises the original
+    # helpful ImportError instead of AttributeError.
+    if name == "cv_ops" and _cv_ops_error is not None:
+        raise _cv_ops_error
     if name in _CV_VIDEO_NAMES and _cv_video_error is not None:
         raise _cv_video_error
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

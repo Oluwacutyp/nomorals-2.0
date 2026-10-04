@@ -125,6 +125,37 @@ class ManagerLifecycleTests(unittest.TestCase):
         found = {r.id for r in result.records}
         self.assertTrue(set(ids) <= found)
 
+    def test_lexical_hits_resolved_in_single_query(self):
+        """R8 perf: the FTS rowid→id step must be one batched query, not N+1.
+
+        Every memory below matches the query lexically, so the old code did
+        one SELECT per hit (limit*4 round-trips); the batched path does one.
+        """
+        ids = self.memory.remember_many(
+            [(f"lexical recall target {i} alpha beta gamma", "fact")
+             for i in range(30)],
+            source="test",
+        )
+        calls = []
+        inner = self.db.query
+
+        def counting(sql, params=()):
+            calls.append(sql)
+            return inner(sql, params)
+
+        self.db.query = counting
+        try:
+            result = self.memory.recall("alpha beta gamma", limit=12)
+        finally:
+            self.db.query = inner
+        rowid_lookups = [s for s in calls if "WHERE rowid IN" in s]
+        self.assertEqual(len(rowid_lookups), 1)
+        fts_hits = self.memory.fts.search("alpha beta gamma", limit=48)
+        self.assertEqual(len(rowid_lookups[0].split("?")) - 1, len(fts_hits))
+        found = {r.id for r in result.records}
+        self.assertEqual(len(result.records), 12)
+        self.assertTrue(found <= set(ids))
+
 
 @unittest.skipUnless(SQLITE_VEC_OK, "sqlite-vec not installed")
 class ManagerSqliteVecTests(unittest.TestCase):

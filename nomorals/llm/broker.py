@@ -27,12 +27,13 @@ reduces what the router could already do.
 
 from __future__ import annotations
 
+import statistics
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from ..core.logging_setup import get_logger
-from .benchmarks import BenchmarkDB
+from .benchmarks import SCORE_WINDOW, BenchmarkDB
 from .capabilities import Capability, ModelCard, capability_from
 
 __all__ = ["BrokerConstraints", "ModelBroker", "NoCandidate"]
@@ -196,10 +197,17 @@ class ModelBroker:
             if pinned is not None:
                 return pinned
         special = _TASK_KIND_CAPABILITY.get((task_kind or "").lower(), None)
-        latency_rank = self._latency_rank(
+        # One prefetch for every candidate: score + latency rank both derive
+        # from the same rows.  This used to cost three identical DB queries
+        # per candidate (summary → samples, summary → score → samples, and
+        # the selection score → samples again) on EVERY broker consult —
+        # i.e. on every model call when a broker is wired to the router.
+        bench_rows = self.benchmarks.samples_many(
             [c.id for c in candidates], cap)
+        latency_rank = self._latency_rank(bench_rows)
         scored = sorted(
-            ((self._score(c, cap, special, cons, latency_rank.get(c.id)), c.id, c)
+            ((self._score(c, cap, special, cons, latency_rank.get(c.id),
+                          bench_rows.get(c.id)), c.id, c)
              for c in candidates),
             key=lambda t: (-t[0], t[1]),
         )
@@ -234,9 +242,12 @@ class ModelBroker:
         with self._lock:
             cands = [c for c in self._cards.values()
                      if c.serves(cap) and self._fits(c, cons)]
-        latency_rank = self._latency_rank([c.id for c in cands], cap)
+        bench_rows = self.benchmarks.samples_many(
+            [c.id for c in cands], cap)
+        latency_rank = self._latency_rank(bench_rows)
         ranked = sorted(
-            ((c, self._score(c, cap, special, cons, latency_rank.get(c.id)))
+            ((c, self._score(c, cap, special, cons, latency_rank.get(c.id),
+                             bench_rows.get(c.id)))
              for c in cands),
             key=lambda t: (-t[1], t[0].id),
         )
@@ -277,15 +288,22 @@ class ModelBroker:
         except (TypeError, ValueError):
             return None
 
-    def _latency_rank(self, model_ids: list[str],
-                      capability: Capability) -> dict[str, float]:
+    def _latency_rank(
+        self, rows_by_model: Mapping[str, list[dict[str, Any]]]
+    ) -> dict[str, float]:
         """Cross-candidate latency rank: fastest median → 1.0, others scale
-        as best/median.  Models with no measurements get 0.5 (neutral)."""
+        as best/median.  Models with no measurements get 0.5 (neutral).
+
+        Takes the prefetched ``samples_many`` rows (newest first) instead of
+        re-querying per model — medians match :meth:`BenchmarkDB.summary`
+        exactly (same rows, same rounding).
+        """
         medians: dict[str, float] = {}
-        for model_id in model_ids:
-            summary = self.benchmarks.summary(model_id, capability)
-            if summary["samples"]:
-                medians[model_id] = max(summary["median_latency_s"], 1e-6)
+        for model_id, rows in rows_by_model.items():
+            latencies = [r["latency_s"] for r in rows if r["success"]]
+            if latencies:
+                medians[model_id] = max(
+                    round(statistics.median(latencies), 4), 1e-6)
         if not medians:
             return {}
         best = min(medians.values())
@@ -293,8 +311,14 @@ class ModelBroker:
 
     def _score(self, card: ModelCard, capability: Capability,
                special: Capability | None, cons: BrokerConstraints,
-               latency_rank: float | None = None) -> float:
-        bench = self.benchmarks.score(card.id, capability)
+               latency_rank: float | None = None,
+               bench_rows: list[dict[str, Any]] | None = None) -> float:
+        if bench_rows is None:
+            bench = self.benchmarks.score(card.id, capability)
+        else:
+            # Same value score() would return: it fetches LIMIT SCORE_WINDOW
+            # newest-first rows, and this is that slice of the prefetch.
+            bench = BenchmarkDB.score_rows(bench_rows[:SCORE_WINDOW])
         total = self.w_benchmark * bench
         weight_sum = self.w_benchmark
         traj = self._trajectory_rate("", capability, card.id)

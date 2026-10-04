@@ -61,6 +61,11 @@ CREATE INDEX IF NOT EXISTS idx_bench_created
 #: broker to a model that has since degraded (or been fixed).
 SCORE_WINDOW = 20
 
+#: How many samples a summary (and a broker prefetch) pulls per model.  The
+#: broker's latency rank needs the full recent history, not just the score
+#: window — one fetch serves both, so selection never re-queries per card.
+SUMMARY_WINDOW = 1000
+
 
 @dataclass
 class BenchmarkSample:
@@ -135,14 +140,52 @@ class BenchmarkDB:
         with self._lock:
             return self.db.query(sql, tuple(params))
 
-    def score(self, model_id: str, capability: Capability | str = "") -> float:
-        """0..1 score: 70% recent success rate + 30% latency quality.
+    def samples_many(
+        self,
+        model_ids: Sequence[str],
+        capability: Capability | str = "",
+        *,
+        limit: int = SUMMARY_WINDOW,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """One query for many models: ``model_id -> rows`` (newest first,
+        capped at ``limit`` rows each).
 
-        Latency quality compares the model's median latency against its own
-        p90 — a model that is consistently fast scores near 1, one whose
-        latency spikes scores lower.  No rows → 0.5 (neutral, not punished).
+        Hot path for :meth:`ModelBroker.select`, which used to issue three
+        identical ``samples()`` queries per candidate (summary, summary's
+        score, selection score).  Rows come back in the same
+        ``ORDER BY created_at DESC`` order as :meth:`samples`, so slicing
+        ``rows[:SCORE_WINDOW]`` reproduces :meth:`score` exactly.
         """
-        rows = self.samples(model_id, capability)
+        ids = list(dict.fromkeys(model_ids))
+        if not ids:
+            return {}
+        cap = capability.value if isinstance(capability, Capability) else str(capability)
+        placeholders = ", ".join("?" for _ in ids)
+        sql = ("SELECT model_id, latency_s, success, memory_mb, source, created_at "
+               f"FROM model_benchmarks WHERE model_id IN ({placeholders})")
+        params: list[Any] = list(ids)
+        if cap:
+            sql += " AND capability = ?"
+            params.append(cap)
+        sql += " ORDER BY created_at DESC"
+        with self._lock:
+            rows = self.db.query(sql, tuple(params))
+        out: dict[str, list[dict[str, Any]]] = {mid: [] for mid in ids}
+        for row in rows:
+            bucket = out.get(row["model_id"])
+            if bucket is not None and len(bucket) < limit:
+                bucket.append(row)
+        return out
+
+    @staticmethod
+    def score_rows(rows: Sequence[dict[str, Any]]) -> float:
+        """0..1 score from pre-fetched samples (newest first).
+
+        Pure function of the rows: :meth:`score` is ``score_rows`` over
+        :meth:`samples` output, so a single prefetch can serve score and
+        summary without re-querying.  ``rows`` longer than ``SCORE_WINDOW``
+        must be sliced by the caller — mirrors ``samples(limit=SCORE_WINDOW)``.
+        """
         if not rows:
             return 0.5
         successes = sum(1 for r in rows if r["success"])
@@ -157,17 +200,36 @@ class BenchmarkDB:
         latency_quality = median / p90 if p90 > 0 else 1.0
         return round(0.7 * success_rate + 0.3 * latency_quality, 4)
 
-    def summary(self, model_id: str, capability: Capability | str = "") -> dict[str, Any]:
-        rows = self.samples(model_id, capability, limit=1000)
+    def score(self, model_id: str, capability: Capability | str = "") -> float:
+        """0..1 score: 70% recent success rate + 30% latency quality.
+
+        Latency quality compares the model's median latency against its own
+        p90 — a model that is consistently fast scores near 1, one whose
+        latency spikes scores lower.  No rows → 0.5 (neutral, not punished).
+        """
+        return self.score_rows(self.samples(model_id, capability))
+
+    @staticmethod
+    def summary_rows(model_id: str, rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """Summary dict from pre-fetched samples (newest first).
+
+        The ``"score"`` entry uses ``rows[:SCORE_WINDOW]`` — identical to the
+        separate query :meth:`score` used to issue, because both order by
+        ``created_at DESC``.
+        """
         latencies = [r["latency_s"] for r in rows if r["success"]]
         return {
             "model_id": model_id,
             "samples": len(rows),
             "success_rate": round(sum(1 for r in rows if r["success"]) / len(rows), 4) if rows else 0.0,
             "median_latency_s": round(statistics.median(latencies), 4) if latencies else 0.0,
-            "score": self.score(model_id, capability),
+            "score": BenchmarkDB.score_rows(rows[:SCORE_WINDOW]),
             "sources": sorted({r["source"] for r in rows}),
         }
+
+    def summary(self, model_id: str, capability: Capability | str = "") -> dict[str, Any]:
+        rows = self.samples(model_id, capability, limit=SUMMARY_WINDOW)
+        return self.summary_rows(model_id, rows)
 
     def models(self) -> list[str]:
         with self._lock:

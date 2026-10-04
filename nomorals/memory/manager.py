@@ -284,11 +284,21 @@ class MemoryManager:
             candidates[hit.owner_id] = hit.owner_id  # placeholder, resolved below
 
         # Lexical pass: catches identifiers and rare terms vectors blur.
-        for hit in self.fts.search(query, limit=limit * 4):
-            record_id = self._id_for_rowid(hit.rowid)
-            if record_id:
-                lexical_scores[record_id] = max(0.0, min(1.0, (hit.score + 20.0) / 25.0))
-                candidates.setdefault(record_id, record_id)
+        # rowid→id is resolved in ONE query, not one per hit (N+1): with a
+        # busy FTS index this pass can return limit*4 hits per recall.
+        fts_hits = self.fts.search(query, limit=limit * 4)
+        if fts_hits:
+            id_placeholders = ", ".join("?" for _ in fts_hits)
+            id_rows = self.db.query(
+                f"SELECT rowid, id FROM memories WHERE rowid IN ({id_placeholders})",
+                [hit.rowid for hit in fts_hits],
+            )
+            rowid_to_id = {row["rowid"]: row["id"] for row in id_rows}
+            for hit in fts_hits:
+                record_id = rowid_to_id.get(hit.rowid)
+                if record_id:
+                    lexical_scores[record_id] = max(0.0, min(1.0, (hit.score + 20.0) / 25.0))
+                    candidates.setdefault(record_id, record_id)
 
         ids = list(candidates)
         if not ids:

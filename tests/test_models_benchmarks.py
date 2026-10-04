@@ -130,5 +130,69 @@ class SyntheticSeedTests(unittest.TestCase):
         self.assertEqual(result["successes"], 1)
 
 
+class PrefetchTests(unittest.TestCase):
+    """R8 perf: one prefetch must equal the old per-model query path.
+
+    ``select()`` used to issue three identical ``samples()`` queries per
+    candidate; ``samples_many`` + the row-based scorers replace them with
+    one query total.  These tests pin the equivalence.
+    """
+
+    def setUp(self):
+        self.db = BenchmarkDB()
+        for i in range(4):
+            for j in range(25):
+                self.db.record(f"m{i}", Capability.CHAT, 0.1 + 0.05 * j,
+                               success=(j % 5 != 0))
+
+    def test_samples_many_matches_samples(self):
+        from nomorals.llm.benchmarks import SCORE_WINDOW
+        got = self.db.samples_many(["m0", "m1", "m2", "m3"], Capability.CHAT)
+        self.assertEqual(set(got), {"m0", "m1", "m2", "m3"})
+        for mid, rows in got.items():
+            expected = self.db.samples(mid, Capability.CHAT, limit=1000)
+            self.assertEqual([r["latency_s"] for r in rows],
+                             [r["latency_s"] for r in expected])
+            self.assertLessEqual(len(rows), 1000)
+        # limit is honored per model
+        capped = self.db.samples_many(["m0"], Capability.CHAT, limit=7)
+        self.assertEqual(len(capped["m0"]), 7)
+
+    def test_samples_many_empty(self):
+        self.assertEqual(self.db.samples_many([], Capability.CHAT), {})
+
+    def test_score_rows_matches_score(self):
+        from nomorals.llm.benchmarks import SCORE_WINDOW
+        pref = self.db.samples_many(["m0", "m1", "m2", "m3"], Capability.CHAT)
+        for mid, rows in pref.items():
+            self.assertEqual(
+                BenchmarkDB.score_rows(rows[:SCORE_WINDOW]),
+                self.db.score(mid, Capability.CHAT))
+
+    def test_score_rows_no_data_neutral(self):
+        self.assertEqual(BenchmarkDB.score_rows([]), 0.5)
+
+    def test_summary_rows_matches_summary(self):
+        pref = self.db.samples_many(["m0", "m1", "m2", "m3"], Capability.CHAT)
+        for mid, rows in pref.items():
+            self.assertEqual(BenchmarkDB.summary_rows(mid, rows),
+                             self.db.summary(mid, Capability.CHAT))
+
+    def test_summary_is_single_query(self):
+        calls = []
+        inner = self.db.db.query
+
+        def counting(sql, params=()):
+            calls.append(sql)
+            return inner(sql, params)
+
+        self.db.db.query = counting
+        try:
+            self.db.summary("m0", Capability.CHAT)
+        finally:
+            self.db.db.query = inner
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

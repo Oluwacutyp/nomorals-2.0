@@ -64,9 +64,34 @@ actually use.)
 
 | Feature | Command | Used by |
 |---|---|---|
-| Telegram bot API + userbot | `pip install telethon requests` | `nomorals/social/chat/telegram.py` (Bot API over HTTP via `requests`; MTProto userbot via `telethon`), `nomorals/exporter.py` |
+| Telegram bot API + userbot | `pip install telethon` | `nomorals/social/chat/telegram.py` (Bot API over HTTP via stdlib `nomorals/core/http.py` — no `requests` needed; MTProto userbot via `telethon`), `nomorals/exporter.py` |
 | Discord | `pip install discord.py` | `nomorals/social/chat/discord.py` |
 | WhatsApp bridge | `cd bridge && npm install` (needs **Node ≥ 18**) | `bridge/whatsapp-bridge.mjs` — npm deps `@whiskeysockets/baileys`, `qrcode-terminal`; speaks JSON-lines to Devon's WhatsApp adapter over localhost TCP |
+
+### Web search
+
+| Feature | Command | Used by |
+|---|---|---|
+| DuckDuckGo keyless fallback | `pip install ddgs` | `nomorals/search/web.py` (`web_ddgs` source — multi-engine text search, no API key); missing → the source reports unavailable, other sources still work |
+
+### Memory — vector store
+
+| Feature | Command | Used by |
+|---|---|---|
+| Exact in-database KNN | `pip install sqlite-vec` | `nomorals/memory/vector_backends.py` (`SqliteVecBackend`) — fastest semantic recall; missing → `usearch`, then the zero-dependency legacy brute-force store |
+
+### WisdomKeeper embeddings
+
+| Feature | Command | Used by |
+|---|---|---|
+| ONNX embedding backend | `pip install fastembed` (pulls `onnxruntime`) | `nomorals/wisdom/embeddings.py` — local embeddings without torch |
+| SentenceTransformers backend | `pip install sentence-transformers` | `nomorals/wisdom/embeddings.py` — needs `torch`; highest quality local embeddings |
+
+### Media library
+
+| Feature | Command | Used by |
+|---|---|---|
+| Rich audio tag reading | `pip install mutagen` | `nomorals/media/library.py` — MP3/FLAC/OGG/M4A tag metadata; missing → stdlib-only fallback |
 
 ### Browser automation
 
@@ -119,10 +144,15 @@ Pick the engines you want; each is independent.
 | Engine | Command | Notes |
 |---|---|---|
 | XTTS v2 (local voice cloning) | `pip install TTS` | Coqui TTS; needs `torch` |
+| Piper (CPU, MIT) | `pip install piper-tts` | + `python -m piper.download_voices en_US-lessac-medium` |
+| Chatterbox (MIT) | `pip install chatterbox-tts` | Python 3.11+; expressive, incl. multilingual |
+| Qwen3-TTS (0.6B) | `pip install qwen-tts` | |
+| F5-TTS | `pip install f5-tts` | Needs a reference clip |
 | Bark | `pip install git+https://github.com/suno-ai/bark.git` | Suno Bark |
 | Kokoro | `pip install kokoro` | |
 | CosyVoice | `pip install cosyvoice` | Model dir via `COSYVOICE_MODEL_DIR` |
 | Orpheus | `pip install orpheus-speech` | GPU |
+| OmniVoice | `pip install omnivoice` | + `torch`; GPU recommended, CPU offload supported |
 | Dia | `pip install git+https://github.com/nari-labs/dia.git` | GPU-only, ~10 GB VRAM; model via `DIA_MODEL_ID` (default `nari-labs/Dia-1.6B-0626`) |
 | Edge TTS (cloud) | `pip install edge-tts` | Also used by `nomorals/tools/audio.py` and `nomorals/integrations/voice_integration.py` |
 | gTTS (cloud) | `pip install gTTS` | `nomorals/integrations/voice_integration.py` |
@@ -133,7 +163,10 @@ Pick the engines you want; each is independent.
 
 | Engine | Command | Notes |
 |---|---|---|
-| Whisper (local) | `pip install openai-whisper` | `import whisper` |
+| Faster-Whisper (local) | `pip install faster-whisper` | CTranslate2 — 7.7% WER, tiny decoder stack, good on weak hardware |
+| Parakeet via onnx-asr (local) | `pip install onnx-asr` (optionally `onnx-asr[cpu,hub]`) | NVIDIA Parakeet TDT 0.6B — 6.3% WER English, fastest free dictation |
+| whisper.cpp (local) | `pip install pywhispercpp` | No torch; GGUF/quantized models |
+| Whisper (local) | `pip install openai-whisper` | `import whisper` — classic reference, slowest, kept as fallback |
 | OpenAI Whisper API | `pip install openai` | Key via `NM_AUDIO_STT_API_KEY` / `OPENAI_API_KEY` |
 | SpeechRecognition | `pip install SpeechRecognition` | |
 | AssemblyAI (cloud) | `pip install assemblyai` | |

@@ -318,5 +318,85 @@ class CLISmokeTests(unittest.TestCase):
         self.assertIn("primary", out)
 
 
+class BrokerPrefetchTests(unittest.TestCase):
+    """R8 perf: select() must consult the benchmark DB exactly once.
+
+    Before the prefetch, every select issued 3N identical samples queries
+    for N candidates (summary, summary's score, selection score) — on the
+    hot path of every model call when a broker is wired to the router.
+    """
+
+    def _broker_with_data(self, n_cards=8):
+        bench = BenchmarkDB()
+        for i in range(n_cards):
+            for j in range(10):
+                bench.record(f"c{i}", Capability.CHAT,
+                             0.1 + 0.05 * j + 0.01 * i,
+                             success=(j % 4 != 0))
+        broker = ModelBroker(benchmarks=bench)
+        for i in range(n_cards):
+            broker.register(_card(f"c{i}", f"p{i}", {Capability.CHAT}))
+        return broker, bench
+
+    def _count_queries(self, bench):
+        calls = []
+        inner = bench.db.query
+
+        def counting(sql, params=()):
+            calls.append(sql)
+            return inner(sql, params)
+
+        bench.db.query = counting
+        return calls, inner
+
+    def test_select_single_db_query(self):
+        from nomorals.llm.broker import BrokerConstraints
+        broker, bench = self._broker_with_data()
+        calls, inner = self._count_queries(bench)
+        try:
+            winner = broker.select(Capability.CHAT)
+        finally:
+            bench.db.query = inner
+        self.assertIsNotNone(winner)
+        self.assertEqual(len(calls), 1)
+
+    def test_ranked_single_db_query(self):
+        broker, bench = self._broker_with_data()
+        calls, inner = self._count_queries(bench)
+        try:
+            ranked = broker.ranked(Capability.CHAT)
+        finally:
+            bench.db.query = inner
+        self.assertEqual(len(ranked), 8)
+        self.assertEqual(len(calls), 1)
+
+    def test_select_matches_naive_per_card_path(self):
+        # The prefetch path must pick the same winner as the old naive
+        # per-card queries (summary/score per model) would.
+        import statistics
+        from nomorals.llm.benchmarks import SUMMARY_WINDOW
+        from nomorals.llm.broker import BrokerConstraints
+        broker, bench = self._broker_with_data()
+        winner = broker.select(Capability.CHAT)
+        rows = {c.id: bench.samples(c.id, Capability.CHAT, limit=SUMMARY_WINDOW)
+                for c in broker.cards()}
+        medians = {}
+        for mid, rws in rows.items():
+            lats = [r["latency_s"] for r in rws if r["success"]]
+            if lats:
+                medians[mid] = max(round(statistics.median(lats), 4), 1e-6)
+        best = min(medians.values())
+        rank = {m: best / v for m, v in medians.items()}
+        naive = sorted(
+            ((broker._score(c, Capability.CHAT, None, BrokerConstraints(),
+                            rank.get(c.id), rows[c.id]), c.id)
+             for c in broker.cards()),
+            key=lambda t: (-t[0], t[1]),
+        )
+        self.assertEqual(winner.id, naive[0][1])
+        # fastest card wins on the latency rank tie-break
+        self.assertEqual(winner.id, "c0")
+
+
 if __name__ == "__main__":
     unittest.main()
