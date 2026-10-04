@@ -77,6 +77,12 @@ class _HourWindow:
         with self._lock:
             return sum(1 for t in self._events if t >= cutoff)
 
+    def set_limit(self, limit: int) -> None:
+        """Change the cap live, under the window's own lock (the same lock
+        ``allow()``/``pending()`` read it under)."""
+        with self._lock:
+            self.limit = int(limit)
+
 
 class ChatGateway:
     """Runs N chat adapters at once and funnels everything through one callback."""
@@ -118,6 +124,16 @@ class ChatGateway:
         self._inbound: IncomingHandler | None = None
         self._chat_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        #: Guards ``adapters``/``_known``: start_one/stop_one mutate them from
+        #: the control thread while send()/status()/stop() read them from
+        #: adapter, pool, and autonomy threads. Unlocked, a stop_one() pop
+        #: racing a stop()/status() iteration raised "dictionary changed size
+        #: during iteration".
+        self._adapters_guard = threading.Lock()
+        #: Guards ``stats``: inbound/dropped/dry_run counters are bumped from
+        #: every adapter thread plus the pool; ``+=`` on a dict value is a
+        #: read-modify-write and lost increments otherwise.
+        self._stats_lock = threading.Lock()
         #: Inbound windows are PER-CHAT, not per-platform. A single spam group
         #: flooding the platform must not starve the owner's DMs (that bug
         #: dropped the owner's own /help while a group posted 30 times an hour).
@@ -127,6 +143,20 @@ class ChatGateway:
         self.stats = {"dropped_rate_limited": 0, "dry_run_sends": 0, "inbound": 0}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
+    def _bump(self, key: str, amount: int = 1) -> None:
+        """Thread-safe stats increment (see ``_stats_lock``)."""
+        with self._stats_lock:
+            self.stats[key] = self.stats.get(key, 0) + amount
+
+    def _adapter_for(self, platform: str) -> ChatAdapter | None:
+        """Thread-safe adapter lookup (see ``_adapters_guard``)."""
+        with self._adapters_guard:
+            return self.adapters.get(platform)
+
+    def _snapshot_adapters(self) -> dict[str, ChatAdapter]:
+        with self._adapters_guard:
+            return dict(self.adapters)
+
     def start(self, handler: IncomingHandler) -> list[str]:
         # Adapters always deliver into the gateway's funnel (registry, rate
         # limit, error isolation); the brain's handler sits at the far end of it.
@@ -134,23 +164,27 @@ class ChatGateway:
         # One-time interactive setup (e.g. Telegram first-run login) must run
         # on the main thread while the keyboard is still free — the console
         # starts below and reads stdin from then on.
-        for name in list(self.adapters):
+        for name in list(self._snapshot_adapters()):
             try:
-                self.adapters[name].preflight()
+                adapter = self._adapter_for(name)
+                if adapter is None:
+                    continue
+                adapter.preflight()
             except KeyboardInterrupt:  # noqa: E106 - re-raised; only adapter errors are swallowed
                 raise
             except Exception as exc:  # noqa: BLE001 - login failed: keep the rest
                 _log.warning("chat preflight failed for %s: %s", name, exc)
-                del self.adapters[name]
+                with self._adapters_guard:
+                    self.adapters.pop(name, None)
         started: list[str] = []
-        for name, adapter in self.adapters.items():
+        for name, adapter in self._snapshot_adapters().items():
             if adapter.start(self._on_inbound):
                 started.append(name)
         _log.info("chat gateway up: %s (dry_run=%s)", ",".join(started) or "none", self.dry_run)
         return started
 
     def stop(self) -> None:
-        for adapter in self.adapters.values():
+        for adapter in self._snapshot_adapters().values():
             try:
                 adapter.stop()
             except Exception:  # noqa: BLE001
@@ -167,13 +201,19 @@ class ChatGateway:
         configured base. Existing windows pick the new limit up immediately.
         """
         self._max_per_hour = int(limit)
+        # Snapshot first, then update each window under its own lock (see
+        # _HourWindow.set_limit): no lock is ever held across a window lock
+        # here, so the _locks_guard -> window-lock ordering used by
+        # _on_inbound/_pending_total can never invert.
         with self._locks_guard:
-            for window in self._windows.values():
-                window.limit = self._max_per_hour
+            windows = list(self._windows.values())
+        for window in windows:
+            window.set_limit(self._max_per_hour)
 
     def start_one(self, name: str, handler: IncomingHandler) -> dict[str, Any]:
         name = name.strip().lower()
-        adapter = self._known.get(name)
+        with self._adapters_guard:
+            adapter = self._known.get(name)
         if adapter is None and self._adapter_builder is not None:
             try:
                 adapter = self._adapter_builder(name)
@@ -181,40 +221,56 @@ class ChatGateway:
                 return {"ok": False, "error": str(exc)}
         if adapter is None:
             return {"ok": False, "error": f"platform {name!r} is unknown or disabled in settings"}
-        if name in self.adapters and adapter._thread is not None and adapter._thread.is_alive():
-            return {"ok": False, "error": f"{name} is already running"}
-        self._known[name] = adapter
-        self.adapters[name] = adapter
-        if adapter.start(handler):
+        # Check-and-register is atomic under _adapters_guard: adapter.start
+        # only spawns the receive thread (non-blocking, no callbacks), so
+        # holding the guard across it is safe and closes the
+        # double-start race between two control threads.
+        with self._adapters_guard:
+            current = self.adapters.get(name)
+            if (current is not None and current._thread is not None
+                    and current._thread.is_alive()):
+                return {"ok": False, "error": f"{name} is already running"}
+            self._known[name] = adapter
+            self.adapters[name] = adapter
+            started = adapter.start(handler)
+        if started:
             _log.info("chat platform started on demand: %s", name)
             return {"ok": True, "platform": name}
         return {"ok": False, "error": f"{name} was already running"}
 
     def stop_one(self, name: str) -> dict[str, Any]:
         name = name.strip().lower()
-        adapter = self.adapters.get(name)
+        # Pop-then-stop is atomic under _adapters_guard: adapter.stop only
+        # sets the stop event (non-blocking), so no deadlock with an adapter
+        # thread calling back into the gateway.
+        with self._adapters_guard:
+            adapter = self.adapters.pop(name, None)
         if adapter is None:
             return {"ok": False, "error": f"{name} is not running"}
         try:
             adapter.stop()
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
-        self.adapters.pop(name, None)
         _log.info("chat platform stopped on demand: %s", name)
         return {"ok": True, "platform": name}
 
     def status(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        for name in sorted(set(list(self.adapters) + list(self._known))):
-            adapter = self._known.get(name)
+        with self._adapters_guard:
+            names = sorted(set(list(self.adapters) + list(self._known)))
+            known = dict(self._known)
+            running = set(self.adapters)
+        for name in names:
+            adapter = known.get(name)
             if adapter is None:
                 continue
             out[name] = {
                 **adapter.health(),
-                "running_in_session": name in self.adapters,
+                "running_in_session": name in running,
                 "hour_pending": self._pending_total(),
             }
-        out["_stats"] = dict(self.stats)
+        with self._stats_lock:
+            out["_stats"] = dict(self.stats)
         return out
 
     def _pending_total(self) -> int:
@@ -264,7 +320,7 @@ class ChatGateway:
 
     # ── inbound ──────────────────────────────────────────────────────────────
     def _on_inbound(self, message: ChatMessage) -> None:
-        self.stats["inbound"] += 1
+        self._bump("inbound")
         row = self.register_chat(message.chat)
         self.touch(message.chat)
         # Owner messages are NEVER rate-limited: the cap exists to protect
@@ -287,7 +343,7 @@ class ChatGateway:
                     window = _HourWindow(self._max_per_hour)
                     self._windows[message.chat.key] = window
             if not window.allow(self.clock()):
-                self.stats["dropped_rate_limited"] += 1
+                self._bump("dropped_rate_limited")
                 _log.warning("rate limit: dropping inbound from %s (>%s/h in this chat)",
                              message.chat.key, window.limit)
                 return
@@ -332,13 +388,14 @@ class ChatGateway:
     ) -> SendResult:
         """Send one message on one platform. Ordered per chat by default."""
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
-        adapter = self.adapters.get(chat.platform)
+        text = text if text is not None else ""
+        adapter = self._adapter_for(chat.platform)
         if adapter is None:
             return SendResult(ok=False, platform=platform, error=f"no adapter for {platform!r}")
         if not text.strip():
             return SendResult(ok=True, platform=platform, message_id=new_short_id("skip"))
         if self.dry_run:
-            self.stats["dry_run_sends"] += 1
+            self._bump("dry_run_sends")
             _log.info("DRY-RUN send %s: %s", chat.key, text[:120])
             return SendResult(ok=True, platform=platform, message_id=new_short_id("dry"))
 
@@ -369,7 +426,7 @@ class ChatGateway:
         can pre-check with the compress tool.
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
-        adapter = self.adapters.get(chat.platform)
+        adapter = self._adapter_for(chat.platform)
         if adapter is None:
             return SendResult(ok=False, platform=platform, error=f"no adapter for {platform!r}")
         target = path
@@ -400,7 +457,7 @@ class ChatGateway:
 
     def typing(self, platform: str, chat: ChatRef | str, seconds: float = 3.0) -> bool:
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
-        adapter = self.adapters.get(chat.platform)
+        adapter = self._adapter_for(chat.platform)
         if adapter is None or self.dry_run:
             return False
         try:
@@ -411,7 +468,7 @@ class ChatGateway:
 
     def history(self, platform: str, chat: ChatRef | str, limit: int = 20) -> list[ChatMessage]:
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
-        adapter = self.adapters.get(chat.platform)
+        adapter = self._adapter_for(chat.platform)
         if adapter is None:
             return []
         try:

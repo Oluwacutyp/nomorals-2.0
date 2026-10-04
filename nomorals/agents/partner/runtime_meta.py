@@ -119,6 +119,7 @@ class RuntimeMetaMixin:
             name for name, info in self.gateway.status().items()
             if name != "_stats" and info.get("running_in_session")
         ) or "none"
+        stats = self._stats_snapshot()
         return "\n".join(
             [
                 f"mood: {mood.label} (affection {mood.values.get('affection', 0):.0f}, "
@@ -129,8 +130,8 @@ class RuntimeMetaMixin:
                 f"model: {self._model_status_line()}",
                 f"platforms running: {platforms}",
                 f"power mode: {power_state}",
-                f"stats: {self.stats['messages']} msgs, {self.stats['replies']} replies, "
-                f"{self.stats['errors']} errors, {self.stats.get('controls', 0)} commands",
+                f"stats: {stats['messages']} msgs, {stats['replies']} replies, "
+                f"{stats['errors']} errors, {stats.get('controls', 0)} commands",
             ]
         )
 

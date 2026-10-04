@@ -58,6 +58,7 @@ from typing import Any, Callable
 
 from ..core.ids import new_short_id
 from ..storage import router_telemetry
+from ..storage.db import release_thread_connection
 
 _log = logging.getLogger("nomorals.coremind")
 
@@ -1144,6 +1145,9 @@ class CoreMind:
                 box["resp"] = router.complete(prompt)
             except Exception as exc:  # noqa: BLE001
                 box["exc"] = exc
+            finally:
+                # One-shot thread: don't leak its DB connection.
+                release_thread_connection(getattr(self.context, "db", None))
 
         self._router_calls += 1
         db = getattr(self.context, "db", None)
@@ -1483,6 +1487,8 @@ class CoreMind:
                 self._inflight.release()
                 with self._lock:
                     self._inflight_now = max(0, self._inflight_now - 1)
+                # One-shot thread: don't leak its DB connection.
+                release_thread_connection(getattr(self.context, "db", None))
             self._job_done(job_id, ok, note)
             if self.runtime is not None:
                 try:

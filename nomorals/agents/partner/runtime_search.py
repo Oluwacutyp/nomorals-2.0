@@ -238,6 +238,8 @@ class RuntimeSearchMixin:
                 finally:
                     with self._queue_guard:
                         self._book_busy.discard(slug)
+                    # One-shot thread: don't leak its DB connection.
+                    self._release_db_thread()
 
             threading.Thread(target=_work, name=f"book-{slug}", daemon=True).start()
             return ""  # the start note is already on its way

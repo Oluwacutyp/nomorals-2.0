@@ -77,6 +77,9 @@ class Database:
         self._write_lock = threading.RLock()
         self._all_connections: list[sqlite3.Connection] = []
         self._all_lock = threading.Lock()
+        #: Guards ``stats``: execute()/transaction() run on every worker
+        #: thread and ``+=`` on a dict value is a read-modify-write.
+        self._stats_lock = threading.Lock()
         self._closed = False
         self._depth = threading.local()
 
@@ -153,9 +156,36 @@ class Database:
                 _log.debug("connection close failed during teardown: %s", e)
         self._local.conn = None
 
+    def release_thread(self) -> None:
+        """Close and forget the calling thread's connection.
+
+        Connections are per-thread (``threading.local``) and registered in
+        ``_all_connections`` so ``close()`` can tear everything down. When a
+        *one-shot* worker thread dies (typing keepalive, delayed reply,
+        book build, …) its thread-local entry is dropped but the registered
+        connection object — and its file descriptor — lives on until
+        process exit. One leaked fd per short-lived thread adds up on a
+        bot that runs for weeks, so those threads call this in a ``finally``
+        block. Long-lived pool threads must NOT call it; the next
+        ``_connection()`` lazily reopens, so a stray call is harmless but
+        pointless.
+        """
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        if conn is None:
+            return
+        with self._all_lock:
+            try:
+                self._all_connections.remove(conn)
+            except ValueError:  # pragma: no cover - already released/closed
+                pass
+        try:
+            conn.close()
+        except sqlite3.Error:  # pragma: no cover - close is best-effort here
+            _log.debug("thread connection close failed", exc_info=True)
+
     def __enter__(self) -> "Database":
         return self
-
     def __exit__(self, *exc: object) -> None:
         self.close()
 
@@ -167,6 +197,11 @@ class Database:
         with self._all_lock:
             return len(self._all_connections)
 
+    def _bump_stat(self, key: str, amount: float = 1) -> None:
+        """Thread-safe stats increment (see ``_stats_lock``)."""
+        with self._stats_lock:
+            self.stats[key] = self.stats.get(key, 0) + amount
+
     # ── execution ────────────────────────────────────────────────────────────
     def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor:
         """Run a single statement. Returns the cursor (use ``.lastrowid``/``.rowcount``)."""
@@ -174,19 +209,19 @@ class Database:
         try:
             cursor = self._connection().execute(sql, params)
         except sqlite3.IntegrityError as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise ConstraintViolation(str(exc)) from exc
         except sqlite3.OperationalError as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise StorageError(str(exc), retryable=_is_retryable_sqlite(exc)) from exc
         except sqlite3.Error as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise StorageError(str(exc)) from exc
         finally:
-            self.stats["queries"] += 1
-            self.stats["query_seconds"] += time.perf_counter() - started
+            self._bump_stat("queries")
+            self._bump_stat("query_seconds", time.perf_counter() - started)
         if sql.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE", "REPLAC"}:
-            self.stats["writes"] += 1
+            self._bump_stat("writes")
         return cursor
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
@@ -194,18 +229,18 @@ class Database:
         try:
             cursor = self._connection().executemany(sql, list(seq))
         except sqlite3.IntegrityError as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise ConstraintViolation(str(exc)) from exc
         except sqlite3.OperationalError as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise StorageError(str(exc), retryable=_is_retryable_sqlite(exc)) from exc
         except sqlite3.Error as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise StorageError(str(exc)) from exc
         finally:
-            self.stats["queries"] += 1
-            self.stats["query_seconds"] += time.perf_counter() - started
-        self.stats["writes"] += 1
+            self._bump_stat("queries")
+            self._bump_stat("query_seconds", time.perf_counter() - started)
+        self._bump_stat("writes")
         return cursor
 
     def executescript(self, script: str) -> None:
@@ -218,7 +253,7 @@ class Database:
         try:
             self._connection().executescript(script)
         except sqlite3.Error as exc:
-            self.stats["errors"] += 1
+            self._bump_stat("errors")
             raise StorageError(str(exc)) from exc
 
     def execute_statements(self, script: str) -> int:
@@ -320,7 +355,7 @@ class Database:
         try:
             self.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             self._depth.value = 1
-            self.stats["transactions"] += 1
+            self._bump_stat("transactions")
             try:
                 yield self
             except Exception:
@@ -391,6 +426,9 @@ class Database:
         return MigrationSummary(applied=applied, version=runner.current_version())
 
     def stats_snapshot(self) -> dict[str, Any]:
+        # Note: tables() issues a query, so the snapshot itself bumps the
+        # "queries" counter by one. The stats merge is taken under
+        # _stats_lock for a consistent read.
         info = {
             "path": str(self.path) if self.path else ":memory:",
             "connections": self.connection_count(),
@@ -398,7 +436,8 @@ class Database:
         }
         if self.path is not None and self.path.exists():
             info["size_bytes"] = self.path.stat().st_size
-        return {**self.stats, **info}
+        with self._stats_lock:
+            return {**self.stats, **info}
 
 
 class MigrationSummary:
@@ -507,3 +546,17 @@ def require_row(row: dict[str, Any] | None, what: str = "row") -> dict[str, Any]
     if row is None:
         raise NotFound(f"{what} not found")
     return row
+
+
+def release_thread_connection(db: "Database | None") -> None:
+    """Best-effort per-thread DB connection release for one-shot workers.
+
+    No-op when the thread never touched the DB or ``db`` is None — safe to
+    call unconditionally in a thread's ``finally`` block. One line per
+    spawn site; see :meth:`Database.release_thread` for why.
+    """
+    try:
+        if db is not None:
+            db.release_thread()
+    except Exception:  # noqa: BLE001 - never break thread teardown
+        pass

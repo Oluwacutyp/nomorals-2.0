@@ -194,6 +194,9 @@ class RuntimeMissionMixin:
                     runner.resume(mission.id)
                 except Exception:  # noqa: BLE001 - chat must stay alive
                     _log.exception("mission resume %s failed", mission.id)
+                finally:
+                    # One-shot thread: don't leak its DB connection.
+                    self._release_db_thread()
 
             threading.Thread(target=_resume_job,
                              name=f"mission-resume-{mission.id[:8]}",
@@ -280,6 +283,9 @@ class RuntimeMissionMixin:
                     runner.run(new, max_iterations=8)
                 except Exception:  # noqa: BLE001 - chat must stay alive
                     _log.exception("mission retry %s failed", new.id)
+                finally:
+                    # One-shot thread: don't leak its DB connection.
+                    self._release_db_thread()
 
             threading.Thread(target=_retry_job,
                              name=f"mission-retry-{new.id[:8]}",

@@ -100,6 +100,11 @@ class PartnerRuntime(
         self._stopped = threading.Event()
         self._autonomy: Any = None
         self.stats = {"messages": 0, "replies": 0, "errors": 0, "controls": 0}
+        #: Guards ``stats``: the counters are bumped from every chat-pool
+        #: worker, the delayed-reply threads, and the control path. ``+=``
+        #: on a dict value is a read-modify-write and lost increments
+        #: otherwise (silent undercounting in /status).
+        self._stats_lock = threading.Lock()
         self._owner_chats = _key_set(partner_cfg.owner_chats)
         self._book_busy: set[str] = set()  # slugs with a book pipeline running
         self._apply_persisted_mode()
@@ -195,10 +200,30 @@ class PartnerRuntime(
             _log.exception("discord newcomer greeting failed: %s", exc)
             return
         if outcome.parts:
-            self.stats["replies"] += 1
+            self._bump("replies")
             self._send_reply(message, outcome.parts)
 
     # ── inbound fan-in: per-chat FIFO, cross-chat parallel ──────────────────
+    def _bump(self, key: str, amount: int = 1) -> None:
+        """Thread-safe stats increment (see ``_stats_lock``)."""
+        with self._stats_lock:
+            self.stats[key] = self.stats.get(key, 0) + amount
+
+    def _stats_snapshot(self) -> dict[str, int]:
+        """A consistent copy of the counters for status/log lines."""
+        with self._stats_lock:
+            return dict(self.stats)
+
+    def _release_db_thread(self) -> None:
+        """Drop the calling thread's DB connection (see
+        ``Database.release_thread``): one-shot workers (typing keepalive,
+        delayed replies, book builds) each open a per-thread sqlite
+        connection, and without this every such thread leaks one fd until
+        process exit. Long-lived pool threads never call this."""
+        from ...storage.db import release_thread_connection
+
+        release_thread_connection(getattr(self.context, "db", None))
+
     def on_message(self, message: ChatMessage) -> None:
         key = message.chat.key
         with self._queue_guard:
@@ -208,7 +233,14 @@ class PartnerRuntime(
             self._draining[key] = True
         if draining:
             return  # a pump is already working this chat; it will pick the message up
-        self._pool.submit(self._pump, key)
+        try:
+            self._pool.submit(self._pump, key)
+        except RuntimeError:
+            # The pool is shut down (runtime stopping): reset the flag or
+            # the queued message is orphaned — no pump will ever pick it up.
+            _log.warning("on_message: pool shut down, dropping inbound for %s", key)
+            with self._queue_guard:
+                self._draining[key] = False
 
     def _pump(self, key: str) -> None:
         try:
@@ -217,7 +249,13 @@ class PartnerRuntime(
                     queue = self._queues.get(key)
                     message = queue.popleft() if queue else None
                     if message is None:
-                        self._draining[key] = False
+                        # Queue drained: drop the entries. A long-lived
+                        # runtime otherwise keeps one dict slot per chat it
+                        # ever saw, forever. Safe under the guard: a racing
+                        # on_message setdefaults a fresh queue and (seeing
+                        # no _draining entry) submits a new pump.
+                        self._queues.pop(key, None)
+                        self._draining.pop(key, None)
                         break
                 self._process(message)
         except Exception as exc:  # noqa: BLE001 - a bad chat must not kill the pool
@@ -226,7 +264,7 @@ class PartnerRuntime(
                 self._draining[key] = False
 
     def _process(self, message: ChatMessage) -> None:
-        self.stats["messages"] += 1
+        self._bump("messages")
         # Vision flag: with it off, inbound media is dropped before the brain
         # (no download-to-understanding pipeline, no token cost).
         if message.media:
@@ -303,7 +341,7 @@ class PartnerRuntime(
                       message.text[:40], command)
             if (command is not None
                     and (command.kind == "game" or command.kind in GAME_COMMANDS)):
-                self.stats["controls"] += 1
+                self._bump("controls")
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
                           message.text[:40], message.sender or "?", message.chat.key)
                 try:
@@ -365,7 +403,7 @@ class PartnerRuntime(
             from ...social.chat.control import parse_control
 
             if parse_control(message.text) is not None:
-                self.stats["controls"] += 1
+                self._bump("controls")
                 # Feed the arena's interest profiler: what the owner runs
                 # most shapes future topic picks. Never raises.
                 try:
@@ -401,7 +439,7 @@ class PartnerRuntime(
                 _log.exception("core mind failed on %s", message.chat.key)
                 mind_reply = None
             if mind_reply is not None:
-                self.stats["controls"] += 1
+                self._bump("controls")
                 _log.info("core mind routed %r in %s",
                           message.text[:40], message.chat.key)
                 # The fast path skips the brain (zero model calls) — but the
@@ -431,7 +469,7 @@ class PartnerRuntime(
         try:
             outcome = self.brain.handle_message(message)
         except Exception as exc:  # noqa: BLE001
-            self.stats["errors"] += 1
+            self._bump("errors")
             _log.exception("brain failed on %s: %s", message.chat.key, exc)
             keepalive_stop.set()
             return
@@ -441,7 +479,7 @@ class PartnerRuntime(
             if outcome.presence.delay_seconds > 0:
                 self._schedule_delayed(message, outcome.presence)
             return
-        self.stats["replies"] += 1
+        self._bump("replies")
         self._send_reply(message, outcome.parts)
 
     def _schedule_delayed(self, message: ChatMessage, presence: Presence) -> None:
@@ -454,18 +492,21 @@ class PartnerRuntime(
         delay = presence.delay_seconds
 
         def _job() -> None:
-            if self._stopped.is_set():
-                return
-            time.sleep(delay)
-            if self._stopped.is_set():
-                return
             try:
-                parts = self.brain.deliver_reply(message)
-                if parts:
-                    self.stats["replies"] += 1
-                    self._send_reply(message, parts)
-            except Exception:  # noqa: BLE001 - a late reply must not crash the thread
-                _log.exception("delayed reply for %s failed", message.chat.key)
+                if self._stopped.is_set():
+                    return
+                time.sleep(delay)
+                if self._stopped.is_set():
+                    return
+                try:
+                    parts = self.brain.deliver_reply(message)
+                    if parts:
+                        self._bump("replies")
+                        self._send_reply(message, parts)
+                except Exception:  # noqa: BLE001 - a late reply must not crash the thread
+                    _log.exception("delayed reply for %s failed", message.chat.key)
+            finally:
+                self._release_db_thread()
 
         threading.Thread(target=_job, name=f"delayed-reply-{message.chat.key}", daemon=True).start()
 
@@ -810,11 +851,11 @@ class PartnerRuntime(
             write_status(self.settings.home, state)
         except Exception:  # noqa: BLE001
             pass
-        _log.info("partner runtime stopped: %s", self.stats)
+        _log.info("partner runtime stopped: %s", self._stats_snapshot())
 
     def status(self) -> dict[str, Any]:
         return {
-            "stats": dict(self.stats),
+            "stats": self._stats_snapshot(),
             "mood": self.brain.mood.current().to_dict(),
             "relationship": {
                 "stage": self.brain.relationship.stage,
@@ -1302,6 +1343,16 @@ class PartnerRuntime(
         (Telegram/Discord hold the call for the window) and fire-and-forget
         ones (the bridge), since the wait tops up the cycle to the tick.
         """
+        try:
+            self._typing_keepalive_loop(chat, stop)
+        finally:
+            # One-shot thread: don't leak its DB connection (gateway.send ->
+            # touch opens one on the first successful send).
+            self._release_db_thread()
+
+    def _typing_keepalive_loop(self, chat: ChatRef, stop: threading.Event) -> None:
+        """Body of :meth:`_typing_keepalive` (split out so the wrapper can
+        own the thread-teardown ``finally``)."""
         partner_cfg = self.settings.partner
         if chat.kind == ChatKind.GROUP and not partner_cfg.typing_in_groups:
             return

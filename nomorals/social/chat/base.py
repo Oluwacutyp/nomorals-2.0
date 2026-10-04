@@ -91,6 +91,23 @@ class ChatRef:
     peer: str = ""  # the other human, when the chat is a DM
     thread_id: str = ""
 
+    def __post_init__(self) -> None:
+        # Same None-coercion as ChatMessage: adapters build refs from raw
+        # payloads where fields can be missing. Frozen dataclass, so the
+        # coercion goes through object.__setattr__.
+        if self.platform is None:
+            object.__setattr__(self, "platform", "")
+        if self.chat_id is None:
+            object.__setattr__(self, "chat_id", "")
+        if self.kind is None:
+            object.__setattr__(self, "kind", ChatKind.DM)
+        if self.title is None:
+            object.__setattr__(self, "title", "")
+        if self.peer is None:
+            object.__setattr__(self, "peer", "")
+        if self.thread_id is None:
+            object.__setattr__(self, "thread_id", "")
+
     @property
     def key(self) -> str:
         base = f"{self.platform}:{self.chat_id}"
@@ -134,6 +151,20 @@ class ChatMessage:
     ts: float = field(default_factory=time.time)
     message_id: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Adapters build these from raw platform payloads where any field
+        # can arrive as None (missing text, anonymous sender, …). Coerce
+        # once here so the dozen downstream ``.strip()`` call sites never
+        # see a None.
+        if self.text is None:
+            self.text = ""
+        if self.sender is None:
+            self.sender = ""
+        if self.reply_to is None:
+            self.reply_to = ""
+        if self.message_id is None:
+            self.message_id = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
