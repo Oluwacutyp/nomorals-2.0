@@ -505,8 +505,8 @@ class GameEngine:
             try:
                 from .progression import level_for_xp
                 prof = self.store.get(key)
-                store.grant_level_points(key, level_for_xp(prof.xp))
-                stats = store.get(key)  # re-read after grant
+                _, stats = store.grant_level_points(
+                    key, level_for_xp(prof.xp))
             except Exception:  # noqa: BLE001
                 pass
             room.state.setdefault("rpg_stats", {})[key] = stats.to_dict()
@@ -1081,9 +1081,8 @@ class GameEngine:
                             msgs.append(describe_level_up(lvl))
                             # RPG attributes: each level grants points
                             try:
-                                from .stats import (StatStore,
-                                                    POINTS_PER_LEVEL)
-                                pts = StatStore(self.db).grant_level_points(
+                                from .stats import StatStore
+                                pts, _ = StatStore(self.db).grant_level_points(
                                     p.key, lvl)
                                 if pts:
                                     msgs.append(

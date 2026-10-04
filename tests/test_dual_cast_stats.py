@@ -141,15 +141,20 @@ class StatStoreTests(unittest.TestCase):
     def test_grant_level_points(self):
         store = StatStore(self._db())
         # level 1 → no new points (starts at level_applied=1)
-        self.assertEqual(store.grant_level_points("p1", 1), 0)
+        pts, stats = store.grant_level_points("p1", 1)
+        self.assertEqual(pts, 0)
+        self.assertEqual(stats.unspent, 0)
         # level 4 → 3 new levels × 3 points
-        self.assertEqual(store.grant_level_points("p1", 4),
-                         3 * POINTS_PER_LEVEL)
+        pts, stats = store.grant_level_points("p1", 4)
+        self.assertEqual(pts, 3 * POINTS_PER_LEVEL)
+        self.assertEqual(stats.unspent, 3 * POINTS_PER_LEVEL)
         # already applied → no double grant
-        self.assertEqual(store.grant_level_points("p1", 4), 0)
-        # level 5 → one more level
-        self.assertEqual(store.grant_level_points("p1", 5),
-                         POINTS_PER_LEVEL)
+        pts, stats = store.grant_level_points("p1", 4)
+        self.assertEqual(pts, 0)
+        # level 5 → one more level; returned block has the points
+        pts, stats = store.grant_level_points("p1", 5)
+        self.assertEqual(pts, POINTS_PER_LEVEL)
+        self.assertEqual(stats.unspent, 4 * POINTS_PER_LEVEL)
 
     def test_spend(self):
         store = StatStore(self._db())

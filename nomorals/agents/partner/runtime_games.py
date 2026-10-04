@@ -612,14 +612,15 @@ class RuntimeGamesMixin:
         engine = self._game_engine()
         store = StatStore(engine.db)
         # top up any pending level-up points first
+        new_pts = 0
         try:
             from ...games.progression import level_for_xp
             prof = engine.store.get(player.key)
-            new_pts = store.grant_level_points(player.key,
-                                               level_for_xp(prof.xp))
+            new_pts, stats = store.grant_level_points(
+                player.key, level_for_xp(prof.xp))
         except Exception:  # noqa: BLE001
             new_pts = 0
-        stats = store.get(player.key)
+            stats = store.get(player.key)
         tail = (tail or "").strip().lower()
         lines: list[str] = []
         if new_pts:

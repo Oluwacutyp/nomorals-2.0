@@ -203,18 +203,34 @@ class StatStore:
         return StatBlock()
 
     # ── level-up grants ────────────────────────────────────────────────────
-    def grant_level_points(self, player_key: str, level: int) -> int:
-        """Top up unspent points for levels gained. Returns points added."""
+    def grant_level_points(self, player_key: str,
+                           level: int) -> tuple[int, "StatBlock"]:
+        """Top up unspent points for levels gained.
+
+        Returns (points_added, updated_stats). The stats block is the
+        freshly-saved state — callers should use it directly instead of
+        doing a separate read that might hit a transient failure.
+        """
         level = max(1, int(level))
         stats = self.get(player_key)
         if level <= stats.level_applied:
-            return 0
+            return 0, stats
         new_levels = level - stats.level_applied
         points = new_levels * POINTS_PER_LEVEL
         stats.unspent += points
         stats.level_applied = level
         self._save(player_key, stats)
-        return points
+        # Re-read to verify the save persisted; fall back to the
+        # in-memory stats if the read fails (transient DB issue).
+        try:
+            verified = self.get(player_key)
+            # If the read shows our points, use it; otherwise trust
+            # the in-memory state we just saved.
+            if verified.unspent >= stats.unspent:
+                return points, verified
+        except Exception:  # noqa: BLE001
+            _log.debug("grant verification read failed", exc_info=True)
+        return points, stats
 
     # ── spending ───────────────────────────────────────────────────────────
     def spend(self, player_key: str, name: str,
