@@ -258,8 +258,10 @@ class ConnectFourGame(MultiGame):
     difficulties = DIFFICULTY_LEVELS
     rules = ("Drop a disc into columns 1–7. First to align four "
              "(horizontal, vertical, or diagonal) wins. The board "
-             "is 6 rows × 7 columns. The house thinks ahead — pick "
-             "its strength with /game connect4 [easy|normal|hard|expert].")
+             "is 6 rows × 7 columns. The house thinks ahead — deeper "
+             "search on hard/expert; easy genuinely misses wins "
+             "sometimes. Pick its strength with "
+             "/game connect4 [easy|normal|hard|expert].")
 
     def new_state(self, rng: random.Random,
                   difficulty: str = "normal") -> dict[str, Any]:
@@ -373,8 +375,10 @@ class BattleshipGame(MultiGame):
     difficulties = DIFFICULTY_LEVELS
     rules = ("10×10 grid. You have 5 ships (sizes 5,4,3,3,2). The AI "
              "has the same. Take turns firing coordinates (e.g. B5). "
-             "Sink all five to win. The house hunts with real "
-             "probability maps — set its strength with "
+             "Sink all five to win. The house's brain scales with "
+             "difficulty — easy guesses the checkerboard, normal "
+             "finishes damaged ships, hard hunts with probability "
+             "maps, expert never wastes a shot. Set its strength with "
              "/game battleship [easy|normal|hard|expert].")
 
     SHIP_SIZES = (5, 4, 3, 3, 2)
@@ -510,8 +514,10 @@ class BattleshipGame(MultiGame):
         return out
 
     def _ai_fire(self, room: Room) -> tuple[int, int]:
-        """The house's shot: a probability-density hunter on normal+,
-        a checkerboard guesser on easy."""
+        """The house's shot, graded by difficulty: easy checkerboards
+        and pokes randomly at hits; normal checkerboards but finishes
+        ships smartly; hard hunts with probability-density maps; expert
+        is the hard brain with zero guessing among equals."""
         return battleship_shot(
             room.state["player_shots"], self.SHIP_SIZES,
             difficulty=self.difficulty(room), rng=self.rng(room))

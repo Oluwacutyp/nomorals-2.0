@@ -183,7 +183,14 @@ class RuntimeGamesMixin:
                 return str(exc)
             if msgs and not msgs[0].startswith("🎮"):
                 msgs[0] = f"🎮 {msgs[0]}"  # the table-opening banner
-            return "\n".join(msgs) or engine.describe(room)
+            # show the difficulty mode so it's clear what's active
+            diff_line = f"🎯 difficulty: {difficulty}"
+            if daily:
+                diff_line += " · 📅 daily"
+            if timed:
+                diff_line += " · ⏱️ timed"
+            body = "\n".join(msgs) or engine.describe(room)
+            return f"{diff_line}\n{body}"
         return (f"unknown game {verb!r} — /game list to see the table.")
 
     # ── arena gear commands ──────────────────────────────────────────────────

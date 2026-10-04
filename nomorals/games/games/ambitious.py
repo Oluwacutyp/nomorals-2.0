@@ -55,6 +55,7 @@ FARM_YIELD: dict[str, int] = {"spring": 5, "summer": 4,
 
 #: weighted town events — the town has a life of its own. Each tick the
 #: table is rolled once; nothing happens most days.
+#: Rewards scale with day count so long-term play stays rewarding.
 TOWN_EVENTS: tuple[tuple[str, int, str], ...] = (
     # (event, weight, flavor)
     ("rain", 3, "rain soaks the fields — +5 food"),
@@ -64,6 +65,8 @@ TOWN_EVENTS: tuple[tuple[str, int, str], ...] = (
     ("merchant", 1, "a merchant lingers — trade pays +2 for 3 days"),
     ("plague", 1, "a cough moves through the houses"),
     ("raid", 1, "raiders hit the night market"),
+    ("goldrush", 1, "prospectors strike a rich vein — +15 gold"),
+    ("taxday", 1, "tax collectors make their rounds — +2 gold per 10 people"),
 )
 
 #: population milestones — the town earns titles as it grows
@@ -114,6 +117,25 @@ class WorldGame(MultiGame):
         return 2 * room.state["buildings"].get("shed", 0) + \
             3 * room.state["buildings"].get("farm", 0)
 
+    def _gold_per_day(self, room: Room) -> int:
+        """Buildings generate gold income — the town earns, not just events."""
+        b = room.state["buildings"]
+        # market: trade hub, granary: surplus sales, workshop: tool sales,
+        # temple: donations scale with population
+        income = (2 * b.get("market", 0) +
+                  1 * b.get("granary", 0) +
+                  1 * b.get("workshop", 0))
+        # temple donations scale with town size
+        if b.get("temple"):
+            income += max(1, room.state["pop"] // 10)
+        return income
+
+    def _mine_yield(self, room: Room) -> int:
+        """Mine scales with progress — deeper shafts, better tools."""
+        day = room.state["day"]
+        # +3 base, +1 per 75 days, +1 per workshop level (better picks)
+        return 3 + day // 75 + room.state["buildings"].get("workshop", 0)
+
     def _report(self, room: Room) -> str:
         s = room.state
         b = ", ".join(f"{k}×{v}" for k, v in s["buildings"].items()) \
@@ -125,7 +147,8 @@ class WorldGame(MultiGame):
                  f"food {s['food']} · gold {s['gold']} · tools "
                  f"{s['tools']}",
                  f"buildings: {b} · yield: +{self._food_per_day(room)} "
-                 f"food/day, eat 1/person/day · farm pays "
+                 f"food/day, +{self._gold_per_day(room)} gold/day · eat "
+                 f"1/person/day · farm pays "
                  f"{FARM_YIELD[season]} + farm levels"]
         if s["merchant_days"] > 0:
             lines.append(f"merchant in town — trade pays +2 for "
@@ -142,6 +165,11 @@ class WorldGame(MultiGame):
         old_season = season_of(s["day"])
         s["day"] += 1
         s["food"] += self._food_per_day(room)
+        # buildings generate gold income every day
+        gold_income = self._gold_per_day(room)
+        if gold_income > 0:
+            s["gold"] += gold_income
+            events.append(f"the town's enterprises bring +{gold_income} gold")
         # a season turning is a town-wide event
         if season_of(s["day"]) != old_season:
             events.append(f"the season turns — {season_of(s['day'])} "
@@ -194,17 +222,30 @@ class WorldGame(MultiGame):
             return
         name, flavor = pick
         b = s["buildings"]
+        # event rewards scale with progress (day // 50 bonus)
+        progress_bonus = s["day"] // 50
         if name == "rain":
             s["food"] += 5
         elif name == "caravan":
-            s["gold"] += 6
+            gain = 6 + progress_bonus * 2
+            s["gold"] += gain
+            flavor = f"a caravan crosses the gate — +{gain} gold"
         elif name == "festival":
             if s["pop"] < self._max_pop(room) and s["food"] >= 2:
                 s["pop"] += 1
                 s["food"] -= 2
             else:
-                s["gold"] += 2  # the stranger leaves a coin and goes
-                flavor = "the festival passes — +2 gold"
+                gain = 2 + progress_bonus
+                s["gold"] += gain
+                flavor = f"the festival passes — +{gain} gold"
+        elif name == "goldrush":
+            gain = 15 + progress_bonus * 3
+            s["gold"] += gain
+            flavor = f"prospectors strike a rich vein — +{gain} gold"
+        elif name == "taxday":
+            gain = max(2, (s["pop"] // 10) * 2 + progress_bonus)
+            s["gold"] += gain
+            flavor = f"tax collectors make their rounds — +{gain} gold"
         elif name == "drought":
             s["food"] = max(0, s["food"] - 4)
         elif name == "merchant":
@@ -239,8 +280,9 @@ class WorldGame(MultiGame):
             out.append(f"the {season_of(s['day'])} fields give +{gain} "
                        "food.")
         elif t == "mine":
-            s["gold"] += 3
-            out.append("the mine gives +3 gold.")
+            gain = self._mine_yield(room)
+            s["gold"] += gain
+            out.append(f"the mine gives +{gain} gold.")
         elif t == "craft":
             bonus = s["buildings"].get("workshop", 0)
             if s["gold"] >= 2 and s["tools"] < 12:

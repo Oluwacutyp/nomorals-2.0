@@ -79,26 +79,50 @@ def _gomoku_wins(grid: list[list[str]], r: int, c: int, side: str) -> bool:
         grid[r][c] = ""
 
 
+def _gomoku_cell_value(grid: list[list[str]], r: int, c: int,
+                       me: str) -> float:
+    """Threat value of ``me`` playing the empty cell (r, c): longest
+    run through the cell for me (×10) and for the foe (×9), plus a
+    centre bias. The grid is restored before returning."""
+    foe = "B" if me == "W" else "W"
+    grid[r][c] = me
+    mine = _gomoku_run(grid, r, c, me)
+    grid[r][c] = foe
+    theirs = _gomoku_run(grid, r, c, foe)
+    grid[r][c] = ""
+    centre = 7 - (abs(r - 7) + abs(c - 7)) / 2.0
+    return mine * 10.0 + theirs * 9.0 + centre
+
+
 def _gomoku_house_move(grid: list[list[str]],
                        rng: random.Random,
                        difficulty: str = "normal"
                        ) -> tuple[int, int] | None:
-    """Win if we can, block if we must, otherwise play the most
+    """The house's move, graded by difficulty.
+
+    easy: usually sound, but ~35% of the time it genuinely misses the
+    board — it won't take its win or block yours, and just plays near
+    the action.
+    normal: takes its wins, blocks yours, otherwise plays the most
     pressuring empty cell (longest threat through it, centre-biased).
-    On hard/expert the house also reads one move ahead: each candidate
-    is scored minus the opponent's best reply, so it spots double
-    threats and doesn't walk into forks. Deterministic given the
-    room's rng."""
+    hard: the normal brain plus one-ply lookahead — each candidate is
+    scored minus your best reply, so it spots double threats and
+    doesn't walk into forks.
+    expert: two-ply on a shortlist — your best reply is itself scored
+    minus the house's best counter, so it sets traps a move deeper.
+    Deterministic given the room's rng."""
     empties = [(r, c) for r in range(_GOMOKU_SIZE)
                for c in range(_GOMOKU_SIZE) if not grid[r][c]]
     if not empties:
         return None
-    for r, c in empties:
-        if _gomoku_wins(grid, r, c, "W"):
-            return r, c
-    for r, c in empties:
-        if _gomoku_wins(grid, r, c, "B"):
-            return r, c
+    blunder = difficulty == "easy" and rng.random() < 0.35
+    if not blunder:
+        for r, c in empties:
+            if _gomoku_wins(grid, r, c, "W"):
+                return r, c
+        for r, c in empties:
+            if _gomoku_wins(grid, r, c, "B"):
+                return r, c
     stones = [(r, c) for r in range(_GOMOKU_SIZE)
               for c in range(_GOMOKU_SIZE) if grid[r][c]]
     if not stones:
@@ -112,36 +136,51 @@ def _gomoku_house_move(grid: list[list[str]],
                 if (0 <= rr < _GOMOKU_SIZE and 0 <= cc < _GOMOKU_SIZE
                         and not grid[rr][cc]):
                     near.add((rr, cc))
+    if blunder:
+        # the miss: a plausible-looking but tactically blind move
+        return rng.choice(sorted(near)) if near else rng.choice(empties)
 
-    def pressure(r: int, c: int) -> float:
-        grid[r][c] = "W"
-        w = _gomoku_run(grid, r, c, "W")
-        grid[r][c] = "B"
-        b = _gomoku_run(grid, r, c, "B")
-        grid[r][c] = ""
-        centre = 7 - (abs(r - 7) + abs(c - 7)) / 2.0
-        return w * 10.0 + b * 9.0 + centre
+    def reply_best(g: list[list[str]], cells: set[tuple[int, int]],
+                   side: str) -> float:
+        return max((_gomoku_cell_value(g, rr, cc, side)
+                    for rr, cc in cells if not g[rr][cc]),
+                   default=0.0)
 
-    lookahead = difficulty in ("hard", "expert")
-    scored: list[tuple[float, int, int]] = []
-    for r, c in near:
-        val = pressure(r, c)
-        if lookahead:
-            # their best reply after our move — subtract it
+    if difficulty in ("hard", "expert"):
+        raw: list[tuple[float, int, int]] = []
+        for r, c in near:
+            val = _gomoku_cell_value(grid, r, c, "W")
             grid[r][c] = "W"
-            reply = 0.0
-            for rr, cc in near:
-                if (rr, cc) == (r, c) or grid[rr][cc]:
-                    continue
-                grid[rr][cc] = "B"
-                b = _gomoku_run(grid, rr, cc, "B")
-                grid[rr][cc] = ""
-                reply = max(reply, b * 9.0)
-                if reply >= 40.0:  # they make five next — dead move
-                    break
+            one_ply = reply_best(grid, near, "B")
             grid[r][c] = ""
-            val -= reply
-        scored.append((val, r, c))
+            raw.append((val, one_ply, r, c))
+        if difficulty == "expert":
+            # two-ply: re-score the shortlist, treating your best
+            # reply as itself weakened by the house's best counter
+            raw.sort(key=lambda t: t[0] - t[1], reverse=True)
+            rescored: list[tuple[float, int, int]] = []
+            for val, _one_ply, r, c in raw[:8]:
+                grid[r][c] = "W"
+                best_reply = float("-inf")
+                for rr, cc in near:
+                    if grid[rr][cc]:
+                        continue
+                    rv = _gomoku_cell_value(grid, rr, cc, "B")
+                    grid[rr][cc] = "B"
+                    rv -= reply_best(grid, near, "W")
+                    grid[rr][cc] = ""
+                    if rv > best_reply:
+                        best_reply = rv
+                grid[r][c] = ""
+                if best_reply == float("-inf"):
+                    best_reply = 0.0
+                rescored.append((val - best_reply, r, c))
+            scored = rescored
+        else:
+            scored = [(val - one_ply, r, c) for val, one_ply, r, c in raw]
+    else:
+        scored = [(_gomoku_cell_value(grid, r, c, "W"), r, c)
+                  for r, c in near]
     scored.sort(key=lambda t: t[0], reverse=True)
     top = scored[0][0]
     tied = [(r, c) for s, r, c in scored if s == top]
@@ -161,7 +200,10 @@ class GomokuGame(MultiGame):
              "Say a square like h8 (columns a–o, rows 1–15) — one move "
              "per message, whenever you like. Five in a row, any "
              "direction, wins. No clock: the table stays open a week "
-             "between moves.")
+             "between moves. The house's brain scales: easy blunders "
+             "its wins sometimes, normal plays sound threats, hard "
+             "reads one move ahead, expert two. "
+             "/game gomoku [easy|normal|hard|expert].")
 
     def new_state(self, rng: random.Random,
                   difficulty: str = "normal") -> dict[str, Any]:

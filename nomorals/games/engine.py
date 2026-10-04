@@ -373,6 +373,8 @@ class GameEngine:
                 **_new_state_kwargs(
                     game, daily=daily, timed=timed,
                     difficulty=difficulty, history=history))
+            # stash difficulty on the room so start/status messages can show it
+            room.state["_difficulty"] = difficulty
             self._mirror_inventory(room)
             self._rooms[chat_key] = room
             self._by_id[room.id] = room
@@ -1307,8 +1309,9 @@ class GameEngine:
     # ── inspection ─────────────────────────────────────────────────────────
     def describe(self, room: Room) -> str:
         game = self.games.get(room.game)
+        diff = (room.state or {}).get("_difficulty", "normal")
         lines = [
-            f"🎮 {room.game} — {room.status} ({room.kind})",
+            f"🎮 {room.game} — {room.status} ({room.kind}) · 🎯 {diff}",
             "players:",
         ]
         for i, p in enumerate(room.players):

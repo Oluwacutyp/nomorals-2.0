@@ -451,8 +451,9 @@ def connect4_move(board: list[list[int]], me: int, *,
                   rng: random.Random | None = None) -> int:
     """Pick a column for ``me`` (1 or 2).
 
-    easy: immediate wins/blocks only, then a random column. normal and
-    up: iterative-deepening alpha-beta with centre-first ordering —
+    easy: usually plays random columns, and sometimes doesn't even see
+    an immediate win or block. normal and up: iterative-deepening
+    alpha-beta with centre-first ordering —
     each difficulty gets a deeper ceiling and a bigger time budget, and
     the best move of the last fully searched depth is always kept, so
     the house never stalls the chat. Always returns a legal column (or
@@ -461,6 +462,10 @@ def connect4_move(board: list[list[int]], me: int, *,
     valid = _c4_valid(board)
     if not valid:
         return -1
+    if difficulty == "easy" and rng.random() < 0.35:
+        # the easy house genuinely misses it sometimes — the win or
+        # the block sits there and it plays elsewhere
+        return rng.choice(valid)
     # take the win / block the loss — every difficulty does this first
     for col in valid:
         r = _c4_drop_row(board, col)
@@ -536,11 +541,16 @@ def battleship_shot(shots: list[list[int]], ship_sizes: tuple[int, ...], *,
                     rng: random.Random | None = None) -> tuple[int, int]:
     """Pick the next cell to fire at.
 
-    *target mode* — unresolved hits exist: finish the ship. A lone hit
-    fires at an unshot neighbor; an aligned pair extends the line.
-    *hunt mode* — probability density: every cell is scored by how many
-    legal placements of the remaining ship sizes cover it, filtered by
-    known misses. easy fires at a random parity cell instead.
+    easy: checkerboard guesses; when it hits something it pokes a
+    random neighbor (no line tracking — ships escape).
+    normal: checkerboard hunt, but a smart target mode — an aligned
+    pair of hits extends the line, a lone hit probes the neighbors.
+    hard: probability-density hunt (every cell scored by how many
+    legal placements of the remaining ship sizes cover it, filtered
+    by known misses) plus the smart target mode.
+    expert: the hard brain, but it never guesses among equals — the
+    single best-density cell wins ties deterministically, and a lone
+    hit probes the highest-density neighbor first.
     """
     rng = rng or random.Random()
     n = len(shots)
@@ -549,8 +559,64 @@ def battleship_shot(shots: list[list[int]], ship_sizes: tuple[int, ...], *,
     def unshot(r: int, c: int) -> bool:
         return 0 <= r < n and 0 <= c < n and shots[r][c] == 0
 
+    def centre_key(rc: tuple[int, int]) -> float:
+        return (abs(rc[0] - (n - 1) / 2) + abs(rc[1] - (n - 1) / 2))
+
+    def density_grid() -> list[list[int]]:
+        density = [[0] * n for _ in range(n)]
+        for size in ship_sizes:
+            for r in range(n):
+                for c in range(n):
+                    # horizontal
+                    if c + size <= n and all(shots[r][c + i] != 2
+                                             for i in range(size)):
+                        for i in range(size):
+                            if shots[r][c + i] == 0:
+                                density[r][c + i] += 1
+                    # vertical
+                    if r + size <= n and all(shots[r + i][c] != 2
+                                             for i in range(size)):
+                        for i in range(size):
+                            if shots[r + i][c] == 0:
+                                density[r + i][c] += 1
+        return density
+
+    def parity_hunt() -> tuple[int, int]:
+        parity = [(r, c) for r in range(n) for c in range(n)
+                  if shots[r][c] == 0 and (r + c) % 2 == 0]
+        pool = parity or [(r, c) for r in range(n) for c in range(n)
+                          if shots[r][c] == 0]
+        return rng.choice(pool)
+
+    def density_hunt(deterministic: bool) -> tuple[int, int]:
+        density = density_grid()
+        best = max(density[r][c] for r in range(n) for c in range(n)
+                   if shots[r][c] == 0)
+        top = [(r, c) for r in range(n) for c in range(n)
+               if shots[r][c] == 0 and density[r][c] == best]
+        # centre bias breaks ties toward the most likely waters
+        top.sort(key=centre_key)
+        if deterministic:
+            return top[0]
+        peak = centre_key(top[0])
+        tied = [rc for rc in top if centre_key(rc) == peak]
+        return rng.choice(tied)
+
+    if hits and difficulty == "easy":
+        # dumb target mode: poke a random neighbor of a random hit —
+        # no line tracking, so damaged ships regularly escape
+        nbrs = [(r + dr, c + dc) for r, c in hits
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+        live = [(r, c) for r, c in nbrs if unshot(r, c)]
+        if live:
+            return rng.choice(live)
+        # no live neighbor (shouldn't happen): fall to the hunt
+
     if hits and difficulty != "easy":
-        # orientation: an aligned pair tells us the ship's axis
+        # smart target mode: finish the ship. An aligned pair of hits
+        # reveals the axis — extend the line; a lone hit (or a
+        # non-aligned cluster) probes the neighbors.
+        density = density_grid() if difficulty == "expert" else None
         if len(hits) >= 2:
             rows = {r for r, _ in hits}
             cols = {c for _, c in hits}
@@ -567,51 +633,20 @@ def battleship_shot(shots: list[list[int]], ship_sizes: tuple[int, ...], *,
                 cands = [(lo, c), (hi, c)]
             live = [(r, c) for r, c in cands if unshot(r, c)]
             if live:
+                if density is not None:
+                    return max(live, key=lambda rc: density[rc[0]][rc[1]])
                 return rng.choice(live)
-        # lone hit (or a non-aligned cluster): probe the neighbors,
-        # preferring the axis that already has a hit
         nbrs = [(r + dr, c + dc) for r, c in hits
                 for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))]
         live = [(r, c) for r, c in nbrs if unshot(r, c)]
         if live:
+            if density is not None:
+                return max(live, key=lambda rc: density[rc[0]][rc[1]])
             return rng.choice(live)
 
-    if difficulty == "easy":
-        parity = [(r, c) for r in range(n) for c in range(n)
-                  if shots[r][c] == 0 and (r + c) % 2 == 0]
-        pool = parity or [(r, c) for r in range(n) for c in range(n)
-                          if shots[r][c] == 0]
-        return rng.choice(pool)
-
-    # hunt mode: probability density over every legal placement
-    density = [[0] * n for _ in range(n)]
-    for size in ship_sizes:
-        for r in range(n):
-            for c in range(n):
-                # horizontal
-                if c + size <= n and all(shots[r][c + i] != 2
-                                         for i in range(size)):
-                    for i in range(size):
-                        if shots[r][c + i] == 0:
-                            density[r][c + i] += 1
-                # vertical
-                if r + size <= n and all(shots[r + i][c] != 2
-                                         for i in range(size)):
-                    for i in range(size):
-                        if shots[r + i][c] == 0:
-                            density[r + i][c] += 1
-    best = max(density[r][c] for r in range(n) for c in range(n)
-               if shots[r][c] == 0)
-    top = [(r, c) for r in range(n) for c in range(n)
-           if shots[r][c] == 0 and density[r][c] == best]
-    # centre bias breaks ties toward the most likely waters
-    top.sort(key=lambda rc: -(abs(rc[0] - (n - 1) / 2)
-                              + abs(rc[1] - (n - 1) / 2)))
-    peak = top[0]
-    tied = [rc for rc in top
-            if (abs(rc[0] - (n - 1) / 2) + abs(rc[1] - (n - 1) / 2))
-            == (abs(peak[0] - (n - 1) / 2) + abs(peak[1] - (n - 1) / 2))]
-    return rng.choice(tied)
+    if difficulty in ("easy", "normal"):
+        return parity_hunt()
+    return density_hunt(deterministic=difficulty == "expert")
 
 
 # ── reversi: positional brain ────────────────────────────────────────────────
