@@ -266,25 +266,60 @@ print("----")
 print(beast("\\u1e62\\u00e9 o l\\u00e8 s\\u1ecd \\u00e8d\\u00e8 Yor\\u00f9b\\u00e1? K\\u1ecd ew\\u00ec k\\u00e9ker\\u00e9 kan f\\u00fan mi."))""")
 
 code("""#@title 8) Export GGUF for your Samsung 📱 (~2.3GB Q4_K_M)
+# Disk-smart: the 16-bit merge is done ONCE, then the GGUF is exported
+# *from the merged checkpoint* — no second 7.6GB merge, so the whole thing
+# fits Kaggle's 19.5GB /kaggle/working. (Exporting straight from the LoRA
+# model re-merges internally and blows the disk budget.)
 from unsloth import FastLanguageModel
-import glob, os
+import glob, os, shutil, gc
+import torch
 
-FastLanguageModel.for_inference(model)
+MERGED_DIR = os.path.abspath("merged_16bit")
+if not os.path.isdir(MERGED_DIR):
+    try:
+        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_16bit")
+    except Exception as e:
+        print("16-bit merge hit RAM limit — using 4-bit merge:", e)
+        MERGED_DIR = os.path.abspath("merged_4bit")
+        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_4bit")
+else:
+    print(f"♻️ reusing existing {MERGED_DIR}/ — merge already done")
 
-MERGED_DIR = "merged_16bit"
-try:
-    model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_16bit")
-except Exception as e:
-    print("16-bit merge hit RAM limit (Kaggle has ~13GB) — using 4-bit merge:", e)
-    MERGED_DIR = "merged_4bit"
-    model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_4bit")
+# free the 4-bit LoRA training model from VRAM before loading the 7.6GB merge
+if "model" in globals():
+    del globals()["model"]
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
-model.save_pretrained_gguf(f"{RUN_DIR}/codebeast_gguf", tokenizer, quantization_method="q4_k_m")
-gguf = sorted(glob.glob(f"{RUN_DIR}/codebeast_gguf/*.gguf"))
+print("loading merged checkpoint (GGUF export reuses it — no re-merge)...")
+merged_model, _ = FastLanguageModel.from_pretrained(
+    model_name=MERGED_DIR,
+    max_seq_length=SEQ_LEN,
+    load_in_4bit=False,
+)
+free_gb = shutil.disk_usage(RUN_DIR).free / 1e9
+print(f"disk free: {free_gb:.1f}GB — export needs ~10GB from the merged checkpoint")
+result = merged_model.save_pretrained_gguf(
+    f"{RUN_DIR}/codebeast_gguf", tokenizer, quantization_method="q4_k_m")
+
+# locate the finished GGUFs (newer Unsloth returns them; otherwise glob)
+gguf = []
+gdirs = []
+if isinstance(result, dict):
+    gguf = list(result.get("gguf_files", []) or [])
+    if result.get("gguf_directory"):
+        gdirs.append(result["gguf_directory"])
+gdirs += [f"{RUN_DIR}/codebeast_gguf_gguf", f"{RUN_DIR}/codebeast_gguf"]
+if not gguf:
+    for d in gdirs:
+        gguf = sorted(glob.glob(f"{d}/*.gguf"))
+        if gguf:
+            break
 print("GGUF:", gguf)
 for g in gguf:
     print(f"{g}: {os.path.getsize(g)/1e9:.2f} GB")
-print("Download it from the notebook Output panel (or Files tab) — wifi only.")""")
+print("Download the q4_k_m file from the notebook Output panel (or Files tab) — wifi only.")""")
 
 code("""#@title 9) Push the MERGED model to YOUR Hugging Face account (optional)
 # The end product for nomorals 2.0. Needs HF_TOKEN in Add-ons → Secrets.
