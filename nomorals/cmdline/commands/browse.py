@@ -108,6 +108,15 @@ class _LocalBackend:
     def fill(self, name: str, value: str) -> dict[str, Any]:
         return _active_tab(self._handle()).fill(name, value)
 
+    def select(self, name: str, value: str) -> dict[str, Any]:
+        return _active_tab(self._handle()).select(name, value)
+
+    def check(self, name: str, checked: bool = True) -> dict[str, Any]:
+        return _active_tab(self._handle()).check(name, checked)
+
+    def captcha_check(self) -> dict[str, Any]:
+        return _active_tab(self._handle()).check_captcha()
+
     def click(self, target: str) -> dict[str, Any]:
         tab = _active_tab(self._handle())
         result = tab.click(target)
@@ -191,6 +200,22 @@ class _LocalBackend:
     def r_wait(self, tab_id: str, selector: str) -> dict[str, Any]:
         return self._rtab(tab_id).wait_for(selector)
 
+    def r_wait_url(self, tab_id: str, pattern: str) -> dict[str, Any]:
+        return self._rtab(tab_id).wait_for_url(pattern)
+
+    def r_wait_text(self, tab_id: str, text: str) -> dict[str, Any]:
+        return self._rtab(tab_id).wait_for_text(text)
+
+    def r_select(self, tab_id: str, name: str, value: str) -> dict[str, Any]:
+        return self._rtab(tab_id).select(name, value)
+
+    def r_check(self, tab_id: str, name: str,
+                checked: bool = True) -> dict[str, Any]:
+        return self._rtab(tab_id).check(name, checked)
+
+    def r_captcha(self, tab_id: str) -> dict[str, Any]:
+        return self._rtab(tab_id).check_captcha()
+
     def r_extract(self, tab_id: str, target: str = "",
                   kind: str = "") -> dict[str, Any]:
         return self._rtab(tab_id).extract(target, kind=kind)
@@ -245,6 +270,15 @@ class _DaemonBackend:
 
     def fill(self, name: str, value: str) -> dict[str, Any]:
         return self._call("fill", name=name, value=value)["result"]
+
+    def select(self, name: str, value: str) -> dict[str, Any]:
+        return self._call("select", name=name, value=value)["result"]
+
+    def check(self, name: str, checked: bool = True) -> dict[str, Any]:
+        return self._call("check", name=name, checked=checked)["result"]
+
+    def captcha_check(self) -> dict[str, Any]:
+        return self._call("captcha_check")["result"]
 
     def click(self, target: str) -> dict[str, Any]:
         return self._call("click", target=target)["result"]
@@ -314,6 +348,26 @@ class _DaemonBackend:
         return self._call("r_wait", tab_id=tab_id,
                            selector=selector)["result"]
 
+    def r_wait_url(self, tab_id: str, pattern: str) -> dict[str, Any]:
+        return self._call("r_wait_url", tab_id=tab_id,
+                           pattern=pattern)["result"]
+
+    def r_wait_text(self, tab_id: str, text: str) -> dict[str, Any]:
+        return self._call("r_wait_text", tab_id=tab_id,
+                           text=text)["result"]
+
+    def r_select(self, tab_id: str, name: str, value: str) -> dict[str, Any]:
+        return self._call("r_select", tab_id=tab_id, name=name,
+                           value=value)["result"]
+
+    def r_check(self, tab_id: str, name: str,
+                checked: bool = True) -> dict[str, Any]:
+        return self._call("r_check", tab_id=tab_id, name=name,
+                           checked=checked)["result"]
+
+    def r_captcha(self, tab_id: str) -> dict[str, Any]:
+        return self._call("r_captcha", tab_id=tab_id)["result"]
+
     def r_extract(self, tab_id: str, target: str = "",
                   kind: str = "") -> dict[str, Any]:
         return self._call("r_extract", tab_id=tab_id, target=target,
@@ -357,13 +411,15 @@ def _cmd_browse(args: Any, context: Any) -> int:
         print("usage: nm browse open <url> [--session S]\n"
               "       nm browse tabs [--session S] | nm browse text|md|links\n"
               "       nm browse fill <name> <value> | nm browse click <target>\n"
+              "       nm browse select <name> <value> | nm browse check <name> [--off]\n"
+              "       nm browse captcha-check\n"
               "       nm browse submit [target] [--upload field=path ...]\n"
               "       nm browse extract [target] [--kind K]\n"
               "       nm browse task --steps-file PATH | --steps-json '[...]'\n"
               "       nm browse cookies [export|import <path> [--format F]]\n"
               "       nm browse proxy status|rotate|set <url>|clear\n"
               "       nm browse downloads [--category C] [--limit N]\n"
-              "       nm browse rtab open <url> | rtab tabs|shot|fill|click|submit|wait|extract|download\n"
+              "       nm browse rtab open <url> | rtab tabs|shot|fill|click|submit|wait|wait-url|wait-text|select|check|captcha|extract|download\n"
               "       nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
               "       nm browse history | nm browse close | nm browse sessions\n"
               "       nm browse daemon start|stop|status",
@@ -385,6 +441,12 @@ def _cmd_browse(args: Any, context: Any) -> int:
             return _browse_links(args, context)
         if verb == "fill":
             return _browse_fill(args, context, words[1:])
+        if verb == "select":
+            return _browse_select(args, context, words[1:])
+        if verb == "check":
+            return _browse_check(args, context, words[1:])
+        if verb == "captcha-check":
+            return _browse_captcha_check(args, context)
         if verb == "click":
             return _browse_click(args, context, words[1:])
         if verb == "submit":
@@ -613,6 +675,54 @@ def _browse_click(args: Any, context: Any, rest: list[str]) -> int:
     return 0
 
 
+def _browse_select(args: Any, context: Any, rest: list[str]) -> int:
+    if len(rest) < 2:
+        print("usage: nm browse select <name> <value> [--session S]",
+              file=sys.stderr)
+        return 2
+    backend = _backend(args, context)
+    result = backend.select(rest[0], " ".join(rest[1:]))
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"selected {result.get('picked')!r} in {rest[0]!r}")
+    return 0
+
+
+def _browse_check(args: Any, context: Any, rest: list[str]) -> int:
+    if not rest:
+        print("usage: nm browse check <name> [--off] [--session S]",
+              file=sys.stderr)
+        return 2
+    checked = "--off" not in rest
+    name = rest[0]
+    backend = _backend(args, context)
+    result = backend.check(name, checked)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"{'checked' if result.get('checked') else 'unchecked'} {name!r}")
+    return 0
+
+
+def _browse_captcha_check(args: Any, context: Any) -> int:
+    backend = _backend(args, context)
+    result = backend.captcha_check()
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        challenges = result.get("challenges") or []
+        if not challenges:
+            print(f"no captcha on {result.get('url') or 'this page'}")
+        else:
+            print(f"{len(challenges)} captcha(s) on {result.get('url')}:")
+            for ch in challenges:
+                print(f"  - {ch.get('kind')} "
+                      f"(sitekey: {ch.get('sitekey') or 'n/a'}, "
+                      f"domain: {ch.get('domain') or 'n/a'})")
+    return 0
+
+
 def _parse_uploads(args: Any) -> tuple[dict[str, str] | None, int]:
     """Parse repeatable --upload field=path flags. Returns (uploads, rc)."""
     uploads: dict[str, str] = {}
@@ -751,8 +861,13 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
         print("usage: nm browse rtab open <url> [--proxy P] | rtab tabs\n"
               "       nm browse rtab close|shot <tab-id>\n"
               "       nm browse rtab fill <tab-id> <name> <value>\n"
+              "       nm browse rtab select <tab-id> <name> <value>\n"
+              "       nm browse rtab check <tab-id> <name> [--off]\n"
+              "       nm browse rtab captcha <tab-id>\n"
               "       nm browse rtab click|submit <tab-id> <target>\n"
               "       nm browse rtab wait <tab-id> <selector>\n"
+              "       nm browse rtab wait-url <tab-id> <pattern>\n"
+              "       nm browse rtab wait-text <tab-id> <text>\n"
               "       nm browse rtab extract <tab-id> [target] [--kind K]\n"
               "       nm browse rtab download <tab-id> <target>",
               file=sys.stderr)
@@ -820,6 +935,38 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
                   file=sys.stderr)
             return 2
         result = backend.r_wait(rest[1], rest[2])
+    elif sub == "wait-url":
+        if len(rest) < 3:
+            print("usage: nm browse rtab wait-url <tab-id> <pattern>\n"
+                  "       (substring, or re:regex for SPAs)",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_wait_url(rest[1], " ".join(rest[2:]))
+    elif sub == "wait-text":
+        if len(rest) < 3:
+            print("usage: nm browse rtab wait-text <tab-id> <text>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_wait_text(rest[1], " ".join(rest[2:]))
+    elif sub == "select":
+        if len(rest) < 4:
+            print("usage: nm browse rtab select <tab-id> <name> <value>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_select(rest[1], rest[2], " ".join(rest[3:]))
+    elif sub == "check":
+        if len(rest) < 3:
+            print("usage: nm browse rtab check <tab-id> <name> [--off]",
+                  file=sys.stderr)
+            return 2
+        checked = "--off" not in rest[3:]
+        result = backend.r_check(rest[1], rest[2], checked)
+    elif sub == "captcha":
+        if len(rest) < 2:
+            print("usage: nm browse rtab captcha <tab-id>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_captcha(rest[1])
     elif sub == "extract":
         if len(rest) < 2:
             print("usage: nm browse rtab extract <tab-id> [target] [--kind K]",

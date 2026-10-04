@@ -2189,6 +2189,11 @@ def _parser() -> argparse.ArgumentParser:
         "assist", help="Browser-assisted signup (runs in background, reports back)")
     trial_assist.add_argument("platform", help="platform name")
     trial_sub.add_parser("status", help="Status of background assisted signups")
+    trial_resume = trial_sub.add_parser(
+        "resume", help="Continue a paused account flow after the human step")
+    trial_resume.add_argument("checkpoint_id", help="checkpoint id to resume")
+    trial_resume.add_argument("--note", default="",
+                              help="note recorded with the resolution")
     trial_sms = trial_sub.add_parser(
         "sms", help="Grab a free temp number for SMS verification")
     trial_sms.add_argument("country", nargs="?", default="us",

@@ -385,5 +385,142 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn("K3Y", json.dumps(out))
 
 
+# ── Round 19: inline data-URI images, audio challenges, byte fetching ─────────
+
+import base64 as _b64  # noqa: E402
+
+
+class InlineImageTests(unittest.TestCase):
+    def test_data_uri_image_decoded_into_bytes(self):
+        payload = _b64.b64encode(b"\x89PNG" + b"\x00" * 100).decode()
+        html = (
+            '<html><body><img class="captcha" '
+            f'src="data:image/png;base64,{payload}" alt="captcha"></body></html>'
+        )
+        found = cap.detect(html, "https://example.com/")
+        imgs = [c for c in found if c.kind == cap.CaptchaKind.IMAGE_CAPTCHA]
+        self.assertEqual(1, len(imgs))
+        self.assertTrue(imgs[0].image_url.startswith("data:"))
+        self.assertEqual(b"\x89PNG" + b"\x00" * 100, imgs[0].image_bytes)
+
+    def test_malformed_data_uri_yields_empty_bytes_not_crash(self):
+        html = ('<html><body><img class="captcha" '
+                'src="data:image/png;base64,!!!not-base64!!!" '
+                'alt="captcha"></body></html>')
+        found = cap.detect(html, "https://example.com/")
+        imgs = [c for c in found if c.kind == cap.CaptchaKind.IMAGE_CAPTCHA]
+        self.assertEqual(1, len(imgs))
+        self.assertEqual(b"", imgs[0].image_bytes)
+
+    def test_summary_truncates_inline_image(self):
+        payload = _b64.b64encode(b"x" * 5000).decode()
+        html = (
+            '<html><body><img class="captcha" '
+            f'src="data:image/png;base64,{payload}"></body></html>'
+        )
+        found = cap.detect(html, "https://example.com/")
+        summary = found[0].summary()
+        self.assertLess(len(summary["image_url"]), 200)
+        self.assertEqual(5000, summary["image_bytes"])
+
+    def test_fetch_bytes_downloads_remote_image(self):
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return fake_png
+
+        with mock.patch.object(cap.urllib.request, "urlopen",
+                               return_value=_Resp()):
+            found = cap.detect(IMAGE_HTML, "https://example.com/form",
+                               fetch_bytes=True)
+        imgs = [c for c in found if c.kind == cap.CaptchaKind.IMAGE_CAPTCHA]
+        self.assertEqual(1, len(imgs))
+        self.assertEqual(fake_png, imgs[0].image_bytes)
+
+    def test_fetch_bytes_failure_leaves_empty_bytes(self):
+        with mock.patch.object(cap.urllib.request, "urlopen",
+                               side_effect=OSError("down")):
+            found = cap.detect(IMAGE_HTML, "https://example.com/form",
+                               fetch_bytes=True)
+        imgs = [c for c in found if c.kind == cap.CaptchaKind.IMAGE_CAPTCHA]
+        self.assertEqual(1, len(imgs))
+        self.assertEqual(b"", imgs[0].image_bytes)
+
+    def test_default_detect_stays_pure_no_network(self):
+        with mock.patch.object(cap.urllib.request, "urlopen",
+                               side_effect=AssertionError("no net")):
+            found = cap.detect(IMAGE_HTML, "https://example.com/form")
+        imgs = [c for c in found if c.kind == cap.CaptchaKind.IMAGE_CAPTCHA]
+        self.assertEqual(b"", imgs[0].image_bytes)
+
+
+class AudioCaptchaTests(unittest.TestCase):
+    AUDIO_HTML = """
+    <html><body>
+    <div class="g-recaptcha" data-sitekey="6Le-AAAAv2sitekey123"></div>
+    <div id="rc-audio">Get an audio challenge</div>
+    <audio src="https://www.google.com/recaptcha/api2/payload/audio?k=abc"></audio>
+    </body></html>
+    """
+
+    def test_audio_challenge_detected(self):
+        found = cap.detect(self.AUDIO_HTML, "https://example.com/")
+        kinds = {c.kind for c in found}
+        self.assertIn(cap.CaptchaKind.AUDIO_CAPTCHA, kinds)
+        audio = [c for c in found
+                 if c.kind == cap.CaptchaKind.AUDIO_CAPTCHA][0]
+        self.assertIn("google.com", audio.image_url)
+
+    def test_audio_service_solve_sends_audio_method(self):
+        posted: dict = {}
+
+        class _Resp:
+            def __init__(self, body):
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return self._body
+
+        def fake_urlopen(req, timeout=30):
+            url = req.full_url
+            if url.endswith("/in.php?") or "/in.php?" in url:
+                posted["in"] = url
+                return _Resp(b'{"status":1,"request":"task-1"}')
+            posted["res"] = url
+            return _Resp(b'{"status":1,"request":"spoken words"}')
+
+        ch = cap.CaptchaChallenge(
+            kind=cap.CaptchaKind.AUDIO_CAPTCHA,
+            page_url="https://example.com/",
+            image_bytes=b"FAKEAUDIO" * 100)
+        backend = cap.ServiceBackend(api_key="K", sleeper=lambda s: None)
+        with mock.patch.object(cap.urllib.request, "urlopen", fake_urlopen):
+            result = backend.solve(ch)
+        self.assertTrue(result.ok)
+        self.assertEqual("spoken words", result.text)
+        self.assertIn("method=audio", posted["in"])
+
+    def test_audio_solve_without_bytes_raises_clean_error(self):
+        ch = cap.CaptchaChallenge(kind=cap.CaptchaKind.AUDIO_CAPTCHA,
+                                  page_url="https://example.com/")
+        backend = cap.ServiceBackend(api_key="K", sleeper=lambda s: None)
+        with self.assertRaises(cap.CaptchaError) as ctx:
+            backend.solve(ch)
+        self.assertIn("bytes", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

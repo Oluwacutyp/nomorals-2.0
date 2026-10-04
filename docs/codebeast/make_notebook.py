@@ -205,33 +205,26 @@ if _dropped:
     print(f"⚠️ this transformers doesn't accept {_dropped} — skipping")
 args = {k: v for k, v in args.items() if k in _valid}
 
-def _fmt(examples):
-    # Unsloth calls this on ONE row and demands a LIST of strings back;
-    # TRL-style callers pass a whole batch dict. Handle every shape so the
-    # probe `isinstance(formatting_func(next(iter(ds))), list)` passes and
-    # real mapping still yields one rendered string per conversation.
-    if isinstance(examples, dict):
-        msgs = examples.get("messages", [])
-    else:  # list of row dicts
-        convos = [r.get("messages", []) for r in examples]
-        return [tokenizer.apply_chat_template(
-            c, tokenize=False, add_generation_prompt=False) for c in convos]
-    if msgs and isinstance(msgs[0], dict):
-        convos = [msgs]      # single row: messages IS the conversation
-    else:
-        convos = msgs        # batch: messages is a list of conversations
-    return [tokenizer.apply_chat_template(
-        c, tokenize=False, add_generation_prompt=False) for c in convos]
+def _render_text(batch):
+    # Render the "messages" column through the chat template into a plain
+    # "text" column with stable datasets.map — no formatting_func passed to
+    # the trainer at all, so Unsloth's ever-changing formatting contract
+    # (probe shapes, re-application, list-vs-dict) can't bite us.
+    return {"text": [tokenizer.apply_chat_template(
+        c, tokenize=False, add_generation_prompt=False)
+        for c in batch["messages"]]}
+
+train_ds = train_ds.map(_render_text, batched=True, batch_size=1000,
+                        remove_columns=["messages"], desc="rendering train text")
+val_ds = val_ds.map(_render_text, batched=True, batch_size=1000,
+                    remove_columns=["messages"], desc="rendering val text")
 
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     train_dataset=train_ds,
     eval_dataset=val_ds,
-    # Newer Unsloth/TRL *requires* formatting_func when there is no plain
-    # text column. Our data has a "messages" column -> render it through
-    # the model's chat template into text.
-    formatting_func=_fmt,
+    dataset_text_field="text",
     max_seq_length=SEQ_LEN,
     args=TrainingArguments(**args),
 )

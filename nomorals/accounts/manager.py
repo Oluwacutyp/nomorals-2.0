@@ -58,7 +58,125 @@ class AccountManager:
     
     def __init__(self, vault: CredentialVault) -> None:
         self.vault = vault
+        self._ensure_defaults_schema()
         _log.info("Account manager initialized")
+
+    def _ensure_defaults_schema(self) -> None:
+        """Create the per-service default-account table if missing."""
+        with self.vault.db.transaction():
+            self.vault.db.execute("""
+                CREATE TABLE IF NOT EXISTS account_defaults (
+                    service TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+
+    # ── default account per service (account switching) ──────────────────
+    #
+    # Several usernames can live in the vault for one service; the default
+    # is the one automation reaches for when the caller doesn't pin one.
+
+    def set_default(self, service: str, username: str) -> None:
+        """Make ``username`` the default account for ``service``.
+
+        Fails fast when no such credential exists — a default must always
+        point at something real.
+        """
+        service = (service or "").strip()
+        username = (username or "").strip()
+        if not service or not username:
+            raise ValueError("set_default needs a service and a username")
+        # Fail fast on unknown credentials (no usage mark — this is admin).
+        self.vault.get(service, username, mark_used=False)
+        with self.vault.db.transaction():
+            self.vault.db.execute(
+                "INSERT OR REPLACE INTO account_defaults "
+                "(service, username, updated_at) VALUES (?, ?, ?)",
+                (service, username, time.time()),
+            )
+        _log.info("default account for %s -> %s", service, username)
+
+    def get_default(self, service: str) -> str | None:
+        """The default username for ``service``, or None when unset."""
+        row = self.vault.db.query_one(
+            "SELECT username FROM account_defaults WHERE service = ?",
+            ((service or "").strip(),),
+        )
+        return row["username"] if row else None
+
+    def clear_default(self, service: str) -> bool:
+        """Remove the default for ``service``. Returns True when one existed."""
+        with self.vault.db.transaction():
+            cur = self.vault.db.execute(
+                "DELETE FROM account_defaults WHERE service = ?",
+                ((service or "").strip(),),
+            )
+        cleared = cur.rowcount > 0
+        if cleared:
+            _log.info("cleared default account for %s", service)
+        return cleared
+
+    def default_credential(self, service: str) -> Credential | None:
+        """The default account's credential for ``service`` (decrypted).
+
+        Returns None when no default is set; raises NotFound when the
+        default points at a credential that no longer exists (stale
+        pointer — clear it with :meth:`clear_default`).
+        """
+        username = self.get_default(service)
+        if username is None:
+            return None
+        return self.vault.get(service, username)
+
+    def resolve_account(self, service: str,
+                        username: str | None = None) -> Credential:
+        """Pin ``username``, else the service default, else the single
+        stored account — the "which account?" decision in one call.
+
+        Raises NotFound when nothing resolves.
+        """
+        service = (service or "").strip()
+        if username:
+            return self.vault.get(service, username)
+        default = self.get_default(service)
+        if default:
+            return self.vault.get(service, default)
+        creds = self.vault.list_all(service=service, active_only=True)
+        if len(creds) == 1:
+            return self.vault.get(service, creds[0].username)
+        if not creds:
+            raise NotFound(f"no account stored for service {service!r}")
+        raise NotFound(
+            f"{len(creds)} accounts stored for {service!r} and no default "
+            "is set — set one with set_default() or pin a username")
+
+    # ── credential rotation ──────────────────────────────────────────────
+
+    def rotate_credential_auto(
+        self,
+        service: str,
+        username: str,
+        *,
+        length: int = 32,
+        symbols: bool = True,
+    ) -> Credential:
+        """Generate a fresh cryptographically-secure password and rotate the
+        vault credential to it. Returns the updated Credential.
+
+        This is the "expired password → generate new + update vault" step,
+        automated. The new secret lives only in the vault — applying it on
+        the service itself (the site's "change password" form) is the
+        caller's job, because every service's rotation flow differs.
+        Pair with :mod:`nomorals.accounts.browser_login` when the service
+        exposes its password-change page over the web.
+        """
+        from .creator import generate_password
+
+        new_password = generate_password(length=length, symbols=symbols)
+        cred = self.vault.rotate(service, username, new_password)
+        _log.info("auto-rotated credential: %s/%s", service, username)
+        return cred
     
     def get_credential(self, service: str, username: str) -> Credential:
         """Get credentials for a specific account.

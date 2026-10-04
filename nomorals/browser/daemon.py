@@ -537,6 +537,19 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         tab = _active_tab_or_raise(_get_or_open(svc, name))
         return {"result": tab.fill(params.get("name") or "",
                                    params.get("value") or "")}
+    if op == "select":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.select(params.get("name") or "",
+                                     params.get("value") or "")}
+    if op == "check":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.check(
+            params.get("name") or "",
+            bool(params.get("checked", True)))}
+    if op == "captcha_check":
+        tab = _active_tab_or_raise(_get_or_open(svc, name))
+        return {"result": tab.check_captcha(
+            fetch_bytes=bool(params.get("fetch_bytes")))}
     if op == "click":
         tab = _active_tab_or_raise(_get_or_open(svc, name))
         return {"result": tab.click(params.get("target") or "")}
@@ -622,6 +635,31 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
             params.get("selector") or "",
             state=params.get("state") or "visible",
             timeout=int(params.get("timeout") or 10_000))}
+    if op == "r_wait_url":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for_url(
+            params.get("pattern") or "",
+            timeout=int(params.get("timeout") or 10_000))}
+    if op == "r_wait_text":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for_text(
+            params.get("text") or "",
+            timeout=int(params.get("timeout") or 10_000))}
+    if op == "r_select":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.select(
+            params.get("name") or "",
+            params.get("value") or "",
+            by=params.get("by") or "auto")}
+    if op == "r_check":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.check(
+            params.get("name") or "",
+            bool(params.get("checked", True)))}
+    if op == "r_captcha":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.check_captcha(
+            fetch_bytes=bool(params.get("fetch_bytes")))}
     if op == "r_extract":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.extract(params.get("target") or "",

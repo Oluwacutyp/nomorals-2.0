@@ -21,6 +21,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -232,6 +233,22 @@ class Tab:
 
     def fill(self, name: str, value: str) -> dict[str, Any]:
         return self._delegate("fill", name, value)
+
+    def select(self, name: str, value: str) -> dict[str, Any]:
+        """Pick a ``<select>`` dropdown option (submitted on next submit)."""
+        return self._delegate("select", name, value)
+
+    def check(self, name: str, checked: bool = True) -> dict[str, Any]:
+        """Check/uncheck a checkbox, or pick a radio button."""
+        return self._delegate("check", name, checked)
+
+    def check_captcha(self, *, fetch_bytes: bool = False) -> dict[str, Any]:
+        """One-call captcha scan of this tab's current page HTML."""
+        from ..tools.captcha import detect
+        raw = getattr(self.session, "_raw", "") or ""
+        found = detect(raw, self.url, fetch_bytes=fetch_bytes)
+        return {"url": self.url, "count": len(found),
+                "challenges": [c.summary() for c in found]}
 
     def upload(self, field_name: str, file_path: str) -> dict[str, Any]:
         """Stage a file for a ``<input type="file">`` field, then submit.
@@ -528,12 +545,56 @@ class RenderedTab:
         escaped = (name or "").replace('"', '\\"')
         return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"], [id="{escaped}"]'
 
+    def _field_kind(self, name: str) -> dict[str, str]:
+        """Inspect the first matching field's tag/type via the live DOM.
+
+        Returns {"tag": ..., "type": ...} (lowercased); raises BrowserError
+        when nothing matches, so callers fail fast instead of guessing.
+        """
+        page = self._require_loaded()
+        selector = self._field_selector(name)
+        js = """(sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            return {tag: (el.tagName || '').toLowerCase(),
+                    type: ((el.getAttribute('type') || '')).toLowerCase()};
+        }"""
+        try:
+            info = page.evaluate(js, selector)
+        except Exception as exc:  # noqa: BLE001 - eval errors are opaque
+            raise BrowserError(
+                f"rendered field inspection of {name!r} on {self.url} "
+                f"failed: {exc}") from exc
+        if not info:
+            raise BrowserError(
+                f"no form field {name!r} on {self.url}")
+        return {"tag": info.get("tag", ""), "type": info.get("type", "")}
+
     def fill(self, name: str, value: str) -> dict[str, Any]:
-        """Fill a form field by name or id on the rendered page."""
+        """Fill a form field by name or id on the rendered page.
+
+        Type-aware: ``<select>`` fields route to :meth:`select`,
+        checkboxes/radios route to :meth:`check`, file inputs fail fast
+        with a pointer to :meth:`upload` — plain ``page.fill`` only ever
+        touches real text-like inputs, so a select no longer dies with an
+        opaque playwright error.
+        """
         page = self._require_loaded()
         name = (name or "").strip()
         if not name:
             raise BrowserError("rendered fill needs a field name")
+        kind = self._field_kind(name)
+        tag, ftype = kind["tag"], kind["type"]
+        if tag == "select":
+            return self.select(name, value)
+        if tag == "input" and ftype in {"checkbox", "radio"}:
+            truthy = str(value).strip().lower() not in {
+                "", "0", "false", "no", "off", "unchecked"}
+            return self.check(name, checked=truthy)
+        if tag == "input" and ftype == "file":
+            raise BrowserError(
+                f"field {name!r} is a file input — use rendered upload, "
+                "not fill")
         selector = self._field_selector(name)
         try:
             page.fill(selector, str(value))
@@ -541,6 +602,79 @@ class RenderedTab:
             raise BrowserError(
                 f"rendered fill of {name!r} on {self.url} failed: {exc}") from exc
         return {"ok": True, "field": name, "tab_id": self.tab_id}
+
+    def select(self, name: str, value: str, *,
+               by: str = "auto") -> dict[str, Any]:
+        """Pick an option of a ``<select>`` dropdown by name or id.
+
+        ``by``: "auto" (default) tries the option *value* first, then the
+        visible *label*; "value" and "label" pin the match. Fail fast when
+        the field is not a ``<select>`` or the option does not exist.
+        """
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("rendered select needs a field name")
+        kind = self._field_kind(name)
+        if kind["tag"] != "select":
+            raise BrowserError(
+                f"field {name!r} is a <{kind['tag']}> "
+                f"(type={kind['type'] or 'n/a'}), not a <select>")
+        by = (by or "auto").strip().lower()
+        if by not in {"auto", "value", "label"}:
+            raise BrowserError(
+                f"unknown select match {by!r} (want auto|value|label)")
+        selector = self._field_selector(name)
+        attempts = ([{"value": value}, {"label": value}] if by == "auto"
+                    else [{"value": value}] if by == "value"
+                    else [{"label": value}])
+        last_exc: Exception | None = None
+        for kw in attempts:
+            try:
+                picked = page.select_option(selector, **kw)
+            except Exception as exc:  # noqa: BLE001 - opaque
+                last_exc = exc
+                continue
+            if picked:
+                return {"ok": True, "field": name, "picked": picked,
+                        "tab_id": self.tab_id}
+            last_exc = BrowserError(
+                f"no option matching {value!r} in select {name!r}")
+        raise BrowserError(
+            f"rendered select of {value!r} in {name!r} on {self.url} "
+            f"failed: {last_exc}") from last_exc
+
+    def check(self, name: str, checked: bool = True) -> dict[str, Any]:
+        """Check/uncheck a checkbox (or pick a radio) by name or id.
+
+        Fail fast when the field is not a checkable input.
+        """
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("rendered check needs a field name")
+        kind = self._field_kind(name)
+        if kind["tag"] != "input" or kind["type"] not in {"checkbox",
+                                                          "radio"}:
+            raise BrowserError(
+                f"field {name!r} is a <{kind['tag']}> "
+                f"(type={kind['type'] or 'n/a'}), not a checkbox/radio")
+        if kind["type"] == "radio" and not checked:
+            raise BrowserError(
+                f"field {name!r} is a radio button — radios cannot be "
+                "unchecked, pick another option in the group instead")
+        selector = self._field_selector(name)
+        try:
+            if checked:
+                page.check(selector)
+            else:
+                page.uncheck(selector)
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise BrowserError(
+                f"rendered {'check' if checked else 'uncheck'} of {name!r} "
+                f"on {self.url} failed: {exc}") from exc
+        return {"ok": True, "field": name, "checked": bool(checked),
+                "tab_id": self.tab_id}
 
     def click(self, target: str) -> dict[str, Any]:
         """Click a link/button: CSS selector when it looks like one
@@ -614,6 +748,73 @@ class RenderedTab:
                 f"rendered wait_for {selector!r} ({state}) on {self.url} "
                 f"timed out after {timeout}ms: {exc}") from exc
         return {"ok": True, "selector": selector, "state": state}
+
+    def wait_for_url(self, pattern: str = "",
+                     timeout: int = 10_000) -> dict[str, Any]:
+        """Wait until the page URL matches ``pattern`` (substring or
+        ``re:``-prefixed regex). Built for SPAs, where navigation happens
+        without a page load after a click/submit. Fail fast on timeout."""
+        page = self._require_loaded()
+        pattern = (pattern or "").strip()
+        if not pattern:
+            raise BrowserError("rendered wait_for_url needs a pattern")
+        try:
+            if pattern.startswith("re:"):
+                page.wait_for_url(re.compile(pattern[3:]),
+                                  timeout=int(timeout))
+            else:
+                page.wait_for_url(f"*{pattern}*", timeout=int(timeout))
+        except Exception as exc:  # noqa: BLE001 - timeout errors are opaque
+            raise BrowserError(
+                f"rendered wait_for_url {pattern!r} on {self.url} timed "
+                f"out after {timeout}ms: {exc}") from exc
+        try:
+            self.url = page.url
+            self.title = page.title()
+        except Exception:  # noqa: BLE001 - cosmetic
+            pass
+        return {"ok": True, "pattern": pattern, "url": self.url}
+
+    def wait_for_text(self, text: str = "",
+                      timeout: int = 10_000) -> dict[str, Any]:
+        """Wait until ``text`` appears anywhere in the rendered page.
+
+        The dynamic-content counterpart to :meth:`wait_for`: SPAs that
+        fetch content via XHR never add new selectors, but the text shows
+        up. Fail fast on timeout.
+        """
+        page = self._require_loaded()
+        text = (text or "").strip()
+        if not text:
+            raise BrowserError("rendered wait_for_text needs text")
+        try:
+            page.get_by_text(text).first.wait_for(timeout=int(timeout))
+        except Exception as exc:  # noqa: BLE001 - timeout errors are opaque
+            raise BrowserError(
+                f"rendered wait_for_text {text!r} on {self.url} timed out "
+                f"after {timeout}ms: {exc}") from exc
+        return {"ok": True, "text": text}
+
+    def check_captcha(self, *, fetch_bytes: bool = False) -> dict[str, Any]:
+        """One-call captcha scan of the live rendered page.
+
+        Runs :func:`nomorals.tools.captcha.detect` over the current DOM —
+        the bot asks "is there a captcha on this page?" without scraping
+        HTML itself. Returns the same challenge summaries the captcha
+        tool reports (kind, sitekey, domain, image info).
+        """
+        from ..tools.captcha import detect
+        page = self._require_loaded()
+        try:
+            html = page.content()
+            url = page.url
+        except Exception as exc:  # noqa: BLE001 - read errors are opaque
+            raise BrowserError(
+                f"rendered check_captcha on {self.url} failed: {exc}") from exc
+        found = detect(html, url, fetch_bytes=fetch_bytes)
+        self.url = url
+        return {"url": url, "count": len(found),
+                "challenges": [c.summary() for c in found]}
 
     def screenshot(self, *, full_page: bool = False,
                    path: str | os.PathLike[str] | None = None) -> dict[str, Any]:

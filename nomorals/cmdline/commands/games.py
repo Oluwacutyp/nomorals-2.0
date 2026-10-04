@@ -80,6 +80,16 @@ def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
         print(flow.assist_status())
         return 0
 
+    if cmd == "resume":
+        checkpoint_id = (getattr(args, "checkpoint_id", "") or "").strip()
+        if not checkpoint_id:
+            print("trial resume needs a checkpoint id — "
+                  "nm trial resume <checkpoint-id>", file=sys.stderr)
+            return 2
+        print(flow.resume(checkpoint_id,
+                          note=getattr(args, "note", "") or ""))
+        return 0
+
     if cmd == "sms":
         print(flow.temp_number(getattr(args, "country", "us") or "us"))
         return 0

@@ -266,6 +266,92 @@ class TrialFlow:
             "check status: /trial status"
         )
 
+    def resume(self, checkpoint_id: str, *, note: str = "",
+               chat_key: str = "") -> str:
+        """Continue a paused account flow from chat: ``/trial resume <id>``.
+
+        The phone-side counterpart of ``nm account resume --id``: after the
+        owner completes the human step (solves the CAPTCHA, finishes the
+        manual signup), one chat message continues the flow — no SSH, no
+        CLI. Returns a truthful status either way.
+        """
+        checkpoint_id = (checkpoint_id or "").strip()
+        if not checkpoint_id:
+            return "usage: /trial resume <checkpoint-id>"
+        if not os.environ.get("NM_VAULT_PASSPHRASE", ""):
+            return (
+                "vault is locked: set the NM_VAULT_PASSPHRASE environment "
+                "variable so I can store the credentials, then ask me again."
+            )
+        try:
+            from ...accounts.creator import (
+                AccountCheckpoint,
+                AccountCheckpointPending,
+                AccountCreator,
+                CreatedAccount,
+            )
+            from ...accounts.vault import CredentialVault
+            from ...core.errors import NotFound
+        except Exception as exc:  # noqa: BLE001
+            return f"account automation unavailable: {exc}"
+
+        vault = CredentialVault(
+            self.db,
+            master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""),
+        )
+        creator = AccountCreator(vault, db=self.db)
+        try:
+            cp = creator.checkpoints.get(checkpoint_id)
+        except NotFound:
+            return f"no checkpoint {checkpoint_id!r} — check /trial status"
+        if cp.state.value != "pending":
+            return (f"checkpoint {checkpoint_id} is already {cp.state.value} "
+                    f"({cp.title}) — nothing to resume")
+        identity = self._owner_identity()
+        try:
+            result = creator.resume_checkpoint(
+                checkpoint_id, note,
+                owner_name=identity.get("name") or None,
+                owner_email=identity.get("email") or None)
+        except AccountCheckpointPending as pending:
+            nxt = pending.checkpoint
+            return (
+                "⏸️ still paused — one more human step:\n\n"
+                f"**{nxt.title}**\n{nxt.instructions}\n\n"
+                f"When you're done: `/trial resume {nxt.id}`"
+            )
+        except Exception as exc:  # noqa: BLE001 - truthful report
+            _log.exception("trial resume %s failed", checkpoint_id)
+            return f"❌ resume failed: {exc}"
+
+        if isinstance(result, CreatedAccount):
+            return (
+                f"✅ account ready — {result.service}, username: "
+                f"{result.username}"
+                + (f", email: {result.email}" if result.email else "")
+                + ". Credentials are stored in the vault."
+            )
+        if isinstance(result, AccountCheckpoint):
+            flow = (result.resume_state or {}).get("flow", "")
+            service = result.service or (result.resume_state or {}).get(
+                "service", "")
+            if flow in ("captcha_takeover",) and service:
+                # The human step is done; the dead browser session is not
+                # coming back — re-drive the signup automatically instead
+                # of asking the owner to type another command.
+                retry = self.assist(service, chat_key=chat_key)
+                return (
+                    f"✅ human step recorded ({result.title}).\n\n"
+                    f"Re-driving the signup automatically:\n{retry}"
+                )
+            if flow == "need_identity":
+                return (
+                    "✅ identity recorded. Re-run the signup to continue:\n"
+                    f"  /trial assist {service}" if service else
+                    "✅ identity recorded.")
+            return f"✅ checkpoint resolved: {result.title}"
+        return f"✅ resumed {checkpoint_id}"
+
     def _assist_run(self, run_id: str, platform: str, chat_key: str,
                     identity: dict[str, str]) -> None:
         """Background body of :meth:`assist` — runs the real creator."""
@@ -309,7 +395,8 @@ class TrialFlow:
             note = (
                 "⏸️ account creation paused — I need your help:\n\n"
                 f"**{cp.title}**\n{cp.instructions}\n\n"
-                f"When you're done: `nm account resume --id {cp.id}`"
+                f"When you're done, just say: `/trial resume {cp.id}`\n"
+                f"(or on the machine: `nm account resume --id {cp.id}`)"
             )
             ok = True
         except Exception as exc:  # noqa: BLE001 - the report must go out

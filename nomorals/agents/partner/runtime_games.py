@@ -860,6 +860,10 @@ class RuntimeGamesMixin:
             return flow.assist(" ".join(parts[1:]), chat_key=chat_key)
         if verb == "status":
             return flow.assist_status()
+        if verb == "resume":
+            if len(parts) < 2:
+                return "usage: /trial resume <checkpoint-id>"
+            return flow.resume(parts[1], chat_key=chat_key)
         if verb == "sms":
             rest = parts[1:]
             if rest and rest[0].lower() == "code":
@@ -890,7 +894,7 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial rm <platform>"
             return flow.remove(parts[1])
-        return ("usage: /trial [list|start <p>|assist <p>|status|sms [country]|"
+        return ("usage: /trial [list|start <p>|assist <p>|status|resume <id>|sms [country]|"
                 "sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]")
 
     # ── sports bet analyst: /bet (analysis only — never places bets) ─────────

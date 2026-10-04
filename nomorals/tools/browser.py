@@ -485,6 +485,78 @@ class BrowserSession:
         return {"ok": True, "field": name,
                 "pending": sorted(self._form_values)}
 
+    def _find_field(self, name: str) -> Any:
+        """First form field node with this name (or id), or None."""
+        name = (name or "").strip()
+        for form in self.dom.find_all("form"):
+            for field in _form_fields(form):
+                if field.attrs.get("name") == name \
+                        or field.attrs.get("id") == name:
+                    return field
+        return None
+
+    def select(self, name: str = "", value: str = "", **_: Any) -> dict[str, Any]:
+        """Pick a ``<select>`` dropdown option (submitted on the next submit).
+
+        ``value`` matches the option's ``value`` attribute first, then its
+        visible text. Fail fast when the field is not a ``<select>`` or no
+        option matches — a typo'd option name must not silently submit the
+        dropdown's default.
+        """
+        self._require_page()
+        field = self._find_field(name or "")
+        if field is None:
+            raise ToolError(f"browser select: no form field {name!r}")
+        if (field.tag or "").lower() != "select":
+            raise ToolError(
+                f"browser select: field {name!r} is a <{field.tag}>, "
+                "not a <select>")
+        picked = ""
+        for opt in field.find_all("option"):
+            opt_value = opt.attrs.get("value", "")
+            label = opt.inner_text().strip()
+            if value == opt_value or (opt_value == "" and value == label) \
+                    or value == label:
+                picked = opt_value if "value" in opt.attrs else label
+                break
+        if not picked and value:
+            options = [o.attrs.get("value", o.inner_text().strip()[:40])
+                       for o in field.find_all("option")[:10]]
+            raise ToolError(
+                f"browser select: no option {value!r} in {name!r} "
+                f"(options: {options})")
+        self._form_values[name] = picked
+        return {"ok": True, "field": name, "picked": picked,
+                "pending": sorted(self._form_values)}
+
+    def check(self, name: str = "", checked: bool = True, **_: Any) -> dict[str, Any]:
+        """Check/uncheck a checkbox, or pick a radio button.
+
+        HTTP forms only submit *checked* boxes, so unchecking removes the
+        field from the pending values entirely. Fail fast when the field
+        is not a checkbox/radio.
+        """
+        self._require_page()
+        field = self._find_field(name or "")
+        if field is None:
+            raise ToolError(f"browser check: no form field {name!r}")
+        ftype = (field.attrs.get("type") or "").lower()
+        if (field.tag or "").lower() != "input" \
+                or ftype not in {"checkbox", "radio"}:
+            raise ToolError(
+                f"browser check: field {name!r} is a <{field.tag}> "
+                f"(type={ftype or 'n/a'}), not a checkbox/radio")
+        if ftype == "radio" and not checked:
+            raise ToolError(
+                f"browser check: {name!r} is a radio button — radios "
+                "cannot be unchecked, pick another option instead")
+        if checked:
+            self._form_values[name] = field.attrs.get("value", "on")
+        else:
+            self._form_values.pop(name, None)
+        return {"ok": True, "field": name, "checked": bool(checked),
+                "pending": sorted(self._form_values)}
+
     def submit(self, target: str = "", *,
                uploads: dict[str, str] | None = None, **_: Any) -> dict[str, Any]:
         """Submit a form: by index, id, or action-text match. Uses fills.

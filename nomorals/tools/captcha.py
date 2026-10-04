@@ -4,8 +4,10 @@ Devon drives browser sessions (see :mod:`nomorals.tools.browser`) for the
 owner — logins, forms, checkouts — and those flows regularly hit captchas.
 This module gives her a way through without paging the owner every time:
 
-* :func:`detect` — scan page HTML for reCAPTCHA v2/v3/enterprise, hCaptcha,
-  Cloudflare Turnstile, Cloudflare challenge pages, and image captchas.
+* :func:`detect` — scan page HTML for reCAPTCHA v2/v2-audio/v3/enterprise,
+  hCaptcha, Cloudflare Turnstile, Cloudflare challenge pages, and
+  image/audio captchas (inline ``data:`` images are decoded on the
+  spot so the solver can use them directly).
 * :class:`CaptchaBackend` — pluggable solvers behind one interface:
   ``service`` (a 2captcha-shaped commercial solving API, key from the
   environment only), ``takeover`` (pause and hand the challenge to the
@@ -47,6 +49,7 @@ __all__ = [
     "detect",
     "detect_in_session",
     "extract_image_captcha_urls",
+    "fetch_image_bytes",
     "backend_for",
     "solve",
     "creator_solver_adapter",
@@ -68,11 +71,12 @@ class CaptchaKind:
     HCAPTCHA = "hcaptcha"
     TURNSTILE = "turnstile"
     IMAGE_CAPTCHA = "image_captcha"
+    AUDIO_CAPTCHA = "audio_captcha"
     UNKNOWN = "unknown"
 
     ALL = (
         RECAPTCHA_V2, RECAPTCHA_V3, RECAPTCHA_ENTERPRISE,
-        HCAPTCHA, TURNSTILE, IMAGE_CAPTCHA, UNKNOWN,
+        HCAPTCHA, TURNSTILE, IMAGE_CAPTCHA, AUDIO_CAPTCHA, UNKNOWN,
     )
 
 
@@ -98,11 +102,16 @@ class CaptchaChallenge:
         return (urllib.parse.urlparse(self.page_url).hostname or "").lower()
 
     def summary(self) -> dict[str, Any]:
+        img_url = self.image_url
+        if img_url.startswith("data:"):
+            # inline image — never dump kilobytes of base64 into a summary
+            img_url = img_url[:64] + "…<inline image>"
         return {
             "kind": self.kind,
             "sitekey": self.sitekey,
             "domain": self.domain,
-            "image_url": self.image_url,
+            "image_url": img_url,
+            "image_bytes": len(self.image_bytes),
             "action": self.action,
         }
 
@@ -149,11 +158,32 @@ def _has(html: str, *needles: str) -> bool:
     return any(n.lower() in low for n in needles)
 
 
-def detect(html: str, url: str = "") -> list[CaptchaChallenge]:
+def _decode_data_uri(src: str) -> bytes:
+    """Decode a ``data:image/...;base64,...`` URI to raw bytes.
+
+    Returns b"" when the URI is not base64-encoded image data.
+    """
+    try:
+        header, _, payload = src.partition(",")
+        if ";base64" not in header.lower() or not payload:
+            return b""
+        return base64.b64decode(payload, validate=True)
+    except Exception:  # noqa: BLE001 — malformed data URI, not a captcha
+        return b""
+
+
+def detect(html: str, url: str = "", fetch_bytes: bool = False) -> list[CaptchaChallenge]:
     """Scan page HTML, return every captcha challenge found.
 
-    Pure function — no network, no side effects. ``sitekey`` values are
-    public site keys, safe to surface.
+    Pure function when ``fetch_bytes=False`` (default) — no network, no
+    side effects. ``sitekey`` values are public site keys, safe to surface.
+
+    Inline (``data:`` URI) captcha images are decoded into
+    ``image_bytes`` on the spot, so the service backend can solve them
+    without a second fetch. Pass ``fetch_bytes=True`` to also download
+    the bytes of remote (http/https) captcha images — best effort, one
+    short-timeout request per image; failures leave ``image_bytes``
+    empty rather than failing detection.
     """
     html = html or ""
     out: list[CaptchaChallenge] = []
@@ -213,16 +243,53 @@ def detect(html: str, url: str = "") -> list[CaptchaChallenge]:
             metadata={"provider": "cloudflare",
                       "note": "interactive challenge page"}))
 
-    # image captchas — <img> whose src/alt/class/id smells like a captcha
+    # image captchas — <img> whose src/alt/class/id smells like a captcha,
+    # including inline data: URIs (decoded into image_bytes so the solver
+    # can use them directly).
     for img_url in extract_image_captcha_urls(html, url):
+        img_bytes = b""
+        if img_url.startswith("data:"):
+            img_bytes = _decode_data_uri(img_url)
+        elif fetch_bytes and img_url.startswith(("http://", "https://")):
+            try:
+                img_bytes = fetch_image_bytes(img_url, timeout=10.0)
+            except Exception:  # noqa: BLE001 — best effort
+                img_bytes = b""
         add(CaptchaChallenge(CaptchaKind.IMAGE_CAPTCHA, page_url=url,
-                             image_url=img_url))
+                             image_url=img_url, image_bytes=img_bytes))
+
+    # audio captchas — reCAPTCHA v2's "audio challenge" fallback (and any
+    # <audio> element in a captcha context). The audio bytes are the
+    # challenge payload; services solve them the same way as images.
+    if _has(html, "audio challenge", "recaptcha/api2/payload/audio",
+            "get audio challenge"):
+        audio_url = ""
+        audio_bytes = b""
+        m = re.search(
+            r"<audio\b[^>]*src\s*=\s*[\"']([^\"']+)[\"']", html, re.I)
+        if m:
+            audio_url = urllib.parse.urljoin(url, m.group(1).strip())
+            if audio_url.startswith("data:"):
+                audio_bytes = _decode_data_uri(audio_url)
+            elif fetch_bytes and audio_url.startswith(
+                    ("http://", "https://")):
+                try:
+                    audio_bytes = fetch_image_bytes(audio_url, timeout=10.0)
+                except Exception:  # noqa: BLE001 — best effort
+                    audio_bytes = b""
+        add(CaptchaChallenge(CaptchaKind.AUDIO_CAPTCHA, page_url=url,
+                             image_url=audio_url, image_bytes=audio_bytes,
+                             metadata={"note": "audio challenge"}))
 
     return out
 
 
 def extract_image_captcha_urls(html: str, base_url: str = "") -> list[str]:
-    """Pull candidate image-captcha URLs out of page HTML."""
+    """Pull candidate image-captcha URLs out of page HTML.
+
+    Inline ``data:`` URIs are kept (not resolved against ``base_url``) so
+    callers can decode the image bytes directly.
+    """
     urls: list[str] = []
     for tag in _IMG_TAG_RE.findall(html or ""):
         low = tag.lower()
@@ -233,6 +300,7 @@ def extract_image_captcha_urls(html: str, base_url: str = "") -> list[str]:
             continue
         src = m.group(1).strip()
         if src.startswith("data:"):
+            urls.append(src)
             continue
         urls.append(urllib.parse.urljoin(base_url, src))
     # de-dupe, keep order
@@ -313,6 +381,7 @@ _METHOD_FOR_KIND = {
     CaptchaKind.HCAPTCHA: "hcaptcha",
     CaptchaKind.TURNSTILE: "turnstile",
     CaptchaKind.IMAGE_CAPTCHA: "base64",
+    CaptchaKind.AUDIO_CAPTCHA: "audio",
 }
 
 
@@ -376,9 +445,11 @@ class ServiceBackend(CaptchaBackend):
 
         params: dict[str, str] = {"key": self._key, "json": "1",
                                   "method": method}
-        if method == "base64":
+        if method in ("base64", "audio"):
             if not challenge.image_bytes:
-                raise CaptchaError("image captcha needs image bytes")
+                raise CaptchaError(
+                    f"{challenge.kind} needs audio/image bytes "
+                    "(detect(..., fetch_bytes=True) or supply image_bytes)")
             params["body"] = base64.b64encode(challenge.image_bytes).decode()
         else:
             if not challenge.sitekey:
@@ -412,7 +483,8 @@ class ServiceBackend(CaptchaBackend):
             raise CaptchaError("solver timed out waiting for a token")
 
         elapsed = int((time.time() - started) * 1000)
-        if challenge.kind == CaptchaKind.IMAGE_CAPTCHA:
+        if challenge.kind in (CaptchaKind.IMAGE_CAPTCHA,
+                              CaptchaKind.AUDIO_CAPTCHA):
             return SolveResult(ok=True, kind=challenge.kind,
                                backend=self.name, text=token,
                                elapsed_ms=elapsed)
@@ -592,7 +664,7 @@ def register(registry: Any) -> None:
         description=(
             "captcha handling for owner-directed browser automation: detect "
             "captchas in page HTML (reCAPTCHA v2/v3/enterprise, hCaptcha, "
-            "Turnstile, Cloudflare challenges, image captchas) and solve "
+            "Turnstile, Cloudflare challenges, image and audio captchas) and solve "
             "them via a pluggable backend — 'service' (commercial solving "
             "API, key from CAPTCHA_API_KEY env only), 'takeover' (pause and "
             "hand the challenge to the owner), or 'detect' (report only). "
@@ -605,7 +677,8 @@ def register(registry: Any) -> None:
             "url": "str — page URL (hints detection, used as pageurl)",
             "session": "str — browser session name to detect against",
             "kind": "str — for solve: recaptcha_v2|recaptcha_v3|"
-                    "recaptcha_enterprise|hcaptcha|turnstile|image_captcha",
+                    "recaptcha_enterprise|hcaptcha|turnstile|image_captcha|"
+                    "audio_captcha",
             "sitekey": "str — for solve: the data-sitekey",
             "backend": "str — service|takeover|detect|auto (default auto)",
             "image": "str — for solve of image_captcha: path or URL",

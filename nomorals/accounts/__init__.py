@@ -18,6 +18,14 @@ checkpoint instead of being bypassed.
 
 from .vault import CredentialVault, Credential, AccountProfile
 from .manager import AccountManager
+from .browser_login import (
+    LoginConfig,
+    LoginFailed,
+    LoginCaptchaRequired,
+    login_with_vault,
+    USERNAME_FIELD_CANDIDATES,
+    PASSWORD_FIELD_CANDIDATES,
+)
 from .creator import (
     AccountCreator,
     CreatedAccount,
@@ -46,6 +54,12 @@ __all__ = [
     "Credential",
     "AccountProfile",
     "AccountManager",
+    "LoginConfig",
+    "LoginFailed",
+    "LoginCaptchaRequired",
+    "login_with_vault",
+    "USERNAME_FIELD_CANDIDATES",
+    "PASSWORD_FIELD_CANDIDATES",
     "AccountCreator",
     "CreatedAccount",
     "AccountCheckpoint",
