@@ -877,7 +877,8 @@ class PartnerRuntime(
         # chat the gating layer doesn't call owner must not run.
         # Prefer the gateway's verdict (stashed in meta) which includes the
         # DB-registered owner chats; fall back to the config-only check.
-        if message.meta.get("is_owner") is True:
+        meta = getattr(message, "meta", None)
+        if isinstance(meta, dict) and meta.get("is_owner") is True:
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
 

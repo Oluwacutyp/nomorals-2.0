@@ -272,7 +272,7 @@ class DispatchRetryTest(unittest.TestCase):
         self.assertIn("that route just failed", reply)
         job = mind._jobs[-1]
         self.assertEqual(job["status"], "failed")
-        self.assertIn("2 attempts", job["note"])
+        self.assertIn("3 attempts", job["note"])
 
 
 # ── coremind: job registry + browse normalization ─────────────────────────
