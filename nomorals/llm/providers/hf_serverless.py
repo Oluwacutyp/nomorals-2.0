@@ -24,7 +24,7 @@ import json
 import time
 from typing import Any, Sequence
 
-from ...core.errors import ModelError, ProviderError, RateLimited, classify
+from ...core.errors import ModelError, ProviderError, RateLimited, classify, is_auth_error
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
 from ..base import (
@@ -34,6 +34,7 @@ from ..base import (
     SamplingParams,
     Usage,
     messages_to_text,
+    short_error,
     validate_messages,
 )
 
@@ -62,10 +63,18 @@ class HFServerlessProvider(LLMProvider):
         self,
         *,
         token: str = "",
-        model: str = "cognitivecomputations/dolphin-2.9.1-llama-3-8b",
+        # Default is verified live on the HF router catalog (routers serve
+        # it today); the heal path below recovers from a stale override,
+        # but starting on a model that 404s wastes a round trip every boot.
+        model: str = "meta-llama/Llama-3.1-8B-Instruct",
         base_url: str = SERVERLESS_URL,
         endpoint_url: str = "",
-        timeout: float = 180.0,
+        # Bounded by the interactive reply budget (25s): a hung network
+        # call must fail over to the next model/provider long before the
+        # responder abandons the turn.  Warm router models answer in
+        # seconds; only cold dedicated endpoints want longer — pass a
+        # bigger timeout explicitly for those.
+        timeout: float = 90.0,
         max_retries: int = 4,
         template: str = "chatml",
         wait_for_model: bool = True,
@@ -212,24 +221,21 @@ class HFServerlessProvider(LLMProvider):
         payload = self.build_chat_payload(messages, sampling)
 
         # Try with current model first
+        attempts: list[tuple[str, str]] = []  # (model, error) for the final report
         try:
             raw = self._post_checked(self.chat_url(), payload)
             return self._record(self._parse_chat(raw), started)
         except Exception as exc:  # noqa: BLE001
             # Don't heal on authentication errors (401/403) — swapping models
-            # won't fix a bad or unauthorized key.
-            error_msg = str(exc).lower()
-            if (
-                "401" in error_msg
-                or "403" in error_msg
-                or "unauthorized" in error_msg
-                or "forbidden" in error_msg
-            ):
+            # won't fix a bad or unauthorized key.  Status comes from the
+            # HTTP layer's details (machine-readable), not message sniffing.
+            if is_auth_error(exc):
                 error = classify(exc)
                 return self._record(
                     LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
                     started,
                 )
+            attempts.append((self.model, short_error(exc)))
 
             # Model failed (not hosted, 404, 400, etc.) — discover candidates
             # and try each in turn, not just one.
@@ -243,6 +249,7 @@ class HFServerlessProvider(LLMProvider):
                     result = self._parse_chat(raw)
                     if result.error:
                         last_error = Exception(result.error)
+                        attempts.append((new_model, short_error(last_error)))
                         continue
                     # Success with healed model — record where we came from.
                     if result.raw is None:
@@ -252,13 +259,22 @@ class HFServerlessProvider(LLMProvider):
                     return self._record(result, started)
                 except Exception as retry_exc:  # noqa: BLE001
                     last_error = retry_exc
+                    attempts.append((new_model, short_error(retry_exc)))
                     continue
 
-            # All candidates failed — restore original and return the error.
+            # All candidates failed — restore original and return the whole
+            # attempt chain, not just the last error.  The owner needs to see
+            # that model A 404'd AND model B 429'd, not one opaque line.
             self.model = original_model
             error = classify(last_error)
+            chain = "; ".join(f"{m} ({e})" for m, e in attempts)
             return self._record(
-                LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
+                LLMResponse(
+                    text="",
+                    model=self.model,
+                    error=f"{error.code}: all HF models failed — {chain}",
+                    raw={"heal_attempts": [{"model": m, "error": e} for m, e in attempts]},
+                ),
                 started,
             )
 

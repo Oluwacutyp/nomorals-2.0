@@ -187,26 +187,41 @@ def _parse_retry_after(headers: Mapping[str, str] | None) -> float:
 
 def http_error(status: int, body: str, url: str = "",
                headers: Mapping[str, str] | None = None) -> NoMoralsError:
-    """Map an HTTP status onto the framework error hierarchy."""
+    """Map an HTTP status onto the framework error hierarchy.
+
+    Every mapped error carries ``details["http_status"]`` so callers can
+    branch on the status *machine-readably* (auth vs not-found vs
+    rate-limit) instead of regexing the message.  :func:`classify` passes
+    these errors through unchanged, so the status survives into providers.
+    """
     detail = _safe_detail(body)
     if status == 429:
         retry_after = _parse_retry_after(headers)
         return RateLimited(f"429 from {url}: {detail}",
-                           retry_after=retry_after)
+                           retry_after=retry_after,
+                           details={"http_status": 429})
     if status in {401, 403}:
-        return ProviderError(f"{status} unauthorized for {url}: {detail}", retryable=False)
+        # Auth is terminal for this key: never retried, never healed by
+        # swapping models — a different model won't fix a bad key.
+        return ProviderError(f"{status} unauthorized for {url}: {detail}",
+                             retryable=False,
+                             details={"http_status": status})
     if status == 404:
         # a 404 without the server's reason is unactionable — "model not
         # found: <retired-id>" is exactly what tells the owner to fix config
         why = _error_snippet(body)
         return ProviderError(
             f"404 not found: {url}" + (f" — {why}" if why else ""),
-            retryable=False)
+            retryable=False,
+            details={"http_status": 404})
     if status in {408, 425} or status >= 500:
-        return ProviderError(f"{status} from {url}: {detail}", retryable=True)
-    if status == 503:
-        return ProviderError(f"503 unavailable: {url}", retryable=True)
-    return ProviderError(f"HTTP {status} from {url}: {detail}", retryable=False)
+        # 503 included: the server is down or overloaded — back off and retry.
+        return ProviderError(f"{status} from {url}: {detail}",
+                             retryable=True,
+                             details={"http_status": status})
+    return ProviderError(f"HTTP {status} from {url}: {detail}",
+                         retryable=False,
+                         details={"http_status": status})
 
 
 class HttpClient:

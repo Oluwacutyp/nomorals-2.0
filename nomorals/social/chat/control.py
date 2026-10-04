@@ -100,6 +100,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
     "model": (0, 6),  # provider + up to 5 fallback providers
+    "providers": (0, 0),  # /providers — probe the whole chain, live or why not
     "say": (2, None),
     "proposals": (0, 0),
     "approve": (1, 1),
@@ -261,6 +262,7 @@ _HELP_TEXT = "\n".join(
         "  /profile [save|reload]                 this machine's runtime tune (wave 86)",
         "  /mind [status|<goal>]                  the core mind — route a goal, inspect the routing",
         "  /model [provider [fallback …]]          switch model live (persists)",
+        "  /providers                          probe every provider: live or why not",
         "  /say telegram:123 text…                 send as her",
         "  /proposals /approve <id> /deny <id>",
         "  /stage [committed|dating|…]",
@@ -506,7 +508,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "related": "/proposals /power"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
-              "related": "/status"},
+              "related": "/status /providers"},
+    "providers": {"what": "probe every registered provider and report live/dead with the reason — "
+                          "the diagnostic for a silent brain.",
+                  "usage": "/providers", "example": "/providers",
+                  "related": "/model /status"},
     "say": {"what": "send a message to a chat as her, from your hands.",
             "usage": "/say <platform:chat> <text>", "example": "/say telegram:123 hi",
             "related": "/file /publish"},
@@ -1044,7 +1050,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
 #: The catalog's groups — every registered command must appear in one.
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("her day", ["status", "platforms", "proposals", "approve", "deny",
-                 "mood", "stage", "model", "say", "power", "quit",
+                 "mood", "stage", "model", "providers", "say", "power", "quit",
                  "mode", "mind"]),
     ("search & research", ["search", "searchdeep", "searchleads",
                            "money",
@@ -1250,7 +1256,7 @@ def _detailed_overview() -> str:
 #: (COMMAND_DETAILS already carries richer pages; /list stays scannable.)
 LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
-     ["status", "platforms", "mood", "stage", "model", "say", "power",
+     ["status", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "profile", "mind"]),
     ("search & research",
@@ -1318,6 +1324,7 @@ LIST_ONELINERS: dict[str, str] = {
     "mood": "set or read her mood (label or dim=NN)",
     "stage": "relationship stage (committed|dating|…)",
     "model": "switch the brain live: /model [provider [fallbacks]]",
+    "providers": "probe every provider: live, cooling down, or why it fails",
     "say": "send a message as her: /say platform:chat text",
     "power": "power mode on/off/status (key-gated)",
     "proposals": "actions waiting for your approval",

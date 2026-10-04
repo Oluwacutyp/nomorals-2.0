@@ -238,6 +238,111 @@ class RuntimeMetaMixin:
         _log.info("model switched live: provider=%s chain=%s", provider, chain)
         return f"model switched — now: {self._model_status_line()}"
 
+    def _control_providers(self) -> str:
+        """Probe every registered provider and report live/dead with reasons.
+
+        ``/providers`` — the diagnostic for a silent brain.  Runs each
+        provider's liveness probe in parallel (bounded), then joins it with
+        the router's recorded health (calls, failures, last error, cooldown)
+        and translates the last error into an actionable hint: bad key,
+        dead model id, rate limit, or network.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from ...core.errors import (
+            is_auth_error,
+            is_not_found_error,
+            is_rate_limited_error,
+        )
+
+        router = getattr(self.context, "router", None)
+        if router is None:
+            return "providers: no router on this runtime."
+        names = list(router.providers())
+        if not names:
+            return "providers: chain is empty — nothing can answer. /model to configure."
+
+        def _probe(name: str) -> tuple[str, bool, float]:
+            provider = router.get(name)
+            if provider is None:
+                return name, False, 0.0
+            started = time.perf_counter()
+            try:
+                ok = bool(provider.health())
+            except Exception:  # noqa: BLE001 - a probe must never raise
+                ok = False
+            return name, ok, (time.perf_counter() - started)
+
+        # Parallel: sequential probes would cost sum(health timeouts).
+        live: dict[str, tuple[bool, float]] = {}
+        with ThreadPoolExecutor(max_workers=max(1, len(names)),
+                                thread_name_prefix="providers-probe") as pool:
+            for name, ok, elapsed in pool.map(_probe, names):
+                live[name] = (ok, elapsed)
+
+        try:
+            snap = router.stats_snapshot()
+        except Exception:  # noqa: BLE001 - status must never crash a chat
+            snap = {}
+        health = snap.get("health") or {}
+        active = str(snap.get("active") or "")
+
+        def _hint(last_error: str) -> str:
+            if not last_error:
+                return ""
+            probe_exc: Exception = Exception(last_error)
+            # Rebuild enough signal for the classifiers: the recorded error
+            # already embeds the HTTP status ("401 unauthorized for …").
+            if is_auth_error(probe_exc):
+                return "→ auth failed: check the key/token for this provider"
+            if is_not_found_error(probe_exc):
+                return "→ model id not hosted: fix the model name in config"
+            if is_rate_limited_error(probe_exc):
+                return "→ rate limited: wait for the quota window"
+            lowered = last_error.lower()
+            if "timed out" in lowered or "timeout" in lowered:
+                return "→ network timeout: check connectivity"
+            if "cool" in lowered:
+                return ""
+            return ""
+
+        lines = [f"providers (active: {active or 'none'}):"]
+        for name in names:
+            provider = router.get(name)
+            model_id = ""
+            if provider is not None:
+                try:
+                    model_id = str(provider.model_id or "")
+                except Exception:  # noqa: BLE001
+                    model_id = ""
+            h = health.get(name) or {}
+            ok, elapsed = live.get(name, (False, 0.0))
+            calls = int(h.get("calls") or 0)
+            failures = int(h.get("failures") or 0)
+            cooling = bool(h.get("cooling_down"))
+            last_error = str(h.get("last_error") or "")
+            marker = "★" if name == active else " "
+            if cooling:
+                state = "🧊 cooling down"
+            elif ok:
+                state = f"✅ live ({elapsed:.1f}s)"
+            elif calls and failures >= calls:
+                state = "❌ failing every call"
+            elif calls:
+                state = f"⚠️ probe failed ({failures}/{calls} failed)"
+            else:
+                state = "⚠️ probe failed (no calls yet)"
+            detail = f" — {model_id}" if model_id else ""
+            lines.append(f" {marker} {name}{detail}: {state}")
+            if last_error:
+                short = last_error[:160] + ("…" if len(last_error) > 160 else "")
+                lines.append(f"    last error: {short}")
+                hint = _hint(last_error)
+                if hint:
+                    lines.append(f"    {hint}")
+            elif calls and not failures:
+                lines.append(f"    {calls} calls, 0 failures")
+        return "\n".join(lines)
+
     # ── devon: the autonomous dev & investigation agent ──────────────────────
     def _control_devon(self, tail: str, chat_key: str) -> str:
         """Owner types ``/devon <free text>``: Devon plans the tools that fit

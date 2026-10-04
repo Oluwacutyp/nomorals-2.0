@@ -128,3 +128,11 @@ class OpenRouterProvider(OpenAICompatProvider):
     def is_free_model(self) -> bool:
         """True when the configured model costs nothing (``:free`` or alias)."""
         return self.model == OPENROUTER_FREE_ALIAS or self.model.endswith(":free")
+
+    def _fallback_models(self) -> list[str]:
+        """The ``openrouter/free`` alias, for when the configured id 404s.
+
+        The ``:free`` roster churns monthly, so a pinned free id rots; the
+        alias always routes to whichever free model currently has headroom.
+        """
+        return [OPENROUTER_FREE_ALIAS]

@@ -13,7 +13,67 @@ Every error carries:
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+# ── HTTP status helpers ──────────────────────────────────────────────────────
+#: Status codes worth matching out of a free-text error message, for errors
+#: that did not come through :func:`nomorals.core.http.http_error` (which
+#: sets ``details["http_status"]`` directly).
+_STATUS_RE = re.compile(r"\b(400|401|403|404|408|425|429|5\d\d)\b")
+
+
+def http_status_of(exc: BaseException) -> int | None:
+    """Best-effort HTTP status for an error, or ``None`` when unknown.
+
+    Prefers ``details["http_status"]`` (set by the HTTP layer); falls back
+    to the first status-like code in the message, which covers errors
+    built from raw exception strings (tests, third-party clients).
+    """
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        status = details.get("http_status")
+        if isinstance(status, bool):
+            pass  # a bool is not a status; fall through to the message
+        elif isinstance(status, int):
+            return status
+        elif isinstance(status, str) and status.isdigit():
+            return int(status)
+    text = str(getattr(exc, "message", "") or exc)
+    match = _STATUS_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """401/403 — the key is bad or lacks access.  Terminal: retrying with
+    the same key, or swapping models under it, can never succeed."""
+    status = http_status_of(exc)
+    if status is not None:
+        return status in (401, 403)
+    lowered = str(getattr(exc, "message", "") or exc).lower()
+    return "unauthorized" in lowered or "forbidden" in lowered
+
+
+def is_not_found_error(exc: BaseException) -> bool:
+    """404 — the URL or model id does not exist.  Terminal for this id:
+    retrying the same id is pointless, but a *different* model id may work."""
+    return http_status_of(exc) == 404
+
+
+def is_rate_limited_error(exc: BaseException) -> bool:
+    """429 — back off (honoring ``retry_after``) and retry."""
+    return isinstance(exc, RateLimited) or http_status_of(exc) == 429
+
+
+def is_server_error(exc: BaseException) -> bool:
+    """5xx / 408 / 425 — the server stumbled; back off and retry."""
+    status = http_status_of(exc)
+    if status is None:
+        return isinstance(exc, (ProviderUnavailable, ProviderError)) and getattr(
+            exc, "retryable", False
+        )
+    return status in (408, 425) or 500 <= status <= 599
 
 
 class NoMoralsError(Exception):

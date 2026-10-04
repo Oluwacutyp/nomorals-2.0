@@ -1055,6 +1055,9 @@ class PartnerRuntime(
         if kind == "model":
             return self._control_model(command.tail)
 
+        if kind == "providers":
+            return self._control_providers()
+
         if kind == "say":
             target, sep, payload = command.tail.partition(" ")
             payload = payload.strip()

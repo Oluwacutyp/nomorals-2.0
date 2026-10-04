@@ -106,7 +106,9 @@ def specs_from_env() -> list[ProviderSpec]:
         ),
         ProviderSpec(
             "hf_serverless", "hf_serverless",
-            kwargs={"model": os.environ.get("HF_MODEL", "microsoft/Phi-3.5-mini-instruct")},
+            # Default verified live on the HF router catalog (Oct 2026);
+            # microsoft/Phi-3.5-mini-instruct is not served there.
+            kwargs={"model": os.environ.get("HF_MODEL", "meta-llama/Llama-3.1-8B-Instruct")},
             env_key="HF_TOKEN",
         ),
     ]

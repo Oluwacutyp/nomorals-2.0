@@ -11,7 +11,7 @@ import base64
 import time
 from typing import Any, Sequence
 
-from ...core.errors import ModelError, ProviderError, classify
+from ...core.errors import ModelError, ProviderError, classify, is_not_found_error
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
 from ..base import (
@@ -20,6 +20,7 @@ from ..base import (
     Message,
     SamplingParams,
     Usage,
+    short_error,
     validate_messages,
 )
 
@@ -79,6 +80,17 @@ class OpenAICompatProvider(LLMProvider):
         except Exception:  # noqa: BLE001 - liveness probe
             return False
 
+    def _fallback_models(self) -> list[str]:
+        """Model ids to try when the configured model 404s.
+
+        A dead model id (retired name, typo in env config) is the most
+        common cloud-provider outage this layer sees, and retrying the
+        same dead id is pure waste.  Subclasses with a known-good roster
+        (Groq, OpenRouter) override this; the generic base returns none —
+        for an arbitrary OpenAI-compatible server there is no safe guess.
+        """
+        return []
+
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
@@ -92,37 +104,48 @@ class OpenAICompatProvider(LLMProvider):
             **self.extra_body,
             **kw,
         }
-        try:
-            raw = retry_call(
-                lambda: self.http.post_json(f"{self.base_url}/chat/completions", payload),
-                policy=self._policy,
-            )
-        except Exception as exc:  # noqa: BLE001
-            error = classify(exc)
-            return self._record(
-                LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
-                started,
-            )
+        original_model = self.model
+        fallbacks = [m for m in self._fallback_models() if m and m != original_model]
+        attempts: list[tuple[str, str]] = []
+        last_exc: Exception | None = None
+        for attempt_no, model_id in enumerate([original_model, *fallbacks]):
+            self.model = model_id
+            payload["model"] = model_id
+            try:
+                raw = retry_call(
+                    lambda: self.http.post_json(f"{self.base_url}/chat/completions", payload),
+                    policy=self._policy,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                attempts.append((model_id, short_error(exc)))
+                # 404 = this model id is dead; a different id may live.
+                # Anything else (auth, rate limit, server error) is already
+                # retried by the policy above — swapping the model cannot
+                # fix a bad key or an overloaded server.
+                if is_not_found_error(exc) and attempt_no < len(fallbacks):
+                    continue
+                break
 
-        data = raw.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return self._record(
-                LLMResponse(text="", model=self.model, error="provider returned no choices", raw=data),
-                started,
-            )
-        choice = choices[0]
-        message = choice.get("message") or {}
-        content = message.get("content")
-        if content is None and message.get("tool_calls"):
-            import json
+            data = raw.json()
+            choices = data.get("choices") or []
+            if not choices:
+                self.model = original_model
+                return self._record(
+                    LLMResponse(text="", model=model_id, error="provider returned no choices", raw=data),
+                    started,
+                )
+            choice = choices[0]
+            message = choice.get("message") or {}
+            content = message.get("content")
+            if content is None and message.get("tool_calls"):
+                import json
 
-            content = json.dumps(message["tool_calls"])
-        usage = data.get("usage") or {}
-        return self._record(
-            LLMResponse(
+                content = json.dumps(message["tool_calls"])
+            usage = data.get("usage") or {}
+            response = LLMResponse(
                 text=content or "",
-                model=data.get("model", self.model),
+                model=data.get("model", model_id),
                 usage=Usage(
                     prompt_tokens=int(usage.get("prompt_tokens") or 0),
                     completion_tokens=int(usage.get("completion_tokens") or 0),
@@ -130,6 +153,24 @@ class OpenAICompatProvider(LLMProvider):
                 ),
                 finish_reason=choice.get("finish_reason", "stop"),
                 raw=data,
+            )
+            # Healed onto a fallback id: keep it (a dead id 404s every call),
+            # and record where we came from.
+            if model_id != original_model and isinstance(response.raw, dict):
+                response.raw["healed_from"] = original_model
+            return self._record(response, started)
+
+        # Every model id failed — restore the configured one and report the
+        # whole attempt chain, not just the last error.
+        self.model = original_model
+        error = classify(last_exc) if last_exc is not None else ModelError("unknown error")
+        chain = "; ".join(f"{m} ({e})" for m, e in attempts) or "no attempt made"
+        return self._record(
+            LLMResponse(
+                text="",
+                model=original_model,
+                error=f"{error.code}: all models failed on {self.name} — {chain}",
+                raw={"model_failover_attempts": [{"model": m, "error": e} for m, e in attempts]},
             ),
             started,
         )

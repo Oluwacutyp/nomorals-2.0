@@ -23,6 +23,7 @@ __all__ = [
     "SamplingParams",
     "Usage",
     "messages_to_text",
+    "short_error",
     "validate_messages",
 ]
 
@@ -303,6 +304,12 @@ class LLMProvider(abc.ABC):
         response.latency_ms = elapsed
         response.provider = self.name
         return response
+
+
+def short_error(exc: BaseException, limit: int = 120) -> str:
+    """One-line error for attempt chains (truncated, no newlines)."""
+    text = str(exc).replace("\n", " ").strip() or type(exc).__name__
+    return text[:limit] + "…" if len(text) > limit else text
 
 
 def estimate_tokens(text: str) -> int:

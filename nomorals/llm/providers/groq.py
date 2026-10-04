@@ -30,9 +30,15 @@ __all__ = ["GROQ_BASE_URL", "GROQ_FREE_MODELS", "GroqProvider"]
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-#: Free-tier chat models (Groq free plan, verified Sep 2026).  context is the
+#: Free-tier chat models (Groq free plan, verified Oct 2026 against Groq's
+#: published rate-limits table and live /v1/models probes).  context is the
 #: vendor context window; limits are (requests/day, tokens/day) on the free
 #: plan — tokens bind first for real chat exchanges (~1k tokens each).
+#:
+#: NOTE: the llama-3.x ids (llama-3.3-70b-versatile, llama-3.1-8b-instant)
+#: that older configs used are RETIRED on Groq — they 404 with
+#: model_not_found on a standard key.  If GROQ_MODEL names one, the
+#: provider heals onto this roster automatically (see _fallback_models).
 GROQ_FREE_MODELS: tuple[dict[str, Any], ...] = (
     {"id": "openai/gpt-oss-120b", "context": 131072, "requests_per_day": 1000,
      "tokens_per_day": 200000, "notes": "120B open model; strongest free-tier chat"},
@@ -56,7 +62,9 @@ class GroqProvider(OpenAICompatProvider):
         base_url: str = GROQ_BASE_URL,
         api_key: str = "",
         model: str = "openai/gpt-oss-120b",
-        timeout: float = 120.0,
+        # Groq serves at 300-1000 tok/s: a call that stalls past 60s is
+        # never coming back in the interactive budget — fail over instead.
+        timeout: float = 60.0,
         max_retries: int = 3,
         **kwargs: Any,
     ) -> None:
@@ -69,6 +77,14 @@ class GroqProvider(OpenAICompatProvider):
             max_retries=max_retries,
             **kwargs,
         )
+
+    def _fallback_models(self) -> list[str]:
+        """Known-good free-tier ids, for when the configured model 404s.
+
+        Groq retires model ids (llama-3.3-70b-versatile is gone); a stale
+        GROQ_MODEL must heal onto a live id instead of 404ing every call.
+        """
+        return [m["id"] for m in GROQ_FREE_MODELS]
 
     @property
     def capabilities(self) -> set[str]:
