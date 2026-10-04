@@ -30,6 +30,14 @@ from .creator import (
     CheckpointStore,
 )
 from .sessions import SessionManager, Session, OAuthToken, SessionInvalid
+from .temp_sms import (
+    TempSmsProvider,
+    SimcodesProvider,
+    TempNumber,
+    SmsMessage,
+    get_provider as get_sms_provider,
+    PROVIDERS as SMS_PROVIDERS,
+)
 
 __all__ = [
     "CredentialVault",
@@ -49,4 +57,10 @@ __all__ = [
     "Session",
     "OAuthToken",
     "SessionInvalid",
+    "TempSmsProvider",
+    "SimcodesProvider",
+    "TempNumber",
+    "SmsMessage",
+    "get_sms_provider",
+    "SMS_PROVIDERS",
 ]

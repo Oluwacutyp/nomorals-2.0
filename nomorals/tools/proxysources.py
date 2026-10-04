@@ -375,6 +375,11 @@ BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("freeproxyworld-http", "https://www.freeproxy.world/?type=http", "html"),
     # advanced.name — base64 data-ip/data-port cells (parser layout 4)
     ("advancedname-http", "https://advanced.name/freeproxy", "html"),
+    # proxydb.net — SOCKS5 table (user-supplied); country filter via
+    # ?protocol=socks5&country=XX, empty country = worldwide
+    ("proxydb-socks5",
+     "https://proxydb.net/?protocol=socks5",
+     "html"),
 )
 
 #: pages that LIST proxy-list projects / endpoints — the seeds for

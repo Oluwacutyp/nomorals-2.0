@@ -56,6 +56,7 @@ from ..core.errors import NoMoralsError, NotFound
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
+from .temp_sms import get_provider as get_sms_provider
 from .vault import Credential, CredentialVault
 
 __all__ = [
@@ -431,7 +432,9 @@ class AccountCreator:
 
     #: Services that hand out throwaway addresses via API — exempt from
     #: the one-account-per-service rule and the owner-identity rule.
-    DISPOSABLE_EMAIL_SERVICES = frozenset({"guerrilla", "tempmail"})
+    DISPOSABLE_EMAIL_SERVICES = frozenset({
+        "guerrilla", "tempmail", "mailtm", "1secmail",
+    })
 
     def __init__(
         self,
@@ -787,7 +790,7 @@ class AccountCreator:
         """Create a disposable email account (no human step needed).
 
         Args:
-            provider: Email provider (guerrilla, tempmail)
+            provider: Email provider (guerrilla, tempmail, mailtm, 1secmail)
             username: Desired username (generated if not provided)
 
         Returns:
@@ -801,6 +804,10 @@ class AccountCreator:
                 return await self._create_guerrilla_email(username)
             elif provider == "tempmail":
                 return await self._create_tempmail(username)
+            elif provider == "mailtm":
+                return await self._create_mailtm_email(username)
+            elif provider == "1secmail":
+                return await self._create_1secmail_email(username)
             return CreatedAccount(
                 service=f"email_{provider}",
                 username=username,
@@ -888,6 +895,321 @@ class AccountCreator:
         )
         self._creation_history.append(account)
         return account
+
+    # -- mail.tm (real REST API, no key needed) ---------------------
+
+    _MAILTM_API = "https://api.mail.tm"
+
+    def _mailtm_request(self, method: str, path: str,
+                        payload: dict | None = None,
+                        token: str | None = None,
+                        timeout: float = 15) -> dict:
+        """Synchronous mail.tm API call (called from async via executor)."""
+        import json
+        import urllib.request
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {
+            "User-Agent": "Devon/1.0",
+            "Accept": "application/json",
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"{self._MAILTM_API}{path}", data=data,
+            headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        return json.loads(body) if body.strip() else {}
+
+    async def _create_mailtm_email(self, username: str) -> CreatedAccount:
+        """Create a mail.tm disposable address via their public REST API.
+
+        Full lifecycle: pick a domain -> create account -> fetch a JWT
+        token.  The token is stored in the vault metadata so the inbox
+        can be polled later without re-authenticating.
+        """
+        import asyncio
+        import secrets
+
+        loop = asyncio.get_running_loop()
+        try:
+            domains = await loop.run_in_executor(
+                None, self._mailtm_request, "GET", "/domains")
+            members = domains.get("hydra:member") or []
+            domain = next((d.get("domain") for d in members
+                           if d.get("isActive")), None)
+            if not domain:
+                raise RuntimeError("mail.tm returned no active domains")
+            address = f"{username}@{domain}".replace(" ", "").lower()
+            password = secrets.token_urlsafe(20)
+
+            acc = await loop.run_in_executor(
+                None, self._mailtm_request, "POST", "/accounts",
+                {"address": address, "password": password})
+            account_id = acc.get("id")
+            if not account_id:
+                raise RuntimeError(
+                    f"mail.tm account creation failed: {str(acc)[:120]}")
+            tok = await loop.run_in_executor(
+                None, self._mailtm_request, "POST", "/token",
+                {"address": address, "password": password})
+            jwt = tok.get("token", "")
+        except Exception as exc:  # noqa: BLE001 - provider down, report it
+            _log.warning("mail.tm account creation failed: %s", exc)
+            return CreatedAccount(
+                service="email_mailtm",
+                username=username,
+                password="",
+                email="",
+                status="failed",
+                notes=f"mail.tm error: {exc}",
+            )
+
+        cred = self.vault.store(
+            service="email_mailtm",
+            username=address,
+            password=password,
+            credential_type="disposable_email",
+            tags=["email", "disposable"],
+            metadata={"provider": "mailtm", "account_id": account_id,
+                      "jwt": jwt},
+        )
+        account = CreatedAccount(
+            service="email_mailtm",
+            username=address,
+            password=password,
+            email=address,
+            status="created",
+            credential=cred,
+            notes="Disposable email via mail.tm (API) - poll inbox with check_disposable_inbox",
+        )
+        self._creation_history.append(account)
+        return account
+
+    def mailtm_inbox(self, address: str, password: str,
+                     limit: int = 10) -> list[dict]:
+        """Poll a mail.tm inbox. Returns newest-first message dicts."""
+        tok = self._mailtm_request(
+            "POST", "/token", {"address": address, "password": password})
+        jwt = tok.get("token", "")
+        if not jwt:
+            return []
+        data = self._mailtm_request("GET", "/messages", token=jwt)
+        out = []
+        for m in (data.get("hydra:member") or [])[:limit]:
+            out.append({
+                "id": m.get("id"),
+                "from": (m.get("from") or {}).get("address", ""),
+                "subject": m.get("subject", ""),
+                "date": m.get("createdAt", ""),
+                "intro": m.get("intro", ""),
+            })
+        return out
+
+    def mailtm_read(self, address: str, password: str,
+                    message_id: str) -> dict:
+        """Fetch one full mail.tm message (body included)."""
+        tok = self._mailtm_request(
+            "POST", "/token", {"address": address, "password": password})
+        jwt = tok.get("token", "")
+        if not jwt:
+            return {}
+        return self._mailtm_request("GET", f"/messages/{message_id}",
+                                    token=jwt)
+
+    # -- 1secmail (simple GET API, no key) --------------------------
+
+    _ONEC_API = "https://www.1secmail.com/api/v1/"
+
+    def _1secmail_get(self, params: dict,
+                      timeout: float = 15) -> Any:
+        """GET against the 1secmail API, returns parsed JSON."""
+        import json
+        import urllib.parse
+        import urllib.request
+        qs = urllib.parse.urlencode(params)
+        req = urllib.request.Request(
+            f"{self._ONEC_API}?{qs}",
+            headers={"User-Agent": "Mozilla/5.0 (Devon/1.0)"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    async def _create_1secmail_email(self, username: str) -> CreatedAccount:
+        """Mint a 1secmail address.  No registration call needed — any
+        login@domain on their domain list is instantly receivable; the
+        address is reserved here and stored so the inbox can be polled.
+        """
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        try:
+            domains = await loop.run_in_executor(
+                None, self._1secmail_get, {"action": "getDomainList"})
+            if not isinstance(domains, list) or not domains:
+                raise RuntimeError("1secmail returned no domains")
+            domain = domains[0]
+            login = username.replace(" ", "").lower() or "devon"
+            address = f"{login}@{domain}"
+        except Exception as exc:  # noqa: BLE001 - provider down
+            _log.warning("1secmail setup failed: %s", exc)
+            return CreatedAccount(
+                service="email_1secmail",
+                username=username,
+                password="",
+                email="",
+                status="failed",
+                notes=f"1secmail error: {exc}",
+            )
+
+        cred = self.vault.store(
+            service="email_1secmail",
+            username=address,
+            password="",
+            credential_type="disposable_email",
+            tags=["email", "disposable"],
+            metadata={"provider": "1secmail", "login": login,
+                      "domain": domain},
+        )
+        account = CreatedAccount(
+            service="email_1secmail",
+            username=address,
+            password="",
+            email=address,
+            status="created",
+            credential=cred,
+            notes="Disposable email via 1secmail (API) - poll inbox with check_disposable_inbox",
+        )
+        self._creation_history.append(account)
+        return account
+
+    def onec_inbox(self, login: str, domain: str,
+                   limit: int = 10) -> list[dict]:
+        """Poll a 1secmail inbox. Returns newest-first message dicts."""
+        try:
+            msgs = self._1secmail_get({
+                "action": "getMessages", "login": login, "domain": domain})
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for m in (msgs or [])[:limit]:
+            if isinstance(m, dict):
+                out.append({
+                    "id": m.get("id"),
+                    "from": m.get("from", ""),
+                    "subject": m.get("subject", ""),
+                    "date": m.get("date", ""),
+                })
+        return out
+
+    def onec_read(self, login: str, domain: str, message_id: int) -> dict:
+        """Fetch one full 1secmail message (body included)."""
+        try:
+            return self._1secmail_get({
+                "action": "readMessage", "login": login,
+                "domain": domain, "id": message_id}) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    # -- unified disposable inbox -----------------------------------
+
+    def check_disposable_inbox(self, credential: Credential,
+                               limit: int = 10) -> list[dict]:
+        """Poll the inbox for a stored disposable-email credential.
+
+        Dispatches on the credential metadata provider.  Returns a list
+        of message dicts (id/from/subject/date/intro).  Sync — cheap
+        enough to call from command handlers.
+        """
+        meta = credential.metadata or {}
+        provider = str(meta.get("provider", ""))
+        try:
+            if provider == "mailtm":
+                return self.mailtm_inbox(
+                    credential.username, credential.password or "",
+                    limit=limit)
+            if provider == "1secmail":
+                return self.onec_inbox(
+                    str(meta.get("login", "")),
+                    str(meta.get("domain", "")), limit=limit)
+            if provider == "guerrilla":
+                return self._guerrilla_inbox(
+                    str(meta.get("sid_token", "")), limit=limit)
+        except Exception as exc:  # noqa: BLE001 - inbox poll never crashes
+            _log.warning("inbox poll failed for %s: %s", provider, exc)
+        return []
+
+    def _guerrilla_inbox(self, sid_token: str,
+                         limit: int = 10) -> list[dict]:
+        """Poll a Guerrilla Mail inbox via their API."""
+        import json
+        import urllib.request
+        if not sid_token:
+            return []
+        url = (f"https://api.guerrillamail.com/ajax.php?f=get_email_list"
+               f"&offset=0&sid_token={sid_token}")
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Devon/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        out = []
+        for m in (data.get("list") or [])[:limit]:
+            if isinstance(m, dict):
+                out.append({
+                    "id": m.get("mail_id"),
+                    "from": m.get("mail_from", ""),
+                    "subject": m.get("mail_subject", ""),
+                    "date": m.get("mail_date", ""),
+                    "intro": m.get("mail_excerpt", ""),
+                })
+        return out
+
+    # -- temporary SMS numbers --------------------------------------
+
+    def get_temp_number(self, country: str = "us",
+                        provider: str = "simcodes") -> dict:
+        """Grab a free temporary phone number for SMS verification.
+
+        Returns a dict with number/masked/country/inbox_id/provider.
+        Use :meth:`poll_sms_code` to wait for the verification code.
+        """
+        prov = get_sms_provider(provider)
+        numbers = prov.list_numbers(country=country, limit=10)
+        if not numbers:
+            return {"status": "failed",
+                    "notes": f"no {provider} numbers for {country}"}
+        n = numbers[0]
+        return {
+            "status": "ok",
+            "number": n.number,
+            "masked": n.masked,
+            "country": n.country,
+            "country_name": n.country_name,
+            "provider": n.provider,
+            "inbox_id": n.inbox_id,
+        }
+
+    def poll_sms_code(self, number_info: dict, *,
+                      sender_hint: str = "",
+                      timeout: float = 180) -> str:
+        """Wait for an SMS verification code on a temp number.
+
+        ``number_info`` is the dict returned by :meth:`get_temp_number`.
+        Returns the code or "" on timeout.
+        """
+        from .temp_sms import TempNumber
+        prov = get_sms_provider(str(number_info.get("provider", "simcodes")))
+        num = TempNumber(
+            number=str(number_info.get("number", "")),
+            masked=str(number_info.get("masked", "")),
+            country=str(number_info.get("country", "us")),
+            country_name=str(number_info.get("country_name", "")),
+            provider=str(number_info.get("provider", "simcodes")),
+            inbox_id=str(number_info.get("inbox_id", "")),
+        )
+        return prov.wait_for_code(num, sender_hint=sender_hint,
+                                  timeout=timeout)
 
     # ── account creation (human-in-the-loop) ────────────────────
 
