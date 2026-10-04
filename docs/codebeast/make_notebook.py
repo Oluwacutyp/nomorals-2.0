@@ -192,6 +192,19 @@ if MAX_STEPS:
 else:
     args["num_train_epochs"] = EPOCHS
 
+# Version-proofing: transformers renames/drops args between releases
+# (e.g. warmup_ratio, eval_strategy vs evaluation_strategy). Only pass
+# what THIS install accepts instead of crashing on the first mismatch.
+import inspect
+_valid = set(inspect.signature(TrainingArguments.__init__).parameters)
+for _new_k, _old_k in (("eval_strategy", "evaluation_strategy"),):
+    if _new_k in args and _new_k not in _valid and _old_k in _valid:
+        args[_old_k] = args.pop(_new_k)
+_dropped = [k for k in args if k not in _valid]
+if _dropped:
+    print(f"⚠️ this transformers doesn't accept {_dropped} — skipping")
+args = {k: v for k, v in args.items() if k in _valid}
+
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
