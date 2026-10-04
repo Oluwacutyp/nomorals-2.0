@@ -1108,6 +1108,10 @@ class PartnerRuntime(
         if kind == "trial":
             return self._control_trial(command.tail or arg, chat_key=chat_key)
 
+        # ── identity bank (profile for signups) ──────────────────────────────
+        if kind == "identity":
+            return self._control_identity(command.tail or arg)
+
         # ── expansion wave ───────────────────────────────────────────────────
         if kind == "game":
             # console path: no inbound message, so the player is derived from

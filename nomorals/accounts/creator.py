@@ -458,6 +458,9 @@ class AccountCreator:
 
     # ── owner identity ──────────────────────────────────────────
 
+    #: kv_store key for the persisted owner identity bank.
+    IDENTITY_KV_KEY = "accounts.owner_identity"
+
     def set_owner_identity(
         self,
         name: str,
@@ -468,7 +471,8 @@ class AccountCreator:
         """Record the owner's real identity for account flows.
 
         Flows never invent fake identities; the name/email here is what
-        signups use. Replaces any previously recorded identity.
+        signups use. Replaces any previously recorded identity. Persisted
+        to the database so it survives restarts (the profile bank).
 
         Raises:
             ValueError: If name or email is empty
@@ -481,12 +485,63 @@ class AccountCreator:
         if phone:
             identity["phone"] = phone.strip()
         self._owner_identity = identity
+        self._persist_identity(identity)
         _log.info("owner identity recorded for %s", email)
         return dict(identity)
 
     def get_owner_identity(self) -> dict[str, str] | None:
-        """The recorded owner identity, or None if not set."""
-        return dict(self._owner_identity) if self._owner_identity else None
+        """The recorded owner identity, or None if not set.
+
+        Loads from the database on first access if not in memory.
+        """
+        if self._owner_identity:
+            return dict(self._owner_identity)
+        loaded = self._load_identity()
+        if loaded:
+            self._owner_identity = loaded
+            return dict(loaded)
+        return None
+
+    def _persist_identity(self, identity: dict[str, str]) -> None:
+        """Save the identity bank to kv_store (best-effort)."""
+        if self.db is None:
+            return
+        try:
+            import json
+            self.db.execute(
+                "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?)",
+                (self.IDENTITY_KV_KEY, json.dumps(identity), __import__("time").time()),
+            )
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            _log.warning("could not persist owner identity: %s", exc)
+
+    def _load_identity(self) -> dict[str, str] | None:
+        """Load the identity bank from kv_store, or None.
+
+        Returns partial identities too — the signup flow validates
+        completeness when actually needed.
+        """
+        if self.db is None:
+            return None
+        try:
+            import json
+            row = self.db.query_one(
+                "SELECT value FROM kv_store WHERE key = ?", (self.IDENTITY_KV_KEY,)
+            )
+            if row and row.get("value"):
+                data = json.loads(row["value"])
+                if isinstance(data, dict) and (data.get("name") or data.get("email")):
+                    out = {}
+                    if data.get("name"):
+                        out["name"] = str(data["name"])
+                    if data.get("email"):
+                        out["email"] = str(data["email"])
+                    if data.get("phone"):
+                        out["phone"] = str(data["phone"])
+                    return out if out else None
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            _log.debug("could not load owner identity: %s", exc)
+        return None
 
     def _require_owner_identity(
         self, service: str, username: str, password: str

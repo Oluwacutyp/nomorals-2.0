@@ -343,3 +343,78 @@ class RuntimeMetaMixin:
             score = "n/a" if d.score is None else f"{d.score:.0%}"
             lines.append(f"  {name}: {score} ({d.passed}/{d.total})")
         return "\n".join(lines)
+
+    def _control_identity(self, tail: str) -> str:
+        """Identity bank for signups: /identity show | set <field> <value> | clear.
+
+        Stores the owner's real identity once (name, email, phone) so account
+        creation flows can use it without asking every time. Persisted to DB.
+        """
+        from ...accounts.creator import AccountCreator
+        from ...accounts.vault import CredentialVault
+
+        parts = (tail or "").strip().split(None, 2)
+        verb = parts[0].lower() if parts else "show"
+
+        # Get or create the AccountCreator
+        vault = CredentialVault(self.context.db if hasattr(self.context, "db") else None)
+        creator = AccountCreator(vault, db=getattr(self.context, "db", None))
+
+        if verb == "show":
+            identity = creator.get_owner_identity()
+            if not identity:
+                return ("no identity bank set yet.\n"
+                        "usage:\n"
+                        "  /identity set name <your name>\n"
+                        "  /identity set email <your email>\n"
+                        "  /identity set phone <your phone>  (optional)")
+            lines = ["identity bank:"]
+            lines.append(f"  name: {identity.get('name', '')}")
+            lines.append(f"  email: {identity.get('email', '')}")
+            if identity.get("phone"):
+                lines.append(f"  phone: {identity.get('phone', '')}")
+            return "\n".join(lines)
+
+        if verb == "set":
+            if len(parts) < 3:
+                return "usage: /identity set <name|email|phone> <value>"
+            field, value = parts[1].lower(), parts[2].strip()
+            if field not in ("name", "email", "phone"):
+                return f"unknown field {field!r} — use name, email, or phone"
+            if not value:
+                return f"value for {field} cannot be empty"
+            # Load existing (may be partial), update the field, persist.
+            # Partial saves are allowed — signup flows validate completeness.
+            current = creator.get_owner_identity() or {}
+            current[field] = value
+            try:
+                import json, time
+                if creator.db is not None:
+                    creator.db.execute(
+                        "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at)"
+                        " VALUES (?, ?, 'json', ?)",
+                        (creator.IDENTITY_KV_KEY, json.dumps(current), time.time()),
+                    )
+                creator._owner_identity = dict(current)
+            except Exception as exc:  # noqa: BLE001
+                return f"save failed: {exc}"
+            missing = [f for f in ("name", "email") if not current.get(f)]
+            if missing:
+                return (f"set {field}. still need: {', '.join(missing)}\n"
+                        f"  /identity set {missing[0]} <value>")
+            return "identity bank complete."
+
+        if verb == "clear":
+            # Clear by setting empty (will fail validation, so do direct kv delete)
+            try:
+                if creator.db is not None:
+                    creator.db.execute(
+                        "DELETE FROM kv_store WHERE key = ?",
+                        (creator.IDENTITY_KV_KEY,),
+                    )
+                creator._owner_identity = None
+                return "identity bank cleared."
+            except Exception as exc:  # noqa: BLE001
+                return f"clear failed: {exc}"
+
+        return "usage: /identity [show|set <field> <value>|clear]"

@@ -124,6 +124,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "features": (0, 2),      # /features | /features <name> on|off
     "arena": (0, None),      # /arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]
     "trial": (0, 5),         # /trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]
+    "identity": (0, 3),      # /identity [show|set <field> <value>|clear] — the profile bank for signups
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
     # wave 87: direct game-start commands — games are social, so they work in
@@ -577,6 +578,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
               "usage": "/trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]",
               "example": "/trial list", "related": "/say"},
+    "identity": {"what": "the profile bank for signups: your name/email/phone stored once, used by account creation flows.",
+              "usage": "/identity [show|set <name|email|phone> <value>|clear]",
+              "example": "/identity set name Death", "related": "/trial"},
     "game": {"what": "the social game engine — 42 games across DM, group and "
                      "channel, with a shared economy, items and leaderboards. "
                      "Works for every participant in every chat; in a group a "
