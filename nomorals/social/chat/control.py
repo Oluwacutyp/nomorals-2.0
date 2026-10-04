@@ -66,6 +66,8 @@ GAME_COMMANDS = (
     "20q", "rps", "digits",
     # medium
     "mafia", "king", "story", "rpg", "shop", "duel", "case",
+    # pvp + raid boss (arena multiplayer)
+    "pvp", "raid",
     # ambitious
     "world", "escape", "political",
     # wild (wave 95)
@@ -155,6 +157,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # medium
     "mafia": (0, 0), "king": (0, 0), "story": (0, 0),
     "rpg": (0, 0), "shop": (0, 0), "duel": (0, 0), "case": (0, 0),
+    # pvp + raid boss (arena multiplayer)
+    "pvp": (0, 1), "raid": (0, 0),
     # ambitious
     "world": (0, 0), "escape": (0, 0), "political": (0, 0),
     # wild (wave 95)
@@ -718,6 +722,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                    "plain messages are moves and the engine owns the turns.",
              "usage": "/duel", "example": "/duel",
              "related": "/game list · /game leaderboard duel · /game quit"},
+    "pvp": {"what": "pvp — 1v1 combat against another human: your level, gear, and learned skills all fight. Start a lobby in a group "
+                   "(/pvp), or challenge DM-to-DM (/pvp @user, /arena challenge @user). 120s per move; stall 3× and you forfeit.",
+             "usage": "/pvp [@user]", "example": "/pvp @user",
+             "related": "/game list · /game leaderboard pvp · /arena challenge @user"},
+    "raid": {"what": "raid — team up against a raid boss: massive HP, cleaves the party every 3rd round, enrages at 30% HP. "
+                   "Loot splits by damage dealt. Start it in a group; hunters join with /game join.",
+             "usage": "/raid", "example": "/raid",
+             "related": "/game list · /game leaderboard raid · /arena raid"},
     "case": {"what": "the case — a cooperative investigation: clues drop, the table reasons together. Start it from any chat; while it's live, "
                    "plain messages are moves and the engine owns the turns.",
              "usage": "/case", "example": "/case",

@@ -66,6 +66,9 @@ class RuntimeGamesMixin:
             lines.append("  /game <name> — start · /game rematch — run it back")
             lines.append("  /game <name> [easy|normal|hard|expert] — AI/puzzle difficulty")
             lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
+            lines.append("  /pvp · /pvp @user — 1v1 PvP lobby or DM-to-DM challenge")
+            lines.append("  /raid — team up against the raid boss")
+            lines.append("  /arena challenge @user · /arena raid — same, arena-branded")
             return "\n".join(lines)
         if verb == "quit":
             # capture the relay (if any) BEFORE quitting — the engine
@@ -120,27 +123,15 @@ class RuntimeGamesMixin:
                         "/game accept <code> from any chat.")
             game_name = parts[1].lower()
             to_label = parts[2] if len(parts) > 2 else ""
-            try:
-                relay = self._game_relay()
-                invite = relay.create_invite(
-                    chat_key, player, game_name, to_label=to_label)
-            except ValueError as exc:
-                return str(exc)
-            share = (f"invite ready for {invite.game_name} — share this:\n"
-                     f"/game accept {invite.code}\n"
-                     f"(expires in 1 hour, works from any chat)")
-            target = self._resolve_invite_target(chat_key, to_label)
-            if target is not None:
-                sent = self._relay_send(
-                    target,
-                    f"🎮 {player.name} invited you to play "
-                    f"{invite.game_name}!\n"
-                    f"to accept: /game accept {invite.code}\n"
-                    f"(expires in 1 hour)")
-                if sent:
-                    return (f"invite sent to {to_label} for "
-                            f"{invite.game_name}.\n{share}")
-            return share
+            return self._challenge_player(game_name, to_label, chat_key,
+                                          player)
+        if verb == "pvp" and len(parts) > 1 and parts[1].lower() not in (
+                "easy", "normal", "hard", "expert"):
+            # /pvp @user — challenge a specific person DM-to-DM
+            if player is None:
+                return "pvp needs a chat sender — say it where you play."
+            return self._challenge_player("pvp", parts[1], chat_key,
+                                          player)
         if verb == "accept":
             if player is None:
                 return ("accept needs a chat sender — paste the /game accept "
@@ -192,6 +183,35 @@ class RuntimeGamesMixin:
             body = "\n".join(msgs) or engine.describe(room)
             return f"{diff_line}\n{body}"
         return (f"unknown game {verb!r} — /game list to see the table.")
+
+    def _challenge_player(self, game_name: str, to_label: str,
+                          chat_key: str, player: Any) -> str:
+        """DM-to-DM challenge: create a relay invite for ``game_name``
+        addressed to ``to_label``. Shared by ``/game invite``,
+        ``/pvp @user`` and ``/arena challenge``."""
+        if player is None:
+            return "challenging needs a chat sender — say it where you play."
+        try:
+            relay = self._game_relay()
+            invite = relay.create_invite(
+                chat_key, player, game_name, to_label=to_label)
+        except ValueError as exc:
+            return str(exc)
+        share = (f"invite ready for {invite.game_name} — share this:\n"
+                 f"/game accept {invite.code}\n"
+                 f"(expires in 1 hour, works from any chat)")
+        target = self._resolve_invite_target(chat_key, to_label)
+        if target is not None:
+            sent = self._relay_send(
+                target,
+                f"🎮 {player.name} invited you to play "
+                f"{invite.game_name}!\n"
+                f"to accept: /game accept {invite.code}\n"
+                f"(expires in 1 hour)")
+            if sent:
+                return (f"invite sent to {to_label} for "
+                        f"{invite.game_name}.\n{share}")
+        return share
 
     # ── arena gear commands ──────────────────────────────────────────────────
     def _control_gear(self, cmd: str, ref: str, *,
@@ -573,7 +593,22 @@ class RuntimeGamesMixin:
         return _call
 
     def _game_send(self, chat_key: str, text: str) -> None:
-        """Engine output → the same chat it came from, on any platform."""
+        """Engine output → the same chat it came from, on any platform.
+
+        Virtual relay rooms (``relay:<code>``) fan out to BOTH players'
+        real chats — otherwise scheduler emissions (turn timeouts, idle
+        expiry, finishes) would vanish into a chat key no platform
+        owns."""
+        if (chat_key or "").startswith("relay:"):
+            try:
+                relay = self._game_engine().relay
+                room = relay.get_relay_for_virtual(chat_key)
+            except Exception:  # noqa: BLE001
+                room = None
+            if room is not None:
+                for other in (room.chat_a, room.chat_b):
+                    self._relay_send(other, text)
+                return
         ref = ChatRef.parse(chat_key)
         for chunk in self._game_chunks(text):
             try:
@@ -638,14 +673,61 @@ class RuntimeGamesMixin:
                 f"· items: {items}")
 
     # ── arena ────────────────────────────────────────────────────────────────
-    def _control_arena(self, tail: str, chat_key: str) -> str:
+    def _control_arena(self, tail: str, chat_key: str, *,
+                       player: Any = None, kind: str = "dm") -> str:
         from ..arena import Arena
         from ..features import feature_enabled
 
-        # Reuse the runtime's arena (loop state lives per instance).
-        arena = getattr(self, "_arena", None) or Arena(self.context)
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else "status"
+        # ── PvP verbs: duel challenges + raid boss ────────────────────
+        # (the rest of this handler is the self-improvement arena)
+        if verb == "challenge":
+            if not feature_enabled(self.context, "games"):
+                return "games are off. /features games on"
+            who = parts[1] if len(parts) > 1 else ""
+            if not who:
+                return ("usage: /arena challenge @user — challenge "
+                        "someone to a 1v1 duel. they accept with "
+                        "/game accept <code> (or /arena accept <code>).")
+            return self._challenge_player("pvp", who, chat_key, player)
+        if verb == "raid":
+            if not feature_enabled(self.context, "games"):
+                return "games are off. /features games on"
+            if player is None:
+                return "raid needs a chat sender — run it where you play."
+            engine = self._game_engine()
+            try:
+                room, msgs = engine.start(chat_key, "raid", player,
+                                          kind=kind)
+            except ValueError as exc:
+                return str(exc)
+            body = "\n".join(msgs) or engine.describe(room)
+            return f"🎮 {body}"
+        if verb == "accept":
+            if not feature_enabled(self.context, "games"):
+                return "games are off. /features games on"
+            if player is None:
+                return ("accept needs a chat sender — paste the /arena "
+                        "accept <code> in the chat where you play.")
+            if len(parts) < 2:
+                return "usage: /arena accept <invite_code>"
+            code = parts[1]
+            try:
+                relay = self._game_relay()
+                relay_room = relay.accept_invite(code, chat_key, player)
+                self._relay_send(
+                    relay_room.chat_a,
+                    f"🎮 {player.name} accepted your "
+                    f"{relay_room.game_name} invite — game on! play in "
+                    f"your DM, moves are relayed.")
+                return ("game started! play here in this chat — your moves "
+                        "are relayed to your opponent.")
+            except ValueError as exc:
+                return str(exc)
+        # ── self-improvement arena below ──────────────────────────────
+        # Reuse the runtime's arena (loop state lives per instance).
+        arena = getattr(self, "_arena", None) or Arena(self.context)
         if verb == "stats":
             s = arena.stats()
             builds = ", ".join(f"{k}={v}" for k, v in s["builds"].items())

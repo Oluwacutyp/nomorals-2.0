@@ -1197,7 +1197,9 @@ class PartnerRuntime(
 
         # ── self-improvement arena ───────────────────────────────────────────
         if kind == "arena":
-            return self._control_arena(command.tail or arg, chat_key=chat_key)
+            return self._control_arena(
+                command.tail or arg, chat_key=chat_key,
+                player=self._game_player_for_key(chat_key), kind="dm")
 
         # ── single-account trials ────────────────────────────────────────────
         if kind == "trial":

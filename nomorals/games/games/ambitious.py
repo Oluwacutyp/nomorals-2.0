@@ -618,38 +618,22 @@ class BattleArenaGame(MultiGame):
 
     def _hit(self, room: Room, src: str, dst: str, mind: GameMind,
              mult: float = 1.0, ignore_def: float = 0.0) -> str:
+        from ..combat import strike
         s = room.state
         a, d = s[src], s[dst]
-        # shadow step: the fighter simply isn't there
-        if dst == "you" and d.get("dodge_next"):
-            d["dodge_next"] = False
+        crit_bonus = (float(s.get("crit_bonus") or 0.0)
+                      if src == "you" else 0.0)
+        rep = strike(a, d, mind.rng, mult=mult, ignore_def=ignore_def,
+                     crit_bonus=crit_bonus)
+        if rep["dodged"]:
             return (f"{src} swings — and hits only air. "
                     f"shadow step dodged it clean.")
-        # a focused fighter spends its focus on this hit
-        focused = a.get("focused", False)
-        a["focused"] = False
-        eff_def = int(d["def"] * (1.0 - ignore_def))
-        raw = max(1, a["atk"] - eff_def // 2 + mind.rng.randint(-2, 3))
-        if mult != 1.0:
-            raw = max(1, int(raw * mult))
-        if focused:
-            raw = max(1, int(raw * 1.5))
-        crit_chance = 0.10 + (float(s.get("crit_bonus") or 0.0)
-                              if src == "you" else 0.0)
-        crit = mind.rng.random() < crit_chance
-        if crit:
-            raw *= 2
-        if d["defending"]:
-            raw = max(1, raw // 2)
-            d["defending"] = False
-        d["hp"] -= raw
+        raw, crit, focused = rep["dmg"], rep["crit"], rep["focused"]
         # gear wear: the attacker's weapon and the defender's armor
         wear_notes: list[str] = []
         if src == "you" or dst == "you":
             wear_notes = self._apply_wear(room, src, dst)
-        if d["hp"] <= 0 and d["shield"]:
-            d["shield"] = False
-            d["hp"] = 1
+        if rep["shielded"]:
             return (f"the shield SHATTERS — {dst} is burned to 1 HP. "
                     f"one more hit and it's over.")
         if crit and d["hp"] <= 0:
@@ -827,19 +811,9 @@ class BattleArenaGame(MultiGame):
         s = room.state
         t = text.strip().lower()
         out: list[str] = []
-        # the player's fury cooldown ticks down once per turn
-        if s["you"]["fury_cd"] > 0:
-            s["you"]["fury_cd"] -= 1
-        # skill cooldowns tick down too
-        for slug in list(s.get("skill_cd", {})):
-            if s["skill_cd"][slug] > 0:
-                s["skill_cd"][slug] -= 1
-        # war cry fades when its turns run out
-        if s["you"].get("warcry_turns", 0) > 0:
-            s["you"]["warcry_turns"] -= 1
-            if s["you"]["warcry_turns"] <= 0:
-                s["you"]["atk"] = max(1, s["you"]["atk"] - 3)
-                out.append("the war cry fades — your attack settles.")
+        # start-of-turn decay: fury/skill cooldowns, war-cry expiry
+        from ..combat import tick_fighter
+        out.extend(tick_fighter(s["you"], s.get("skill_cd")))
         if t == "attack":
             out.append(self._hit(room, "you", "house", mind))
             win = self._check(room)

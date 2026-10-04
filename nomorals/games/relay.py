@@ -263,20 +263,35 @@ class GameRelay:
         # Start the game OUTSIDE the relay lock: engine.start takes the
         # engine lock, and engine.quit takes relay-lock-after-engine-lock
         # (see GameEngine.quit) — nesting them the other way deadlocks.
+        #
+        # kind="group" (not "dm"): the virtual room has two humans, so
+        # the engine must enforce strict turn order. In "dm" mode any
+        # human may move at any time, which breaks turn-based duels.
         try:
             room, _msgs = self.engine.start(
                 relay.virtual_chat, game_name, from_player,
-                kind="dm")
+                kind="group")
         except Exception:
             with self._lock:
                 self.relays.pop(room_id, None)
                 self.chat_to_relay.pop(relay.chat_a, None)
                 self.chat_to_relay.pop(relay.chat_b, None)
             raise
-        # seat the second player alongside the inviter
+        # seat the second player alongside the inviter: mirror their
+        # snapshots first (inventory/gear/skills/progression), then let
+        # the game build their seat via on_join
         with room.guard:
             if room.player(to_player.key) is None:
                 room.players.append(to_player)
+                self.engine._mirror_player(room, to_player)
+                game = self.engine.games.get(game_name)
+                if game is not None:
+                    try:
+                        game.on_join(room, to_player,
+                                     self.engine._mind)
+                    except Exception:  # noqa: BLE001 - a bad on_join
+                        pass           # must not strand the relay
+                self.engine._persist(room)
         with self._lock:
             self._save_relay(relay)
         return relay
@@ -321,6 +336,16 @@ class GameRelay:
             relay = self.relays.get(code) if code else None
             if relay is not None and relay.active:
                 return relay
+            return None
+
+    def get_relay_for_virtual(self, virtual_chat: str) -> RelayRoom | None:
+        """Find the relay room by its virtual engine key
+        (``relay:<code>``) — used to fan engine emissions (timeouts,
+        finishes) out to both players' real chats."""
+        with self._lock:
+            for relay in self.relays.values():
+                if relay.active and relay.virtual_chat == virtual_chat:
+                    return relay
             return None
 
     def close_relay(self, room_id: str, reason: str = "") -> None:

@@ -142,9 +142,10 @@ class GameEngine:
         from .games.casino import CASINO_GAMES
         from .games.inbox import INBOX_GAMES
         from .games.puzzles import PUZZLE_GAMES
+        from .games.pvp import PVP_GAMES
         for game in (*EASY_GAMES, *MEDIUM_GAMES, *AMBITIOUS_GAMES,
                      *WILD_GAMES, *ARCADE_GAMES, *CASINO_GAMES,
-                     *INBOX_GAMES, *PUZZLE_GAMES):
+                     *INBOX_GAMES, *PUZZLE_GAMES, *PVP_GAMES):
             self.games[game.name] = game
 
     def register(self, game: MultiGame) -> None:
@@ -413,65 +414,62 @@ class GameEngine:
         Durable gear is mirrored separately into ``state['loadout']``:
         slot → {id, slug, atk, def, durability, set} for what's equipped.
         """
-        inv: dict[str, dict[str, int]] = {}
-        loadout: dict[str, dict[str, dict[str, Any]]] = {}
-        closet: dict[str, list[dict[str, Any]]] = {}
         for p in room.humans:
-            try:
-                inv[p.key] = dict(self.store.get(p.key).items)
-            except Exception:  # noqa: BLE001
-                inv[p.key] = {}
-            try:
-                from .gear import GEAR_CATALOG, effective_stats
-                worn: dict[str, dict[str, Any]] = {}
-                owned: list[dict[str, Any]] = []
-                for inst in self.gear.list(p.key):
-                    defn = GEAR_CATALOG.get(inst.slug)
-                    if defn is None:
-                        continue
-                    atk, df = effective_stats(defn)
-                    entry = {"id": inst.id, "slug": inst.slug,
-                             "name": defn.name, "slot": defn.slot,
-                             "atk": atk, "def": df,
-                             "durability": inst.durability,
-                             "max_durability": inst.max_durability,
-                             "set": defn.set_name,
-                             "unbreakable": bool(defn.unbreakable),
-                             "equipped": inst.equipped}
-                    owned.append(entry)
-                    if inst.equipped and not inst.broken:
-                        worn.setdefault(defn.slot, entry)
-                loadout[p.key] = worn
-                closet[p.key] = owned
-            except Exception:  # noqa: BLE001
-                loadout[p.key] = {}
-                closet[p.key] = {}
-        room.state["inventory"] = inv
-        room.state["loadout"] = loadout
-        room.state["gear_closet"] = closet
+            self._mirror_player(room, p)
+
+    def _mirror_player(self, room: Room, player: Player) -> None:
+        """Mirror ONE player's inventory/gear/progression/skills into
+        ``room.state``. Additive: only this player's keys are written,
+        so a mid-game join (raid reinforcements, duel challengers) can
+        never clobber another player's snapshot."""
+        key = player.key
+        try:
+            room.state.setdefault("inventory", {})[key] = dict(
+                self.store.get(key).items)
+        except Exception:  # noqa: BLE001
+            room.state.setdefault("inventory", {}).setdefault(key, {})
+        try:
+            from .gear import GEAR_CATALOG, effective_stats
+            worn: dict[str, dict[str, Any]] = {}
+            owned: list[dict[str, Any]] = []
+            for inst in self.gear.list(key):
+                defn = GEAR_CATALOG.get(inst.slug)
+                if defn is None:
+                    continue
+                atk, df = effective_stats(defn)
+                entry = {"id": inst.id, "slug": inst.slug,
+                         "name": defn.name, "slot": defn.slot,
+                         "atk": atk, "def": df,
+                         "durability": inst.durability,
+                         "max_durability": inst.max_durability,
+                         "set": defn.set_name,
+                         "unbreakable": bool(defn.unbreakable),
+                         "equipped": inst.equipped}
+                owned.append(entry)
+                if inst.equipped and not inst.broken:
+                    worn.setdefault(defn.slot, entry)
+            room.state.setdefault("loadout", {})[key] = worn
+            room.state.setdefault("gear_closet", {})[key] = owned
+        except Exception:  # noqa: BLE001
+            room.state.setdefault("loadout", {}).setdefault(key, {})
+            room.state.setdefault("gear_closet", {}).setdefault(key, [])
         # persistent progression: level + arena stat bonus per human,
         # so games apply it store-free (see progression.level_stat_bonus)
-        prog: dict[str, dict[str, Any]] = {}
         try:
             from .progression import level_for_xp, level_stat_bonus
-            for p in room.humans:
-                prof = self.store.get(p.key)
-                level = level_for_xp(prof.xp)
-                prog[p.key] = {"level": level,
-                               **level_stat_bonus(level)}
+            prof = self.store.get(key)
+            level = level_for_xp(prof.xp)
+            room.state.setdefault("progression", {})[key] = {
+                "level": level, **level_stat_bonus(level)}
         except Exception:  # noqa: BLE001
             _log.debug("progression mirror failed", exc_info=True)
-        room.state["progression"] = prog
-        # learned battle skills, so the arena applies them store-free
-        learned: dict[str, list[str]] = {}
+        # learned battle skills, so combat games apply them store-free
         try:
             from .skills import SkillStore
-            skills = SkillStore(self.db)
-            for p in room.humans:
-                learned[p.key] = skills.learned(p.key)
+            room.state.setdefault("skills", {})[key] = \
+                SkillStore(self.db).learned(key)
         except Exception:  # noqa: BLE001
             _log.debug("skills mirror failed", exc_info=True)
-        room.state["skills"] = learned
 
     def _reconcile_items(self, room: Room) -> None:
         consumed = room.state.get("consumed", {})
@@ -557,6 +555,10 @@ class GameEngine:
                 return ["the table is full."]
         else:
             room.players.append(player)
+        # the joiner needs their own snapshots (inventory/gear/skills/
+        # progression) before the game's on_join builds their seat —
+        # additive, so nobody else's mid-game state is touched
+        self._mirror_player(room, player)
         msgs: list[str] = []
         note = game.on_join(room, player, self._mind)
         if note:
@@ -593,7 +595,10 @@ class GameEngine:
         room.players = [p for p in room.players if p.key != player.key]
         if room.turn >= len(room.players):
             room.turn = 0 % max(1, len(room.players))
-        if not room.humans or len(room.players) <= len(room.ai_seats):
+        # is_over: a game may end itself in on_leave (duel walkover) —
+        # honor that instead of leaving a decided table open
+        if (not room.humans or len(room.players) <= len(room.ai_seats)
+                or self.is_over(room)):
             return self._finish(room, notice)
         room.turn_started = time.time()
         room.last_activity = time.time()
@@ -906,6 +911,10 @@ class GameEngine:
                     won = None
                     if winner == "draw":
                         won = None
+                    elif winner == "all":
+                        # co-op victory (raid): every human at the
+                        # table won — full win credit, streaks move
+                        won = True
                     elif isinstance(winner, Player):
                         won = (winner.key == p.key)
                     elif winner is None:
