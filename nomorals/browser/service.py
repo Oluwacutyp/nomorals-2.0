@@ -35,6 +35,7 @@ from ..core.events import Event, global_bus
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
+from . import forms
 from ..tools.browser import (
     BrowserSession,
     dom_forms,
@@ -178,9 +179,30 @@ class Tab:
         self.error = ""
         return result
 
-    def navigate(self, url: str) -> dict[str, Any]:
-        """Navigate and append to history AFTER the load succeeded."""
-        result = self._load_page(url)
+    def navigate(self, url: str, *, retries: int = 0) -> dict[str, Any]:
+        """Navigate and append to history AFTER the load succeeded.
+
+        ``retries`` re-attempts a failed load with linear backoff (0 =
+        try once). The final failure raises BrowserError — never a
+        half-loaded tab.
+        """
+        url = (url or "").strip()
+        if not url:
+            raise BrowserError("navigate needs a url")
+        attempts = 1 + max(0, int(retries))
+        last_exc: BrowserError | None = None
+        result: dict[str, Any] = {}
+        for attempt in range(attempts):
+            try:
+                result = self._load_page(url)
+                last_exc = None
+                break
+            except BrowserError as exc:
+                last_exc = exc
+                if attempt < attempts - 1:
+                    time.sleep(min(2.0 * (attempt + 1), 8.0))
+        if last_exc is not None:
+            raise last_exc
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
         _emit("browser.tab.navigated", {
@@ -345,6 +367,58 @@ _PLAYWRIGHT_HINT = (
 #: goto timeout for rendered tabs (Cloudflare-guarded pages can be slow).
 _RENDERED_GOTO_TIMEOUT_MS = 60_000
 
+#: sentinel for "no arg passed" (None is a legitimate JS arg).
+_MISSING: Any = object()
+
+#: wait_until values playwright accepts for page.goto().
+_GOTO_WAIT_UNTIL = frozenset({"load", "domcontentloaded", "networkidle", "commit"})
+
+#: Basic anti-detection for rendered tabs. Realistic user agent, viewport,
+#: locale, timezone, the AutomationControlled blink flag disabled, and
+#: navigator.webdriver hidden — enough to stop flagging the obvious
+#: headless-Chromium tells, without fingerprint-spoofing rabbit holes.
+_DEFAULT_STEALTH: dict[str, Any] = {
+    "enabled": True,
+    "user_agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "viewport": {"width": 1366, "height": 768},
+    "locale": "en-US",
+    "timezone_id": "Africa/Lagos",
+}
+_STEALTH_KEYS = frozenset(_DEFAULT_STEALTH)
+
+#: init script hiding the classic headless tell.
+_WEBDRIVER_HIDE_JS = (
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+)
+
+#: chromium flags for rendered tabs (stealth).
+_STEALTH_CHROME_ARGS = ["--disable-blink-features=AutomationControlled"]
+
+
+def _merge_stealth(base: dict[str, Any] | None,
+                  override: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge stealth profiles over the defaults. Unknown keys fail fast —
+    a silently ignored profile entry is a lie about what's applied."""
+    merged = dict(_DEFAULT_STEALTH)
+    for profile in (base, override):
+        if not profile:
+            continue
+        unknown = set(profile) - _STEALTH_KEYS
+        if unknown:
+            raise BrowserError(
+                f"unknown stealth profile keys: {sorted(unknown)} "
+                f"(known: {sorted(_STEALTH_KEYS)})")
+        merged.update(profile)
+    viewport = merged.get("viewport")
+    if merged.get("enabled") and not (
+            isinstance(viewport, dict) and viewport.get("width")
+            and viewport.get("height")):
+        raise BrowserError("stealth viewport must be {width, height}")
+    return merged
+
 
 def _require_playwright_sync():
     """The playwright sync API factory, or a BrowserError that says exactly
@@ -386,14 +460,20 @@ class RenderedTab:
     Plain-HTTP tabs cannot pass Cloudflare managed challenges ("Just a
     moment..."); a rendered tab executes the page's JavaScript and keeps
     cookies via playwright's ``storage_state``, persisted to the session's
-    cookie directory so logins survive restarts.
+    cookie directory so logins survive restarts. ``storage_state`` also
+    carries the page's ``localStorage``/``sessionStorage`` origins, so
+    sites that stash tokens in localStorage resume logged-in too.
 
-    The tab does NOT own the playwright driver: it receives the started
-    driver object from :meth:`BrowserService.open_rendered_tab` and
-    launches one browser per tab on the first ``navigate()``. The driver
-    itself lives as long as the service — playwright's sync API cannot
-    be stopped and restarted in one thread, so the service starts it once
-    and only tears it down in :meth:`BrowserService.shutdown`.
+    Stealth: unless disabled via the ``stealth`` profile, the tab launches
+    chromium with a realistic user agent, viewport, locale, and timezone,
+    disables the AutomationControlled blink feature, and hides
+    ``navigator.webdriver`` — the cheap, obvious headless tells.
+
+    Error recovery: ``navigate`` retries with backoff; when
+    ``shot_on_error`` is true (default), a failed navigate/fill/click/
+    submit/select/check captures a screenshot AND a DOM dump into the
+    session's screenshots dir and the error message names both paths, so
+    the failure is debuggable instead of a bare timeout.
     """
 
     def __init__(
@@ -403,6 +483,10 @@ class RenderedTab:
         storage_state_path: str | os.PathLike[str],
         playwright: Any,
         proxy: str = "",
+        *,
+        stealth: dict[str, Any] | None = None,
+        shot_on_error: bool = True,
+        retries: int = 2,
     ) -> None:
         self.tab_id = tab_id
         self.session_name = session_name
@@ -416,6 +500,12 @@ class RenderedTab:
         self._playwright = playwright
         #: proxy URL for this tab's chromium ("" = direct).
         self._proxy = (proxy or "").strip()
+        #: merged stealth profile (see _merge_stealth).
+        self._stealth = _merge_stealth(None, stealth)
+        #: capture screenshot+DOM on action failure.
+        self.shot_on_error = bool(shot_on_error)
+        #: navigate retries after the first attempt (0 = try once).
+        self.retries = max(0, int(retries))
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -428,15 +518,27 @@ class RenderedTab:
             return self._page
         try:
             launch_kwargs: dict[str, Any] = {"headless": True}
+            if self._stealth.get("enabled"):
+                launch_kwargs["args"] = list(_STEALTH_CHROME_ARGS)
             proxy_cfg = _playwright_proxy_config(self._proxy)
             if proxy_cfg:
                 launch_kwargs["proxy"] = proxy_cfg
             self._browser = self._playwright.chromium.launch(**launch_kwargs)
+            ctx_kwargs: dict[str, Any] = {}
             state = str(self._storage_state_path)
             if self._storage_state_path.is_file():
-                self._context = self._browser.new_context(storage_state=state)
-            else:
-                self._context = self._browser.new_context()
+                ctx_kwargs["storage_state"] = state
+            if self._stealth.get("enabled"):
+                ctx_kwargs.update({
+                    "user_agent": self._stealth["user_agent"],
+                    "viewport": dict(self._stealth["viewport"]),
+                    "locale": self._stealth["locale"],
+                    "timezone_id": self._stealth["timezone_id"],
+                })
+            self._context = self._browser.new_context(**ctx_kwargs)
+            add_init = getattr(self._context, "add_init_script", None)
+            if callable(add_init) and self._stealth.get("enabled"):
+                add_init(_WEBDRIVER_HIDE_JS)
             self._page = self._context.new_page()
         except Exception as exc:  # noqa: BLE001 - launch errors are opaque
             self._teardown_quiet()
@@ -459,19 +561,109 @@ class RenderedTab:
                 except Exception:  # noqa: BLE001 - teardown best effort
                     _log.debug("rendered tab teardown %s.close failed", attr)
 
+    # -- error recovery --------------------------------------------------------
+    def _fail_snapshot(self, action: str) -> dict[str, str]:
+        """Capture a screenshot AND a DOM dump of the current page into the
+        session's screenshots dir. Best-effort (never raises); returns the
+        paths that were actually written, so the caller can name them in
+        the error message."""
+        paths: dict[str, str] = {}
+        if not self.shot_on_error or self._page is None:
+            return paths
+        dest_dir = (Path(self._storage_state_path).parent.parent
+                    / "screenshots" / self.session_name)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return paths
+        stamp = int(time.time() * 1000)
+        shot = dest_dir / f"error-{self.tab_id}-{stamp}.png"
+        try:
+            self._page.screenshot(path=str(shot))
+        except Exception as exc:  # noqa: BLE001 - snapshot best effort
+            _log.debug("error snapshot screenshot failed: %s", exc)
+        else:
+            if shot.is_file() and shot.stat().st_size:
+                paths["screenshot"] = str(shot)
+        dom_path = dest_dir / f"error-{self.tab_id}-{stamp}.html"
+        try:
+            dom = self._page.content()
+        except Exception as exc:  # noqa: BLE001 - snapshot best effort
+            _log.debug("error snapshot DOM dump failed: %s", exc)
+        else:
+            try:
+                dom_path.write_text(dom or "", encoding="utf-8")
+            except OSError as exc:
+                _log.debug("error snapshot DOM write failed: %s", exc)
+            else:
+                paths["dom"] = str(dom_path)
+        return paths
+
+    def _action_error(self, action: str, exc: Exception,
+                      detail: str = "") -> BrowserError:
+        """Wrap an action failure: snapshot the page, then raise a
+        BrowserError that names exactly what failed and where the
+        evidence is."""
+        paths = self._fail_snapshot(action)
+        where = ""
+        if paths:
+            where = " (evidence: " + ", ".join(
+                f"{k}={v}" for k, v in paths.items()) + ")"
+        msg = (f"rendered {action} on {self.url or '(no page)'} failed"
+               + (f" — {detail}" if detail else "")
+               + f": {exc}{where}")
+        return BrowserError(msg)
+
+    def persist(self) -> dict[str, Any]:
+        """Flush cookies AND localStorage to the session's storage file
+        right now (close() also does this). Returns the path written."""
+        if self._context is None:
+            raise BrowserError("rendered tab has no browser context yet — "
+                               "navigate first")
+        self._storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._context.storage_state(path=str(self._storage_state_path))
+        except Exception as exc:  # noqa: BLE001 - persistence errors opaque
+            raise BrowserError(
+                f"could not persist rendered session state: {exc}") from exc
+        return {"path": str(self._storage_state_path)}
+
     # -- navigation ----------------------------------------------------------
-    def navigate(self, url: str) -> dict[str, Any]:
-        """Render the page and append to history AFTER the load succeeded."""
+    def navigate(self, url: str, *, wait_until: str = "domcontentloaded",
+                 retries: int | None = None) -> dict[str, Any]:
+        """Render the page and append to history AFTER the load succeeded.
+
+        ``wait_until``: load|domcontentloaded|networkidle|commit —
+        "networkidle" for JS-heavy pages whose content arrives after the
+        DOM is parsed. Failed loads retry ``retries`` times (default: the
+        tab's ``retries``) with linear backoff; the final failure raises a
+        BrowserError naming the captured screenshot/DOM evidence.
+        """
         url = (url or "").strip()
         if not url:
             raise BrowserError("navigate needs a url")
+        if wait_until not in _GOTO_WAIT_UNTIL:
+            raise BrowserError(
+                f"unknown wait_until {wait_until!r} "
+                f"(want one of {sorted(_GOTO_WAIT_UNTIL)})")
         page = self._ensure_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=_RENDERED_GOTO_TIMEOUT_MS)
-        except Exception as exc:  # noqa: BLE001 - goto errors are opaque
-            self.error = f"navigate {url} failed: {exc}"
-            raise BrowserError(self.error) from exc
+        attempts = 1 + max(0, self.retries if retries is None else retries)
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                page.goto(url, wait_until=wait_until,
+                          timeout=_RENDERED_GOTO_TIMEOUT_MS)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001 - goto errors opaque
+                last_exc = exc
+                if attempt < attempts - 1:
+                    time.sleep(min(2.0 * (attempt + 1), 8.0))
+        if last_exc is not None:
+            self.error = (f"navigate {url} failed after {attempts} "
+                          f"attempt(s): {last_exc}")
+            raise self._action_error("navigate", last_exc,
+                                     detail=f"{url} ({attempts} attempts)")
         self.url = page.url
         try:
             self.title = page.title()
@@ -486,6 +678,33 @@ class RenderedTab:
         if self._page is None or not self.url:
             raise BrowserError("rendered tab has no loaded page — navigate first")
         return self._page
+
+    def wait_for_load_state(self, state: str = "load",
+                            timeout: int = 30_000) -> dict[str, Any]:
+        """Wait for the page's load state: load|domcontentloaded|networkidle.
+
+        The dynamic-site primitive: after a click that triggers XHR,
+        ``wait_for_load_state("networkidle")`` waits until the network
+        settles instead of a blind sleep. Fail fast on timeout.
+        """
+        page = self._require_loaded()
+        state = (state or "").strip().lower()
+        if state not in {"load", "domcontentloaded", "networkidle"}:
+            raise BrowserError(
+                f"unknown load state {state!r} "
+                "(want load|domcontentloaded|networkidle)")
+        try:
+            page.wait_for_load_state(state, timeout=int(timeout))
+        except Exception as exc:  # noqa: BLE001 - timeout errors opaque
+            raise self._action_error(
+                f"wait_for_load_state({state})", exc,
+                detail=f"timeout after {timeout}ms")
+        return {"ok": True, "state": state, "url": self.url}
+
+    def wait_for_network_idle(self, timeout: int = 15_000) -> dict[str, Any]:
+        """Shorthand for ``wait_for_load_state("networkidle")`` — the wait
+        to use after actions on JS-heavy pages."""
+        return self.wait_for_load_state("networkidle", timeout=timeout)
 
     # -- page work (same result shapes as Tab) --------------------------------
     def text(self, max_chars: int = 40000) -> dict[str, Any]:
@@ -541,9 +760,48 @@ class RenderedTab:
     # -- interaction (same verbs as Tab.fill/click/submit, on the live DOM) --
     @staticmethod
     def _field_selector(name: str) -> str:
-        """Match a form field by name, then id — whichever the page uses."""
+        """Legacy match: a form field by name, then id — whichever the page
+        uses. Only used when the page driver cannot run JavaScript."""
         escaped = (name or "").replace('"', '\\"')
         return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"], [id="{escaped}"]'
+
+    def _resolve_field(self, name: str) -> tuple[str, dict[str, Any] | None]:
+        """Resolve ``name`` to ``(selector, info)`` via the smart field
+        resolver (label/placeholder/aria/name/id scoring — see
+        ``nomorals.browser.forms``).
+
+        Fail fast with a field inventory: when nothing matches, the error
+        lists the controls the page actually has instead of a bare name.
+        """
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("a field name is required")
+        try:
+            return forms.resolve(page, name)
+        except forms.FieldNotFound:
+            fields = forms.describe_fields(page)
+            detail = ""
+            if fields:
+                detail = ("\nfields on this page:\n"
+                          + forms.format_field_list(fields))
+            paths = self._fail_snapshot("field resolution")
+            where = ""
+            if paths:
+                where = " (evidence: " + ", ".join(
+                    f"{k}={v}" for k, v in paths.items()) + ")"
+            raise BrowserError(
+                f"no form field {name!r} on {self.url or '(no page)'}"
+                f"{detail}{where}")
+
+    def _kind_of(self, name: str,
+                 info: dict[str, Any] | None) -> dict[str, str] | None:
+        """{"tag", "type"} from resolver info, or the legacy DOM inspect
+        when the driver cannot run the resolver. None when the type cannot
+        be inspected at all (duck-typed driver)."""
+        if info is not None:
+            return {"tag": info.get("tag", ""), "type": info.get("type", "")}
+        return self._field_kind(name)
 
     def _field_kind(self, name: str) -> dict[str, str] | None:
         """Inspect the first matching field's tag/type via the live DOM.
@@ -576,22 +834,22 @@ class RenderedTab:
         return {"tag": info.get("tag", ""), "type": info.get("type", "")}
 
     def fill(self, name: str, value: str) -> dict[str, Any]:
-        """Fill a form field by name or id on the rendered page.
+        """Fill a form field by label, placeholder, aria-label, name, or id.
 
         Type-aware: ``<select>`` fields route to :meth:`select`,
         checkboxes/radios route to :meth:`check`, file inputs fail fast
         with a pointer to :meth:`upload` — plain ``page.fill`` only ever
         touches real text-like inputs, so a select no longer dies with an
-        opaque playwright error. When the field type cannot be inspected
-        the untyped ``page.fill`` path is used (previous behavior).
+        opaque playwright error. The result names which identity matched
+        (``matched_via``: aria-label|label|placeholder|name|id|...), so a
+        surprising match is visible instead of silent.
         """
         page = self._require_loaded()
-        name = (name or "").strip()
-        if not name:
-            raise BrowserError("rendered fill needs a field name")
-        kind = self._field_kind(name)
-        if kind is not None:
-            tag, ftype = kind["tag"], kind["type"]
+        selector, info = self._resolve_field(name)
+        kind = self._kind_of(name, info)
+        tag = (kind or {}).get("tag", "")
+        ftype = (kind or {}).get("type", "")
+        try:
             if tag == "select":
                 return self.select(name, value)
             if tag == "input" and ftype in {"checkbox", "radio"}:
@@ -602,13 +860,160 @@ class RenderedTab:
                 raise BrowserError(
                     f"field {name!r} is a file input — use rendered upload, "
                     "not fill")
-        selector = self._field_selector(name)
-        try:
             page.fill(selector, str(value))
-        except Exception as exc:  # noqa: BLE001 - selector errors are opaque
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - selector errors opaque
+            raise self._action_error(
+                "fill", exc, detail=f"field {name!r}") from exc
+        finally:
+            forms.clear_marker(page)
+        return {"ok": True, "field": name, "tab_id": self.tab_id,
+                "matched_via": (info or {}).get("by", "") or "name/id"}
+
+    def fill_form(self, fields: dict[str, Any], *,
+                  stop_on_error: bool = True) -> dict[str, Any]:
+        """Fill many fields in one call: ``{"Email address": "...",
+        "country": "ng", "agree": True}``.
+
+        Each value goes through :meth:`fill`, so selects/checkboxes are
+        handled per field. Fail fast by default (``stop_on_error``);
+        otherwise every field is attempted and failures are collected in
+        the result's ``failed`` map.
+        """
+        if not isinstance(fields, dict) or not fields:
+            raise BrowserError("fill_form needs a non-empty {field: value} mapping")
+        filled: list[str] = []
+        failed: dict[str, str] = {}
+        for name, value in fields.items():
+            try:
+                self.fill(str(name), "" if value is None else str(value))
+            except BrowserError as exc:
+                if stop_on_error:
+                    raise
+                failed[str(name)] = str(exc)
+                continue
+            filled.append(str(name))
+        return {"ok": not failed, "filled": filled, "failed": failed,
+                "tab_id": self.tab_id}
+
+    def set_date(self, name: str, value: str) -> dict[str, Any]:
+        """Set a date field — native ``<input type="date">`` pickers and
+        JS-driven text pickers alike.
+
+        ``value`` accepts "2026-10-04", "04/10/2026", "10/04/2026",
+        "4 Oct 2026" (see :func:`nomorals.browser.forms.normalize_date`).
+        Native date inputs are filled directly; other inputs get the ISO
+        date typed + Enter, with a React-compatible JS setter as fallback
+        when the typed value doesn't stick. Fail fast on unparseable
+        dates — never a silently wrong date.
+        """
+        page = self._require_loaded()
+        try:
+            iso = forms.normalize_date(value)
+        except ValueError as exc:
+            raise BrowserError(str(exc)) from exc
+        selector, info = self._resolve_field(name)
+        kind = self._kind_of(name, info)
+        tag = (kind or {}).get("tag", "")
+        ftype = (kind or {}).get("type", "")
+        try:
+            if tag == "input" and ftype in {
+                    "date", "datetime-local", "month", "time", "week"}:
+                page.fill(selector, iso)
+            elif tag in {"input", "textarea"} or tag == "":
+                page.fill(selector, iso)
+                press = getattr(page, "press", None)
+                if callable(press):
+                    try:
+                        press(selector, "Enter")
+                    except Exception:  # noqa: BLE001 - Enter is best effort
+                        _log.debug("set_date Enter press failed")
+                if info is not None:
+                    readback = self.evaluate(
+                        "() => { const el = document.querySelector("
+                        "'[data-nm-field=\"1\"]'); "
+                        "return el ? el.value : null; }")
+                    if readback != iso:
+                        forms.set_value_js(page, iso)
+            else:
+                raise BrowserError(
+                    f"field {name!r} is a <{tag}> (type={ftype or 'n/a'}) — "
+                    "not a date-settable control")
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - picker errors opaque
+            raise self._action_error(
+                "set_date", exc, detail=f"field {name!r} = {value!r}") from exc
+        finally:
+            forms.clear_marker(page)
+        return {"ok": True, "field": name, "date": iso, "tab_id": self.tab_id}
+
+    def describe_fields(self, limit: int = 100) -> dict[str, Any]:
+        """Every fillable control on the current page with its visible
+        identity (label, placeholder, aria-label, name, id). What to call
+        a field when writing a fill/fill_form call — or when a "field not
+        found" error needs context."""
+        page = self._require_loaded()
+        fields = forms.describe_fields(page)
+        return {"url": self.url, "count": len(fields),
+                "fields": fields[: max(1, int(limit))]}
+
+    def evaluate(self, js: str, arg: Any = _MISSING) -> Any:
+        """Run ``js`` in the page and return its result.
+
+        The escape hatch for token injection (CAPTCHA solvers),
+        localStorage reads, and anything the verbs don't cover. Fail fast
+        when the driver cannot evaluate JavaScript.
+        """
+        page = self._require_loaded()
+        if not (js or "").strip():
+            raise BrowserError("evaluate needs JavaScript source")
+        evaluate = getattr(page, "evaluate", None)
+        if evaluate is None:
             raise BrowserError(
-                f"rendered fill of {name!r} on {self.url} failed: {exc}") from exc
-        return {"ok": True, "field": name, "tab_id": self.tab_id}
+                "this page driver cannot evaluate JavaScript")
+        try:
+            if arg is _MISSING:
+                return evaluate(js)
+            return evaluate(js, arg)
+        except Exception as exc:  # noqa: BLE001 - eval errors opaque
+            raise self._action_error("evaluate", exc) from exc
+
+    def local_storage(self, action: str = "get", key: str = "",
+                      value: Any = None) -> dict[str, Any]:
+        """Read/write the page's ``localStorage`` (the token stash most
+        SPAs use for sessions).
+
+        ``action``: get|set|remove|clear. ``get`` returns the value (None
+        when the key is absent); ``set`` stores ``str(value)``; ``remove``
+        deletes one key; ``clear`` wipes the origin's storage. Changes
+        persist across restarts — ``localStorage`` is part of the
+        persisted ``storage_state`` saved by :meth:`persist`/:meth:`close`.
+        """
+        page = self._require_loaded()
+        action = (action or "get").strip().lower()
+        if action not in {"get", "set", "remove", "clear"}:
+            raise BrowserError(
+                f"unknown localStorage action {action!r} "
+                "(want get|set|remove|clear)")
+        key = (key or "").strip()
+        if action in {"get", "set", "remove"} and not key:
+            raise BrowserError(
+                f"localStorage {action} needs a key")
+        snippets = {
+            "get": ("(k) => window.localStorage.getItem(k)", key),
+            "set": ("([k, v]) => { window.localStorage.setItem(k, String(v));"
+                    " return true; }", [key, value]),
+            "remove": ("(k) => { window.localStorage.removeItem(k);"
+                       " return true; }", key),
+            "clear": ("() => { window.localStorage.clear(); return true; }",
+                      None),
+        }
+        js, arg = snippets[action]
+        result = self.evaluate(js, arg)
+        return {"action": action, "key": key, "value": result,
+                "url": self.url}
 
     def select(self, name: str, value: str, *,
                by: str = "auto") -> dict[str, Any]:
@@ -622,7 +1027,12 @@ class RenderedTab:
         name = (name or "").strip()
         if not name:
             raise BrowserError("rendered select needs a field name")
-        kind = self._field_kind(name)
+        by = (by or "auto").strip().lower()
+        if by not in {"auto", "value", "label"}:
+            raise BrowserError(
+                f"unknown select match {by!r} (want auto|value|label)")
+        selector, info = self._resolve_field(name)
+        kind = self._kind_of(name, info)
         if kind is None:
             raise BrowserError(
                 f"cannot inspect field {name!r} on this page driver — "
@@ -631,29 +1041,27 @@ class RenderedTab:
             raise BrowserError(
                 f"field {name!r} is a <{kind['tag']}> "
                 f"(type={kind['type'] or 'n/a'}), not a <select>")
-        by = (by or "auto").strip().lower()
-        if by not in {"auto", "value", "label"}:
-            raise BrowserError(
-                f"unknown select match {by!r} (want auto|value|label)")
-        selector = self._field_selector(name)
         attempts = ([{"value": value}, {"label": value}] if by == "auto"
                     else [{"value": value}] if by == "value"
                     else [{"label": value}])
         last_exc: Exception | None = None
-        for kw in attempts:
-            try:
-                picked = page.select_option(selector, **kw)
-            except Exception as exc:  # noqa: BLE001 - opaque
-                last_exc = exc
-                continue
-            if picked:
-                return {"ok": True, "field": name, "picked": picked,
-                        "tab_id": self.tab_id}
-            last_exc = BrowserError(
-                f"no option matching {value!r} in select {name!r}")
-        raise BrowserError(
-            f"rendered select of {value!r} in {name!r} on {self.url} "
-            f"failed: {last_exc}") from last_exc
+        try:
+            for kw in attempts:
+                try:
+                    picked = page.select_option(selector, **kw)
+                except Exception as exc:  # noqa: BLE001 - opaque
+                    last_exc = exc
+                    continue
+                if picked:
+                    return {"ok": True, "field": name, "picked": picked,
+                            "tab_id": self.tab_id}
+                last_exc = BrowserError(
+                    f"no option matching {value!r} in select {name!r}")
+        finally:
+            forms.clear_marker(page)
+        raise self._action_error(
+            "select", last_exc or BrowserError("unknown select failure"),
+            detail=f"field {name!r}, option {value!r}") from last_exc
 
     def check(self, name: str, checked: bool = True) -> dict[str, Any]:
         """Check/uncheck a checkbox (or pick a radio) by name or id.
@@ -664,7 +1072,8 @@ class RenderedTab:
         name = (name or "").strip()
         if not name:
             raise BrowserError("rendered check needs a field name")
-        kind = self._field_kind(name)
+        selector, info = self._resolve_field(name)
+        kind = self._kind_of(name, info)
         if kind is None:
             raise BrowserError(
                 f"cannot inspect field {name!r} on this page driver — "
@@ -678,16 +1087,17 @@ class RenderedTab:
             raise BrowserError(
                 f"field {name!r} is a radio button — radios cannot be "
                 "unchecked, pick another option in the group instead")
-        selector = self._field_selector(name)
         try:
             if checked:
                 page.check(selector)
             else:
                 page.uncheck(selector)
         except Exception as exc:  # noqa: BLE001 - opaque
-            raise BrowserError(
-                f"rendered {'check' if checked else 'uncheck'} of {name!r} "
-                f"on {self.url} failed: {exc}") from exc
+            raise self._action_error(
+                f"{'check' if checked else 'uncheck'}", exc,
+                detail=f"field {name!r}") from exc
+        finally:
+            forms.clear_marker(page)
         return {"ok": True, "field": name, "checked": bool(checked),
                 "tab_id": self.tab_id}
 
@@ -706,8 +1116,8 @@ class RenderedTab:
         try:
             page.click(selector)
         except Exception as exc:  # noqa: BLE001 - click errors are opaque
-            raise BrowserError(
-                f"rendered click of {target!r} on {self.url} failed: {exc}") from exc
+            raise self._action_error(
+                "click", exc, detail=f"target {target!r}") from exc
         try:
             after = page.url
         except Exception:  # noqa: BLE001 - url read is cosmetic
@@ -737,8 +1147,7 @@ class RenderedTab:
         except BrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - submit errors are opaque
-            raise BrowserError(
-                f"rendered submit on {self.url} failed: {exc}") from exc
+            raise self._action_error("submit", exc) from exc
         try:
             self.url = page.url
             self.title = page.title()
@@ -1091,6 +1500,7 @@ class BrowserService:
         data_dir: str | os.PathLike[str] | None = None,
         artifact_store: Any = None,
         mission_id: str = "",
+        stealth: dict[str, Any] | None = None,
     ) -> None:
         self.data_dir = Path(
             data_dir if data_dir is not None
@@ -1106,6 +1516,10 @@ class BrowserService:
         self._playwright: Any = None
         self._artifact_store = artifact_store
         self._mission_id = mission_id or ""
+        #: default stealth profile for rendered tabs (merged over the
+        #: built-in defaults; per-tab overrides in open_rendered_tab).
+        #: Fail fast on unknown keys — a silently ignored profile is a lie.
+        self._stealth = _merge_stealth(None, stealth)
         #: per-session proxy URL (in-memory only — never persisted to
         #: sessions.json, since URLs can carry credentials).
         self._session_proxies: dict[str, str] = {}
@@ -1304,15 +1718,21 @@ class BrowserService:
                 _log.warning("browser service shutdown failed: %s", exc)
 
     def open_rendered_tab(self, session_name: str, url: str = "",
-                          proxy: str = "") -> RenderedTab:
+                          proxy: str = "", *,
+                          stealth: dict[str, Any] | None = None,
+                          shot_on_error: bool = True,
+                          retries: int = 2) -> RenderedTab:
         """Open a playwright-backed tab in ``session_name``'s cookie space.
 
         For JavaScript/Cloudflare-guarded pages that plain-HTTP tabs cannot
         pass. Cookies persist via playwright storage_state in the session's
         cookie dir. ``proxy`` overrides the session's proxy for this tab
         ("" = inherit the session proxy, which may itself be direct).
-        Fail fast: raises BrowserError when playwright or its chromium
-        build is missing, or when the initial navigate fails.
+        ``stealth`` overrides the service's stealth profile for this tab;
+        ``shot_on_error`` captures screenshot+DOM on action failures;
+        ``retries`` is the navigate retry count. Fail fast: raises
+        BrowserError when playwright or its chromium build is missing, or
+        when the initial navigate fails.
         """
         session_name = (session_name or "").strip()
         if not session_name:
@@ -1326,6 +1746,9 @@ class BrowserService:
             storage_state_path=self._rendered_state_path(session_name),
             playwright=playwright,
             proxy=tab_proxy,
+            stealth=_merge_stealth(self._stealth, stealth),
+            shot_on_error=shot_on_error,
+            retries=retries,
         )
         self._rendered_tabs[tab_id] = tab
         try:

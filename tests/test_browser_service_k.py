@@ -454,8 +454,12 @@ class TestRenderedTabs(unittest.TestCase):
         with _mocked_playwright(page) as (instances, context, browser, chromium):
             tab = self.svc.open_rendered_tab("sess1", "https://example.com/")
             self.assertIsInstance(tab, RenderedTab)
-            # headless chromium launched lazily, exactly once
-            self.assertEqual(chromium.launch_kwargs, {"headless": True})
+            # headless chromium launched lazily, exactly once, with the
+            # stealth flag (AutomationControlled blink feature disabled)
+            self.assertEqual(
+                chromium.launch_kwargs,
+                {"headless": True,
+                 "args": ["--disable-blink-features=AutomationControlled"]})
             self.assertTrue(instances[0].started)
             url, kwargs = page.goto_calls[0]
             self.assertEqual(url, "https://example.com/")
@@ -497,8 +501,14 @@ class TestRenderedTabs(unittest.TestCase):
                                 "playwright-storage.json")
         with _mocked_playwright(page) as (instances, context, browser, chromium):
             tab = self.svc.open_rendered_tab("sessA", "https://example.com/")
-            # no storage file on first open -> plain context
-            self.assertEqual(browser.context_kwargs, {})
+            # no storage file on first open -> fresh context, but with the
+            # stealth profile applied (realistic UA/viewport/locale/tz)
+            self.assertNotIn("storage_state", browser.context_kwargs)
+            self.assertIn("Chrome/131.0.0.0", browser.context_kwargs["user_agent"])
+            self.assertEqual(browser.context_kwargs["viewport"],
+                             {"width": 1366, "height": 768})
+            self.assertEqual(browser.context_kwargs["locale"], "en-US")
+            self.assertEqual(browser.context_kwargs["timezone_id"], "Africa/Lagos")
             self.svc.close_rendered_tab(tab.tab_id)
             # closing persists storage_state into the session's cookie dir
             self.assertEqual(context.saved_path, expected)

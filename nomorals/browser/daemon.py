@@ -69,7 +69,11 @@ _FRAME_HEADER = struct.Struct(">I")
 #: Refuse absurd frames early instead of buffering garbage.
 _MAX_FRAME = 256 * 1024 * 1024
 #: Ops that mutate persisted session state; the daemon saves after each.
-_MUTATING_OPS = frozenset({"open", "close", "click", "submit"})
+_MUTATING_OPS = frozenset({
+    "open", "close", "click", "submit",
+    "r_fill", "r_click", "r_submit", "r_evaluate", "r_fill_form",
+    "r_set_date", "r_check", "r_select",
+})
 #: Cap on bus events buffered between client drains.
 _MAX_BUFFERED_EVENTS = 10_000
 
@@ -664,6 +668,44 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.extract(params.get("target") or "",
                                       kind=params.get("kind") or "")}
+    if op == "r_evaluate":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        if "arg" in params:
+            return {"result": tab.evaluate(params.get("js") or "",
+                                           params.get("arg"))}
+        return {"result": tab.evaluate(params.get("js") or "")}
+    if op == "r_fill_form":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        fields = params.get("fields")
+        if not isinstance(fields, dict):
+            raise DaemonError("r_fill_form fields must be a {field: value} object")
+        return {"result": tab.fill_form(
+            fields, stop_on_error=bool(params.get("stop_on_error", True)))}
+    if op == "r_set_date":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.set_date(params.get("name") or "",
+                                       params.get("value") or "")}
+    if op == "r_wait_state":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for_load_state(
+            params.get("state") or "load",
+            timeout=int(params.get("timeout") or 30_000))}
+    if op == "r_wait_idle":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for_network_idle(
+            timeout=int(params.get("timeout") or 15_000))}
+    if op == "r_fields":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.describe_fields()}
+    if op == "r_storage":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.local_storage(
+            params.get("action") or "get",
+            params.get("key") or "",
+            params.get("value"))}
+    if op == "r_persist":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.persist()}
     if op == "r_download":
         return {"result": svc.rendered_tab_download(
             params.get("tab_id") or "", params.get("target") or "")}

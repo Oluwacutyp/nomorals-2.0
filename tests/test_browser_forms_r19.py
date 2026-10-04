@@ -149,6 +149,10 @@ class _FakeRPage:
         self.uncheck_calls = []
         self.url_waits = []
         self.text_waits = []
+        # last field name resolved through evaluate() (the new protocol
+        # passes a bare name; select_option reads it back for the marker
+        # selector, which carries no name).
+        self.last_field = ""
         self.page_html = (
             "<html><body><form>"
             '<div class="g-recaptcha" data-sitekey="6Le-AAAAv2sitekey123"></div>'
@@ -163,13 +167,18 @@ class _FakeRPage:
     def content(self):
         return self.page_html
 
-    def evaluate(self, js, selector):
-        m = re.search(r'name="([^"]+)"', selector)
-        name = m.group(1) if m else ""
+    def evaluate(self, js, arg=None):
+        # Supports both the legacy protocol (arg = CSS selector string
+        # containing name="...") and the resolver protocol (arg = bare
+        # field name; returns the resolver's info dict).
+        m = re.search(r'name="([^"]+)"', str(arg or ""))
+        name = m.group(1) if m else str(arg or "")
         hit = self.fields.get(name)
+        self.last_field = name if hit else ""
         if hit is None:
             return None
-        return {"tag": hit[0], "type": hit[1]}
+        return {"tag": hit[0], "type": hit[1], "by": "name", "score": 70,
+                "name": name, "id": ""}
 
     def fill(self, selector, value):
         self.fill_calls.append((selector, value))
@@ -177,7 +186,7 @@ class _FakeRPage:
     def select_option(self, selector, **kw):
         self.select_calls.append((selector, kw))
         m = re.search(r'name="([^"]+)"', selector)
-        name = m.group(1) if m else ""
+        name = m.group(1) if m else self.last_field
         want = kw.get("value") or kw.get("label")
         for val, label in self.options.get(name, []):
             if want == val or want == label:
@@ -281,8 +290,11 @@ class RenderedFormTests(unittest.TestCase):
         with _mocked(page):
             out = tab.fill("q", "hello")
         self.assertTrue(out["ok"])
+        self.assertEqual("name", out["matched_via"])
         self.assertEqual(1, len(page.fill_calls))
-        self.assertIn('name="q"', page.fill_calls[0][0])
+        # the resolver pins the field with a marker selector, not name="q"
+        self.assertEqual('[data-nm-field="1"]', page.fill_calls[0][0])
+        self.assertEqual("hello", page.fill_calls[0][1])
 
     def test_fill_routes_select_to_select_option(self):
         page = _FakeRPage()

@@ -191,6 +191,30 @@ class _LocalBackend:
     def r_fill(self, tab_id: str, name: str, value: str) -> dict[str, Any]:
         return self._rtab(tab_id).fill(name, value)
 
+    def r_fill_form(self, tab_id: str,
+                    fields: dict[str, str]) -> dict[str, Any]:
+        return self._rtab(tab_id).fill_form(fields)
+
+    def r_set_date(self, tab_id: str, name: str,
+                   value: str) -> dict[str, Any]:
+        return self._rtab(tab_id).set_date(name, value)
+
+    def r_fields(self, tab_id: str) -> dict[str, Any]:
+        return self._rtab(tab_id).describe_fields()
+
+    def r_evaluate(self, tab_id: str, js: str,
+                   arg: Any = None) -> Any:
+        if arg is None:
+            return self._rtab(tab_id).evaluate(js)
+        return self._rtab(tab_id).evaluate(js, arg)
+
+    def r_storage(self, tab_id: str, action: str = "get", key: str = "",
+                  value: Any = None) -> dict[str, Any]:
+        return self._rtab(tab_id).local_storage(action, key, value)
+
+    def r_persist(self, tab_id: str) -> dict[str, Any]:
+        return self._rtab(tab_id).persist()
+
     def r_click(self, tab_id: str, target: str) -> dict[str, Any]:
         return self._rtab(tab_id).click(target)
 
@@ -199,6 +223,15 @@ class _LocalBackend:
 
     def r_wait(self, tab_id: str, selector: str) -> dict[str, Any]:
         return self._rtab(tab_id).wait_for(selector)
+
+    def r_wait_state(self, tab_id: str, state: str = "load",
+                     timeout: int = 30_000) -> dict[str, Any]:
+        return self._rtab(tab_id).wait_for_load_state(state,
+                                                      timeout=timeout)
+
+    def r_wait_idle(self, tab_id: str,
+                    timeout: int = 15_000) -> dict[str, Any]:
+        return self._rtab(tab_id).wait_for_network_idle(timeout=timeout)
 
     def r_wait_url(self, tab_id: str, pattern: str) -> dict[str, Any]:
         return self._rtab(tab_id).wait_for_url(pattern)
@@ -337,6 +370,34 @@ class _DaemonBackend:
         return self._call("r_fill", tab_id=tab_id, name=name,
                            value=value)["result"]
 
+    def r_fill_form(self, tab_id: str,
+                    fields: dict[str, str]) -> dict[str, Any]:
+        return self._call("r_fill_form", tab_id=tab_id,
+                           fields=fields)["result"]
+
+    def r_set_date(self, tab_id: str, name: str,
+                   value: str) -> dict[str, Any]:
+        return self._call("r_set_date", tab_id=tab_id, name=name,
+                           value=value)["result"]
+
+    def r_fields(self, tab_id: str) -> dict[str, Any]:
+        return self._call("r_fields", tab_id=tab_id)["result"]
+
+    def r_evaluate(self, tab_id: str, js: str,
+                   arg: Any = None) -> Any:
+        params: dict[str, Any] = {"tab_id": tab_id, "js": js}
+        if arg is not None:
+            params["arg"] = arg
+        return self._call("r_evaluate", **params)["result"]
+
+    def r_storage(self, tab_id: str, action: str = "get", key: str = "",
+                  value: Any = None) -> dict[str, Any]:
+        return self._call("r_storage", tab_id=tab_id, action=action,
+                           key=key, value=value)["result"]
+
+    def r_persist(self, tab_id: str) -> dict[str, Any]:
+        return self._call("r_persist", tab_id=tab_id)["result"]
+
     def r_click(self, tab_id: str, target: str) -> dict[str, Any]:
         return self._call("r_click", tab_id=tab_id, target=target)["result"]
 
@@ -347,6 +408,16 @@ class _DaemonBackend:
     def r_wait(self, tab_id: str, selector: str) -> dict[str, Any]:
         return self._call("r_wait", tab_id=tab_id,
                            selector=selector)["result"]
+
+    def r_wait_state(self, tab_id: str, state: str = "load",
+                     timeout: int = 30_000) -> dict[str, Any]:
+        return self._call("r_wait_state", tab_id=tab_id, state=state,
+                           timeout=timeout)["result"]
+
+    def r_wait_idle(self, tab_id: str,
+                    timeout: int = 15_000) -> dict[str, Any]:
+        return self._call("r_wait_idle", tab_id=tab_id,
+                           timeout=timeout)["result"]
 
     def r_wait_url(self, tab_id: str, pattern: str) -> dict[str, Any]:
         return self._call("r_wait_url", tab_id=tab_id,
@@ -419,7 +490,7 @@ def _cmd_browse(args: Any, context: Any) -> int:
               "       nm browse cookies [export|import <path> [--format F]]\n"
               "       nm browse proxy status|rotate|set <url>|clear\n"
               "       nm browse downloads [--category C] [--limit N]\n"
-              "       nm browse rtab open <url> | rtab tabs|shot|fill|click|submit|wait|wait-url|wait-text|select|check|captcha|extract|download\n"
+              "       nm browse rtab open <url> | rtab tabs|shot|fill|fill-form|set-date|fields|eval|storage|persist|click|submit|wait|wait-url|wait-text|wait-state|wait-idle|select|check|captcha|extract|download\n"
               "       nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
               "       nm browse history | nm browse close | nm browse sessions\n"
               "       nm browse daemon start|stop|status",
@@ -862,6 +933,12 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
         print("usage: nm browse rtab open <url> [--proxy P] | rtab tabs\n"
               "       nm browse rtab close|shot <tab-id>\n"
               "       nm browse rtab fill <tab-id> <name> <value>\n"
+              "       nm browse rtab fill-form <tab-id> name=value ...\n"
+              "       nm browse rtab set-date <tab-id> <name> <date>\n"
+              "       nm browse rtab fields <tab-id>\n"
+              "       nm browse rtab eval <tab-id> <js>\n"
+              "       nm browse rtab storage <tab-id> get|set|remove|clear <key> [value]\n"
+              "       nm browse rtab persist <tab-id>\n"
               "       nm browse rtab select <tab-id> <name> <value>\n"
               "       nm browse rtab check <tab-id> <name> [off]\n"
               "       nm browse rtab captcha <tab-id>\n"
@@ -869,6 +946,8 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
               "       nm browse rtab wait <tab-id> <selector>\n"
               "       nm browse rtab wait-url <tab-id> <pattern>\n"
               "       nm browse rtab wait-text <tab-id> <text>\n"
+              "       nm browse rtab wait-state <tab-id> [state]\n"
+              "       nm browse rtab wait-idle <tab-id>\n"
               "       nm browse rtab extract <tab-id> [target] [--kind K]\n"
               "       nm browse rtab download <tab-id> <target>",
               file=sys.stderr)
@@ -918,6 +997,54 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
                   file=sys.stderr)
             return 2
         result = backend.r_fill(rest[1], rest[2], " ".join(rest[3:]))
+    elif sub == "fill-form":
+        if len(rest) < 3:
+            print("usage: nm browse rtab fill-form <tab-id> name=value ...",
+                  file=sys.stderr)
+            return 2
+        fields: dict[str, str] = {}
+        for pair in rest[2:]:
+            if "=" not in pair:
+                print(f"fill-form: {pair!r} is not name=value",
+                      file=sys.stderr)
+                return 2
+            name, value = pair.split("=", 1)
+            fields[name] = value
+        result = backend.r_fill_form(rest[1], fields)
+    elif sub == "set-date":
+        if len(rest) < 4:
+            print("usage: nm browse rtab set-date <tab-id> <name> <date>\n"
+                  "       (e.g. 2026-10-04, 04/10/2026, '4 Oct 2026')",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_set_date(rest[1], rest[2], " ".join(rest[3:]))
+    elif sub == "fields":
+        if len(rest) < 2:
+            print("usage: nm browse rtab fields <tab-id>", file=sys.stderr)
+            return 2
+        result = backend.r_fields(rest[1])
+    elif sub == "eval":
+        if len(rest) < 3:
+            print("usage: nm browse rtab eval <tab-id> <js>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_evaluate(rest[1], " ".join(rest[2:]))
+    elif sub == "storage":
+        if len(rest) < 4:
+            print("usage: nm browse rtab storage <tab-id> "
+                  "get|set|remove|clear <key> [value]", file=sys.stderr)
+            return 2
+        action = rest[2].lower()
+        if action not in {"get", "set", "remove", "clear"}:
+            print(f"unknown storage action {action!r}", file=sys.stderr)
+            return 2
+        result = backend.r_storage(rest[1], action, rest[3],
+                                   " ".join(rest[4:]) if len(rest) > 4 else None)
+    elif sub == "persist":
+        if len(rest) < 2:
+            print("usage: nm browse rtab persist <tab-id>", file=sys.stderr)
+            return 2
+        result = backend.r_persist(rest[1])
     elif sub == "click":
         if len(rest) < 3:
             print("usage: nm browse rtab click <tab-id> <target>",
@@ -949,6 +1076,19 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
                   file=sys.stderr)
             return 2
         result = backend.r_wait_text(rest[1], " ".join(rest[2:]))
+    elif sub == "wait-state":
+        if len(rest) < 2:
+            print("usage: nm browse rtab wait-state <tab-id> "
+                  "[load|domcontentloaded|networkidle]",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_wait_state(rest[1], rest[2] if len(rest) > 2 else "load")
+    elif sub == "wait-idle":
+        if len(rest) < 2:
+            print("usage: nm browse rtab wait-idle <tab-id>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_wait_idle(rest[1])
     elif sub == "select":
         if len(rest) < 4:
             print("usage: nm browse rtab select <tab-id> <name> <value>",
