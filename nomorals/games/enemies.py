@@ -17,7 +17,9 @@ import random
 from typing import Any
 
 #: gear grades each hunter rank may roll.  Myth is reserved for the
-#: named Cutyp legacy set and never spawns on enemies.
+#: named Cutyp legacy set and never spawns on enemies — unless the
+#: player brings myth gear themselves (``myth_foe=True``), in which case
+#: S-rank hunters answer with their own myth-forged kit.
 GRADE_POOLS: dict[int, tuple[str, ...]] = {
     0: ("common", "rare"),          # E
     1: ("rare",),                   # D
@@ -26,6 +28,40 @@ GRADE_POOLS: dict[int, tuple[str, ...]] = {
     4: ("epic", "legendary"),       # A
     5: ("legendary",),              # S
 }
+
+#: enemy-only myth gear — myth-forged, but never the Cutyp legacy set.
+#: These pieces exist only as dicts (never in the shop catalog), with
+#: the same shape as ``GearDef.to_dict()``.  S-rank hunters wield them
+#: when facing a myth-equipped player.
+MYTH_FOE_WEAPONS: tuple[dict[str, Any], ...] = (
+    {"slug": "myth_foe_blade", "name": "Mythril Reaver [myth]",
+     "cost": 0, "slot": "weapon", "kind": "mythril_blade",
+     "grade": "myth", "set": "", "atk": 90, "def": 0,
+     "durability": 999},
+    {"slug": "myth_foe_fang", "name": "Void-Touched Katana [myth]",
+     "cost": 0, "slot": "weapon", "kind": "void_katana",
+     "grade": "myth", "set": "", "atk": 84, "def": 0,
+     "durability": 999},
+    {"slug": "myth_foe_maul", "name": "Worldbreaker Maul [myth]",
+     "cost": 0, "slot": "weapon", "kind": "worldbreaker",
+     "grade": "myth", "set": "", "atk": 96, "def": 0,
+     "durability": 999},
+)
+
+MYTH_FOE_ARMORS: tuple[dict[str, Any], ...] = (
+    {"slug": "myth_foe_plate", "name": "Dreadplate of the Void [myth]",
+     "cost": 0, "slot": "armor", "kind": "dreadplate",
+     "grade": "myth", "set": "", "atk": 0, "def": 72,
+     "durability": 999},
+    {"slug": "myth_foe_mail", "name": "Abyssal Dragonscale [myth]",
+     "cost": 0, "slot": "armor", "kind": "abyssal_scale",
+     "grade": "myth", "set": "", "atk": 0, "def": 66,
+     "durability": 999},
+    {"slug": "myth_foe_shroud", "name": "Nightmare Shroud [myth]",
+     "cost": 0, "slot": "armor", "kind": "nightmare_shroud",
+     "grade": "myth", "set": "", "atk": 0, "def": 78,
+     "durability": 999},
+)
 
 #: how many active skills each rank rolls (0 = bare-knuckle brawlers).
 SKILL_COUNTS: dict[int, int] = {
@@ -80,12 +116,26 @@ _ENEMY_TITLES: dict[int, tuple[str, ...]] = {
     5: ("the Render", "the World-Eater", "the Unbroken"),
 }
 
+#: titles reserved for myth-foe hunters — S-rank killers who rose to
+#: meet a myth-equipped player.
+_MYTH_FOE_TITLES: tuple[str, ...] = (
+    "the Mythslayer", "the God-Eater", "the Unmaking",
+    "the Final Verdict",
+)
 
-def roll_enemy_name(rng: random.Random, rank_idx: int) -> str:
-    """A flavorful name, e.g. ``Vex the Render``."""
+
+def roll_enemy_name(rng: random.Random, rank_idx: int,
+                    myth_foe: bool = False) -> str:
+    """A flavorful name, e.g. ``Vex the Render``.
+
+    Myth-foe hunters (spawned against myth-equipped players) take a
+    darker title — the player knows this one is different.
+    """
     rank_idx = max(0, min(5, int(rank_idx)))
+    titles = (_MYTH_FOE_TITLES if myth_foe and rank_idx == 5
+              else _ENEMY_TITLES[rank_idx])
     return (f"{rng.choice(_ENEMY_FIRST)} "
-            f"{rng.choice(_ENEMY_TITLES[rank_idx])}")
+            f"{rng.choice(titles)}")
 
 
 def _gear_pool(rank_idx: int) -> tuple[str, ...]:
@@ -93,15 +143,25 @@ def _gear_pool(rank_idx: int) -> tuple[str, ...]:
 
 
 def roll_enemy_gear(rng: random.Random,
-                    rank_idx: int) -> dict[str, dict[str, Any]]:
+                    rank_idx: int,
+                    myth_foe: bool = False) -> dict[str, dict[str, Any]]:
     """Roll ``{"weapon": gear_dict, "armor": gear_dict}`` for an enemy.
 
     Gear dicts match the shop ``to_dict()`` shape (slug, name, atk,
     def, grade, ...).  C+-rank enemies sometimes roll a matched
     storm/shadow set for the combo attack.
+
+    When ``myth_foe`` is true (the player brought myth gear), S-rank
+    hunters roll from the enemy-only myth-forged kit instead — the
+    Cutyp legacy set itself is never wielded by the house.
     """
     from .gear import GEAR_CATALOG
     rank_idx = max(0, min(5, int(rank_idx)))
+    if myth_foe and rank_idx == 5:
+        return {
+            "weapon": dict(rng.choice(MYTH_FOE_WEAPONS)),
+            "armor": dict(rng.choice(MYTH_FOE_ARMORS)),
+        }
     if rng.random() < SET_CHANCE[rank_idx]:
         set_name = rng.choice(("storm", "shadow"))
         weapon = GEAR_CATALOG[f"{set_name}_{'katana' if set_name == 'storm' else 'rapier'}"].to_dict()
@@ -125,11 +185,14 @@ def roll_enemy_gear(rng: random.Random,
 
 
 def roll_enemy_skills(rng: random.Random,
-                      rank_idx: int) -> dict[str, int]:
+                      rank_idx: int,
+                      myth_foe: bool = False) -> dict[str, int]:
     """Roll ``{slug: tier}`` active skills for an enemy of this rank.
 
     Higher ranks also roll forbidden techniques — the house's own
-    martial arts that players can never learn.
+    martial arts that players can never learn.  Myth-foe hunters
+    (S-rank vs a myth-equipped player) roll a third forbidden art:
+    they came to kill a legend, and they brought everything.
     """
     rank_idx = max(0, min(5, int(rank_idx)))
     skills: dict[str, int] = {}
@@ -147,6 +210,8 @@ def roll_enemy_skills(rng: random.Random,
             skills[slug] = tier
     # forbidden techniques: B+ hunters fight dirty
     xcount = ENEMY_EXCLUSIVE_COUNTS[rank_idx]
+    if myth_foe and rank_idx == 5:
+        xcount = 3
     if xcount > 0:
         xpicks = rng.sample(ENEMY_EXCLUSIVE_POOL,
                             k=min(xcount, len(ENEMY_EXCLUSIVE_POOL)))
@@ -164,7 +229,8 @@ def _gear_power(gear: dict[str, Any]) -> tuple[int, int]:
 
 def roll_enemy(rng: random.Random, rank_idx: int,
                player_power: int = 0,
-               foe_base: dict[str, Any] | None = None) -> dict[str, Any]:
+               foe_base: dict[str, Any] | None = None,
+               myth_foe: bool = False) -> dict[str, Any]:
     """Roll a complete enemy: name, gear, skills, potions.
 
     ``player_power`` feeds the anti-triviality backstop, measured with
@@ -173,14 +239,20 @@ def roll_enemy(rng: random.Random, rank_idx: int,
     gear is re-rolled one grade pool up; above 125% it's re-rolled one
     pool down.  One adjustment each way, then accept whatever lands —
     the fight stays competitive but never a foregone conclusion.
+
+    ``myth_foe`` marks a hunter spawned against a myth-equipped
+    player: S-rank rolls myth-forged gear, a darker title, and an
+    extra forbidden technique.  The Cutyp legacy set itself is never
+    wielded by the house.
     """
     rank_idx = max(0, min(5, int(rank_idx)))
     enemy: dict[str, Any] = {
-        "name": roll_enemy_name(rng, rank_idx),
+        "name": roll_enemy_name(rng, rank_idx, myth_foe=myth_foe),
         "rank_idx": rank_idx,
-        "gear": roll_enemy_gear(rng, rank_idx),
-        "skills": roll_enemy_skills(rng, rank_idx),
+        "gear": roll_enemy_gear(rng, rank_idx, myth_foe=myth_foe),
+        "skills": roll_enemy_skills(rng, rank_idx, myth_foe=myth_foe),
         "potions": POTIONS[rank_idx],
+        "myth_foe": myth_foe and rank_idx == 5,
     }
     if player_power > 0:
         from .power import fighter_power
@@ -197,7 +269,9 @@ def roll_enemy(rng: random.Random, rank_idx: int,
 
         power = _with_gear(enemy["gear"])
         if power < player_power * 0.85:
-            enemy["gear"] = roll_enemy_gear(rng, min(5, rank_idx + 1))
+            enemy["gear"] = roll_enemy_gear(
+                rng, min(5, rank_idx + 1), myth_foe=myth_foe)
         elif power > player_power * 1.25:
-            enemy["gear"] = roll_enemy_gear(rng, max(0, rank_idx - 1))
+            enemy["gear"] = roll_enemy_gear(
+                rng, max(0, rank_idx - 1), myth_foe=myth_foe)
     return enemy

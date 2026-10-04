@@ -414,7 +414,10 @@ class BattleArenaGame(MultiGame):
         foe = s.get("house_name", "a hunter")
         foe_gear = self._house_gear_note(room)
         foe_skills = s.get("house_skills", {})
+        myth_foe = bool(s.get("myth_foe"))
         foe_line = (f"a {rank}-rank hunter, {foe}, blocks your path."
+                    + (" 👹 a MYTH-FOE — they rose to kill a legend."
+                       if myth_foe else "")
                     + (f" {foe_gear}" if foe_gear else "")
                     + (f" they know {len(foe_skills)} "
                        f"{'skill' if len(foe_skills) == 1 else 'skills'}."
@@ -543,10 +546,19 @@ class BattleArenaGame(MultiGame):
         tiers = s.get("skill_tiers", {}).get(pkey, {})
         player_power = fighter_power(s["you"], slugs, tiers)
         s["player_power"] = player_power
+        # myth check: if the player brought myth-tier gear, the house
+        # answers with a myth-foe hunter — same Cutyp legacy stays
+        # player-exclusive, but the fight scales up to meet it.
+        loadout = self._loadout(room)
+        myth_foe = any(isinstance(piece, dict)
+                       and piece.get("grade") == "myth"
+                       for piece in loadout.values())
+        s["myth_foe"] = myth_foe
         enemy = roll_enemy(
             rng, rank_idx, player_power,
             foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
-                      "def": h["def"]})
+                      "def": h["def"]},
+            myth_foe=myth_foe)
         # house_skills must land before _apply_house_gear: the 20%
         # power cap counts skill power when it measures.
         s["house_skills"] = enemy["skills"]
@@ -562,19 +574,23 @@ class BattleArenaGame(MultiGame):
         """Fold the rolled enemy gear into the house fighter's stats.
 
         Enemy gear fights at 50% effectiveness — the hunter's kit is
-        battle-worn and notched, not shop-fresh.  After gear and any set
-        bonus land, a power cap trims the house back when it would
-        otherwise wall the player: the house may out-power the player by
-        at most 20%.  The fight stays competitive; never a foregone
-        conclusion either way.
+        battle-worn and notched, not shop-fresh — except for myth-foe
+        hunters, whose myth-forged kit is maintained at full power.
+        After gear and any set bonus land, a power cap trims the house
+        back when it would otherwise wall the player: the house may
+        out-power the player by at most 20%.  The fight stays
+        competitive; never a foregone conclusion either way.
         """
         s = room.state
         h = s["house"]
         gear = enemy.get("gear", {})
+        myth_foe = bool(enemy.get("myth_foe"))
         weapon = gear.get("weapon") or {}
         armor = gear.get("armor") or {}
-        h["atk"] += int(weapon.get("atk", 0)) // 2
-        h["def"] += int(armor.get("def", 0)) // 2
+        # myth-foe hunters maintain their kit at full effectiveness
+        effectiveness = 1.0 if myth_foe else 0.5
+        h["atk"] += int(int(weapon.get("atk", 0)) * effectiveness)
+        h["def"] += int(int(armor.get("def", 0)) * effectiveness)
         h["combo_every"], h["combo_count"], h["combo_name"] = 0, 0, ""
         s["house_set_bonus"] = None
         # set bonus: matching weapon + armor of one set
@@ -597,6 +613,31 @@ class BattleArenaGame(MultiGame):
                 s["house_set_bonus"] = set_name
                 break
         s["house_gear"] = gear
+        # ── mythic ascension ────────────────────────────────────────
+        # A myth-foe hunter rose to kill a legend: after gear lands,
+        # their raw stats swell until the fight is genuinely
+        # competitive — targeting ~85% of the player's power.  The
+        # power cap below still holds as the ceiling, so the house
+        # can challenge but never wall.
+        try:
+            player_power = int(s.get("player_power") or 0)
+        except Exception:  # noqa: BLE001
+            player_power = 0
+        if myth_foe and player_power > 0:
+            skills = s.get("house_skills", {})
+            try:
+                from ..power import fighter_power as _fp
+            except Exception:  # noqa: BLE001
+                _fp = None
+            if _fp is not None:
+                target = player_power * 0.85
+                for _ in range(25):
+                    if _fp(h, tuple(skills), skills) >= target:
+                        break
+                    h["atk"] = int(h["atk"] * 1.08) + 2
+                    h["def"] = int(h["def"] * 1.08) + 2
+                    h["max_hp"] = int(h["max_hp"] * 1.04) + 5
+                    h["hp"] = h["max_hp"]
         # ── the power cap ─────────────────────────────────────────────
         # The house may out-power the player by at most 20% — 30% when
         # it fights with forbidden techniques (they're meant to be

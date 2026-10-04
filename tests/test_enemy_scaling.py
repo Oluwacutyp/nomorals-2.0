@@ -288,5 +288,67 @@ class XpScalingTest(unittest.TestCase):
                          ARENA_LOSS_XP)
 
 
+class MythFoeTest(unittest.TestCase):
+    """Myth-foe hunters: spawned when the player brings myth gear."""
+
+    def test_myth_foe_rolls_myth_gear(self) -> None:
+        rng = random.Random(7)
+        for _ in range(10):
+            gear = roll_enemy_gear(rng, 5, myth_foe=True)
+            for piece in gear.values():
+                self.assertEqual(piece["grade"], "myth")
+
+    def test_normal_s_rank_never_rolls_myth(self) -> None:
+        # default behavior unchanged — myth stays special
+        rng = random.Random(7)
+        for _ in range(10):
+            gear = roll_enemy_gear(rng, 5)
+            for piece in gear.values():
+                self.assertNotEqual(piece["grade"], "myth")
+
+    def test_myth_foe_gear_is_not_cutyp_legacy(self) -> None:
+        rng = random.Random(7)
+        for _ in range(20):
+            enemy = roll_enemy(rng, 5, 4000,
+                               {"max_hp": 200, "atk": 40, "def": 30},
+                               myth_foe=True)
+            for piece in enemy["gear"].values():
+                self.assertNotIn("cutyp", piece["slug"])
+            self.assertNotIn("slaying_force", enemy["skills"])
+
+    def test_myth_foe_rolls_three_forbidden(self) -> None:
+        from nomorals.games.skills import is_enemy_skill
+        rng = random.Random(7)
+        enemy = roll_enemy(rng, 5, 4000,
+                           {"max_hp": 200, "atk": 40, "def": 30},
+                           myth_foe=True)
+        forbidden = [s for s in enemy["skills"] if is_enemy_skill(s)]
+        self.assertEqual(len(forbidden), 3)
+
+    def test_myth_foe_gets_darker_title(self) -> None:
+        name = roll_enemy_name(random.Random(7), 5, myth_foe=True)
+        self.assertTrue(
+            any(t in name for t in ("Mythslayer", "God-Eater",
+                                    "Unmaking", "Final Verdict")),
+            f"unexpected myth-foe name: {name}")
+
+    def test_myth_foe_only_at_s_rank(self) -> None:
+        # lower ranks don't get myth gear even with myth_foe=True
+        rng = random.Random(7)
+        gear = roll_enemy_gear(rng, 4, myth_foe=True)
+        for piece in gear.values():
+            self.assertNotEqual(piece["grade"], "myth")
+
+    def test_myth_foe_flag_on_enemy(self) -> None:
+        rng = random.Random(7)
+        enemy = roll_enemy(rng, 5, 4000,
+                           {"max_hp": 200, "atk": 40, "def": 30},
+                           myth_foe=True)
+        self.assertTrue(enemy["myth_foe"])
+        enemy2 = roll_enemy(rng, 5, 4000,
+                            {"max_hp": 200, "atk": 40, "def": 30})
+        self.assertFalse(enemy2["myth_foe"])
+
+
 if __name__ == "__main__":
     unittest.main()
