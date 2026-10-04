@@ -201,89 +201,115 @@ class HFServerlessProvider(LLMProvider):
         started = time.perf_counter()
         sampling = (params or SamplingParams()).clamped()
         payload = self.build_chat_payload(messages, sampling)
-        
+
         # Try with current model first
         try:
             raw = self._post_checked(self.chat_url(), payload)
             return self._record(self._parse_chat(raw), started)
         except Exception as exc:  # noqa: BLE001
-            # Don't heal on authentication errors (401)
+            # Don't heal on authentication errors (401/403) — swapping models
+            # won't fix a bad or unauthorized key.
             error_msg = str(exc).lower()
-            if "401" in error_msg or "unauthorized" in error_msg:
+            if (
+                "401" in error_msg
+                or "403" in error_msg
+                or "unauthorized" in error_msg
+                or "forbidden" in error_msg
+            ):
                 error = classify(exc)
                 return self._record(
                     LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
                     started,
                 )
-            
-            # Model failed, try to discover a new one
-            try:
-                catalog_data = self.fetch_catalog()
-                # catalog_data is a list of dicts with "id" or "model_id" keys
-                new_model = self._discover_catalog_model(catalog_data, exclude=self.model)
-            except Exception:  # noqa: BLE001
-                # Catalog failed, fall back to first curated model
-                new_model = ROUTER_FALLBACK_MODELS[0] if ROUTER_FALLBACK_MODELS else None
-                if new_model == self.model:
-                    new_model = None
-            try:
-                if new_model is None:
-                    # Try to get from catalog again or use fallback
-                    try:
-                        catalog_data = self.fetch_catalog()
-                        new_model = self._discover_catalog_model(catalog_data, exclude=self.model)
-                    except Exception:  # noqa: BLE001
-                        new_model = ROUTER_FALLBACK_MODELS[0] if ROUTER_FALLBACK_MODELS else None
-                        if new_model == self.model:
-                            new_model = None
-                if new_model:
-                    # Update the model and retry
-                    original_model = self.model
-                    self.model = new_model
-                    try:
-                        payload = self.build_chat_payload(messages, sampling)
-                        raw = self.http.post_json(self.chat_url(), payload)
-                        # Check if response is ok
-                        if hasattr(raw, 'ok') and not raw.ok:
-                            # Retry failed, restore original model and return error
-                            self.model = original_model
-                            return self._record(
-                                LLMResponse(text="", model=self.model, error=f"HTTP {getattr(raw, 'status_code', 'unknown')}"),
-                                started,
-                            )
-                        # raw is a response object, call .json() to get the data
-                        if hasattr(raw, 'json'):
-                            data = raw.json()
-                        else:
-                            data = raw
-                        result = self._parse_chat(data)
-                        if result.error:
-                            # Retry failed, restore original model
-                            self.model = original_model
-                        else:
-                            # Success with healed model, add healed_from info
-                            if result.raw is None:
-                                result.raw = {}
-                            if isinstance(result.raw, dict):
-                                result.raw["healed_from"] = original_model
-                        return self._record(result, started)
-                    except Exception as retry_exc:  # noqa: BLE001
-                        # Retry failed, restore original model and return error
-                        self.model = original_model
-                        error = classify(retry_exc)
-                        return self._record(
-                            LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
-                            started,
-                        )
-            except Exception:  # noqa: BLE001
-                pass
-            
-            # Return error
-            error = classify(exc)
+
+            # Model failed (not hosted, 404, 400, etc.) — discover candidates
+            # and try each in turn, not just one.
+            original_model = self.model
+            candidates = self._candidate_models(exclude=original_model)
+            last_error = exc
+            for new_model in candidates[:3]:  # cap at 3 swaps per call
+                self.model = new_model
+                try:
+                    raw = self._post_checked(self.chat_url(), payload)
+                    result = self._parse_chat(raw)
+                    if result.error:
+                        last_error = Exception(result.error)
+                        continue
+                    # Success with healed model — record where we came from.
+                    if result.raw is None:
+                        result.raw = {}
+                    if isinstance(result.raw, dict):
+                        result.raw["healed_from"] = original_model
+                    return self._record(result, started)
+                except Exception as retry_exc:  # noqa: BLE001
+                    last_error = retry_exc
+                    continue
+
+            # All candidates failed — restore original and return the error.
+            self.model = original_model
+            error = classify(last_error)
             return self._record(
                 LLMResponse(text="", model=self.model, error=f"{error.code}: {error.message}"),
                 started,
             )
+
+    def _candidate_models(self, exclude: str = "") -> list[str]:
+        """Ordered list of alternative models to try, excluding the given one."""
+        seen: set[str] = set()
+        ordered: list[str] = []
+        # 1. Live catalog, best-first
+        try:
+            catalog = self.fetch_catalog()
+            # _discover_catalog_model returns a single best; we want several.
+            # Collect scored candidates directly.
+            scored = self._score_catalog_models(catalog, exclude=exclude)
+            for model_id in scored:
+                if model_id not in seen:
+                    seen.add(model_id)
+                    ordered.append(model_id)
+        except Exception:  # noqa: BLE001 - fall through to curated list
+            pass
+        # 2. Curated fallback list
+        for model_id in ROUTER_FALLBACK_MODELS:
+            if model_id != exclude and model_id not in seen:
+                seen.add(model_id)
+                ordered.append(model_id)
+        return ordered
+
+    @staticmethod
+    def _score_catalog_models(catalog: list[dict], exclude: str = "") -> list[str]:
+        """Score and order catalog models best-first (shared with _discover_catalog_model)."""
+        if not catalog:
+            return []
+        candidates: list[str] = []
+        for model in catalog:
+            model_id = model.get("id", "")
+            if not model_id or model_id == exclude:
+                continue
+            providers = model.get("providers")
+            if providers is not None:
+                if not any(p.get("status") == "live" for p in providers):
+                    continue
+            candidates.append(model_id)
+        if not candidates:
+            return []
+        uncensored_keywords = ["abliterated", "uncensored", "dolphin"]
+        small_keywords = ["7B", "8B", "3B", "1.5B"]
+
+        def _score(model_id: str) -> tuple[int, str]:
+            lower = model_id.lower()
+            score = 0
+            for keyword in uncensored_keywords:
+                if keyword in lower:
+                    score += 10
+                    break
+            for keyword in small_keywords:
+                if keyword in lower:
+                    score += 5
+                    break
+            return (-score, model_id)
+
+        return [m for _, m in sorted(_score(m) for m in candidates)]
 
     def complete(self, prompt: str, params: SamplingParams | None = None, **kw: Any) -> LLMResponse:
         if self.use_chat_endpoint or self._is_dedicated_endpoint:
@@ -442,62 +468,16 @@ class HFServerlessProvider(LLMProvider):
     @staticmethod
     def _discover_catalog_model(catalog: list[dict], exclude: str = "") -> str:
         """Discover the best model from a catalog.
-        
+
         Args:
             catalog: List of model dicts with 'id' and 'providers' keys
             exclude: Model ID to exclude from selection
-        
+
         Returns:
             The selected model ID, or empty string if none found
         """
-        if not catalog:
-            return None
-        
-        # Filter out excluded models
-        candidates = []
-        for model in catalog:
-            model_id = model.get("id", "")
-            if model_id == exclude:
-                continue
-            # Check if model has live providers (if providers field exists)
-            providers = model.get("providers")
-            if providers is not None:
-                # Only include if at least one provider is live
-                if not any(p.get("status") == "live" for p in providers):
-                    continue
-            # Include the model
-            candidates.append(model_id)
-        
-        if not candidates:
-            return None
-        
-        # Prefer small uncensored models (abliterated, uncensored, etc.)
-        uncensored_keywords = ["abliterated", "uncensored", "dolphin"]
-        small_keywords = ["7B", "8B", "3B", "1.5B"]
-        
-        # Score candidates
-        scored = []
-        for model_id in candidates:
-            score = 0
-            model_lower = model_id.lower()
-            
-            # Bonus for uncensored
-            for keyword in uncensored_keywords:
-                if keyword in model_lower:
-                    score += 10
-                    break
-            
-            # Bonus for small models
-            for keyword in small_keywords:
-                if keyword in model_id:
-                    score += 5
-                    break
-            
-            scored.append((score, model_id))
-        
-        # Sort by score (descending) and return the best
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return scored[0][1] if scored else None
+        scored = HFServerlessProvider._score_catalog_models(catalog, exclude=exclude)
+        return scored[0] if scored else None
 
 
 
