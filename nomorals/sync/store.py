@@ -2,6 +2,13 @@
 
 Every record carries ``updated_at`` (unix seconds, set by the writer) and
 ``device_id``. Deletes are tombstones, not removals, so deletes replicate.
+
+Replication uses a monotonic per-store sequence number (``seq``), assigned
+on every local write — including writes applied from a peer. The engine's
+push/pull cursors are seqs, not timestamps, so a backdated write (explicit
+old ``updated_at``, phone/cloud clock skew) can never slip past a cursor
+unseen. ``updated_at``/``device_id`` remain the conflict-resolution key
+(last-write-wins); ``seq`` is only the "what changed since X" cursor.
 """
 
 from __future__ import annotations
@@ -21,6 +28,26 @@ _log = get_logger(__name__)
 TABLE = "sync_records"
 
 
+def ensure_column(db: Database, table: str, column: str, ddl: str) -> None:
+    """Add ``column`` to ``table`` if missing.
+
+    Tolerates losing a creation race with another thread/process building
+    the same schema: if the ALTER fails, the column is re-checked and the
+    error only propagates when the column is still genuinely absent.
+    """
+    cols = {r["name"] for r in db.table_info(table)}
+    if column in cols:
+        return
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except Exception:  # noqa: BLE001 - re-checked below; real errors re-raise
+        cols = {r["name"] for r in db.table_info(table)}
+        if column not in cols:
+            raise
+        _log.debug("column %s.%s appeared via a concurrent migration",
+                   table, column)
+
+
 @dataclass
 class SyncRecord:
     key: str
@@ -28,6 +55,10 @@ class SyncRecord:
     updated_at: float
     device_id: str
     deleted: bool = False
+    # Local replication cursor, assigned by SyncStore on write. Not part of
+    # the LWW identity — two records are "the same" when (updated_at,
+    # device_id, value, deleted) match, regardless of seq.
+    seq: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +67,7 @@ class SyncRecord:
             "updated_at": self.updated_at,
             "device_id": self.device_id,
             "deleted": self.deleted,
+            "seq": self.seq,
         }
 
     @staticmethod
@@ -63,12 +95,43 @@ class SyncStore:
                 value TEXT NOT NULL DEFAULT '{{}}',
                 updated_at REAL NOT NULL DEFAULT 0,
                 device_id TEXT NOT NULL DEFAULT '',
-                deleted INTEGER NOT NULL DEFAULT 0
+                deleted INTEGER NOT NULL DEFAULT 0,
+                seq INTEGER NOT NULL DEFAULT 0
             )"""
         )
         self.db.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_updated ON {TABLE}(updated_at)"
         )
+        # Migration first: the seq index below requires the column to exist
+        # on pre-seq databases.
+        self._ensure_seq_column()
+        self.db.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_seq ON {TABLE}(seq)"
+        )
+
+    def _ensure_seq_column(self) -> None:
+        """Migration for pre-seq databases: add the column, then backfill.
+
+        Backfill order is (updated_at, rowid) continuing from the current
+        max seq, so rows that predate the seq era keep a sensible order and
+        no two rows share a seq.
+        """
+        ensure_column(self.db, TABLE, "seq", "INTEGER NOT NULL DEFAULT 0")
+        with self.db.transaction():
+            pending = self.db.query(
+                f"SELECT rowid AS rid FROM {TABLE} "
+                "WHERE seq = 0 ORDER BY updated_at, rowid"
+            )
+            if not pending:
+                return
+            start = int(self.db.scalar(
+                f"SELECT COALESCE(MAX(seq), 0) FROM {TABLE}", default=0))
+            for i, row in enumerate(pending, start=1):
+                self.db.execute(
+                    f"UPDATE {TABLE} SET seq = ? WHERE rowid = ?",
+                    (start + i, row["rid"]),
+                )
+            _log.info("sync store: backfilled seq for %d rows", len(pending))
 
     def put(
         self,
@@ -116,6 +179,24 @@ class SyncStore:
         )
         return [self._row_to_record(r) for r in rows]
 
+    def list_since_seq(self, seq: int) -> list[SyncRecord]:
+        """Records written after replication cursor ``seq``, in seq order.
+
+        This is the cursor the sync engine uses. Unlike
+        :meth:`list_changed_since` it cannot miss a backdated write
+        (explicit old ``updated_at``, phone/cloud clock skew): the cursor
+        is a monotonic local sequence, not a timestamp.
+        """
+        rows = self.db.query(
+            f"SELECT * FROM {TABLE} WHERE seq > ? ORDER BY seq",
+            (seq,),
+        )
+        return [self._row_to_record(r) for r in rows]
+
+    def max_seq(self) -> int:
+        return int(self.db.scalar(
+            f"SELECT COALESCE(MAX(seq), 0) FROM {TABLE}", default=0))
+
     def apply(self, rec: SyncRecord) -> bool:
         """Merge a remote record. Returns True if it changed local state."""
         if not rec.key:
@@ -149,22 +230,33 @@ class SyncStore:
         return int(rows[0]["n"]) if rows else 0
 
     def _upsert(self, rec: SyncRecord) -> None:
-        self.db.execute(
-            f"""INSERT INTO {TABLE} (key, value, updated_at, device_id, deleted)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value=excluded.value,
-                    updated_at=excluded.updated_at,
-                    device_id=excluded.device_id,
-                    deleted=excluded.deleted""",
-            (
-                rec.key,
-                json.dumps(rec.value, default=str),
-                rec.updated_at,
-                rec.device_id,
-                1 if rec.deleted else 0,
-            ),
-        )
+        # Every local write — own put/delete or a peer's record applied here
+        # — advances the replication cursor. Pulled records MUST bump the
+        # local seq too: that is what lets a hub fan records out to a third
+        # device. The write and the seq assignment are one transaction, so
+        # concurrent writers can never share or skip a seq.
+        with self.db.transaction():
+            nxt = int(self.db.scalar(
+                f"SELECT COALESCE(MAX(seq), 0) FROM {TABLE}", default=0)) + 1
+            self.db.execute(
+                f"""INSERT INTO {TABLE} (key, value, updated_at, device_id, deleted, seq)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at,
+                        device_id=excluded.device_id,
+                        deleted=excluded.deleted,
+                        seq=excluded.seq""",
+                (
+                    rec.key,
+                    json.dumps(rec.value, default=str),
+                    rec.updated_at,
+                    rec.device_id,
+                    1 if rec.deleted else 0,
+                    nxt,
+                ),
+            )
+        rec.seq = nxt
 
     @staticmethod
     def _row_to_record(row: Any) -> SyncRecord:
@@ -174,4 +266,5 @@ class SyncStore:
             updated_at=row["updated_at"],
             device_id=row["device_id"],
             deleted=bool(row["deleted"]),
+            seq=int(row.get("seq") or 0),
         )

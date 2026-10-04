@@ -683,6 +683,34 @@ class VideoCompileTests(unittest.TestCase):
         self.assertEqual(info["kind"], "video")
         self.assertGreater(info["duration"], 3.0)
 
+    def test_render_speed_ramp_end_to_end(self):
+        # R22 live check: the timeline speed-ramp filter graph (split →
+        # retime → concat, R20's "output survival" fix) must survive an
+        # actual ffmpeg run, not just graph compilation. Timeline: 1.0s
+        # title + 2×2s clips with 0.5s fade = 4.5s; 2× ramp over [1.5, 3.0]
+        # shrinks 1.5s → 0.75s, so output lands at ~3.75s.
+        st = EditStudio(str(self.c1), kind="video", name="ramp-e2e")
+        st.add_clip(str(self.c2))
+        st.transition("fade", duration=0.5)
+        st.title_card("Ramp", duration=1.0)
+        st.speed(2.0, start=1.5, end=3.0)
+        st.export("web-optimized")
+        r = st.render(out_dir=self.root / "out-ramp", wait=True, timeout=300)
+        self.assertEqual(r["status"], "done", r)
+        out = Path(r["output_ref"])
+        self.assertTrue(out.exists())
+        self.assertGreater(out.stat().st_size, 0)
+        from nomorals.media_edit import videos as videos_mod
+        info = videos_mod.media_probe_any(out)
+        self.assertEqual(info["kind"], "video")
+        types = {s.get("type") for s in info.get("streams", [])}
+        self.assertIn("video", types)
+        self.assertIn("audio", types)  # atempo chain kept audio alive
+        self.assertGreater(info["duration"], 2.0)
+        self.assertLess(info["duration"], 4.5)  # ramp shortened the timeline
+        self.assertEqual((info.get("width"), info.get("height")),
+                         (1280, 720))  # web-optimized preset
+
     def test_render_async_job(self):
         st = EditStudio(str(self.c1), kind="video", name="async")
         st.export("web-optimized")

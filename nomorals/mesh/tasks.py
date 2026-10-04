@@ -1,12 +1,19 @@
 """Mesh task dispatch over the durable work queue.
 
 Wraps :class:`nomorals.storage.queue.WorkQueue`. Targeting uses topic
-namespaces: ``mesh:broadcast`` for all nodes, ``mesh:node:<id>`` for one
-node. A node polls both. No lease-and-filter, no wasted attempts.
+namespaces: ``mesh:broadcast`` for tasks any node may claim,
+``mesh:node:<id>`` for one node. A node polls its own topic first, then
+broadcast. No lease-and-filter, no wasted attempts.
+
+Broadcast semantics are work-stealing, not fan-out: a broadcast task is
+claimed by the *first* node that polls it (at-least-once per task, like
+every queue job). To have every node run something, dispatch one targeted
+task per node from :meth:`NodeRegistry.list_active`.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +28,34 @@ __all__ = ["MeshTask", "MeshTasks"]
 _log = get_logger(__name__)
 
 
+# Canonical DDL for the work queue lives in migration V5
+# (nomorals.storage.migrations); this mirrors it so a MeshTasks built on a
+# fresh Database (CLI, tests) works without running the full migration
+# suite. IF NOT EXISTS keeps it a no-op on migrated databases.
+WORK_QUEUE_DDL = """
+CREATE TABLE IF NOT EXISTS work_queue (
+    id           TEXT PRIMARY KEY,
+    topic        TEXT NOT NULL,
+    payload      TEXT NOT NULL DEFAULT '{}',
+    priority     INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'ready',
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    available_at REAL NOT NULL DEFAULT 0,
+    lease_until  REAL NOT NULL DEFAULT 0,
+    lease_owner  TEXT NOT NULL DEFAULT '',
+    result       TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_queue_ready
+    ON work_queue(topic, status, priority DESC, available_at);
+CREATE INDEX IF NOT EXISTS idx_work_queue_lease
+    ON work_queue(status, lease_until);
+"""
+
+
 def _emit(topic: str, data: dict[str, Any]) -> None:
     """Publish a telemetry event. Best-effort: a broken bus or subscriber
     must never break mesh task handling (fail-open telemetry, fail-closed
@@ -31,6 +66,11 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
         _log.debug("event %s failed", topic, exc_info=True)
 
 BROADCAST_TOPIC = "mesh:broadcast"
+
+#: Task payloads are envelopes, not file transfers — a runaway producer
+#: embedding megabytes would bloat the queue DB and slow every poll.
+#: Anything bigger belongs in the artifact store with a reference here.
+MESH_MAX_PAYLOAD_BYTES = 1 * 1024 * 1024
 
 
 def _node_topic(node_id: str) -> str:
@@ -65,6 +105,9 @@ class MeshTasks:
     def __init__(self, db: Database, queue: WorkQueue | None = None) -> None:
         self.db = db
         self.queue = queue or WorkQueue(db)
+        # WorkQueue itself doesn't create its table (migrations do); a mesh
+        # built on a fresh database must still work.
+        self.db.executescript(WORK_QUEUE_DDL)
 
     def dispatch(
         self,
@@ -77,17 +120,26 @@ class MeshTasks:
         delay: float = 0.0,
         max_attempts: int = 5,
     ) -> str:
-        """Queue a task. ``target_node=None`` broadcasts to all nodes."""
+        """Queue a task. ``target_node=None`` leaves the task unclaimed by
+        any specific node: the first node to poll takes it (work-stealing).
+        """
         if not task_type:
             raise ValueError("task_type is required")
         if not origin_node:
             raise ValueError("origin_node is required")
+        payload = payload or {}
+        size = len(json.dumps(payload, default=str))
+        if size > MESH_MAX_PAYLOAD_BYTES:
+            raise ValueError(
+                f"task payload is {size} bytes (limit "
+                f"{MESH_MAX_PAYLOAD_BYTES}); put large blobs in the artifact "
+                "store and reference them instead")
         topic = BROADCAST_TOPIC if target_node is None else _node_topic(target_node)
         job_id = self.queue.enqueue(
             topic,
             {
                 "task_type": task_type,
-                "payload": payload or {},
+                "payload": payload,
                 "target_node": target_node,
                 "origin_node": origin_node,
                 "enqueued_at": time.time(),

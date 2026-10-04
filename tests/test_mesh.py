@@ -114,6 +114,12 @@ class MeshTasksTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.tasks.poll("")
 
+    def test_dispatch_rejects_oversized_payload(self):
+        big = {"blob": "x" * (2 * 1024 * 1024)}
+        with self.assertRaises(ValueError) as ctx:
+            self.tasks.dispatch("t", big, origin_node="a")
+        self.assertIn("artifact", str(ctx.exception))
+
     def test_pending_count(self):
         self.tasks.dispatch("a", {}, origin_node="x", target_node="phone")
         self.tasks.dispatch("b", {}, origin_node="x")  # broadcast
@@ -140,6 +146,105 @@ class LocalTransportTests(unittest.TestCase):
         self.assertEqual(tasks[0].job_id, jid)
         self.t.complete(jid)
         self.assertEqual(self.t.poll(phone.node_id), [])
+
+    def test_fail_no_retry(self):
+        t = self.t
+        jid = t.dispatch("work", {}, origin_node="a", target_node="b")
+        polled = t.poll("b")
+        self.assertEqual(len(polled), 1)
+        t.fail(jid, error="boom", retry=False)
+        # No retry: the job never becomes pollable again.
+        self.assertEqual(t.poll("b"), [])
+        self.assertEqual(t.tasks.pending_count("b"), 0)
+
+
+class MeshFreshDbTests(unittest.TestCase):
+    """R22: MeshTasks on a database that never ran migrations.
+
+    WorkQueue doesn't create its own table; dispatch used to crash with
+    'no such table: work_queue' on a fresh DB (e.g. the mesh CLI path).
+    """
+
+    def test_dispatch_poll_complete_on_fresh_db(self):
+        db = Database(":memory:")  # no migrations applied
+        tasks = MeshTasks(db)
+        jid = tasks.dispatch("backup", {"x": 1}, origin_node="cloud",
+                             target_node="phone")
+        got = tasks.poll("phone")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].job_id, jid)
+        tasks.complete(jid, result={"ok": True})
+        self.assertEqual(tasks.pending_count("phone"), 0)
+
+
+class MeshCLITests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Fresh DB, no migrations — exercises the R22 schema fix too.
+        db = Database(str(Path(self._tmp.name) / "t.db"))
+        self.ctx = SimpleNamespace(
+            db=db, device_id="test",
+            settings=SimpleNamespace(workspace_dir=self._tmp.name))
+
+    def _run(self, *words, **kw):
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        from types import SimpleNamespace
+        from nomorals.cmdline.commands.mesh import _cmd_mesh
+        args = SimpleNamespace(task=list(words), json=kw.get("json", False))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = _cmd_mesh(args, self.ctx)
+        return rc, out.getvalue(), err.getvalue()
+
+    def _node_id(self):
+        rc, out, _ = self._run("register", "worker", "--platform", "linux")
+        self.assertEqual(rc, 0)
+        return out.strip()
+
+    def test_dispatch_poll_complete_cycle(self):
+        nid = self._node_id()
+        rc, out, _ = self._run("dispatch", "summarize",
+                               "--json-args", '{"n": 3}')
+        self.assertEqual(rc, 0, out)
+        jid = out.strip()
+        rc, out, _ = self._run("poll", nid)
+        self.assertEqual(rc, 0)
+        self.assertIn(jid, out)
+        self.assertIn("summarize", out)
+        rc, out, _ = self._run("pending")
+        self.assertIn("0 pending", out)
+        rc, _, _ = self._run("complete", jid, "--result", '{"ok": true}')
+        self.assertEqual(rc, 0)
+
+    def test_dispatch_rejects_bad_json_cleanly(self):
+        rc, _, err = self._run("dispatch", "t", "--json-args", "{bad")
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid JSON", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_fail_no_retry(self):
+        nid = self._node_id()
+        rc, out, _ = self._run("dispatch", "work", "--target", nid)
+        jid = out.strip()
+        self._run("poll", nid)
+        rc, _, _ = self._run("fail", jid, "--error", "boom", "--no-retry")
+        self.assertEqual(rc, 0)
+        rc, out, _ = self._run("pending", "--node", nid)
+        self.assertIn("0 pending", out)
+
+    def test_prune(self):
+        nid = self._node_id()
+        self.ctx.db.execute(
+            "UPDATE mesh_nodes SET last_seen=? WHERE node_id=?",
+            (time.time() - 100000, nid))
+        rc, out, _ = self._run("prune", "--stale-after", "60")
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned 1", out)
 
 
 if __name__ == "__main__":

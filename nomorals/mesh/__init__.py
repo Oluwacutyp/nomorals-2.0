@@ -5,7 +5,8 @@ each other and track presence via heartbeats.
 
 The task queue reuses :class:`nomorals.storage.queue.WorkQueue` (durable,
 leased, at-least-once). Node targeting is a payload field; a node polls for
-tasks addressed to it (or broadcast to all).
+tasks addressed to it, or untargeted (broadcast) tasks, which are claimed
+by the first node that polls — work-stealing, not fan-out.
 """
 
 from __future__ import annotations

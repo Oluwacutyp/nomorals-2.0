@@ -2,24 +2,34 @@
 
 :mod:`.loader` defines the *gated* surface (:class:`PluginCapabilities`);
 this module wires it to real implementations so a plugin granted
-``artifacts.write`` / ``storage.kv`` / ``network.fetch`` can actually use
-them (e.g. via ``nm plugin run``). Every accessor still checks the granted
-permission set first — wiring never widens what the manifest allows.
+``artifacts.write`` / ``storage.kv`` / ``network.fetch`` / ``llm.chat``
+can actually use them (e.g. via ``nm plugin run``). Every accessor still
+checks the granted permission set first — wiring never widens what the
+manifest allows.
 
-``llm.chat`` stays unwired here: the CLI has no provider chain to hand
-over, so a plugin that calls it gets the loader's honest "no model wired"
-error instead of a half-working stub.
+``llm.chat`` is wired to a real model path: the agent context's own router
+when one is available (the user's configured, settings-driven chain with
+its broker and learning hook), else the env-based provider chain from
+:mod:`nomorals.llm.defaults` (free/local first) with a
+:class:`~nomorals.llm.broker.ModelBroker` attached. The fallback chain
+builds lazily on the first ``chat()`` call — plugin runs that never touch
+the model pay nothing. When neither exists, the chatter stays ``None`` and
+the loader reports its honest ``llm.chat: no model wired`` error.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..llm.base import Message
+from ..llm.broker import ModelBroker
+from ..llm.defaults import build_chain, specs_from_env, sync_broker_cards
 from .errors import PluginError
 from .loader import PluginCapabilities
 
@@ -132,6 +142,104 @@ def make_fetcher(*, timeout: int = 30,
     return _fetch
 
 
+_CHAT_ROLES = ("system", "user", "assistant", "tool")
+
+
+def _to_messages(raw: Any) -> list[Message]:
+    """Validate a plugin's ``[{role, content}, ...]`` into :class:`Message`s.
+
+    Fail-fast: a malformed call surfaces as a clear :class:`PluginError`
+    here, not as a confusing provider rejection three layers down.
+    """
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        raise PluginError(
+            "llm.chat: messages must be a list of {role, content} dicts, "
+            f"got {type(raw).__name__}")
+    if not raw:
+        raise PluginError("llm.chat: messages must not be empty")
+    messages: list[Message] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise PluginError(
+                f"llm.chat: message {i} must be a dict, "
+                f"got {type(item).__name__}")
+        role = str(item.get("role", "")).strip().lower()
+        if role not in _CHAT_ROLES:
+            raise PluginError(
+                f"llm.chat: message {i} has invalid role "
+                f"{item.get('role')!r}; want one of {_CHAT_ROLES}")
+        content = item.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        messages.append(Message(role=role, content=content))
+    return messages
+
+
+def _context_router(context: Any) -> Any | None:
+    """The agent's own LLM router, when the context carries one.
+
+    Duck-typed on purpose: any object with a ``chat(messages)`` method
+    works. Returns None for exotic contexts (tests, bare Database) so the
+    caller can fall back to the env-based chain.
+    """
+    router = getattr(context, "router", None)
+    if router is not None and callable(getattr(router, "chat", None)):
+        return router
+    return None
+
+
+def _make_chatter(specs: list[Any], context: Any = None) -> Any:
+    """Build the lazy ``chatter(messages) -> str`` for ``llm.chat``.
+
+    Prefers the agent context's own router when one is available — that's
+    the user's configured, settings-driven chain (with its broker and
+    learning hook), not a parallel one. Otherwise the env-based provider
+    chain (free/local first) builds lazily on the *first* chat call, so
+    plugin runs that never touch the model import no provider modules and
+    open no connections. Thread-safe: concurrent first calls build the
+    fallback chain exactly once.
+
+    Failures raise :class:`PluginError` with the router's own diagnosis
+    (which providers failed, who served) — never a bare empty string.
+    """
+    lock = threading.Lock()
+    state: dict[str, Any] = {"router": None}
+
+    def _chatter(messages: list[dict[str, str]]) -> str:
+        # Validate first: malformed input fails fast without importing a
+        # single provider module.
+        msgs = _to_messages(messages)
+        router = state["router"]
+        if router is None:
+            router = _context_router(context)
+            if router is None:
+                with lock:
+                    router = state["router"]
+                    if router is None:
+                        router = build_chain(specs)
+                        broker = ModelBroker()
+                        sync_broker_cards(broker, router)
+                        router.set_broker(broker)
+                        state["router"] = router
+                        _log.info(
+                            "plugin llm.chat chain ready: %s",
+                            router.providers(),
+                        )
+            if router is not None:
+                state["router"] = router
+        try:
+            resp = router.chat(msgs)
+        except Exception as exc:  # noqa: BLE001 - contract is PluginError
+            raise PluginError(f"llm.chat failed: {exc}") from exc
+        if not resp.ok:
+            note = f" ({resp.fallback_note})" if resp.fallback_note else ""
+            raise PluginError(
+                f"llm.chat failed: {resp.error or 'unknown error'}{note}")
+        return resp.text
+
+    return _chatter
+
+
 def wire_capabilities(context: Any, plugin: Any,
                       workspace_base: str | Path | None = None
                       ) -> PluginCapabilities:
@@ -157,9 +265,20 @@ def wire_capabilities(context: Any, plugin: Any,
         migrate()
     artifacts = ArtifactStore(db, BlobStore(db, str(base / "blobs")))
     kv = PluginKV(db, plugin.name)
+    # llm.chat: prefer the agent context's own router (the user's
+    # configured chain) when available; otherwise wire a lazy env-based
+    # chain (free/local first) with a capability broker. No specs and no
+    # context router → chatter stays None and the loader reports the
+    # honest "llm.chat: no model wired" error.
+    specs = specs_from_env()
+    if _context_router(context) is None and not specs:
+        chatter = None
+    else:
+        chatter = _make_chatter(specs, context)
     return PluginCapabilities(
         granted=frozenset(plugin.manifest.permissions),
         artifacts=artifacts,
         kv=kv,
         fetcher=make_fetcher(),
+        chatter=chatter,
     )

@@ -2670,15 +2670,24 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm mesh nodes [--json]\n"
                      "nm mesh register <name> [--platform P]\n"
                      "nm mesh heartbeat <node-id>\n"
-                     "nm mesh dispatch <task-type> [--target NODE]"),
+                     "nm mesh dispatch <task-type> [--target NODE] [--json-args '{}']\n"
+                     "nm mesh poll <node-id> [--batch N] [--json]\n"
+                     "nm mesh complete <job-id> [--result JSON]\n"
+                     "nm mesh fail <job-id> [--error MSG] [--no-retry]\n"
+                     "nm mesh pending [--node ID] [--json]\n"
+                     "nm mesh prune [--stale-after SEC]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mesh.add_argument("task", nargs="*", default=[], help="verb and arguments")
     mesh.add_argument("--json", action="store_true", help="Output as JSON")
 
     sync = sub.add_parser("sync", aliases=CLI_ALIASES["sync"],
-        help="multi-device sync: status, push, pull",
+        help="multi-device sync: keys, status, push, pull",
         description=("nm sync status [--json]\n"
+                     "nm sync put <key> <json-object>\n"
+                     "nm sync get <key> [--json]\n"
+                     "nm sync delete <key>\n"
+                     "nm sync keys [--json]\n"
                      "nm sync push --peer-db PATH [--json]\n"
                      "nm sync pull --peer-db PATH [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -57,7 +57,7 @@ class Transport(ABC):
         ...
 
     @abstractmethod
-    def fail(self, job_id: str, error: str = "") -> None:
+    def fail(self, job_id: str, error: str = "", *, retry: bool = True) -> None:
         ...
 
 
@@ -105,5 +105,5 @@ class LocalTransport(Transport):
     def complete(self, job_id: str, result: Any = None) -> None:
         self.tasks.complete(job_id, result=result)
 
-    def fail(self, job_id: str, error: str = "") -> None:
-        self.tasks.fail(job_id, error=error)
+    def fail(self, job_id: str, error: str = "", *, retry: bool = True) -> None:
+        self.tasks.fail(job_id, error=error, retry=retry)

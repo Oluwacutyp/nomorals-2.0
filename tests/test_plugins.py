@@ -370,6 +370,88 @@ class WiringTests(unittest.TestCase):
         with self.assertRaises(PluginError):
             fetch("file:///etc/passwd")
 
+    def _wired_caps(self, permissions=("llm.chat",), router=None):
+        """wire_capabilities with fake context/plugin for chat tests."""
+        from types import SimpleNamespace
+        from nomorals.plugins.wiring import wire_capabilities
+        ctx = SimpleNamespace(
+            db=self.db,
+            settings=SimpleNamespace(
+                workspace_dir=str(Path(self.tmp.name) / "ws")))
+        if router is not None:
+            ctx.router = router
+        plugin = SimpleNamespace(
+            name="demo",
+            manifest=SimpleNamespace(permissions=list(permissions)))
+        return wire_capabilities(ctx, plugin)
+
+    @staticmethod
+    def _mock_router(**kwargs):
+        from nomorals.llm.providers.mock import MockProvider
+        from nomorals.llm.router import LLMRouter
+        router = LLMRouter()
+        router.add(MockProvider(**kwargs), primary=True, name="mock")
+        return router
+
+    def test_chat_serves_via_mock_chain(self):
+        from unittest.mock import patch
+        from nomorals.plugins import wiring
+        router = self._mock_router()
+        with patch.object(wiring, "build_chain", return_value=router):
+            caps = self._wired_caps()
+            text = caps.chat([{"role": "user", "content": "hello"}])
+        self.assertIsInstance(text, str)
+        self.assertTrue(text)
+        # the broker is attached: plugins get capability-routed chat
+        self.assertIsNotNone(router.broker)
+        # chain is built once, even across calls
+        with patch.object(wiring, "build_chain",
+                          side_effect=AssertionError("rebuilt")) as bc:
+            caps.chat([{"role": "user", "content": "again"}])
+            bc.assert_not_called()
+
+    def test_chat_prefers_context_router(self):
+        # When the context carries its own router (the agent's configured
+        # chain), plugins use it — no parallel env chain is built.
+        from unittest.mock import patch
+        from nomorals.plugins import wiring
+        router = self._mock_router()
+        with patch.object(wiring, "build_chain",
+                          side_effect=AssertionError("should not build")):
+            caps = self._wired_caps(router=router)
+            text = caps.chat([{"role": "user", "content": "hello"}])
+        self.assertIsInstance(text, str)
+        self.assertTrue(text)
+        # the context router is reused as-is (its own broker untouched)
+        self.assertIsNone(router.broker)
+
+    def test_chat_rejects_malformed_messages(self):
+        caps = self._wired_caps()
+        for bad in ("nope", None, [], [{"role": "bogus", "content": "x"}],
+                    [{"content": "x"}], ["str-msg"]):
+            with self.assertRaises(PluginError, msg=f"bad={bad!r}"):
+                caps.chat(bad)
+
+    def test_chat_failure_surfaces_plugin_error(self):
+        from unittest.mock import patch
+        from nomorals.plugins import wiring
+        router = self._mock_router(failure_rate=1.0)
+        with patch.object(wiring, "build_chain", return_value=router):
+            caps = self._wired_caps()
+            with self.assertRaises(PluginError) as ctx:
+                caps.chat([{"role": "user", "content": "hi"}])
+        self.assertIn("llm.chat failed", str(ctx.exception))
+
+    def test_chat_unwired_without_specs(self):
+        from unittest.mock import patch
+        from nomorals.plugins import wiring
+        from nomorals.plugins.errors import PermissionDenied
+        with patch.object(wiring, "specs_from_env", return_value=[]):
+            caps = self._wired_caps()
+            with self.assertRaises(PermissionDenied) as ctx:
+                caps.chat([{"role": "user", "content": "hi"}])
+        self.assertIn("no model wired", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
