@@ -21,12 +21,14 @@ Usage:
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import time
+import urllib.error
 import urllib.request
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..core.cipher import CipherError
 from ..core.errors import NoMoralsError, NotFound
@@ -45,11 +47,11 @@ class SessionInvalid(NoMoralsError):
 @dataclass
 class OAuthToken:
     """OAuth 2.0 token with metadata."""
-    
-    access_token: str
+
+    access_token: str = field(repr=False)
     token_type: str = "Bearer"
     expires_at: Optional[float] = None
-    refresh_token: Optional[str] = None
+    refresh_token: Optional[str] = field(default=None, repr=False)
     scope: str = ""
     
     def is_expired(self) -> bool:
@@ -83,12 +85,12 @@ class OAuthToken:
 @dataclass
 class Session:
     """An authenticated session for a service."""
-    
+
     service: str
     username: str
-    cookies: dict[str, str] = field(default_factory=dict)
-    headers: dict[str, str] = field(default_factory=dict)
-    oauth_token: Optional[OAuthToken] = None
+    cookies: dict[str, str] = field(default_factory=dict, repr=False)
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
+    oauth_token: Optional[OAuthToken] = field(default=None, repr=False)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
     last_used: float = 0.0
@@ -107,6 +109,40 @@ class Session:
         if time.time() - self.last_used > 24 * 3600:
             return False
         return True
+
+    def health_report(self) -> dict[str, Any]:
+        """Machine-readable session health.
+
+        Returns ``{"status", "reasons", "age_seconds", "idle_seconds"}``
+        where status is one of:
+
+        * ``ok`` — usable right now
+        * ``expired`` — OAuth token expired
+        * ``stale`` — 24h of inactivity
+        * ``empty`` — valid timewise but holds no cookies or OAuth token,
+          so it cannot authenticate anything
+        """
+        reasons: list[str] = []
+        now = time.time()
+        if self.oauth_token is not None and self.oauth_token.is_expired():
+            reasons.append("oauth_token_expired")
+        if now - self.last_used > 24 * 3600:
+            reasons.append("idle_over_24h")
+        if not self.cookies and (
+            self.oauth_token is None or self.oauth_token.is_expired()
+        ):
+            reasons.append("no_cookies_or_token")
+        if reasons:
+            status = "expired" if "oauth_token_expired" in reasons else (
+                "stale" if "idle_over_24h" in reasons else "empty")
+        else:
+            status = "ok"
+        return {
+            "status": status,
+            "reasons": reasons,
+            "age_seconds": now - self.created_at,
+            "idle_seconds": now - self.last_used,
+        }
     
     def touch(self):
         """Update last_used timestamp."""
@@ -196,6 +232,14 @@ class SessionManager:
             return session
         return None
 
+    def peek_session(self, service: str, username: str) -> Session | None:
+        """Load the stored session WITHOUT touching it.
+
+        Health checks and audits use this so a stale session isn't
+        accidentally refreshed by the act of looking at it.
+        """
+        return self._load_session(service, username)
+
     def get_session(self, service: str, username: str) -> Session:
         """Get or create a session for a service.
 
@@ -217,6 +261,144 @@ class SessionManager:
         session.touch()
         self._save_session(session)
         return session
+
+    def ensure_authenticated(
+        self,
+        service: str,
+        username: str,
+        *,
+        reauth: Optional[Callable[[], Any]] = None,
+    ) -> Session:
+        """Return a usable session, re-authenticating when it is gone.
+
+        Unlike :meth:`get_valid_session` (which just raises), this tries
+        the ``reauth`` callable once when the stored session is
+        invalid/expired: ``reauth`` performs whatever flow restores the
+        session (typically :func:`browser_login.ensure_login` with a
+        zero-arg tab factory bound) and may return anything — the
+        session is re-loaded from the store afterwards.
+
+        Args:
+            service: Service name
+            username: Username or identifier
+            reauth: Optional zero-arg callable that restores the session
+
+        Returns:
+            A valid Session
+
+        Raises:
+            SessionInvalid: Session unusable and re-auth missing/failed
+        """
+        try:
+            return self.get_valid_session(service, username)
+        except SessionInvalid as exc:
+            if reauth is None:
+                raise
+            _log.info("session for %s/%s invalid (%s) — running re-auth",
+                      service, username, exc)
+        try:
+            reauth()
+        except Exception as exc:  # noqa: BLE001 — report, then re-raise below
+            _log.warning("re-auth for %s/%s failed: %s", service, username,
+                         exc)
+        # One more attempt: either the re-auth restored the session, or
+        # this raises SessionInvalid with the real reason.
+        return self.get_valid_session(service, username)
+
+    def probe(
+        self,
+        service: str,
+        username: str,
+        url: str,
+        *,
+        ok_markers: tuple[str, ...] | list[str] = (),
+        bad_markers: tuple[str, ...] | list[str] = (),
+        marker_status: dict[str, tuple[str, ...] | list[str]] | None = None,
+        timeout: float = 15.0,
+    ) -> dict[str, Any]:
+        """Server-side session check: fetch ``url`` with the session's
+        cookies and look for login-state markers.
+
+        A session can look valid locally (fresh, cookies present) while
+        the server has already killed it — this is how that is detected.
+
+        Args:
+            service: Service name
+            username: Username or identifier
+            url: A page/API endpoint that only a logged-in user can see
+            ok_markers: Text that must appear when logged in
+            bad_markers: Text that means logged out (e.g. "sign in",
+                "log in to continue")
+            marker_status: Optional mapping status -> markers, checked
+                BEFORE ``bad_markers`` so a page can be classified more
+                precisely than "logged out" (e.g. {"locked": (...),
+                "needs_verification": (...)})
+            timeout: HTTP timeout in seconds
+
+        Returns:
+            ``{"ok": True/False, "status": ..., "http_status": int|None,
+            "reason": str}`` — status is "logged_in" when the server
+            accepts the session, "logged_out" on rejection, a
+            ``marker_status`` key on a classified page, or "unknown" on
+            transport/HTTP errors. Never raises for transport errors.
+        """
+        session = self.get_session(service, username)
+        jar = http.cookiejar.CookieJar()
+        parsed = urllib.parse.urlparse(url)
+        for name, value in (session.cookies or {}).items():
+            jar.set_cookie(http.cookiejar.Cookie(
+                version=0, name=name, value=value,
+                port=None, port_specified=False,
+                domain=parsed.hostname or "", domain_specified=bool(parsed.hostname),
+                domain_initial_dot=False, path="/", path_specified=True,
+                secure=False, expires=None, discard=True,
+                comment=None, comment_url=None, rest={},
+            ))
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar))
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                http_status: int | None = resp.status
+                body = resp.read(200_000).decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            http_status = exc.code
+            try:
+                body = exc.read(200_000).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 — best-effort body
+                body = ""
+        except Exception as exc:  # noqa: BLE001 — transport failure
+            return {"ok": False, "status": "unknown", "http_status": None,
+                    "reason": f"transport error: {exc}"}
+        low = body.lower()
+        for status, markers in (marker_status or {}).items():
+            for marker in markers:
+                if marker and marker.lower() in low:
+                    return {"ok": False, "status": status,
+                            "http_status": http_status,
+                            "reason": f"page marker {marker!r} "
+                                      f"(classified {status})"}
+        for marker in bad_markers:
+            if marker and marker.lower() in low:
+                return {"ok": False, "status": "logged_out",
+                        "http_status": http_status,
+                        "reason": f"logout marker {marker!r} on page"}
+        for marker in ok_markers:
+            if marker and marker.lower() not in low:
+                return {"ok": False, "status": "unknown",
+                        "http_status": http_status,
+                        "reason": f"expected marker {marker!r} missing"}
+        if http_status in (401, 403):
+            return {"ok": False, "status": "logged_out",
+                    "http_status": http_status,
+                    "reason": f"HTTP {http_status} from server"}
+        if http_status and http_status >= 400:
+            return {"ok": False, "status": "unknown",
+                    "http_status": http_status,
+                    "reason": f"HTTP {http_status} from server"}
+        return {"ok": True, "status": "logged_in", "http_status": http_status,
+                "reason": "session accepted by server"}
     
     def _encrypt_session_data(self, plaintext: str) -> str:
         """Encrypt serialized session data (may hold OAuth tokens)."""

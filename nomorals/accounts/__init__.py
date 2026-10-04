@@ -23,6 +23,9 @@ from .browser_login import (
     LoginFailed,
     LoginCaptchaRequired,
     login_with_vault,
+    ensure_login,
+    PasswordChangeConfig,
+    change_password_on_site,
     USERNAME_FIELD_CANDIDATES,
     PASSWORD_FIELD_CANDIDATES,
 )
@@ -37,7 +40,20 @@ from .creator import (
     CheckpointState,
     CheckpointStore,
 )
-from .sessions import SessionManager, Session, OAuthToken, SessionInvalid
+from .sessions import (
+    SessionManager,
+    Session,
+    OAuthToken,
+    SessionInvalid,
+)
+from .health import (
+    AccountHealth,
+    check_account_health,
+    check_all_health,
+    LOCKED_MARKERS,
+    VERIFICATION_MARKERS,
+    LOGGED_OUT_MARKERS,
+)
 from .temp_sms import (
     TempSmsProvider,
     SimcodesProvider,
@@ -58,6 +74,9 @@ __all__ = [
     "LoginFailed",
     "LoginCaptchaRequired",
     "login_with_vault",
+    "ensure_login",
+    "PasswordChangeConfig",
+    "change_password_on_site",
     "USERNAME_FIELD_CANDIDATES",
     "PASSWORD_FIELD_CANDIDATES",
     "AccountCreator",
@@ -73,6 +92,12 @@ __all__ = [
     "Session",
     "OAuthToken",
     "SessionInvalid",
+    "AccountHealth",
+    "check_account_health",
+    "check_all_health",
+    "LOCKED_MARKERS",
+    "VERIFICATION_MARKERS",
+    "LOGGED_OUT_MARKERS",
     "TempSmsProvider",
     "SimcodesProvider",
     "TempNumber",

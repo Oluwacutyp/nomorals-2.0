@@ -1254,8 +1254,12 @@ def _parser() -> argparse.ArgumentParser:
                      "nm account sms-code [--timeout 180] [--sender-hint HINT]\n"
                      "nm account inbox --service email_mailtm [--limit 10]\n"
                      "nm account login --service S [--username U] [--login-url URL]\n"
+                     "                    [--force]\n"
                      "nm account default --service S --username U | --clear\n"
-                     "nm account rotate --service S --username U [--length 32]"),
+                     "nm account rotate --service S --username U [--length 32]\n"
+                     "                    [--on-site --change-password-url URL]\n"
+                     "nm account health [--service S] [--username U]\n"
+                     "                    [--probe-url URL]"),
     )
     account_sub = account.add_subparsers(dest="account_action", required=True)
     a_create = account_sub.add_parser("create", help="start an account flow")
@@ -1309,7 +1313,8 @@ def _parser() -> argparse.ArgumentParser:
 
     a_login = account_sub.add_parser(
         "login", help="log in to an existing account with the vault password "
-                      "(browser-driven; cookies persist to the session store)")
+                      "(restores the stored session when it is still valid; "
+                      "--force re-logs in anyway)")
     a_login.add_argument("--service", required=True, help="service name")
     a_login.add_argument("--username", default=None,
                          help="pin an account (default: the service default)")
@@ -1323,6 +1328,9 @@ def _parser() -> argparse.ArgumentParser:
     a_login.add_argument("--no-solver", dest="solver_enabled",
                          action="store_false",
                          help="skip the solver, fail on CAPTCHA instead")
+    a_login.add_argument("--force", action="store_true",
+                         help="re-login even when the stored session is "
+                              "still valid")
     a_login.add_argument("--json", action="store_true",
                          help="output as JSON")
 
@@ -1344,7 +1352,34 @@ def _parser() -> argparse.ArgumentParser:
     a_rotate.add_argument("--username", required=True, help="account username")
     a_rotate.add_argument("--length", type=int, default=32,
                           help="new password length (default: 32)")
+    a_rotate.add_argument("--on-site", action="store_true",
+                          help="change the password on the site itself "
+                               "(browser-driven) before updating the vault")
+    a_rotate.add_argument("--change-password-url", default="",
+                          help="site's password-change page "
+                               "(falls back to credential metadata)")
+    a_rotate.add_argument("--success-text", default="",
+                          help="text that must appear after the change")
+    a_rotate.add_argument("--solver", dest="solver_enabled",
+                          action="store_true", default=None,
+                          help="try the CAPTCHA solver first (default: on)")
+    a_rotate.add_argument("--no-solver", dest="solver_enabled",
+                          action="store_false",
+                          help="skip the solver, fail on CAPTCHA instead")
     a_rotate.add_argument("--json", action="store_true",
+                          help="output as JSON")
+
+    a_health = account_sub.add_parser(
+        "health", help="check account health: vault state, session health, "
+                       "and an optional server-side probe (locked / needs "
+                       "verification / logged out)")
+    a_health.add_argument("--service", default=None,
+                          help="check one service (default: sweep all)")
+    a_health.add_argument("--username", default=None,
+                          help="pin an account (default: the service default)")
+    a_health.add_argument("--probe-url", default="",
+                          help="logged-in-only URL for the server-side check")
+    a_health.add_argument("--json", action="store_true",
                           help="output as JSON")
 
     # --- more OpenCV/ffmpeg frame-level video ops ---
@@ -1589,9 +1624,10 @@ def _parser() -> argparse.ArgumentParser:
     c_solve = captcha_sub.add_parser("solve", help="solve one challenge")
     c_solve.add_argument("--kind", required=True,
                          help="recaptcha_v2|recaptcha_v3|recaptcha_enterprise|"
-                              "hcaptcha|turnstile|image_captcha")
+                              "hcaptcha|turnstile|geetest|arkose|aws_waf|"
+                              "image_captcha|audio_captcha")
     c_solve.add_argument("--sitekey", default="",
-                         help="the data-sitekey")
+                         help="the data-sitekey (or public key / captchaId)")
     c_solve.add_argument("--url", default="", help="page URL")
     c_solve.add_argument("--backend", default="auto",
                          help="service|takeover|detect|auto (default auto)")
@@ -1607,6 +1643,9 @@ def _parser() -> argparse.ArgumentParser:
     c_solve.add_argument("--no-solver", dest="solver_enabled",
                          action="store_false",
                          help="skip the service, go straight to takeover")
+    c_solve.add_argument("--no-notify", dest="notify_owner",
+                         action="store_false", default=True,
+                         help="do not ping the owner on takeover")
     c_solve.add_argument("--json", action="store_true",
                          help="output as JSON")
 

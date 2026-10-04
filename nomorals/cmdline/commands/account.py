@@ -173,15 +173,16 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if action == "login":
-        # Browser-driven login with the vault password; cookies persist
-        # into the session store so the login survives restarts.
+        # Session-restore-aware login: when the stored session is still
+        # valid, no browser opens and no login form is touched
+        # (--force bypasses the restore check and re-logs in anyway).
         from ...accounts import (
             AccountManager,
             LoginCaptchaRequired,
             LoginConfig,
             LoginFailed,
             SessionManager,
-            login_with_vault,
+            ensure_login,
         )
         try:
             vault = _vault(context)
@@ -212,12 +213,13 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
             success_text=getattr(args, "success_text", "") or "",
         )
         try:
-            result = login_with_vault(
+            result = ensure_login(
                 manager, sessions, _open_tab,
                 service=args.service,
                 username=getattr(args, "username", None),
                 config=cfg,
                 captcha_solver=solver,
+                force=bool(getattr(args, "force", False)),
             )
         except (LoginFailed, LoginCaptchaRequired) as exc:
             print(f"login failed: {exc}", file=sys.stderr)
@@ -226,7 +228,10 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
             print(_json.dumps(result, indent=2))
         else:
             print(result["note"])
-            print(f"cookies saved: {result['cookies_saved']}")
+            if result.get("from_session"):
+                print("(restored from the stored session — no re-login)")
+            else:
+                print(f"cookies saved: {result['cookies_saved']}")
         return 0
 
     if action == "default":
@@ -276,6 +281,56 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
             print(str(exc), file=sys.stderr)
             return 2
         manager = AccountManager(vault)
+
+        if getattr(args, "on_site", False):
+            # Full rotation: change the password on the site itself, then
+            # in the vault. Needs the site's password-change page.
+            from ...accounts import (
+                LoginCaptchaRequired,
+                LoginFailed,
+                PasswordChangeConfig,
+                SessionManager,
+                change_password_on_site,
+            )
+            sessions = SessionManager(vault)
+
+            def _open_tab():
+                from ...browser.service import BrowserService
+                svc = BrowserService()
+                try:
+                    return svc.open_rendered_tab(args.service)
+                except Exception:
+                    handle = svc.open_session(args.service)
+                    return handle.open_tab()
+
+            solver = None
+            solver_on = getattr(args, "solver_enabled", None)
+            if solver_on is not False:
+                solver = creator_solver_adapter(
+                    solver_enabled=solver_on, settings=settings)
+            pw_cfg = PasswordChangeConfig(
+                change_password_url=getattr(
+                    args, "change_password_url", "") or "",
+                success_text=getattr(args, "success_text", "") or "",
+            )
+            try:
+                result = change_password_on_site(
+                    manager, sessions, _open_tab,
+                    service=args.service,
+                    username=args.username,
+                    length=int(getattr(args, "length", 32) or 32),
+                    config=pw_cfg,
+                    captcha_solver=solver,
+                )
+            except (LoginFailed, LoginCaptchaRequired) as exc:
+                print(f"on-site rotation failed: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(_json.dumps(result, indent=2))
+            else:
+                print(result["note"])
+            return 0
+
         try:
             cred = manager.rotate_credential_auto(
                 args.service, args.username,
@@ -295,6 +350,45 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
             print("apply the new password on the service's own "
                   "password-change page — the vault copy is updated.")
         return 0
+
+    if action == "health":
+        # Account health: vault state + session health + optional
+        # server-side probe. One account or the full sweep.
+        from ...accounts import AccountManager, SessionManager, check_all_health
+        try:
+            vault = _vault(context)
+        except _AccountCliError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        manager = AccountManager(vault)
+        sessions = SessionManager(vault)
+        service = getattr(args, "service", None)
+        username = getattr(args, "username", None)
+        probe_url = getattr(args, "probe_url", "") or ""
+        if service:
+            from ...accounts import check_account_health
+            report = check_account_health(
+                manager, sessions, service, username,
+                probe_url=probe_url)
+            if getattr(args, "json", False):
+                print(_json.dumps(report.to_dict(), indent=2))
+            else:
+                print(f"{report.service}/{report.username}: {report.status}")
+                for issue in report.issues:
+                    print(f"  - {issue}")
+            return 0 if report.ok else 1
+        # Sweep mode: probe URLs come from each credential's metadata
+        # (health_probe_url), so configure once and sweep forever.
+        sweep = check_all_health(manager, sessions)
+        if getattr(args, "json", False):
+            print(_json.dumps(sweep, indent=2))
+        else:
+            print(f"checked {len(sweep['accounts'])} account(s):")
+            for entry in sweep["accounts"]:
+                print(f"  {entry['service']}/{entry['username']}: "
+                      f"{entry['status']}")
+            print(f"summary: {_json.dumps(sweep['summary'])}")
+        return 0 if not sweep["needs_attention"] else 1
 
     print(f"unknown account action: {action}", file=sys.stderr)
     return 2

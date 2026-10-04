@@ -55,7 +55,9 @@ class Credential:
     id: int
     service: str
     username: str
-    password: str  # Decrypted when retrieved
+    # repr=False: a stray repr()/log of a Credential must never carry the
+    # secret — free-text redaction can't catch a bare random string.
+    password: str = field(repr=False)  # Decrypted when retrieved
     credential_type: str = "password"  # password, api_key, oauth_token, etc.
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
