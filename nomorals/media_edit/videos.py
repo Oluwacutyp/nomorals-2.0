@@ -717,7 +717,12 @@ def speed_ramp(src: str | os.PathLike[str],
             sped = speed(seg["output"], factor, out_dir=tmpdir,
                          suffix=f"seg{i:02d}r")
             parts.append(sped["output"])
-        final = concat(parts, out_dir=out_dir, suffix=suffix, ext=ext,
+        # Final output must NOT default into tmpdir (concat derives its
+        # default from parts[0], which lives in tmpdir and is wiped by the
+        # finally block below). Anchor it next to the original input, like
+        # every other op.
+        final_dir = Path(out_dir) if out_dir else p.parent / "edited"
+        final = concat(parts, out_dir=final_dir, suffix=suffix, ext=ext,
                        timeout=timeout, progress_cb=progress_cb)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

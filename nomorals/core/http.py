@@ -80,7 +80,7 @@ class HttpResponse:
     def raise_for_status(self) -> "HttpResponse":
         if self.ok:
             return self
-        raise http_error(self.status, self.text, self.url)
+        raise http_error(self.status, self.text, self.url, self.headers)
 
 
 def _error_snippet(body: str) -> str:
@@ -131,12 +131,68 @@ def _safe_detail(body: str, limit: int = 500) -> str:
     return text or "<no readable error detail>"
 
 
-def http_error(status: int, body: str, url: str = "") -> NoMoralsError:
+def _parse_retry_after(headers: Mapping[str, str] | None) -> float:
+    """Seconds to wait per the server's rate-limit headers.
+
+    Reads ``Retry-After`` (delay-seconds or HTTP-date) and the common
+    ``X-RateLimit-Reset`` epoch variants. Falls back to 1.0s when nothing
+    usable is present. Header names are matched case-insensitively so
+    both plain dicts and ``http.client.HTTPMessage`` work.
+    """
+    if not headers:
+        return 1.0
+    lowered: dict[str, str] = {}
+    try:
+        items = headers.items()  # type: ignore[union-attr]
+    except AttributeError:
+        items = []
+    for k, v in items:
+        lowered[str(k).lower()] = str(v).strip()
+
+    def _get(*names: str) -> str:
+        for name in names:
+            val = lowered.get(name, "")
+            if val:
+                return val
+        return ""
+
+    raw = _get("retry-after")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime, timezone
+            from email.utils import parsedate_to_datetime
+            reset = parsedate_to_datetime(raw)
+            if reset.tzinfo is None:
+                reset = reset.replace(tzinfo=timezone.utc)
+            delta = (reset - datetime.now(timezone.utc)).total_seconds()
+            return max(0.0, min(delta, 3600.0))
+        except Exception:  # noqa: BLE001 - unparsable date, fall through
+            pass
+    for name in ("x-ratelimit-reset", "ratelimit-reset",
+                 "x-rate-limit-reset"):
+        raw = _get(name)
+        if raw:
+            try:
+                delta = float(raw) - time.time()
+            except ValueError:
+                continue
+            if delta > 0:
+                return min(delta, 3600.0)
+    return 1.0
+
+
+def http_error(status: int, body: str, url: str = "",
+               headers: Mapping[str, str] | None = None) -> NoMoralsError:
     """Map an HTTP status onto the framework error hierarchy."""
     detail = _safe_detail(body)
     if status == 429:
-        retry_after = 1.0
-        return RateLimited(f"429 from {url}: {detail}", retry_after=retry_after)
+        retry_after = _parse_retry_after(headers)
+        return RateLimited(f"429 from {url}: {detail}",
+                           retry_after=retry_after)
     if status in {401, 403}:
         return ProviderError(f"{status} unauthorized for {url}: {detail}", retryable=False)
     if status == 404:
@@ -253,7 +309,12 @@ class HttpClient:
             except Exception:  # noqa: BLE001 - error path must not raise
                 pass
             self.stats["errors"] += 1
-            raise http_error(exc.code, body.decode("utf-8", "replace"), target) from exc
+            try:
+                err_headers = dict(exc.headers.items()) if exc.headers else None
+            except Exception:  # noqa: BLE001 - error path must not raise
+                err_headers = None
+            raise http_error(exc.code, body.decode("utf-8", "replace"),
+                             target, err_headers) from exc
         except urllib.error.URLError as exc:
             self.stats["errors"] += 1
             reason = str(exc.reason)

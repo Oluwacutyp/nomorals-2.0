@@ -200,6 +200,9 @@ def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
         for c in collected
     ], index=_pd.to_datetime([c["start"] for c in collected], unit="s",
                              utc=True))
+    # Chunk boundaries are inclusive on both requests, so the boundary
+    # candle can arrive twice — dedupe before sorting.
+    df = df[~df.index.duplicated(keep="first")]
     df = df.sort_index()
     return ensure_ohlcv(df.tail(limit))
 

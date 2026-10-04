@@ -87,6 +87,61 @@ class Http404BodyTest(unittest.TestCase):
         self.assertIn("non-text", err.message)
 
 
+class Http429RetryAfterTest(unittest.TestCase):
+    def test_429_defaults_to_one_second(self) -> None:
+        from nomorals.core.http import http_error
+        from nomorals.core.errors import RateLimited
+
+        err = http_error(429, "slow down", "https://x/v2/tweets")
+        self.assertIsInstance(err, RateLimited)
+        self.assertEqual(err.retry_after, 1.0)
+
+    def test_429_reads_retry_after_seconds(self) -> None:
+        from nomorals.core.http import http_error
+
+        err = http_error(429, "slow down", "https://x/v2/tweets",
+                         {"Retry-After": "45"})
+        self.assertEqual(err.retry_after, 45.0)
+
+    def test_429_reads_http_date(self) -> None:
+        from email.utils import formatdate
+        from nomorals.core.http import http_error
+
+        import time as _time
+        hdr = formatdate(_time.time() + 30, usegmt=True)
+        err = http_error(429, "slow down", "https://api.slack.com",
+                         {"retry-after": hdr})
+        self.assertGreater(err.retry_after, 20.0)
+        self.assertLessEqual(err.retry_after, 31.0)
+
+    def test_429_reads_ratelimit_reset_epoch(self) -> None:
+        import time as _time
+        from nomorals.core.http import http_error
+
+        hdr = str(int(_time.time()) + 120)
+        err = http_error(429, "slow down", "https://api.soundcloud.com",
+                         {"X-RateLimit-Reset": hdr})
+        self.assertGreater(err.retry_after, 100.0)
+        self.assertLessEqual(err.retry_after, 121.0)
+
+    def test_429_ignores_garbage_headers(self) -> None:
+        from nomorals.core.http import http_error
+
+        err = http_error(429, "slow down", "https://example.com",
+                         {"Retry-After": "never", "X-RateLimit-Reset": "abc"})
+        self.assertEqual(err.retry_after, 1.0)
+
+    def test_raise_for_status_threads_headers(self) -> None:
+        from nomorals.core.http import HttpResponse
+
+        resp = HttpResponse(status=429, body=b"slow",
+                            headers={"retry-after": "17"},
+                            url="https://x/v2/tweets")
+        with self.assertRaises(Exception) as ctx:
+            resp.raise_for_status()
+        self.assertEqual(ctx.exception.retry_after, 17.0)
+
+
 class NoSilentMockTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="nm-nomock-")

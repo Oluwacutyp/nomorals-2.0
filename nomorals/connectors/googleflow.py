@@ -413,6 +413,12 @@ class GoogleFlowConnector(Connector):
         while True:
             try:
                 resp = self.http.get(url, headers=headers)
+            except RateLimited as exc:
+                raise GoogleFlowError(
+                    "veo poll rate limited (429) — back off "
+                    f"~{exc.retry_after:.0f}s before retrying",
+                    status_code=429,
+                ) from exc
             except NoMoralsError as exc:
                 raise GoogleFlowError(
                     f"operation poll failed: {exc}"

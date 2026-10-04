@@ -233,6 +233,56 @@ class SpeedRampTests(unittest.TestCase):
                 self.assertEqual(res["output"], env["out"])
                 self.assertEqual(len(res["segments"]), 3)
 
+    def test_output_survives_tmpdir_cleanup(self):
+        """Regression: with out_dir=None the final concat output used to
+        default inside speed_ramp's own tmpdir (concat derives its default
+        from parts[0]), which the finally block then wiped — FileNotFoundError
+        on out.stat(). The output must land next to the original input."""
+        import nomorals.media_edit.videos as _Vmod
+        orig_out = _Vmod._out  # noqa: F841 (stash before fixture patches it)
+        with _op_env() as env:
+            V = env["V"]
+            # re-anchor _out to the real implementation and spy the out_dir
+            # concat is given for its final output
+            seen: dict[str, object] = {}
+
+            def spy_out(src, out_dir, suffix, ext):
+                seen["out_dir"] = out_dir
+                return orig_out(src, out_dir, suffix, ext)
+
+            probe = {"duration": 10.0, "width": 320, "height": 240,
+                     "fps": 30.0, "streams": []}
+            seg_dir = Path(env["tmp"]) / "segs"
+            seg_dir.mkdir()
+
+            def fake_trim(s, **kw):
+                out = seg_dir / f"{kw.get('suffix', 'trimmed')}.mp4"
+                out.write_bytes(b"t" * 32)
+                return {"output": str(out)}
+
+            def fake_speed(s, factor, **kw):
+                out = seg_dir / (Path(s).stem + "r.mp4")
+                out.write_bytes(b"s" * 32)
+                return {"output": str(out)}
+
+            def fake_run(args, **kw):
+                # real concat runs; emulate ffmpeg by touching its output
+                Path(args[-1]).write_bytes(b"c" * 64)
+                return {"seconds": 0.1}
+
+            with patch.object(V, "_out", side_effect=spy_out), \
+                 patch.object(V, "trim", side_effect=fake_trim), \
+                 patch.object(V, "speed", side_effect=fake_speed), \
+                 patch.object(V, "run_ffmpeg", side_effect=fake_run), \
+                 patch.object(V, "video_probe",
+                              MagicMock(return_value=probe)):
+                res = V.speed_ramp(env["src"],
+                                   [(0, 5, 0.5), (5, 10, 2.0)])
+            out = Path(res["output"])
+            self.assertTrue(out.exists(), f"output vanished: {out}")
+            self.assertEqual(Path(seen["out_dir"]),
+                             Path(env["src"]).parent / "edited")
+
 
 class DuckingTests(unittest.TestCase):
     PROBE = {"duration": 10.0, "width": 640, "height": 480, "fps": 30.0,
