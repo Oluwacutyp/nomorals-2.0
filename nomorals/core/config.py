@@ -1149,9 +1149,39 @@ def _validate(settings: Settings) -> None:
         problems.append("memory.context_budget_tokens must be >= 256")
     if settings.api.port < 1 or settings.api.port > 65535:
         problems.append("api.port out of range")
+    # LLM provider settings: catch typos and nonsense values at load time
+    # instead of failing silently at runtime with "no model is answering".
+    _KNOWN_PROVIDERS = {
+        "mock", "offline", "test",
+        "ollama", "ollama_native",
+        "groq", "openrouter",
+        "openai", "openai_compat", "vllm", "lmstudio", "ollama_compat",
+        "hf", "hf_serverless", "huggingface", "hf_endpoint",
+        "llama_cpp", "llamacpp", "gguf",
+        "ocr", "tesseract",
+    }
+    provider = (settings.llm.provider or "").strip().lower()
+    if not provider:
+        problems.append("llm.provider must not be empty")
+    elif provider not in _KNOWN_PROVIDERS:
+        problems.append(
+            f"llm.provider {provider!r} is not a known provider "
+            f"(known: {', '.join(sorted(_KNOWN_PROVIDERS))})"
+        )
+    for fb in settings.llm.fallback_chain or []:
+        if (fb or "").strip().lower() not in _KNOWN_PROVIDERS:
+            problems.append(f"llm.fallback_chain contains unknown provider {fb!r}")
+    if settings.llm.timeout <= 0:
+        problems.append("llm.timeout must be > 0")
+    if settings.chat.webhook_port < 0 or settings.chat.webhook_port > 65535:
+        problems.append("chat.webhook_port out of range")
+    if settings.chat.telegram_bot_token and not settings.chat.telegram_bot_token.strip():
+        problems.append("chat.telegram_bot_token is blank (set a real token or leave it unset)")
     weight_sum = sum(settings.memory.weights.values())
     if weight_sum <= 0:
         problems.append("memory.weights must sum to a positive value")
+    if any(w < 0 for w in settings.memory.weights.values()):
+        problems.append("memory.weights must not contain negative values")
     if problems:
         raise ConfigError("invalid configuration: " + "; ".join(problems))
 

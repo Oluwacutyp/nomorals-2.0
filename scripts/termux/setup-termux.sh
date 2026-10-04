@@ -37,11 +37,14 @@ echo "[5/5] Setting up secrets..."
 if [ ! -f "$HOME/.devon-secrets" ]; then
   cat > "$HOME/.devon-secrets" << 'EOF'
 # Devon secrets — fill these in
-export TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
-export TELEGRAM_CHAT_ID="your-numeric-chat-id"
+# NOTE: use the NM_-prefixed names below; the old TELEGRAM_BOT_TOKEN /
+# TELEGRAM_CHAT_ID names are not read for the chat allowlist.
+export NM_CHAT_TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
+export NM_CHAT_TELEGRAM_BOT_CHATS="your-numeric-chat-id"
+export NM_PARTNER_PLATFORMS="telegram-bot"
 # Optional: for cloud LLM fallback
-# export HF_TOKEN="your-huggingface-token"
-# export GROQ_API_KEY="your-groq-key"
+# export NM_HF_TOKEN="your-huggingface-token"
+# export NM_GROQ_API_KEY="your-groq-key"
 EOF
   echo "Created ~/.devon-secrets — EDIT IT with your tokens!"
 else

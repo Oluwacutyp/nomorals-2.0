@@ -79,7 +79,7 @@ NM_LLM_PROVIDER=llama_cpp
 
 # --- brain fallbacks when you have internet (used only if local dies) ---
 NM_LLM_FALLBACK_CHAIN=hf_serverless,openrouter
-NM_HF_MODEL=microsoft/Phi-3.5-mini-instruct
+NM_HF_MODEL=Qwen/Qwen2.5-7B-Instruct
 HF_TOKEN=<your-hf-token>
 NM_OPENROUTER_API_KEY=<redacted>
 NM_OPENROUTER_MODEL=qwen/qwen3-8b:free
@@ -113,8 +113,10 @@ Notes:
   HF's and OpenRouter's free tiers serve curated catalogs only — no
   abliterated/uncensored models are offered on either (verified 2026-10-01).
   Uncensored stays local (the GGUF) until Serv00.
-- `NM_HF_MODEL` is the stock Phi-3.5 — it exists only as an emergency
-  fallback when the local server is down *and* you have internet.
+- `NM_HF_MODEL` is Qwen2.5-7B-Instruct — a working model on HF's
+  inference API. Note: HF retired the old api-inference endpoint; only
+  models in their hosted catalog work (microsoft/Phi-3.5-mini-instruct
+  is NOT hosted there anymore).
 
 ## 6. Run it
 
