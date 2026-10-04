@@ -43,10 +43,14 @@ LORA_ALPHA  = 32
 LORA_DROP   = 0.05
 BATCH       = 2      # per-device
 GRAD_ACCUM  = 4      # effective batch = 8
-TARGET_ROWS = 500000  # FULL RUN — all 500K rows, one epoch (~6-8h, one session)
-PACKING = True        # pack ~390-token rows into 2048-token blocks (~5x fewer steps)
+TARGET_ROWS = 30000   # SWEET SPOT: 30K rows = 3,750 steps ≈ 4-7h training,
+                      # fits one 9h session with room for merge + GGUF + push.
+                      # (500K rows needs ~62K steps ≈ 100h at T4 speed — not viable;
+                      # 50K rows ≈ 6,250 steps is borderline. 30K is the safe play.)
+PACKING = True        # requested, but Unsloth ignores it on some setups —
+                      # harmless either way; step math below assumes no packing
 if PACKING:
-    MAX_STEPS = None  # one full epoch over packed data (~12K steps on T4)
+    MAX_STEPS = None  # one full epoch over the (sliced) rows
 else:
     MAX_STEPS = TARGET_ROWS // (BATCH * GRAD_ACCUM)
 EPOCHS      = 1
@@ -416,7 +420,7 @@ md("""# 📱 Deploy on your 12GB Samsung
 # ⏱️ Honest time math — Kaggle free tier
 - Quota: **30 GPU-hours/week** (rolling) · sessions up to **9 hours** · T4 = ~2,500–4,000 tok/s on 3.8B QLoRA.
 - 500K rows × ~390 tokens ≈ **195M tokens ≈ 14–22 GPU-hours** → **under one week** of quota, spread over 2–4 sessions.
-- Full-run mode: TARGET_ROWS=500000 with PACKING=True → one epoch ≈ 12K steps ≈ 6–8h on T4, fits a single 9h session. For a quick proof run, set TARGET_ROWS=6000 (slice logic kicks in automatically).
+- Sweet spot: TARGET_ROWS=30000 → 3,750 steps ≈ 4–7h training, fits one 9h session with room for merge + GGUF + push. 500K rows ≈ 62K steps ≈ 100h at T4 speed — not viable; 50K is borderline. Set 6000 for a quick proof run (slice logic is automatic).
 
 # 💾 Persist between sessions (the Kaggle superpower)
 1. Notebook menu (top right) → **Save Version** → **Quick Save** (or Save & Run All). Your `/kaggle/working` files — checkpoints, adapter, GGUF — are saved with the version (up to 20GB).
