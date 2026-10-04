@@ -11,6 +11,7 @@
 //
 // Build: c++ -O2 -fPIC -shared -std=c++17 bpe.cpp -o libbpe.so
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -225,27 +226,57 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
         // Only words containing the LEFT symbol are touched — and within
         // them, only the actual (l, r) adjacencies are merged.  Python
         // scans + rewrites far more on every merge.
-        for (int32_t w : word_sets[best_l]) {
+        // The inverted index must stay exact: a word that still contains
+        // best_l / best_r after the rewrite (in a non-merged position)
+        // has to remain listed, or the next iteration's rewrite loop will
+        // skip it and the same pair will win again forever.  Only touched
+        // words can gain or lose these three symbols, so the three lists
+        // are rebuilt from the touched set alone.
+        std::vector<int32_t> touched_words = word_sets[best_l];
+        // Untouched words can still hold best_r (only the (l,r) adjacency
+        // triggers a rewrite, and that needs best_l): their entries must
+        // survive the clear below.
+        std::vector<int32_t> r_holders =
+            (best_r == best_l) ? std::vector<int32_t>() : word_sets[best_r];
+        for (int32_t w : touched_words) {
             const auto& syms = splits[w];
             std::vector<int32_t> out;
             out.reserve(syms.size());
-            bool merged_here = false;
             size_t i = 0;
             while (i < syms.size()) {
                 if (i + 1 < syms.size() && syms[i] == best_l && syms[i + 1] == best_r) {
                     out.push_back(merged_id);
                     i += 2;
-                    merged_here = true;
                 } else {
                     out.push_back(syms[i]);
                     i += 1;
                 }
             }
             splits[w] = std::move(out);
-            if (merged_here) word_sets[merged_id].push_back(w);
         }
         word_sets[best_l].clear();
         word_sets[best_r].clear();
+        word_sets[merged_id].clear();
+        std::vector<int32_t> touched_sorted = touched_words;
+        std::sort(touched_sorted.begin(), touched_sorted.end());
+        auto is_touched = [&](int32_t w) {
+            return std::binary_search(touched_sorted.begin(),
+                                      touched_sorted.end(), w);
+        };
+        for (int32_t w : touched_words) {
+            bool has_l = false, has_r = false, has_m = false;
+            for (int32_t s : splits[w]) {
+                if (s == best_l) has_l = true;
+                else if (s == best_r) has_r = true;
+                else if (s == merged_id) has_m = true;
+            }
+            if (has_l) word_sets[best_l].push_back(w);
+            if (has_r) word_sets[best_r].push_back(w);
+            if (has_m) word_sets[merged_id].push_back(w);
+        }
+        for (int32_t w : r_holders) {
+            if (!is_touched(w)) word_sets[best_r].push_back(w);
+        }
     }
 
     // Serialize: per merge [len_l, packed bytes_l, len_r, packed bytes_r].

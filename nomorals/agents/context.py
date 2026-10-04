@@ -21,7 +21,8 @@ from ..core.policy import CapabilitySet, Policy
 from ..core.ratelimit import SemaphorePool
 from ..storage.db import Database
 
-__all__ = ["AgentContext"]
+__all__ = ["AgentContext", "build_context", "build_router",
+           "persist_provider_override", "ensure_local_gguf"]
 
 _log = get_logger(__name__)
 
@@ -225,7 +226,7 @@ def build_context(
         )
 
     if with_router:
-        context.router = _build_router(settings, event_bus, db=context.db)
+        context.router = build_router(settings, event_bus, db=context.db)
 
     if with_memory:
         from ..memory.manager import MemoryManager
@@ -302,13 +303,17 @@ def _apply_provider_override(db: Any, settings: Settings) -> None:
         _log.debug("provider override lookup failed; using .env defaults: %s", exc)
 
 
-def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
-                  context: Any | None = None) -> Any:
+def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
+                 context: Any | None = None) -> Any:
     """Build the provider chain, wiring each backend's own credentials.
 
     Each provider kind needs different arguments; passing one flat kwargs dict
     would either drop the HF token or send an api_key to a provider that does not
     use one.
+
+    Public entry point for the same builder ``build_context`` uses: the CLI
+    setup wizard (``nm setup``) rebuilds the router after writing new
+    credentials, and partner-runtime hot-swaps use it for live model changes.
     """
     from ..llm.providers import build_provider
     from ..llm.router import LLMRouter
@@ -436,6 +441,11 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
     except Exception:  # noqa: BLE001
         _log.warning("learning attach failed; continuing without it", exc_info=True)
     return router
+
+
+# Compatibility alias: partner runtime and older call sites import the
+# private name.  Both names refer to the same builder.
+_build_router = build_router
 
 
 def ensure_local_gguf(model_path_or_settings, **kwargs):

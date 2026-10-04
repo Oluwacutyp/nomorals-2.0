@@ -38,6 +38,116 @@ def _send_json(handler: Any, status: int, payload: dict) -> None:
     handler.wfile.write(raw)
 
 
+def _ts_of(ev: dict[str, Any]) -> float:
+    return float(ev.get("ts", 0) or 0)
+
+
+def _id_of(ev: dict[str, Any]) -> str:
+    return str(ev.get("event_id") or "")
+
+
+def _emit_page(
+    handler: Any,
+    events: list[dict[str, Any]],
+    cursor: float,
+    seen_at_cursor: set[str],
+) -> tuple[float, set[str]]:
+    """Emit one newest-first page oldest-first. Returns (cursor, seen).
+
+    ``Timeline.query(since=)`` is inclusive (``ts >= cursor``) while the
+    cursor only advances on strictly newer timestamps — without identity
+    tracking, an event whose ``ts`` equals the cursor is re-emitted on
+    every poll. ``seen_at_cursor`` holds the event_ids already emitted at
+    this cursor, so a connection is exactly-once per event while resume
+    across reconnects stays at-least-once (the boundary event is
+    delivered again, once, to the new connection).
+    """
+    # query() is newest-first; emit oldest-first.
+    for ev in reversed(events):
+        ts = _ts_of(ev)
+        eid = _id_of(ev)
+        if ts > cursor:
+            cursor = ts
+            seen_at_cursor = {eid} if eid else set()
+        elif ts == cursor and eid and eid not in seen_at_cursor:
+            seen_at_cursor.add(eid)
+        else:
+            continue  # duplicate of an already-emitted event — skip
+        data = json.dumps(ev, default=str)
+        chunk = (
+            f"event: timeline\n"
+            f"id: {cursor}\n"
+            f"data: {data}\n\n"
+        ).encode("utf-8")
+        handler.wfile.write(chunk)
+        handler.wfile.flush()
+    return cursor, seen_at_cursor
+
+
+def _query_page(
+    timeline_factory: Callable[[], Any],
+    topic: str | None,
+    since: float,
+    until: float | None,
+) -> list[dict[str, Any]]:
+    """One newest-first page; the timeline instance is never shared."""
+    timeline = timeline_factory()
+    try:
+        kwargs: dict[str, Any] = {"since": since, "topic": topic,
+                                  "limit": PAGE_LIMIT}
+        if until is not None:
+            kwargs["until"] = until
+        return timeline.query(**kwargs)
+    finally:
+        close = getattr(timeline, "close", None)
+        if callable(close):
+            close()
+
+
+def _drain_backlog(
+    handler: Any,
+    timeline_factory: Callable[[], Any],
+    topic: str | None,
+    cursor: float,
+    seen_at_cursor: set[str],
+    *,
+    _floor: float | None = None,
+    _ceiling: float | None = None,
+    _depth: int = 0,
+) -> tuple[float, set[str]]:
+    """Emit every event with ``_floor <= ts`` (``ts <= _ceiling`` when set).
+
+    A full page may hide older events behind it (the query is
+    newest-first): those are drained first via a narrowed ``until``
+    bound, so a burst bigger than one page cannot silently drop its
+    tail. The inclusive-boundary overlap between the narrowed slice and
+    its parent page is harmless — the event_id dedup in
+    :func:`_emit_page` skips re-emission.
+
+    Recursion strictly narrows ``_ceiling`` each level, so the only
+    non-shrinking shape is a full page of identical timestamps; that —
+    and any backlog deeper than ``_MAX_DRAIN_DEPTH`` pages — is emitted
+    once and logged loudly instead of looping forever or dying
+    silently.
+    """
+    floor = cursor if _floor is None else _floor
+    events = _query_page(timeline_factory, topic, floor, _ceiling)
+    if len(events) < PAGE_LIMIT:
+        return _emit_page(handler, events, cursor, seen_at_cursor)
+    oldest = min(_ts_of(e) for e in events)
+    if _depth >= _MAX_DRAIN_DEPTH or (
+            _ceiling is not None and oldest >= _ceiling):
+        _log.warning(
+            "stream: backlog of >%d events at/above ts %r truncated for "
+            "this poll (depth=%d)", PAGE_LIMIT, oldest, _depth)
+        return _emit_page(handler, events, cursor, seen_at_cursor)
+    # Drain the older slice first, then this page.
+    cursor, seen_at_cursor = _drain_backlog(
+        handler, timeline_factory, topic, cursor, seen_at_cursor,
+        _floor=floor, _ceiling=oldest, _depth=_depth + 1)
+    return _emit_page(handler, events, cursor, seen_at_cursor)
+
+
 def emit_sse(
     handler: Any,
     timeline_factory: Callable[[], Any],
@@ -70,32 +180,13 @@ def emit_sse(
     handler.end_headers()
 
     cursor = since
+    seen_at_cursor: set[str] = set()
     last_beat = time.time()
     _log.info("stream subscriber connected (topic=%s)", topic)
     try:
         while True:
-            timeline = timeline_factory()
-            try:
-                events = timeline.query(
-                    since=cursor, topic=topic, limit=100
-                )
-            finally:
-                close = getattr(timeline, "close", None)
-                if callable(close):
-                    close()
-            # query() is newest-first; emit oldest-first.
-            for ev in reversed(events):
-                ts = float(ev.get("ts", 0) or 0)
-                if ts > cursor:
-                    cursor = ts
-                data = json.dumps(ev, default=str)
-                chunk = (
-                    f"event: timeline\n"
-                    f"id: {cursor}\n"
-                    f"data: {data}\n\n"
-                ).encode("utf-8")
-                handler.wfile.write(chunk)
-                handler.wfile.flush()
+            cursor, seen_at_cursor = _drain_backlog(
+                handler, timeline_factory, topic, cursor, seen_at_cursor)
             now = time.time()
             if now - last_beat >= HEARTBEAT_INTERVAL:
                 handler.wfile.write(b":ping\n\n")
@@ -119,6 +210,17 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
 
 HEARTBEAT_INTERVAL = 15.0  # seconds between :ping comments
 POLL_INTERVAL = 1.0        # seconds between Timeline polls
+
+#: Events per backlog-drain page. A poll that finds a full page drains the
+#: older slice behind it (see _drain_backlog) instead of silently dropping
+#: the tail the way a single fixed page would.
+PAGE_LIMIT = 1000
+
+#: Backlog-drain recursion cap: each level consumes at least one full
+#: page, so this bounds the drain at ~50k events per poll — beyond that
+#: the subscriber gets the newest slice and a loud warning, never a
+#: RecursionError or a silent drop.
+_MAX_DRAIN_DEPTH = 50
 
 
 class StreamServer:

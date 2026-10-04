@@ -43,6 +43,18 @@ class MeshNode:
             "created_at": self.created_at,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MeshNode":
+        """Rebuild from :meth:`to_dict` output (hub HTTP wire format)."""
+        return cls(
+            node_id=str(data.get("node_id") or ""),
+            name=str(data.get("name") or ""),
+            platform=str(data.get("platform") or ""),
+            capabilities=[str(c) for c in (data.get("capabilities") or [])],
+            last_seen=float(data.get("last_seen") or 0.0),
+            created_at=float(data.get("created_at") or 0.0),
+        )
+
     @property
     def age(self) -> float:
         """Seconds since the last heartbeat."""

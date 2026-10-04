@@ -12,8 +12,9 @@ by the first node that polls — work-stealing, not fan-out.
 from __future__ import annotations
 
 from .errors import MeshError, NodeUnknown, TransportError
+from .http_transport import HttpTransport
 from .node import MeshNode, NodeRegistry
-from .tasks import MeshTasks
+from .tasks import MeshTask, MeshTasks
 from .transport import LocalTransport, Transport
 
 __all__ = [
@@ -22,7 +23,9 @@ __all__ = [
     "TransportError",
     "MeshNode",
     "NodeRegistry",
+    "MeshTask",
     "MeshTasks",
     "Transport",
     "LocalTransport",
+    "HttpTransport",
 ]

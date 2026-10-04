@@ -98,6 +98,19 @@ class MeshTask:
             "attempts": self.attempts,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MeshTask":
+        """Rebuild from :meth:`to_dict` output (hub HTTP wire format)."""
+        return cls(
+            job_id=str(data.get("job_id") or ""),
+            task_type=str(data.get("task_type") or ""),
+            payload=dict(data.get("payload") or {}),
+            target_node=data.get("target_node"),
+            origin_node=str(data.get("origin_node") or ""),
+            priority=int(data.get("priority") or 0),
+            attempts=int(data.get("attempts") or 0),
+        )
+
 
 class MeshTasks:
     """Dispatch and poll for mesh tasks."""

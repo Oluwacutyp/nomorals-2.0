@@ -517,6 +517,23 @@ class RuntimeSettings:
     threads: int = 4
 
 @dataclass
+class HubSettings:
+    """Remote device hub (mesh + sync over HTTP).
+
+    ``url`` points a device at its hub, e.g. ``http://192.168.1.5:8861``
+    (empty = no hub; mesh/sync stay local). ``token`` is the shared bearer
+    secret the hub was started with. ``bind_host``/``port`` are the hub
+    server's own listen address when THIS machine runs the hub
+    (``nm mesh serve``); a non-loopback bind without a token is refused.
+    Env: NM_HUB_URL, NM_HUB_TOKEN, NM_HUB_HOST, NM_HUB_PORT, NM_HUB_TIMEOUT.
+    """
+    url: str = ""
+    token: str = ""
+    bind_host: str = "127.0.0.1"
+    port: int = 8861
+    request_timeout: float = 15.0
+
+@dataclass
 class Settings:
     """Root configuration object."""
 
@@ -568,6 +585,7 @@ class Settings:
     improvement: "ImprovementSettings" = field(default_factory=lambda: ImprovementSettings())
     trading: "TradingSettings" = field(default_factory=lambda: TradingSettings())
     mind: "MindSettings" = field(default_factory=lambda: MindSettings())
+    hub: "HubSettings" = field(default_factory=lambda: HubSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -715,6 +733,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_HUB_URL": "hub.url",
+    "NM_HUB_TOKEN": "hub.token",
+    "NM_HUB_HOST": "hub.bind_host",
+    "NM_HUB_PORT": "hub.port",
+    "NM_HUB_TIMEOUT": "hub.request_timeout",
     "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
     "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
     "NM_CHAT_TELEGRAM_ENABLED": "chat.telegram_enabled",

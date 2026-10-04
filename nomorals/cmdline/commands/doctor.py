@@ -384,10 +384,14 @@ def _cmd_setup(args: argparse.Namespace, context: Any) -> int:
             # Reload settings
             from ...core.config import load_settings
             context.settings = load_settings()
-            
-            # Reinitialize router
-            from ...llm.router import LLMRouter
-            context.router = LLMRouter(context.settings)
+
+            # Reinitialize the router the same way the boot path does —
+            # LLMRouter() takes keyword-only tuning args, not settings; the
+            # provider chain is assembled by build_router().
+            from ...agents.context import build_router
+            context.router = build_router(
+                context.settings, context.bus, db=getattr(context, "db", None)
+            )
             
             # Test with a simple prompt
             from ...llm.base import Message, SamplingParams

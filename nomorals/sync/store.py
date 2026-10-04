@@ -70,6 +70,22 @@ class SyncRecord:
             "seq": self.seq,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SyncRecord":
+        """Rebuild from :meth:`to_dict` output (hub HTTP wire format).
+
+        ``seq`` is informational here: the receiver's store assigns its own
+        seq on write, and LWW identity ignores it.
+        """
+        return cls(
+            key=str(data.get("key") or ""),
+            value=dict(data.get("value") or {}),
+            updated_at=float(data.get("updated_at") or 0.0),
+            device_id=str(data.get("device_id") or ""),
+            deleted=bool(data.get("deleted")),
+            seq=int(data.get("seq") or 0),
+        )
+
     @staticmethod
     def wins(a: "SyncRecord", b: "SyncRecord") -> "SyncRecord":
         """Last-write-wins; ties break deterministically by device_id."""

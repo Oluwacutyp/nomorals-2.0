@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from .engine import LocalPeer, SyncEngine, SyncPeer
 from .errors import SyncError
+from .http_peer import HttpSyncPeer
 from .store import SyncRecord, SyncStore
 
-__all__ = ["LocalPeer", "SyncEngine", "SyncPeer", "SyncError", "SyncRecord", "SyncStore"]
+__all__ = ["LocalPeer", "SyncEngine", "SyncPeer", "SyncError", "SyncRecord",
+           "SyncStore", "HttpSyncPeer"]

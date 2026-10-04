@@ -21,8 +21,33 @@ def _engine(context: Any):
     return SyncEngine(db, store), store
 
 
+def _http_peer(context: Any, words: list[str]):
+    """Resolve the hub sync peer: ``--hub`` flag or NM_HUB_URL setting."""
+    settings = getattr(context, "settings", None)
+    hub_cfg = getattr(settings, "hub", None)
+    hub_url = (getattr(hub_cfg, "url", "") or "").strip()
+    use_hub = "--hub" in words or bool(hub_url)
+    if not use_hub:
+        return None
+    url = hub_url
+    for i, w in enumerate(words):
+        if w == "--hub-url" and i + 1 < len(words):
+            url = words[i + 1].strip()
+    if not url:
+        raise ValueError(
+            "sync: --hub needs a hub URL — set NM_HUB_URL or pass "
+            "--hub-url <url>")
+    from ...sync import HttpSyncPeer
+    return HttpSyncPeer(
+        url,
+        token=(getattr(hub_cfg, "token", "") or ""),
+        timeout=float(getattr(hub_cfg, "request_timeout", 30.0) or 30.0),
+    )
+
+
 def _peer_store(args: Any, context: Any):
-    """Resolve the peer store: --peer-db path, or settings hub (not yet)."""
+    """Resolve the peer store: --peer-db path (the hub peer is resolved
+    separately by _http_peer)."""
     from ...storage.db import Database
     from ...sync import SyncStore
     peer_db = getattr(args, "peer_db", None)
@@ -42,7 +67,9 @@ def _cmd_sync(args: Any, context: Any) -> int:
               "       nm sync delete <key>\n"
               "       nm sync keys [--json]\n"
               "       nm sync push --peer-db PATH [--json]\n"
-              "       nm sync pull --peer-db PATH [--json]",
+              "       nm sync pull --peer-db PATH [--json]\n"
+              "       nm sync push --hub [--hub-url URL] [--json]  (via device hub)\n"
+              "       nm sync pull --hub [--hub-url URL] [--json]  (via device hub)",
               file=sys.stderr)
         return 2
     verb = words[0]
@@ -107,15 +134,23 @@ def _cmd_sync(args: Any, context: Any) -> int:
     if verb in ("push", "pull"):
         from ...sync import LocalPeer
         peer_store = _peer_store(args, context)
-        if peer_store is None:
-            print("sync %s: need --peer-db PATH (hub URL transport pending)"
-                  % verb, file=sys.stderr)
+        try:
+            http_peer = _http_peer(context, words) if peer_store is None else None
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if peer_store is None and http_peer is None:
+            print("sync %s: need --peer-db PATH, or --hub / NM_HUB_URL "
+                  "for the device hub" % verb, file=sys.stderr)
             return 3
-        peer = LocalPeer(peer_store)
-        # push-then-pull is one atomic sync(); for pull-only we still run
-        # the full sync (push is idempotent when nothing changed).
-        peer_path = getattr(peer_store.db, "path", None)
-        peer_id = str(peer_path) if peer_path else "peer"
+        if http_peer is not None:
+            peer, peer_id = http_peer, "hub"
+        else:
+            peer = LocalPeer(peer_store)
+            # push-then-pull is one atomic sync(); for pull-only we still run
+            # the full sync (push is idempotent when nothing changed).
+            peer_path = getattr(peer_store.db, "path", None)
+            peer_id = str(peer_path) if peer_path else "peer"
         result = engine.sync(peer, peer_id=peer_id)
         if as_json:
             print(json.dumps(result.to_dict(), indent=2))

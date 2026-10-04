@@ -303,6 +303,34 @@ def bpe_unpack(stream: array.array, n: int) -> list[str]:
     return out
 
 
+def _unpack_blobs(buf: array.array, pos: int, count: int,
+                  capacity: int) -> list[str] | None:
+    """Read exactly ``count`` blobs starting at ``pos``.
+
+    Returns None when the buffer ends early (truncated kernel output) —
+    the caller must then use the pure-Python reference, never a partial
+    result.
+    """
+    out: list[str] = []
+    for _ in range(count):
+        if pos >= capacity:
+            return None
+        words = buf[pos]
+        pos += 1
+        if words < 0 or pos + words > capacity:
+            return None
+        raw = b"".join(
+            (buf[pos + i] & 0xFFFFFFFF).to_bytes(4, "little")
+            for i in range(words)
+        )
+        try:
+            out.append(raw.rstrip(b"\0").decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
+        pos += words
+    return out
+
+
 def bpe_train(words: Sequence[str], freqs: Sequence[int], *,
               target_merges: int, min_frequency: int) -> list[tuple[str, str]] | None:
     """C++ BPE training.  Returns the merge list, or None when the kernel
@@ -331,8 +359,13 @@ def bpe_train(words: Sequence[str], freqs: Sequence[int], *,
     )
     if produced <= 0:
         return [] if produced == 0 else None
-    blobs = bpe_unpack(out, capacity)
-    if len(blobs) != produced * 2:
+    # nm_bpe_train returns the MERGE count, not cells written — unpack
+    # exactly produced*2 blobs. (Unpacking the whole capacity used to
+    # decode the trailing zero padding as empty blobs, so the length
+    # check below failed on every run and the native path never
+    # delivered.)
+    blobs = _unpack_blobs(out, 0, produced * 2, capacity)
+    if blobs is None or len(blobs) != produced * 2:
         return None  # truncated — refuse; caller falls back to Python
     return [(blobs[2 * i], blobs[2 * i + 1]) for i in range(produced)]
 
@@ -526,10 +559,22 @@ def topk(matrix: Sequence[Sequence[float]] | bytes, query: Sequence[float] | byt
     if lib is not None and matrix:
         dim = len(matrix[0])
         rows = len(matrix)
+        # The C++ kernel reads exactly `dim` floats from every row and
+        # from the query — ragged rows or a short query would over-read
+        # the heap.  Fail fast instead of returning garbage (or worse).
+        for i, row in enumerate(matrix):
+            if len(row) != dim:
+                raise ValueError(
+                    f"topk: row {i} has dim {len(row)}, expected {dim} "
+                    "(ragged matrix)")
+        q = _to_f32(query)
+        if len(q) < dim:
+            raise ValueError(
+                f"topk: query dim {len(q)} < matrix dim {dim}")
+        q = q[:dim]
         flat = array.array("f")
         for row in matrix:
             flat.extend((float(v) for v in row))
-        q = _to_f32(query)[:dim]
         scores = (ctypes.c_float * k)()
         indices = (ctypes.c_int32 * k)()
         count = lib.nm_vecsim_topk(_fptr(flat), rows, dim, _fptr(q), k,

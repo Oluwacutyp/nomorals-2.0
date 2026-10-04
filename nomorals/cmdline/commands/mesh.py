@@ -6,7 +6,23 @@ import sys
 from typing import Any
 
 
-def _transport(context: Any):
+def _transport(context: Any, words: list[str]):
+    """Local transport by default; ``--hub`` (or NM_HUB_URL) switches to
+    the remote hub over HTTP."""
+    settings = getattr(context, "settings", None)
+    hub_cfg = getattr(settings, "hub", None)
+    hub_url = (getattr(hub_cfg, "url", "") or "").strip()
+    use_hub = "--hub" in words or bool(hub_url)
+    if use_hub:
+        from ...mesh import HttpTransport
+        url = hub_url or (_flag(words, "--hub-url") or "").strip()
+        if not url:
+            raise ValueError(
+                "mesh: --hub needs a hub URL — set NM_HUB_URL or pass "
+                "--hub-url <url>")
+        token = (getattr(hub_cfg, "token", "") or "")
+        timeout = float(getattr(hub_cfg, "request_timeout", 15.0) or 15.0)
+        return HttpTransport(url, token=token, timeout=timeout)
     from ...mesh import LocalTransport
     from ...storage.db import Database
     db = getattr(context, "db", None)
@@ -39,20 +55,31 @@ def _cmd_mesh(args: Any, context: Any) -> int:
     """Route ``nm mesh <verb>``."""
     words = list(getattr(args, "task", None) or [])
     if not words:
-        print("usage: nm mesh nodes [--json]\n"
-              "       nm mesh register <name> [--platform P]\n"
-              "       nm mesh heartbeat <node-id>\n"
-              "       nm mesh dispatch <task-type> [--target NODE] [--json-args '{}']\n"
-              "       nm mesh poll <node-id> [--batch N] [--json]\n"
-              "       nm mesh complete <job-id> [--result JSON]\n"
-              "       nm mesh fail <job-id> [--error MSG] [--no-retry]\n"
+        print("usage: nm mesh nodes [--json] [--hub]\n"
+              "       nm mesh serve [--host H] [--port P]  (start the device hub)\n"
+              "       nm mesh register <name> [--platform P] [--hub]\n"
+              "       nm mesh heartbeat <node-id> [--hub]\n"
+              "       nm mesh dispatch <task-type> [--target NODE] [--json-args '{}'] [--hub]\n"
+              "       nm mesh poll <node-id> [--batch N] [--json] [--hub]\n"
+              "       nm mesh complete <job-id> [--result JSON] [--hub]\n"
+              "       nm mesh fail <job-id> [--error MSG] [--no-retry] [--hub]\n"
               "       nm mesh pending [--node ID] [--json]\n"
-              "       nm mesh prune [--stale-after SEC]",
+              "       nm mesh prune [--stale-after SEC]\n"
+              "  --hub uses the remote hub (NM_HUB_URL) instead of the local database.",
               file=sys.stderr)
         return 2
     verb = words[0]
-    t = _transport(context)
     as_json = bool(getattr(args, "json", False))
+    if verb == "serve":
+        # Start the device hub: mesh + sync endpoints for remote devices.
+        # This machine's database becomes the shared rendezvous point —
+        # point phones/laptops at it with NM_HUB_URL.
+        return _cmd_mesh_serve(context, words)
+    try:
+        t = _transport(context, words)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if verb == "nodes":
         nodes = t.active_nodes()
         if as_json:
@@ -190,3 +217,43 @@ def _cmd_mesh(args: Any, context: Any) -> int:
         return 0
     print(f"unknown mesh verb: {verb}", file=sys.stderr)
     return 2
+
+
+def _cmd_mesh_serve(context: Any, words: list[str]) -> int:
+    """``nm mesh serve`` — run the device hub (mesh + sync endpoints).
+
+    Foreground, blocking: Ctrl-C stops it. Point remote devices at the
+    printed URL with NM_HUB_URL and the same NM_HUB_TOKEN.
+    """
+    from ...hub import serve
+    from ...storage.db import Database
+
+    settings = getattr(context, "settings", None)
+    hub_cfg = getattr(settings, "hub", None)
+    host = _flag(words, "--host") or (getattr(hub_cfg, "bind_host", "") or "127.0.0.1")
+    try:
+        port = int(_flag(words, "--port") or (getattr(hub_cfg, "port", 0) or 8861))
+    except ValueError:
+        print("--port must be an integer", file=sys.stderr)
+        return 2
+    token = (getattr(hub_cfg, "token", "") or "")
+    db = getattr(context, "db", None)
+    own_db = False
+    if db is None:
+        from pathlib import Path
+        home = Path.home() / ".nomorals"
+        home.mkdir(parents=True, exist_ok=True)
+        db = Database(str(home / "nomorals.db"))
+        own_db = True
+    try:
+        serve(db, host=host, port=port, token=token, background=False)
+    except ValueError as exc:
+        print(f"mesh serve: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\nstopped")
+        return 0
+    finally:
+        if own_db:
+            db.close()
+    return 0
