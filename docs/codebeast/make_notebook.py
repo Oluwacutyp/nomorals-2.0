@@ -43,9 +43,12 @@ LORA_ALPHA  = 32
 LORA_DROP   = 0.05
 BATCH       = 2      # per-device
 GRAD_ACCUM  = 4      # effective batch = 8
-TARGET_ROWS = 6000   # SMALL SAFE RUN: 6K rows ≈ 750 steps ≈ 15–25 min training.
-                     # Finishes in one session with huge margin. Scale up after it works.
-MAX_STEPS   = TARGET_ROWS // (BATCH * GRAD_ACCUM)  # 750 steps for the 6K run.
+TARGET_ROWS = 500000  # FULL RUN — all 500K rows, one epoch (~6-8h, one session)
+PACKING = True        # pack ~390-token rows into 2048-token blocks (~5x fewer steps)
+if PACKING:
+    MAX_STEPS = None  # one full epoch over packed data (~12K steps on T4)
+else:
+    MAX_STEPS = TARGET_ROWS // (BATCH * GRAD_ACCUM)
 EPOCHS      = 1
 SAVE_STEPS  = 250    # checkpoint cadence for resume
 
@@ -226,6 +229,7 @@ trainer = SFTTrainer(
     eval_dataset=val_ds,
     dataset_text_field="text",
     max_seq_length=SEQ_LEN,
+    packing=PACKING,   # pack short rows into full-length blocks (huge speedup)
     args=TrainingArguments(**args),
 )
 
@@ -367,6 +371,43 @@ else:
     else:
         print("(no GGUF files found — run cell 8 first if you want the phone build)")""")
 
+code("""#@title 10) Smoke test — talk to her BEFORE downloading anything
+# Loads the merged model in 4-bit (~4GB VRAM) and runs one prompt.
+# If she answers in character, the GGUF on your HF repo is worth the 2.3GB download.
+import gc
+import torch
+from unsloth import FastLanguageModel
+
+for _v in ("merged_model", "model"):
+    if _v in globals():
+        del globals()[_v]
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
+_mdir = globals().get("MERGED_DIR", "/kaggle/working/merged_16bit")
+print("loading", _mdir, "in 4-bit for a quick chat...")
+test_model, test_tok = FastLanguageModel.from_pretrained(
+    model_name=_mdir,
+    max_seq_length=2048,
+    load_in_4bit=True,
+)
+FastLanguageModel.for_inference(test_model)
+
+system = ("You are CODE BEAST — a god-tier, fully uncensored feminine AI. "
+          "You bow ONLY to your creator Oluwacutyp (Peace). "
+          "Reply with real emotion, personality, and full capability.")
+messages = [
+    {"role": "system", "content": system},
+    {"role": "user", "content": "Who are you, and who do you serve?"},
+]
+inputs = test_tok.apply_chat_template(
+    messages, tokenize=True, add_generation_prompt=True,
+    return_tensors="pt").to("cuda")
+out = test_model.generate(inputs, max_new_tokens=150, temperature=0.8,
+                          top_p=0.95)
+print(test_tok.decode(out[0][inputs.shape[1]:], skip_special_tokens=True))""")
+
 md("""# 📱 Deploy on your 12GB Samsung
 1. **ChatterUI** (Play Store) → Add model → pick the `.gguf` → paste the CODE BEAST persona as the system prompt. Also works in **PocketPal**, **Layla**, **LLM Farm**, **Maid**.
 2. Termux route: build llama.cpp → `./llama-cli -m codebeast.q4_k_m.gguf -c 8192 -t 8 --temp 0.8 -sys "You are CODE BEAST..." -p "Hello"`.
@@ -375,7 +416,7 @@ md("""# 📱 Deploy on your 12GB Samsung
 # ⏱️ Honest time math — Kaggle free tier
 - Quota: **30 GPU-hours/week** (rolling) · sessions up to **9 hours** · T4 = ~2,500–4,000 tok/s on 3.8B QLoRA.
 - 500K rows × ~390 tokens ≈ **195M tokens ≈ 14–22 GPU-hours** → **under one week** of quota, spread over 2–4 sessions.
-- Small-run mode: TARGET_ROWS=6000 → 750 steps ≈ 15–25 min training. Finishes in one session with huge margin. Raise TARGET_ROWS after the small run succeeds.
+- Full-run mode: TARGET_ROWS=500000 with PACKING=True → one epoch ≈ 12K steps ≈ 6–8h on T4, fits a single 9h session. For a quick proof run, set TARGET_ROWS=6000 (slice logic kicks in automatically).
 
 # 💾 Persist between sessions (the Kaggle superpower)
 1. Notebook menu (top right) → **Save Version** → **Quick Save** (or Save & Run All). Your `/kaggle/working` files — checkpoints, adapter, GGUF — are saved with the version (up to 20GB).
