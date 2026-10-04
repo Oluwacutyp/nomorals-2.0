@@ -1249,7 +1249,10 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm account create --service github [--username U] [--email E]\n"
                      "                    [--solver|--no-solver]\n"
                      "nm account resume --id ID [--note NOTE]\n"
-                     "nm account pending [--service S]"),
+                     "nm account pending [--service S]\n"
+                     "nm account sms [--country us] [--provider simcodes]\n"
+                     "nm account sms-code [--timeout 180] [--sender-hint HINT]\n"
+                     "nm account inbox --service email_mailtm [--limit 10]"),
     )
     account_sub = account.add_subparsers(dest="account_action", required=True)
     a_create = account_sub.add_parser("create", help="start an account flow")
@@ -1276,6 +1279,30 @@ def _parser() -> argparse.ArgumentParser:
                                        help="list pending checkpoints")
     a_pending.add_argument("--service", default=None,
                            help="filter by service")
+    a_sms = account_sub.add_parser(
+        "sms", help="grab a free temp phone number for SMS verification")
+    a_sms.add_argument("--country", default="us",
+                       help="country code for the number (default: us)")
+    a_sms.add_argument("--provider", default="simcodes",
+                       help="temp-SMS provider (default: simcodes)")
+    a_sms.add_argument("--json", action="store_true",
+                       help="output as JSON")
+    a_smscode = account_sub.add_parser(
+        "sms-code", help="wait for an SMS verification code on the last "
+                         "grabbed temp number")
+    a_smscode.add_argument("--timeout", type=float, default=180,
+                           help="max seconds to poll (default: 180)")
+    a_smscode.add_argument("--sender-hint", default="",
+                           help="only accept codes mentioning this sender")
+    a_inbox = account_sub.add_parser(
+        "inbox", help="poll a stored disposable-email inbox")
+    a_inbox.add_argument("--service", required=True,
+                         help="disposable service name "
+                              "(e.g. email_mailtm, email_1secmail)")
+    a_inbox.add_argument("--limit", type=int, default=10,
+                         help="max messages to show (default: 10)")
+    a_inbox.add_argument("--json", action="store_true",
+                         help="output as JSON")
 
     # --- more OpenCV/ffmpeg frame-level video ops ---
     s_vslow = studio_sub.add_parser(
@@ -2158,6 +2185,24 @@ def _parser() -> argparse.ArgumentParser:
     trial_save.add_argument("password", help="account password (stored encrypted in the vault)")
     trial_save.add_argument("--note", default="", help="optional note")
     trial_sub.add_parser("list", help="List stored trial accounts")
+    trial_assist = trial_sub.add_parser(
+        "assist", help="Browser-assisted signup (runs in background, reports back)")
+    trial_assist.add_argument("platform", help="platform name")
+    trial_sub.add_parser("status", help="Status of background assisted signups")
+    trial_sms = trial_sub.add_parser(
+        "sms", help="Grab a free temp number for SMS verification")
+    trial_sms.add_argument("country", nargs="?", default="us",
+                           help="country code (default: us)")
+    trial_smscode = trial_sub.add_parser(
+        "sms-code", help="Wait for an SMS verification code on the temp number")
+    trial_smscode.add_argument("--timeout", type=float, default=180,
+                               help="max seconds to poll (default: 180)")
+    trial_inbox = trial_sub.add_parser(
+        "inbox", help="Poll a stored disposable-email inbox")
+    trial_inbox.add_argument("service",
+                             help="disposable service (e.g. email_mailtm)")
+    trial_inbox.add_argument("--limit", type=int, default=10,
+                             help="max messages to show")
     train = sub.add_parser("train", aliases=CLI_ALIASES["train"],
                            help="model training: backends, runs")
     train.add_argument("--backends", action="store_true",

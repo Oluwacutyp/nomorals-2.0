@@ -817,11 +817,26 @@ class SpotifyConnector(Connector):
         ``_raw`` when Spotify rejected the leeway-checked token anyway
         (clock skew, an early-revoked grant, or a server-side token
         rotation the leeway check cannot see).
+
+        This path NEVER prompts for the client secret: refreshes happen on
+        background threads (scheduler ticks, API handlers) where stdin may
+        be a TTY with nobody watching — an interactive prompt would hang
+        forever.  The secret comes from the environment only; when it is
+        missing this raises a clear, actionable error instead of hanging.
         """
         cred = self._require_credential()
         meta = cred.metadata or {}
         client_id = str(meta.get("client_id", ""))
-        secret = self._client_secret(None)
+        secret = os.environ.get(SPOTIFY_CLIENT_SECRET_ENV, "").strip()
+        if not secret:
+            raise ConnectorError(
+                "spotify access token expired and the client secret needed "
+                "for an unattended refresh is not available — set the "
+                f"{SPOTIFY_CLIENT_SECRET_ENV} environment variable, or "
+                "reconnect once with client_secret=... so a fresh token "
+                "pair is stored (no interactive prompt is possible on this "
+                "path)"
+            )
         tokens = self._refresh(client_id, secret, cred.password)
         new_access = str(tokens.get("access_token", ""))
         if not new_access:

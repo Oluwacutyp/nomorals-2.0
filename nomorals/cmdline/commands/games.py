@@ -52,7 +52,7 @@ def _cmd_arena(args: argparse.Namespace, context: Any) -> int:
 
 
 def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
-    """`nm trial save|list` — the single-account trial flow CLI.
+    """`nm trial save|list|assist|status|sms|sms-code|inbox` — the single-account trial flow CLI.
 
     Saved credentials go straight into the encrypted vault; they are
     never printed back by save (list shows platforms + logins only).
@@ -65,6 +65,39 @@ def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
     if cmd == "list":
         text = flow.list()
         _emit(args, {"accounts": text}, text)
+        return 0
+
+    if cmd == "assist":
+        platform = (getattr(args, "platform", "") or "").strip()
+        if not platform:
+            print("trial assist needs a platform — nm trial assist <platform>",
+                  file=sys.stderr)
+            return 2
+        print(flow.assist(platform))
+        return 0
+
+    if cmd == "status":
+        print(flow.assist_status())
+        return 0
+
+    if cmd == "sms":
+        print(flow.temp_number(getattr(args, "country", "us") or "us"))
+        return 0
+
+    if cmd == "sms-code":
+        print(flow.temp_sms_code(
+            timeout=float(getattr(args, "timeout", 180) or 180)))
+        return 0
+
+    if cmd == "inbox":
+        service = (getattr(args, "service", "") or "").strip()
+        if not service:
+            print("trial inbox needs a service — "
+                  "nm trial inbox <service> (e.g. email_mailtm)",
+                  file=sys.stderr)
+            return 2
+        print(flow.disposable_inbox(
+            service, limit=int(getattr(args, "limit", 10) or 10)))
         return 0
 
     if cmd == "save":

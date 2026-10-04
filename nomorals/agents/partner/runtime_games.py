@@ -845,7 +845,7 @@ class RuntimeGamesMixin:
     def _control_trial(self, tail: str, chat_key: str) -> str:
         from ..trial import TrialFlow
 
-        flow = TrialFlow(self.context)
+        flow = TrialFlow(self.context, gateway=getattr(self, "gateway", None))
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else "list"
         if verb == "list":
@@ -857,7 +857,20 @@ class RuntimeGamesMixin:
         if verb == "assist":
             if len(parts) < 2:
                 return "usage: /trial assist <platform>"
-            return flow.assist(" ".join(parts[1:]))
+            return flow.assist(" ".join(parts[1:]), chat_key=chat_key)
+        if verb == "status":
+            return flow.assist_status()
+        if verb == "sms":
+            rest = parts[1:]
+            if rest and rest[0].lower() == "code":
+                return flow.temp_sms_code_async(chat_key)
+            country = rest[0] if rest else "us"
+            return flow.temp_number(country)
+        if verb == "inbox":
+            if len(parts) < 2:
+                return ("usage: /trial inbox <service>  "
+                        "(e.g. /trial inbox email_mailtm)")
+            return flow.disposable_inbox(parts[1])
         if verb == "save":
             if len(parts) < 4:
                 return "usage: /trial save <platform> <login> <password>"
@@ -877,7 +890,8 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial rm <platform>"
             return flow.remove(parts[1])
-        return "usage: /trial [list|start <p>|assist <p>|save <p> <login> <pass>|send <p>|rm <p>]"
+        return ("usage: /trial [list|start <p>|assist <p>|status|sms [country]|"
+                "sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]")
 
     # ── sports bet analyst: /bet (analysis only — never places bets) ─────────
     def _control_bet(self, tail: str, chat_key: str) -> str:

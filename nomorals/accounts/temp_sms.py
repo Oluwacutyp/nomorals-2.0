@@ -29,6 +29,8 @@ __all__ = [
     "TempSmsProvider",
     "SimcodesProvider",
     "get_provider",
+    "grab_number",
+    "wait_code",
     "PROVIDERS",
 ]
 
@@ -201,3 +203,50 @@ def get_provider(name: str = "simcodes") -> TempSmsProvider:
             f"unknown temp-sms provider {name!r} "
             f"(available: {', '.join(sorted(PROVIDERS))})")
     return cls()
+
+
+def grab_number(country: str = "us",
+                provider: str = "simcodes") -> dict[str, Any]:
+    """Grab a free temporary phone number for SMS verification.
+
+    Module-level so callers (chat, CLI) don't need an ``AccountCreator``
+    instance — this path touches no vault.  Returns a plain dict
+    (number/masked/country/inbox_id/provider) suitable for
+    :func:`wait_code`.
+    """
+    prov = get_provider(provider)
+    numbers = prov.list_numbers(country=country, limit=10)
+    if not numbers:
+        return {"status": "failed",
+                "notes": f"no {provider} numbers for {country}"}
+    n = numbers[0]
+    return {
+        "status": "ok",
+        "number": n.number,
+        "masked": n.masked,
+        "country": n.country,
+        "country_name": n.country_name,
+        "provider": n.provider,
+        "inbox_id": n.inbox_id,
+    }
+
+
+def wait_code(number_info: dict[str, Any], *,
+              sender_hint: str = "",
+              timeout: float = 180) -> str:
+    """Wait for an SMS verification code on a grabbed number.
+
+    ``number_info`` is the dict returned by :func:`grab_number`.
+    Returns the code or "" on timeout.
+    """
+    prov = get_provider(str(number_info.get("provider", "simcodes")))
+    num = TempNumber(
+        number=str(number_info.get("number", "")),
+        masked=str(number_info.get("masked", "")),
+        country=str(number_info.get("country", "us")),
+        country_name=str(number_info.get("country_name", "")),
+        provider=str(number_info.get("provider", "simcodes")),
+        inbox_id=str(number_info.get("inbox_id", "")),
+    )
+    return prov.wait_for_code(num, sender_hint=sender_hint,
+                             timeout=timeout)

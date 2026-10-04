@@ -123,5 +123,54 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
         print(_json.dumps([c.to_dict() for c in pending], indent=2))
         return 0
 
+    if action == "sms":
+        # Free temp number for SMS verification; stashed for `sms-code`.
+        from ...agents.trial.flow import TrialFlow
+
+        flow = TrialFlow(context)
+        if getattr(args, "json", False):
+            from ...accounts.temp_sms import grab_number
+
+            info = grab_number(country=args.country or "us",
+                               provider=args.provider or "simcodes")
+            if info.get("status") == "ok":
+                flow._stash_temp_number(info)
+            print(_json.dumps(info, indent=2))
+            return 0 if info.get("status") == "ok" else 1
+        print(flow.temp_number(args.country or "us",
+                               args.provider or "simcodes"))
+        return 0
+
+    if action == "sms-code":
+        # Blocking poll for the verification code (CLI context: the user
+        # is watching, so blocking is the honest behavior here).
+        from ...agents.trial.flow import TrialFlow
+
+        flow = TrialFlow(context)
+        print(flow.temp_sms_code(sender_hint=getattr(args, "sender_hint", "")
+                                 or "",
+                                 timeout=float(getattr(args, "timeout", 180)
+                                               or 180)))
+        return 0
+
+    if action == "inbox":
+        # Poll a stored disposable-email inbox.
+        from ...agents.trial.flow import TrialFlow
+
+        flow = TrialFlow(context)
+        username, msgs, error = flow.disposable_inbox_messages(
+            args.service, limit=int(getattr(args, "limit", 10) or 10))
+        if error:
+            print(error, file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(_json.dumps({"address": username, "messages": msgs},
+                              indent=2))
+        else:
+            print(flow.disposable_inbox(args.service,
+                                        limit=int(getattr(args, "limit", 10)
+                                                  or 10)))
+        return 0
+
     print(f"unknown account action: {action}", file=sys.stderr)
     return 2

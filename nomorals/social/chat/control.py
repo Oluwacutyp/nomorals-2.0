@@ -125,7 +125,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # feature flags + arena + trial accounts
     "features": (0, 2),      # /features | /features <name> on|off
     "arena": (0, None),      # /arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]
-    "trial": (0, 5),         # /trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]
+    "trial": (0, 5),         # /trial [list|start <p>|assist <p>|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]
     "identity": (0, 3),      # /identity [show|set <field> <value>|clear] — the profile bank for signups
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
@@ -601,8 +601,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>|promote <build-id>|ship|apply <proposal-id>|reject <proposal-id> <reason>|scores|sample]",
               "example": "/arena run llama fine-tuning",
               "related": "/features /research"},
-    "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account).",
-              "usage": "/trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]",
+    "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account); assisted signups + temp SMS/email for verification.",
+              "usage": "/trial [list|start <p>|assist <p>|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]",
               "example": "/trial list", "related": "/say"},
     "identity": {"what": "the profile bank for signups: your name/email/phone stored once, used by account creation flows.",
               "usage": "/identity [show|set <name|email|phone> <value>|clear]",

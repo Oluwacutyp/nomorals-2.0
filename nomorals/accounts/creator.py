@@ -56,7 +56,6 @@ from ..core.errors import NoMoralsError, NotFound
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
-from .temp_sms import get_provider as get_sms_provider
 from .vault import Credential, CredentialVault
 
 __all__ = [
@@ -1174,21 +1173,9 @@ class AccountCreator:
         Returns a dict with number/masked/country/inbox_id/provider.
         Use :meth:`poll_sms_code` to wait for the verification code.
         """
-        prov = get_sms_provider(provider)
-        numbers = prov.list_numbers(country=country, limit=10)
-        if not numbers:
-            return {"status": "failed",
-                    "notes": f"no {provider} numbers for {country}"}
-        n = numbers[0]
-        return {
-            "status": "ok",
-            "number": n.number,
-            "masked": n.masked,
-            "country": n.country,
-            "country_name": n.country_name,
-            "provider": n.provider,
-            "inbox_id": n.inbox_id,
-        }
+        from .temp_sms import grab_number
+
+        return grab_number(country=country, provider=provider)
 
     def poll_sms_code(self, number_info: dict, *,
                       sender_hint: str = "",
@@ -1198,18 +1185,10 @@ class AccountCreator:
         ``number_info`` is the dict returned by :meth:`get_temp_number`.
         Returns the code or "" on timeout.
         """
-        from .temp_sms import TempNumber
-        prov = get_sms_provider(str(number_info.get("provider", "simcodes")))
-        num = TempNumber(
-            number=str(number_info.get("number", "")),
-            masked=str(number_info.get("masked", "")),
-            country=str(number_info.get("country", "us")),
-            country_name=str(number_info.get("country_name", "")),
-            provider=str(number_info.get("provider", "simcodes")),
-            inbox_id=str(number_info.get("inbox_id", "")),
-        )
-        return prov.wait_for_code(num, sender_hint=sender_hint,
-                                  timeout=timeout)
+        from .temp_sms import wait_code
+
+        return wait_code(number_info, sender_hint=sender_hint,
+                         timeout=timeout)
 
     # ── account creation (human-in-the-loop) ────────────────────
 
@@ -1328,6 +1307,8 @@ class AccountCreator:
                     "1. Go to https://accounts.google.com/signup\n"
                     "2. Use your name and a username like {username}\n"
                     "3. Provide YOUR phone number for the verification code\n"
+                    "   (or ask me: `/trial sms` grabs a free temp number and\n"
+                    "   `/trial sms code` watches its inbox for the code)\n"
                     "4. Tell me the final address — I'll store it in the vault"
                 ),
             },

@@ -176,8 +176,10 @@ def _heuristic_title(raw: str) -> str:
     raw = re.sub(r"\bto feel (better|good|happier)\b,?\s*", "",
                  raw, flags=re.IGNORECASE).strip(" ,")
     lowered = raw.lower()
-    # strip dangling topic introducers left behind ("about X", "on X")
-    for intro in ("about ", "on ", "for "):
+    # strip dangling topic introducers left behind ("about X", "on X",
+    # "to X" — the last one appears when the medium strip above removes
+    # e.g. "a guide" from "a guide to urban gardening")
+    for intro in ("about ", "on ", "for ", "to "):
         if lowered.startswith(intro):
             raw = raw[len(intro):].strip()
             lowered = raw.lower()

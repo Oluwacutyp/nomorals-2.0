@@ -364,7 +364,10 @@ class Scheduler:
         # alert the owner — durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
         # not page every run). Successes notify too, except for routine
-        # tick/heartbeat jobs which would spam.
+        # tick/heartbeat jobs which would spam.  Message payloads are the
+        # exception the other way round: the message itself was already
+        # delivered to the owner's DM by _run_message — a second "job ran"
+        # alert would double-send.
         job_name = row['name'].lower()
         is_routine_tick = 'tick' in job_name or 'heartbeat' in job_name or 'sweep' in job_name
         alert = True
@@ -372,6 +375,8 @@ class Scheduler:
             alert = False  # still failing — the owner already knows
         if ok and is_routine_tick:
             alert = False  # routine tick succeeded — silent
+        if ok and row.get("payload_kind") == "message":
+            alert = False  # the message itself already went out
         if alert:
             try:
                 self.notifier.publish(
@@ -388,10 +393,26 @@ class Scheduler:
         }
 
     def _run_message(self, payload: dict[str, Any]) -> str:
+        """Deliver the literal message text to the owner's DM.
+
+        The old behavior returned ``"sent: ..."`` without pushing anything
+        to a chat surface.  Now the text goes through the Notifier — every
+        live owner channel receives it — and the notification row stays in
+        the DB (pending redelivery) when no channel is live.  ``force=True``:
+        the owner explicitly scheduled this message, so it bypasses dedupe
+        and the notifier feature flag.  Empty payloads still raise (that is
+        a broken job, not a quiet no-op).
+        """
         text = str(payload.get("text") or "").strip()
         if not text:
             raise ValueError("empty message payload")
-        return f"sent: {text[:200]}"
+        outcome = self.notifier.publish("message", text, force=True)
+        if outcome.get("delivered"):
+            return f"sent: {text[:200]}"
+        state = outcome.get("delivery_state") or "pending"
+        _log.warning("scheduled message stored undelivered (%s): %r",
+                     state, text[:80])
+        return f"stored ({state}): {text[:200]}"
 
     def _run_tool(self, payload: dict[str, Any]) -> str:
         tool = str(payload.get("tool") or "").strip()

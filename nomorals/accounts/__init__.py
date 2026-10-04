@@ -36,6 +36,8 @@ from .temp_sms import (
     TempNumber,
     SmsMessage,
     get_provider as get_sms_provider,
+    grab_number as grab_temp_number,
+    wait_code as wait_temp_sms_code,
     PROVIDERS as SMS_PROVIDERS,
 )
 
@@ -62,5 +64,7 @@ __all__ = [
     "TempNumber",
     "SmsMessage",
     "get_sms_provider",
+    "grab_temp_number",
+    "wait_temp_sms_code",
     "SMS_PROVIDERS",
 ]
