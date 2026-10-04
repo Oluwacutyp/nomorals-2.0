@@ -91,6 +91,9 @@ LAYERS: dict[str, int] = {
     # stream/: SSE streaming API for dashboards. L5 organ; serves os.timeline
     # events over stdlib HTTP, reaches only downward.
     "stream": 5,
+    # hub/: HTTP transport for mesh + sync (multi-device). L5 organ; serves
+    # LocalTransport/LocalPeer over stdlib HTTP, reaches only downward.
+    "hub": 5,
     # missions sits *with* agents, not above: the dependency is genuinely
     # bidirectional (the runner needs agents; Devon needs the runner), so a
     # strict hierarchy here was fiction.  Peers at the same layer may import
