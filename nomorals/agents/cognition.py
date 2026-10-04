@@ -808,7 +808,7 @@ class CognitiveLoop:
                     # the goal un-pauses with its project
                     self.context.db.execute(
                         "UPDATE goals SET status='active', updated_at=? "
-                        "WHERE id=?", (time.time(), goal_id))
+                        "WHERE goal_id=?", (time.time(), goal_id))
                     # advance() self-resumes the project and runs the step
                     gs.advance(goal_id, executor=executor)
                     resumed.append(goal_id)
