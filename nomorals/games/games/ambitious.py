@@ -370,6 +370,13 @@ class BattleArenaGame(MultiGame):
              "Winning earns XP — level up for +max HP, +atk, +def. "
              "The house ranks up with you, E-rank to S-rank: higher ranks "
              "hit harder and fight smarter. "
+             "Every fight spawns a fresh named hunter with their own "
+             "rolled weapons, armor (better grades at higher ranks), "
+             "martial-arts skills, and potions — D-rank and up cast "
+             "techniques back at you. "
+             "⚡ power rates both fighters (HP + attack×10 + defense×10 + "
+             "skills): if the foe out-powers you, the win pays an upset "
+             "bonus on top of the rank-scaled XP. "
              "First to 0 HP loses.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
@@ -388,6 +395,15 @@ class BattleArenaGame(MultiGame):
         self._apply_progression(room)
         self._apply_loadout(room)
         self._apply_skills(room)
+        self._spawn_enemy(room, getattr(mind, "rng", None))
+        # power is finalized once both fighters are fully kitted
+        try:
+            from ..power import power_bar
+            power_line = (f"\n⚡ power {s['player_power']} "
+                          f"{power_bar(s['player_power'], s.get('house_power', 1))} "
+                          f"vs {s.get('house_power', '?')}")
+        except Exception:  # noqa: BLE001
+            power_line = ""
         gear_note = self._gear_note(room)
         skill_note = self._skill_note(room)
         prog = self._prog_bonus(room)
@@ -395,16 +411,43 @@ class BattleArenaGame(MultiGame):
                     f"+{prog['atk']} atk, +{prog['def']} def. "
                     if prog["level"] > 1 else "")
         rank = s.get("house_rank", "E")
+        foe = s.get("house_name", "a hunter")
+        foe_gear = self._house_gear_note(room)
+        foe_skills = s.get("house_skills", {})
+        foe_line = (f"a {rank}-rank hunter, {foe}, blocks your path."
+                    + (f" {foe_gear}" if foe_gear else "")
+                    + (f" they know {len(foe_skills)} "
+                       f"{'skill' if len(foe_skills) == 1 else 'skills'}."
+                       if foe_skills else ""))
         return ("⚔️ battle arena — "
                 f"{s['you']['max_hp']} HP, {s['you']['atk']} atk, "
                 f"{s['you']['def']} def, 1 potion.\n"
                 + (lvl_note if lvl_note else "")
                 + (skill_note + "\n" if skill_note else "")
-                + f"a {rank}-rank hunter blocks your path.\n"
+                + foe_line + "\n"
                 + "attack · focus · fury · defend · potion · "
                 "skill <name> · item <gear|potion|shield>\n"
                 + (gear_note + "\n" if gear_note else "")
+                + power_line
+                + ("\n" if power_line else "")
                 + "the house is already warming up.")
+
+    def _house_gear_note(self, room) -> str:
+        """One-liner describing the enemy's rolled gear."""
+        gear = room.state.get("house_gear", {})
+        bits = []
+        weapon = gear.get("weapon") or {}
+        armor = gear.get("armor") or {}
+        if weapon.get("name"):
+            bits.append(weapon["name"])
+        if armor.get("name"):
+            bits.append(armor["name"])
+        note = ""
+        if bits:
+            note = "wielding " + " and ".join(bits) + "."
+        if room.state.get("house_set_bonus"):
+            note += f" ✨ {room.state['house_set_bonus']} set bonus!"
+        return note
 
     # ── progression ──────────────────────────────────────────────────────────
     #: Solo-Leveling-style hunter ranks for the house AI. Higher player
@@ -447,8 +490,9 @@ class BattleArenaGame(MultiGame):
 
         The house ranks up Solo-Leveling style: each hunter rank mirrors a
         bigger share of the player's bonus, adds flat rank stats, and
-        fights smarter. Progression always feels powerful — but the house
-        never falls too far behind.
+        fights smarter.  The dynamic opponent (gear, skills, name) spawns
+        separately in ``_spawn_enemy``.  Progression always feels
+        powerful — but the house never falls too far behind.
         """
         s = room.state
         prog = self._prog_bonus(room)
@@ -466,9 +510,110 @@ class BattleArenaGame(MultiGame):
         s["house_rank"] = rank
         s["house_skill"] = rank_idx
 
+    def _spawn_enemy(self, room, rng=None) -> None:
+        """Roll the dynamic opponent: name, gear, skills, potions.
+
+        Called after the player's loadout and skills are applied so the
+        power backstop measures the real, fully-kitted player.  Higher
+        ranks roll better gear grades and more skills; a power backstop
+        re-rolls the gear up a grade when the enemy would otherwise be
+        trivial next to the player.
+        """
+        import random as _random
+        s = room.state
+        rank_idx = int(s.get("house_skill", 0))
+        h = s["house"]
+        try:
+            from ..enemies import roll_enemy
+            from ..power import fighter_power
+        except Exception:  # noqa: BLE001
+            return
+        rng = rng or _random.Random()
+        pkey = next((p.key for p in room.humans), "")
+        slugs = s.get("skills", {}).get(pkey, [])
+        tiers = s.get("skill_tiers", {}).get(pkey, {})
+        player_power = fighter_power(s["you"], slugs, tiers)
+        s["player_power"] = player_power
+        enemy = roll_enemy(
+            rng, rank_idx, player_power,
+            foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
+                      "def": h["def"]})
+        # house_skills must land before _apply_house_gear: the 20%
+        # power cap counts skill power when it measures.
+        s["house_skills"] = enemy["skills"]
+        self._apply_house_gear(room, enemy)
+        s["house_name"] = enemy["name"]
+        s["house_skill_cd"] = {}
+        s["house_skill_used"] = []
+        h["potions"] = enemy["potions"]
+        s["house_power"] = fighter_power(h, tuple(enemy["skills"]),
+                                        enemy["skills"])
+
+    def _apply_house_gear(self, room, enemy) -> None:
+        """Fold the rolled enemy gear into the house fighter's stats.
+
+        Enemy gear fights at 50% effectiveness — the hunter's kit is
+        battle-worn and notched, not shop-fresh.  After gear and any set
+        bonus land, a power cap trims the house back when it would
+        otherwise wall the player: the house may out-power the player by
+        at most 20%.  The fight stays competitive; never a foregone
+        conclusion either way.
+        """
+        s = room.state
+        h = s["house"]
+        gear = enemy.get("gear", {})
+        weapon = gear.get("weapon") or {}
+        armor = gear.get("armor") or {}
+        h["atk"] += int(weapon.get("atk", 0)) // 2
+        h["def"] += int(armor.get("def", 0)) // 2
+        h["combo_every"], h["combo_count"], h["combo_name"] = 0, 0, ""
+        s["house_set_bonus"] = None
+        # set bonus: matching weapon + armor of one set
+        sets: dict[str, set] = {}
+        for slot, piece in (("weapon", weapon), ("armor", armor)):
+            if piece.get("set"):
+                sets.setdefault(piece["set"], set()).add(slot)
+        try:
+            from ..gear import SET_BONUSES
+            from ..power import fighter_power
+        except Exception:  # noqa: BLE001
+            SET_BONUSES = {}
+        for set_name, slots in sets.items():
+            bonus = SET_BONUSES.get(set_name)
+            if bonus and all(x in slots for x in bonus.needs):
+                h["atk"] = int(round(h["atk"] * (1 + bonus.atk_pct)))
+                h["def"] = int(round(h["def"] * (1 + bonus.def_pct)))
+                h["combo_every"] = bonus.combo_every
+                h["combo_name"] = bonus.combo_name
+                s["house_set_bonus"] = set_name
+                break
+        s["house_gear"] = gear
+        # ── the 20% power cap ─────────────────────────────────────────
+        try:
+            player_power = int(s.get("player_power") or 0)
+        except Exception:  # noqa: BLE001
+            player_power = 0
+        if player_power > 0:
+            skills = s.get("house_skills", {})
+            for _ in range(10):
+                if fighter_power(h, tuple(skills), skills) \
+                        <= player_power * 1.2:
+                    break
+                h["atk"] = max(1, int(h["atk"] * 0.9))
+                h["def"] = max(0, int(h["def"] * 0.9))
+
+    #: win-XP multiplier per hunter rank — harder opponents pay more.
+    #: E×1.0 → S×1.75, so climbing is always worth it.
+    RANK_XP_MULT = (1.0, 1.15, 1.3, 1.45, 1.6, 1.75)
+
     def xp_reward(self, won: bool | None, room, player) -> int:
         """Rich arena XP: wins pay, losses still move the bar, and clean
-        fighting earns bonuses (capped so farming one trick stalls)."""
+        fighting earns bonuses (capped so farming one trick stalls).
+
+        The payout scales with the opponent: higher hunter ranks multiply
+        the win, and beating a stronger foe (higher power than you) adds
+        an upset bonus.  A tough win is worth far more than a routine one.
+        """
         from ..progression import ARENA_LOSS_XP, ARENA_WIN_XP
         s = room.state
         if won is not True:
@@ -484,7 +629,15 @@ class BattleArenaGame(MultiGame):
             bonus += 10
         # set combos actually fired
         bonus += 5 * int(s.get("combo_triggers", 0))
-        return xp + min(30, bonus)
+        total = xp + min(30, bonus)
+        # the opponent's strength sets the stakes
+        rank_idx = max(0, min(5, int(s.get("house_skill", 0))))
+        total = int(round(total * self.RANK_XP_MULT[rank_idx]))
+        you_pow = int(s.get("player_power", 0))
+        foe_pow = int(s.get("house_power", 0))
+        if you_pow > 0 and foe_pow >= you_pow * 1.1:
+            total = int(round(total * 1.25))  # the upset bonus
+        return total
 
     # ── gear ───────────────────────────────────────────────────────────────
     def _loadout(self, room) -> dict[str, dict[str, Any]]:
@@ -650,11 +803,12 @@ class BattleArenaGame(MultiGame):
         tag = " (focused)" if focused else ""
         msg = (f"{kind}{src} lands {raw}{tag} — "
                f"{dst} at {max(0, d['hp'])} HP.")
-        # set combo: every Nth player attack strikes twice
-        if src == "you" and d["hp"] > 0 and a.get("combo_every"):
+        # set combo: every Nth attack strikes twice — both seats can combo
+        if d["hp"] > 0 and a.get("combo_every"):
             a["combo_count"] = int(a.get("combo_count", 0)) + 1
             if a["combo_count"] % int(a["combo_every"]) == 0:
-                s["combo_triggers"] = int(s.get("combo_triggers", 0)) + 1
+                if src == "you":
+                    s["combo_triggers"] = int(s.get("combo_triggers", 0)) + 1
                 second = max(1, int((a["atk"] - d["def"] // 2) * 0.7))
                 d["hp"] -= second
                 msg += (f" ⚡ {a.get('combo_name', 'combo')}! "
@@ -754,75 +908,96 @@ class BattleArenaGame(MultiGame):
             msg += f" ✨ {s['set_bonus']} set bonus active!"
         return msg
 
-    def _cast_skill(self, room, player, ref: str, mind) -> str | None:
+    def _cast_skill(self, room, player, ref: str, mind,
+                    src: str = "you", dst: str = "house") -> str | None:
         """Cast a learned active skill. Returns the result message, or
         None if the ref isn't a usable skill (so the caller can fall
-        through to the move list)."""
+        through to the move list).  ``src``/``dst`` let the house cast
+        its own rolled skills with the same code path."""
         from ..skills import SKILL_CATALOG, effective_def, resolve_skill
         s = room.state
-        y = s["you"]
+        me = s[src]
+        foe_name = "the house" if dst == "house" else "you"
+        my_name = "the house" if src == "house" else "you"
         defn = resolve_skill(ref)
         if defn is None or defn.kind != "active":
             return None
-        learned: list[str] = []
-        pkey = getattr(player, "key", "")
-        for p in room.humans:
-            pkey = p.key
-            learned = s.get("skills", {}).get(p.key, [])
-            break
-        if defn.slug not in learned:
-            known = [SKILL_CATALOG[x].name for x in learned
-                     if x in SKILL_CATALOG]
-            hint = (f"you know: {', '.join(known)}."
-                    if known else "you haven't learned any skills yet — "
-                    "/skill to see the school.")
-            return f"you don't know {defn.name}. {hint}"
-        # upgrades fight: fold the player's tier into the blueprint
-        tier = s.get("skill_tiers", {}).get(pkey, {}).get(defn.slug, 1)
+        if src == "you":
+            learned: list[str] = []
+            pkey = ""
+            for p in room.humans:
+                pkey = p.key
+                learned = s.get("skills", {}).get(p.key, [])
+                break
+            tiers = s.get("skill_tiers", {}).get(pkey, {})
+            cd = s.setdefault("skill_cd", {})
+            used = s.setdefault("skill_used", [])
+            if defn.slug not in learned:
+                known = [SKILL_CATALOG[x].name for x in learned
+                         if x in SKILL_CATALOG]
+                hint = (f"you know: {', '.join(known)}."
+                        if known else "you haven't learned any skills yet — "
+                        "/skill to see the school.")
+                return f"you don't know {defn.name}. {hint}"
+        else:
+            learned = list(s.get("house_skills", {}).keys())
+            tiers = s.get("house_skills", {})
+            cd = s.setdefault("house_skill_cd", {})
+            used = s.setdefault("house_skill_used", [])
+            if defn.slug not in learned:
+                return None
+            pkey = "house"
+        # upgrades fight: fold the caster's tier into the blueprint
+        tier = int(tiers.get(defn.slug, 1))
         defn = effective_def(defn, tier)
-        cd = s.setdefault("skill_cd", {})
         if int(cd.get(defn.slug, 0)) > 0:
-            return (f"{defn.name} is recovering — "
-                    f"{cd[defn.slug]} turn(s) left.")
-        used = s.setdefault("skill_used", [])
+            if src == "you":
+                return (f"{defn.name} is recovering — "
+                        f"{cd[defn.slug]} turn(s) left.")
+            return None  # the house silently picks another move
         if defn.once_per_battle and defn.slug in used:
-            return f"{defn.name} is spent for this battle."
+            if src == "you":
+                return f"{defn.name} is spent for this battle."
+            return None
         # ── effects ──
         msg = ""
         if defn.slug == "shadow_step":
-            y["dodge_next"] = True
-            msg = ("you melt into shadow — the house's next attack "
-                   "will miss.")
+            me["dodge_next"] = True
+            msg = (f"{my_name} {'melt' if src == 'you' else 'melts'} into "
+                   f"shadow — {foe_name}'s next attack will miss.")
             if defn.counter_mult:
-                parts = [self._hit(room, "you", "house", mind,
+                parts = [self._hit(room, src, dst, mind,
                                    mult=defn.counter_mult)]
                 win = self._check(room)
                 if win:
                     parts.append(win)
-                msg += " You strike from the dark! " + " ".join(parts)
+                msg += (" You strike from the dark! " if src == "you"
+                        else " It strikes from the dark! ") + " ".join(parts)
         elif defn.slug == "war_cry":
-            y["atk"] += defn.atk_buff
-            y["warcry_turns"] = defn.buff_turns
-            y["warcry_amt"] = defn.atk_buff
-            msg = (f"you ROAR — +{defn.atk_buff} attack for "
+            me["atk"] += defn.atk_buff
+            me["warcry_turns"] = defn.buff_turns
+            me["warcry_amt"] = defn.atk_buff
+            verb = "ROAR" if src == "you" else "roars"
+            msg = (f"{my_name} {verb} — +{defn.atk_buff} attack for "
                    f"{defn.buff_turns} turns!")
         elif defn.slug == "second_wind":
-            heal = int(y["max_hp"] * defn.heal_pct)
-            y["hp"] = min(y["max_hp"], y["hp"] + heal)
-            msg = f"you breathe deep — +{heal} HP ({y['hp']}/{y['max_hp']})."
+            heal = int(me["max_hp"] * defn.heal_pct)
+            me["hp"] = min(me["max_hp"], me["hp"] + heal)
+            msg = (f"{my_name} {'breathe' if src == 'you' else 'breathes'} "
+                   f"deep — +{heal} HP ({me['hp']}/{me['max_hp']}).")
         else:
             # striking skills: dragon_punch / whirlwind / thousand_fists /
             # pressure_point — N hits at mult×, optionally ignoring defense
             parts = []
             for _ in range(max(1, defn.hits)):
-                parts.append(self._hit(room, "you", "house", mind,
+                parts.append(self._hit(room, src, dst, mind,
                                        mult=defn.mult or 1.0,
                                        ignore_def=defn.ignore_def_pct))
                 win = self._check(room)
                 if win:
                     parts.append(win)
                     break
-            msg = f"🥋 {defn.name}! " + " ".join(parts)
+            msg = f"🥋 {my_name} unleashes {defn.name}! " + " ".join(parts)
         cd[defn.slug] = defn.cooldown
         if defn.once_per_battle:
             used.append(defn.slug)
@@ -912,14 +1087,76 @@ class BattleArenaGame(MultiGame):
                        f"({s['you']['potions']} potions){tail}.")
         return out
 
+    def _house_skill_pick(self, room, mind) -> str | None:
+        """Pick a skill for the house to cast this turn, or None.
+
+        E-rank hunters are bare-knuckle brawlers; D+ cast.  The pick is
+        tactical, not random: heal when bleeding, dodge when the player
+        is focused (or a small feint chance), buff early, otherwise the
+        hardest-hitting ready strike.
+        """
+        from ..skills import SKILL_CATALOG, effective_def
+        s = room.state
+        if int(s.get("house_skill", 0)) < 1:
+            return None
+        skills: dict[str, int] = s.get("house_skills", {})
+        if not skills:
+            return None
+        cd = s.setdefault("house_skill_cd", {})
+        used = s.setdefault("house_skill_used", [])
+        house, you = s["house"], s["you"]
+        ready = []
+        for slug, tier in skills.items():
+            defn = SKILL_CATALOG.get(slug)
+            if defn is None:
+                continue
+            if int(cd.get(slug, 0)) > 0:
+                continue
+            if defn.once_per_battle and slug in used:
+                continue
+            ready.append((slug, effective_def(defn, int(tier))))
+        if not ready:
+            return None
+        by_slug = {slug: d for slug, d in ready}
+        # bleeding: the breath that saves lives
+        if "second_wind" in by_slug and \
+                house["hp"] < house["max_hp"] * 0.45:
+            return "second_wind"
+        # the player is winding up something big: vanish
+        if "shadow_step" in by_slug and \
+                (you.get("focused") or mind.rng.random() < 0.12):
+            return "shadow_step"
+        # roar early while there's still fight left in it
+        if "war_cry" in by_slug and not house.get("warcry_turns") \
+                and house["hp"] > house["max_hp"] * 0.6:
+            return "war_cry"
+        # otherwise the hardest ready strike
+        strikes = [(slug, d) for slug, d in ready
+                   if (d.mult or 0) > 0]
+        if strikes:
+            strikes.sort(key=lambda sd: (sd[1].mult or 0) * (sd[1].hits or 1),
+                         reverse=True)
+            return strikes[0][0]
+        return None
+
     def _house_act(self, room: Room, mind: GameMind,
                    out: list[str]) -> None:
         """The house's turn, per the combat brain — focus, fury, guard,
-        drink, or swing."""
+        drink, swing, or (D+ hunters) cast a rolled skill."""
+        from ..combat import tick_fighter
         s = room.state
         house = s["house"]
+        out.extend(tick_fighter(house, s.get("house_skill_cd")))
         if house["fury_cd"] > 0:
             house["fury_cd"] -= 1
+        # a skilled hunter opens with technique, not fists
+        pick = self._house_skill_pick(room, mind)
+        if pick:
+            msg = self._cast_skill(room, None, pick, mind,
+                                   src="house", dst="you")
+            if msg:
+                out.append(msg)
+                return
         move = mind.combat_move(house, s["you"],
                                 skill=int(s.get("house_skill", 0)))
         if move["action"] == "potion" and house["potions"] > 0:
@@ -961,7 +1198,13 @@ class BattleArenaGame(MultiGame):
 
     def describe_state(self, room):
         s = room.state
-        return (f"you {s['you']['hp']} HP · house {s['house']['hp']} HP")
+        base = (f"you {s['you']['hp']} HP · "
+                f"{s.get('house_name', 'the house')} "
+                f"{s['house']['hp']} HP")
+        if s.get("player_power") and s.get("house_power"):
+            base += (f" · ⚡{s['player_power']} vs "
+                     f"{s['house_power']}")
+        return base
 
 
 # ── escape room ──────────────────────────────────────────────────────────────

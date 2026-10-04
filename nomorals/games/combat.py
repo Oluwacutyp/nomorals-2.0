@@ -89,5 +89,5 @@ def tick_fighter(fighter: dict[str, Any],
             # older saves / hand-built fighters carry no amount)
             amt = int(fighter.pop("warcry_amt", 0) or 3)
             fighter["atk"] = max(1, int(fighter["atk"]) - amt)
-            notes.append("the war cry fades — your attack settles.")
+            notes.append("the war cry fades — the attack settles.")
     return notes
