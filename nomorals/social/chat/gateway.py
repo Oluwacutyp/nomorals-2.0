@@ -259,8 +259,8 @@ class ChatGateway:
             self.db.execute(
                 "UPDATE chats SET last_active = ? WHERE id = ?", (self.clock(), chat.key)
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 - touch is best-effort, but log it
+            _log.warning("chat touch failed for %s: %s", chat.key, exc)
 
     # ── inbound ──────────────────────────────────────────────────────────────
     def _on_inbound(self, message: ChatMessage) -> None:
