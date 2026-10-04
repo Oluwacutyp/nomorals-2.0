@@ -14,7 +14,6 @@ durable stakes.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -153,11 +152,12 @@ class GameEconomy:
             slug = LEGACY_GEAR_MAP[slug]
         gear_defn = GEAR_CATALOG.get(slug)
         if gear_defn is not None and self.gear is not None:
-            prof = self.store.get(player.key)
-            if prof.coins < gear_defn.cost:
+            new_balance = self.store.spend_coins(
+                player, gear_defn.cost, f"buy:{slug}")
+            if new_balance is None:
+                prof = self.store.get(player.key)
                 return False, (f"{gear_defn.name} costs {gear_defn.cost}c — "
                                f"you have {prof.coins}c. win games to earn more.")
-            self.store.add_coins(player, -gear_defn.cost, f"buy:{slug}")
             try:
                 inst = self.gear.grant(player.key, slug)
             except Exception as exc:  # noqa: BLE001
@@ -174,11 +174,12 @@ class GameEconomy:
         if item is None:
             known = ", ".join(sorted(self._items))
             return False, f"no such item {slug!r}. in stock: {known}"
-        prof = self.store.get(player.key)
-        if prof.coins < item.cost:
+        new_balance = self.store.spend_coins(player, item.cost,
+                                             f"buy:{slug}")
+        if new_balance is None:
+            prof = self.store.get(player.key)
             return False, (f"{item.name} costs {item.cost}c — you have "
                            f"{prof.coins}c. win games to earn more.")
-        self.store.add_coins(player, -item.cost, f"buy:{slug}")
         self.store.grant_item(player, slug)
         return True, (f"bought {item.name} for {item.cost}c — "
                       f"{item.effect} (you now have "
@@ -189,13 +190,7 @@ class GameEconomy:
 
     def consume(self, player: Player, slug: str) -> bool:
         """Spend one owned item. False if they don't have one."""
-        prof = self.store.get(player.key)
-        if int(prof.items.get(slug) or 0) <= 0:
-            return False
-        prof.items[slug] = int(prof.items.get(slug) or 0) - 1
-        prof.updated_at = time.time()
-        self.store._upsert(prof)
-        return True
+        return self.store.consume_item(player, slug)
 
     # ── rewards ──────────────────────────────────────────────────────────────
     @staticmethod

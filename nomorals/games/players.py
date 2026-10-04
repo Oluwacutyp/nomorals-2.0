@@ -15,6 +15,7 @@ chat, tests and the engine all at once.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -118,10 +119,17 @@ class PlayerStore:
     All mutations are transactional; readers never block writers (SQLite
     read while the writer holds the write lock is fine on the busy
     timeout the shared Database already configures).
+
+    Read-modify-write sequences (balance checks, item grants) run under
+    an in-process lock so two concurrent purchases for the same player
+    can't both pass the affordability check on a stale read — the
+    classic double-spend.  SQLite serializes the writes anyway, but the
+    Python-side check has to be atomic with the write.
     """
 
     def __init__(self, db: Any) -> None:
         self.db = db
+        self._lock = threading.RLock()
 
     # ── reads ────────────────────────────────────────────────────────────────
     def get(self, key: str, *, name: str = "", platform: str = "") -> Profile:
@@ -159,54 +167,93 @@ class PlayerStore:
         ``won=None`` is a draw / participation-only outcome.  Streaks and
         best-streaks are maintained here so no game can forget to.
         """
-        prof = self.get(player.key, name=player.name, platform=player.platform)
-        prof.games_played += 1
-        prof.points += max(0, points)
-        prof.coins = max(0, prof.coins + coins)
-        stats = prof.per_game.setdefault(
-            game, {"played": 0, "wins": 0, "points": 0, "best": 0}
-        )
-        stats["played"] = int(stats.get("played") or 0) + 1
-        stats["points"] = int(stats.get("points") or 0) + max(0, points)
-        stats["best"] = max(int(stats.get("best") or 0), score)
-        if won is True:
-            prof.wins += 1
-            stats["wins"] = int(stats.get("wins") or 0) + 1
-            prof.streak = prof.streak + 1 if prof.streak > 0 else 1
-            prof.best_streak = max(prof.best_streak, prof.streak)
-        elif won is False:
-            prof.losses += 1
-            prof.streak = prof.streak - 1 if prof.streak < 0 else -1
-        else:
-            prof.draws += 1
-        prof.updated_at = time.time()
-        self._upsert(prof)
-        return prof
+        with self._lock:
+            prof = self.get(player.key, name=player.name,
+                            platform=player.platform)
+            prof.games_played += 1
+            prof.points += max(0, points)
+            prof.coins = max(0, prof.coins + coins)
+            stats = prof.per_game.setdefault(
+                game, {"played": 0, "wins": 0, "points": 0, "best": 0}
+            )
+            stats["played"] = int(stats.get("played") or 0) + 1
+            stats["points"] = int(stats.get("points") or 0) + max(0, points)
+            stats["best"] = max(int(stats.get("best") or 0), score)
+            if won is True:
+                prof.wins += 1
+                stats["wins"] = int(stats.get("wins") or 0) + 1
+                prof.streak = prof.streak + 1 if prof.streak > 0 else 1
+                prof.best_streak = max(prof.best_streak, prof.streak)
+            elif won is False:
+                prof.losses += 1
+                prof.streak = prof.streak - 1 if prof.streak < 0 else -1
+            else:
+                prof.draws += 1
+            prof.updated_at = time.time()
+            self._write(prof)
+            return prof
 
     def add_coins(self, player: Player, amount: int, reason: str = "") -> int:
-        prof = self.get(player.key, name=player.name, platform=player.platform)
-        prof.coins = max(0, prof.coins + amount)
-        prof.updated_at = time.time()
-        self._upsert(prof)
-        if self.db is not None and reason:
-            try:
-                self.db.execute(
-                    "INSERT INTO game_wallet (player_key, amount, reason, at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (prof.key, amount, reason[:80], time.time()),
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        return prof.coins
+        with self._lock:
+            prof = self.get(player.key, name=player.name,
+                            platform=player.platform)
+            prof.coins = max(0, prof.coins + amount)
+            prof.updated_at = time.time()
+            self._write(prof, ledger=[(amount, reason)] if reason else [])
+            return prof.coins
+
+    def spend_coins(self, player: Player, amount: int,
+                    reason: str = "") -> int | None:
+        """Atomically spend coins. Returns the new balance, or None when
+        the player can't afford it (balance untouched).
+
+        Check and deduction happen under one lock in one transaction, so
+        two concurrent purchases can't both spend the same coins.
+        """
+        if amount < 0:
+            raise ValueError("spend_coins amount must be >= 0")
+        with self._lock:
+            prof = self.get(player.key, name=player.name,
+                            platform=player.platform)
+            if prof.coins < amount:
+                return None
+            prof.coins -= amount
+            prof.updated_at = time.time()
+            self._write(prof, ledger=[(-amount, reason)] if reason else [])
+            return prof.coins
 
     def grant_item(self, player: Player, item: str, count: int = 1) -> dict[str, int]:
-        prof = self.get(player.key, name=player.name, platform=player.platform)
-        prof.items[item] = int(prof.items.get(item) or 0) + count
-        prof.updated_at = time.time()
-        self._upsert(prof)
-        return prof.items
+        with self._lock:
+            prof = self.get(player.key, name=player.name,
+                            platform=player.platform)
+            prof.items[item] = int(prof.items.get(item) or 0) + count
+            prof.updated_at = time.time()
+            self._write(prof)
+            return prof.items
+
+    def consume_item(self, player: Player, item: str) -> bool:
+        """Spend one owned item. False if they don't have one."""
+        with self._lock:
+            prof = self.get(player.key, name=player.name,
+                            platform=player.platform)
+            if int(prof.items.get(item) or 0) <= 0:
+                return False
+            prof.items[item] = int(prof.items.get(item) or 0) - 1
+            prof.updated_at = time.time()
+            self._write(prof)
+            return True
 
     def _upsert(self, p: Profile) -> None:
+        """Persist a profile (kept for callers that mutate a Profile
+        directly, e.g. the economy). Takes the store lock."""
+        with self._lock:
+            self._write(p)
+
+    def _write(self, p: Profile,
+               ledger: list[tuple[int, str]] | None = None) -> None:
+        """Write one profile plus optional wallet rows in a single DB
+        transaction. Caller must hold ``self._lock`` (``_upsert`` takes
+        it; the write methods above already hold it)."""
         if self.db is None:
             return
         try:
@@ -231,6 +278,14 @@ class PlayerStore:
                         json.dumps(p.items), p.created_at, p.updated_at,
                     ),
                 )
+                for amount, reason in ledger or ():
+                    if not reason:
+                        continue
+                    self.db.execute(
+                        "INSERT INTO game_wallet (player_key, amount, reason, at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (p.key, amount, reason[:80], time.time()),
+                    )
         except Exception:  # noqa: BLE001
             _log.debug("game_players upsert failed", exc_info=True)
 

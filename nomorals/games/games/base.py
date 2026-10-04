@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,6 +80,15 @@ class Room:
     #: timeouts and AI pumps deliberately do NOT touch this — it drives
     #: idle expiry, so only a real player keeps the table alive.
     last_activity: float = field(default_factory=time.time)
+
+    #: Per-room re-entrant guard. The engine's global lock protects the
+    #: room *tables*; this guard serializes everything that touches one
+    #: room's mutable state (moves, AI pumps, quits, timeouts) so two
+    #: inbound messages for the same chat can't interleave a move with
+    #: a quit or double-apply a turn. Lock order is always engine →
+    #: room; the guard is never held while taking the engine lock.
+    guard: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False)
 
     # ── players ─────────────────────────────────────────────────────────────
     def rng(self) -> random.Random:

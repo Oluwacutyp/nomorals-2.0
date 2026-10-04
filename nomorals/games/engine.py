@@ -256,6 +256,12 @@ class GameEngine:
     def _persist(self, room: Room) -> None:
         if self.db is None:
             return
+        # serialize under the room guard: a concurrent move mutating
+        # state mid-dumps would otherwise raise or persist a torn room
+        with room.guard:
+            self._persist_inner(room)
+
+    def _persist_inner(self, room: Room) -> None:
         try:
             import json as _json
             with self.db.transaction():
@@ -514,23 +520,30 @@ class GameEngine:
             game = self.games.get(room.game)
             if room.player(player.key) is not None:
                 return [f"{player.name} is already at the table."]
-            
-            replaced_ai = None
-            if len(room.players) >= game.max_players:
-                # Try to replace an AI player
-                ai_players = [p for p in room.players if p.is_ai]
-                if ai_players:
-                    # Remove the first AI player to make room
-                    replaced_ai = ai_players[0]
-                    room.players = [p for p in room.players if p.key != replaced_ai.key]
-                    # Adjust turn if needed
-                    if room.turn >= len(room.players):
-                        room.turn = 0
-                    room.players.append(player)
-                else:
-                    return ["the table is full."]
-            else:
+        with room.guard:
+            if room.status != "active":
+                return ["no game is live here — start one with /game <name>."]
+            return self._join_inner(room, game, chat_key, player)
+
+    def _join_inner(self, room: Room, game: MultiGame, chat_key: str,
+                    player: Player) -> list[str]:
+        """The body of :meth:`join`. Caller holds ``room.guard``."""
+        replaced_ai = None
+        if len(room.players) >= game.max_players:
+            # Try to replace an AI player
+            ai_players = [p for p in room.players if p.is_ai]
+            if ai_players:
+                # Remove the first AI player to make room
+                replaced_ai = ai_players[0]
+                room.players = [p for p in room.players if p.key != replaced_ai.key]
+                # Adjust turn if needed
+                if room.turn >= len(room.players):
+                    room.turn = 0
                 room.players.append(player)
+            else:
+                return ["the table is full."]
+        else:
+            room.players.append(player)
         msgs: list[str] = []
         note = game.on_join(room, player, self._mind)
         if note:
@@ -554,7 +567,15 @@ class GameEngine:
                 return [f"{player.name} isn't in this game."]
             if room.player(player.key).is_ai:
                 return []
-        game = self.games.get(room.game)
+            game = self.games.get(room.game)
+        with room.guard:
+            if room.status != "active":
+                return []
+            return self._leave_inner(room, game, chat_key, player)
+
+    def _leave_inner(self, room: Room, game: MultiGame | None, chat_key: str,
+                     player: Player) -> list[str]:
+        """The body of :meth:`leave`. Caller holds ``room.guard``."""
         notice = game.on_leave(room, player, self._mind) if game else None
         room.players = [p for p in room.players if p.key != player.key]
         if room.turn >= len(room.players):
@@ -588,6 +609,19 @@ class GameEngine:
             if game is None:
                 return []
             room.last_activity = time.time()
+        # Serialize per room: two inbound messages for the same chat must
+        # not interleave a move with a quit/timeout, nor double-apply a
+        # turn. Lock order is always engine → room; here we hold only the
+        # room guard (the game callbacks may call the model — the global
+        # lock must never be held across that).
+        with room.guard:
+            if room.status != "active":
+                return []  # quit/timeout closed it while we waited
+            return self._move_inner(room, game, chat_key, text, sender)
+
+    def _move_inner(self, room: Room, game: MultiGame, chat_key: str,
+                    text: str, sender: Player) -> list[str]:
+        """The body of :meth:`move`. Caller holds ``room.guard``."""
         # channel spectator mode: humans don't move, they watch
         if room.kind == "channel" and game.channel_mode == "house" \
                 and not sender.is_ai:
@@ -804,10 +838,36 @@ class GameEngine:
             return False
 
     def _finish(self, room: Room, extra: str | None = None) -> list[str]:
-        """Close a room: final message + ledger credits + persistence."""
+        """Close a room: final message + ledger credits + persistence.
+
+        Serialized on the room guard so a timeout/quit racing an
+        in-flight move can't double-award or tear the room down mid-move.
+        The room-table pops happen after the guard is released (under the
+        engine lock) to keep lock order engine → room everywhere.
+        """
+        with room.guard:
+            msgs, rematch_mem = self._finish_inner(room, extra)
+        with self._lock:
+            self._rooms.pop(room.chat_key, None)
+            self._by_id.pop(room.id, None)
+            # remember the table for /game rematch (relay virtual rooms
+            # are excluded — a rematch there needs a fresh invite)
+            if rematch_mem is not None:
+                self._last_game[room.chat_key] = rematch_mem
+        return msgs
+
+    def _finish_inner(self, room: Room,
+                      extra: str | None = None
+                      ) -> tuple[list[str], tuple | None]:
+        """The body of :meth:`_finish`. Caller holds ``room.guard``.
+
+        Returns (messages, rematch_memory) — the wrapper stores the
+        rematch memory under the engine lock after releasing the guard,
+        keeping lock order engine → room everywhere.
+        """
         game = self.games.get(room.game)
         if room.status == "finished":
-            return [extra] if extra else []
+            return ([extra] if extra else [], None)
         room.status = "finished"
         msgs: list[str] = []
         if extra:
@@ -897,17 +957,14 @@ class GameEngine:
         self._persist(room)
         self._emit(room, *msgs)
         # remember the table for /game rematch (relay virtual rooms are
-        # excluded — a rematch there needs a fresh invite)
+        # excluded — a rematch there needs a fresh invite). The wrapper
+        # stores this under the engine lock; we only compute it here.
+        rematch_mem = None
         if not room.chat_key.startswith("relay:"):
             humans = [p for p in room.players if not p.is_ai]
             if humans:
-                with self._lock:
-                    self._last_game[room.chat_key] = (
-                        room.game, humans, room.kind)
-        with self._lock:
-            self._rooms.pop(room.chat_key, None)
-            self._by_id.pop(room.id, None)
-        return msgs
+                rematch_mem = (room.game, humans, room.kind)
+        return msgs, rematch_mem
 
     def rematch(self, chat_key: str) -> tuple[Room | None, list[str]]:
         """Start the last finished game again with the same humans.

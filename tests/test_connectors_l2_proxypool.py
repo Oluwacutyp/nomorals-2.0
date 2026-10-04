@@ -97,20 +97,21 @@ class _ForwardProxyHandler(_QuietHandler):
         import urllib.request
 
         # Retry upstream fetch: under full-suite load the loopback target
-        # can be slow to accept connections. Retry a few times before
-        # giving up with 502.
+        # can be slow to accept connections. Retry briefly, then fail
+        # fast with 502 — the client retries, which beats one very long
+        # stall that would trip the caller's own timeout instead.
         body = b"bad gateway"
         code = 502
-        for _ in range(5):
+        for _ in range(3):
             try:
                 with urllib.request.urlopen(
-                    self.path, timeout=10
+                    self.path, timeout=3
                 ) as upstream:
                     body = upstream.read()
                     code = int(upstream.status)
                 break
             except Exception:  # noqa: BLE001 - test double, retry then 502
-                time.sleep(0.2)
+                time.sleep(0.1)
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -629,18 +630,26 @@ class HealthCheckTests(_ProxyNetCase):
     def test_single_healthy_proxy(self) -> None:
         self.conn.add_proxy("127.0.0.1", self.open_port)
         pid = f"http://127.0.0.1:{self.open_port}"
-        # Retry: under full-suite load the loopback target can be slow,
-        # and the test proxy maps any upstream failure to 502. Multiple
-        # attempts with backoff stabilize the test. Each attempt records
-        # a check, so assert checks >= 1 (not == 1).
-        health = None
-        for attempt in range(10):
-            result = self.conn.health_check(pid, url=self.target_url,
-                                            timeout=10)
+        # Retry: under full-suite load the loopback target can be slow.
+        # A slow probe either times out (health_check RAISES
+        # ProxyPoolError — it does not return an unhealthy dict) or comes
+        # back 502 while the fake upstream recovers. Retry both outcomes;
+        # each attempt records a check, so assert checks >= 1 (not == 1).
+        health: dict | None = None
+        result: dict | None = None
+        for attempt in range(12):
+            try:
+                result = self.conn.health_check(pid, url=self.target_url,
+                                                timeout=5)
+            except ProxyPoolError:
+                time.sleep(0.5)
+                continue
             health = result["health"]
             if health["status_code"] == 200:
                 break
             time.sleep(0.5 * (attempt + 1))
+        self.assertIsNotNone(health, "proxy never became healthy")
+        assert health is not None and result is not None
         self.assertEqual(health["status"], "healthy")
         self.assertEqual(health["status_code"], 200)
         self.assertGreaterEqual(health["latency_ms"], 0)

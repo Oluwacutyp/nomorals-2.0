@@ -675,6 +675,135 @@ class PlayerEconomyTests(unittest.TestCase):
         self.assertFalse(self.econ.consume(ADA, "keycard"))
 
 
+# ── atomic economy (R12): no double-spend, receipts always written ────
+
+
+class AtomicEconomyTests(unittest.TestCase):
+    def setUp(self):
+        # temp FILE db: Database uses per-thread connections, and each
+        # thread would otherwise get its own empty :memory: database.
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="econ_atomic_")
+        self.addCleanup(self._tmp.cleanup)
+        db = Database(f"{self._tmp.name}/t.db")
+        db.migrate()
+        self.engine = GameEngine(Ctx(db), send=lambda c, t: None)
+        self.addCleanup(self.engine.shutdown)
+        self.store = self.engine.store
+        self.econ = self.engine.economy
+
+    def test_spend_coins_atomic(self):
+        self.store.add_coins(ADA, 100, "test grant")
+        self.assertEqual(self.store.spend_coins(ADA, 80, "buy:x"), 20)
+        # broke: balance untouched, no receipt
+        self.assertIsNone(self.store.spend_coins(ADA, 50, "buy:y"))
+        self.assertEqual(self.store.get(ADA.key).coins, 20)
+        rows = self.engine.db.query(
+            "SELECT reason FROM game_wallet WHERE player_key = ?",
+            (ADA.key,))
+        reasons = [r["reason"] for r in rows]
+        self.assertIn("buy:x", reasons)
+        self.assertNotIn("buy:y", reasons)
+
+    def test_concurrent_purchases_cannot_double_spend(self):
+        # 100 coins, 5 threads buying an 80c item: exactly one wins.
+        self.store.add_coins(ADA, 100, "test grant")
+        results: list[bool] = []
+        barrier = threading.Barrier(5)
+
+        def buy():
+            barrier.wait()
+            ok, _msg = self.econ.purchase(ADA, "hint_scroll")
+            results.append(ok)
+
+        threads = [threading.Thread(target=buy) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sum(results), 1, results)
+        self.assertEqual(self.econ.count(ADA, "hint_scroll"), 1)
+        self.assertEqual(self.econ.balance(ADA), 20)
+
+    def test_concurrent_consume_grants_one(self):
+        self.store.grant_item(ADA, "potion", 1)
+        results: list[bool] = []
+        barrier = threading.Barrier(4)
+
+        def take():
+            barrier.wait()
+            results.append(self.econ.consume(ADA, "potion"))
+
+        threads = [threading.Thread(target=take) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sum(results), 1, results)
+        self.assertEqual(self.econ.count(ADA, "potion"), 0)
+
+    def test_gear_purchase_writes_receipt(self):
+        self.store.add_coins(ADA, 1000, "test grant")
+        ok, msg = self.econ.purchase(ADA, "broadsword_common")
+        self.assertTrue(ok, msg)
+        rows = self.engine.db.query(
+            "SELECT reason FROM game_wallet WHERE player_key = ?",
+            (ADA.key,))
+        self.assertTrue(
+            any(r["reason"] == "buy:broadsword_common" for r in rows),
+            [r["reason"] for r in rows])
+
+
+# ── per-room serialization (R12) ──────────────────────────────────────
+
+
+class RoomGuardTests(unittest.TestCase):
+    def setUp(self):
+        # temp FILE db: Database uses per-thread connections, and each
+        # thread would otherwise get its own empty :memory: database.
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="room_guard_")
+        self.addCleanup(self._tmp.cleanup)
+        db = Database(f"{self._tmp.name}/t.db")
+        db.migrate()
+        self.engine = GameEngine(Ctx(db), send=lambda c, t: None)
+        self.addCleanup(self.engine.shutdown)
+        self.store = self.engine.store
+
+    def tearDown(self):
+        self.engine.shutdown()
+
+    def test_room_has_guard(self):
+        room, _ = self.engine.start("local:g1", "numberguess", ADA, kind="dm")
+        self.assertTrue(hasattr(room, "guard"))
+        # re-entrant: the engine takes it repeatedly on one thread
+        with room.guard:
+            with room.guard:
+                pass
+
+    def test_concurrent_finish_awards_once(self):
+        room, _ = self.engine.start("local:g2", "numberguess", ADA, kind="dm")
+        barrier = threading.Barrier(2)
+
+        def finish():
+            barrier.wait()
+            self.engine._finish(room)
+
+        threads = [threading.Thread(target=finish) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # exactly one finish ran the awards loop
+        self.assertEqual(self.store.get(ADA.key).games_played, 1)
+        self.assertIsNone(self.engine.live("local:g2"))
+
+    def test_move_on_finished_room_is_noop(self):
+        room, _ = self.engine.start("local:g3", "numberguess", ADA, kind="dm")
+        self.engine._finish(room)
+        self.assertEqual(self.engine.move("local:g3", "50", ADA), [])
+
+
 # ── the AI mind ──────────────────────────────────────────────────────────────
 
 class GameMindTests(unittest.TestCase):

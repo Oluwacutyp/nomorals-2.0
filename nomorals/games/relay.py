@@ -251,23 +251,35 @@ class GameRelay:
                 room_id=room_id, game_name=invite.game_name,
                 chat_a=invite.from_chat, chat_b=to_chat,
                 player_a=invite.from_player, player_b=to_player)
-
-            # start the game in the virtual room both chats play through
-            room, _msgs = self.engine.start(
-                relay.virtual_chat, invite.game_name, invite.from_player,
-                kind="dm")
-            # seat the second player alongside the inviter
-            if room.player(to_player.key) is None:
-                room.players.append(to_player)
+            game_name = invite.game_name
+            from_player = invite.from_player
 
             self.relays[room_id] = relay
             self.chat_to_relay[relay.chat_a] = room_id
             self.chat_to_relay[relay.chat_b] = room_id
-            self._save_relay(relay)
 
             del self.invites[code]
             self._delete_invite(code)
-            return relay
+        # Start the game OUTSIDE the relay lock: engine.start takes the
+        # engine lock, and engine.quit takes relay-lock-after-engine-lock
+        # (see GameEngine.quit) — nesting them the other way deadlocks.
+        try:
+            room, _msgs = self.engine.start(
+                relay.virtual_chat, game_name, from_player,
+                kind="dm")
+        except Exception:
+            with self._lock:
+                self.relays.pop(room_id, None)
+                self.chat_to_relay.pop(relay.chat_a, None)
+                self.chat_to_relay.pop(relay.chat_b, None)
+            raise
+        # seat the second player alongside the inviter
+        with room.guard:
+            if room.player(to_player.key) is None:
+                room.players.append(to_player)
+        with self._lock:
+            self._save_relay(relay)
+        return relay
 
     # ── moves ────────────────────────────────────────────────────────────
     def relay_move(self, from_chat: str, text: str,
@@ -278,18 +290,30 @@ class GameRelay:
             relay = self.relays.get(code) if code else None
             if relay is None or not relay.active:
                 return []
-            # the virtual room may have finished or been lost on restart —
-            # never strand the players on a dead relay
-            if self.engine.live(relay.virtual_chat) is None:
-                self._close_locked(relay.room_id, reason="game over")
-                return []
-            msgs = self.engine.move(relay.virtual_chat, text, player)
+            virtual_chat = relay.virtual_chat
+            room_id = relay.room_id
+        # engine.move takes the engine lock + the room guard — never hold
+        # the relay lock across it (engine.quit takes them in the reverse
+        # order; nesting the other way deadlocks).
+        # the virtual room may have finished or been lost on restart —
+        # never strand the players on a dead relay
+        if self.engine.live(virtual_chat) is None:
+            with self._lock:
+                self._close_locked(room_id, reason="game over")
+            return []
+        msgs = self.engine.move(virtual_chat, text, player)
+        # liveness is checked outside the relay lock: engine.live takes
+        # the engine lock, and nesting relay → engine deadlocks against
+        # quit's engine → relay order. _close_locked is idempotent, so a
+        # stale read here is harmless.
+        dead = self.engine.live(virtual_chat) is None
+        with self._lock:
             relay.last_activity = time.time()
             self._save_relay(relay)
             # the engine finished the game → retire the relay now
-            if self.engine.live(relay.virtual_chat) is None:
-                self._close_locked(relay.room_id, reason="game over")
-            return msgs
+            if dead:
+                self._close_locked(room_id, reason="game over")
+        return msgs
 
     def get_relay_for_chat(self, chat_key: str) -> RelayRoom | None:
         with self._lock:
@@ -354,10 +378,19 @@ class GameRelay:
                 del self.invites[code]
                 self._delete_invite(code)
                 removed["invites"] += 1
-            for code, relay in list(self.relays.items()):
+            candidates = [(code, relay.virtual_chat)
+                          for code, relay in list(self.relays.items())]
+        # liveness probes go outside the relay lock (engine.live takes the
+        # engine lock; see relay_move for why the order matters)
+        dead = {code for code, vc in candidates
+                if self.engine.live(vc) is None}
+        with self._lock:
+            for code, _vc in candidates:
+                relay = self.relays.get(code)
+                if relay is None:
+                    continue
                 idle = now - relay.last_activity
-                dead_game = self.engine.live(relay.virtual_chat) is None
-                if idle > self._RELAY_TTL or (dead_game and idle > 300):
+                if idle > self._RELAY_TTL or (code in dead and idle > 300):
                     self._close_locked(code, reason="expired")
                     removed["relays"] += 1
         return removed
