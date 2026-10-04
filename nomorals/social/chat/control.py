@@ -148,8 +148,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unequip": (0, 1),     # /unequip [slot] — take gear off
     "repair": (0, 1),      # /repair [gear] — restore durability for coins
     "level": (0, 0),       # /level — XP, level, stat growth
-    "skill": (0, 2),       # /skill [learn <name>] — battle skills
-    "title": (0, 1),       # /title [set <name>] — earnable titles
+    "skill": (0, 3),       # /skill [learn|upgrade <name>] — battle skills
+    "title": (0, 3),       # /title [set <name>] — earnable titles
     "daily": (0, 0),       # /daily — today's double-XP hunt
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
