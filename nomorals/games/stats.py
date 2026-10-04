@@ -234,14 +234,15 @@ class StatStore:
 
     # ── spending ───────────────────────────────────────────────────────────
     def spend(self, player_key: str, name: str,
-              points: int = 1) -> tuple[bool, str]:
+              points: int = 1, stats: "StatBlock | None" = None) -> tuple[bool, str]:
         """Spend unspent points on one attribute."""
         name = (name or "").strip().lower()
         if name not in STAT_NAMES:
             return False, (f"unknown attribute — choose from "
                            f"{', '.join(STAT_NAMES)}.")
         points = max(1, int(points))
-        stats = self.get(player_key)
+        if stats is None:
+            stats = self.get(player_key)
         if stats.unspent < points:
             return False, (f"only {stats.unspent} unspent point(s) — "
                            f"level up to earn more.")

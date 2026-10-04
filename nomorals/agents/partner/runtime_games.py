@@ -642,7 +642,7 @@ class RuntimeGamesMixin:
         parts = tail.split()
         attr = parts[0]
         pts = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
-        ok, msg = store.spend(player.key, attr, pts)
+        ok, msg = store.spend(player.key, attr, pts, stats=stats)
         return ("📊 " if ok else "") + msg
 
     def _control_daily(self, *, player: Any = None) -> str:
