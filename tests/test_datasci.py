@@ -141,10 +141,71 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(child.rows, 4)
         self.assertIn("query", child.source)
 
+    def test_query_save_as_persists(self):
+        # derived datasets survive across workspace instances (R21: they
+        # used to live only in memory)
+        self.ws.query("d", "a > 5", as_name="big")
+        ws2 = DataWorkspace(Path(self.tmp.name) / "ws")
+        self.assertEqual(ws2.get("big").rows, 4)
+        self.assertIn("query", ws2.get("big").source)
+
     def test_query_save_duplicate_raises(self):
         self.ws.query("d", "a > 5", as_name="big")
         with self.assertRaises(DatasetExists):
             self.ws.query("d", "a > 1", as_name="big")
+
+
+class FrameHashTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = DataWorkspace(Path(self.tmp.name) / "ws")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_load_frame_content_hash(self):
+        import pandas as pd
+        f1 = pd.DataFrame({"a": [1, 2, 3]})
+        f2 = pd.DataFrame({"a": [1, 2, 4]})  # same shape, different data
+        d1 = self.ws.load_frame("one", f1)
+        d2 = self.ws.load_frame("two", f2)
+        # R21: load_frame used to hash only the shape — identical for f1/f2
+        self.assertNotEqual(d1.sha256, d2.sha256)
+        self.assertEqual(len(d1.sha256), 64)
+
+    def test_load_frame_persists(self):
+        import pandas as pd
+        self.ws.load_frame("f", pd.DataFrame({"a": [1, 2]}))
+        ws2 = DataWorkspace(Path(self.tmp.name) / "ws")
+        self.assertEqual(ws2.get("f").rows, 2)
+
+
+class WorkspacePlotTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = DataWorkspace(Path(self.tmp.name) / "ws")
+        self.ws.load("d", _csv(Path(self.tmp.name) / "d.csv"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_workspace_plot_returns_png(self):
+        png = self.ws.plot("d", "line", x="a", y="b", title="t")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertGreater(len(png), 1000)
+
+    def test_workspace_plot_bad_kind_raises(self):
+        with self.assertRaises(PlotError):
+            self.ws.plot("d", "nope", x="a", y="b")
+
+    def test_workspace_plot_missing_dataset_raises(self):
+        from nomorals.datasci import DatasetNotFound
+        with self.assertRaises(DatasetNotFound):
+            self.ws.plot("nope", "line", x="a", y="b")
 
 
 class PlotTests(unittest.TestCase):

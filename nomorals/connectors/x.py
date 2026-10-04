@@ -132,6 +132,7 @@ class XConnector(Connector):
         try:
             me = self._api("GET", "/users/me", token=cred.password)
         except XError as exc:
+            self._record_health(False)
             return ConnectorStatus(
                 connected=False,
                 account=cred.username,
@@ -140,6 +141,7 @@ class XConnector(Connector):
                 detail=f"bearer token rejected ({exc}): regenerate it in "
                        "the X developer portal and reconnect",
             )
+        self._record_health(True)
         return ConnectorStatus(
             connected=True,
             account=f"@{me.get('username', cred.username)}",
@@ -157,6 +159,143 @@ class XConnector(Connector):
             return True
         except ConnectorError:
             return False
+
+    # ── token health ─────────────────────────────────────────────
+
+    # A recent healthy check is reused for up to an hour unless forced —
+    # X bearer tokens don't expire on a schedule (they die when revoked
+    # or regenerated in the developer portal), so hammering /users/me
+    # on every status poll just burns the tiny free-tier quota.
+    TOKEN_HEALTH_TTL = 3600.0
+
+    def _record_health(self, ok: bool) -> None:
+        """Persist the latest token-health outcome in credential metadata.
+
+        Best-effort: a vault write failure must never break the check
+        itself.
+        """
+        cred = self._load_credential()
+        if cred is None:
+            return
+        meta = dict(cred.metadata or {})
+        now = time.time()
+        meta["token_last_check"] = now
+        if ok:
+            meta["token_last_ok"] = now
+            meta["token_failures"] = 0
+        else:
+            meta["token_failures"] = int(meta.get("token_failures", 0)) + 1
+        try:
+            self.vault.store(
+                service=self._service,
+                username=cred.username,
+                password=cred.password,
+                credential_type=cred.credential_type,
+                tags=list(cred.tags or []),
+                metadata=meta,
+            )
+        except Exception:  # noqa: BLE001 - health bookkeeping is best-effort
+            _log.debug("x: could not persist token health", exc_info=True)
+
+    def token_health(self, *, force: bool = False) -> dict[str, Any]:
+        """Check whether the stored bearer token still works.
+
+        There is nothing to auto-refresh — an X bearer token is static
+        until revoked/regenerated in the developer portal — so this
+        check exists to turn a silently dead token into a clear,
+        actionable nudge.
+
+        Returns a JSON-safe report with ``status`` one of ``"healthy"``,
+        ``"invalid"`` (401 — regenerate + reconnect), ``"degraded"``
+        (429 — token fine, back off), ``"unknown"`` (other errors), or
+        ``"not_connected"``. Results are cached in credential metadata
+        for :attr:`TOKEN_HEALTH_TTL` seconds unless ``force=True``.
+        """
+        cred = self._load_credential()
+        now = time.time()
+        if cred is None:
+            return {
+                "connected": False,
+                "account": None,
+                "status": "not_connected",
+                "last_checked": now,
+                "last_ok": None,
+                "consecutive_failures": 0,
+                "nudge": "not connected — run "
+                         "`nm connectors connect --name x`",
+            }
+        meta = dict(cred.metadata or {})
+        last_ok = meta.get("token_last_ok")
+        last_check = float(meta.get("token_last_check") or 0)
+        if (not force and last_ok
+                and now - last_check < self.TOKEN_HEALTH_TTL):
+            return {
+                "connected": True,
+                "account": cred.username,
+                "status": "healthy",
+                "last_checked": last_check,
+                "last_ok": float(last_ok),
+                "consecutive_failures": 0,
+                "nudge": "",
+            }
+        try:
+            me = self._api("GET", "/users/me", token=cred.password)
+        except XError as exc:
+            self._record_health(False)
+            failures = int((self._load_credential().metadata or {})
+                           .get("token_failures", 1))
+            account = cred.username
+            if exc.status_code == 401:
+                return {
+                    "connected": False,
+                    "account": account,
+                    "status": "invalid",
+                    "last_checked": now,
+                    "last_ok": float(last_ok) if last_ok else None,
+                    "consecutive_failures": failures,
+                    "nudge": ("bearer token rejected (401): regenerate it in "
+                              "the X developer portal (developer.x.com → "
+                              "your app → Keys and tokens), then "
+                              "`nm connectors disconnect --name x` and "
+                              "`nm connectors connect --name x`"),
+                }
+            if exc.status_code == 429:
+                return {
+                    "connected": True,
+                    "account": account,
+                    "status": "degraded",
+                    "last_checked": now,
+                    "last_ok": float(last_ok) if last_ok else None,
+                    "consecutive_failures": failures,
+                    "nudge": ("rate-limited (429): the token itself is "
+                              "fine — back off before retrying"),
+                }
+            return {
+                "connected": True,
+                "account": account,
+                "status": "unknown",
+                "last_checked": now,
+                "last_ok": float(last_ok) if last_ok else None,
+                "consecutive_failures": failures,
+                "nudge": (f"x API error "
+                          f"({exc.status_code or 'network'}): {exc} — "
+                          f"retry; if it persists, the token may have "
+                          f"been revoked"),
+            }
+        self._record_health(True)
+        user = me.get("data") if isinstance(me, dict) else {}
+        account = (f"@{user.get('username')}"
+                   if isinstance(user, dict) and user.get("username")
+                   else cred.username)
+        return {
+            "connected": True,
+            "account": account,
+            "status": "healthy",
+            "last_checked": now,
+            "last_ok": now,
+            "consecutive_failures": 0,
+            "nudge": "",
+        }
 
     # ── API v2 ───────────────────────────────────────────────────
 

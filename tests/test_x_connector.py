@@ -285,5 +285,63 @@ class ApiTests(unittest.TestCase):
         self.assertIn("invalid JSON", str(ctx.exception))
 
 
+class TokenHealthTests(unittest.TestCase):
+    def test_not_connected(self) -> None:
+        conn, _http = _x()
+        report = conn.token_health()
+        self.assertEqual(report["status"], "not_connected")
+        self.assertFalse(report["connected"])
+        self.assertIn("connect", report["nudge"])
+
+    def test_healthy(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/users/me", FakeResponse(200, ME))
+        report = conn.token_health(force=True)
+        self.assertEqual(report["status"], "healthy")
+        self.assertTrue(report["connected"])
+        self.assertIn("devon_x", report["account"])
+        self.assertEqual(report["nudge"], "")
+        cred = conn._load_credential()
+        self.assertEqual(cred.metadata.get("token_failures"), 0)
+        self.assertGreater(cred.metadata.get("token_last_ok", 0), 0)
+
+    def test_healthy_cached(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/users/me", FakeResponse(200, ME))
+        conn.token_health(force=True)
+        http.routes.clear()  # cached: no HTTP needed
+        calls_before = len(http.calls)
+        report = conn.token_health()
+        self.assertEqual(report["status"], "healthy")
+        self.assertEqual(len(http.calls), calls_before)
+
+    def test_invalid_token_nudge(self) -> None:
+        conn, http = _connected()
+        http.routes.clear()
+        http.route("GET", "/users/me", FakeResponse(401, {"title": "x"}))
+        report = conn.token_health(force=True)
+        self.assertEqual(report["status"], "invalid")
+        self.assertFalse(report["connected"])
+        self.assertIn("regenerate", report["nudge"])
+        cred = conn._load_credential()
+        self.assertEqual(cred.metadata.get("token_failures"), 1)
+
+    def test_rate_limited_degraded(self) -> None:
+        conn, http = _connected()
+        http.routes.clear()
+        http.route("GET", "/users/me", FakeResponse(429, {"title": "x"}))
+        report = conn.token_health(force=True)
+        self.assertEqual(report["status"], "degraded")
+        self.assertIn("back off", report["nudge"])
+
+    def test_status_records_health(self) -> None:
+        conn, http = _connected()
+        http.route("GET", "/users/me", FakeResponse(200, ME))
+        st = conn.status()
+        self.assertTrue(st.connected)
+        cred = conn._load_credential()
+        self.assertGreater(cred.metadata.get("token_last_ok", 0), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

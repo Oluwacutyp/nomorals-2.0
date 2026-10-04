@@ -10,7 +10,7 @@ from .errors import (
     PermissionDenied,
     PluginError,
 )
-from .loader import LoadedPlugin, PluginCapabilities, load_plugin
+from .loader import LoadedPlugin, PluginCapabilities, load_plugin, unload_plugin
 from .manifest import (
     KNOWN_PERMISSIONS,
     MANIFEST_FILENAME,
@@ -19,6 +19,7 @@ from .manifest import (
     load_manifest_file,
 )
 from .registry import InstalledPlugin, PluginRegistry
+from .wiring import PluginKV, make_fetcher, wire_capabilities
 
 __all__ = [
     "AlreadyInstalled",
@@ -32,9 +33,13 @@ __all__ = [
     "PermissionDenied",
     "PluginCapabilities",
     "PluginError",
+    "PluginKV",
     "PluginManifest",
     "PluginRegistry",
     "load_manifest",
     "load_manifest_file",
     "load_plugin",
+    "make_fetcher",
+    "unload_plugin",
+    "wire_capabilities",
 ]

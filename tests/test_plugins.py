@@ -214,5 +214,162 @@ class CapabilitiesTests(unittest.TestCase):
             caps.kv()
 
 
+class ZipInstallTests(unittest.TestCase):
+    """Zip installs were broken (R21): the manifest was validated against
+    the zip *path* before unpacking, so every zip install failed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        from nomorals.storage.db import Database
+        self.db = Database(str(Path(self.tmp.name) / "t.db"))
+        self.reg = PluginRegistry(self.db, Path(self.tmp.name) / "plugins")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _zip_of(self, src: Path, name: str = "p.zip") -> Path:
+        import zipfile
+        zp = Path(self.tmp.name) / name
+        with zipfile.ZipFile(zp, "w") as zf:
+            for p in src.rglob("*"):
+                zf.write(p, p.relative_to(src))
+        return zp
+
+    def test_install_from_zip(self):
+        src = _plugin_dir(Path(self.tmp.name))
+        zp = self._zip_of(src)
+        p = self.reg.install(zp)
+        self.assertEqual(p.name, "demo")
+        self.assertTrue((Path(p.path) / "plugin.json").is_file())
+
+    def test_install_from_zip_with_wrapper_dir(self):
+        import zipfile
+        src = _plugin_dir(Path(self.tmp.name))
+        zp = Path(self.tmp.name) / "wrapped.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            for p in src.rglob("*"):
+                zf.write(p, Path("wrapper") / p.relative_to(src))
+        p = self.reg.install(zp)
+        self.assertEqual(p.name, "demo")
+        self.assertTrue((Path(p.path) / "plugin.json").is_file())
+
+    def test_zip_slip_rejected(self):
+        import zipfile
+        src = _plugin_dir(Path(self.tmp.name))
+        zp = Path(self.tmp.name) / "evil.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            for p in src.rglob("*"):
+                zf.write(p, p.relative_to(src))
+            zf.writestr("../evil.txt", "pwned")
+        with self.assertRaises(ManifestError):
+            self.reg.install(zp)
+        self.assertFalse((Path(self.tmp.name) / "evil.txt").exists())
+
+    def test_non_zip_non_dir_rejected(self):
+        p = Path(self.tmp.name) / "notes.txt"
+        p.write_text("hello", encoding="utf-8")
+        with self.assertRaises(ManifestError):
+            self.reg.install(p)
+
+
+class VersionOrderingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        from nomorals.storage.db import Database
+        self.db = Database(str(Path(self.tmp.name) / "t.db"))
+        self.reg = PluginRegistry(self.db, Path(self.tmp.name) / "plugins")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_latest_version_is_numeric(self):
+        # R21: ORDER BY version DESC is lexicographic ("1.9.0" > "1.10.0")
+        self.reg.install(_plugin_dir(Path(self.tmp.name), version="1.9.0"))
+        self.reg.install(_plugin_dir(Path(self.tmp.name), version="1.10.0"))
+        self.reg.install(_plugin_dir(Path(self.tmp.name), version="1.2.0"))
+        self.assertEqual(self.reg.get("demo").version, "1.10.0")
+
+    def test_prerelease_version_accepted(self):
+        m = load_manifest({
+            "name": "pre", "version": "1.0.0-beta",
+            "entry_points": {"main": "m:f"}})
+        self.assertEqual(m.version, "1.0.0-beta")
+        self.reg.install(_plugin_dir(Path(self.tmp.name), name="pre",
+                                     version="1.0.0-beta"))
+        self.assertEqual(self.reg.get("pre").version, "1.0.0-beta")
+
+
+class UnloadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unload_purges_modules(self):
+        import sys
+        from nomorals.plugins import unload_plugin
+        src = _plugin_dir(Path(self.tmp.name))
+        manifest = load_manifest_file(src)
+        loaded = load_plugin(manifest, src)
+        ns = "nomorals.plugins._loaded.demo"
+        self.assertIn(ns + ".demo", sys.modules)
+        unload_plugin(loaded)
+        self.assertNotIn(ns + ".demo", sys.modules)
+        self.assertNotIn(ns, sys.modules)
+
+    def test_reload_after_unload_runs_new_code(self):
+        from nomorals.plugins import unload_plugin
+        src = _plugin_dir(Path(self.tmp.name))
+        manifest = load_manifest_file(src)
+        loaded = load_plugin(manifest, src)
+        caps = PluginCapabilities(granted=frozenset())
+        self.assertEqual(loaded.entry("main", caps)["ok"], True)
+        unload_plugin(loaded)
+        # new code under the same plugin name loads fresh
+        (src / "demo.py").write_text(
+            "def run(caps):\n    return {'ok': False, 'v2': True}\n",
+            encoding="utf-8")
+        loaded2 = load_plugin(manifest, src)
+        self.assertEqual(loaded2.entry("main", caps)["v2"], True)
+
+
+class WiringTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        from nomorals.storage.db import Database
+        self.db = Database(str(Path(self.tmp.name) / "t.db"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_kv_roundtrip(self):
+        from nomorals.plugins import PluginKV
+        kv = PluginKV(self.db, "demo")
+        self.assertIsNone(kv.get("missing"))
+        kv.set("count", 3)
+        kv.set("cfg", {"a": [1, 2]})
+        self.assertEqual(kv.get("count"), 3)
+        self.assertEqual(kv.get("cfg"), {"a": [1, 2]})
+        self.assertEqual(sorted(kv.keys()), ["cfg", "count"])
+        self.assertTrue(kv.delete("count"))
+        self.assertFalse(kv.delete("count"))
+        # namespaced per plugin
+        kv2 = PluginKV(self.db, "other")
+        self.assertIsNone(kv2.get("cfg"))
+
+    def test_kv_rejects_non_json(self):
+        from nomorals.plugins import PluginKV
+        kv = PluginKV(self.db, "demo")
+        with self.assertRaises(PluginError):
+            kv.set("bad", object())
+
+    def test_fetcher_rejects_non_http(self):
+        from nomorals.plugins import make_fetcher
+        fetch = make_fetcher()
+        with self.assertRaises(PluginError):
+            fetch("file:///etc/passwd")
+
+
 if __name__ == "__main__":
     unittest.main()

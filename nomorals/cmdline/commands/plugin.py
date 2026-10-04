@@ -143,9 +143,10 @@ def _pl_remove(args: Any, context: Any, rest: list[str]) -> int:
 def _pl_run(args: Any, context: Any, rest: list[str]) -> int:
     """Run a plugin entry point with gated capabilities."""
     from ...plugins import (
-        PluginCapabilities,
         PluginError,
         load_plugin,
+        unload_plugin,
+        wire_capabilities,
     )
     if not rest:
         print("usage: nm plugin run <name> [entry]", file=sys.stderr)
@@ -160,9 +161,11 @@ def _pl_run(args: Any, context: Any, rest: list[str]) -> int:
                   file=sys.stderr)
             return 1
         loaded = load_plugin(plugin.manifest, plugin.path)
-        caps = PluginCapabilities(
-            granted=frozenset(plugin.manifest.permissions))
-        result = loaded.entry(entry, caps)
+        try:
+            caps = wire_capabilities(context, plugin)
+            result = loaded.entry(entry, caps)
+        finally:
+            unload_plugin(loaded)
     except PluginError as exc:
         print(f"run failed: {exc}", file=sys.stderr)
         return 1

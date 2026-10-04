@@ -322,9 +322,9 @@ def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if action not in ("status", "connect", "disconnect", "provision",
-                      "checkpoint"):
+                      "checkpoint", "health"):
         _emit(args, {"error": f"unknown action: {action}"},
-              f"Unknown action: {action} (list, status, connect, disconnect, provision, checkpoint)")
+              f"Unknown action: {action} (list, status, connect, disconnect, provision, checkpoint, health)")
         return 1
     if not name and action != "checkpoint":
         _emit(args, {"error": "name required"},
@@ -364,6 +364,8 @@ def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
             connector.disconnect()
             _emit(args, {"disconnected": True, "name": name},
                   f"{connector.name}: disconnected")
+        elif action == "health":
+            return _cmd_connector_health(args, connector)
         elif action == "provision":
             kind = getattr(args, "kind", "") or ""
             if not kind:
@@ -393,6 +395,47 @@ def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
         _emit(args, {"error": str(exc)}, str(exc))
         return 1
     return 0
+
+
+def _cmd_connector_health(args: argparse.Namespace,
+                            connector: Any) -> int:
+    """``nm connectors health --name <id>`` — token/credential health check.
+
+    Connectors that implement ``token_health()`` (e.g. x) get a real
+    check with an actionable nudge; everything else falls back to the
+    generic status + connectivity probe.
+    """
+    from ...connectors.base import ConnectorError
+    try:
+        health_fn = getattr(connector, "token_health", None)
+        if callable(health_fn):
+            report = dict(health_fn())
+        else:
+            st = connector.status()
+            ok = connector.test_connection()
+            report = {
+                "connected": bool(st.connected and ok),
+                "account": st.account,
+                "status": ("healthy" if st.connected and ok
+                           else "unknown"),
+                "last_checked": st.last_checked,
+                "last_ok": None,
+                "consecutive_failures": 0,
+                "nudge": ("" if st.connected and ok
+                          else (st.detail or "connection check failed")),
+            }
+    except ConnectorError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+    status = report.get("status", "unknown")
+    account = report.get("account") or ""
+    nudge = report.get("nudge") or ""
+    human = f"{connector.name}: token {status}" + (f" as {account}"
+                                                  if account else "")
+    if nudge:
+        human += f" — {nudge}"
+    _emit(args, report, human)
+    return 0 if report.get("connected") else 1
 
 
 def _cmd_connector_checkpoint(args: argparse.Namespace, context: Any) -> int:

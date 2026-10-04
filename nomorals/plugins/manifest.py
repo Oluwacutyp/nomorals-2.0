@@ -53,7 +53,8 @@ KNOWN_PERMISSIONS = frozenset({
 })
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([ab]\d+)?$")
+_VERSION_RE = re.compile(
+    r"^\d+\.\d+\.\d+(([ab]\d+)|([-+][0-9A-Za-z.-]+))?$")
 
 
 @dataclass
@@ -87,7 +88,9 @@ def load_manifest(data: dict[str, Any]) -> PluginManifest:
     version = data.get("version", "")
     if not isinstance(version, str) or not _VERSION_RE.match(version):
         raise ManifestError(
-            f"bad version {version!r}: expected semver like 1.0.0")
+            f"bad version {version!r}: expected semver like 1.0.0 "
+            f"(prerelease/build suffixes like 1.0.0-beta or 1.0.0+build "
+            f"are allowed)")
     entry_points = data.get("entry_points", {})
     if not isinstance(entry_points, dict) or not entry_points:
         raise ManifestError("manifest needs a non-empty entry_points map")

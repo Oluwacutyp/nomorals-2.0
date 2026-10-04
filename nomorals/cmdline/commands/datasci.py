@@ -1,8 +1,8 @@
 """``nm datasci`` — data-science workspace: load, describe, query, plot.
 
-Datasets persist as parquet in the workspace dir, so separate invocations
-share them: ``nm datasci load data.csv --name sales`` then
-``nm datasci describe sales``.
+Datasets persist as CSV plus a JSON sidecar (dtypes, provenance) in the
+workspace dir, so separate invocations share them:
+``nm datasci load data.csv --name sales`` then ``nm datasci describe sales``.
 """
 
 from __future__ import annotations
@@ -179,10 +179,9 @@ def _ds_plot(args: Any, context: Any, rest: list[str]) -> int:
     y = getattr(args, "y", "") or ""
     title = getattr(args, "title", "") or f"{name}: {kind}"
     try:
-        from ...datasci import render_plot
         ws = _workspace(context)
         ds = ws.get(name)
-        png = render_plot(ds.frame, kind, x=x, y=y, title=title)
+        png = ws.plot(name, kind, x=x, y=y, title=title)
         art = _artifacts(context).put(
             png, type="chart", mime="image/png", creator="datasci",
             metadata={"dataset": name, "kind": kind, "x": x, "y": y},

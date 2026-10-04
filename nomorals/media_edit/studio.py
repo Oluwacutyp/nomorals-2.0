@@ -29,6 +29,7 @@ module is imported.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -291,9 +292,15 @@ def op_grade(img: Any, *,
     for zone, kind in ((shadows, "shadows"), (midtones, "midtones"),
                        (highlights, "highlights")):
         if zone:
-            color, amount = zone
-            out = _apply_zone_tint(out, tuple(int(c) for c in color),
-                                   float(amount), kind)
+            try:
+                color, amount = zone
+                color_t = (int(color[0]), int(color[1]), int(color[2]))
+                amount_f = float(amount)
+            except (TypeError, ValueError, IndexError) as exc:
+                raise MediaEditError(
+                    f"{kind} zone tint must be ((r, g, b), amount), "
+                    f"got {zone!r}") from exc
+            out = _apply_zone_tint(out, color_t, amount_f, kind)
     if contrast != 1.0:
         out = ImageEnhance.Contrast(out).enhance(contrast)
     sat_eff = saturation * (1.0 + 0.5 * vibrance)
@@ -371,7 +378,11 @@ def _scale_preset(params: dict[str, Any], strength: float) -> dict[str, Any]:
             out[k] = (color, amt * strength)
         elif k == "vibrance":
             out[k] = v * strength
-        else:  # grayscale and friends: keep as-is
+        elif k == "grayscale":
+            # strength 0 must be a true no-op: keep grayscale only when
+            # the preset is actually being applied.
+            out[k] = bool(v) and strength > 0
+        else:  # unknown keys: keep as-is
             out[k] = v
     return out
 
@@ -936,10 +947,17 @@ def op_collage(img: Any, images: list[Any] | None = None, *,
     if template not in COLLAGE_TEMPLATES:
         raise MediaEditError(f"unknown collage template {template!r}; "
                              f"use {list(COLLAGE_TEMPLATES)}")
-    others = [load_image(p) if isinstance(p, (str, Path)) else p
-              for p in (images or [])]
-    cells = [img] + others
+    others: list[Any] = []
+    opened: list[Any] = []  # only these were opened by us (safe to close)
     try:
+        for p in (images or []):
+            if isinstance(p, (str, Path)):
+                img = load_image(p)
+                others.append(img)
+                opened.append(img)
+            else:
+                others.append(p)
+        cells = [img] + others
         if captions:
             if len(captions) != len(cells):
                 raise MediaEditError(
@@ -962,7 +980,7 @@ def op_collage(img: Any, images: list[Any] | None = None, *,
                                  f"(base + 2), got {len(cells)}")
         return op_stack(cells, direction="horizontal", bg=bg, gap=gap)
     finally:
-        for extra in others:
+        for extra in opened:
             try:
                 extra.close()
             except Exception:  # noqa: BLE001
@@ -1196,9 +1214,14 @@ def compile_video(segments: list[dict[str, Any]], *,
     Pure (no ffmpeg run): safe to unit-test. Returns {"inputs": [...],
     "filter_complex": str, "maps": [...], "extra_args": [...],
     "duration": float, "preset": str, "preset_params": dict,
-    "v_label": str, "a_label": str,
+    "v_label": str, "a_label": str, "work_dir": str,
     "loop_inputs": {input_index: seconds} (still images needing -loop),
     "chapters_file": path|None}.
+
+    Note: when the project has a title card, lower thirds, or chapters,
+    helper PNG/text assets are written into ``work_dir`` (a fresh temp
+    dir when not given — the caller owns cleaning it up; the studio's
+    own render does this automatically).
     """
     from .videos import parse_time, video_probe
     if not segments:
@@ -1208,8 +1231,14 @@ def compile_video(segments: list[dict[str, Any]], *,
     speed_ramps = speed_ramps or []
     chapters = chapters or []
 
-    work = Path(work_dir) if work_dir else Path.cwd()
-    work.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    if work_dir:
+        work = Path(work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+    else:
+        # Never default to the caller's cwd: title cards, lower thirds,
+        # and chapter files would land next to unrelated files.
+        work = Path(tempfile.mkdtemp(prefix="studio-compile-"))
 
     inputs: list[str] = []
     fc: list[str] = []
@@ -1431,6 +1460,7 @@ def compile_video(segments: list[dict[str, Any]], *,
         "preset_params": preset,
         "v_label": v_final,
         "a_label": a_final,
+        "work_dir": str(work),
         "loop_inputs": loop_inputs,
         "chapters_file": str(chapters_file) if chapters_file else None,
     }
@@ -1932,8 +1962,15 @@ class EditStudio:
         out = _unique_output(first, target, suffix, ext)
 
         def _run(progress_cb: Any) -> dict[str, Any]:
-            return render_video_compiled(compiled, out, timeout=timeout,
-                                         progress_cb=progress_cb)
+            # The compile step may have written helper assets (title
+            # card / lower-third PNGs, chapter files) into the temp work
+            # dir — remove it once the render is done so /tmp doesn't
+            # accumulate a directory per studio render.
+            try:
+                return render_video_compiled(compiled, out, timeout=timeout,
+                                             progress_cb=progress_cb)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
 
         label = f"studio:{self.name} ({len(self.ops)} ops)"
         if wait:
@@ -1964,12 +2001,13 @@ class EditStudio:
             target = Path(out_dir) if out_dir else Path(self.source).parent / "edited"
             target.mkdir(parents=True, exist_ok=True)
             if mode == "html":
-                html = target / f"{Path(self.source).stem}-compare.html"
+                html = _unique_output(Path(self.source), target,
+                                      "compare", ".html")
                 compare_html(self.source, rendered["output"], html)
                 return {"mode": "html", "output": str(html),
                         "render": rendered["output"]}
             comp = compare_render(before, after, mode=mode)
-            out = target / f"{Path(self.source).stem}-compare.png"
+            out = _unique_output(Path(self.source), target, "compare", ".png")
             save_image(comp, out)
             try:
                 comp.close()
@@ -1997,7 +2035,11 @@ class EditStudio:
         for path in sorted(Path(src_dir).glob(pattern)):
             if not path.is_file():
                 continue
-            st = cls.from_dict(proto.to_dict())
+            # Deep-copy: from_dict would otherwise hand every file the
+            # SAME ops list object as the prototype (to_dict returns it
+            # directly), so an undo()/edit on one file would corrupt the
+            # rest of the batch.
+            st = cls.from_dict(copy.deepcopy(proto.to_dict()))
             st.source = str(path)
             try:
                 results.append(st.render(out_dir=out_dir, suffix=suffix,

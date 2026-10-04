@@ -81,6 +81,19 @@ def _pd():
     return pd
 
 
+def _sha256_frame(frame: Any) -> str:
+    """Content hash for provenance. Falls back to shape+dtypes when the
+    frame can't be hashed (exotic dtypes), never to a constant."""
+    try:
+        import pandas as pd
+        hashed = pd.util.hash_pandas_object(frame, index=True)
+        return hashlib.sha256(hashed.values.tobytes()).hexdigest()
+    except Exception:  # noqa: BLE001 - best-effort, keep some provenance
+        return hashlib.sha256(
+            repr((frame.shape, [str(t) for t in frame.dtypes])).encode()
+        ).hexdigest()
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -209,10 +222,16 @@ class DataWorkspace:
                 "overwrite=True")
         if getattr(frame, "empty", True):
             raise LoadError("refusing empty DataFrame")
-        h = hashlib.sha256(repr(frame.shape).encode()).hexdigest()
-        ds = Dataset(name=name, frame=frame, source=source, sha256=h)
+        ds = Dataset(name=name, frame=frame, source=source,
+                     sha256=_sha256_frame(frame))
         self._sets[name] = ds
         self._persist(ds)
+        _emit("datasci.dataset.loaded", {
+            "name": name,
+            "source": source,
+            "rows": ds.rows,
+            "columns": ds.columns,
+        })
         return ds
 
     # ── inspection ────────────────────────────────────────────────────
@@ -297,9 +316,38 @@ class DataWorkspace:
             raise DatasetExists(
                 f"dataset {as_name!r} already loaded; drop it first")
         self._sets[as_name] = child
+        self._persist(child)
+        _emit("datasci.dataset.derived", {
+            "name": as_name,
+            "parent": name,
+            "expr": expr,
+            "rows": child.rows,
+            "columns": child.columns,
+        })
         return child
 
     def head(self, name: str, n: int = 5) -> list[dict[str, Any]]:
         """First ``n`` rows as plain dicts (JSON-safe)."""
         ds = self.get(name)
         return ds.frame.head(n).to_dict(orient="records")
+
+    def plot(self, name: str, kind: str, *, x: str = "", y: str = "",
+             title: str = "") -> bytes:
+        """Render a dataset as a PNG chart (see :mod:`.plots`).
+
+        Returns PNG bytes; the caller stores them as an artifact.
+        Emits ``datasci.plot.rendered`` with the dataset provenance so
+        charts stay traceable to their source data.
+        """
+        from .plots import render_plot
+        ds = self.get(name)
+        png = render_plot(ds.frame, kind, x=x, y=y, title=title)
+        _emit("datasci.plot.rendered", {
+            "name": name,
+            "kind": kind,
+            "x": x,
+            "y": y,
+            "sha256": ds.sha256,
+            "bytes": len(png),
+        })
+        return png

@@ -30,6 +30,7 @@ __all__ = [
     "PluginCapabilities",
     "LoadedPlugin",
     "load_plugin",
+    "unload_plugin",
 ]
 
 _log = get_logger(__name__)
@@ -189,9 +190,30 @@ def load_plugin(manifest: PluginManifest, path: str | Path) -> LoadedPlugin:
     if not root.is_dir():
         raise LoadError(f"plugin path not a directory: {root}")
     namespace = f"nomorals.plugins._loaded.{manifest.name}"
+    # Purge stale modules from a previous load of the same plugin (e.g.
+    # after an upgrade) so the new code actually runs.
+    _purge_namespace(namespace)
     modules = _import_tree(root, namespace)
     if not modules:
         raise LoadError(f"plugin {manifest.name!r} contains no Python modules")
     _log.info("loaded plugin %s (%d modules)",
               manifest.name, len(modules))
     return LoadedPlugin(manifest, root, modules)
+
+
+def unload_plugin(loaded: LoadedPlugin) -> None:
+    """Purge a loaded plugin's isolated modules from ``sys.modules``.
+
+    Use after ``run`` when the plugin won't be needed again, or before
+    re-loading an upgraded copy. Idempotent.
+    """
+    _purge_namespace(f"nomorals.plugins._loaded.{loaded.manifest.name}")
+    loaded._modules.clear()
+    _log.info("unloaded plugin %s", loaded.manifest.name)
+
+
+def _purge_namespace(namespace: str) -> None:
+    prefix = namespace + "."
+    for name in [n for n in sys.modules
+                 if n == namespace or n.startswith(prefix)]:
+        sys.modules.pop(name, None)
