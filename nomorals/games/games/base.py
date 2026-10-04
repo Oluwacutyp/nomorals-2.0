@@ -265,6 +265,30 @@ class MultiGame:
         """The winning player, "draw", or None (no winner)."""
         return None
 
+    def finish_won(self, room: Room, player: Player) -> bool | None | str:
+        """Decide this player's win/loss/draw outcome for finish payout.
+
+        Return True (win), False (loss), or None (draw) to settle the
+        outcome directly.  Return the string ``"winner"`` (the default)
+        to fall back to the standard ``winner()``-based derivation.
+
+        Never-ending games (``world``) settle a prosperous run as a win
+        instead of a draw; competitive games use ``winner()``.
+        """
+        return "winner"
+
+    def coin_payout(self, room: Room, player: Player, won: bool | None,
+                    score: int, difficulty: str, streak_after: int
+                    ) -> tuple[int, str] | None:
+        """Custom coin payout for this finish.
+
+        Return ``(coins, reason)`` to bypass
+        ``GameEconomy.coin_breakdown`` — e.g. a score-based settlement
+        that outgrows the standard win caps — or None (the default) for
+        the standard performance-based breakdown.
+        """
+        return None
+
     def score(self, room: Room, player: Player) -> int:
         """Numeric score for the ledger (per-game 'best')."""
         return 0

@@ -4,7 +4,8 @@ outlive a single game.
 * **world** — a continuing town that never ends: the room stays live
   between visits (the bridge resumes it instead of restarting), the
   simulation ticks once per visit, and the town you leave is the town
-  you come back to.
+  you come back to. Quitting settles the town as a completed run —
+  prosperity pays out in coins instead of the flat draw crumb.
 * **battle_arena** — turn-to-death combat where shop items are real
   gear (the engine consumes them from the player's inventory on close).
 * **escape_room** — cooperative puzzles, three strikes per lock, and a
@@ -45,6 +46,11 @@ BUILDINGS: dict[str, dict[str, Any]] = {
                "effect": "plague keeps its distance"},
     "granary": {"cost_g": 10, "cost_f": 4, "cost_t": 0,
                 "effect": "trade price +1"},
+    "tradepost": {"cost_g": 25, "cost_f": 0, "cost_t": 2,
+                  "effect": "a trade route — auto-sells surplus food daily"},
+    "wonder": {"cost_g": 200, "cost_f": 20, "cost_t": 5,
+               "effect": "a wonder of the age — renown beyond measure",
+               "requires_rank": 5},
 }
 
 #: four-season wheel — 10 days each. Farm yield by season.
@@ -69,11 +75,117 @@ TOWN_EVENTS: tuple[tuple[str, int, str], ...] = (
     ("taxday", 1, "tax collectors make their rounds — +2 gold per 10 people"),
 )
 
-#: population milestones — the town earns titles as it grows
-MILESTONES: tuple[tuple[int, str], ...] = (
-    (20, "the huts are a village now"),
-    (40, "the village is a town — the market ring is full"),
-    (60, "the town is a city — the walls ring with hammers"),
+#: town ranks — population thresholds the town climbs as it grows.
+#: The rank feeds the prosperity score, gates technologies and the
+#: wonder, and is announced with fanfare. Eight ranks, hamlet → legend.
+TOWN_RANKS: tuple[tuple[int, str, str], ...] = (
+    # (population, title, fanfare)
+    (8, "hamlet", "a few huts hold together — a hamlet"),
+    (20, "village", "the huts are a village now"),
+    (40, "town", "the village is a town — the market ring is full"),
+    (60, "city", "the town is a city — the walls ring with hammers"),
+    (90, "metropolis", "a metropolis — traders come from three lands away"),
+    (120, "capital", "the capital — banners fly from every tower"),
+    (160, "empire", "an empire in all but name"),
+    (220, "legend", "a legend sung by every bard alive"),
+)
+
+#: technologies — researched with `research <name>` for gold once the
+#: town reaches the required rank. Each one deepens the economy.
+TECHS: dict[str, dict[str, Any]] = {
+    "irrigation": {"cost_g": 30, "rank": 1,
+                   "effect": "+1 food/day per farm"},
+    "deep_mining": {"cost_g": 40, "rank": 2,
+                    "effect": "+2 gold per mine action"},
+    "guilds": {"cost_g": 50, "rank": 3,
+               "effect": "+1 gold/day per market"},
+    "medicine": {"cost_g": 60, "rank": 3,
+                 "effect": "plague immunity, faster growth"},
+    "engineering": {"cost_g": 80, "rank": 4,
+                    "effect": "building upgrades reach level 5, +1 tool per craft"},
+    "astronomy": {"cost_g": 100, "rank": 5,
+                  "effect": "golden ages last longer, richer caravans"},
+}
+
+#: building upgrade cap — each `upgrade <name>` raises one building
+#: type's level, multiplying its effects by (1 + 0.5 × level).
+UPGRADE_MAX = 3
+
+#: visitors and dilemmas — they don't resolve immediately. The event
+#: sets ``pending_choice`` and the player answers `1` / `2`
+#: (or `choose 1`). Other moves still work while a dilemma waits;
+#: it expires after 3 days.
+#: (name, weight, min_day, prompt, options)
+#: each option: (label, effects, result_text). Effects map a resource
+#: to a delta (negative = cost, must be affordable) plus special keys:
+#: mercenary_days / warded_days / golden_age (timers), quests_done,
+#: upgrade:<building> (free upgrade level), quest:<preset>, and the
+#: special:<name> hooks handled in code.
+CHOICE_EVENTS: tuple = (
+    ("refugees", 2, 1,
+     "a column of refugees begs at the gate — take them in?",
+     (("open the gates (−8 food)",
+       {"food": -8, "pop": 3, "happiness": 4, "quests_done": 1},
+       "the gates open — new mouths, new hands, new hope."),
+      ("turn them away",
+       {"happiness": -4},
+       "the gates stay shut. the town feels colder."))),
+    ("scholar", 2, 20,
+     "a traveling scholar offers star-charts and strange tales — host them for a night?",
+     (("host them (−6 food)",
+       {"food": -6, "gold": 20, "happiness": 4, "quests_done": 1},
+       "the scholar pays in star-charts — +20 gold, and stories for the winter."),
+      ("send them on",
+       {},
+       "the scholar bows and walks into the dusk."))),
+    ("mercenaries", 2, 15,
+     "a sellsword company offers its blades — hire them for 20 days?",
+     (("hire them (−25 gold)",
+       {"gold": -25, "mercenary_days": 20, "quests_done": 1},
+       "the company plants its banner on the wall — raiders will think twice."),
+      ("decline",
+       {},
+       "the captain shrugs and marches on."))),
+    ("healer", 1, 10,
+     "a healer offers warding herbs against the coughing sickness — buy a stock?",
+     (("buy the herbs (−15 gold)",
+       {"gold": -15, "warded_days": 20, "happiness": 3},
+       "the herbs hang in every doorway — plague will find no purchase here."),
+      ("decline",
+       {},
+       "the healer pockets the herbs and moves on."))),
+    ("artisan", 1, 25,
+     "a master artisan offers to improve your craft — commission a masterwork?",
+     (("commission it (−30 gold)",
+       {"gold": -30, "quests_done": 1, "special:artisan": 1},
+       ""),  # result names the upgraded building; built at offer time
+      ("decline",
+       {},
+       "the artisan finds richer patrons elsewhere."))),
+    ("tax_revolt", 1, 30,
+     "grumbling in the market — the taxes bite too hard. ease them, or crack down?",
+     (("ease the taxes (−10 gold)",
+       {"gold": -10, "happiness": 8},
+       "the market breathes again — the grumbling fades."),
+      ("crack down (+12 gold)",
+       {"gold": 12, "happiness": -6, "pop": -1},
+       "the collectors take their due. a family leaves in the night."))),
+    ("shrine", 2, 40,
+     "a pilgrim begs 12 food for the mountain shrine, within 8 days — accept the quest?",
+     (("accept the quest",
+       {"quest:shrine": 1},
+       "the pilgrim marks your name — lay food on the shrine stones within 8 days (use: tithe)."),
+      ("decline",
+       {},
+       "the pilgrim bows and climbs alone."))),
+    ("dragon", 1, 100,
+     "a dragon circles the fields — it demands 40 gold tribute, or a fight.",
+     (("pay the tribute (−40 gold)",
+       {"gold": -40, "happiness": 2},
+       "the dragon takes the gold and wheels away. the town exhales."),
+      ("fight it!",
+       {"special:dragon": 1},
+       ""))),  # result computed from the battle
 )
 
 
@@ -83,99 +195,245 @@ def season_of(day: int) -> str:
 
 class WorldGame(MultiGame):
     name = "world"
-    description = "a continuing town — seasons, events, and it just grows"
+    description = ("a continuing town — seasons, ranks, technologies, "
+                   "dilemmas, and it just grows")
     min_players = 1
     max_players = 3
     ai_seats = 0
     move_timeout = 0
     rules = ("Your town, one action at a time: farm (+food, more in "
              "autumn, less in winter), mine (+gold), craft (+tools), "
-             "trade (sell food), rest (+people, −food), or build "
-             "house|shed|farm|market|workshop|well|wall|temple|granary. "
-             "Four seasons turn every 10 days, and the town has a life "
-             "of its own — rain, caravans, festivals, droughts, plague, "
-             "raids. Leave and come back: the town keeps living.")
+             "trade (sell food), rest (+people, +happiness, −food), feast "
+             "(−food, +happiness), or build "
+             "house|shed|farm|market|workshop|well|wall|temple|granary|"
+             "tradepost|wonder. upgrade <name> improves a building type, "
+             "research <tech> unlocks irrigation, guilds, medicine and "
+             "more, tithe feeds an active shrine quest. Visitors bring "
+             "dilemmas — answer 1 or 2. Happiness drives productivity "
+             "and growth; golden ages double income. Eight ranks, hamlet "
+             "to legend. Four seasons turn every 10 days. Leave whenever "
+             "— your prosperity is settled in coins when you go.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         return {"day": 1, "pop": 8, "food": 24, "gold": 12, "tools": 3,
                 "buildings": {}, "max_pop": 10, "log": [],
-                "merchant_days": 0, "milestone": 0}
+                "merchant_days": 0, "rank": 0,
+                # prosperity systems
+                "happiness": 60,      # 0–100, drives productivity & growth
+                "upgrades": {},       # building -> town-wide upgrade level
+                "tech": [],           # researched technologies
+                "quests_done": 0,     # resolved dilemmas and quests
+                "golden_age": 0,      # days of double income remaining
+                "mercenary_days": 0,  # hired raid protection
+                "warded_days": 0,     # healer's plague protection
+                "vein_days": 0,       # deep-vein mining bonus
+                "pending_choice": None,  # dilemma awaiting an answer
+                "quest": None,        # active multi-day quest
+                "last_golden_age": -1000}
+
+    @staticmethod
+    def _norm(s: dict[str, Any]) -> dict[str, Any]:
+        """Fill defaults for saves from before the prosperity systems."""
+        s.setdefault("happiness", 60)
+        s.setdefault("upgrades", {})
+        s.setdefault("tech", [])
+        s.setdefault("quests_done", 0)
+        s.setdefault("golden_age", 0)
+        s.setdefault("mercenary_days", 0)
+        s.setdefault("warded_days", 0)
+        s.setdefault("vein_days", 0)
+        s.setdefault("pending_choice", None)
+        s.setdefault("quest", None)
+        s.setdefault("last_golden_age", -1000)
+        if "milestone" in s:  # pre-rank saves
+            s["rank"] = max(int(s.pop("milestone")),
+                            int(s.get("rank", 0)))
+        s.setdefault("rank", 0)
+        return s
 
     def setup(self, room, mind):
-        s = room.state
+        s = self._norm(room.state)
         if s.get("day"):
             return self._report(room)
         return ("your town wakes on day one, in spring — 8 people, 24 "
                 "food, 12 gold, 3 tools. farm · mine · craft · trade · "
-                "rest · build <name>. seasons turn, events roll, and "
-                "the town ticks after you act.")
+                "rest · feast · build <name> · upgrade <name> · "
+                "research <tech> · tithe. seasons turn, events roll, "
+                "visitors bring dilemmas — and the town ticks after you "
+                "act.")
 
     def _max_pop(self, room: Room) -> int:
         return 10 + 2 * room.state["buildings"].get("house", 0)
 
+    def _upgrade_cap(self, room: Room) -> int:
+        s = room.state
+        return 5 if "engineering" in s.get("tech", []) else UPGRADE_MAX
+
+    def _upgrade_mult(self, room: Room, name: str) -> float:
+        """Effect multiplier for a building type: 1 + 0.5 × level."""
+        return 1.0 + 0.5 * room.state.get("upgrades", {}).get(name, 0)
+
+    def _productivity(self, room: Room) -> float:
+        """Happiness drives output: 0.75× at 0% → 1.25× at 100%."""
+        return 0.75 + room.state.get("happiness", 60) / 200.0
+
+    def _income_mult(self, room: Room) -> float:
+        mult = self._productivity(room)
+        if room.state.get("golden_age", 0) > 0:
+            mult *= 2
+        return mult
+
     def _food_per_day(self, room: Room) -> int:
-        return 2 * room.state["buildings"].get("shed", 0) + \
-            3 * room.state["buildings"].get("farm", 0)
+        s = room.state
+        b = s["buildings"]
+        base = (2 * b.get("shed", 0) * self._upgrade_mult(room, "shed") +
+                3 * b.get("farm", 0) * self._upgrade_mult(room, "farm"))
+        if "irrigation" in s.get("tech", []):
+            base += 1 * b.get("farm", 0)
+        return int(base * self._productivity(room))
 
     def _gold_per_day(self, room: Room) -> int:
         """Buildings generate gold income — the town earns, not just events."""
-        b = room.state["buildings"]
+        s = room.state
+        b = s["buildings"]
         # market: trade hub, granary: surplus sales, workshop: tool sales,
         # temple: donations scale with population
-        income = (2 * b.get("market", 0) +
-                  1 * b.get("granary", 0) +
-                  1 * b.get("workshop", 0))
+        income = (2 * b.get("market", 0) * self._upgrade_mult(room, "market") +
+                  1 * b.get("granary", 0) * self._upgrade_mult(room, "granary") +
+                  1 * b.get("workshop", 0) * self._upgrade_mult(room, "workshop"))
+        if "guilds" in s.get("tech", []):
+            income += 1 * b.get("market", 0)
         # temple donations scale with town size
         if b.get("temple"):
-            income += max(1, room.state["pop"] // 10)
-        return income
+            income += max(1, s["pop"] // 10)
+        return int(income * self._income_mult(room))
+
+    def _trade_price(self, room: Room) -> int:
+        s = room.state
+        return (1 +
+                int(s["buildings"].get("market", 0) *
+                    self._upgrade_mult(room, "market")) +
+                s["buildings"].get("granary", 0) +
+                (2 if s["merchant_days"] > 0 else 0))
+
+    def _trade_routes(self, room: Room, events: list[str]) -> None:
+        """Each trade post auto-sells surplus food at market price."""
+        s = room.state
+        posts = s["buildings"].get("tradepost", 0)
+        if not posts:
+            return
+        reserve = s["pop"] * 2 + 5
+        surplus = s["food"] - reserve
+        if surplus <= 0:
+            return
+        price = self._trade_price(room)
+        sell = min(surplus, 4 * posts)
+        s["food"] -= sell
+        gain = sell * price
+        if s.get("golden_age", 0) > 0:
+            gain *= 2
+        s["gold"] += gain
+        events.append(f"trade routes carry {sell} food downriver — "
+                      f"+{gain} gold")
 
     def _mine_yield(self, room: Room) -> int:
         """Mine scales with progress — deeper shafts, better tools."""
-        day = room.state["day"]
+        s = room.state
+        day = s["day"]
         # +3 base, +1 per 75 days, +1 per workshop level (better picks)
-        return 3 + day // 75 + room.state["buildings"].get("workshop", 0)
+        y = 3 + day // 75 + s["buildings"].get("workshop", 0)
+        if "deep_mining" in s.get("tech", []):
+            y += 2
+        if s.get("vein_days", 0) > 0:
+            y += 3
+        return y
+
+    def _check_golden_age(self, room: Room, events: list[str]) -> None:
+        """A happy, sizable town can enter a golden age: double income."""
+        s = room.state
+        if (s.get("golden_age", 0) <= 0 and s["happiness"] >= 75 and
+                s["pop"] >= 30 and
+                s["day"] - s.get("last_golden_age", -1000) >= 40):
+            dur = 7 if "astronomy" in s.get("tech", []) else 5
+            s["golden_age"] = dur
+            s["last_golden_age"] = s["day"]
+            s["happiness"] = min(100, s["happiness"] + 10)
+            events.append(f"🌟 GOLDEN AGE — {dur} days of double income! "
+                          f"the town rejoices.")
 
     def _report(self, room: Room) -> str:
-        s = room.state
+        s = self._norm(room.state)
         b = ", ".join(f"{k}×{v}" for k, v in s["buildings"].items()) \
             or "none yet"
         season = season_of(s["day"])
         days_left = SEASON_DAYS - ((s["day"] - 1) % SEASON_DAYS)
+        rank_title = TOWN_RANKS[s["rank"]][1]
         lines = [f"day {s['day']} ({season}, {days_left} days in) — "
+                 f"{rank_title} · "
                  f"population {s['pop']}/{self._max_pop(room)} · "
                  f"food {s['food']} · gold {s['gold']} · tools "
-                 f"{s['tools']}",
+                 f"{s['tools']} · happiness {s['happiness']}%",
                  f"buildings: {b} · yield: +{self._food_per_day(room)} "
                  f"food/day, +{self._gold_per_day(room)} gold/day · eat "
                  f"1/person/day · farm pays "
                  f"{FARM_YIELD[season]} + farm levels"]
+        if s["upgrades"]:
+            lines.append("upgrades: " + ", ".join(
+                f"{k} lv{v}" for k, v in sorted(s["upgrades"].items())))
+        if s["tech"]:
+            lines.append("tech: " + ", ".join(s["tech"]))
+        if s["golden_age"] > 0:
+            lines.append(f"🌟 GOLDEN AGE — double income for "
+                         f"{s['golden_age']} more day(s)")
         if s["merchant_days"] > 0:
             lines.append(f"merchant in town — trade pays +2 for "
                          f"{s['merchant_days']} more day(s)")
+        if s["mercenary_days"] > 0:
+            lines.append(f"⚔️ sellswords on the wall — "
+                         f"{s['mercenary_days']} day(s) of raid cover left")
+        if s["warded_days"] > 0:
+            lines.append(f"🌿 warding herbs — plague cover for "
+                         f"{s['warded_days']} more day(s)")
+        q = s.get("quest")
+        if q:
+            lines.append(f"⛩️ quest: {q['name']} — {q['have']}/{q['need']} "
+                         f"food, {q['days_left']} day(s) left (tithe)")
+        pc = s.get("pending_choice")
+        if pc:
+            lines.append(f"⚖️ {pc['prompt']}")
+            for i, (label, _e, _r) in enumerate(pc["options"], 1):
+                lines.append(f"   {i}. {label}")
+            lines.append("   answer with 1 or 2 — the dilemma waits, "
+                         "other moves still work")
         for line in s["log"][-4:]:
             lines.append(f"  {line}")
         lines.append("your move: farm · mine · craft · trade · rest · "
-                     "build <name>")
+                     "feast · build <name> · upgrade <name> · "
+                     "research <tech> · tithe")
         return "\n".join(lines)
 
     def _tick(self, room: Room) -> list[str]:
-        s = room.state
+        s = self._norm(room.state)
         events: list[str] = []
         old_season = season_of(s["day"])
         s["day"] += 1
+        # prosperity recognized: golden ages start before income lands
+        self._check_golden_age(room, events)
+        # daily yields
         s["food"] += self._food_per_day(room)
-        # buildings generate gold income every day
         gold_income = self._gold_per_day(room)
         if gold_income > 0:
             s["gold"] += gold_income
             events.append(f"the town's enterprises bring +{gold_income} gold")
+        # trade routes move surplus food downriver
+        self._trade_routes(room, events)
         # a season turning is a town-wide event
         if season_of(s["day"]) != old_season:
             events.append(f"the season turns — {season_of(s['day'])} "
                           f"arrives.")
         # the town's own life: one weighted roll per tick
         self._roll_event(room, events)
+        # upkeep: the town eats
         eat = s["pop"]
         s["food"] -= eat
         if s["food"] < 0:
@@ -184,43 +442,135 @@ class WorldGame(MultiGame):
                 lost = max(1, lost // 2)  # the well stretches the food
             s["pop"] = max(1, s["pop"] - lost)
             s["food"] = 0
+            s["happiness"] = max(0, s["happiness"] - 10)
             events.append(f"famine — {lost} left the town")
         elif (s["food"] >= s["pop"] * 1.3 and
               s["pop"] < self._max_pop(room) and
+              s["happiness"] >= 45 and
               season_of(s["day"]) != "winter"):
-            if s["day"] % 2 == 0:
+            # a miserable town doesn't attract families
+            if "medicine" in s["tech"] or s["day"] % 2 == 0:
                 s["pop"] += 1
                 events.append("a family moved in (+1)")
-        if s["merchant_days"] > 0:
-            s["merchant_days"] -= 1
-        # milestones: the town earns titles
-        while (s["milestone"] < len(MILESTONES) and
-               s["pop"] >= MILESTONES[s["milestone"]][0]):
-            events.append("🏆 " + MILESTONES[s["milestone"]][1])
-            s["milestone"] += 1
+        # timers tick down
+        for key in ("merchant_days", "mercenary_days", "warded_days",
+                    "vein_days", "golden_age"):
+            if s[key] > 0:
+                s[key] -= 1
+        # happiness drifts toward contentment (higher with a wonder)
+        target = 75 if s["buildings"].get("wonder") else 55
+        if s["happiness"] < target:
+            s["happiness"] += 1
+        elif s["happiness"] > target:
+            s["happiness"] -= 1
+        # quest progress and expiry
+        self._quest_tick(room, events)
+        # ranks: the town earns titles
+        while (s["rank"] + 1 < len(TOWN_RANKS) and
+               s["pop"] >= TOWN_RANKS[s["rank"] + 1][0]):
+            s["rank"] += 1
+            events.append("🏆 " + TOWN_RANKS[s["rank"]][2])
+        # unanswered dilemmas expire
+        pc = s.get("pending_choice")
+        if pc and s["day"] > pc["expires"]:
+            s["pending_choice"] = None
+            events.append("the moment passes — the visitors move on.")
         s["log"].extend(events)
         s["log"] = s["log"][-12:]
         return events
 
+    def _quest_tick(self, room: Room, events: list[str]) -> None:
+        """Advance the active quest: completion pays, expiry stings."""
+        s = room.state
+        q = s.get("quest")
+        if not q:
+            return
+        done_msg = self._quest_progress(room)
+        if done_msg:
+            events.append(done_msg)
+            return
+        q["days_left"] -= 1
+        if q["days_left"] <= 0:
+            s["quest"] = None
+            s["happiness"] = max(0, s["happiness"] - 4)
+            events.append("the shrine's patience runs out — the quest "
+                          "fails.")
+
+    def _quest_progress(self, room: Room) -> str | None:
+        """Pay out a fulfilled quest. Returns the announcement, or None."""
+        s = room.state
+        q = s.get("quest")
+        if not q or q["have"] < q["need"]:
+            return None
+        s["gold"] += q["reward_g"]
+        s["quests_done"] += 1
+        s["happiness"] = min(100, s["happiness"] + 6)
+        s["quest"] = None
+        return (f"⛩️ the shrine accepts your offering — "
+                f"+{q['reward_g']} gold, and the pilgrim's blessing.")
+
+    def _event_table(self, room: Room) -> list[tuple]:
+        """The weighted roll table for this tick.
+
+        Entries are (kind, name, weight, flavor). ``simple`` events
+        resolve immediately; ``choice`` events set a pending dilemma.
+        Seasonal, progress, and mood gates keep the town's life fresh
+        from day 1 to day 1000.
+        """
+        s = room.state
+        day = s["day"]
+        season = season_of(day)
+        table = [("simple", name, w, flavor)
+                 for name, w, flavor in TOWN_EVENTS]
+        table.append(("simple", "storm", 2, ""))
+        table.append(("simple", "bountiful", 2, ""))
+        if season == "autumn":
+            table.append(("simple", "harvest_moon", 2, ""))
+        if day >= 60:
+            table.append(("simple", "deep_vein", 1, ""))
+        if day >= 40:
+            table.append(("simple", "flood", 1, ""))
+        if day >= 50:
+            table.append(("simple", "earthquake", 1, ""))
+        if season == "summer":
+            # droughts bite harder in summer: double the weight
+            table = [e for e in table if e[1] != "drought"] + \
+                [("simple", "drought", 4,
+                  "the summer heat cracks the fields — −4 food")]
+        if not s.get("pending_choice"):
+            # one dilemma at a time
+            for name, weight, min_day, *_ in CHOICE_EVENTS:
+                if day < min_day:
+                    continue
+                if name == "tax_revolt" and s["happiness"] >= 50:
+                    continue  # content towns don't revolt
+                table.append(("choice", name, weight, ""))
+        return table
+
     def _roll_event(self, room: Room, events: list[str]) -> None:
         s = room.state
         rng = room.rng()
-        table = list(TOWN_EVENTS)
-        if season_of(s["day"]) == "summer":
-            # droughts bite harder in summer: double the weight
-            table = [e for e in table if e[0] != "drought"] + \
-                    [("drought", 4, "the summer heat cracks the fields — −4 food")]
-        total_w = sum(w for _, w, _ in table)
+        table = self._event_table(room)
+        total_w = sum(w for _, _, w, _ in table)
         roll = rng.randrange(total_w)
         pick = None
-        for name, w, flavor in table:
+        for kind, name, w, flavor in table:
             roll -= w
             if roll < 0:
-                pick = (name, flavor)
+                pick = (kind, name, flavor)
                 break
         if pick is None:
             return
-        name, flavor = pick
+        kind, name, flavor = pick
+        if kind == "choice":
+            self._offer_choice(room, name, events)
+            return
+        self._apply_simple_event(room, rng, name, flavor, events)
+
+    def _apply_simple_event(self, room: Room, rng: random.Random,
+                            name: str, flavor: str,
+                            events: list[str]) -> None:
+        s = room.state
         b = s["buildings"]
         # event rewards scale with progress (day // 50 bonus)
         progress_bonus = s["day"] // 50
@@ -228,9 +578,12 @@ class WorldGame(MultiGame):
             s["food"] += 5
         elif name == "caravan":
             gain = 6 + progress_bonus * 2
+            if "astronomy" in s.get("tech", []):
+                gain += 4
             s["gold"] += gain
             flavor = f"a caravan crosses the gate — +{gain} gold"
         elif name == "festival":
+            s["happiness"] = min(100, s["happiness"] + 5)
             if s["pop"] < self._max_pop(room) and s["food"] >= 2:
                 s["pop"] += 1
                 s["food"] -= 2
@@ -245,34 +598,193 @@ class WorldGame(MultiGame):
         elif name == "taxday":
             gain = max(2, (s["pop"] // 10) * 2 + progress_bonus)
             s["gold"] += gain
+            s["happiness"] = max(0, s["happiness"] - 3)
             flavor = f"tax collectors make their rounds — +{gain} gold"
         elif name == "drought":
             s["food"] = max(0, s["food"] - 4)
         elif name == "merchant":
             s["merchant_days"] = 3
         elif name == "plague":
-            if b.get("temple"):
-                events.append("the plague comes — and the temple keeps "
-                               "it at the gate.")
+            if b.get("temple") or "medicine" in s.get("tech", []):
+                events.append("the plague comes — and the town's wards "
+                              "keep it at the gate.")
+                return
+            if s["warded_days"] > 0:
+                events.append("the plague comes — the healer's herbs "
+                              "turn it aside.")
                 return
             lost = min(2, s["pop"] - 1)
+            s["happiness"] = max(0, s["happiness"] - 8)
             if lost > 0:
                 s["pop"] -= lost
                 events.append(f"the plague takes {lost}.")
                 return
         elif name == "raid":
+            if s["mercenary_days"] > 0:
+                events.append("raiders try the gate — the hired swords "
+                              "send them running.")
+                return
             if b.get("wall"):
+                s["happiness"] = max(0, s["happiness"] - 2)
                 events.append("raiders try the wall — and bounce off.")
                 return
             lost = min(6, s["gold"])
             s["gold"] -= lost
+            s["happiness"] = max(0, s["happiness"] - 5)
             flavor = f"raiders take {lost} gold"
+        elif name == "storm":
+            loss = 1 if b.get("workshop") else 2
+            s["tools"] = max(0, s["tools"] - loss)
+            flavor = f"a storm tears through the yards — −{loss} tools"
+        elif name == "bountiful":
+            gain = 4 + progress_bonus
+            s["food"] += 8
+            s["gold"] += gain
+            flavor = f"a bountiful stretch — +8 food, +{gain} gold"
+        elif name == "harvest_moon":
+            s["food"] += 10
+            flavor = "the harvest moon hangs huge — +10 food"
+        elif name == "deep_vein":
+            s["vein_days"] = 5
+            flavor = "the miners hit a deep vein — mining pays +3 for 5 days"
+        elif name == "flood":
+            loss = 4 if b.get("well") else 8
+            s["food"] = max(0, s["food"] - loss)
+            flavor = f"the river floods — −{loss} food"
+        elif name == "earthquake":
+            if "engineering" in s.get("tech", []) or \
+                    b.get("wall", 0) >= 2:
+                events.append("the earth shakes — the engineered "
+                              "foundations hold. nothing falls.")
+                return
+            victims = [k for k, v in b.items() if v > 0 and k != "wonder"]
+            if victims:
+                fallen = rng.choice(victims)
+                b[fallen] -= 1
+                if b[fallen] <= 0:
+                    del b[fallen]
+                events.append(f"the earth shakes — a {fallen} collapses!")
+                return
+            events.append("the earth shakes — but there's little to break.")
+            return
         events.append(flavor)
 
-    def on_move(self, room, player, text, mind):
+    # ── dilemmas: visitors with choices ──────────────────────────────────
+    def _offer_choice(self, room: Room, name: str,
+                      events: list[str]) -> None:
         s = room.state
+        for cname, _w, _md, prompt, options in CHOICE_EVENTS:
+            if cname == name:
+                break
+        else:
+            return
+        if name == "artisan":
+            options = self._artisan_options(room, options)
+        s["pending_choice"] = {"name": name, "prompt": prompt,
+                               "options": options,
+                               "expires": s["day"] + 3}
+        events.append(f"⚖️ {prompt} (answer 1 or 2)")
+
+    def _artisan_options(self, room: Room, options: tuple) -> tuple:
+        """Bake the concrete masterwork into the artisan's offer."""
+        s = room.state
+        owned = [(k, v) for k, v in s["buildings"].items()
+                 if v > 0 and k != "wonder"]
+        if not owned:
+            return options
+        name = max(owned, key=lambda kv: kv[1])[0]
+        _label, _effects, _result = options[0]
+        effects = {"gold": -30, "quests_done": 1, f"upgrade:{name}": 1}
+        result = (f"the artisan's masterwork raises your {name}s a full "
+                  f"level.")
+        return ((f"commission it (−30 gold, {name} +1 level)",
+                 effects, result), options[1])
+
+    def _resolve_choice(self, room: Room, idx: int) -> str:
+        s = room.state
+        pc = s.get("pending_choice")
+        if pc is None or idx >= len(pc["options"]):
+            return "the moment has passed."
+        if pc["name"] == "dragon" and idx == 1:
+            return self._dragon_fight(room)
+        label, effects, result = pc["options"][idx]
+        problem = self._can_afford(room, effects)
+        if problem:
+            return f"you can't — {problem}."
+        self._apply_effects(room, effects)
+        s["pending_choice"] = None
+        return f"⚖️ {result}"
+
+    def _dragon_fight(self, room: Room) -> str:
+        s = room.state
+        s["pending_choice"] = None
+        if s["buildings"].get("wall", 0) >= 2 or s["mercenary_days"] > 0:
+            s["gold"] += 80
+            s["quests_done"] += 1
+            s["happiness"] = min(100, s["happiness"] + 6)
+            return ("⚖️ the town fights as one — ballistae on the wall, "
+                    "sellswords in the square — and the dragon falls! "
+                    "its hoard: +80 gold.")
+        lost_g = min(30, s["gold"])
+        s["gold"] -= lost_g
+        s["pop"] = max(1, s["pop"] - 4)
+        s["happiness"] = max(0, s["happiness"] - 8)
+        return ("⚖️ the dragon is stronger — it takes "
+                f"{lost_g} gold and 4 souls before it tires of the game.")
+
+    def _can_afford(self, room: Room, effects: dict[str, Any]) -> str | None:
+        """None if the choice's costs are affordable, else a reason."""
+        s = room.state
+        if effects.get("food", 0) < 0 and s["food"] < -effects["food"]:
+            return "not enough food"
+        if effects.get("gold", 0) < 0 and s["gold"] < -effects["gold"]:
+            return "not enough gold"
+        if effects.get("pop", 0) < 0 and s["pop"] + effects["pop"] < 1:
+            return "too few people left"
+        return None
+
+    def _apply_effects(self, room: Room, effects: dict[str, Any]) -> None:
+        s = room.state
+        for key, val in effects.items():
+            if key == "food":
+                s["food"] = max(0, s["food"] + int(val))
+            elif key == "gold":
+                s["gold"] = max(0, s["gold"] + int(val))
+            elif key == "pop":
+                s["pop"] = max(1, min(self._max_pop(room),
+                                      s["pop"] + int(val)))
+            elif key == "happiness":
+                s["happiness"] = max(0, min(100, s["happiness"] + int(val)))
+            elif key == "quests_done":
+                s["quests_done"] = max(0, s["quests_done"] + int(val))
+            elif key in ("mercenary_days", "warded_days", "golden_age"):
+                s[key] = max(0, s[key] + int(val))
+            elif key.startswith("upgrade:"):
+                name = key.split(":", 1)[1]
+                cap = self._upgrade_cap(room)
+                s["upgrades"][name] = min(
+                    cap, int(s["upgrades"].get(name, 0)) + int(val))
+            elif key == "quest:shrine":
+                s["quest"] = {"name": "offering for the mountain shrine",
+                              "need": 12, "have": 0, "days_left": 8,
+                              "reward_g": 50}
+            # special:artisan is baked into concrete upgrade: effects at
+            # offer time; special:dragon resolves in _dragon_fight.
+
+    def on_move(self, room, player, text, mind):
+        s = self._norm(room.state)
         t = text.strip().lower()
         out: list[str] = []
+        # a waiting dilemma: 1 / 2 (or `choose 1`) answers it; anything
+        # else plays on and the dilemma keeps waiting (3 days)
+        pc = s.get("pending_choice")
+        if pc:
+            m = re.fullmatch(r"(?:choose\s+)?([12])", t)
+            if m:
+                out.append(self._resolve_choice(room, int(m.group(1)) - 1))
+                out.extend(self._tick(room))
+                out.append(self._report(room))
+                return out
         if t == "farm":
             gain = (FARM_YIELD[season_of(s["day"])] +
                     s["buildings"].get("farm", 0))
@@ -285,6 +797,8 @@ class WorldGame(MultiGame):
             out.append(f"the mine gives +{gain} gold.")
         elif t == "craft":
             bonus = s["buildings"].get("workshop", 0)
+            if "engineering" in s["tech"]:
+                bonus += 1
             if s["gold"] >= 2 and s["tools"] < 12:
                 s["gold"] -= 2
                 s["tools"] += 1 + bonus
@@ -294,9 +808,7 @@ class WorldGame(MultiGame):
                            "tool shed (12 max).")
         elif t == "trade":
             if s["food"] >= 5:
-                price = (1 + s["buildings"].get("market", 0) +
-                         s["buildings"].get("granary", 0) +
-                         (2 if s["merchant_days"] > 0 else 0))
+                price = self._trade_price(room)
                 sold = min(10, s["food"] - 2)
                 s["food"] -= sold
                 s["gold"] += sold * price
@@ -309,16 +821,86 @@ class WorldGame(MultiGame):
             if s["food"] >= 2 and s["pop"] < self._max_pop(room):
                 s["food"] -= 2
                 s["pop"] += 1
-                out.append("the doors are open — +1 person (−2 food).")
+                s["happiness"] = min(100, s["happiness"] + 2)
+                out.append("the doors are open — +1 person, +2 happiness "
+                           "(−2 food).")
             elif s["pop"] >= self._max_pop(room):
                 out.append("the town is full — build a house first.")
             else:
                 out.append("resting costs 2 food you don't have.")
+        elif t == "feast":
+            if s["food"] >= 12:
+                s["food"] -= 10
+                s["happiness"] = min(100, s["happiness"] + 8)
+                out.append("a feast under the lanterns — +8 happiness "
+                           "(−10 food).")
+            else:
+                out.append("a feast needs 12 food on the table.")
+        elif t == "tithe":
+            q = s.get("quest")
+            if not q:
+                out.append("no quest waits for an offering.")
+            elif s["food"] >= 6:
+                s["food"] -= 6
+                q["have"] += 6
+                out.append(f"you lay 6 food on the shrine stones "
+                           f"({q['have']}/{q['need']}).")
+                done = self._quest_progress(room)
+                if done:
+                    out.append(done)
+            else:
+                out.append("a tithe needs 6 food to spare.")
+        elif t.startswith("upgrade "):
+            name = t[8:].strip()
+            spec = BUILDINGS.get(name)
+            count = s["buildings"].get(name, 0)
+            if spec is None or count == 0:
+                out.append("upgradeable: " +
+                           ", ".join(k for k, v in s["buildings"].items()
+                                     if v > 0) or "build something first.")
+            else:
+                level = s["upgrades"].get(name, 0)
+                cap = self._upgrade_cap(room)
+                if level >= cap:
+                    out.append(f"{name} is at max level ({cap}).")
+                else:
+                    cost_g = spec["cost_g"] * (level + 1)
+                    cost_t = spec["cost_t"] + level
+                    if s["gold"] >= cost_g and s["tools"] >= cost_t:
+                        s["gold"] -= cost_g
+                        s["tools"] -= cost_t
+                        s["upgrades"][name] = level + 1
+                        mult = 1 + 0.5 * (level + 1)
+                        out.append(f"{name} rises to level {level + 1} — "
+                                   f"effects ×{mult:g} "
+                                   f"(−{cost_g}g, −{cost_t}t).")
+                    else:
+                        out.append(f"upgrading {name} needs {cost_g}g, "
+                                   f"{cost_t}t.")
+        elif t.startswith("research "):
+            name = t[9:].strip()
+            spec = TECHS.get(name)
+            if spec is None:
+                out.append("researchable: " + ", ".join(TECHS) + ".")
+            elif name in s["tech"]:
+                out.append(f"{name} is already researched.")
+            elif s["rank"] < spec["rank"]:
+                need = TOWN_RANKS[spec["rank"]][1]
+                out.append(f"{name} needs a {need} — grow the town first.")
+            elif s["gold"] >= spec["cost_g"]:
+                s["gold"] -= spec["cost_g"]
+                s["tech"].append(name)
+                out.append(f"📚 {name} researched — {spec['effect']}.")
+            else:
+                out.append(f"{name} needs {spec['cost_g']}g.")
         elif t.startswith("build "):
             name = t[6:].strip()
             spec = BUILDINGS.get(name)
             if spec is None:
                 out.append("buildable: " + ", ".join(BUILDINGS) + ".")
+            elif spec.get("requires_rank", 0) > s["rank"]:
+                need = TOWN_RANKS[spec["requires_rank"]][1]
+                out.append(f"a {name} needs a {need} — grow the town first.")
             elif s["gold"] >= spec["cost_g"] and s["food"] >= spec["cost_f"] \
                     and s["tools"] >= spec["cost_t"]:
                 s["gold"] -= spec["cost_g"]
@@ -326,13 +908,19 @@ class WorldGame(MultiGame):
                 s["tools"] -= spec["cost_t"]
                 s["buildings"][name] = \
                     int(s["buildings"].get(name, 0)) + 1
-                out.append(f"a {name} rises — {spec['effect']}.")
+                if name == "wonder":
+                    s["happiness"] = min(100, s["happiness"] + 15)
+                    out.append("a WONDER rises over the town — the age "
+                               "will remember this. +15 happiness.")
+                else:
+                    out.append(f"a {name} rises — {spec['effect']}.")
             else:
                 out.append(f"a {name} needs {spec['cost_g']}g, "
                            f"{spec['cost_f']}f, {spec['cost_t']}t.")
         else:
-            out.append("farm · mine · craft · trade · rest · "
-                       "build <name>.")
+            out.append("farm · mine · craft · trade · rest · feast · "
+                       "build <name> · upgrade <name> · research <tech> · "
+                       "tithe.")
         out.extend(self._tick(room))
         out.append(self._report(room))
         return out
@@ -343,10 +931,57 @@ class WorldGame(MultiGame):
     def is_over(self, room):
         return False  # the town doesn't end
 
+    def finish_won(self, room, player):
+        """Leaving the town settles it as a completed run — a win.
+
+        A never-ending game has no final victor; the prosperity the
+        town reached is the result, and it pays like one.
+        """
+        return True
+
+    def coin_payout(self, room, player, won, score, difficulty,
+                    streak_after):
+        """Prosperity settlement: base win pay plus an *uncapped* share
+        of the town's score — a 360-day thriving town pays hundreds,
+        not the flat draw crumb."""
+        from ..economy import GameEconomy
+        base = 40
+        prosperity = max(0, int(score)) // 10
+        mult = GameEconomy.DIFFICULTY_COIN_MULT.get(
+            str(difficulty or "normal").strip().lower(), 1.0)
+        subtotal = int(round((base + prosperity) * mult))
+        streak_bonus = GameEconomy.streak_bonus(streak_after)
+        total = subtotal + streak_bonus
+        parts = [f"town settled {base}", f"prosperity +{prosperity}",
+                 f"x{mult:g} {difficulty}"]
+        if streak_bonus:
+            parts.append(f"streak +{streak_bonus}")
+        return total, " + ".join(parts)
+
+    def final_message(self, room, mind):
+        s = self._norm(room.state)
+        title = TOWN_RANKS[s["rank"]][1]
+        n_buildings = sum(s["buildings"].values())
+        return (f"🏁 the {title} closes its gates after {s['day']} days — "
+                f"population {s['pop']}, {n_buildings} buildings, "
+                f"{len(s['tech'])} technologies, {s['quests_done']} "
+                f"quests completed. final prosperity score: "
+                f"{self.score(room, None)}.")
+
     def score(self, room, player):
-        s = room.state
-        return (s["pop"] + sum(s["buildings"].values()) * 2 +
-                s.get("milestone", 0) * 10)
+        """Prosperity score: days, people, buildings, stockpiles, rank,
+        technologies, quests, and upgrades all count. A 360-day
+        thriving town scores in the thousands."""
+        s = self._norm(room.state)
+        return (s["day"] * 2 +
+                s["pop"] * 3 +
+                sum(s["buildings"].values()) * 5 +
+                s["gold"] // 10 +
+                s["food"] // 20 +
+                s["rank"] * 25 +
+                len(s["tech"]) * 30 +
+                s["quests_done"] * 15 +
+                sum(s["upgrades"].values()) * 10)
 
 
 # ── battle arena ─────────────────────────────────────────────────────────────

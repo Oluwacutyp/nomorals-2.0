@@ -943,17 +943,7 @@ class GameEngine:
                 for p in list(room.players):
                     if p.is_ai:
                         continue
-                    won = None
-                    if winner == "draw":
-                        won = None
-                    elif winner == "all":
-                        # co-op victory (raid): every human at the
-                        # table won — full win credit, streaks move
-                        won = True
-                    elif isinstance(winner, Player):
-                        won = (winner.key == p.key)
-                    elif winner is None:
-                        won = None
+                    won = self._settle_won(game, room, p, winner)
                     points = GameEconomy.reward_points(won, game.score(room, p))
                     score = game.score(room, p)
                     try:
@@ -966,9 +956,9 @@ class GameEngine:
                         streak_after = pre.streak + 1 if won is True else pre.streak
                     except Exception:  # noqa: BLE001
                         streak_after = 1 if won is True else 0
-                    coins, coin_why = GameEconomy.coin_breakdown(
-                        won, score=score, difficulty=difficulty,
-                        streak_after=streak_after)
+                    coins, coin_why = self._settle_coins(
+                        game, room, p, won, score, difficulty,
+                        streak_after)
                     # boosters: coin charm is consumed on use
                     try:
                         prof_items = self.store.get(p.key).items
@@ -1096,6 +1086,58 @@ class GameEngine:
             if humans:
                 rematch_mem = (room.game, humans, room.kind)
         return msgs, rematch_mem
+
+    @staticmethod
+    def _settle_won(game: MultiGame, room: Room, player: Player,
+                    winner: Player | str | None) -> bool | None:
+        """Per-player win/loss/draw outcome for finish payout.
+
+        Games may settle the outcome themselves via ``finish_won()`` —
+        never-ending games like ``world`` treat a prosperous run as a
+        win instead of a draw.  Everything else derives from
+        ``winner()`` exactly as before.
+        """
+        try:
+            hook = game.finish_won(room, player)
+        except Exception:  # noqa: BLE001
+            _log.debug("finish_won hook failed", exc_info=True)
+            hook = "winner"
+        if hook is True or hook is False or hook is None:
+            return hook
+        # default: the winner()-based derivation
+        if winner == "draw":
+            return None
+        if winner == "all":
+            # co-op victory (raid): every human at the table won —
+            # full win credit, streaks move
+            return True
+        if isinstance(winner, Player):
+            return winner.key == player.key
+        return None
+
+    @staticmethod
+    def _settle_coins(game: MultiGame, room: Room, player: Player,
+                      won: bool | None, score: int, difficulty: str,
+                      streak_after: int) -> tuple[int, str]:
+        """Coin payout for a finish.
+
+        Games may take over via ``coin_payout()`` — e.g. ``world``
+        settles prosperity with an uncapped score share.  Everything
+        else uses the standard ``GameEconomy.coin_breakdown``.
+        """
+        try:
+            custom = game.coin_payout(room, player, won=won, score=score,
+                                      difficulty=difficulty,
+                                      streak_after=streak_after)
+        except Exception:  # noqa: BLE001
+            _log.debug("coin_payout hook failed", exc_info=True)
+            custom = None
+        if custom is not None:
+            coins, why = custom
+            return max(0, int(coins)), str(why)
+        return GameEconomy.coin_breakdown(
+            won, score=score, difficulty=difficulty,
+            streak_after=streak_after)
 
     def rematch(self, chat_key: str) -> tuple[Room | None, list[str]]:
         """Start the last finished game again with the same humans.
