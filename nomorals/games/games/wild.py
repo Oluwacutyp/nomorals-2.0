@@ -603,10 +603,18 @@ class TicTacToeGame(MultiGame):
 
     def score(self, room, player):
         s = room.state
-        if s.get("winner") == "X" and not player.is_ai:
-            return 1
-        if s.get("winner") == "draw":
+        if player.is_ai:
             return 0
+        if s.get("winner") == "X":
+            # beating the perfect house (normal+) is legendary; on easy
+            # it's still an achievement — faster wins pay more.
+            base = 100 if self.difficulty(room) != "easy" else 25
+            speed = max(0, 9 - s.get("moves", 9)) * 2
+            return base + speed
+        if s.get("winner") == "draw":
+            # holding the perfect house to a draw is the ceiling on
+            # normal+ — worth real points.
+            return 15
         return 0
 
     def describe_state(self, room):

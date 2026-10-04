@@ -65,6 +65,8 @@ class RuntimeGamesMixin:
             lines.append(engine.list_games())
             lines.append("  /game <name> — start · /game rematch — run it back")
             lines.append("  /game <name> [easy|normal|hard|expert] — AI/puzzle difficulty")
+            lines.append("  /game <name> [daily|timed|<variant>] — modes & mastery unlocks")
+            lines.append("  /mastery — your per-game mastery tiers")
             lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
             lines.append("  /pvp · /pvp @user — 1v1 PvP lobby or DM-to-DM challenge")
             lines.append("  /raid — team up against the raid boss")
@@ -159,6 +161,7 @@ class RuntimeGamesMixin:
             # "/hangman daily" — same word for everyone, all day
             # "/game case timed" — countdown mode with a speed bonus
             # "/game connect4 hard" — AI/puzzle difficulty
+            # "/game gomoku big" — mastery-gated variant (see game.variants)
             words = [p.lower() for p in parts[1:]]
             daily = "daily" in words
             timed = "timed" in words
@@ -166,10 +169,16 @@ class RuntimeGamesMixin:
                 (w for w in words
                  if w in ("easy", "normal", "hard", "expert")),
                 "normal")
+            game_def = engine.games[verb]
+            variant = next(
+                (w for w in words
+                 if w in getattr(game_def, "variants", {})),
+                "")
             try:
                 room, msgs = engine.start(chat_key, verb, player, kind=kind,
                                           daily=daily, timed=timed,
-                                          difficulty=difficulty)
+                                          difficulty=difficulty,
+                                          variant=variant)
             except ValueError as exc:
                 return str(exc)
             if msgs and not msgs[0].startswith("🎮"):
@@ -180,6 +189,16 @@ class RuntimeGamesMixin:
                 diff_line += " · 📅 daily"
             if timed:
                 diff_line += " · ⏱️ timed"
+            if variant:
+                diff_line += f" · 🃏 {variant}"
+            # mastery tier: shown at every game start
+            try:
+                from ...games.mastery import (get_one_game_stats,
+                                              mastery_line)
+                diff_line += " · " + mastery_line(
+                    verb, get_one_game_stats(engine.db, player.key, verb))
+            except Exception:  # noqa: BLE001
+                pass
             body = "\n".join(msgs) or engine.describe(room)
             return f"{diff_line}\n{body}"
         return (f"unknown game {verb!r} — /game list to see the table.")
@@ -635,6 +654,32 @@ class RuntimeGamesMixin:
         from ...games.daily import daily_hunt_status
         engine = self._game_engine()
         return daily_hunt_status(engine.db, player.key)
+
+    def _control_mastery(self, tail: str, *, player: Any = None) -> str:
+        """Per-game mastery tiers: /mastery | /mastery <game>.
+
+        Every non-arena game tracks a mastery rank (Novice → Legend,
+        with game-specific names like sudoku's Solver → Grandmaster)
+        from cumulative wins, games played, and best score.  Tiers gate
+        unlockables — harder sudoku boards, bigger gomoku boards, the
+        2048 marathon, long hangman words, trivia sudden death.
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here — run this from the chat where you play."
+        from ...games.mastery import (describe_game_mastery,
+                                      describe_mastery)
+        engine = self._game_engine()
+        want = (tail or "").strip().lower()
+        if want:
+            game = engine.games.get(want)
+            if game is None:
+                return (f"no game {want!r} — /mastery alone lists your "
+                        f"tiers.")
+            return describe_game_mastery(engine.db, player.key, game.name)
+        return describe_mastery(engine.db, player.key, player.name)
 
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:

@@ -159,19 +159,45 @@ class SudokuGame(MultiGame):
              "digit is a strike — three strikes and the puzzle beats "
              "you. 'hint' spends a Hint Scroll (see /shop) to reveal a "
              "cell. Pick the puzzle: /game sudoku "
-             "[easy|normal|hard|expert].")
+             "[easy|normal|hard|expert]. hard unlocks at Tactician "
+             "mastery, expert at Expert mastery — /mastery to check "
+             "yours. /game sudoku timed adds a speed bonus; "
+             "/game sudoku daily is today's shared board.")
 
     def new_state(self, rng: random.Random,
-                  difficulty: str = "normal") -> dict[str, Any]:
-        difficulty = normalize_difficulty(difficulty)
+                  difficulty: str = "normal",
+                  timed: bool = False,
+                  mastery: int = 0,
+                  daily: bool = False) -> dict[str, Any]:
+        requested = normalize_difficulty(difficulty)
+        # mastery-gated boards: hard wants tier 2 (Tactician), expert
+        # wants tier 3 (Expert). Under-tiered players get normal and a
+        # note instead of a wall.
+        need = {"hard": 2, "expert": 3}
+        locked = ""
+        actual = requested
+        if requested in need and mastery < need[requested]:
+            locked = requested
+            actual = "normal"
+        if daily:
+            # the daily board: same puzzle for every player, every chat.
+            import hashlib
+            from datetime import date
+            seed = int.from_bytes(
+                hashlib.sha256(
+                    f"sudoku:{date.today().isoformat()}".encode("utf-8")
+                ).digest()[:8], "big")
+            rng = random.Random(seed)
         solution, puzzle = _sudoku_generate(
-            rng, _SUDOKU_GIVENS[difficulty])
+            rng, _SUDOKU_GIVENS[actual])
         return {
             "solution": solution, "puzzle": puzzle,
             "board": puzzle[:],
             "givens": [v != 0 for v in puzzle],
             "mistakes": 0, "hints_used": 0, "max_mistakes": 3,
-            "difficulty": difficulty, "start": time.time(),
+            "difficulty": actual, "requested": requested,
+            "locked": locked, "timed": bool(timed),
+            "daily": bool(daily), "start": time.time(),
             "over": False, "won": False, "consumed": {},
         }
 
@@ -204,9 +230,20 @@ class SudokuGame(MultiGame):
     def setup(self, room: Room, mind: GameMind) -> str:
         s = room.state
         n = sum(s["givens"])
-        return (f"sudoku ({s['difficulty']}, {n} givens) — fill it in.\n"
-                + self._render(room)
-                + "\n'r3c5 7' places, 'erase r3c5' clears, 'hint' reveals.")
+        tags = []
+        if s.get("timed"):
+            tags.append("⏱️ timed (speed bonus)")
+        if s.get("daily"):
+            tags.append("📅 daily — same board for everyone today")
+        tagline = f" [{', '.join(tags)}]" if tags else ""
+        out = (f"sudoku ({s['difficulty']}, {n} givens){tagline} — fill it in.\n"
+               + self._render(room)
+               + "\n'r3c5 7' places, 'erase r3c5' clears, 'hint' reveals.")
+        if s.get("locked"):
+            out += (f"\n🔒 {s['locked']} boards unlock at mastery tier "
+                    f"{'3 (Expert)' if s['locked'] == 'expert' else '2 (Tactician)'}"
+                    f" — playing normal. (/mastery)")
+        return out
 
     # ── moves ────────────────────────────────────────────────────────
     def on_move(self, room: Room, player: Player, text: str,
@@ -307,8 +344,29 @@ class SudokuGame(MultiGame):
         if not (s.get("won") and not player.is_ai):
             return 0
         base = _SUDOKU_BASE_SCORE.get(s.get("difficulty"), 700)
-        return max(50, base - 150 * s["mistakes"]
-                   - 100 * s["hints_used"])
+        pts = max(50, base - 150 * s["mistakes"]
+                  - 100 * s["hints_used"])
+        if s.get("timed"):
+            # time attack: up to +180 for a sub-minute blitz, fading to
+            # zero past 30 minutes.
+            elapsed = time.time() - s.get("start", time.time())
+            pts += max(0, int(1800 - elapsed) // 10)
+        return pts
+
+    def final_message(self, room: Room, mind: GameMind) -> str:
+        s = room.state
+        elapsed = time.time() - s.get("start", time.time())
+        mm, ss = int(elapsed // 60), int(elapsed % 60)
+        clock = f"{mm}:{ss:02d}"
+        if s.get("won"):
+            humans = [p for p in room.players if not p.is_ai]
+            name = humans[0].name if humans else "you"
+            timed = " ⏱️" if s.get("timed") else ""
+            return (f"🏆 {name} solved the {s.get('difficulty')} sudoku "
+                    f"in {clock}{timed} — {s['mistakes']} strikes, "
+                    f"{s['hints_used']} hints.")
+        return (f"the {s.get('difficulty')} sudoku wins this one "
+                f"({clock}). /game rematch for another board.")
 
     def describe_state(self, room: Room) -> str:
         return self._render(room)

@@ -328,13 +328,18 @@ class GameEngine:
               host: Player, *, kind: str = "dm",
               platform: str = "", daily: bool = False,
               timed: bool = False,
-              difficulty: str = "normal") -> tuple[Room, list[str]]:
+              difficulty: str = "normal",
+              variant: str = "") -> tuple[Room, list[str]]:
         """Open a room and seat the host (plus AI seats).
 
         Returns (room, messages_to_send). Raises ValueError when the
         game is unknown or the chat kind doesn't fit (group-only game in
         a DM, …). ``difficulty`` is only handed to games that declare a
-        named ``difficulty`` parameter on ``new_state``.
+        named ``difficulty`` parameter on ``new_state``. ``variant`` is a
+        game-specific mode word (gomoku "big"/"huge", hangman "long",
+        trivia "sudden", 2048 "big") — only games that declare it get
+        it. ``mastery`` (the host's current tier index for this game)
+        lets games gate their unlockables.
         """
         name = (game_name or "").strip().lower()
         game = self.games.get(name)
@@ -358,10 +363,11 @@ class GameEngine:
             )
             room.players = [host]
             self._fill_ai(room, game)
-            # daily/timed/difficulty/history are opt-in: only handed to
-            # games whose new_state accepts kwargs (hangman: daily; case:
-            # history + timed; connect4/reversi/…: difficulty). The rest
-            # play as always.
+            # daily/timed/difficulty/variant/history/mastery are opt-in:
+            # only handed to games whose new_state accepts kwargs
+            # (hangman: daily; case: history + timed; connect4/reversi/…:
+            # difficulty; gomoku: variant + mastery). The rest play as
+            # always.
             history = None
             load = getattr(game, "load_history", None)
             if load is not None and _new_state_accepts_kwargs(game):
@@ -369,11 +375,20 @@ class GameEngine:
                     history = load(self.store, host)
                 except Exception:  # noqa: BLE001
                     _log.debug("history load failed", exc_info=True)
+            # the host's mastery tier gates game-specific unlockables
+            # (harder sudoku boards, bigger gomoku boards, …)
+            try:
+                from .mastery import get_one_game_stats, mastery_tier
+                mastery_idx = mastery_tier(
+                    name, get_one_game_stats(self.db, host.key, name))[1]
+            except Exception:  # noqa: BLE001
+                mastery_idx = 0
             room.state = game.new_state(
                 game.rng(room),
                 **_new_state_kwargs(
                     game, daily=daily, timed=timed,
-                    difficulty=difficulty, history=history))
+                    difficulty=difficulty, variant=variant,
+                    mastery=mastery_idx, history=history))
             # stash difficulty on the room so start/status messages can show it
             room.state["_difficulty"] = difficulty
             self._mirror_inventory(room)
@@ -989,8 +1004,23 @@ class GameEngine:
                     # update game stats
                     try:
                         from .achievements import update_game_stats
+                        from .mastery import (get_one_game_stats,
+                                              mastery_tier, new_unlocks)
+                        before = mastery_tier(
+                            room.game,
+                            get_one_game_stats(self.db, p.key, room.game))
                         update_game_stats(self.db, p.key, room.game,
                                           won=bool(won), score=score)
+                        after = mastery_tier(
+                            room.game,
+                            get_one_game_stats(self.db, p.key, room.game))
+                        if after[1] > before[1]:
+                            msgs.append(
+                                f"🏅 {p.name} mastery up: {before[0]} → "
+                                f"{after[0]} ({room.game})!")
+                            for unlock in new_unlocks(room.game, before[1],
+                                                      after[1]):
+                                msgs.append(f"🔓 {p.name}: {unlock}")
                     except Exception:  # noqa: BLE001
                         _log.debug("game stats update failed", exc_info=True)
                     # persist per-player history (case game: anti-repeat,

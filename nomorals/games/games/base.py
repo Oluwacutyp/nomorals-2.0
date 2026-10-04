@@ -211,6 +211,11 @@ class MultiGame:
     #: difficulty ladder this game actually honors (subset of
     #: DIFFICULTY_LEVELS). Empty = the game doesn't take a difficulty.
     difficulties: tuple[str, ...] = ()
+    #: game-specific mode words the player can pass at start
+    #: (``/game gomoku big``). word → one-line description shown in
+    #: help. The word arrives as ``variant`` in ``new_state``; the game
+    #: validates it against the player's mastery tier itself.
+    variants: dict[str, str] = {}
 
     def rng(self, room: Room) -> random.Random:
         return room.rng()

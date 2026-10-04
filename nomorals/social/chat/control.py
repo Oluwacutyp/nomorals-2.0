@@ -90,6 +90,8 @@ GAME_COMMANDS = (
     "stats",
     # daily hunt (double-XP arena challenge)
     "daily",
+    # per-game mastery tiers (non-arena depth: ranks, unlocks)
+    "mastery",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -154,6 +156,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "title": (0, 3),       # /title [set <name>] — earnable titles
     "stats": (0, 2),       # /stats [<attr> [points]] — RPG attributes
     "daily": (0, 0),       # /daily — today's double-XP hunt
+    "mastery": (0, 1),     # /mastery [game] — per-game mastery tiers
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
@@ -690,6 +693,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/daily",
               "example": "/daily",
               "related": "game, skill, title"},
+    "mastery": {"what": "per-game mastery tiers — every non-arena game "
+                        "tracks a rank (Novice → Legend, with game-specific "
+                        "names) from your wins, games played, and best "
+                        "score. Tiers unlock harder sudoku boards, bigger "
+                        "gomoku boards, the 2048 marathon, long hangman "
+                        "words, trivia sudden death.",
+                "usage": "/mastery [game]",
+                "example": "/mastery  ·  /mastery sudoku",
+                "related": "game, daily, title"},
     "mind": {"what": "the Core Mind — the always-on layer that turns a "
                     "natural-language goal into routed work: research swarm, "
                     "builder, browser, downloader, missions, games, "
@@ -1075,7 +1087,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "title", "stats", "daily",
+      "skill", "title", "stats", "daily", "mastery",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
@@ -1286,7 +1298,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["remember", "recall", "forget", "think", "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "title", "stats", "daily",
+      "skill", "title", "stats", "daily", "mastery",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",

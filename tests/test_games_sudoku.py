@@ -101,9 +101,20 @@ class SudokuEngineTests(unittest.TestCase):
         self.engine.shutdown()
 
     def test_difficulty_plumbing(self):
+        # hard/expert are mastery-gated: a fresh player is downgraded
+        # to normal with a lock note…
         room, _ = self.engine.start("t:sd1", "sudoku", ADA,
                                     difficulty="hard")
+        self.assertEqual(room.state["difficulty"], "normal")
+        self.assertEqual(room.state["locked"], "hard")
+        # …while a Tactician+ player gets the real board.
+        from nomorals.games.achievements import update_game_stats
+        for _ in range(5):
+            update_game_stats(self.db, ADA.key, "sudoku", True, 1000)
+        room, _ = self.engine.start("t:sd1b", "sudoku", ADA,
+                                    difficulty="hard")
         self.assertEqual(room.state["difficulty"], "hard")
+        self.assertEqual(room.state["locked"], "")
         self.assertLessEqual(sum(room.state["givens"]), 32)
         room2, _ = self.engine.start("t:sd2", "sudoku", ADA)
         self.assertEqual(room2.state["difficulty"], "normal")
@@ -136,8 +147,13 @@ class SudokuEngineTests(unittest.TestCase):
         self.assertIsNone(self.engine.live("t:sd5"))
 
     def test_solving_wins_and_unlocks(self):
+        # expert boards need Expert mastery (tier 3) — earn it first
+        from nomorals.games.achievements import update_game_stats
+        for _ in range(10):
+            update_game_stats(self.db, ADA.key, "sudoku", True, 1000)
         room, _ = self.engine.start("t:sd6", "sudoku", ADA,
                                     difficulty="expert")
+        self.assertEqual(room.state["difficulty"], "expert")
         s = room.state
         for i in range(81):
             if self.engine.live("t:sd6") is None:

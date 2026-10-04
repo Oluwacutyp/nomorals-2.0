@@ -10,6 +10,7 @@ All state is pure dicts in ``room.state``, all moves are scripted-testable.
 from __future__ import annotations
 
 import random
+import time
 from typing import Any
 
 from ..ai import GameMind, battleship_shot, connect4_move
@@ -29,18 +30,37 @@ class TwentyFortyEightGame(MultiGame):
     max_players = 1
     ai_seats = 0
     move_timeout = 0
+    #: mastery-gated board: marathon 5×5 at tier 3 (Master+). More
+    #: room to build, longer road to glory.
+    variants = {
+        "big": "marathon 5×5 board (Master mastery+)",
+    }
     rules = ("Swipe u/d/l/r to slide all tiles. Equal tiles merge. "
              "Reach 2048 to win, or keep going for a high score. "
-             "The board is full and no moves left? Game over.")
+             "The board is full and no moves left? Game over. "
+             "/game 2048 big plays the 5×5 marathon (Master mastery+).")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
-        grid = [[0] * 4 for _ in range(4)]
+    def new_state(self, rng: random.Random,
+                  variant: str = "",
+                  mastery: int = 0) -> dict[str, Any]:
+        size = 4
+        locked = ""
+        if variant == "big":
+            if mastery >= 3:
+                size = 5
+            else:
+                locked = "big"
+        grid = [[0] * size for _ in range(size)]
         self._spawn(grid, rng)
         self._spawn(grid, rng)
-        return {"grid": grid, "score": 0, "won": False, "lost": False}
+        return {"grid": grid, "score": 0, "won": False, "lost": False,
+                "size": size, "locked": locked, "variant": variant,
+                "start": time.time()}
 
     def _spawn(self, grid: list[list[int]], rng: random.Random) -> None:
-        empty = [(r, c) for r in range(4) for c in range(4) if grid[r][c] == 0]
+        n = len(grid)
+        empty = [(r, c) for r in range(n) for c in range(n)
+                 if grid[r][c] == 0]
         if not empty:
             return
         r, c = rng.choice(empty)
@@ -48,6 +68,7 @@ class TwentyFortyEightGame(MultiGame):
 
     def _slide_row(self, row: list[int]) -> tuple[list[int], int]:
         """Slide and merge one row leftward. Returns (new_row, points)."""
+        n = len(row)
         filtered = [x for x in row if x]
         merged = []
         points = 0
@@ -62,62 +83,75 @@ class TwentyFortyEightGame(MultiGame):
                 skip = True
             else:
                 merged.append(val)
-        merged += [0] * (4 - len(merged))
+        merged += [0] * (n - len(merged))
         return merged, points
 
     def _move(self, grid: list[list[int]], direction: str) -> tuple[list[list[int]], int]:
         """Apply one move. Returns (new_grid, points_earned)."""
+        n = len(grid)
         g = [row[:] for row in grid]
         points = 0
         if direction == "l":
-            for i in range(4):
+            for i in range(n):
                 g[i], p = self._slide_row(g[i])
                 points += p
         elif direction == "r":
-            for i in range(4):
+            for i in range(n):
                 rev, p = self._slide_row(g[i][::-1])
                 g[i] = rev[::-1]
                 points += p
         elif direction == "u":
-            for c in range(4):
-                col = [g[r][c] for r in range(4)]
+            for c in range(n):
+                col = [g[r][c] for r in range(n)]
                 col, p = self._slide_row(col)
-                for r in range(4):
+                for r in range(n):
                     g[r][c] = col[r]
                 points += p
         elif direction == "d":
-            for c in range(4):
-                col = [g[r][c] for r in range(4)][::-1]
+            for c in range(n):
+                col = [g[r][c] for r in range(n)][::-1]
                 col, p = self._slide_row(col)
                 col = col[::-1]
-                for r in range(4):
+                for r in range(n):
                     g[r][c] = col[r]
                 points += p
         return g, points
 
     def _can_move(self, grid: list[list[int]]) -> bool:
-        if any(grid[r][c] == 0 for r in range(4) for c in range(4)):
+        n = len(grid)
+        if any(grid[r][c] == 0 for r in range(n) for c in range(n)):
             return True
-        for r in range(4):
-            for c in range(4):
+        for r in range(n):
+            for c in range(n):
                 val = grid[r][c]
-                if c + 1 < 4 and grid[r][c + 1] == val:
+                if c + 1 < n and grid[r][c + 1] == val:
                     return True
-                if r + 1 < 4 and grid[r + 1][c] == val:
+                if r + 1 < n and grid[r + 1][c] == val:
                     return True
         return False
 
     def _render(self, grid: list[list[int]], score: int) -> str:
-        lines = [f"score: {score}", "┌────┬────┬────┬────┐"]
-        for row in grid:
+        n = len(grid)
+        top = "┌" + "────┬" * (n - 1) + "────┐"
+        mid = "├" + "────┼" * (n - 1) + "────┤"
+        bot = "└" + "────┴" * (n - 1) + "────┘"
+        lines = [f"score: {score}", top]
+        for ri, row in enumerate(grid):
             cells = "│".join(f"{x:^4}" if x else "    " for x in row)
             lines.append(f"│{cells}│")
-            lines.append("├────┼────┼────┼────┤" if row != grid[-1] else "└────┴────┴────┴────┘")
+            lines.append(mid if ri != n - 1 else bot)
         lines.append("swipe: u / d / l / r")
         return "\n".join(lines)
 
     def setup(self, room, mind):
-        return self._render(room.state["grid"], room.state["score"])
+        s = room.state
+        out = self._render(s["grid"], s["score"])
+        if s.get("locked"):
+            out += ("\n🔒 the 5×5 marathon board needs Master mastery "
+                    "(tier 3) — playing 4×4. (/mastery)")
+        elif s.get("size", 4) == 5:
+            out = "⬛ marathon 5×5 — more room, longer road.\n" + out
+        return out
 
     def on_move(self, room, player, text, mind):
         s = room.state
@@ -131,7 +165,8 @@ class TwentyFortyEightGame(MultiGame):
         s["grid"] = new_grid
         s["score"] += points
         self._spawn(s["grid"], room.rng())
-        if any(s["grid"][r][c] >= 2048 for r in range(4) for c in range(4)):
+        n = len(s["grid"])
+        if any(s["grid"][r][c] >= 2048 for r in range(n) for c in range(n)):
             s["won"] = True
         if not self._can_move(s["grid"]):
             s["lost"] = True
@@ -148,6 +183,28 @@ class TwentyFortyEightGame(MultiGame):
 
     def is_over(self, room):
         return room.state.get("lost", False)
+
+    def winner(self, room):
+        # reaching 2048 IS the win — even if you keep sliding for a
+        # high score afterwards and eventually fill the board.
+        s = room.state
+        if s.get("won"):
+            humans = [p for p in room.players if not p.is_ai]
+            return humans[0] if humans else "draw"
+        return None
+
+    def final_message(self, room, mind):
+        s = room.state
+        elapsed = time.time() - s.get("start", time.time())
+        mm, ss = int(elapsed // 60), int(elapsed % 60)
+        size = s.get("size", 4)
+        board = f" on the {size}×{size}" if size != 4 else ""
+        hi = max(max(r) for r in s["grid"])
+        if s.get("won"):
+            return (f"🏆 2048 reached{board} in {mm}:{ss:02d} — final "
+                    f"score {s['score']}, highest tile {hi}.")
+        return (f"board's full{board} — final score {s['score']}, "
+                f"highest tile {hi}, {mm}:{ss:02d} played.")
 
     def score(self, room, player):
         return room.state.get("score", 0)

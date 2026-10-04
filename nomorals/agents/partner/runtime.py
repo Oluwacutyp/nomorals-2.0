@@ -368,6 +368,10 @@ class PartnerRuntime(
                     elif command.kind == "daily":
                         reply = self._control_daily(
                             player=self._game_player(message))
+                    elif command.kind == "mastery":
+                        reply = self._control_mastery(
+                            command.tail or command.arg,
+                            player=self._game_player(message))
                     else:
                         verb = (command.tail or command.arg) \
                             if command.kind == "game" \
@@ -1257,6 +1261,11 @@ class PartnerRuntime(
         # ── daily hunt ───────────────────────────────────────────────────────
         if kind == "daily":
             return self._control_daily(
+                player=self._game_player_for_key(chat_key))
+        # ── per-game mastery tiers ───────────────────────────────────────────
+        if kind == "mastery":
+            return self._control_mastery(
+                command.tail or arg,
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)

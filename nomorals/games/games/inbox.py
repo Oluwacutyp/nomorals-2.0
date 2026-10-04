@@ -44,30 +44,39 @@ def _human(room: Room) -> Player | None:
 
 _GOMOKU_SIZE = 15
 _GOMOKU_DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
-_GOMOKU_CELL = re.compile(r"^([a-o])(1[0-5]|[1-9])$", re.I)
 
 
-def _gomoku_parse(text: str) -> tuple[int, int] | None:
-    m = _GOMOKU_CELL.match((text or "").strip())
+def _gomoku_parse(text: str, size: int = _GOMOKU_SIZE,
+                  ) -> tuple[int, int] | None:
+    """Parse 'h8' for a board of ``size`` (columns a–…, rows 1–size)."""
+    text = (text or "").strip().lower()
+    if size <= 0:
+        return None
+    last_col = chr(ord("a") + size - 1)
+    m = re.match(rf"^([a-{last_col}])([1-9][0-9]*)$", text)
     if not m:
         return None
-    return int(m.group(2)) - 1, ord(m.group(1).lower()) - ord("a")
+    r, c = int(m.group(2)) - 1, ord(m.group(1)) - ord("a")
+    if not (0 <= r < size and 0 <= c < size):
+        return None
+    return r, c
 
 
 def _gomoku_run(grid: list[list[str]], r: int, c: int,
                 side: str) -> int:
     """Longest line through (r, c) if it held ``side``."""
+    n = len(grid)
     best = 1
     for dr, dc in _GOMOKU_DIRS:
-        n = 1
+        n_run = 1
         for sgn in (1, -1):
             rr, cc = r + sgn * dr, c + sgn * dc
-            while (0 <= rr < _GOMOKU_SIZE and 0 <= cc < _GOMOKU_SIZE
+            while (0 <= rr < n and 0 <= cc < n
                    and grid[rr][cc] == side):
-                n += 1
+                n_run += 1
                 rr += sgn * dr
                 cc += sgn * dc
-        best = max(best, n)
+        best = max(best, n_run)
     return best
 
 
@@ -90,7 +99,8 @@ def _gomoku_cell_value(grid: list[list[str]], r: int, c: int,
     grid[r][c] = foe
     theirs = _gomoku_run(grid, r, c, foe)
     grid[r][c] = ""
-    centre = 7 - (abs(r - 7) + abs(c - 7)) / 2.0
+    mid = len(grid) // 2
+    centre = mid - (abs(r - mid) + abs(c - mid)) / 2.0
     return mine * 10.0 + theirs * 9.0 + centre
 
 
@@ -111,8 +121,9 @@ def _gomoku_house_move(grid: list[list[str]],
     expert: two-ply on a shortlist — your best reply is itself scored
     minus the house's best counter, so it sets traps a move deeper.
     Deterministic given the room's rng."""
-    empties = [(r, c) for r in range(_GOMOKU_SIZE)
-               for c in range(_GOMOKU_SIZE) if not grid[r][c]]
+    n = len(grid)
+    empties = [(r, c) for r in range(n)
+               for c in range(n) if not grid[r][c]]
     if not empties:
         return None
     blunder = difficulty == "easy" and rng.random() < 0.35
@@ -123,17 +134,17 @@ def _gomoku_house_move(grid: list[list[str]],
         for r, c in empties:
             if _gomoku_wins(grid, r, c, "B"):
                 return r, c
-    stones = [(r, c) for r in range(_GOMOKU_SIZE)
-              for c in range(_GOMOKU_SIZE) if grid[r][c]]
+    stones = [(r, c) for r in range(n)
+              for c in range(n) if grid[r][c]]
     if not stones:
-        return 7, 7
+        return n // 2, n // 2
     # only cells near the action matter
     near: set[tuple[int, int]] = set()
     for r, c in stones:
         for dr in range(-2, 3):
             for dc in range(-2, 3):
                 rr, cc = r + dr, c + dc
-                if (0 <= rr < _GOMOKU_SIZE and 0 <= cc < _GOMOKU_SIZE
+                if (0 <= rr < n and 0 <= cc < n
                         and not grid[rr][cc]):
                     near.add((rr, cc))
     if blunder:
@@ -196,6 +207,12 @@ class GomokuGame(MultiGame):
     move_timeout = 0          # inbox game: no per-turn clock
     idle_ttl = INBOX_IDLE_TTL  # …the table waits up to a week
     difficulties = DIFFICULTY_LEVELS
+    #: mastery-gated boards: big (13×13) at tier 2, huge (19×19) at
+    #: tier 4. Bigger boards mean longer wars and bigger win scores.
+    variants = {
+        "big": "13×13 board (Adept mastery+)",
+        "huge": "19×19 board (Master mastery+)",
+    }
     rules = ("15×15 board. You're ● (black, first), the house is ○. "
              "Say a square like h8 (columns a–o, rows 1–15) — one move "
              "per message, whenever you like. Five in a row, any "
@@ -203,40 +220,66 @@ class GomokuGame(MultiGame):
              "between moves. The house's brain scales: easy blunders "
              "its wins sometimes, normal plays sound threats, hard "
              "reads one move ahead, expert two. "
-             "/game gomoku [easy|normal|hard|expert].")
+             "/game gomoku [easy|normal|hard|expert]. Mastery unlocks "
+             "bigger wars: /game gomoku big (13×13, Adept+) "
+             "and /game gomoku huge (19×19, Master+).")
 
     def new_state(self, rng: random.Random,
-                  difficulty: str = "normal") -> dict[str, Any]:
-        return {"grid": [[""] * _GOMOKU_SIZE for _ in range(_GOMOKU_SIZE)],
+                  difficulty: str = "normal",
+                  variant: str = "",
+                  mastery: int = 0) -> dict[str, Any]:
+        size = _GOMOKU_SIZE
+        locked = ""
+        if variant == "big":
+            if mastery >= 2:
+                size = 13
+            else:
+                locked = "big"
+        elif variant == "huge":
+            if mastery >= 4:
+                size = 19
+            else:
+                locked = "huge"
+        return {"grid": [[""] * size for _ in range(size)],
+                "size": size, "locked": locked, "variant": variant,
                 "moves": 0, "over": False, "winner": "",
                 "difficulty": normalize_difficulty(difficulty)}
 
     def setup(self, room: Room, mind: GameMind) -> str:
-        return ("gomoku — five in a row wins. you're ●, the house is ○. "
-                "say a square like h8 (a–o, 1–15). no clock — play "
-                "whenever. set the house's strength: /game gomoku "
-                "[easy|normal|hard|expert].")
+        s = room.state
+        size = s.get("size", _GOMOKU_SIZE)
+        last = chr(ord("a") + size - 1)
+        out = (f"gomoku — five in a row wins on {size}×{size}. you're ●, "
+               f"the house is ○. say a square like h8 (a–{last}, "
+               f"1–{size}). no clock — play whenever. set the house's "
+               "strength: /game gomoku [easy|normal|hard|expert].")
+        if s.get("locked"):
+            need = "Adept (tier 2)" if s["locked"] == "big" else "Master (tier 4)"
+            out += (f"\n🔒 the {s['locked']} board needs {need} mastery — "
+                    f"playing 15×15. (/mastery)")
+        return out
 
     def _board(self, room: Room) -> str:
         g = room.state["grid"]
-        head = "   " + " ".join(chr(ord("a") + c)
-                                for c in range(_GOMOKU_SIZE))
+        n = len(g)
+        head = "   " + " ".join(chr(ord("a") + c) for c in range(n))
         rows = [head]
-        for r in range(_GOMOKU_SIZE):
-            cells = [g[r][c] if g[r][c] else "·" for c in range(_GOMOKU_SIZE)]
+        for r in range(n):
+            cells = [g[r][c] if g[r][c] else "·" for c in range(n)]
             rows.append(f"{r + 1:>2} " + " ".join(cells))
         return "\n".join(rows)
 
     def _place(self, room: Room, r: int, c: int, side: str) -> bool:
         """Place a stone; True when it ends the game."""
         s = room.state
+        n = len(s["grid"])
         s["grid"][r][c] = side
         s["moves"] += 1
         if _gomoku_run(s["grid"], r, c, side) >= 5:
             s["over"] = True
             s["winner"] = side
             return True
-        if s["moves"] >= _GOMOKU_SIZE * _GOMOKU_SIZE:
+        if s["moves"] >= n * n:
             s["over"] = True
             s["winner"] = "draw"
             return True
@@ -247,9 +290,11 @@ class GomokuGame(MultiGame):
         s = room.state
         if s["over"]:
             return ["the board is done — /game rematch for another."]
-        sq = _gomoku_parse(text)
+        sq = _gomoku_parse(text, len(s["grid"]))
         if sq is None:
-            return ["a square like h8 (columns a–o, rows 1–15)."]
+            n = len(s["grid"])
+            last = chr(ord("a") + n - 1)
+            return [f"a square like h8 (columns a–{last}, rows 1–{n})."]
         r, c = sq
         if s["grid"][r][c]:
             return [f"{text.strip().lower()} is taken."]
@@ -285,9 +330,13 @@ class GomokuGame(MultiGame):
 
     def score(self, room: Room, player: Player) -> int:
         s = room.state
-        if (s.get("winner") == "B" and not player.is_ai
-                and s.get("moves")):
-            return max(1, _GOMOKU_SIZE * _GOMOKU_SIZE - s["moves"])
+        n = len(s["grid"])
+        if s.get("winner") == "B" and not player.is_ai and s.get("moves"):
+            # faster wins on bigger boards pay more: a 19×19 war is a
+            # longer road than 15×15.
+            return max(1, n * n - s["moves"])
+        if s.get("winner") == "draw" and not player.is_ai:
+            return 10
         return 0
 
     def final_message(self, room: Room, mind: GameMind) -> str:

@@ -483,6 +483,8 @@ class WordChainGame(MultiGame):
             return self._miss(room, player, f"“{word}” is not a real word")
         room.state["used"].append(word)
         room.state["last"] = word
+        room.state.setdefault("words_by", {})[player.key] = \
+            int(room.state.get("words_by", {}).get(player.key, 0)) + 1
         return [f"good — **{word}**. next letter: {word[-1]}."]
 
     def ai_turn(self, room, mind):
@@ -512,6 +514,8 @@ class WordChainGame(MultiGame):
             return [f"the house is stuck on “{last[-1]}” and drops out."]
         room.state["used"].append(word)
         room.state["last"] = word
+        room.state.setdefault("words_by", {})[me.key] = \
+            int(room.state.get("words_by", {}).get(me.key, 0)) + 1
         return [f"house: **{word}** — your letter: {word[-1]}."]
 
     def is_over(self, room):
@@ -528,6 +532,11 @@ class WordChainGame(MultiGame):
         return Player(key="ai:wordchain", platform="ai", name="The House",
                       is_ai=True)
 
+    def score(self, room, player):
+        # every valid word you chained is 10 pts — surviving long
+        # chains is the skill.
+        return int(room.state.get("words_by", {}).get(player.key, 0)) * 10
+
     def describe_state(self, room):
         return (f"last word: {room.state['last']} · "
                 f"out: {', '.join(room.state['eliminated']) or 'nobody'}")
@@ -542,26 +551,47 @@ class HangmanGame(MultiGame):
     max_players = 6
     ai_seats = 1
     move_timeout = 60
+    #: mastery-gated word pool: long words (9+ letters) at tier 2.
+    variants = {
+        "long": "long words, 9+ letters (Adept mastery+)",
+    }
     rules = ("One letter per turn, or 'word <guess>' to try the whole word. "
              "Six wrong letters and the word is revealed — if the table "
-             "cracks it first, the table wins.")
+             "cracks it first, the table wins. /game hangman long plays "
+             "the 9+ letter pool (Adept mastery+); /game hangman daily "
+             "is today's shared word.")
 
-    def new_state(self, rng: random.Random, **kw: Any) -> dict[str, Any]:
+    def new_state(self, rng: random.Random, mastery: int = 0,
+                  variant: str = "", **kw: Any) -> dict[str, Any]:
         daily = bool(kw.get("daily"))
+        locked = ""
+        pool = HANGMAN_WORDS
+        if not daily and variant == "long":
+            if mastery >= 2:
+                long_pool = [wc for wc in HANGMAN_WORDS if len(wc[0]) >= 9]
+                pool = long_pool or HANGMAN_WORDS
+            else:
+                locked = "long"
         if daily:
             word = hangman_daily_word()
             category = next(c for w, c in HANGMAN_WORDS if w == word)
         else:
-            word, category = rng.choice(HANGMAN_WORDS)
+            word, category = rng.choice(pool)
         return {"word": word, "category": category, "revealed": [],
-                "wrong": 0, "max_wrong": 6, "found_by": [], "daily": daily}
+                "wrong": 0, "max_wrong": 6, "found_by": [], "daily": daily,
+                "variant": variant, "locked": locked}
 
     def setup(self, room, mind):
         s = self._board(room)
         daily = " — today's word, same for everyone" if room.state.get("daily") else ""
-        return (f"hangman — a {len(room.state['word'])}-letter word, "
-                f"category: {room.state['category']}{daily}.\n{s}\n"
-                "letters, or 'word <guess>'. the house guesses too.")
+        long = " — long-words pool" if room.state.get("variant") == "long" else ""
+        out = (f"hangman — a {len(room.state['word'])}-letter word, "
+               f"category: {room.state['category']}{daily}{long}.\n{s}\n"
+               "letters, or 'word <guess>'. the house guesses too.")
+        if room.state.get("locked"):
+            out += ("\n🔒 long words need Adept mastery (tier 2) — "
+                    "playing the normal pool. (/mastery)")
+        return out
 
     @staticmethod
     def _board(room: Room) -> str:
@@ -662,6 +692,20 @@ class HangmanGame(MultiGame):
                           name="The House", is_ai=True)
         return None
 
+    def score(self, room, player):
+        s = room.state
+        if player.is_ai or s.get("done") != "table":
+            return 0
+        # longer words, fewer wrongs, no-mistake games pay; daily and
+        # long-word tables carry bonuses.
+        word = s.get("word", "")
+        base = len(word) * 10
+        accuracy = max(0, s.get("max_wrong", 6) - s.get("wrong", 0)) * 10
+        perfect = 25 if s.get("wrong", 0) == 0 else 0
+        daily_bonus = 25 if s.get("daily") else 0
+        long_bonus = 30 if s.get("variant") == "long" else 0
+        return base + accuracy + perfect + daily_bonus + long_bonus
+
 
 # ── 3. number guess battle ───────────────────────────────────────────────────
 
@@ -751,6 +795,14 @@ class NumberGuessGame(MultiGame):
             return Player(key="ai:numberguess", platform="ai",
                           name="The House", is_ai=True)
         return "draw"
+
+    def score(self, room, player):
+        s = room.state
+        if player.is_ai or s.get("done") != "player":
+            return 0
+        # the house bisects perfectly in ~7 rounds — cracking its
+        # number faster than that is the real achievement.
+        return max(10, 150 - s.get("rounds", 14) * 10)
 
     def describe_state(self, room):
         s = room.state
@@ -1290,23 +1342,47 @@ class TriviaRoyaleGame(MultiGame):
     max_players = 8
     ai_seats = 1
     move_timeout = 60
+    #: mastery-gated mode: sudden death (1 life, double points) at
+    #: tier 2. One wrong answer and you're out.
+    variants = {
+        "sudden": "sudden death — 1 life, double points (Adept mastery+)",
+    }
     rules = ("8 questions, everyone in turn. Correct: 10 pts + 5×streak. "
              "Wrong: lose a life (3 total). Out of lives = eliminated. "
              "Most points at the end wins — the house answers at 80% "
-             "confidence, so it bleeds sometimes. that's your window.")
+             "confidence, so it bleeds sometimes. that's your window. "
+             "/game trivia sudden is sudden death: 1 life, double "
+             "points (Adept mastery+).")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random, variant: str = "",
+                  mastery: int = 0) -> dict[str, Any]:
         qs = rng.sample(list(TRIVIA), 8)
+        locked = ""
+        lives = 3
+        if variant == "sudden":
+            if mastery >= 2:
+                lives = 1
+            else:
+                locked = "sudden"
         return {"questions": qs, "round": 0, "points": {}, "lives": {},
-                "streak": {}, "q": None, "a": None, "total": 8}
+                "streak": {}, "q": None, "a": None, "total": 8,
+                "start_lives": lives, "variant": variant,
+                "locked": locked}
 
     def setup(self, room, mind):
+        lives = room.state.get("start_lives", 3)
         for p in room.players:
-            room.state["lives"][p.key] = 3
+            room.state["lives"][p.key] = lives
         q, a = room.state["questions"][0]
         room.state["q"], room.state["a"] = q, a
-        return (f"trivia royale — {len(room.players)} seated, 8 questions, "
-                f"3 lives each.\nQ1: {q}")
+        sudden = " — 💀 SUDDEN DEATH (1 life, double points)" \
+            if room.state.get("variant") == "sudden" else ""
+        out = (f"trivia royale — {len(room.players)} seated, 8 questions, "
+               f"{lives} lives each{sudden}.\nQ1: {q}")
+        if room.state.get("locked"):
+            out += ("\n🔒 sudden death needs Adept mastery (tier 2) — "
+                    "playing normal. (/mastery)")
+        return out
 
     def _next_question(self, room: Room) -> str:
         s = room.state
@@ -1404,7 +1480,11 @@ class TriviaRoyaleGame(MultiGame):
         return w if (w and best[1] > 0) else "draw"
 
     def score(self, room, player):
-        return int(room.state.get("points", {}).get(player.key, 0))
+        pts = int(room.state.get("points", {}).get(player.key, 0))
+        # sudden death pays double — one life is a real handicap.
+        if room.state.get("variant") == "sudden":
+            pts *= 2
+        return pts
 
     def describe_state(self, room):
         s = room.state
