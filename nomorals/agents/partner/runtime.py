@@ -794,6 +794,13 @@ class PartnerRuntime(
     def run(self, *, duration: float | None = None) -> None:
         self._started = time.time()
         self._beacon_next = 0.0  # write one immediately at startup
+        # SIGTERM (supervisor stop, `kill`, phone process kill) must take
+        # the same path as Ctrl-C: the loop exits and `finally` runs
+        # stop(), which writes the final beacon with stopped=True so
+        # `nm status` reports a clean stop instead of a stale death.
+        from ...core.shutdown import install_sigterm_as_interrupt
+
+        install_sigterm_as_interrupt()
         started = self.start()
         _log.info("partner runtime running on: %s (Ctrl-C to stop)", ",".join(started) or "none")
         try:

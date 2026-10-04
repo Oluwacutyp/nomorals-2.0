@@ -44,8 +44,10 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -331,7 +333,7 @@ class APIServer:
         context = self.context
         server = self
 
-        @self.route("GET", "/health", description="Health check: version, ok, schema version")
+        @self.route("GET", "/health", description="Health check: version, schema, process and bot runtime state")
         def health(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             db = getattr(context, "db", None)
             schema = 0
@@ -341,7 +343,49 @@ class APIServer:
                 from ..storage.schema import MigrationRunner
 
                 schema = MigrationRunner(db).current_version()
-            return {"version": __version__, "ok": True, "schema_version": schema}
+            payload: dict[str, Any] = {
+                "version": __version__,
+                "ok": True,
+                "schema_version": schema,
+                # Local-only facts — no network, no model calls, safe for a
+                # supervisor to poll every few seconds.
+                "pid": os.getpid(),
+                "uptime_s": round(
+                    time.time() - getattr(context, "started_at", time.time()), 1
+                ),
+            }
+            router = getattr(context, "router", None)
+            try:
+                payload["providers"] = list(router.providers()) if router else []
+            except Exception:  # noqa: BLE001 - health must degrade, not 500
+                payload["providers"] = []
+            # Is the chat bot (partner runtime) alive in this home? The
+            # runtime writes a status beacon every 10s and marks it stopped
+            # on a clean shutdown; SIGTERM now takes the same path.
+            try:
+                from ..agents.beacon import ALIVE_WINDOW_S, read_status
+
+                home = getattr(getattr(context, "settings", None), "home", "")
+                state, age = read_status(home) if home else (None, None)
+                runtime: dict[str, Any] = {"state": "not_running"}
+                if state is not None:
+                    if state.get("stopped"):
+                        runtime = {"state": "stopped"}
+                    elif age is not None and age <= ALIVE_WINDOW_S:
+                        runtime = {
+                            "state": "alive",
+                            "uptime_s": state.get("uptime_s"),
+                        }
+                    else:
+                        runtime = {"state": "stale"}
+                    if age is not None:
+                        runtime["beacon_age_s"] = round(age, 1)
+                    if state.get("last_error"):
+                        runtime["last_error"] = str(state["last_error"])[:200]
+                payload["runtime"] = runtime
+            except Exception:  # noqa: BLE001 - health must degrade, not 500
+                payload["runtime"] = {"state": "unknown"}
+            return payload
 
         @self.route("GET", "/models", description="List registered LLM models plus registry stats")
         def models(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
@@ -896,6 +940,13 @@ def serve(
         thread = threading.Thread(target=httpd.serve_forever, name="api", daemon=True)
         thread.start()
         return 0
+    # A supervisor's SIGTERM must drain the server the same way Ctrl-C
+    # does. httpd.shutdown() may only be called from a thread OTHER than
+    # the serve_forever thread, so the handler maps SIGTERM onto
+    # KeyboardInterrupt and the finally block below does the teardown.
+    from ..core.shutdown import install_sigterm_as_interrupt
+
+    install_sigterm_as_interrupt()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:  # pragma: no cover  # noqa: E103, E106 - deliberate shutdown hook

@@ -28,10 +28,16 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..core.logging_setup import get_logger
-from ..tools.edit_loop import EditLoop, EditResult, TestResult
+
+# Deferred: EditLoop is instantiated in __init__ only, and EditResult /
+# TestResult appear only in annotations. Importing edit_loop at module top
+# pulled `nomorals.agents.coding` (via the old eager import) during tool
+# registration at boot.
+if TYPE_CHECKING:  # pragma: no cover
+    from ..tools.edit_loop import EditLoop, EditResult, TestResult
 
 __all__ = [
     "CodeExecutor",
@@ -154,6 +160,7 @@ class CodeExecutor:
         self.agent = agent
         self.project_root = Path(project_root).resolve()
         self.mode = mode
+        from ..tools.edit_loop import EditLoop  # deferred: see module docstring note
         self.edit_loop = EditLoop(
             agent,
             project_root=project_root,

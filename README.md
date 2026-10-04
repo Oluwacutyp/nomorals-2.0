@@ -9,7 +9,7 @@ Everything else is optional and degrades to a working pure-Python fallback.
 
 ```
 python3 -m nomorals doctor     # what can this machine actually do?
-python3 -m nomorals tools      # 20 tools, each capability-gated
+python3 -m nomorals tools      # 224 tools, each capability-gated
 python3 -m nomorals ask "hi"   # chat with the active model
 python3 -m nomorals run "research X and write a report"
 python3 -m nomorals missions --start "long goal" --budget-wall 3600
@@ -35,14 +35,14 @@ operations. See [`ARCHITECTURE.md` §10](ARCHITECTURE.md).
 | Layer | Contents | Status |
 |-------|----------|--------|
 | L1 Core | config, errors, retry, rate limits, policy, events, logging, HTTP | ✅ tested |
-| L2 Storage | SQLite, 52 tables, migrations, FTS5, vectors, blobs, queue, backups | ✅ tested |
+| L2 Storage | SQLite, 145 tables, migrations, FTS5, vectors, blobs, queue, backups | ✅ tested |
 | L3 Cognition | memory, embeddings, LLM router, model registry, HF download, **training pipeline** | ✅ tested |
 | L4 Capability | filesystem, sandboxed shell, web, parsers, vision, media, **social** | ✅ tested |
 | L5 Agents | task DAG, thread/process/async runtime, budgets, supervisor, orchestrator | ✅ tested |
 | L6 Missions | crash-resumable long-running goals, checkpoints, reflection | ✅ tested |
 | L7 Surface | CLI · HTTP API · TUI | ✅ tested |
 
-**~7,200 tests.** `python3 -m unittest discover -s tests -t .` — the suite runs offline by default (network calls are mocked); see `tests/taxonomy.py` for the unit/integration/live tier map and the `NM_RUN_INTEGRATION=1` gate for live tests.
+**~7,600 tests.** `python3 -m unittest discover -s tests -t .` — the suite runs offline by default (network calls are mocked); see `tests/taxonomy.py` for the unit/integration/live tier map and the `NM_RUN_INTEGRATION=1` gate for live tests.
 
 ## Architecture
 

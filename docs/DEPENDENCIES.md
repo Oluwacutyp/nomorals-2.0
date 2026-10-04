@@ -17,7 +17,7 @@
 > nm doctor                # feature report: which optional deps are present
 > ```
 
-Verified against the actual code on branch `mediadeps-1.0` (AST scan of all
+Verified against the actual code on branch `main` (AST scan of all
 628 files under `nomorals/`, plus `pyproject.toml`, the `compat.py` feature
 table, and the `bridge/package.json`). Every pip package below is imported
 somewhere in `nomorals/` — nothing is listed on guesswork.
@@ -50,6 +50,15 @@ Exactly what's in `pyproject.toml` (`[project.optional-dependencies]`):
 | `train` | `torch>=2.1`, `transformers>=4.38`, `datasets>=2.17`, `peft>=0.9` | GPU fine-tuning (`nomorals/training/finetune.py`, backends) |
 | `finetune` | `unsloth`, `trl>=0.8` | Unsloth / QLoRA training backends (`nomorals/training/backends/unsloth.py`) |
 | `hub` | `huggingface-hub>=0.22` | Resumable cached HF downloads (`voice/fetch.py`, media generation, `llm/download.py` fallback) |
+| `ta` | `numpy>=1.24`, `pandas>=1.5`, `matplotlib>=3.7`, `scikit-learn>=1.3` | Trading-math core: indicators, regime, backtest (`nomorals/ta`) |
+| `datasci` | `pandas>=1.5`, `matplotlib>=3.7` | Data workspace + plots (`nomorals/datasci`) |
+| `docs` | `python-docx>=1.1`, `openpyxl>=3.1`, `pytesseract>=0.3`, `pdf2image>=1.17` | Office docs + OCR + PDF rendering (`nomorals/documents`) |
+| `voice` | `edge-tts>=6.1`, `openai-whisper>=20231117`, `sounddevice>=0.4` | Cloud TTS, local Whisper STT, mic I/O |
+| `chat` | `telethon>=1.36`, `discord.py>=2.3` | Telegram MTProto userbot, Discord bot (`nomorals/social/chat/`) |
+| `cloud` | `boto3>=1.34`, `paramiko>=3.4` | AWS connector, SSH tooling |
+| `genimg` | `diffusers>=0.27`, `rembg>=2.0` | Local image generation, background removal (`nomorals/media_edit/generate.py`) |
+| `browser` | `playwright>=1.42` | Playwright browser automation (`nomorals/browser/service.py`) |
+| `config` | `pyyaml>=6.0` | YAML configs (role specs, skill evolution, `core/decoder.py`) |
 | `dev` | `pytest>=7.4`, `ruff>=0.3` | Test suite and linting |
 | `all` | everything above | One command, everything works |
 

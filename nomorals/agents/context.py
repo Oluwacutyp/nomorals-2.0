@@ -133,7 +133,18 @@ class AgentContext:
         executor, self.executor = self.executor, None
         if executor is not None:
             try:
-                executor.shutdown(wait=False)
+                # Graceful, bounded shutdown: cancel pending futures and
+                # reap process-pool children. The old wait=False orphaned
+                # forked workers whenever a command exited with pool work
+                # still queued (battery/CPU drain on the phone). wait=True
+                # matches HybridExecutor.__exit__; running thread tasks are
+                # waited the same way interpreter exit would wait for them.
+                shutdown = getattr(executor, "shutdown", None)
+                if shutdown is not None:
+                    try:
+                        shutdown(wait=True, timeout=10.0)
+                    except TypeError:
+                        shutdown()  # exotic executor without kwargs
             except Exception as exc:  # noqa: BLE001
                 _log.debug("executor shutdown: %s", exc)
         try:
@@ -287,8 +298,8 @@ def _apply_provider_override(db: Any, settings: Settings) -> None:
                      (_json.loads(crow["value"]).get("chain") or []) if str(c).strip()]
             if chain:
                 settings.llm.fallback_chain = chain
-    except Exception:  # noqa: BLE001 — a broken override must not stop the boot
-        pass
+    except Exception as exc:  # noqa: BLE001 — a broken override must not stop the boot
+        _log.debug("provider override lookup failed; using .env defaults: %s", exc)
 
 
 def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
@@ -400,6 +411,22 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             registered.add("ocr")
         except Exception as exc:  # noqa: BLE001 — the floor itself may be absent
             _log.warning("could not register ocr fallback: %s", exc)
+    # Capability-based routing: attach a ModelBroker so the router can select
+    # the best provider per operation (not just failover order).
+    # Best-effort — broker must never break boot or routing.
+    #
+    # The broker is built FIRST so attach_learning() below finds it on
+    # router.broker and injects the trajectory store into it. The reverse
+    # order used to build a second, store-less broker here that silently
+    # replaced the learning-attached one — live serving outcomes never
+    # reached the broker's ranking evidence.
+    try:
+        from ..llm.broker import ModelBroker
+        broker = ModelBroker()
+        broker.build_from_router(router)
+        router.set_broker(broker)
+    except Exception:  # noqa: BLE001
+        _log.warning("broker attach failed; continuing without it", exc_info=True)
     # Wave J: feed live serving outcomes into the trajectory store and
     # benchmark DB so the broker ranks on evidence instead of priors.
     # Best-effort — learning must never break boot or routing.
@@ -408,16 +435,6 @@ def _build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         attach_learning(router, db=db)
     except Exception:  # noqa: BLE001
         _log.warning("learning attach failed; continuing without it", exc_info=True)
-    # Capability-based routing: attach a ModelBroker so the router can select
-    # the best provider per operation (not just failover order).
-    # Best-effort — broker must never break boot or routing.
-    try:
-        from ..llm.broker import ModelBroker
-        broker = ModelBroker()
-        broker.build_from_router(router)
-        router.set_broker(broker)
-    except Exception:  # noqa: BLE001
-        _log.warning("broker attach failed; continuing without it", exc_info=True)
     return router
 
 

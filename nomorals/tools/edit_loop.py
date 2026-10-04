@@ -50,9 +50,14 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from ..agents.coding import CodingAgent
+# Deferred: CodingAgent is only a type annotation here (the file uses
+# `from __future__ import annotations`). Importing it at module top pulled
+# in `nomorals.agents.__init__` — the whole L5 stack — during tool
+# registration at boot.
+if TYPE_CHECKING:  # pragma: no cover
+    from ..agents.coding import CodingAgent
 from ..core.logging_setup import get_logger
 
 __all__ = [

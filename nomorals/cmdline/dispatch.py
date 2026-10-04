@@ -98,6 +98,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
     setup_logging(args.log_level, force=True)
+    # SIGTERM (supervisor stop, `kill`, Termux session end) must shut the
+    # bot down the same way Ctrl-C does: context teardown, bus drain,
+    # gateway stop, final status beacon. Without this the process died
+    # instantly and `nm status` later reported a stale death as "went stale"
+    # instead of a clean stop.
+    from ..core.shutdown import install_sigterm_as_interrupt
+
+    install_sigterm_as_interrupt()
     try:
         return _dispatch(args)
     except KeyboardInterrupt:  # pragma: no cover  # noqa: E106 - deliberate top-level shutdown; exit 130
@@ -185,6 +193,10 @@ def _dispatch(args: argparse.Namespace) -> int:
     from ..core.config import load_settings
 
     settings = load_settings(args.config)
+    # The log.file / NM_LOG_FILE setting was silently ignored — the
+    # RotatingFileHandler was never attached, so file logging never
+    # happened despite being configured and documented.
+    _configure_log_file(args, settings)
     args.command = _canonical_command(args.command)
 
     if args.command == "doctor":

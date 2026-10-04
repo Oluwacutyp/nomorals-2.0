@@ -20,6 +20,44 @@ def _status_section(name: str, fn: Any) -> tuple[dict[str, Any], list[str]]:
                 [f"{name}: unavailable ({type(exc).__name__})"])
 
 
+def _runtime_section(context: Any) -> tuple[dict[str, Any], list[str]]:
+    """Partner-bot liveness from the status beacon (module-level for tests).
+
+    The runtime rewrites the beacon every 10s and marks ``stopped: true``
+    on a clean shutdown — so "stopped" means it exited through stop(),
+    "stale" means it died without one (kill -9, crash), and a missing
+    beacon means it never ran under this home.
+    """
+    from ...agents.beacon import ALIVE_WINDOW_S, read_status
+
+    state, age = read_status(context.settings.home)
+    if state is None:
+        return ({"available": True, "state": "not_running"},
+                ["runtime:  not running — no status beacon under this home"])
+    if state.get("stopped"):
+        ago = f"{age:.0f}s ago" if age is not None else "at unknown time"
+        return ({"available": True, "state": "stopped", "beacon_age_s": age},
+                [f"runtime:  stopped cleanly {ago}"])
+    if age is not None and age <= ALIVE_WINDOW_S:
+        uptime = state.get("uptime_s")
+        up = f", uptime {uptime:.0f}s" if isinstance(uptime, (int, float)) else ""
+        platforms = state.get("platforms") or {}
+        running = [p for p, s in platforms.items()
+                   if isinstance(s, dict) and s.get("running")]
+        plats = f", adapters: {', '.join(sorted(running))}" if running else ""
+        data: dict[str, Any] = {"available": True, "state": "alive",
+                                "beacon_age_s": age, "uptime_s": uptime,
+                                "adapters": sorted(running)}
+        text = [f"runtime:  ALIVE{up}{plats}"]
+        if state.get("last_error"):
+            text.append(f"          last error: {str(state['last_error'])[:120]}")
+            data["last_error"] = str(state["last_error"])[:200]
+        return data, text
+    ago = f"{age:.0f}s" if age is not None else "unknown"
+    return ({"available": True, "state": "stale", "beacon_age_s": age},
+            [f"runtime:  STALE — beacon {ago} old, bot died without a clean stop"])
+
+
 def _cmd_status(args: argparse.Namespace, context: Any) -> int:
     """`nm status` — system health snapshot with real numbers.
 
@@ -148,9 +186,13 @@ def _cmd_status(args: argparse.Namespace, context: Any) -> int:
                 + f", {data['pending_proposals']} pending proposals"]
         return data, text
 
+    def _runtime() -> tuple[dict[str, Any], list[str]]:
+        return _runtime_section(context)
+
     for name, fn in (("system", _system), ("database", _database),
                      ("queue", _queue), ("missions", _missions),
-                     ("memory", _memory), ("proactive", _proactive),
+                     ("memory", _memory), ("runtime", _runtime),
+                     ("proactive", _proactive),
                      ("power", _power), ("research_loop", _research_loop)):
         data, text = _status_section(name, fn)
         sections[name] = data

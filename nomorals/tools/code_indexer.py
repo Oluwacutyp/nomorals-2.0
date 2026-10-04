@@ -35,11 +35,17 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
-from ..llm.base import LLMProvider
+
+# Deferred: LLMProvider is only a type annotation here (the file uses
+# `from __future__ import annotations`). Importing it at module top pulled
+# in `nomorals.llm.__init__` — the whole model plane — during tool
+# registration at boot.
+if TYPE_CHECKING:  # pragma: no cover
+    from ..llm.base import LLMProvider
 from ..storage.db import Database
 from ..storage.vectors import VectorStore
 from .repo_index import (
