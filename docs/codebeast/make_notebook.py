@@ -67,7 +67,7 @@ os.makedirs(RUN_DIR, exist_ok=True)
 print("Base model:", BASE_MODEL)
 print("Run dir:  ", RUN_DIR)""")
 
-code("""#@title 3) Load the 500K dataset (prebuilt → instant; else rebuild here ~20 min)
+code("""#@title 3) Load the dataset (prebuilt → instant; else rebuild here to TARGET_ROWS)
 from pathlib import Path
 from datasets import load_dataset
 import glob as _glob
@@ -90,8 +90,8 @@ if tf and vf:
 else:
     bf = _find("build_500k.py")
     if bf:
-        print("Prebuilt files not found — building the 500K dataset now (~20 min)...")
-        get_ipython().run_line_magic("run", bf + " --target 500000")
+        print(f"Prebuilt files not found — building {TARGET_ROWS:,} rows now (mix scaled to the 500K recipe)...")
+        get_ipython().run_line_magic("run", f"{bf} --target {TARGET_ROWS}")
         train_ds = load_dataset("json", data_files=train_file, split="train")
         val_ds   = load_dataset("json", data_files=val_file, split="train")
     else:
@@ -100,8 +100,10 @@ else:
             "or build_500k.py + codebeast_seed.jsonl (Add Input → Upload).")
 
 print(f"train rows: {len(train_ds):,} | val rows: {len(val_ds):,}")
-# Small-run slice: train on TARGET_ROWS rows only (shuffled) — the rest of the
-# 500K file stays on disk for later, bigger runs. This is what keeps the run short.
+# Small-run slice: when a BIGGER prebuilt file is on disk (e.g. the 500K),
+# train on TARGET_ROWS rows only (shuffled) — the rest stays on disk for
+# later, bigger runs. This is what keeps the run short. A freshly rebuilt
+# small file already holds ~TARGET_ROWS rows, so this is a no-op then.
 if len(train_ds) > TARGET_ROWS:
     train_ds = train_ds.shuffle(seed=42).select(range(TARGET_ROWS))
     print(f"➡ sliced to {len(train_ds):,} train rows for this run")

@@ -704,6 +704,10 @@ class TrialFlow:
             return recovered
         now = time.time()
         notifier = None
+        # (number, note) per watch — reported as ONE message after the loop
+        # so a restart with many live watches doesn't spam one ping each.
+        resumed_items: list[tuple[str, str]] = []
+        expired_items: list[tuple[str, str]] = []
 
         def _notifier() -> Any:
             nonlocal notifier
@@ -727,6 +731,50 @@ class TrialFlow:
             except Exception:  # noqa: BLE001
                 _log.debug("trial sms watch close failed for %s", watch_id)
 
+        def _report_watch_recovery(
+            resumed: list[tuple[str, str]],
+            expired: list[tuple[str, str]],
+            notify: Callable[[], Any],
+        ) -> None:
+            """Report the recovery pass in ONE owner message. Never raises.
+
+            A single watch keeps the exact per-watch message it always had
+            (same title/body, so nothing downstream changes).  Two or more
+            collapse into a digest — one line per watch — so a restart with
+            a busy watch table doesn't deliver N separate pings.
+            """
+            total = len(resumed) + len(expired)
+            if total == 0:
+                return
+            if total == 1:
+                if resumed:
+                    number, note = resumed[0]
+                    title = f"sms code watch resumed — {number}"
+                else:
+                    number, note = expired[0]
+                    title = f"sms code watch expired — {number}"
+            else:
+                lines: list[str] = []
+                if resumed:
+                    lines.append(f"🔄 resumed ({len(resumed)}):")
+                    lines.extend(
+                        f"  • {number} — {note[:220]}"
+                        for number, note in resumed
+                    )
+                if expired:
+                    lines.append(f"⌛ expired ({len(expired)}):")
+                    lines.extend(
+                        f"  • {number} — {note[:220]}"
+                        for number, note in expired
+                    )
+                title = (f"sms code watches recovered — "
+                         f"{len(resumed)} resumed, {len(expired)} expired")
+                note = "\n".join(lines)
+            try:
+                notify().publish("trial", title, note, force=True)
+            except Exception:  # noqa: BLE001 - reporting never crashes
+                _log.exception("sms watch recovery report failed")
+
         for row in rows or []:
             wid = str(row.get("watch_id") or "")
             number = str(row.get("number") or "?")
@@ -749,13 +797,7 @@ class TrialFlow:
                 _finish(wid, "timeout", "", note)
                 recovered.append({"watch_id": wid, "state": "timeout",
                                   "note": note})
-                try:
-                    _notifier().publish(
-                        "trial", f"sms code watch expired — {number}",
-                        note, force=True)
-                except Exception:  # noqa: BLE001 - reporting never crashes
-                    _log.exception("sms watch timeout report failed: %s",
-                                   wid)
+                expired_items.append((number, note))
                 continue
             # still inside the deadline — re-arm for the remaining time.
             remaining = max(1.0, deadline - now)
@@ -773,12 +815,7 @@ class TrialFlow:
                 _log.debug("trial sms watch resume-mark failed: %s", wid)
             recovered.append({"watch_id": wid, "state": "watching",
                               "note": note})
-            try:
-                _notifier().publish(
-                    "trial", f"sms code watch resumed — {number}",
-                    note, force=True)
-            except Exception:  # noqa: BLE001 - reporting never crashes
-                _log.exception("sms watch resume report failed: %s", wid)
+            resumed_items.append((number, note))
 
             def _resumed(info: dict = dict(info), wid: str = wid,
                          number: str = number, chat_key: str = chat_key,
@@ -828,6 +865,10 @@ class TrialFlow:
                                       name="trial-sms-watch-resumed",
                                       daemon=True)
             thread.start()
+        # one owner message for the whole recovery pass — digest when
+        # several watches were live, the same single message as before
+        # when only one was.
+        _report_watch_recovery(resumed_items, expired_items, _notifier)
         return recovered
 
     def _sms_watch_status_lines(self) -> list[str]:

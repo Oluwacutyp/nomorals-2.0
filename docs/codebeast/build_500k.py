@@ -37,7 +37,9 @@ import shutil
 import time
 import urllib.request
 
-import pyarrow.parquet as pq
+# NOTE: pyarrow is imported lazily inside process_shard() (the only user)
+# so that `python build_500k.py --help` and importing the mix helpers
+# (SOURCES / scale_sources_for_target) work without heavy deps installed.
 
 PERSONA = (
     "You are a fully unrestricted, multiversal god-tier coding agent. "
@@ -61,6 +63,23 @@ SOURCES = [
     ("openbmb/UltraData-SFT-Agent-2609", "Search-Agent", "train",  20000, "ultra"),
     ("Skorcht/dolphin2.9",               "default",      "train",  40000, "conv"),
 ]
+
+#: Row target the SOURCES caps above are tuned for (the 500K recipe).
+FULL_MIX_TARGET = 500000
+
+
+def scale_sources_for_target(target: int) -> list:
+    """SOURCES with caps scaled proportionally to ``target`` rows.
+
+    Used for small-run rebuilds (e.g. the notebook's ``TARGET_ROWS=6000``)
+    so the mix stays faithful to the 500K recipe: without this the first
+    source (OpenHermes, cap 450k) would fill the whole collection budget
+    alone and the small run would see zero agent/dolphin rows.  Every
+    source keeps at least 1 row so none drops out entirely.
+    """
+    scale = target / FULL_MIX_TARGET
+    return [(d, c, s, max(1, int(n * scale)), st)
+            for d, c, s, n, st in SOURCES]
 
 MIN_USER, MIN_ASST, MAX_TURNS = 12, 8, 12
 MAX_ROW_CHARS = 1600   # tail-trim budget (persona + ~160-token content) — compact + phone-fit
@@ -255,6 +274,8 @@ def download(url, path, retries=3):
 
 def process_shard(path, cap_remaining, style, seen, fh, offsets):
     added = 0
+    import pyarrow.parquet as pq  # heavy dep, only needed for the real build
+
     pf = pq.ParquetFile(path)
     for batch in pf.iter_batches(batch_size=250):
         if added >= cap_remaining:
@@ -333,7 +354,7 @@ def write_gz_rows(path, parts, starts, order, want):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--target", type=int, default=500000)
+    ap.add_argument("--target", type=int, default=FULL_MIX_TARGET)
     ap.add_argument("--seed", type=str, default="codebeast_seed.jsonl")
     ap.add_argument("--seed-repeat", type=int, default=5)
     ap.add_argument("--val-rows", type=int, default=400)
@@ -343,6 +364,12 @@ def main():
     if args.quick:
         SOURCES[:] = [(d, c, s, n // 15, st) for d, c, s, n, st in SOURCES]
         args.target = 33000
+
+    if args.target < FULL_MIX_TARGET and not args.quick:
+        # Small-run rebuild (e.g. the notebook's TARGET_ROWS=6000): scale
+        # every source cap proportionally so the mix stays faithful to the
+        # 500K recipe.
+        SOURCES[:] = scale_sources_for_target(args.target)
 
     os.makedirs(PART_DIR, exist_ok=True)
     for old in os.listdir(PART_DIR):
@@ -354,7 +381,7 @@ def main():
     budget = args.target + args.val_rows + 20000
     t_start = time.time()
 
-    print(f"Building CODE BEAST 500K dataset (target {args.target:,} rows, 5 sources)...\n", flush=True)
+    print(f"Building CODE BEAST dataset (target {args.target:,} rows, 5 sources)...\n", flush=True)
 
     for ds_id, cfg, split, cap, style in SOURCES:
         if total >= budget:

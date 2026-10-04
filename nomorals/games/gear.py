@@ -133,13 +133,15 @@ def _build_catalog() -> dict[str, GearDef]:
                 grade, base_def=base_def)
 
     # Named sets — matching weapon + armor unlock the set bonus.
-    add("storm_katana", "Storm Katana", 1400, "weapon", "katana", "epic",
+    # NOTE: base_cost is pre-grade; the grade multiplier applies on top.
+    # Set pieces carry ~2x the plain-epic price as the set-bonus premium.
+    add("storm_katana", "Storm Katana", 600, "weapon", "katana", "epic",
         base_atk=14, set_name="storm")
-    add("storm_plate", "Storm Plate", 1600, "armor", "plate", "epic",
+    add("storm_plate", "Storm Plate", 900, "armor", "plate", "epic",
         base_def=24, set_name="storm")
-    add("shadow_rapier", "Shadow Rapier", 1400, "weapon", "rapier", "epic",
+    add("shadow_rapier", "Shadow Rapier", 400, "weapon", "rapier", "epic",
         base_atk=10, set_name="shadow")
-    add("shadow_mail", "Shadow Mail", 1600, "armor", "chainmail", "epic",
+    add("shadow_mail", "Shadow Mail", 600, "armor", "chainmail", "epic",
         base_def=17, set_name="shadow")
     return defn
 

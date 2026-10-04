@@ -897,11 +897,24 @@ class GameEngine:
                     elif winner is None:
                         won = None
                     points = GameEconomy.reward_points(won, game.score(room, p))
-                    coins = GameEconomy.reward_coins(won)
                     score = game.score(room, p)
+                    try:
+                        difficulty = game.difficulty(room)
+                    except Exception:  # noqa: BLE001
+                        difficulty = "normal"
+                    try:
+                        pre = self.store.get(p.key, name=p.name,
+                                             platform=p.platform)
+                        streak_after = pre.streak + 1 if won is True else pre.streak
+                    except Exception:  # noqa: BLE001
+                        streak_after = 1 if won is True else 0
+                    coins, coin_why = GameEconomy.coin_breakdown(
+                        won, score=score, difficulty=difficulty,
+                        streak_after=streak_after)
                     self.store.record_outcome(
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
+                    msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
                     # record to leaderboard if score > 0
                     if score > 0:
                         try:

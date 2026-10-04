@@ -193,6 +193,19 @@ class GameEconomy:
         return self.store.consume_item(player, slug)
 
     # ── rewards ──────────────────────────────────────────────────────────────
+    #: Difficulty → coin multiplier on the win payout. Playing above your
+    #: weight pays; farming the easy table doesn't.
+    DIFFICULTY_COIN_MULT = {
+        "easy": 0.8,
+        "normal": 1.0,
+        "hard": 1.5,
+        "expert": 2.0,
+    }
+
+    #: Win streak → bonus coins, +10 per streak level past the first, capped.
+    STREAK_BONUS_PER_LEVEL = 10
+    STREAK_BONUS_CAP = 50
+
     @staticmethod
     def reward_points(won: bool | None, score: int = 0) -> int:
         """Points credited on game finish: winners by score, losers a
@@ -204,9 +217,40 @@ class GameEconomy:
         return 20
 
     @staticmethod
-    def reward_coins(won: bool | None) -> int:
+    def coin_breakdown(won: bool | None, score: int = 0,
+                       difficulty: str = "normal",
+                       streak_after: int = 0) -> tuple[int, str]:
+        """Performance-based coin payout.
+
+        Wins pay a base plus a score bonus (up to +80), multiplied by the
+        table difficulty, plus a win-streak bonus (up to +50).  Losses and
+        draws keep flat consolation payouts so the board stays alive.
+        Returns ``(total_coins, human_readable_breakdown)``.
+        """
         if won is True:
-            return 60
+            base = 40
+            score_bonus = min(max(0, int(score)), 40) * 2
+            mult = GameEconomy.DIFFICULTY_COIN_MULT.get(
+                (difficulty or "normal").strip().lower(), 1.0)
+            subtotal = int(round((base + score_bonus) * mult))
+            streak_levels = min(max(0, int(streak_after) - 1), 5)
+            streak_bonus = streak_levels * GameEconomy.STREAK_BONUS_PER_LEVEL
+            total = subtotal + streak_bonus
+            parts = [f"win {base}", f"score +{score_bonus}",
+                     f"x{mult:g} {difficulty}"]
+            if streak_bonus:
+                parts.append(f"streak +{streak_bonus}")
+            return total, " + ".join(parts)
         if won is False:
-            return 15
-        return 25
+            return 15, "participation"
+        return 25, "draw"
+
+    @staticmethod
+    def reward_coins(won: bool | None, score: int = 0,
+                     difficulty: str = "normal",
+                     streak_after: int = 0) -> int:
+        """Total coins for a finished game.  Extra kwargs are optional so
+        old single-argument callers keep working."""
+        total, _ = GameEconomy.coin_breakdown(
+            won, score=score, difficulty=difficulty, streak_after=streak_after)
+        return total
