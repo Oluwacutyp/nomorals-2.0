@@ -651,6 +651,11 @@ class TelegramAdapter(ChatAdapter):
         if client is None or seconds <= 0:
             _log.debug("telegram typing: skipped (client=%s, seconds=%s)", client is not None, seconds)
             return False
+        if self._loop is None or self._loop.is_closed():
+            # Not connected (startup/shutdown/restart) — a typing indicator is
+            # cosmetic; skip quietly instead of spamming warnings per message.
+            _log.debug("telegram typing: skipped, adapter loop not running")
+            return False
         started = time.time()
 
         async def _do() -> bool:
@@ -706,8 +711,8 @@ class TelegramAdapter(ChatAdapter):
         try:
             result = self._run_on_loop(_do(), timeout=seconds + 10)
             return bool(result)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("telegram typing: _run_on_loop failed for chat_id=%s: %s", chat.chat_id, exc)
+        except Exception as exc:  # noqa: BLE001 - typing is cosmetic, never fatal
+            _log.debug("telegram typing: _run_on_loop failed for chat_id=%s: %s", chat.chat_id, exc)
             return False
 
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:

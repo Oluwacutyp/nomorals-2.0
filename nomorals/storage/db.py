@@ -21,12 +21,13 @@ wrong:
 from __future__ import annotations
 
 import os
+import random
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from ..core.errors import ConstraintViolation, NotFound, StorageError
 from ..core.logging_setup import get_logger
@@ -36,6 +37,23 @@ __all__ = ["Database", "Row", "split_sql", "transaction"]
 _log = get_logger(__name__)
 
 Row = sqlite3.Row
+
+#: How many total attempts a statement gets when SQLite reports the database
+#: as locked/busy before the error is surfaced to the caller.
+_LOCK_RETRY_ATTEMPTS = 6
+#: Base delay (seconds) for exponential backoff between lock retries.
+_LOCK_RETRY_BASE_DELAY_S = 0.05
+#: Upper bound (seconds) for a single backoff sleep.
+_LOCK_RETRY_MAX_DELAY_S = 2.0
+
+
+def _lock_retry_delay(attempt: int) -> float:
+    """Exponential backoff with +/-50% jitter for ``database is locked`` retries.
+
+    ``attempt`` is the 1-based retry number (not the initial try).
+    """
+    delay = min(_LOCK_RETRY_MAX_DELAY_S, _LOCK_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+    return delay * (0.5 + random.random())
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -203,11 +221,32 @@ class Database:
             self.stats[key] = self.stats.get(key, 0) + amount
 
     # ── execution ────────────────────────────────────────────────────────────
+    def _with_lock_retry(self, fn: Callable[[], Any]) -> Any:
+        """Run ``fn``; retry when SQLite reports the database as locked/busy.
+
+        SQLite's own ``busy_timeout`` usually absorbs contention, but a second
+        process, a second :class:`Database` on the same file, or a long
+        checkpoint can hold the write lock past the timeout. Retrying here
+        (bounded, with backoff + jitter) turns those transient collisions into
+        a short pause instead of a failed write.
+        """
+        attempt = 0
+        while True:
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not _is_retryable_sqlite(exc) or attempt + 1 >= _LOCK_RETRY_ATTEMPTS:
+                    raise
+                attempt += 1
+                self._bump_stat("retries")
+                _log.debug("database is locked, retry %d/%d", attempt, _LOCK_RETRY_ATTEMPTS - 1)
+                time.sleep(_lock_retry_delay(attempt))
+
     def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor:
         """Run a single statement. Returns the cursor (use ``.lastrowid``/``.rowcount``)."""
         started = time.perf_counter()
         try:
-            cursor = self._connection().execute(sql, params)
+            cursor = self._with_lock_retry(lambda: self._connection().execute(sql, params))
         except sqlite3.IntegrityError as exc:
             self._bump_stat("errors")
             raise ConstraintViolation(str(exc)) from exc
@@ -227,7 +266,7 @@ class Database:
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
         started = time.perf_counter()
         try:
-            cursor = self._connection().executemany(sql, list(seq))
+            cursor = self._with_lock_retry(lambda: self._connection().executemany(sql, list(seq)))
         except sqlite3.IntegrityError as exc:
             self._bump_stat("errors")
             raise ConstraintViolation(str(exc)) from exc
@@ -369,8 +408,10 @@ class Database:
             self._write_lock.release()
 
     def _safe(self, sql: str) -> None:
+        # A COMMIT that hits SQLITE_BUSY leaves the transaction open, so a
+        # blind retry is the correct action (not a fresh BEGIN).
         try:
-            self._connection().execute(sql)
+            self._with_lock_retry(lambda: self._connection().execute(sql))
         except sqlite3.Error as exc:  # pragma: no cover - rollback of a broken txn
             _log.warning("%s failed: %s", sql, exc)
 

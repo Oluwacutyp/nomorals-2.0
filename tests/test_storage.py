@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from nomorals.core.errors import ConstraintViolation, MigrationError, NotFound, StorageError
@@ -125,6 +126,118 @@ class TestDatabase(unittest.TestCase):
             reopened = Database(path)
             self.assertEqual(reopened.row_count("conversations"), 1)
             reopened.close()
+
+
+class _FlakyConnection:
+    """Wraps a real sqlite3 connection; fails the first ``failures`` execute() calls."""
+
+    def __init__(self, conn: sqlite3.Connection, failures: int, error: Exception) -> None:
+        self._conn = conn
+        self._failures = failures
+        self._error = error
+        self.calls = 0
+
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise self._error
+        return self._conn.execute(sql, params)
+
+    def executemany(self, sql: str, seq: list) -> sqlite3.Cursor:
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise self._error
+        return self._conn.executemany(sql, seq)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+class TestLockRetry(unittest.TestCase):
+    """``database is locked`` must be retried with backoff, not surfaced."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        # No real sleeping in tests.
+        self._delay_patch = unittest.mock.patch(
+            "nomorals.storage.db._lock_retry_delay", return_value=0.0
+        )
+        self._delay_patch.start()
+
+    def tearDown(self) -> None:
+        self._delay_patch.stop()
+        self.db.close()
+
+    def _flaky(self, failures: int, error: Exception) -> _FlakyConnection:
+        flaky = _FlakyConnection(self.db._connection(), failures, error)
+        self.db._connection = lambda: flaky  # type: ignore[method-assign]
+        return flaky
+
+    def test_execute_retries_on_locked_then_succeeds(self) -> None:
+        flaky = self._flaky(2, sqlite3.OperationalError("database is locked"))
+        self.db.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        ("c1", "t", 1.0, 1.0))
+        self.assertEqual(flaky.calls, 3)
+        self.assertEqual(self.db.stats["retries"], 2)
+        self.assertEqual(self.db.row_count("conversations"), 1)
+
+    def test_execute_retries_on_busy(self) -> None:
+        flaky = self._flaky(1, sqlite3.OperationalError("database is busy"))
+        self.db.execute("SELECT 1")
+        self.assertEqual(flaky.calls, 2)
+        self.assertEqual(self.db.stats["retries"], 1)
+
+    def test_execute_does_not_retry_other_errors(self) -> None:
+        flaky = self._flaky(5, sqlite3.OperationalError("no such table: nope"))
+        with self.assertRaises(StorageError):
+            self.db.execute("SELECT * FROM nope")
+        self.assertEqual(flaky.calls, 1)
+        self.assertEqual(self.db.stats["retries"], 0)
+
+    def test_execute_does_not_retry_integrity_errors(self) -> None:
+        self.db.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        ("c1", "t", 1.0, 1.0))
+        with self.assertRaises(ConstraintViolation):
+            self.db.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                            ("c1", "t", 1.0, 1.0))
+        self.assertEqual(self.db.stats["retries"], 0)
+
+    def test_execute_gives_up_after_max_attempts(self) -> None:
+        from nomorals.storage.db import _LOCK_RETRY_ATTEMPTS
+        flaky = self._flaky(999, sqlite3.OperationalError("database is locked"))
+        with self.assertRaises(StorageError) as ctx:
+            self.db.execute("SELECT 1")
+        self.assertTrue(ctx.exception.retryable)
+        self.assertEqual(flaky.calls, _LOCK_RETRY_ATTEMPTS)
+        self.assertEqual(self.db.stats["retries"], _LOCK_RETRY_ATTEMPTS - 1)
+
+    def test_executemany_retries_on_locked(self) -> None:
+        flaky = self._flaky(1, sqlite3.OperationalError("database is locked"))
+        self.db.executemany(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            [("c1", "t", 1.0, 1.0), ("c2", "t", 1.0, 1.0)],
+        )
+        self.assertEqual(flaky.calls, 2)
+        self.assertEqual(self.db.row_count("conversations"), 2)
+
+    def test_transaction_begin_retries_on_locked(self) -> None:
+        flaky = self._flaky(2, sqlite3.OperationalError("database is locked"))
+        with self.db.transaction():
+            self.db.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                            ("c1", "t", 1.0, 1.0))
+        self.assertGreaterEqual(flaky.calls, 3)  # BEGIN + retry + insert
+        self.assertEqual(self.db.row_count("conversations"), 1)
+
+    def test_backoff_delay_is_bounded_and_positive(self) -> None:
+        self._delay_patch.stop()  # test the real function, not the stub
+        try:
+            from nomorals.storage.db import _LOCK_RETRY_MAX_DELAY_S, _lock_retry_delay
+            for attempt in range(1, 10):
+                d = _lock_retry_delay(attempt)
+                self.assertGreater(d, 0)
+                self.assertLessEqual(d, _LOCK_RETRY_MAX_DELAY_S * 1.5)
+        finally:
+            self._delay_patch.start()
 
 
 class TestMigrations(unittest.TestCase):
