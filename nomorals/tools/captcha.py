@@ -983,8 +983,16 @@ def _notify_takeover(challenge: CaptchaChallenge, detail: str,
         f"(re-run the step — detection finds nothing once it's cleared)."
     )
     try:
-        from ..agents.notifier import notify as _notify
-        return _notify(context, "captcha", title, body, critical=True)
+        # Use context's notifier if available (avoids upward layer import)
+        notifier = getattr(context, "notifier", None)
+        if notifier and hasattr(notifier, "notify"):
+            return notifier.notify(context, "captcha", title, body, critical=True)
+        # Fallback: try gateway on context
+        gateway = getattr(context, "gateway", None)
+        if gateway and hasattr(gateway, "send_to_owner"):
+            gateway.send_to_owner(f"*{title}*\n\n{body}")
+            return {"delivered": True, "via": "gateway"}
+        return {"delivered": False, "error": "no notifier available"}
     except Exception as exc:  # noqa: BLE001 — notification never breaks flow
         _log.warning("captcha takeover notification failed: %s", exc)
         return {"delivered": False, "error": str(exc)}
