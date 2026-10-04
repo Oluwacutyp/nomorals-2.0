@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ..core.logging_setup import get_logger, setup_logging
+from ..core.logging_setup import RedactionFilter, get_logger, setup_logging
 from .commands.agent import _cmd_ask, _cmd_run
 from .commands.autonomy import _cmd_autonomy
 from .commands.backup import _cmd_backup
@@ -104,6 +104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("interrupted", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001 - CLI is the last line of defence
+        _log.exception(
+            "command dispatch failed: %s", getattr(args, "command", "?")
+        )
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
@@ -448,6 +451,7 @@ def _configure_log_file(args: Any = None, settings: Any = None) -> None:
         maxBytes=10*1024*1024,  # 10MB
         backupCount=5
     )
+    handler.addFilter(RedactionFilter())  # keep tokens/passwords out of the log file
     log_level = getattr(logging, level.upper(), logging.INFO)
     handler.setLevel(log_level)
     handler.setFormatter(logging.Formatter(

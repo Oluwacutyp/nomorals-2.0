@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from ..core.errors import NotFound
 from ..core.logging_setup import get_logger
 from .vault import AccountProfile, Credential, CredentialVault
 
@@ -84,8 +85,14 @@ class AccountManager:
         try:
             cred = self.vault.get(service, username, mark_used=False)
             return cred.is_expired()
+        except NotFound:
+            # No credential stored — nothing to be expired; routine, not an error.
+            _log.debug("credential expiry check: no credential for %s/%s", service, username)
+            return False
         except Exception as e:
-            _log.debug("credential expiry check failed: %s", e)
+            # Vault/decryption failures here fail open (treated as "not expired"),
+            # so they must be visible, not buried at debug.
+            _log.warning("credential expiry check failed for %s/%s: %s", service, username, e)
             return False
     
     def refresh_credential(
