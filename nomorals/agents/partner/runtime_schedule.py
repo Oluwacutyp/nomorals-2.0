@@ -34,7 +34,8 @@ class RuntimeScheduleMixin:
             if not ref:
                 return "usage: /schedule rm <name or id>"
             try:
-                return "removed." if scheduler.remove(ref) else f"no job named {ref!r}"
+                return ("removed." if scheduler.remove(ref)
+        else f"no job named {ref!r} — /schedule list to see the jobs")
             except AmbiguousRef as exc:
                 return str(exc)
         if verb in {"enable", "disable"}:
@@ -95,7 +96,8 @@ class RuntimeScheduleMixin:
             payload = {"tool": payload_parts[0], "args": args}
         else:
             if not payload_parts:
-                return "command action needs the command text"
+                return ("command action needs the command text — e.g. "
+                        "/schedule add backup every 1h command \"python3 backup.py\"")
             payload = {"command": " ".join(payload_parts)}
         try:
             job = scheduler.add(name, spec, payload_kind, payload)

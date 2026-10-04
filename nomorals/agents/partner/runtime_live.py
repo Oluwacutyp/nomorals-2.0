@@ -134,7 +134,7 @@ class RuntimeLiveMixin:
         if verb == "history":
             n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
             if self.context.db is None:
-                return "no database"
+                return "no database attached — research history only lives in the full runtime"
             rows = self.context.db.query(
                 "SELECT id, domain, topic, score, status, created_at FROM research_log "
                 "ORDER BY created_at DESC LIMIT ?", (max(1, min(n, 20)),))

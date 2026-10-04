@@ -69,7 +69,8 @@ class RuntimeMissionMixin:
         if verb == "list":
             rows = store.resumable()
             if not rows:
-                return "no active missions."
+                return ("no active missions — start one with "
+                        "/mission new <research|build|fix> …")
             lines = [f"missions ({len(rows)} active):"]
             for m in rows[:15]:
                 # reconcile on read: a dead runner must not show as running
@@ -112,7 +113,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {ref!r}."
+                return (f"no mission matching {ref!r} — "
+                        "/mission list to see the active ones.")
             if code not in StallCode.ALL:
                 return (f"unknown stall code {code!r} — one of: "
                         f"{', '.join(sorted(StallCode.ALL))}")
@@ -136,7 +138,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             cleared = wired_runner(self.context, store=store).clear_stalled(mission.id)
             return (f"{mission.name}: stall cleared — back in play."
                     if cleared else f"{mission.name}: no stall recorded.")
@@ -146,7 +149,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             # idempotent: double-pause is a no-op success, and a finished
             # mission is already past pausing — never an error, never a
             # state rewrite.
@@ -168,7 +172,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             # a "running" mission whose runner died is not running —
             # reconcile first so resume restarts it instead of no-op'ing
             rec = store.reconcile(mission.id)
@@ -204,7 +209,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {ref!r}."
+                return (f"no mission matching {ref!r} — "
+                        "/mission list to see the active ones.")
             # idempotent: a finished mission stays finished — cancelling
             # must never rewrite done/failed into cancelled, and a second
             # cancel is a no-op success, not an error.
@@ -236,7 +242,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             if mission.status == MissionStatus.RUNNING:
                 return (f"{mission.name} is still running — /mission cancel "
                         "it first if you want to start over.")
@@ -286,7 +293,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             if not chat_key:
                 return "watch needs a chat context — run this from a chat."
             # reconcile on read: report the true state, not stale "running"
@@ -305,7 +313,8 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return f"no mission matching {rest!r}."
+                return (f"no mission matching {rest!r} — "
+                        "/mission list to see the active ones.")
             if not chat_key:
                 return "unwatch needs a chat context — run this from a chat."
             removed = MissionWatchers(self.context.db).unsubscribe(

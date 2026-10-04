@@ -67,7 +67,8 @@ class RuntimeMemoryMixin:
             return "memory is off in this session."
         if re.fullmatch(r"[0-9a-f]{12}", target):
             removed = self.context.memory.forget(target)
-            return "forgotten." if removed else f"no memory with id {target}."
+            return ("forgotten." if removed
+        else f"no memory with id {target} — /recall <query> to search instead")
         record = self.context.memory.find_one(target)
         if record is None:
             return "didn't find that in memory — give me the id from /recall, or better words."

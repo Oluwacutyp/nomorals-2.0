@@ -113,7 +113,7 @@ class RuntimeGamesMixin:
             return "\n".join(engine.join(chat_key, player)) or "joined."
         if verb == "invite":
             if player is None:
-                return "invite needs a chat sender."
+                return "invite needs a chat sender — say it where the game is live."
             if len(parts) < 2:
                 return ("usage: /game invite <game_name> [who]\n"
                         "the code is the invite — your friend accepts with "
@@ -143,7 +143,8 @@ class RuntimeGamesMixin:
             return share
         if verb == "accept":
             if player is None:
-                return "accept needs a chat sender."
+                return ("accept needs a chat sender — paste the /game accept "
+                        "<code> in the chat where you play.")
             if len(parts) < 2:
                 return "usage: /game accept <invite_code>"
             code = parts[1]
@@ -198,7 +199,7 @@ class RuntimeGamesMixin:
         if not feature_enabled(self.context, "games"):
             return "games are off. /features games on"
         if player is None:
-            return "no player here."
+            return "no player here — run this from the chat where you play."
         engine = self._game_engine()
         store, gear = engine.store, engine.gear
         prof = store.get(player.key)
@@ -293,7 +294,7 @@ class RuntimeGamesMixin:
         if not feature_enabled(self.context, "games"):
             return "games are off. /features games on"
         if player is None:
-            return "no player here."
+            return "no player here — run this from the chat where you play."
         from ...games.progression import (
             ARENA_LOSS_XP, ARENA_WIN_XP, GAME_LOSS_XP, GAME_WIN_XP,
             level_for_xp, level_stat_bonus, xp_bar, xp_for_level,
@@ -561,7 +562,9 @@ class RuntimeGamesMixin:
             if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit():
                 hours = float(parts[1])
                 if not arena.set_interval(hours):
-                    return "could not save the interval"
+                    return ("couldn't save the interval (the store refused the "
+                            "write) — try again, or /arena status to check "
+                            "the loop is alive")
                 return f"loop interval set to {hours:g}h (live — the running loop picks it up next cycle)"
             live = arena.interval_hours()
             live_txt = f"{live:g}h" if live else "config default"

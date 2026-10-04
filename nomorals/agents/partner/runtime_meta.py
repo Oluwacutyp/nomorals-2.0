@@ -213,7 +213,8 @@ class RuntimeMetaMixin:
         try:
             build_provider(provider, model="probe")  # validates the name
         except Exception as exc:  # noqa: BLE001
-            return f"can't use {provider!r}: {exc}"
+            return (f"can't use {provider!r}: {exc} — /model alone shows "
+                    f"what's answering and the current fallbacks")
 
         from ..context import _build_router, persist_provider_override
 

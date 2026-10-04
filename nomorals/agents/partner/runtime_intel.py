@@ -354,7 +354,8 @@ class RuntimeIntelMixin:
                     return "usage: /monitor webhook-test <ref>"
                 res = agent.webhook_test(body)
                 if res is None:
-                    return f"no monitor {body!r}"
+                    return (f"no monitor {body!r} — "
+                    "/monitor list to see the live ones")
                 if not res.get("ok"):
                     err = res.get("error") or (res.get("result") or {}).get(
                         "error", "")
@@ -395,7 +396,8 @@ class RuntimeIntelMixin:
                 min_gap=min_gap if min_gap >= 0 else None,
                 auto_decode=False if no_decode else None)
             if row is None:
-                return f"no monitor {body!r}"
+                return (f"no monitor {body!r} — "
+                    "/monitor list to see the live ones")
             return (f"alerting for {row['target']}:"
                     f" webhook={'on → ' + row['webhook_url'] if row['webhook_url'] else 'off'}"
                     f" · gap={row['min_alert_gap_s']:.0f}s"
@@ -410,7 +412,8 @@ class RuntimeIntelMixin:
             return "; ".join(parts)
         if tail.startswith("rm "):
             ref = tail[3:].strip()
-            return "removed" if agent.remove(ref) else f"no monitor {ref!r}"
+            return ("removed" if agent.remove(ref)
+                else f"no monitor {ref!r} — /monitor list to see the live ones")
         if tail == "status":
             st = agent.status()
             return f"{st['enabled']}/{st['total']} monitors active"
