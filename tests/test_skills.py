@@ -59,7 +59,8 @@ class CatalogTests(unittest.TestCase):
         for slug, d in SKILL_CATALOG.items():
             self.assertGreaterEqual(d.cost, 0, slug)
             self.assertGreaterEqual(d.level_req, 1, slug)
-            self.assertIn(d.school, {"tiger", "crane", "snake", "shadow"},
+            self.assertIn(d.school,
+                          {"tiger", "crane", "snake", "shadow", "cutyp"},
                           slug)
 
     def test_passives_have_no_cooldown(self):

@@ -589,7 +589,9 @@ class BattleArenaGame(MultiGame):
         for slot in ("weapon", "armor", "trinket"):
             piece = loadout.get(slot)
             if piece:
-                bits.append(f"{piece['name']} ({piece['durability']} dur)")
+                dur = ("∞ unbreakable" if piece.get("unbreakable")
+                       else f"{piece['durability']} dur")
+                bits.append(f"{piece['name']} ({dur})")
         note = "wearing: " + ", ".join(bits) + "."
         if room.state.get("set_bonus"):
             note += f" ✨ {room.state['set_bonus']} set bonus active!"
@@ -602,6 +604,8 @@ class BattleArenaGame(MultiGame):
         loadout = s.get("loadout", {}).get(player_key, {})
         for slot in list(loadout):
             piece = loadout[slot]
+            if piece.get("unbreakable"):
+                continue  # the Cutyp legacy never shatters
             left = int(piece.get("durability", 0)) - self._gear_wear(
                 room, player_key, piece["id"])
             if left <= 0:
@@ -685,11 +689,11 @@ class BattleArenaGame(MultiGame):
         loadout = s.get("loadout", {}).get(player_key, {})
         if src == "you":
             piece = loadout.get("weapon")
-            if piece:
+            if piece and not piece.get("unbreakable"):
                 self._record_wear(room, player_key, piece["id"], 1)
         if dst == "you":
             piece = loadout.get("armor")
-            if piece:
+            if piece and not piece.get("unbreakable"):
                 self._record_wear(room, player_key, piece["id"], 1)
         return self._break_check(room, player_key)
 

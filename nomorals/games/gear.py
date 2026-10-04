@@ -33,6 +33,7 @@ __all__ = [
     "GearDef", "GearInstance", "GEAR_CATALOG", "SET_BONUSES",
     "LEGACY_GEAR_MAP", "GearStore",
     "effective_stats", "detect_set_bonus", "durability_bar",
+    "durability_display",
 ]
 
 _log = get_logger(__name__)
@@ -43,6 +44,7 @@ GRADE_MULT: dict[str, float] = {
     "rare": 1.25,
     "epic": 1.5,
     "legendary": 2.0,
+    "myth": 3.0,
 }
 GRADES = tuple(GRADE_MULT)
 
@@ -52,6 +54,7 @@ GRADE_DURABILITY: dict[str, int] = {
     "rare": 40,
     "epic": 60,
     "legendary": 100,
+    "myth": 999,
 }
 
 #: Equipment slots. One piece per slot equipped at a time.
@@ -60,6 +63,7 @@ SLOTS = ("weapon", "armor", "trinket")
 #: Grade → price multiplier over the kind's base cost.
 _GRADE_COST_MULT: dict[str, float] = {
     "common": 1.0, "rare": 2.0, "epic": 4.0, "legendary": 7.0,
+    "myth": 12.0,
 }
 
 #: Old shop slugs → the gear they become on migration.
@@ -78,10 +82,11 @@ class GearDef:
     cost: int
     slot: str            # weapon | armor | trinket
     kind: str            # katana | broadsword | ... (flavor + base stats)
-    grade: str           # common | rare | epic | legendary
+    grade: str           # common | rare | epic | legendary | myth
     set_name: str = ""   # "" = no set; else e.g. "storm"
     base_atk: int = 0
     base_def: int = 0
+    unbreakable: bool = False  # never wears, never breaks (legacy pieces)
 
     @property
     def max_durability(self) -> int:
@@ -107,19 +112,22 @@ def _build_catalog() -> dict[str, GearDef]:
 
     def add(slug: str, name: str, base_cost: int, slot: str, kind: str,
             grade: str, base_atk: int = 0, base_def: int = 0,
-            set_name: str = "") -> None:
+            set_name: str = "", unbreakable: bool = False) -> None:
         cost = int(base_cost * _GRADE_COST_MULT[grade])
         defn[slug] = GearDef(slug=slug, name=f"{name} [{grade}]",
                              cost=cost, slot=slot, kind=kind, grade=grade,
                              set_name=set_name, base_atk=base_atk,
-                             base_def=base_def)
+                             base_def=base_def, unbreakable=unbreakable)
 
     weapons = (("katana", "Katana", 300, 12),
                ("broadsword", "Broadsword", 350, 15),
                ("rapier", "Rapier", 200, 8),
                ("warhammer", "Warhammer", 450, 20))
+    # myth is reserved for the named legacy set — ordinary kinds stop at
+    # legendary.
+    shop_grades = ("common", "rare", "epic", "legendary")
     for kind, label, base_cost, base_atk in weapons:
-        for grade in GRADES:
+        for grade in shop_grades:
             add(f"{kind}_{grade}", label, base_cost, "weapon", kind,
                 grade, base_atk=base_atk)
 
@@ -128,7 +136,7 @@ def _build_catalog() -> dict[str, GearDef]:
               ("plate", "Plate Armor", 450, 22),
               ("dragonscale", "Dragonscale Mail", 600, 30))
     for kind, label, base_cost, base_def in armors:
-        for grade in GRADES:
+        for grade in shop_grades:
             add(f"{kind}_{grade}", label, base_cost, "armor", kind,
                 grade, base_def=base_def)
 
@@ -143,6 +151,13 @@ def _build_catalog() -> dict[str, GearDef]:
         base_atk=10, set_name="shadow")
     add("shadow_mail", "Shadow Mail", 600, "armor", "chainmail", "epic",
         base_def=17, set_name="shadow")
+
+    # The Cutyp legacy set — myth-tier, unbreakable, endgame priced.
+    add("cutyp_steel_katana", "Cutyp Steel Katana", 800, "weapon",
+        "katana", "myth", base_atk=35, set_name="cutyp",
+        unbreakable=True)
+    add("cutyp_robe", "Cutyp Robe", 650, "armor", "robe", "myth",
+        base_def=30, set_name="cutyp", unbreakable=True)
     return defn
 
 
@@ -168,6 +183,11 @@ SET_BONUSES: dict[str, SetBonus] = {
     "shadow": SetBonus("shadow", ("weapon", "armor"), atk_pct=0.35,
                        def_pct=0.10, combo_name="umbral flurry",
                        combo_every=4),
+    # The Cutyp legacy — the strongest set in the game. Unbreakable
+    # pieces, so the combo never stops firing.
+    "cutyp": SetBonus("cutyp", ("weapon", "armor"), atk_pct=0.50,
+                      def_pct=0.50, combo_name="cutyp's fury",
+                      combo_every=2),
 }
 
 
@@ -199,6 +219,14 @@ def durability_bar(durability: int, max_durability: int,
     filled = int(round(width * max(0, durability) / max_durability))
     return ("█" * filled + "░" * (width - filled)
             + f" {max(0, durability)}/{max_durability}")
+
+
+def durability_display(defn: GearDef | None = None, durability: int = 0,
+                       max_durability: int = 0) -> str:
+    """Human durability readout — unbreakable pieces show ``∞ unbreakable``."""
+    if defn is not None and defn.unbreakable:
+        return "∞ unbreakable"
+    return durability_bar(durability, max_durability)
 
 
 @dataclass
@@ -370,7 +398,7 @@ class GearStore:
         atk, df = effective_stats(defn)
         bonus = detect_set_bonus(self.equipped(player_key))
         msg = (f"equipped {inst.display_name()} (+{atk} atk, +{df} def, "
-               f"{durability_bar(inst.durability, inst.max_durability)})")
+               f"{durability_display(defn, inst.durability, inst.max_durability)})")
         if bonus:
             msg += (f"\n✨ {bonus.set_name} set complete — "
                     f"{bonus.combo_name}! (+{int(bonus.atk_pct*100)}% atk, "
@@ -402,17 +430,24 @@ class GearStore:
         return True, f"unequipped {names}."
 
     def wear(self, instance_id: str, amount: int = 1) -> tuple[bool, bool]:
-        """Apply wear. Returns (ok, broke_now). Never deletes the row."""
+        """Apply wear. Returns (ok, broke_now). Never deletes the row.
+
+        Unbreakable pieces (the Cutyp legacy set) ignore wear entirely —
+        they can never lose durability or break.
+        """
         if self.db is None or amount <= 0:
             return False, False
         self._ensure()
         try:
             with self.db.transaction():
                 row = self.db.query_one(
-                    "SELECT durability FROM game_gear WHERE id = ?",
+                    "SELECT durability, slug FROM game_gear WHERE id = ?",
                     (instance_id,))
                 if row is None:
                     return False, False
+                defn = GEAR_CATALOG.get(str(row.get("slug") or ""))
+                if defn is not None and defn.unbreakable:
+                    return True, False
                 before = int(row["durability"])
                 after = max(0, before - amount)
                 self.db.execute(

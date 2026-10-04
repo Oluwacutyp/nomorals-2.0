@@ -21,7 +21,6 @@ from nomorals.games.ai import GameMind
 from nomorals.games.engine import GameEngine
 from nomorals.games.gear import (
     GEAR_CATALOG,
-    GRADES,
     LEGACY_GEAR_MAP,
     SET_BONUSES,
     GearStore,
@@ -54,10 +53,19 @@ ADA = Player.from_sender("telegram", "456", "Ada")
 class CatalogTests(unittest.TestCase):
     def test_every_sword_kind_in_every_grade(self):
         kinds = {"katana", "broadsword", "rapier", "warhammer"}
+        # myth is reserved for the named legacy set — ordinary kinds
+        # stop at legendary.
+        shop_grades = ("common", "rare", "epic", "legendary")
         for kind in kinds:
-            for grade in GRADES:
+            for grade in shop_grades:
                 slug = f"{kind}_{grade}"
                 self.assertIn(slug, GEAR_CATALOG, slug)
+
+    def test_myth_reserved_for_legacy_set(self):
+        myth_slugs = [slug for slug, d in GEAR_CATALOG.items()
+                      if d.grade == "myth"]
+        self.assertEqual(sorted(myth_slugs),
+                         ["cutyp_robe", "cutyp_steel_katana"])
 
     def test_grade_multipliers_scale(self):
         atks = [effective_stats(GEAR_CATALOG[f"katana_{g}"])[0]

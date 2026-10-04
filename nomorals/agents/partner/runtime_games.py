@@ -213,7 +213,7 @@ class RuntimeGamesMixin:
         ref = (ref or "").strip().lower()
 
         def _piece_line(inst: Any) -> str:
-            from ...games.gear import (GEAR_CATALOG, durability_bar,
+            from ...games.gear import (GEAR_CATALOG, durability_display,
                                        effective_stats)
             defn = GEAR_CATALOG.get(inst.slug)
             stats = ""
@@ -225,7 +225,7 @@ class RuntimeGamesMixin:
                     stats += f" · {defn.set_name} set"
             broken = " 💥 BROKEN" if inst.broken else ""
             return (f"{inst.display_name()} [{inst.slug}] — {stats} · "
-                    f"{durability_bar(inst.durability, inst.max_durability)}"
+                    f"{durability_display(defn, inst.durability, inst.max_durability)}"
                     f"{broken}")
 
         if cmd == "inventory":

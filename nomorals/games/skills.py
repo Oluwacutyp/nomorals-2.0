@@ -11,7 +11,8 @@ yours forever.
   them into your fighter at setup.
 
 Schools are flavor with a mechanical identity:
-tiger hits hard, crane endures, snake is precise, shadow evades.
+tiger hits hard, crane endures, snake is precise, shadow evades —
+and cutyp is the owner's signature school, devastating and absolute.
 """
 from __future__ import annotations
 
@@ -91,6 +92,11 @@ def _catalog() -> dict[str, SkillDef]:
     add("second_wind", "Second Wind", "crane", "active",
         "Catch your breath mid-fight: restore 40% max HP. Once per battle.",
         6, 1000, cooldown=99, heal_pct=0.4, once_per_battle=True)
+    # ── signature: the Cutyp school ──
+    add("slaying_force", "Slaying Force", "cutyp", "active",
+        "The Cutyp signature technique — a cleaving 3.5× strike that "
+        "ignores ALL enemy defense. The legacy made technique.",
+        10, 5000, cooldown=6, mult=3.5, ignore_def_pct=1.0)
     # ── passive ──
     add("iron_skin", "Iron Skin", "crane", "passive",
         "Hardened body: +4 defense in every battle.",

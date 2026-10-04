@@ -436,6 +436,7 @@ class GameEngine:
                              "durability": inst.durability,
                              "max_durability": inst.max_durability,
                              "set": defn.set_name,
+                             "unbreakable": bool(defn.unbreakable),
                              "equipped": inst.equipped}
                     owned.append(entry)
                     if inst.equipped and not inst.broken:
@@ -685,6 +686,7 @@ class GameEngine:
                                  "durability": inst.durability,
                                  "max_durability": inst.max_durability,
                                  "set": defn.set_name,
+                                 "unbreakable": bool(defn.unbreakable),
                                  "equipped": inst.equipped})
                         room.state.setdefault("gear_closet", {})[sender.key] \
                             = owned

@@ -110,7 +110,7 @@ class GameEconomy:
 
     def gear_catalog_text(self) -> str:
         """The durable-gear section of the shop."""
-        from .gear import GEAR_CATALOG, effective_stats
+        from .gear import GEAR_CATALOG, durability_display, effective_stats
         if not GEAR_CATALOG:
             return ""
         lines = ["⚔️ arena gear — durable, wears with use, repairable "
@@ -128,9 +128,12 @@ class GameEconomy:
                 atk, df = effective_stats(defn)
                 stats = f"+{atk} atk" if defn.slot == "weapon" else f"+{df} def"
                 set_tag = f" · {defn.set_name} set" if defn.set_name else ""
+                dur_tag = ("∞ unbreakable"
+                           if defn.unbreakable
+                           else f"{defn.max_durability} dur")
                 lines.append(
                     f"  {defn.slug:<20} {defn.name} — {defn.cost}c · "
-                    f"{stats}{set_tag} · {defn.max_durability} dur")
+                    f"{stats}{set_tag} · {dur_tag}")
         return "\n".join(lines)
 
     # ── wallet ───────────────────────────────────────────────────────────────
@@ -167,8 +170,11 @@ class GameEconomy:
                 return False, f"couldn't forge {gear_defn.name}: {exc}"
             atk, df = effective_stats(gear_defn)
             stats = f"+{atk} atk" if gear_defn.slot == "weapon" else f"+{df} def"
+            dur_note = ("∞ unbreakable — it will never wear or break."
+                        if gear_defn.unbreakable
+                        else f"{inst.durability} durability.")
             return True, (f"bought {gear_defn.name} for {gear_defn.cost}c — "
-                          f"{stats}, {inst.durability} durability. "
+                          f"{stats}, {dur_note} "
                           f"/equip {slug} to wear it in the arena.")
         item = self._items.get(slug)
         if item is None:
