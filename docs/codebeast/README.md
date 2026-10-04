@@ -37,7 +37,7 @@
 
 ## ☁️ Kaggle — the full walkthrough
 
-**Why Kaggle:** free **T4 GPU, 30 GPU-hours/week**, sessions up to **12 hours**, and **Save Version persists your checkpoints** — the exact three things the Colab runs needed.
+**Why Kaggle:** free **T4 GPU, 30 GPU-hours/week**, sessions up to **9 hours**, and **Save Version persists your checkpoints** — the exact three things the Colab runs needed.
 
 ### Setup (once)
 1. Go to [kaggle.com](https://www.kaggle.com) → sign in → accept the free tier.

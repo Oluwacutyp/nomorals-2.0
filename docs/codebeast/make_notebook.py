@@ -22,10 +22,9 @@ md("""# 🦁 CODE BEAST v3 — 500K rows · Phi-3.5-mini 3.8B · Kaggle-first
 4. **Add-ons → Secrets** → add `HF_TOKEN` (your HF write token — only used by the final push cell)
 5. Run the cells top to bottom
 
-**Why it won't crash like the last one:** dataset is prebuilt or regenerated in ~20 min · checkpoints every 500 steps + auto-resume · bounded steps per session · Kaggle sessions last up to 12 hours (no Colab 2-hr roulette) · Save Version persists everything between sessions.""")
+**Why it won't crash like the last one:** dataset is prebuilt or regenerated in ~20 min · checkpoints every 500 steps + auto-resume · bounded steps per session · Kaggle sessions last up to 9 hours (no Colab 2-hr roulette) · Save Version persists everything between sessions.""")
 
 code("""#@title 1) Install Unsloth
-%%capture
 !pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 !pip install --no-deps trl peft accelerate bitsandbytes pyarrow
 # fallback if the git install fails:
@@ -267,7 +266,7 @@ md("""# 📱 Deploy on your 12GB Samsung
 **RAM check:** 3.8B Q4_K_M ≈ 2.3GB → comfortable on 12GB, no need to close other apps.
 
 # ⏱️ Honest time math — Kaggle free tier
-- Quota: **30 GPU-hours/week** (rolling) · sessions up to **12 hours** · T4 = ~2,500–4,000 tok/s on 3.8B QLoRA.
+- Quota: **30 GPU-hours/week** (rolling) · sessions up to **9 hours** · T4 = ~2,500–4,000 tok/s on 3.8B QLoRA.
 - 500K rows × ~390 tokens ≈ **195M tokens ≈ 14–22 GPU-hours** → **under one week** of quota, spread over 2–4 sessions.
 - Small-run mode: TARGET_ROWS=6000 → 750 steps ≈ 15–25 min training. Finishes in one session with huge margin. Raise TARGET_ROWS after the small run succeeds.
 
