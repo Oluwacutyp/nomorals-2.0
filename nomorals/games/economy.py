@@ -202,9 +202,29 @@ class GameEconomy:
         "expert": 2.0,
     }
 
-    #: Win streak → bonus coins, +10 per streak level past the first, capped.
-    STREAK_BONUS_PER_LEVEL = 10
-    STREAK_BONUS_CAP = 50
+    #: Win streak → bonus coins, tiered milestones: the longer the streak,
+    #: the richer each step pays. ``levels`` is streak_after - 1; each tier
+    #: is (streak cap, coins per level).  Earlier tiers are kept — higher
+    #: streaks stack on top of them, so a 10-streak earns everything a
+    #: 5-streak did, plus the richer 6–10 steps.
+    STREAK_BONUS_TIERS: tuple[tuple[float, int], ...] = (
+        (5, 10),              # streaks 2–5:   +10 per level
+        (10, 15),             # streaks 6–10:  +15 per level
+        (15, 25),             # streaks 11–15: +25 per level
+        (float("inf"), 40),   # streak 16+:   +40 per level, uncapped
+    )
+
+    @staticmethod
+    def streak_bonus(streak_after: int) -> int:
+        """Tiered win-streak coin bonus. No cap — milestones keep paying."""
+        levels = max(0, int(streak_after) - 1)
+        bonus, prev = 0, 0
+        for cap, per in GameEconomy.STREAK_BONUS_TIERS:
+            if levels <= prev:
+                break
+            bonus += (min(levels, cap) - prev) * per
+            prev = cap
+        return bonus
 
     @staticmethod
     def reward_points(won: bool | None, score: int = 0) -> int:
@@ -223,7 +243,8 @@ class GameEconomy:
         """Performance-based coin payout.
 
         Wins pay a base plus a score bonus (up to +80), multiplied by the
-        table difficulty, plus a win-streak bonus (up to +50).  Losses and
+        table difficulty, plus a tiered win-streak bonus (milestones at
+        5/10/15+ wins pay richer per step, uncapped).  Losses and
         draws keep flat consolation payouts so the board stays alive.
         Returns ``(total_coins, human_readable_breakdown)``.
         """
@@ -233,8 +254,7 @@ class GameEconomy:
             mult = GameEconomy.DIFFICULTY_COIN_MULT.get(
                 (difficulty or "normal").strip().lower(), 1.0)
             subtotal = int(round((base + score_bonus) * mult))
-            streak_levels = min(max(0, int(streak_after) - 1), 5)
-            streak_bonus = streak_levels * GameEconomy.STREAK_BONUS_PER_LEVEL
+            streak_bonus = GameEconomy.streak_bonus(streak_after)
             total = subtotal + streak_bonus
             parts = [f"win {base}", f"score +{score_bonus}",
                      f"x{mult:g} {difficulty}"]

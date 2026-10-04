@@ -41,12 +41,29 @@ class CoinBreakdownTest(unittest.TestCase):
 
     def test_streak_bonus(self) -> None:
         total, why = GameEconomy.coin_breakdown(True, streak_after=4)
-        self.assertEqual(total, 70)  # 40 + 3*10
+        self.assertEqual(total, 70)  # 40 + 3*10 (tier 1)
         self.assertIn("streak +30", why)
 
-    def test_streak_bonus_capped(self) -> None:
-        total, _ = GameEconomy.coin_breakdown(True, streak_after=10)
-        self.assertEqual(total, 90)  # 40 + 50 cap
+    def test_streak_bonus_tiers_scale(self) -> None:
+        # tiers are cap-based on levels (streak - 1): tier 1 pays +10/win
+        # for the first 5 levels, tier 2 +15/win for the next 5, tier 3
+        # +25/win for the next 5, then +40/win uncapped. Each milestone
+        # pays strictly more than the last.
+        _, why = GameEconomy.coin_breakdown(True, streak_after=5)
+        self.assertIn("streak +40", why)    # 4*10
+        _, why = GameEconomy.coin_breakdown(True, streak_after=10)
+        self.assertIn("streak +110", why)   # 5*10 + 4*15
+        _, why = GameEconomy.coin_breakdown(True, streak_after=15)
+        self.assertIn("streak +225", why)   # 50 + 5*15 + 4*25
+        _, why = GameEconomy.coin_breakdown(True, streak_after=20)
+        self.assertIn("streak +410", why)   # 225 + 4*40... uncapped tier
+
+    def test_streak_bonus_method(self) -> None:
+        self.assertEqual(GameEconomy.streak_bonus(0), 0)
+        self.assertEqual(GameEconomy.streak_bonus(1), 0)
+        self.assertEqual(GameEconomy.streak_bonus(4), 30)
+        self.assertEqual(GameEconomy.streak_bonus(10), 110)
+        self.assertEqual(GameEconomy.streak_bonus(25), 610)
 
     def test_first_win_no_streak_bonus(self) -> None:
         total, why = GameEconomy.coin_breakdown(True, streak_after=1)

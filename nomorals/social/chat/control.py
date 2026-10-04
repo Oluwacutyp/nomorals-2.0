@@ -80,6 +80,8 @@ GAME_COMMANDS = (
     "sudoku", "anagram", "cryptogram",
     # arena gear (persistent equipment)
     "inventory", "equip", "unequip", "repair", "level",
+    # battle skills (learnable martial arts)
+    "skill",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -139,6 +141,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unequip": (0, 1),     # /unequip [slot] — take gear off
     "repair": (0, 1),      # /repair [gear] — restore durability for coins
     "level": (0, 0),       # /level — XP, level, stat growth
+    "skill": (0, 2),       # /skill [learn <name>] — battle skills
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
@@ -643,6 +646,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/level",
               "example": "/level",
               "related": "inventory, game"},
+    "skill": {"what": "learnable battle skills — martial arts for the "
+                      "arena. Active skills are cast mid-fight with "
+                      "skill <name>; passives are always on. Learning "
+                      "costs coins and may need a level.",
+              "usage": "/skill [learn <name>]",
+              "example": "/skill  ·  /skill learn dragon_punch",
+              "related": "level, inventory, game"},
     "mind": {"what": "the Core Mind — the always-on layer that turns a "
                     "natural-language goal into routed work: research swarm, "
                     "builder, browser, downloader, missions, games, "
@@ -1020,7 +1030,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "skill", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
@@ -1230,7 +1240,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["remember", "recall", "forget", "think", "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "skill", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
@@ -1327,6 +1337,7 @@ LIST_ONELINERS: dict[str, str] = {
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
+    "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>)",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",

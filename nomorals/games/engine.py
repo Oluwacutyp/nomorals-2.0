@@ -461,6 +461,16 @@ class GameEngine:
         except Exception:  # noqa: BLE001
             _log.debug("progression mirror failed", exc_info=True)
         room.state["progression"] = prog
+        # learned battle skills, so the arena applies them store-free
+        learned: dict[str, list[str]] = {}
+        try:
+            from .skills import SkillStore
+            skills = SkillStore(self.db)
+            for p in room.humans:
+                learned[p.key] = skills.learned(p.key)
+        except Exception:  # noqa: BLE001
+            _log.debug("skills mirror failed", exc_info=True)
+        room.state["skills"] = learned
 
     def _reconcile_items(self, room: Room) -> None:
         consumed = room.state.get("consumed", {})
@@ -917,6 +927,12 @@ class GameEngine:
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
                     msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
+                    # streak milestones: 5/10/15/… wins in a row get
+                    # fanfare — the tiered bonus keeps growing with them.
+                    if won is True and streak_after >= 5 and streak_after % 5 == 0:
+                        msgs.append(
+                            f"🔥 {streak_after}-win streak! the bonus "
+                            f"tiers keep paying richer.")
                     # record to leaderboard if score > 0
                     if score > 0:
                         try:

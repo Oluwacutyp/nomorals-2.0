@@ -353,6 +353,10 @@ class PartnerRuntime(
                     elif command.kind == "level":
                         reply = self._control_level(
                             player=self._game_player(message))
+                    elif command.kind == "skill":
+                        reply = self._control_skills(
+                            command.tail or command.arg,
+                            player=self._game_player(message))
                     else:
                         verb = (command.tail or command.arg) \
                             if command.kind == "game" \
@@ -1218,6 +1222,11 @@ class PartnerRuntime(
         # ── progression ──────────────────────────────────────────────────────
         if kind == "level":
             return self._control_level(
+                player=self._game_player_for_key(chat_key))
+        # ── battle skills ────────────────────────────────────────────────────
+        if kind == "skill":
+            return self._control_skills(
+                command.tail or arg,
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)

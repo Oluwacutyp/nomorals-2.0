@@ -1318,6 +1318,22 @@ CREATE INDEX IF NOT EXISTS idx_trial_sms_watches_state
 """
 
 
+_V73_GAME_SKILLS = """
+-- Learned battle skills: martial arts for the arena. One row per
+-- learned skill per player; learning is permanent (skills are never
+-- lost, only gear breaks).
+CREATE TABLE IF NOT EXISTS game_skills (
+    id          TEXT PRIMARY KEY,
+    player_key  TEXT NOT NULL,
+    slug        TEXT NOT NULL,
+    learned_at  REAL NOT NULL DEFAULT 0,
+    UNIQUE(player_key, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_game_skills_player
+    ON game_skills(player_key);
+"""
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2371,6 +2387,7 @@ MIGRATIONS: tuple[Migration, ...] = (
                   "INTEGER NOT NULL DEFAULT 0;"),
     Migration(71, "trial_assist_runs", sql=_V71_TRIAL_ASSIST_RUNS),
     Migration(72, "trial_sms_watches", sql=_V72_TRIAL_SMS_WATCHES),
+    Migration(73, "game_skills", sql=_V73_GAME_SKILLS),
 )
 
 

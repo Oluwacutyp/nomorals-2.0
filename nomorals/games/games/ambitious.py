@@ -361,7 +361,9 @@ class BattleArenaGame(MultiGame):
     rules = ("You vs the house: 50 HP each (your level adds more). attack (deal atk − their "
              "defense, 10% crits double it), focus (next hit +50%, "
              "costs your turn), fury (two 80% attacks, 2-turn cooldown), "
-             "defend (halve the next hit), potion (+30 HP), or equip "
+             "defend (halve the next hit), potion (+30 HP), skill <name> "
+             "(martial arts you learned with /skill — each has its own "
+             "cooldown), or equip "
              "shop gear — /game shop buys real swords & armor with "
              "durability that wears down and can be repaired. "
              "Matching gear sets unlock combo attacks. "
@@ -385,7 +387,9 @@ class BattleArenaGame(MultiGame):
         s = room.state
         self._apply_progression(room)
         self._apply_loadout(room)
+        self._apply_skills(room)
         gear_note = self._gear_note(room)
+        skill_note = self._skill_note(room)
         prog = self._prog_bonus(room)
         lvl_note = (f"level {prog['level']} — +{prog['max_hp']} HP, "
                     f"+{prog['atk']} atk, +{prog['def']} def. "
@@ -395,9 +399,10 @@ class BattleArenaGame(MultiGame):
                 f"{s['you']['max_hp']} HP, {s['you']['atk']} atk, "
                 f"{s['you']['def']} def, 1 potion.\n"
                 + (lvl_note if lvl_note else "")
+                + (skill_note + "\n" if skill_note else "")
                 + f"a {rank}-rank hunter blocks your path.\n"
                 + "attack · focus · fury · defend · potion · "
-                "item <gear|potion|shield>\n"
+                "skill <name> · item <gear|potion|shield>\n"
                 + (gear_note + "\n" if gear_note else "")
                 + "the house is already warming up.")
 
@@ -534,6 +539,48 @@ class BattleArenaGame(MultiGame):
                 s["set_bonus"] = set_name
                 break
 
+    def _apply_skills(self, room) -> None:
+        """Fold learned *passive* skills into the fighter's stats.
+
+        Reads the engine-mirrored ``state["skills"][player_key]`` list so
+        game code stays store-free.  Active skills are cast with
+        ``skill <name>`` during the fight (see ``on_move``).
+        """
+        s = room.state
+        y = s["you"]
+        try:
+            from ..skills import passive_bonuses
+        except Exception:  # noqa: BLE001
+            return
+        slugs: list[str] = []
+        for p in room.humans:
+            slugs = s.get("skills", {}).get(p.key, [])
+            break
+        bonus = passive_bonuses(slugs)
+        if bonus["max_hp"]:
+            y["max_hp"] += bonus["max_hp"]
+            y["hp"] = y["max_hp"]
+        y["atk"] += bonus["atk"]
+        y["def"] += bonus["def"]
+        s["crit_bonus"] = bonus["crit"]
+        s["skill_cd"] = {}
+        s["skill_used"] = []
+
+    def _skill_note(self, room) -> str:
+        """One-liner listing learned skills at battle start."""
+        try:
+            from ..skills import SKILL_CATALOG
+        except Exception:  # noqa: BLE001
+            return ""
+        slugs: list[str] = []
+        for p in room.humans:
+            slugs = room.state.get("skills", {}).get(p.key, [])
+            break
+        if not slugs:
+            return ""
+        names = [SKILL_CATALOG[s].name for s in slugs if s in SKILL_CATALOG]
+        return "🥋 skills: " + ", ".join(names) + " — cast with skill <name>."
+
     def _gear_note(self, room) -> str:
         loadout = self._loadout(room)
         if not loadout:
@@ -566,18 +613,26 @@ class BattleArenaGame(MultiGame):
         return out
 
     def _hit(self, room: Room, src: str, dst: str, mind: GameMind,
-             mult: float = 1.0) -> str:
+             mult: float = 1.0, ignore_def: float = 0.0) -> str:
         s = room.state
         a, d = s[src], s[dst]
+        # shadow step: the fighter simply isn't there
+        if dst == "you" and d.get("dodge_next"):
+            d["dodge_next"] = False
+            return (f"{src} swings — and hits only air. "
+                    f"shadow step dodged it clean.")
         # a focused fighter spends its focus on this hit
         focused = a.get("focused", False)
         a["focused"] = False
-        raw = max(1, a["atk"] - d["def"] // 2 + mind.rng.randint(-2, 3))
+        eff_def = int(d["def"] * (1.0 - ignore_def))
+        raw = max(1, a["atk"] - eff_def // 2 + mind.rng.randint(-2, 3))
         if mult != 1.0:
             raw = max(1, int(raw * mult))
         if focused:
             raw = max(1, int(raw * 1.5))
-        crit = mind.rng.random() < 0.10
+        crit_chance = 0.10 + (float(s.get("crit_bonus") or 0.0)
+                              if src == "you" else 0.0)
+        crit = mind.rng.random() < crit_chance
         if crit:
             raw *= 2
         if d["defending"]:
@@ -704,6 +759,66 @@ class BattleArenaGame(MultiGame):
             msg += f" ✨ {s['set_bonus']} set bonus active!"
         return msg
 
+    def _cast_skill(self, room, player, ref: str, mind) -> str | None:
+        """Cast a learned active skill. Returns the result message, or
+        None if the ref isn't a usable skill (so the caller can fall
+        through to the move list)."""
+        from ..skills import SKILL_CATALOG, resolve_skill
+        s = room.state
+        y = s["you"]
+        defn = resolve_skill(ref)
+        if defn is None or defn.kind != "active":
+            return None
+        learned: list[str] = []
+        for p in room.humans:
+            learned = s.get("skills", {}).get(p.key, [])
+            break
+        if defn.slug not in learned:
+            known = [SKILL_CATALOG[x].name for x in learned
+                     if x in SKILL_CATALOG]
+            hint = (f"you know: {', '.join(known)}."
+                    if known else "you haven't learned any skills yet — "
+                    "/skill to see the school.")
+            return f"you don't know {defn.name}. {hint}"
+        cd = s.setdefault("skill_cd", {})
+        if int(cd.get(defn.slug, 0)) > 0:
+            return (f"{defn.name} is recovering — "
+                    f"{cd[defn.slug]} turn(s) left.")
+        used = s.setdefault("skill_used", [])
+        if defn.once_per_battle and defn.slug in used:
+            return f"{defn.name} is spent for this battle."
+        # ── effects ──
+        msg = ""
+        if defn.slug == "shadow_step":
+            y["dodge_next"] = True
+            msg = ("you melt into shadow — the house's next attack "
+                   "will miss.")
+        elif defn.slug == "war_cry":
+            y["atk"] += defn.atk_buff
+            y["warcry_turns"] = defn.buff_turns
+            msg = (f"you ROAR — +{defn.atk_buff} attack for "
+                   f"{defn.buff_turns} turns!")
+        elif defn.slug == "second_wind":
+            heal = int(y["max_hp"] * defn.heal_pct)
+            y["hp"] = min(y["max_hp"], y["hp"] + heal)
+            msg = f"you breathe deep — +{heal} HP ({y['hp']}/{y['max_hp']})."
+        else:
+            # striking skills: dragon_punch / whirlwind / thousand_fists /
+            # pressure_point — N hits at mult×, optionally ignoring defense
+            parts = []
+            for _ in range(max(1, defn.hits)):
+                parts.append(self._hit(room, "you", "house", mind,
+                                       mult=defn.mult or 1.0,
+                                       ignore_def=defn.ignore_def_pct))
+                win = self._check(room)
+                if win:
+                    parts.append(win)
+                    break
+            msg = f"🥋 {defn.name}! " + " ".join(parts)
+        cd[defn.slug] = defn.cooldown
+        if defn.once_per_battle:
+            used.append(defn.slug)
+        return msg
     def on_move(self, room, player, text, mind):
         s = room.state
         t = text.strip().lower()
@@ -711,6 +826,16 @@ class BattleArenaGame(MultiGame):
         # the player's fury cooldown ticks down once per turn
         if s["you"]["fury_cd"] > 0:
             s["you"]["fury_cd"] -= 1
+        # skill cooldowns tick down too
+        for slug in list(s.get("skill_cd", {})):
+            if s["skill_cd"][slug] > 0:
+                s["skill_cd"][slug] -= 1
+        # war cry fades when its turns run out
+        if s["you"].get("warcry_turns", 0) > 0:
+            s["you"]["warcry_turns"] -= 1
+            if s["you"]["warcry_turns"] <= 0:
+                s["you"]["atk"] = max(1, s["you"]["atk"] - 3)
+                out.append("the war cry fades — your attack settles.")
         if t == "attack":
             out.append(self._hit(room, "you", "house", mind))
             win = self._check(room)
@@ -757,9 +882,21 @@ class BattleArenaGame(MultiGame):
                            "buy it.")
                 return out
             out.append(msg)
+        elif t.startswith("skill "):
+            msg = self._cast_skill(room, player, t[6:].strip(), mind)
+            if msg is None:
+                out.append("no such skill — your moves: attack · focus · "
+                           "fury · defend · potion · skill <name> · "
+                           "item <gear>.")
+                return out
+            out.append(msg)
+            win = self._check(room)
+            if win:
+                out.append(win)
+                return out
         else:
             out.append("attack · focus · fury · defend · potion · "
-                       "item <gear>.")
+                       "skill <name> · item <gear>.")
             return out
         # the house answers
         self._house_act(room, mind, out)
