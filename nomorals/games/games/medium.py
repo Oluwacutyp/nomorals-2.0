@@ -1181,6 +1181,13 @@ class RpgAdventureGame(MultiGame):
         return int(room.state.get("sheets", {}).get(player.key, {})
                    .get("xp", 0))
 
+    def xp_reward(self, won, room, player):
+        """The campaign's session XP converts into persistent XP at 2:1,
+        on top of the generic outcome reward — a full 16-scene run pays
+        like a hard-won arena victory."""
+        from ..progression import generic_game_xp
+        return generic_game_xp(won) + self.score(room, player) // 2
+
     def describe_state(self, room):
         s = room.state
         return (f"scene {s['scene']+1}/{s['scenes']} · " +

@@ -532,21 +532,28 @@ class AmbitiousGamesTests(unittest.TestCase):
         self.assertTrue(finished(room))
         self.assertTrue(any("🏁" in m for m in msgs))
 
-    def test_arena_shop_item_is_consumed(self):
-        self.engine.store.grant_item(ADA, "sword", 1)
-        self.assertEqual(self.engine.economy.count(ADA, "sword"), 1)
+    def test_arena_gear_persists_not_consumed(self):
+        # gear rework: shop swords are durable equipment — equipping wears
+        # them, it never consumes them. They persist unless broken.
+        self.engine.store.add_coins(ADA, 5000, "test-grant")
+        ok, msg = self.engine.economy.purchase(ADA, "broadsword_common")
+        self.assertTrue(ok, msg)
         self.engine.start("telegram:1", "arena", ADA)
         room = self.engine.live("telegram:1")
-        out = self.engine.move("telegram:1", "item sword", ADA)
-        self.assertTrue(any("steel sword" in m for m in out))
-        self.assertEqual(room.state["you"]["atk"], 20)
-        # finish the fight; the engine reconciles the real inventory
+        out = self.engine.move("telegram:1", "item broadsword", ADA)
+        self.assertTrue(any("equipped" in m for m in out),
+                        f"expected equip confirmation, got: {out}")
+        self.assertGreater(room.state["you"]["atk"], 10)
+        # finish the fight; the engine reconciles wear, not consumption
         for _ in range(40):
             if self.engine.live("telegram:1") is None:
                 break
             self.engine.move("telegram:1", "attack", ADA)
-        self.assertEqual(self.engine.economy.count(ADA, "sword"), 0,
-                         "equipped sword must be consumed from inventory")
+        pieces = self.engine.gear.list(ADA.key)
+        self.assertEqual(len(pieces), 1,
+                         "the sword must survive the battle")
+        self.assertLess(pieces[0].durability, pieces[0].max_durability,
+                        "fighting must wear the sword down")
 
     def test_arena_shield_absorbs_one_death(self):
         self.engine.store.grant_item(ADA, "shield", 1)

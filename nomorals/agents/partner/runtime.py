@@ -303,15 +303,27 @@ class PartnerRuntime(
                       message.text[:40], command)
             if (command is not None
                     and (command.kind == "game" or command.kind in GAME_COMMANDS)):
-                verb = (command.tail or command.arg) if command.kind == "game" \
-                    else command.kind + ((" " + command.tail) if command.tail else "")
                 self.stats["controls"] += 1
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
                           message.text[:40], message.sender or "?", message.chat.key)
                 try:
-                    reply = self._control_game(
-                        verb, chat_key=message.chat.key,
-                        player=self._game_player(message), kind=message.chat.kind)
+                    if command.kind in ("inventory", "equip", "unequip",
+                                        "repair"):
+                        reply = self._control_gear(
+                            command.kind, command.tail or command.arg,
+                            player=self._game_player(message))
+                    elif command.kind == "level":
+                        reply = self._control_level(
+                            player=self._game_player(message))
+                    else:
+                        verb = (command.tail or command.arg) \
+                            if command.kind == "game" \
+                            else command.kind + ((" " + command.tail)
+                                                 if command.tail else "")
+                        reply = self._control_game(
+                            verb, chat_key=message.chat.key,
+                            player=self._game_player(message),
+                            kind=message.chat.kind)
                     _log.debug("game command reply: %r", reply[:100] if reply else "")
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("game command failed: %s", exc)
@@ -1119,6 +1131,15 @@ class PartnerRuntime(
             return self._control_game(
                 command.tail or arg, chat_key=chat_key,
                 player=self._game_player_for_key(chat_key), kind="dm")
+        # ── arena gear: persistent equipment ─────────────────────────────────
+        if kind in ("inventory", "equip", "unequip", "repair"):
+            return self._control_gear(
+                kind, command.tail or arg,
+                player=self._game_player_for_key(chat_key))
+        # ── progression ──────────────────────────────────────────────────────
+        if kind == "level":
+            return self._control_level(
+                player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)
         if kind == "research":

@@ -78,6 +78,8 @@ GAME_COMMANDS = (
     "gomoku", "reversi", "checkers",
     # puzzles (gamesbooks-1.0)
     "sudoku", "anagram", "cryptogram",
+    # arena gear (persistent equipment)
+    "inventory", "equip", "unequip", "repair", "level",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -131,6 +133,12 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
     # natural language never launches a game there. ("arena" stays the
     # self-improvement arena — that game is /game arena.)
+    # arena gear: persistent equipment with durability, grades, sets
+    "inventory": (0, 0),   # /inventory — equipped gear, closet, consumables
+    "equip": (0, 1),       # /equip [gear] — wear it into battle
+    "unequip": (0, 1),     # /unequip [slot] — take gear off
+    "repair": (0, 1),      # /repair [gear] — restore durability for coins
+    "level": (0, 0),       # /level — XP, level, stat growth
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
@@ -303,6 +311,9 @@ _HELP_TEXT = "\n".join(
         "   /king /story /case /world /escape /political /auction\n"
         "   /shop /wyrr /two_truths /numberguess   start any of the 39 (every chat)",
         "  /game leaderboard|stats|shop|balance    the shared table: rankings, record, coins",
+        "  /inventory | /equip <gear> | /unequip [slot] | /repair <gear>",
+        "   arena gear — persistent swords & armor with durability, grades, sets",
+        "  /level                                   XP, level, arena stat growth",
         "  /news [run|status]                      fetch + summarize the feeds",
         "  /research [run [domain]|status]         lifestyle | tech | cyber",
         "  /code <what to build>                   the coding bot (draft→run→fix)",
@@ -590,6 +601,33 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "example": "/game trivia  ·  /game mafia (group)  ·  "
                         "/game leaderboard",
              "related": ""},
+    "inventory": {"what": "your persistent equipment & consumables — arena "
+                          "gear bought from /game shop. Swords and armor "
+                          "never vanish: they wear with use, break at 0 "
+                          "durability, and can be repaired.",
+                  "usage": "/inventory",
+                  "example": "/inventory",
+                  "related": "equip, unequip, repair, shop"},
+    "equip": {"what": "wear a piece of gear into battle — its attack/defense "
+                      "applies in the arena immediately.",
+              "usage": "/equip <gear>",
+              "example": "/equip katana_epic",
+              "related": "inventory, unequip, repair"},
+    "unequip": {"what": "take gear off (one slot, or everything).",
+                "usage": "/unequip [slot]",
+                "example": "/unequip weapon  ·  /unequip",
+                "related": "equip, inventory"},
+    "repair": {"what": "restore a broken or worn piece of gear to full "
+                       "durability, for coins.",
+                "usage": "/repair <gear>",
+                "example": "/repair katana_epic",
+                "related": "inventory, equip"},
+    "level": {"what": "your persistent progression — XP, level, and the "
+                      "stat growth each level brings to the arena. Every "
+                      "finished game pays XP; arena wins pay the most.",
+              "usage": "/level",
+              "example": "/level",
+              "related": "inventory, game"},
     "mind": {"what": "the Core Mind — the always-on layer that turns a "
                     "natural-language goal into routed work: research swarm, "
                     "builder, browser, downloader, missions, games, "
@@ -955,7 +993,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking", ["remember", "recall", "forget", "think",
                            "benchmark"]),
     ("games — 39, DM + group, start them directly",
-     ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+     ["game", "inventory", "equip", "unequip", "repair", "level",
+      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
@@ -1143,7 +1182,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "think", "benchmark"]),
     ("games — 39, DM + group, start them directly",
-     ["game", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+     ["game", "inventory", "equip", "unequip", "repair", "level",
+      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",

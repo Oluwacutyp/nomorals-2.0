@@ -259,6 +259,13 @@ class MultiGame:
         """Numeric score for the ledger (per-game 'best')."""
         return 0
 
+    def xp_reward(self, won: bool | None, room: Room, player: Player) -> int:
+        """Persistent XP for finishing this game. Games with a richer
+        story (arena) override this; everyone else gets the generic
+        win/draw/loss table from progression.generic_game_xp."""
+        from ..progression import generic_game_xp
+        return generic_game_xp(won)
+
     def final_message(self, room: Room, mind: GameMind) -> str:
         w = self.winner(room)
         if w == "draw":

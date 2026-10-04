@@ -1257,6 +1257,23 @@ ALTER TABLE improvement_runs ADD COLUMN proposal_id TEXT NOT NULL DEFAULT '';
 """
 
 
+_V69_GAME_GEAR = """
+-- Arena gear: durable equipment. One row per owned piece — wear only
+-- ever decreases durability; breakage keeps the row so it can be
+-- repaired. Never silently deleted.
+CREATE TABLE IF NOT EXISTS game_gear (
+    id             TEXT PRIMARY KEY,
+    player_key     TEXT NOT NULL,
+    slug           TEXT NOT NULL,
+    durability     INTEGER NOT NULL,
+    max_durability INTEGER NOT NULL,
+    equipped       INTEGER NOT NULL DEFAULT 0,
+    created_at     REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_game_gear_player ON game_gear(player_key);
+"""
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2304,6 +2321,10 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(68, "media_queue_album_column",
               sql="ALTER TABLE media_queue ADD COLUMN album "
                   "TEXT NOT NULL DEFAULT '';"),
+    Migration(69, "game_gear", sql=_V69_GAME_GEAR),
+    Migration(70, "game_players_xp_column",
+              sql="ALTER TABLE game_players ADD COLUMN xp "
+                  "INTEGER NOT NULL DEFAULT 0;"),
 )
 
 

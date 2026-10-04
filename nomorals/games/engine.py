@@ -107,7 +107,9 @@ class GameEngine:
         self._by_id: dict[str, Room] = {}
         self._mind = GameMind(suggest=suggest)
         self.store = PlayerStore(self.db)
-        self.economy = GameEconomy(self.store)
+        from .gear import GearStore
+        self.gear = GearStore(self.db)
+        self.economy = GameEconomy(self.store, gear_store=self.gear)
         self.board = Leaderboard(self.store)
         self.games: dict[str, MultiGame] = {}
         self._wake = threading.Event()
@@ -398,14 +400,59 @@ class GameEngine:
         items from ``state['inventory'][player.key]`` — a snapshot taken
         at setup so game code stays pure (no store access inside a
         move). The engine reconciles the actual ledger when the room
-        closes, consuming whatever the state says was used."""
+        closes, consuming whatever the state says was used.
+
+        Durable gear is mirrored separately into ``state['loadout']``:
+        slot → {id, slug, atk, def, durability, set} for what's equipped.
+        """
         inv: dict[str, dict[str, int]] = {}
+        loadout: dict[str, dict[str, dict[str, Any]]] = {}
+        closet: dict[str, list[dict[str, Any]]] = {}
         for p in room.humans:
             try:
                 inv[p.key] = dict(self.store.get(p.key).items)
             except Exception:  # noqa: BLE001
                 inv[p.key] = {}
+            try:
+                from .gear import GEAR_CATALOG, effective_stats
+                worn: dict[str, dict[str, Any]] = {}
+                owned: list[dict[str, Any]] = []
+                for inst in self.gear.list(p.key):
+                    defn = GEAR_CATALOG.get(inst.slug)
+                    if defn is None:
+                        continue
+                    atk, df = effective_stats(defn)
+                    entry = {"id": inst.id, "slug": inst.slug,
+                             "name": defn.name, "slot": defn.slot,
+                             "atk": atk, "def": df,
+                             "durability": inst.durability,
+                             "max_durability": inst.max_durability,
+                             "set": defn.set_name,
+                             "equipped": inst.equipped}
+                    owned.append(entry)
+                    if inst.equipped and not inst.broken:
+                        worn.setdefault(defn.slot, entry)
+                loadout[p.key] = worn
+                closet[p.key] = owned
+            except Exception:  # noqa: BLE001
+                loadout[p.key] = {}
+                closet[p.key] = {}
         room.state["inventory"] = inv
+        room.state["loadout"] = loadout
+        room.state["gear_closet"] = closet
+        # persistent progression: level + arena stat bonus per human,
+        # so games apply it store-free (see progression.level_stat_bonus)
+        prog: dict[str, dict[str, Any]] = {}
+        try:
+            from .progression import level_for_xp, level_stat_bonus
+            for p in room.humans:
+                prof = self.store.get(p.key)
+                level = level_for_xp(prof.xp)
+                prog[p.key] = {"level": level,
+                               **level_stat_bonus(level)}
+        except Exception:  # noqa: BLE001
+            _log.debug("progression mirror failed", exc_info=True)
+        room.state["progression"] = prog
 
     def _reconcile_items(self, room: Room) -> None:
         consumed = room.state.get("consumed", {})
@@ -416,6 +463,25 @@ class GameEngine:
             for item, n in used.items():
                 for _ in range(max(0, int(n))):
                     self.economy.consume(p, item)
+        # durable gear: apply the wear the battle recorded, in the same
+        # pass — breakage only ever zeroes durability, the row survives
+        # for repair.
+        wear = room.state.get("gear_wear", {})
+        for p in room.players:
+            if p.is_ai:
+                continue
+            used = wear.get(p.key) or wear.get("you") or {}
+            for instance_id, n in used.items():
+                for _ in range(max(0, int(n))):
+                    self.gear.wear(instance_id, 1)
+        # gear equipped mid-battle persists as the new loadout
+        equipped_final = room.state.get("gear_equipped", {})
+        for p in room.players:
+            if p.is_ai:
+                continue
+            final = equipped_final.get(p.key) or {}
+            if final:
+                self.gear.sync_equipped(p.key, final)
 
     def _fill_ai(self, room: Room, game: MultiGame) -> None:
         """Seat enough AI players for the game to work. Channel rooms
@@ -558,6 +624,24 @@ class GameEngine:
                         inv = room.state.setdefault("inventory", {})
                         inv[sender.key] = dict(
                             self.store.get(sender.key).items)
+                        # same for the gear closet (arena equips mid-fight)
+                        from .gear import GEAR_CATALOG, effective_stats
+                        owned: list[dict[str, Any]] = []
+                        for inst in self.gear.list(sender.key):
+                            defn = GEAR_CATALOG.get(inst.slug)
+                            if defn is None:
+                                continue
+                            atk, df = effective_stats(defn)
+                            owned.append(
+                                {"id": inst.id, "slug": inst.slug,
+                                 "name": defn.name, "slot": defn.slot,
+                                 "atk": atk, "def": df,
+                                 "durability": inst.durability,
+                                 "max_durability": inst.max_durability,
+                                 "set": defn.set_name,
+                                 "equipped": inst.equipped})
+                        room.state.setdefault("gear_closet", {})[sender.key] \
+                            = owned
                     except Exception:  # noqa: BLE001
                         _log.debug("inventory mirror refresh failed",
                                    exc_info=True)
@@ -784,6 +868,23 @@ class GameEngine:
                                 f"🏆 {p.name} unlocked “{ach_name}”!")
                     except Exception:  # noqa: BLE001
                         _log.debug("achievement award failed", exc_info=True)
+                    # persistent progression: XP for every finished game,
+                    # levels with real stat growth
+                    try:
+                        from .progression import (
+                            award_xp, describe_level_up, xp_bar)
+                        amount = game.xp_reward(won, room, p)
+                        new_level, gained = award_xp(
+                            self.store, p, amount,
+                            reason=f"{room.game}:{'win' if won else 'loss' if won is False else 'draw'}")
+                        if amount > 0:
+                            prof = self.store.get(p.key)
+                            msgs.append(
+                                f"+{amount} XP {xp_bar(prof.xp)}")
+                        for lvl in gained:
+                            msgs.append(describe_level_up(lvl))
+                    except Exception:  # noqa: BLE001
+                        _log.debug("xp award failed", exc_info=True)
                 msgs.append(
                     f"📈 points and coins credited — /game leaderboard"
                 )

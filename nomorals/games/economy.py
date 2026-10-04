@@ -68,8 +68,10 @@ class GameEconomy:
     """Wallet + shop over the player ledger."""
 
     def __init__(self, store: PlayerStore,
-                 extra_items: tuple[ShopItem, ...] = ()) -> None:
+                 extra_items: tuple[ShopItem, ...] = (),
+                 gear_store: Any = None) -> None:
         self.store = store
+        self.gear = gear_store
         self._items: dict[str, ShopItem] = {
             i.slug: i for i in DEFAULT_SHOP
         }
@@ -90,15 +92,46 @@ class GameEconomy:
 
     def catalog_text(self, game: str = "any", player: Player | None = None) -> str:
         items = self.catalog(game)
-        if not items:
-            return "the shop is empty for this game."
         balance = ""
         if player is not None:
             balance = f"  (you have {self.balance(player)} coins)"
         lines = [f"🛒 shop{balance} — /game shop buy <slug>"]
         for item in items:
+            if item.slug in ("gear_sword", "gear_armor"):
+                continue  # legacy one-shots: superseded by durable gear below
             lines.append(f"  {item.slug:<12} {item.name} — {item.cost}c"
                          + (f" · {item.effect}" if item.effect else ""))
+        gear_lines = self.gear_catalog_text()
+        if gear_lines:
+            lines.append("")
+            lines.append(gear_lines)
+        if len(lines) == 1:
+            return "the shop is empty for this game."
+        return "\n".join(lines)
+
+    def gear_catalog_text(self) -> str:
+        """The durable-gear section of the shop."""
+        from .gear import GEAR_CATALOG, effective_stats
+        if not GEAR_CATALOG:
+            return ""
+        lines = ["⚔️ arena gear — durable, wears with use, repairable "
+                 "(/inventory, /equip):"]
+        by_slot: dict[str, list] = {}
+        for defn in GEAR_CATALOG.values():
+            by_slot.setdefault(defn.slot, []).append(defn)
+        for slot in ("weapon", "armor"):
+            pieces = sorted(by_slot.get(slot, []),
+                            key=lambda d: (d.cost, d.slug))
+            if not pieces:
+                continue
+            lines.append(f"  — {slot}s —")
+            for defn in pieces:
+                atk, df = effective_stats(defn)
+                stats = f"+{atk} atk" if defn.slot == "weapon" else f"+{df} def"
+                set_tag = f" · {defn.set_name} set" if defn.set_name else ""
+                lines.append(
+                    f"  {defn.slug:<20} {defn.name} — {defn.cost}c · "
+                    f"{stats}{set_tag} · {defn.max_durability} dur")
         return "\n".join(lines)
 
     # ── wallet ───────────────────────────────────────────────────────────────
@@ -106,7 +139,37 @@ class GameEconomy:
         return self.store.get(player.key).coins
 
     def purchase(self, player: Player, slug: str) -> tuple[bool, str]:
-        """Buy one item. Returns (ok, message)."""
+        """Buy one item. Returns (ok, message).
+
+        Durable gear (swords, armor) becomes a persistent piece in the
+        player's inventory with its own durability — it is never a
+        one-shot consumable.  Legacy ``gear_sword``/``gear_armor`` slugs
+        map onto their modern equivalents.
+        """
+        from .gear import GEAR_CATALOG, LEGACY_GEAR_MAP, effective_stats
+        slug = (slug or "").strip().lower()
+        # legacy one-shot slugs → real gear
+        if slug in LEGACY_GEAR_MAP:
+            slug = LEGACY_GEAR_MAP[slug]
+        gear_defn = GEAR_CATALOG.get(slug)
+        if gear_defn is not None and self.gear is not None:
+            prof = self.store.get(player.key)
+            if prof.coins < gear_defn.cost:
+                return False, (f"{gear_defn.name} costs {gear_defn.cost}c — "
+                               f"you have {prof.coins}c. win games to earn more.")
+            self.store.add_coins(player, -gear_defn.cost, f"buy:{slug}")
+            try:
+                inst = self.gear.grant(player.key, slug)
+            except Exception as exc:  # noqa: BLE001
+                # coins already taken — refund rather than lose them
+                self.store.add_coins(player, gear_defn.cost,
+                                     f"refund:{slug}")
+                return False, f"couldn't forge {gear_defn.name}: {exc}"
+            atk, df = effective_stats(gear_defn)
+            stats = f"+{atk} atk" if gear_defn.slot == "weapon" else f"+{df} def"
+            return True, (f"bought {gear_defn.name} for {gear_defn.cost}c — "
+                          f"{stats}, {inst.durability} durability. "
+                          f"/equip {slug} to wear it in the arena.")
         item = self._items.get(slug)
         if item is None:
             known = ", ".join(sorted(self._items))

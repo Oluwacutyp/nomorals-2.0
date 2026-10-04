@@ -311,36 +311,183 @@ class WorldGame(MultiGame):
 
 class BattleArenaGame(MultiGame):
     name = "arena"
-    description = "turn-to-death combat — shop items are real gear"
+    description = "turn-to-death combat — shop gear is real equipment"
     min_players = 1
     max_players = 1
     ai_seats = 1
     move_timeout = 60
-    rules = ("You vs the house: 50 HP each. attack (deal atk − their "
+    rules = ("You vs the house: 50 HP each (your level adds more). attack (deal atk − their "
              "defense, 10% crits double it), focus (next hit +50%, "
              "costs your turn), fury (two 80% attacks, 2-turn cooldown), "
              "defend (halve the next hit), potion (+30 HP), or equip "
-             "shop gear — sword +10 atk, armor +15 def, shield "
-             "absorbs one death, potion item +30. Gear is consumed "
-             "from your real inventory. First to 0 HP loses — the "
-             "shield buys exactly one second life.")
+             "shop gear — /game shop buys real swords & armor with "
+             "durability that wears down and can be repaired. "
+             "Matching gear sets unlock combo attacks. "
+             "Winning earns XP — level up for +max HP, +atk, +def. "
+             "First to 0 HP loses.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         def fighter():
             return {"hp": 50, "max_hp": 50, "atk": 10, "def": 5,
                     "potions": 1, "defending": False, "shield": False,
-                    "focused": False, "fury_cd": 0}
+                    "focused": False, "fury_cd": 0,
+                    "combo_every": 0, "combo_count": 0, "combo_name": ""}
         return {"you": fighter(), "house": fighter(),
-                "done": False, "consumed": {}}
+                "done": False, "consumed": {}, "gear_wear": {},
+                "combo_triggers": 0,
+                "gear_base": {"atk": 10, "def": 5}, "set_bonus": None}
 
     def setup(self, room, mind):
-        prof = None
+        s = room.state
+        self._apply_progression(room)
+        self._apply_loadout(room)
+        gear_note = self._gear_note(room)
+        prog = self._prog_bonus(room)
+        lvl_note = (f"level {prog['level']} — +{prog['max_hp']} HP, "
+                    f"+{prog['atk']} atk, +{prog['def']} def. "
+                    if prog["level"] > 1 else "")
+        return ("⚔️ battle arena — "
+                f"{s['you']['max_hp']} HP, {s['you']['atk']} atk, "
+                f"{s['you']['def']} def, 1 potion.\n"
+                + (lvl_note if lvl_note else "")
+                + "attack · focus · fury · defend · potion · "
+                "item <gear|potion|shield>\n"
+                + (gear_note + "\n" if gear_note else "")
+                + "the house is already warming up.")
+
+    # ── progression ──────────────────────────────────────────────────────────
+    def _prog_bonus(self, room) -> dict[str, int]:
+        """The human's mirrored level bonus (engine fills state)."""
         for p in room.humans:
-            prof = p
-            break
-        return ("⚔️ battle arena — 50 HP, 10 atk, 5 def, 1 potion.\n"
-                "attack · defend · potion · item <sword|armor|shield|potion>\n"
-                "the house is already warming up.")
+            prog = room.state.get("progression", {}).get(p.key)
+            if prog:
+                return {"level": int(prog.get("level", 1)),
+                        "max_hp": int(prog.get("max_hp", 0)),
+                        "atk": int(prog.get("atk", 0)),
+                        "def": int(prog.get("def", 0))}
+        return {"level": 1, "max_hp": 0, "atk": 0, "def": 0}
+
+    def _apply_progression(self, room) -> None:
+        """Fold the player's persistent level into base stats.
+
+        The house scales at half the player's bonus — progression always
+        feels powerful, but fights stay competitive.
+        """
+        s = room.state
+        prog = self._prog_bonus(room)
+        s["gear_base"] = {"atk": 10 + prog["atk"], "def": 5 + prog["def"]}
+        y, h = s["you"], s["house"]
+        y["max_hp"] = 50 + prog["max_hp"]
+        y["hp"] = y["max_hp"]
+        h["max_hp"] = 50 + prog["max_hp"] // 2
+        h["hp"] = h["max_hp"]
+        h["atk"] = 10 + prog["atk"] // 2
+        h["def"] = 5 + prog["def"] // 2
+        s["player_level"] = prog["level"]
+
+    def xp_reward(self, won: bool | None, room, player) -> int:
+        """Rich arena XP: wins pay, losses still move the bar, and clean
+        fighting earns bonuses (capped so farming one trick stalls)."""
+        from ..progression import ARENA_LOSS_XP, ARENA_WIN_XP
+        s = room.state
+        if won is not True:
+            return ARENA_LOSS_XP
+        xp = ARENA_WIN_XP
+        bonus = 0
+        y = s.get("you", {})
+        # flawless-ish: finished above half HP
+        if y.get("hp", 0) >= y.get("max_hp", 50) // 2:
+            bonus += 15
+        # killing crit
+        if s.get("crit_kill_by") == "you":
+            bonus += 10
+        # set combos actually fired
+        bonus += 5 * int(s.get("combo_triggers", 0))
+        return xp + min(30, bonus)
+
+    # ── gear ───────────────────────────────────────────────────────────────
+    def _loadout(self, room) -> dict[str, dict[str, Any]]:
+        """Equipped gear snapshot for the human seat."""
+        s = room.state
+        for p in room.humans:
+            return s.get("loadout", {}).get(p.key, {})
+        return {}
+
+    def _gear_wear(self, room, player_key: str,
+                   instance_id: str) -> int:
+        """Wear recorded so far this battle for one piece."""
+        return int(room.state.get("gear_wear", {})
+                   .get(player_key, {}).get(instance_id, 0))
+
+    def _record_wear(self, room, player_key: str,
+                     instance_id: str, amount: int = 1) -> None:
+        s = room.state
+        wear = s.setdefault("gear_wear", {}).setdefault(player_key, {})
+        wear[instance_id] = int(wear.get(instance_id, 0)) + amount
+
+    def _apply_loadout(self, room) -> None:
+        """Fold equipped gear into the fighter's stats + set bonus."""
+        s = room.state
+        y = s["you"]
+        base_atk, base_def = s["gear_base"]["atk"], s["gear_base"]["def"]
+        y["atk"], y["def"] = base_atk, base_def
+        y["combo_every"], y["combo_count"], y["combo_name"] = 0, 0, ""
+        s["set_bonus"] = None
+        loadout = self._loadout(room)
+        for slot, piece in loadout.items():
+            if slot == "weapon":
+                y["atk"] += int(piece.get("atk", 0))
+            elif slot == "armor":
+                y["def"] += int(piece.get("def", 0))
+        # set bonus: matching weapon + armor of one set
+        sets: dict[str, set] = {}
+        for slot, piece in loadout.items():
+            if piece.get("set"):
+                sets.setdefault(piece["set"], set()).add(slot)
+        try:
+            from ..gear import SET_BONUSES
+        except Exception:  # noqa: BLE001
+            SET_BONUSES = {}
+        for set_name, slots in sets.items():
+            bonus = SET_BONUSES.get(set_name)
+            if bonus and all(x in slots for x in bonus.needs):
+                y["atk"] = int(round(y["atk"] * (1 + bonus.atk_pct)))
+                y["def"] = int(round(y["def"] * (1 + bonus.def_pct)))
+                y["combo_every"] = bonus.combo_every
+                y["combo_name"] = bonus.combo_name
+                s["set_bonus"] = set_name
+                break
+
+    def _gear_note(self, room) -> str:
+        loadout = self._loadout(room)
+        if not loadout:
+            return ""
+        bits = []
+        for slot in ("weapon", "armor", "trinket"):
+            piece = loadout.get(slot)
+            if piece:
+                bits.append(f"{piece['name']} ({piece['durability']} dur)")
+        note = "wearing: " + ", ".join(bits) + "."
+        if room.state.get("set_bonus"):
+            note += f" ✨ {room.state['set_bonus']} set bonus active!"
+        return note
+
+    def _break_check(self, room, player_key: str) -> list[str]:
+        """Shatter anything worn down to 0 durability this turn."""
+        out: list[str] = []
+        s = room.state
+        loadout = s.get("loadout", {}).get(player_key, {})
+        for slot in list(loadout):
+            piece = loadout[slot]
+            left = int(piece.get("durability", 0)) - self._gear_wear(
+                room, player_key, piece["id"])
+            if left <= 0:
+                del loadout[slot]
+                out.append(f"💥 your {piece['name']} SHATTERS!")
+        if out:
+            self._apply_loadout(room)
+            out.append("repair it with /repair — or fight on bare-handed.")
+        return out
 
     def _hit(self, room: Room, src: str, dst: str, mind: GameMind,
              mult: float = 1.0) -> str:
@@ -361,6 +508,10 @@ class BattleArenaGame(MultiGame):
             raw = max(1, raw // 2)
             d["defending"] = False
         d["hp"] -= raw
+        # gear wear: the attacker's weapon and the defender's armor
+        wear_notes: list[str] = []
+        if src == "you" or dst == "you":
+            wear_notes = self._apply_wear(room, src, dst)
         if d["hp"] <= 0 and d["shield"]:
             d["shield"] = False
             d["hp"] = 1
@@ -371,8 +522,45 @@ class BattleArenaGame(MultiGame):
             s["crit_kill_by"] = src
         kind = "CRIT — " if crit else ""
         tag = " (focused)" if focused else ""
-        return (f"{kind}{src} lands {raw}{tag} — "
-                f"{dst} at {max(0, d['hp'])} HP.")
+        msg = (f"{kind}{src} lands {raw}{tag} — "
+               f"{dst} at {max(0, d['hp'])} HP.")
+        # set combo: every Nth player attack strikes twice
+        if src == "you" and d["hp"] > 0 and a.get("combo_every"):
+            a["combo_count"] = int(a.get("combo_count", 0)) + 1
+            if a["combo_count"] % int(a["combo_every"]) == 0:
+                s["combo_triggers"] = int(s.get("combo_triggers", 0)) + 1
+                second = max(1, int((a["atk"] - d["def"] // 2) * 0.7))
+                d["hp"] -= second
+                msg += (f" ⚡ {a.get('combo_name', 'combo')}! "
+                        f"a second strike for {second} — "
+                        f"{dst} at {max(0, d['hp'])} HP.")
+                if src == "you":
+                    wear_extra = self._apply_wear(room, src, dst)
+                    wear_notes.extend(w for w in wear_extra
+                                      if w not in wear_notes)
+        if wear_notes:
+            msg += " " + " ".join(wear_notes)
+        return msg
+
+    def _apply_wear(self, room, src: str, dst: str) -> list[str]:
+        """Wear the human's gear for one exchange. Returns break notes."""
+        s = room.state
+        player_key = None
+        for p in room.humans:
+            player_key = p.key
+            break
+        if player_key is None:
+            return []
+        loadout = s.get("loadout", {}).get(player_key, {})
+        if src == "you":
+            piece = loadout.get("weapon")
+            if piece:
+                self._record_wear(room, player_key, piece["id"], 1)
+        if dst == "you":
+            piece = loadout.get("armor")
+            if piece:
+                self._record_wear(room, player_key, piece["id"], 1)
+        return self._break_check(room, player_key)
 
     def _check(self, room: Room) -> str | None:
         s = room.state
@@ -385,30 +573,60 @@ class BattleArenaGame(MultiGame):
         return None
 
     def _equip(self, room: Room, player: Player, item: str) -> str | None:
-        """Check inventory via the state bridge: the engine mirrors
-        owned items into state['inventory'][player.key] at setup time."""
+        """Wear gear or spend a consumable.
+
+        Gear (swords, armor) is *equipped* — it stays yours, wears with
+        use, and can be repaired.  Only true consumables (shield, potion)
+        are spent.  Reads the engine-mirrored snapshots in state so game
+        code stays store-free.
+        """
         s = room.state
-        inv = s.get("inventory", {}).get(player.key, {})
-        if int(inv.get(item, 0)) <= 0:
+        item = (item or "").strip().lower()
+        if not item:
             return None
-        inv[item] = int(inv[item]) - 1
-        s["consumed"].setdefault(player.key, {})
-        s["consumed"][player.key][item] = \
-            int(s["consumed"][player.key].get(item, 0)) + 1
-        y = s["you"]
-        if item == "sword":
-            y["atk"] += 10
-            return "the steel sword goes on — +10 atk."
-        if item == "armor":
-            y["def"] += 15
-            return "iron armor, +15 def."
-        if item == "shield":
-            y["shield"] = True
-            return "the shield is up — it will take one fatal hit."
-        if item == "potion":
-            y["hp"] = min(50, y["hp"] + 30)
+        # ── consumables keep the old spend path ──
+        if item in ("shield", "potion"):
+            inv = s.get("inventory", {}).get(player.key, {})
+            if int(inv.get(item, 0)) <= 0:
+                return None
+            inv[item] = int(inv[item]) - 1
+            s["consumed"].setdefault(player.key, {})
+            s["consumed"][player.key][item] = \
+                int(s["consumed"][player.key].get(item, 0)) + 1
+            y = s["you"]
+            if item == "shield":
+                y["shield"] = True
+                return "the shield is up — it will take one fatal hit."
+            y["hp"] = min(y["max_hp"], y["hp"] + 30)
             return "the potion drinks down — +30 HP."
-        return None
+        # ── gear: resolve against the mirrored closet ──
+        closet = s.get("gear_closet", {}).get(player.key, [])
+        piece = None
+        for cand in closet:
+            if item == cand["slug"].lower() \
+                    or item in cand["slug"].lower() \
+                    or item in cand["name"].lower():
+                piece = cand
+                break
+        if piece is None:
+            return None
+        if int(piece.get("durability", 0)) <= 0:
+            return (f"your {piece['name']} is broken — "
+                    f"/repair {piece['slug']} first.")
+        loadout = s.setdefault("loadout", {}).setdefault(player.key, {})
+        slot = piece["slot"]
+        old = loadout.get(slot)
+        loadout[slot] = dict(piece)
+        self._apply_loadout(room)
+        # record the equip so the engine persists it on close
+        s.setdefault("gear_equipped", {})[player.key] = {
+            sl: p["id"] for sl, p in loadout.items()
+        }
+        swapped = f" (replacing {old['name']})" if old else ""
+        msg = f"equipped {piece['name']}{swapped}."
+        if s.get("set_bonus"):
+            msg += f" ✨ {s['set_bonus']} set bonus active!"
+        return msg
 
     def on_move(self, room, player, text, mind):
         s = room.state

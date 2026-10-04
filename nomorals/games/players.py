@@ -69,6 +69,7 @@ class Profile:
     streak: int = 0                 # >0 winning streak, <0 losing streak
     best_streak: int = 0
     games_played: int = 0
+    xp: int = 0                      # persistent progression (see progression.py)
     per_game: dict[str, dict[str, Any]] = field(default_factory=dict)
     items: dict[str, int] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -86,6 +87,7 @@ class Profile:
             "losses": self.losses, "draws": self.draws, "streak": self.streak,
             "best_streak": self.best_streak, "games_played": self.games_played,
             "per_game": self.per_game, "items": self.items,
+            "xp": self.xp,
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class Profile:
             draws=int(row.get("draws") or 0), streak=int(row.get("streak") or 0),
             best_streak=int(row.get("best_streak") or 0),
             games_played=int(row.get("games_played") or 0),
+            xp=int(row.get("xp") or 0),
             per_game=_load("per_game"), items=_load("items"),
             created_at=float(row.get("created_at") or time.time()),
             updated_at=float(row.get("updated_at") or time.time()),
@@ -211,19 +214,20 @@ class PlayerStore:
                 self.db.execute(
                     "INSERT INTO game_players (player_key, platform, display, coins, "
                     "points, wins, losses, draws, streak, best_streak, games_played, "
-                    "per_game, items, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "xp, per_game, items, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(player_key) DO UPDATE SET platform = excluded.platform, "
                     "display = excluded.display, coins = excluded.coins, "
                     "points = excluded.points, wins = excluded.wins, "
                     "losses = excluded.losses, draws = excluded.draws, "
                     "streak = excluded.streak, best_streak = excluded.best_streak, "
-                    "games_played = excluded.games_played, per_game = excluded.per_game, "
+                    "games_played = excluded.games_played, xp = excluded.xp, "
+                    "per_game = excluded.per_game, "
                     "items = excluded.items, updated_at = excluded.updated_at",
                     (
                         p.key, p.platform, p.name, p.coins, p.points, p.wins,
                         p.losses, p.draws, p.streak, p.best_streak,
-                        p.games_played, json.dumps(p.per_game),
+                        p.games_played, p.xp, json.dumps(p.per_game),
                         json.dumps(p.items), p.created_at, p.updated_at,
                     ),
                 )

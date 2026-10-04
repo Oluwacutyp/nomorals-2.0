@@ -185,6 +185,146 @@ class RuntimeGamesMixin:
             return "\n".join(msgs) or engine.describe(room)
         return (f"unknown game {verb!r} — /game list to see the table.")
 
+    # ── arena gear commands ──────────────────────────────────────────────────
+    def _control_gear(self, cmd: str, ref: str, *,
+                      player: Any = None) -> str:
+        """Persistent equipment: /inventory /equip /unequip /repair.
+
+        Gear lives in the game_gear table (never in-memory only): buying
+        from /game shop forges a piece with its own durability, wearing
+        it down in arena battles, breaking at 0, repairable for coins.
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here."
+        engine = self._game_engine()
+        store, gear = engine.store, engine.gear
+        prof = store.get(player.key)
+        ref = (ref or "").strip().lower()
+
+        def _piece_line(inst: Any) -> str:
+            from ...games.gear import (GEAR_CATALOG, durability_bar,
+                                       effective_stats)
+            defn = GEAR_CATALOG.get(inst.slug)
+            stats = ""
+            if defn is not None:
+                atk, df = effective_stats(defn)
+                stats = (f"+{atk} atk" if defn.slot == "weapon"
+                         else f"+{df} def")
+                if defn.set_name:
+                    stats += f" · {defn.set_name} set"
+            broken = " 💥 BROKEN" if inst.broken else ""
+            return (f"{inst.display_name()} [{inst.slug}] — {stats} · "
+                    f"{durability_bar(inst.durability, inst.max_durability)}"
+                    f"{broken}")
+
+        if cmd == "inventory":
+            lines = [f"🎒 {player.name}'s kit — {prof.coins} coins"]
+            worn = gear.equipped(player.key)
+            if worn:
+                lines.append("equipped:")
+                for slot in ("weapon", "armor", "trinket"):
+                    inst = worn.get(slot)
+                    if inst:
+                        lines.append(f"  [{slot}] {_piece_line(inst)}")
+            pieces = [i for i in gear.list(player.key) if not i.equipped]
+            if pieces:
+                lines.append("closet:")
+                for inst in pieces:
+                    lines.append(f"  {_piece_line(inst)}")
+            if not worn and not pieces:
+                lines.append("no gear yet — /game shop has swords & armor.")
+            from ...games.gear import detect_set_bonus
+            bonus = detect_set_bonus(worn)
+            if bonus:
+                lines.append(
+                    f"✨ {bonus.set_name} set complete — {bonus.combo_name}! "
+                    f"(+{int(bonus.atk_pct * 100)}% atk, "
+                    f"+{int(bonus.def_pct * 100)}% def, combo every "
+                    f"{bonus.combo_every} attacks)")
+            consumables = ", ".join(
+                f"{k}×{v}" for k, v in prof.items.items()) or "none"
+            lines.append(f"consumables: {consumables}")
+            return "\n".join(lines)
+
+        if cmd == "equip":
+            if not ref:
+                return "equip what? /inventory lists your gear."
+            ok, msg = gear.equip(player.key, ref)
+            return msg
+
+        if cmd == "unequip":
+            ok, msg = gear.unequip(player.key, ref)
+            return msg
+
+        if cmd == "repair":
+            if not ref:
+                return "repair what? /inventory lists your gear."
+            ok, msg = gear.repair(player.key, ref)
+            if not ok:
+                return msg
+            # msg is "DisplayName|cost" — deduct coins, then apply
+            try:
+                name, cost_s = msg.rsplit("|", 1)
+                cost = int(cost_s)
+            except ValueError:
+                return msg
+            if prof.coins < cost:
+                return (f"repairing {name} costs {cost}c — "
+                        f"you have {prof.coins}c.")
+            inst = gear.find(player.key, ref)
+            if inst is None:
+                return "lost track of that piece — try again."
+            store.add_coins(player, -cost, f"repair:{inst.slug}")
+            if gear.apply_repair(inst.id):
+                return f"🔧 {name} — good as new, {cost}c."
+            # repair failed after taking coins — refund, never lose coins
+            store.add_coins(player, cost, f"repair-refund:{inst.slug}")
+            return f"repair failed — {cost}c refunded."
+
+        return f"unknown gear command {cmd!r}."
+
+    # ── progression ──────────────────────────────────────────────────────────
+    def _control_level(self, *, player: Any = None) -> str:
+        """Show persistent progression: level, XP bar, stat growth."""
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here."
+        from ...games.progression import (
+            ARENA_LOSS_XP, ARENA_WIN_XP, GAME_LOSS_XP, GAME_WIN_XP,
+            level_for_xp, level_stat_bonus, xp_bar, xp_for_level,
+            xp_progress,
+        )
+        engine = self._game_engine()
+        prof = engine.store.get(player.key)
+        level, into, span = xp_progress(prof.xp)
+        bonus = level_stat_bonus(level)
+        nxt = xp_for_level(level + 1)
+        lines = [
+            f"⭐ {player.name} — level {level} ({prof.xp} XP)",
+            f"   {xp_bar(prof.xp)}",
+            f"   {nxt - prof.xp} XP to level {level + 1}",
+        ]
+        if level > 1:
+            bits = [f"+{bonus['max_hp']} max HP", f"+{bonus['atk']} atk"]
+            if bonus["def"]:
+                bits.append(f"+{bonus['def']} def")
+            lines.append(f"   arena stats: {', '.join(bits)}")
+        else:
+            lines.append("   arena stats: base (level up to grow)")
+        lines.append(
+            f"   earn: arena win +{ARENA_WIN_XP} / loss +{ARENA_LOSS_XP}, "
+            f"other games win +{GAME_WIN_XP} / loss +{GAME_LOSS_XP}")
+        if prof.games_played:
+            lines.append(
+                f"   {prof.games_played} games played · "
+                f"{prof.wins} wins · best streak {prof.best_streak}")
+        return "\n".join(lines)
+
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.
