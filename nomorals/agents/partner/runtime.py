@@ -327,7 +327,9 @@ class PartnerRuntime(
                     _log.debug("game command reply: %r", reply[:100] if reply else "")
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("game command failed: %s", exc)
-                    reply = f"control error: {exc}"
+                    reply = (f"that move broke something on my end: {exc} — "
+                             f"try /help {command.kind} for the usage, "
+                             f"or /game quit and start it fresh")
                 if reply:
                     try:
                         self._typing_for(message.chat, reply)
@@ -378,7 +380,8 @@ class PartnerRuntime(
                                                 message=message)
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("control command failed: %s", exc)
-                    reply = f"control error: {exc}"
+                    reply = (f"/{command.kind} blew up on my end: {exc} — "
+                             f"/help {command.kind} shows the right usage")
                 if reply:
                     try:
                         self._typing_for(message.chat, reply)
@@ -893,7 +896,13 @@ class PartnerRuntime(
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None) -> str:
-        """Parse + dispatch one control command. Returns the reply to send."""
+        """Parse + dispatch one control command. Returns the reply to send.
+
+        A registered kind that has no dispatch branch can only happen through
+        a code inconsistency (``parse_control`` only returns registered kinds);
+        it falls back to an ``"unknown command /<kind>"`` reply rather than
+        raising, so chat never dies on a dispatch-table gap.
+        """
         from ...social.chat.control import detailed_help, parse_control
         from ..power import power_mode_for
 
@@ -997,12 +1006,17 @@ class PartnerRuntime(
 
         if kind == "approve":
             result = self.approve(arg)
-            return (f"approved {arg} → {result.get('status', 'sent')}" if result.get("ok")
-                    else f"approve failed: {result.get('error', '?')}")
+            if result.get("ok"):
+                return f"approved {arg} → {result.get('status', 'sent')}"
+            err = result.get("error") or "no reason given"
+            return f"approve failed: {err} — /proposals to check what's still pending"
 
         if kind == "deny":
             result = self.deny(arg)
-            return "denied." if result.get("ok") else f"deny failed: {result.get('error', '?')}"
+            if result.get("ok"):
+                return "denied."
+            err = result.get("error") or "no reason given"
+            return f"deny failed: {err} — /proposals to check what's still pending"
 
         if kind == "stage":
             rel = self.brain.relationship

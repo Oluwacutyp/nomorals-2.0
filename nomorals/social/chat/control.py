@@ -285,9 +285,9 @@ _HELP_TEXT = "\n".join(
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
         "  /mission status [id|name]             mission progress, ETA, stall reasons",
-"  /mission pause|resume|cancel|retry  pause, resume, stop, or restart a mission",
-"  /mission watch|unwatch <id>          this chat gets milestone updates",
-"  /mission new <research|build|fix>…   create a mission from a template",
+        "  /mission pause|resume|cancel|retry  pause, resume, stop, or restart a mission",
+        "  /mission watch|unwatch <id>          this chat gets milestone updates",
+        "  /mission new <research|build|fix>…   create a mission from a template",
         "  env: NM_PARTNER_PROACTIVE_ENABLED=0 silences all pushes;",
         "       NM_PARTNER_PROACTIVE_BRIEFING=0 / _WATCHERS=0 toggle each kind;",
         "       quiet hours NM_PARTNER_QUIET_START/_END (default 22–8)",
@@ -306,10 +306,10 @@ _HELP_TEXT = "\n".join(
         "  /trial send <platform>                  send it via WhatsApp/Telegram",
         "  /trial list | /trial rm <platform>",
         "  — expansion —",
-        "  /game [list|<name>|quit]                42 games (DM + group): /game list",
+        "  /game [list|<name>|quit]                41 games (DM + group): /game list",
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
         "   /king /story /case /world /escape /political /auction\n"
-        "   /shop /wyrr /two_truths /numberguess   start any of the 39 (every chat)",
+        "   /shop /wyrr /two_truths /numberguess   start any of the 41 (every chat)",
         "  /game leaderboard|stats|shop|balance    the shared table: rankings, record, coins",
         "  /inventory | /equip <gear> | /unequip [slot] | /repair <gear>",
         "   arena gear — persistent swords & armor with durability, grades, sets",
@@ -362,9 +362,9 @@ _HELP_TEXT = "\n".join(
         "  /task add <instruction> | /task run [id] | /task list",
         "  /notify [n]                             recent alerts",
         "  /mission status [id|name]               mission progress, ETA, stall reasons",
-"  /mission pause|resume|cancel|retry    pause, resume, stop, or restart a mission",
-"  /mission watch|unwatch <id>            this chat gets milestone updates",
-"  /mission new <research|build|fix>…     create a mission from a template",
+        "  /mission pause|resume|cancel|retry    pause, resume, stop, or restart a mission",
+        "  /mission watch|unwatch <id>            this chat gets milestone updates",
+        "  /mission new <research|build|fix>…     create a mission from a template",
         "  /image <path-or-url> | <prompt>         look up, or generate an image",
         "  /lens <path-or-url>                     reverse image search",
         "  — devon (autonomous dev agent) —",
@@ -418,8 +418,17 @@ class ControlCommand:
 
 
 def parse_control(text: str) -> ControlCommand | None:
-    """Parse a control message; None when it's ordinary conversation."""
-    stripped = (text or "").strip()
+    """Parse a control message; None when it's ordinary conversation.
+
+    ``text`` must be a string — ``None`` is treated as no message (returns
+    None). Anything else raises :class:`TypeError`, because message text
+    arriving as a non-string is a wiring bug, never valid input.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise TypeError(f"parse_control expects str, got {type(text).__name__}")
+    stripped = text.strip()
     if not stripped.startswith("/"):
         return None
     rest = stripped[1:].strip()
@@ -434,9 +443,9 @@ def parse_control(text: str) -> ControlCommand | None:
     n = len(tail.split()) if tail else 0
     min_args, max_args = CONTROL_COMMANDS[kind]
     if n < min_args:
-        return ControlCommand(kind="error", arg=f"/{kind} needs {min_args} argument(s)")
+        return ControlCommand(kind="error", arg=f"/{kind} needs {min_args} argument(s) — /help {kind} shows the usage")
     if max_args is not None and n > max_args:
-        return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s)")
+        return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s) — /help {kind} shows the usage")
     return ControlCommand(kind=kind, arg=arg, tail=tail)
 
 
@@ -471,8 +480,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "stop": {"what": "hot-stop a chat platform (it keeps running data on disk).",
              "usage": "/stop <platform>", "example": "/stop whatsapp",
              "related": "/start /platforms"},
-    "mood": {"what": "set her mood by label or dimensions (0-100); 'reset' restores baseline.",
-             "usage": "/mood [label | dim=NN …] | reset", "example": "/mood happy",
+    "mood": {"what": "set her mood — a label (happy, tired, playful, calm, …), or set "
+                   "dimensions directly (0-100): affection, happiness, energy, "
+                   "trust, jealousy, frustration, intimacy, distance, "
+                   "insecurity, pride. 'reset' restores the persona's "
+                   "baselines. Bare /mood shows the current state.",
+             "usage": "/mood [label]  ·  /mood dim=NN [dim=NN …]  ·  /mood reset",
+             "example": "/mood happy   ·   /mood energy=20 frustration=70",
              "related": "/stage"},
     "mode": {"what": "her autonomy level: off (asleep) | suggest (proposes, you approve) | auto (acts).",
              "usage": "/mode off|suggest|auto", "example": "/mode auto",
@@ -552,14 +566,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/cookies <cookie-header>   |   /cookies file:<path>   |   /cookies ingest <header>",
              "example": "/cookies PHPSESSID=abc; path=/; HttpOnly; Secure\nJSESSIONID=xyz",
              "related": "/decode, nm cookies"},
-    "structure": {"what": "The prompt/mission structuring sub-agent: turns a "
-                          "raw objective into a structured brief — intent, "
-                          "ordered subgoals, inputs, constraints, acceptance "
-                          "criteria, matching tools, and side effects. The "
-                          "same brief the mission runner plans from.",
+    "structure": {"what": "turns a plain-English objective into a structured "
+                          "mission brief — intent, ordered subgoals, inputs, "
+                          "constraints, acceptance criteria, matching tools, "
+                          "and side effects. This is the same brief the "
+                          "mission runner plans from, so run it when an "
+                          "objective feels too big to just say '/devon do it'.",
              "usage": "/structure <objective>",
              "example": "/structure Build the decoder and verify it against the test corpus",
-             "related": "/code, nm structure"},
+             "related": "/mission (runs the brief) · /devon"},
     "investigate": {"what": "one-pass investigation pipeline: decode → crack → "
                             "OSINT → knowledge graph. Hand it any artifact — a "
                             "hash, JWT, cookie, URL, encoded blob, or a file — "
@@ -592,7 +607,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "identity": {"what": "the profile bank for signups: your name/email/phone stored once, used by account creation flows.",
               "usage": "/identity [show|set <name|email|phone> <value>|clear]",
               "example": "/identity set name Death", "related": "/trial"},
-    "game": {"what": "the social game engine — 42 games across DM, group and "
+    "game": {"what": "the social game engine — 41 games across DM, group and "
                      "channel, with a shared economy, items and leaderboards. "
                      "Works for every participant in every chat; in a group a "
                      "new player is seated the moment they speak.",
@@ -778,8 +793,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/proxy status|list|test|set <url>|clear | scrape|pool [scheme] | discover [seeds] | sources | rotate on | ssh start <n> <host> <user>",
               "example": "/proxy status",
               "related": "/scan /osint"},
-    "gen": {"what": "generate a validated script of a kind.",
-            "usage": "/gen <kind> <name> [json config]", "example": "/gen scraper site name=x",
+    "gen": {"what": "generate a validated automation script of a kind and save it "
+                    "to her workspace — the script is syntax-checked before it "
+                    "lands. Kinds: backup, cron_sh, dedupe_lines, git_autopush, "
+                    "hf_download, jsonl_to_csv, log_rotate, termux_service, "
+                    "webhook_notify. Run /gen with no arguments to see every "
+                    "kind with its config fields.",
+            "usage": "/gen <kind> <name> [json config]  —  /gen (no args) lists the kinds",
+            "example": '/gen backup nightly_db {"source": "/data/db", "dest": "/data/backups"}',
             "related": "/code /record"},
     "osint": {"what": "read-only public-intel: target reports, automated campaigns, identity-correlation graph.",
               "usage": "/osint <target> | campaign <seeds…> | graph <verb>…",
@@ -890,8 +911,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/think <question> [strategy]",
               "example": "/think why is the loop idle auto",
               "related": "/benchmark"},
-    "benchmark": {"what": "how sharp the system is right now, 0-1 per dimension.",
-                  "usage": "/benchmark [dimension]", "example": "/benchmark",
+    "benchmark": {"what": "how sharp the system is right now — runs one quick task "
+                         "per dimension and scores 0-1. Dimensions: reasoning, "
+                         "planning, tool_use, self_correction (default: all four).",
+                  "usage": "/benchmark [reasoning|planning|tool_use|self_correction]",
+                  "example": "/benchmark planning",
                   "related": "/evolve"},
     "help": {"what": "this help — the full catalog, or the detail page for one command.",
              "usage": "/help [command]", "example": "/help devon",
@@ -988,11 +1012,13 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "whois", "ports"]),
+    ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
-                           "data", "evolve", "arena", "trial", "book", "features"]),
+                           "data", "evolve", "upgrade", "arena", "trial",
+                           "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "think",
                            "benchmark"]),
-    ("games — 39, DM + group, start them directly",
+    ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
@@ -1000,14 +1026,16 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots",
-      "gomoku", "reversi", "checkers", "20q", "rps", "digits"]),
+      "gomoku", "reversi", "checkers", "20q", "rps", "digits",
+      "sudoku", "anagram", "cryptogram"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "play", "video", "hub", "podcast"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
-                            "macro", "file", "publish", "notify", "proactive", "mission"]),
+                            "macro", "file", "publish", "notify", "proactive", "mission",
+                            "bet", "finance", "weather", "tz"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1133,6 +1161,25 @@ for _kind in CONTROL_COMMANDS:
             }
 
 
+def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
+    """Wrap ``/cmd`` tokens so a catalog line never runs long in chat.
+
+    The games group alone lists 47 entries — one line of that is a wall
+    of text on a phone screen, so wrap at ~64 columns.
+    """
+    lines: list[str] = []
+    cur = ""
+    for kind in kinds:
+        token = "/" + kind
+        if cur and len(cur) + len(token) + 2 > width:
+            lines.append("  " + cur)
+            cur = ""
+        cur = f"{cur}  {token}" if cur else token
+    if cur:
+        lines.append("  " + cur)
+    return lines
+
+
 def _detailed_overview() -> str:
     lines = [
         "the full catalog — detail for any command: /help <command>",
@@ -1141,7 +1188,7 @@ def _detailed_overview() -> str:
     ]
     for group, kinds in _HELP_GROUPS:
         lines.append(f"  — {group} —")
-        lines.append("  " + "  ".join(f"/{k}" for k in kinds))
+        lines.extend(_wrap_commands(kinds))
         lines.append("")
     shown = {k for _, kinds in _HELP_GROUPS for k in kinds}
     rest = [k for k in CONTROL_COMMANDS if k not in shown]
@@ -1175,13 +1222,13 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["wisdom", "wis"]),
     ("building for real — code & missions",
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
-      "upgrade", "arena", "trial", "book", "exec", "apps", "fix", "structure",
+      "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
       "deliver"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "think", "benchmark"]),
-    ("games — 39, DM + group, start them directly",
+    ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
@@ -1189,9 +1236,10 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots",
-      "gomoku", "reversi", "checkers", "20q", "rps", "digits"]),
+      "gomoku", "reversi", "checkers", "20q", "rps", "digits",
+      "sudoku", "anagram", "cryptogram"]),
     ("voice & vision",
-     ["tts", "speak", "stt", "look", "image", "lens"]),
+     ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
@@ -1220,7 +1268,8 @@ _LIST_GROUP_ALIASES = {
     "media": "media system — music · playback · video",
     "music": "media system — music · playback · video",
     "audio": "media system — music · playback · video",
-    "games": "games — 39, DM + group, start them directly",
+    "wisdom": "wisdom keeper — corpus · history · practice",
+    "games": "games — 41, DM + group, start them directly",
     "discovery": "discovery",
 }
 
@@ -1266,7 +1315,7 @@ LIST_ONELINERS: dict[str, str] = {
     "devon": "the autonomous dev agent — plans tools, runs, digests, replies",
     "swarm": "parallel devon agents + fusion",
     "task": "queued instructions she runs and reports on",
-    "gen": "generate a validated script of a kind",
+    "gen": "generate a validated automation script of a kind (bare /gen lists the kinds)",
     "data": "training data: mine / list / fetch HF sets",
     "evolve": "self-improvement, test-gated (propose|apply|revert|publish)",
     "upgrade": "research→approve→evolve: review tickets, preview patches, approve/deny",
@@ -1276,8 +1325,8 @@ LIST_ONELINERS: dict[str, str] = {
     "recall": "what she remembers (top 5)",
     "forget": "delete a memory",
     "think": "explicit multi-step reasoning with the full trace",
-    "benchmark": "how sharp the system is right now (0-1)",
-    "game": "the social game engine — 42 games, DM + group + channel, with economy and leaderboards",
+    "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
+    "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",
@@ -1304,7 +1353,7 @@ LIST_ONELINERS: dict[str, str] = {
     "tz": "timezone conversion + your labeled local time",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
-    "image": "image lookup: hash, dims, seen-before",
+    "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",
     "db": "inspect the database (tables|schema|query|counts)",
@@ -1338,7 +1387,12 @@ def list_catalog(topic: str = "") -> str:
 
     No topic: the full categorized catalog.  A topic (group name or
     alias): just that group.  Every line is ``/cmd — what it does``.
+
+    ``topic`` must be a string (``None``/``""`` mean the full catalog);
+    anything else raises :class:`TypeError`.
     """
+    if topic is not None and not isinstance(topic, str):
+        raise TypeError(f"list_catalog expects str, got {type(topic).__name__}")
     t = (topic or "").strip().lstrip("/").lower()
     groups = LIST_GROUPS
     if t:
@@ -1377,7 +1431,12 @@ def detailed_help(topic: str = "") -> str:
       related commands.
     * ``/help budget|goals|builds|skills|missions|modes`` — topic pages.
     * unknown — fuzzy match or a pointer, never a dead end.
+
+    ``topic`` must be a string (``None``/``""`` mean the catalog); anything
+    else raises :class:`TypeError`.
     """
+    if topic is not None and not isinstance(topic, str):
+        raise TypeError(f"detailed_help expects str, got {type(topic).__name__}")
     t = (topic or "").strip().lstrip("/").lower()
     if not t:
         return _detailed_overview()

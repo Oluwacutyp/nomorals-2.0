@@ -12,8 +12,15 @@ def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
 
     Imports are deferred so an unused backend never costs an import, and a missing
     optional dependency in one backend cannot break the others.
+
+    Raises :class:`ValueError` for a missing/blank kind or an unknown one —
+    never an ``AttributeError`` off ``None``.
     """
-    kind = kind.lower()
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError(
+            f"provider kind must be a non-empty string, got {kind!r}"
+        )
+    kind = kind.strip().lower()
     if kind in {"mock", "offline", "test"}:
         from .mock import MockProvider
 

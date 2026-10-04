@@ -23,7 +23,14 @@ import time
 from typing import Any, Sequence
 
 from ...core.text import approx_token_count, word_frequencies
-from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage
+from ..base import (
+    LLMProvider,
+    LLMResponse,
+    Message,
+    SamplingParams,
+    Usage,
+    validate_messages,
+)
 
 
 class MockProvider(LLMProvider):
@@ -71,6 +78,7 @@ class MockProvider(LLMProvider):
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
         started = time.perf_counter()
+        messages = validate_messages(messages, who="mock.chat")
         self.calls.append(list(messages))
         if self.latency_ms:
             time.sleep(self.latency_ms / 1000.0)
@@ -80,7 +88,7 @@ class MockProvider(LLMProvider):
                 started,
             )
 
-        prompt = messages[-1].content if messages else ""
+        prompt = messages[-1].content
         params = (params or SamplingParams()).clamped()
         text = self._respond(prompt, messages, params)
         text = self._apply_limits(text, params)

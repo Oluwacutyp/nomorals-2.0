@@ -925,7 +925,15 @@ class AccountCreator:
         Raises:
             AccountExistsError: An active account already exists
             AccountCheckpointPending: Paused for the owner's human step
+            ValueError: ``service`` is not a non-empty string
+            TypeError: a provided ``username``/``email``/``password`` is not a string
         """
+        if not isinstance(service, str) or not service.strip():
+            raise ValueError(f"service must be a non-empty string, got {service!r}")
+        for label, value in (("username", username), ("email", email),
+                             ("password", password)):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{label} must be a string, got {type(value).__name__}")
         service = service.strip().lower()
         if service in self.DISPOSABLE_EMAIL_SERVICES or service.startswith("email_"):
             provider = service.replace("email_", "", 1)

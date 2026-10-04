@@ -27,7 +27,15 @@ from typing import Any, Sequence
 from ...core.errors import ModelError, ProviderError, RateLimited, classify
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
-from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, messages_to_text
+from ..base import (
+    LLMProvider,
+    LLMResponse,
+    Message,
+    SamplingParams,
+    Usage,
+    messages_to_text,
+    validate_messages,
+)
 
 
 # Curated fallback models for the intelligent router
@@ -199,6 +207,7 @@ class HFServerlessProvider(LLMProvider):
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
         started = time.perf_counter()
+        messages = validate_messages(messages, who="hf_serverless.chat")
         sampling = (params or SamplingParams()).clamped()
         payload = self.build_chat_payload(messages, sampling)
 

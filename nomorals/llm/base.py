@@ -23,6 +23,7 @@ __all__ = [
     "SamplingParams",
     "Usage",
     "messages_to_text",
+    "validate_messages",
 ]
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -88,6 +89,38 @@ def messages_to_text(messages: Sequence[Message], *, template: str = "chatml") -
         header = f"{system}\n\n" if system else ""
         return f"{header}{body}\n### Assistant:\n"
     return "\n".join(f"{m.role}: {m.content}" for m in messages) + "\nassistant:"
+
+
+def validate_messages(messages: Sequence[Message], *, who: str = "chat") -> list[Message]:
+    """Fail-fast validation for provider ``chat()`` inputs.
+
+    Every provider's ``chat()`` must call this first so callers get a clear,
+    immediate error instead of the cryptic ``AttributeError`` from
+    ``m.to_openai()`` or the confusing upstream rejection a
+    ``"messages": []`` payload produces.
+
+    Returns the messages as a list. Raises:
+
+    * :class:`TypeError` when ``messages`` is not a sequence of
+      :class:`Message` (a bare string, ``None``, a dict list, …);
+    * :class:`ValueError` when the sequence is empty — an empty
+      conversation is meaningless to send to a model.
+    """
+    if isinstance(messages, (str, bytes)) or not isinstance(messages, Sequence):
+        raise TypeError(
+            f"{who}: messages must be a sequence of Message, "
+            f"got {type(messages).__name__}"
+        )
+    items = list(messages)
+    if not items:
+        raise ValueError(f"{who}: messages must not be empty")
+    bad = next((m for m in items if not isinstance(m, Message)), None)
+    if bad is not None:
+        raise TypeError(
+            f"{who}: every message must be a Message, "
+            f"got {type(bad).__name__}"
+        )
+    return items
 
 
 @dataclass
@@ -217,7 +250,12 @@ class LLMProvider(abc.ABC):
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
-        """Generate a reply to a conversation."""
+        """Generate a reply to a conversation.
+
+        ``messages`` must be a non-empty sequence of :class:`Message` —
+        concrete providers validate via :func:`validate_messages` and raise
+        :class:`TypeError` / :class:`ValueError` otherwise.
+        """
 
     def complete(self, prompt: str, params: SamplingParams | None = None, **kw: Any) -> LLMResponse:
         """Raw completion. Defaults to a single-user-turn chat."""

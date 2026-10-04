@@ -14,7 +14,14 @@ from typing import Any, Sequence
 from ...core.errors import ModelError, ProviderError, classify
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
-from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage
+from ..base import (
+    LLMProvider,
+    LLMResponse,
+    Message,
+    SamplingParams,
+    Usage,
+    validate_messages,
+)
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -76,6 +83,7 @@ class OpenAICompatProvider(LLMProvider):
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
         started = time.perf_counter()
+        messages = validate_messages(messages, who="openai_compat.chat")
         sampling = (params or SamplingParams()).clamped()
         payload: dict[str, Any] = {
             "model": self.model,

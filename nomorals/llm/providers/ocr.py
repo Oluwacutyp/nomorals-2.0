@@ -127,6 +127,14 @@ class OCRProvider(LLMProvider):
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
+        """The OCR backend has no chat surface: ``chat()`` is a deliberate
+        :class:`ProviderError`, not an error :class:`LLMResponse`.
+
+        The router treats it like any other provider failure (failover to the
+        next capable backend), and registering it in the provider list is
+        what makes vision-only routing work — so the raise is intentional
+        and never silenced into a fake-successful response.
+        """
         raise ProviderError("the ocr provider reads images; it does not chat")
 
     def describe_image(

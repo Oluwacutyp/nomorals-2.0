@@ -27,7 +27,7 @@ from typing import Any, Callable, Sequence
 from ...core.errors import ModelError, ProviderError, classify
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
-from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage
+from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, validate_messages
 
 __all__ = ["OllamaProvider", "OLLAMA_DEFAULT_HOST"]
 
@@ -115,6 +115,7 @@ class OllamaProvider(LLMProvider):
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
         started = time.perf_counter()
+        messages = validate_messages(messages, who="ollama.chat")
         payload = self._chat_payload(messages, params, **kw)
         data = self._post("/api/chat", payload, operation="chat")
         message = data.get("message") or {}
