@@ -439,6 +439,7 @@ class GameEngine:
                 atk, df = effective_stats(defn)
                 entry = {"id": inst.id, "slug": inst.slug,
                          "name": defn.name, "slot": defn.slot,
+                         "grade": defn.grade,
                          "atk": atk, "def": df,
                          "durability": inst.durability,
                          "max_durability": inst.max_durability,
