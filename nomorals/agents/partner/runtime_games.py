@@ -711,6 +711,10 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial start <platform>"
             return flow.start(" ".join(parts[1:]))
+        if verb == "assist":
+            if len(parts) < 2:
+                return "usage: /trial assist <platform>"
+            return flow.assist(" ".join(parts[1:]))
         if verb == "save":
             if len(parts) < 4:
                 return "usage: /trial save <platform> <login> <password>"
@@ -730,7 +734,7 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial rm <platform>"
             return flow.remove(parts[1])
-        return "usage: /trial [list|start <p>|save <p> <login> <pass>|send <p>|rm <p>]"
+        return "usage: /trial [list|start <p>|assist <p>|save <p> <login> <pass>|send <p>|rm <p>]"
 
     # ── sports bet analyst: /bet (analysis only — never places bets) ─────────
     def _control_bet(self, tail: str, chat_key: str) -> str:

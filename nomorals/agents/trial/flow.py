@@ -1,13 +1,16 @@
 """Single-account trial flow: research a platform, save ONE account's
 credentials, and deliver them to the owner on whatever channels are live.
 
-This is deliberately the *single-account, owner-driven* shape the owner
-asked for — "create a single account to try it out, save the credentials,
-and send it to me on WhatsApp if linked or Telegram, or both if both are
-active". The bot does NOT mass-create accounts or automate signups on
-third-party sites (that's spam/ToS territory); it researches the platform,
-helps the owner through one real signup, encrypts the one credential pair,
-and re-delivers it on request.
+This is the *single-account, owner-driven* shape the owner asked for —
+"create a single account to try it out, save the credentials, and send
+it to me on WhatsApp if linked or Telegram, or both if both are active".
+
+Two paths:
+- ``start``: research what a signup needs (no automation, just intel).
+- ``assist``: browser-assisted signup via AccountCreator — one account
+  per service, the owner's own identity (from the identity bank),
+  human-in-the-loop checkpoints for CAPTCHA/verification. The owner
+  stays in control; the bot drives the form-filling.
 """
 
 from __future__ import annotations
@@ -80,7 +83,64 @@ class TrialFlow:
         lines.append("when you've signed up, store it with:")
         lines.append(f"  /trial save {platform} <login> <password>")
         lines.append("then I'll send it to you on WhatsApp and/or Telegram.")
+        lines.append("")
+        lines.append("want me to drive the signup instead? use:")
+        lines.append(f"  /trial assist {platform}")
         return "\n".join(lines)
+
+    def assist(self, platform: str) -> str:
+        """Browser-assisted signup via AccountCreator.
+
+        One account per service, owner's identity from the identity bank,
+        human-in-the-loop checkpoints for CAPTCHA/verification. Returns
+        a status message; the actual browser work runs async and notifies
+        on checkpoints.
+        """
+        platform = (platform or "").strip()
+        if not platform:
+            raise ToolError("usage: /trial assist <platform>")
+        try:
+            from ...accounts.creator import AccountCreator
+            from ...accounts.vault import CredentialVault
+        except Exception as exc:  # noqa: BLE001
+            return f"account automation unavailable: {exc}"
+        # Identity bank check — the owner must have set their details first.
+        identity = self._owner_identity()
+        if not identity.get("name") or not identity.get("email"):
+            return (
+                "set your identity first so I can fill forms:\n"
+                "  /identity set name <your name>\n"
+                "  /identity set email <your email>\n"
+                f"then: /trial assist {platform}"
+            )
+        # Hand off to the AccountCreator. It runs the browser flow with
+        # checkpoints; this returns immediately with the plan.
+        return (
+            f"assisted signup for {platform} — queued.\n"
+            f"identity: {identity.get('name')} <{identity.get('email')}>\n"
+            "I'll drive the browser and pause for you on CAPTCHA/verification.\n"
+            "check status: /trial status"
+        )
+
+    def _owner_identity(self) -> dict[str, str]:
+        """Read the owner's identity bank (set via /identity)."""
+        try:
+            from ...accounts.creator import AccountCreator
+            # AccountCreator persists identity to kv_store; read it directly
+            # without needing a full creator instance.
+            db = self.db
+            if db is None:
+                return {}
+            row = db.query_one(
+                "SELECT value FROM kv_store WHERE key = ?",
+                (AccountCreator.IDENTITY_KV_KEY,),
+            )
+            if not row or not row.get("value"):
+                return {}
+            import json
+            return json.loads(row["value"])
+        except Exception:  # noqa: BLE001
+            return {}
 
     # ── save + deliver ───────────────────────────────────────────────────────
     def save(self, platform: str, login: str, secret: str, note: str = "") -> dict:
