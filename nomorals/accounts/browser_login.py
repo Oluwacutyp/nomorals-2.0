@@ -235,7 +235,7 @@ def _solve_and_apply(tab: Any, challenge: dict[str, Any],
                 f"solved {kind} but this tab cannot inject the token "
                 "(no evaluate) — submit it manually",
                 challenges=[challenge])
-        tab.evaluate(js_tpl.format(token=escaped))
+        tab.evaluate(js_tpl.replace("{token}", escaped))
         return f"solved {kind} via {result.get('backend')} (token injected)"
     if kind in _TEXT_KINDS:
         text = result.get("text", "")
@@ -303,6 +303,20 @@ def login_with_vault(
 
     tab = open_tab()
     captcha_notes: list[str] = []
+    solved: set[tuple[str, str, str]] = set()
+
+    def _unsolved(challenges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Challenges not already cleared this run — solving services
+        charge per solve, so never pay twice for the same challenge."""
+        fresh = []
+        for ch in challenges:
+            key = (ch.get("kind", ""), ch.get("sitekey", "") or "",
+                   ch.get("image_url", "") or "")
+            if key not in solved:
+                solved.add(key)
+                fresh.append(ch)
+        return fresh
+
     try:
         tab.navigate(cfg.login_url)
 
@@ -317,7 +331,7 @@ def login_with_vault(
                   service, cred.username, user_field)
 
         # CAPTCHA already on the login page? clear it before submitting.
-        for ch in _detect_captchas(tab):
+        for ch in _unsolved(_detect_captchas(tab)):
             if captcha_solver is None:
                 raise LoginCaptchaRequired(
                     f"CAPTCHA ({ch.get('kind')}) on {service} login page "
@@ -330,7 +344,7 @@ def login_with_vault(
         _wait_after_submit(tab, cfg)
 
         # CAPTCHA after submit (the common case) — solve, resubmit once.
-        post = _detect_captchas(tab)
+        post = _unsolved(_detect_captchas(tab))
         if post:
             if captcha_solver is None:
                 raise LoginCaptchaRequired(

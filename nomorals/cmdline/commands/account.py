@@ -172,5 +172,129 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
                                                   or 10)))
         return 0
 
+    if action == "login":
+        # Browser-driven login with the vault password; cookies persist
+        # into the session store so the login survives restarts.
+        from ...accounts import (
+            AccountManager,
+            LoginCaptchaRequired,
+            LoginConfig,
+            LoginFailed,
+            SessionManager,
+            login_with_vault,
+        )
+        try:
+            vault = _vault(context)
+        except _AccountCliError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        manager = AccountManager(vault)
+        sessions = SessionManager(vault)
+
+        def _open_tab():
+            from ...browser.service import BrowserService
+            svc = BrowserService()
+            try:
+                return svc.open_rendered_tab(args.service)
+            except Exception:
+                # rendered tabs need playwright+chromium; fall back to the
+                # plain-HTTP tab (works for simple login forms).
+                handle = svc.open_session(args.service)
+                return handle.open_tab()
+
+        solver = None
+        solver_on = getattr(args, "solver_enabled", None)
+        if solver_on is not False:
+            solver = creator_solver_adapter(
+                solver_enabled=solver_on, settings=settings)
+        cfg = LoginConfig(
+            login_url=getattr(args, "login_url", "") or "",
+            success_text=getattr(args, "success_text", "") or "",
+        )
+        try:
+            result = login_with_vault(
+                manager, sessions, _open_tab,
+                service=args.service,
+                username=getattr(args, "username", None),
+                config=cfg,
+                captcha_solver=solver,
+            )
+        except (LoginFailed, LoginCaptchaRequired) as exc:
+            print(f"login failed: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(_json.dumps(result, indent=2))
+        else:
+            print(result["note"])
+            print(f"cookies saved: {result['cookies_saved']}")
+        return 0
+
+    if action == "default":
+        from ...accounts import AccountManager
+        try:
+            vault = _vault(context)
+        except _AccountCliError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        manager = AccountManager(vault)
+        service = args.service
+        if getattr(args, "clear", False):
+            cleared = manager.clear_default(service)
+            out = {"service": service, "cleared": cleared}
+            if getattr(args, "json", False):
+                print(_json.dumps(out, indent=2))
+            else:
+                print(f"default for {service}: "
+                      f"{'cleared' if cleared else 'was not set'}")
+            return 0
+        username = getattr(args, "username", None)
+        if not username:
+            current = manager.get_default(service)
+            out = {"service": service, "default": current}
+            if getattr(args, "json", False):
+                print(_json.dumps(out, indent=2))
+            else:
+                print(f"default for {service}: {current or '(not set)'}")
+            return 0
+        try:
+            manager.set_default(service, username)
+        except Exception as exc:  # noqa: BLE001 — surface cleanly
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        out = {"service": service, "default": username}
+        if getattr(args, "json", False):
+            print(_json.dumps(out, indent=2))
+        else:
+            print(f"default for {service} -> {username}")
+        return 0
+
+    if action == "rotate":
+        from ...accounts import AccountManager
+        try:
+            vault = _vault(context)
+        except _AccountCliError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        manager = AccountManager(vault)
+        try:
+            cred = manager.rotate_credential_auto(
+                args.service, args.username,
+                length=int(getattr(args, "length", 32) or 32))
+        except Exception as exc:  # noqa: BLE001 — surface cleanly
+            print(f"rotate failed: {exc}", file=sys.stderr)
+            return 1
+        out = {"service": cred.service, "username": cred.username,
+               "rotated": True,
+               "note": "new password stored in the vault — apply it on the "
+                       "service's own password-change page"}
+        if getattr(args, "json", False):
+            print(_json.dumps(out, indent=2))
+        else:
+            print(f"rotated {cred.service}/{cred.username} "
+                  f"({len(cred.password)}-char password in vault)")
+            print("apply the new password on the service's own "
+                  "password-change page — the vault copy is updated.")
+        return 0
+
     print(f"unknown account action: {action}", file=sys.stderr)
     return 2

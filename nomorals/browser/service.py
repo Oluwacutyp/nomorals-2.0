@@ -545,13 +545,18 @@ class RenderedTab:
         escaped = (name or "").replace('"', '\\"')
         return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"], [id="{escaped}"]'
 
-    def _field_kind(self, name: str) -> dict[str, str]:
+    def _field_kind(self, name: str) -> dict[str, str] | None:
         """Inspect the first matching field's tag/type via the live DOM.
 
-        Returns {"tag": ..., "type": ...} (lowercased); raises BrowserError
-        when nothing matches, so callers fail fast instead of guessing.
+        Returns {"tag": ..., "type": ...} (lowercased), or None when the
+        page object cannot evaluate JS (duck-typed drivers) — callers
+        then fall back to the untyped behavior. Raises BrowserError when
+        nothing matches, so callers fail fast instead of guessing.
         """
         page = self._require_loaded()
+        evaluate = getattr(page, "evaluate", None)
+        if evaluate is None:
+            return None
         selector = self._field_selector(name)
         js = """(sel) => {
             const el = document.querySelector(sel);
@@ -560,7 +565,7 @@ class RenderedTab:
                     type: ((el.getAttribute('type') || '')).toLowerCase()};
         }"""
         try:
-            info = page.evaluate(js, selector)
+            info = evaluate(js, selector)
         except Exception as exc:  # noqa: BLE001 - eval errors are opaque
             raise BrowserError(
                 f"rendered field inspection of {name!r} on {self.url} "
@@ -577,24 +582,26 @@ class RenderedTab:
         checkboxes/radios route to :meth:`check`, file inputs fail fast
         with a pointer to :meth:`upload` — plain ``page.fill`` only ever
         touches real text-like inputs, so a select no longer dies with an
-        opaque playwright error.
+        opaque playwright error. When the field type cannot be inspected
+        the untyped ``page.fill`` path is used (previous behavior).
         """
         page = self._require_loaded()
         name = (name or "").strip()
         if not name:
             raise BrowserError("rendered fill needs a field name")
         kind = self._field_kind(name)
-        tag, ftype = kind["tag"], kind["type"]
-        if tag == "select":
-            return self.select(name, value)
-        if tag == "input" and ftype in {"checkbox", "radio"}:
-            truthy = str(value).strip().lower() not in {
-                "", "0", "false", "no", "off", "unchecked"}
-            return self.check(name, checked=truthy)
-        if tag == "input" and ftype == "file":
-            raise BrowserError(
-                f"field {name!r} is a file input — use rendered upload, "
-                "not fill")
+        if kind is not None:
+            tag, ftype = kind["tag"], kind["type"]
+            if tag == "select":
+                return self.select(name, value)
+            if tag == "input" and ftype in {"checkbox", "radio"}:
+                truthy = str(value).strip().lower() not in {
+                    "", "0", "false", "no", "off", "unchecked"}
+                return self.check(name, checked=truthy)
+            if tag == "input" and ftype == "file":
+                raise BrowserError(
+                    f"field {name!r} is a file input — use rendered upload, "
+                    "not fill")
         selector = self._field_selector(name)
         try:
             page.fill(selector, str(value))
@@ -616,6 +623,10 @@ class RenderedTab:
         if not name:
             raise BrowserError("rendered select needs a field name")
         kind = self._field_kind(name)
+        if kind is None:
+            raise BrowserError(
+                f"cannot inspect field {name!r} on this page driver — "
+                "select needs a live DOM with JS evaluation")
         if kind["tag"] != "select":
             raise BrowserError(
                 f"field {name!r} is a <{kind['tag']}> "
@@ -654,6 +665,10 @@ class RenderedTab:
         if not name:
             raise BrowserError("rendered check needs a field name")
         kind = self._field_kind(name)
+        if kind is None:
+            raise BrowserError(
+                f"cannot inspect field {name!r} on this page driver — "
+                "check needs a live DOM with JS evaluation")
         if kind["tag"] != "input" or kind["type"] not in {"checkbox",
                                                           "radio"}:
             raise BrowserError(

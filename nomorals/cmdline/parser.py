@@ -1252,7 +1252,10 @@ def _parser() -> argparse.ArgumentParser:
                      "nm account pending [--service S]\n"
                      "nm account sms [--country us] [--provider simcodes]\n"
                      "nm account sms-code [--timeout 180] [--sender-hint HINT]\n"
-                     "nm account inbox --service email_mailtm [--limit 10]"),
+                     "nm account inbox --service email_mailtm [--limit 10]\n"
+                     "nm account login --service S [--username U] [--login-url URL]\n"
+                     "nm account default --service S --username U | --clear\n"
+                     "nm account rotate --service S --username U [--length 32]"),
     )
     account_sub = account.add_subparsers(dest="account_action", required=True)
     a_create = account_sub.add_parser("create", help="start an account flow")
@@ -1303,6 +1306,46 @@ def _parser() -> argparse.ArgumentParser:
                          help="max messages to show (default: 10)")
     a_inbox.add_argument("--json", action="store_true",
                          help="output as JSON")
+
+    a_login = account_sub.add_parser(
+        "login", help="log in to an existing account with the vault password "
+                      "(browser-driven; cookies persist to the session store)")
+    a_login.add_argument("--service", required=True, help="service name")
+    a_login.add_argument("--username", default=None,
+                         help="pin an account (default: the service default)")
+    a_login.add_argument("--login-url", default="",
+                         help="override the login_url from credential metadata")
+    a_login.add_argument("--success-text", default="",
+                         help="text that must appear after login")
+    a_login.add_argument("--solver", dest="solver_enabled",
+                         action="store_true", default=None,
+                         help="try the CAPTCHA solver first (default: on)")
+    a_login.add_argument("--no-solver", dest="solver_enabled",
+                         action="store_false",
+                         help="skip the solver, fail on CAPTCHA instead")
+    a_login.add_argument("--json", action="store_true",
+                         help="output as JSON")
+
+    a_default = account_sub.add_parser(
+        "default", help="set/clear the default account for a service "
+                        "(account switching)")
+    a_default.add_argument("--service", required=True, help="service name")
+    a_default.add_argument("--username", default=None,
+                           help="make this the default account")
+    a_default.add_argument("--clear", action="store_true",
+                           help="clear the default instead of setting one")
+    a_default.add_argument("--json", action="store_true",
+                           help="output as JSON")
+
+    a_rotate = account_sub.add_parser(
+        "rotate", help="generate a fresh password and rotate the vault "
+                       "credential to it")
+    a_rotate.add_argument("--service", required=True, help="service name")
+    a_rotate.add_argument("--username", required=True, help="account username")
+    a_rotate.add_argument("--length", type=int, default=32,
+                          help="new password length (default: 32)")
+    a_rotate.add_argument("--json", action="store_true",
+                          help="output as JSON")
 
     # --- more OpenCV/ffmpeg frame-level video ops ---
     s_vslow = studio_sub.add_parser(

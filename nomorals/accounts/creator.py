@@ -752,7 +752,7 @@ class AccountCreator:
         if flow == "need_identity":
             if owner_email:
                 self.set_owner_identity(owner_name or "", owner_email)
-            elif not self._owner_identity:
+            elif not self.get_owner_identity():
                 raise MissingOwnerIdentity(
                     "owner identity still missing — call "
                     "set_owner_identity(name, email) first or pass "

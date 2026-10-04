@@ -411,7 +411,7 @@ def _cmd_browse(args: Any, context: Any) -> int:
         print("usage: nm browse open <url> [--session S]\n"
               "       nm browse tabs [--session S] | nm browse text|md|links\n"
               "       nm browse fill <name> <value> | nm browse click <target>\n"
-              "       nm browse select <name> <value> | nm browse check <name> [--off]\n"
+              "       nm browse select <name> <value> | nm browse check <name> [off]\n"
               "       nm browse captcha-check\n"
               "       nm browse submit [target] [--upload field=path ...]\n"
               "       nm browse extract [target] [--kind K]\n"
@@ -691,10 +691,11 @@ def _browse_select(args: Any, context: Any, rest: list[str]) -> int:
 
 def _browse_check(args: Any, context: Any, rest: list[str]) -> int:
     if not rest:
-        print("usage: nm browse check <name> [--off] [--session S]",
+        print("usage: nm browse check <name> [off] [--session S]",
               file=sys.stderr)
         return 2
-    checked = "--off" not in rest
+    # trailing "off" token unchecks; anything else checks.
+    checked = not (len(rest) > 1 and rest[-1].lower() == "off")
     name = rest[0]
     backend = _backend(args, context)
     result = backend.check(name, checked)
@@ -862,7 +863,7 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
               "       nm browse rtab close|shot <tab-id>\n"
               "       nm browse rtab fill <tab-id> <name> <value>\n"
               "       nm browse rtab select <tab-id> <name> <value>\n"
-              "       nm browse rtab check <tab-id> <name> [--off]\n"
+              "       nm browse rtab check <tab-id> <name> [off]\n"
               "       nm browse rtab captcha <tab-id>\n"
               "       nm browse rtab click|submit <tab-id> <target>\n"
               "       nm browse rtab wait <tab-id> <selector>\n"
@@ -956,10 +957,10 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
         result = backend.r_select(rest[1], rest[2], " ".join(rest[3:]))
     elif sub == "check":
         if len(rest) < 3:
-            print("usage: nm browse rtab check <tab-id> <name> [--off]",
+            print("usage: nm browse rtab check <tab-id> <name> [off]",
                   file=sys.stderr)
             return 2
-        checked = "--off" not in rest[3:]
+        checked = not (len(rest) > 3 and rest[-1].lower() == "off")
         result = backend.r_check(rest[1], rest[2], checked)
     elif sub == "captcha":
         if len(rest) < 2:

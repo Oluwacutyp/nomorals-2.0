@@ -195,8 +195,9 @@ class BrowserLoginTests(unittest.TestCase):
             return tab
 
         kw.setdefault("captcha_solver", _solver_ok)
+        service = kw.pop("service", "acme")
         out = login_with_vault(self.mgr, self.sessions, factory,
-                               service="acme", **kw)
+                               service=service, **kw)
         return out, opened
 
     def test_happy_path_saves_cookies(self):
