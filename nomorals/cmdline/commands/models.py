@@ -252,9 +252,131 @@ def _cmd_model_broker(args: argparse.Namespace, context: Any) -> int:
               f"local={card.local}, ctx={card.context_len})")
         return 0
 
+    if action == "setup":
+        # End-to-end local model setup: register → download (HF token-authed)
+        # → verify → promote → write the boot contract.  One command takes
+        # the phone from zero to a working local brain.
+        #   nm models setup Cutyp/codebeast-3.8b
+        #   nm models setup Cutyp/codebeast-3.8b --gguf-file merged_16bit.Q4_K_M.gguf
+        repo = target or "Cutyp/codebeast-3.8b"
+        gguf_file = getattr(args, "gguf_file", "") or ""
+        return _cmd_models_setup(args, context, broker, lifecycle, repo, gguf_file)
+
     print(f"unknown models action {action!r}; "
-          "try: list, add, remove, benchmark, use, select")
+          "try: list, add, remove, benchmark, use, select, setup")
     return 2
+
+
+def _cmd_models_setup(args: argparse.Namespace, context: Any, broker: ModelBroker,
+                      lifecycle: ModelLifecycle, repo: str,
+                      gguf_file: str = "") -> int:
+    """Full pipeline: register → download → verify → promote → boot contract."""
+    import os
+    import time
+    from pathlib import Path
+
+    model_id = repo.replace("/", "__")
+    print(f"setting up {repo} as the local brain…")
+
+    # 1. register (idempotent — re-running updates the existing entry)
+    try:
+        model = lifecycle.add(
+            repo,
+            model_id=model_id,
+            provider="llama_cpp",
+            capabilities=["chat", "code"],
+            context_len=int(getattr(args, "context_len", 0) or 4096),
+            quant="Q4_K_M",
+            notes="operator local brain",
+        )
+    except (LifecycleError, ValueError) as exc:
+        print(f"error: register failed: {exc}")
+        return 1
+    broker.register(_card_for(model))
+    print(f"  [1/5] registered {model.id} (stage={model.status})")
+
+    # 2. download — HF token required for private repos like Cutyp/codebeast-3.8b
+    if model.status == "registered":
+        if not lifecycle.hf_token:
+            print("  [2/5] WARNING: no HF token found (HF_TOKEN/NM_HF_TOKEN). "
+                  "Private repos will fail with 401 — set the token and re-run.")
+        try:
+            if gguf_file:
+                model = _download_specific_gguf(lifecycle, model, repo, gguf_file)
+            else:
+                model = lifecycle.download(model.id)
+        except LifecycleError as exc:
+            print(f"  [2/5] download failed: {exc}")
+            return 1
+    print(f"  [2/5] downloaded → {model.path} "
+          f"({model.size_bytes // (1024 * 1024)} MB)")
+
+    # 3. verify
+    if model.status == "downloaded":
+        try:
+            model = lifecycle.verify(model.id)
+        except LifecycleError as exc:
+            print(f"  [3/5] verify failed: {exc}")
+            return 1
+    print(f"  [3/5] verified sha256={model.sha256[:16]}…")
+
+    # 4. promote
+    try:
+        lifecycle.promote(model.id)
+    except LifecycleError as exc:
+        print(f"  [4/5] promote failed: {exc}")
+        return 1
+    broker.promote(model.id)
+    print(f"  [4/5] promoted {model.id} as primary mind")
+
+    # 5. boot contract — same as `nm models use`: next boot serves the GGUF
+    if model.path:
+        from .doctor import _env_update_home
+        update = {
+            "NM_LLM_PROVIDER": "llama_cpp",
+            "NM_LLM_LOCAL_MODEL": model.path,
+            "NM_LLM_LOCAL_AUTO_START": "1",
+        }
+        try:
+            _env_update_home(context, update)
+            print(f"  [5/5] boot contract written: llama_cpp serving {model.path}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [5/5] boot contract NOT written ({exc}); "
+                  "lifecycle promotion still active — set NM_LLM_PROVIDER=llama_cpp "
+                  f"and NM_LLM_LOCAL_MODEL={model.path} manually")
+    print("done — restart Devon and the local model serves chat")
+    return 0
+
+
+def _download_specific_gguf(lifecycle: ModelLifecycle, model: ManagedModel,
+                            repo: str, gguf_file: str) -> ManagedModel:
+    """Download one named GGUF from the repo instead of the first match."""
+    from pathlib import Path
+    from ..llm.download import HuggingFaceDownloader
+
+    lifecycle.models_dir.mkdir(parents=True, exist_ok=True)
+    downloader = HuggingFaceDownloader(
+        token=lifecycle.hf_token, cache_dir=str(lifecycle.models_dir))
+    files = downloader.list_files(repo, patterns=(gguf_file,))
+    if not files:
+        raise LifecycleError(
+            f"{gguf_file!r} not found in {repo!r}")
+    entry = files[0]
+    root = lifecycle.models_dir / repo
+    result = downloader.download_file(
+        repo, entry.path, destination=root / entry.path,
+        expected_sha256=entry.sha256)
+    if not result.verified and entry.sha256:
+        raise LifecycleError(
+            f"checksum mismatch downloading {entry.path}")
+    path = Path(result.path)
+    with lifecycle._lock:
+        lifecycle.db.execute(
+            "UPDATE model_lifecycle SET path = ?, size_bytes = ?, updated_at = ? "
+            "WHERE id = ?",
+            (str(path), path.stat().st_size if path.exists() else 0,
+             __import__("time").time(), model.id))
+    return lifecycle._transition(model.id, "downloaded", f"fetched {entry.path}")
 
 
 def _is_existing_path(target: str) -> bool:

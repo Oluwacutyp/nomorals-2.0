@@ -421,7 +421,7 @@ class GGUFServerManager:
         pick = min(candidates, key=lambda f: f.size)  # smallest usable quant
         try:
             result = downloader.download_file(
-                repo, pick.path, expected_sha256=pick.sha256, expected_size=pick.size
+                repo, pick.path, expected_sha256=pick.sha256
             )
         except Exception as exc:  # noqa: BLE001
             problems.append(f"download failed: {exc}")

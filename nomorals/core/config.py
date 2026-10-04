@@ -115,6 +115,10 @@ class LLMSettings:
     system_prompt: str = ""
     local_model: str = ""  # path or name of a downloaded GGUF; drives the
                           # power-mode router cascade when present
+    local_auto_start: bool = False  # NM_LLM_LOCAL_AUTO_START=1: boot starts
+                                    # llama-server on local_model automatically
+    local_host: str = "127.0.0.1"  # NM_LLM_LOCAL_HOST
+    local_port: int = 8080  # NM_LLM_LOCAL_PORT; must match llama_cpp_url
     #: Groq's model IDs churn (they retired llama-3.3-70b-versatile & co. on
     #: 2026-08-16) — the default must be a live ID, and NM_GROQ_MODEL exists
     #: so a drift event is a .env edit, not a re-release.
@@ -720,6 +724,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_TIMEOUT": "llm.timeout",
     "NM_LLM_CACHE_DIR": "llm.cache_dir",
     "NM_LLM_SYSTEM_PROMPT": "llm.system_prompt",
+    "NM_LLM_LOCAL_MODEL": "llm.local_model",
+    "NM_LLM_LOCAL_AUTO_START": "llm.local_auto_start",
+    "NM_LLM_LOCAL_HOST": "llm.local_host",
+    "NM_LLM_LOCAL_PORT": "llm.local_port",
+    "NM_LLAMA_CPP_URL": "llm.llama_cpp_url",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",
     "NM_HF_BASE_URL": "llm.hf_base_url",

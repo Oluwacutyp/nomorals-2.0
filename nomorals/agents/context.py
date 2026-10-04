@@ -227,6 +227,15 @@ def build_context(
 
     if with_router:
         context.router = build_router(settings, event_bus, db=context.db)
+        # Local GGUF auto-start: if the operator promoted a local model
+        # (NM_LLM_PROVIDER=llama_cpp + NM_LLM_LOCAL_AUTO_START=1), make sure
+        # llama-server is actually running before any chat traffic hits it.
+        # Without this the router points at a dead localhost:8080.
+        if settings.llm.provider.lower() in {"llama_cpp", "llamacpp", "gguf"}:
+            try:
+                ensure_local_gguf(settings)
+            except Exception as exc:  # noqa: BLE001 — cloud fallbacks still work
+                _log.warning("local GGUF auto-start failed: %s", exc)
 
     if with_memory:
         from ..memory.manager import MemoryManager

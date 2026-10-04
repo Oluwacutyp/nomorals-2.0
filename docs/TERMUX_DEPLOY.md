@@ -39,21 +39,33 @@ chmod +x llama-server llama-cli
 
 ## 3. The model (WiFi only)
 
+**Recommended: CodeBeast 3.8B** — the phone brain. One command does everything
+(download with your HF token, verify, promote, write the boot contract):
+
 ```bash
-mkdir -p ~/models && cd ~/models
-# ~4.9GB — WiFi, not mobile data. The repo is private, so pass your HF token:
-curl -fSL -C - -o dolphin-8b-merged.Q4_K_M.gguf \
-  -H "Authorization: Bearer <your-hf-token>" \
-  https://huggingface.co/Cutyp/dolphin-8b-merged/resolve/main/dolphin-8b-merged.Q4_K_M.gguf
+export HF_TOKEN="<your-hf-token>"   # the repo is private
+nm models setup Cutyp/codebeast-3.8b --gguf-file merged_16bit.Q4_K_M.gguf
 ```
 
-> **Reality check:** an 8B model at full chat load makes phones hot and can
-> stall — if yours throttles or goes unresponsive, that's the chip, not the
-> setup. The 8B GGUF is still worth having (it runs great on a PC or a VPS),
-> but the realistic everyday phone brain is the **3.8B** (`Cutyp/codebeast-3.8b`
-> Q4_K_M, ~2.3GB) once training finishes — same steps, smaller file, far
-> less heat. Until either is on the phone, the cloud API fallbacks in step 5
-> keep Devon talking.
+~2.3GB — WiFi, not mobile data. Resumable: re-run the same command if it
+gets interrupted.
+
+Manual alternative (if you prefer curl):
+
+```bash
+mkdir -p ~/models/Cutyp/codebeast-3.8b && cd ~/models/Cutyp/codebeast-3.8b
+curl -fSL -C - -o merged_16bit.Q4_K_M.gguf \
+  -H "Authorization: Bearer <your-hf-token>" \
+  https://huggingface.co/Cutyp/codebeast-3.8b/resolve/main/merged_16bit.Q4_K_M.gguf
+nm models add ~/models/Cutyp/codebeast-3.8b/merged_16bit.Q4_K_M.gguf --quant Q4_K_M
+nm models use Cutyp__codebeast-3.8b
+```
+
+> **Reality check:** the old 8B dolphin GGUF (~4.9GB) still works (it runs
+> great on a PC or a VPS), but on a phone it runs hot and can stall — that's
+> the chip, not the setup. CodeBeast 3.8B Q4_K_M is the everyday phone
+> brain: smaller file, far less heat. Until it's on the phone, the cloud API
+> fallbacks in step 5 keep Devon talking.
 
 ## 4. Devon herself
 

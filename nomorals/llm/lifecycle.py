@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -229,6 +230,7 @@ class ModelLifecycle:
         *,
         provisioner: ModelProvisioner | None = None,
         models_dir: str | Path = "models",
+        hf_token: str = "",
     ) -> None:
         if isinstance(db, Database):
             self.db = db
@@ -237,6 +239,7 @@ class ModelLifecycle:
         self.db.executescript(_LIFECYCLE_DDL)
         self.provisioner: ModelProvisioner = provisioner or LocalGGUFProvisioner()
         self.models_dir = Path(models_dir)
+        self.hf_token = hf_token or os.environ.get("HF_TOKEN", "") or os.environ.get("NM_HF_TOKEN", "")
         self._handles: dict[str, Any] = {}
         self._lock = threading.RLock()
 
@@ -394,7 +397,8 @@ class ModelLifecycle:
                                     f"local file present ({size} bytes)")
         from .download import HuggingFaceDownloader  # lazy: network-adjacent
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        downloader = HuggingFaceDownloader(cache_dir=str(self.models_dir))
+        downloader = HuggingFaceDownloader(
+            token=self.hf_token, cache_dir=str(self.models_dir))
         try:
             result = downloader.download_repo(model.source, patterns=("*.gguf",))
         except Exception as exc:
