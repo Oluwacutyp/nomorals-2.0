@@ -27,10 +27,14 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
 
     if action == "status":
         svc = ServiceBackend()
+        from ...tools.captcha import rate_limiter as _rl
+        import os as _os2
         return _out({
             "backends": ["service", "takeover", "detect"],
             "service_available": svc.available(),
             "api_key_configured": svc.available(),
+            "solver_enabled": _os2.environ.get("NM_CAPTCHA_SOLVER", "1") != "0",
+            "rate_limit": _rl(settings).status(),
             "audit_log": _audit_path(settings),
             "kinds": list(CaptchaKind.ALL),
         })
@@ -80,7 +84,9 @@ def _cmd_captcha(args: argparse.Namespace, context: Any) -> int:
             if solver_on is None:
                 solver_on = _os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0"
             result = solve(challenge, backend=args.backend, settings=settings,
-                           solver_enabled=solver_on)
+                           solver_enabled=solver_on,
+                           notify_owner=getattr(args, "notify_owner", True),
+                           context=context)
         except CaptchaError as exc:
             print(f"captcha solve failed: {exc}", file=sys.stderr)
             return 1

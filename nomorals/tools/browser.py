@@ -253,6 +253,12 @@ class BrowserSession:
         #: value attribute unless overridden here
         self._form_values: dict[str, str] = {}
         self._history: list[str] = []
+        #: solved captcha tokens for the current page (token field name ->
+        #: token); merged into the next submit()'s form values.
+        self.captcha_tokens: dict[str, str] = {}
+        #: solved image/audio captcha text (kind -> text); the agent fills
+        #: it into the visible captcha field itself.
+        self.captcha_text: dict[str, str] = {}
         self.created_at = time.time()
         self.request_count = 0
 
@@ -395,6 +401,8 @@ class BrowserSession:
         self.title = title_nodes[0].inner_text() if title_nodes else ""
         # agent fills do not survive a navigation
         self._form_values = {}
+        self.captcha_tokens = {}
+        self.captcha_text = {}
         self._save_cookies()
         return {
             "ok": result["status"] < 400,
@@ -605,6 +613,12 @@ class BrowserSession:
                 values[name] = self._form_values[name]
             else:
                 values[name] = field.attrs.get("value", "")
+
+        # solved captcha tokens (from check_captcha) ride along on the
+        # submit — g-recaptcha-response / h-captcha-response /
+        # cf-turnstile-response / fc-token.
+        if self.captcha_tokens:
+            values.update(self.captcha_tokens)
 
         # file uploads: explicit uploads= wins, then fills on file fields.
         upload_paths: dict[str, str] = {}
@@ -974,6 +988,7 @@ class BrowserSession:
             "requests": self.request_count,
             "seconds_alive": round(time.time() - self.created_at, 1),
             "pending_form_values": sorted(self._form_values),
+            "solved_captcha_tokens": sorted(self.captcha_tokens),
             "cookies_persisted_to": self._session_file(),
         }
 
@@ -988,7 +1003,65 @@ class BrowserSession:
         self.cookie_jar.clear()
         self._form_values = {}
         self._history = []
+        self.captcha_tokens = {}
+        self.captcha_text = {}
         return {"ok": True, "closed": self.name, "cookies_persisted": bool(self.session_dir)}
+
+    # -- captcha handling -------------------------------------------------------
+    def check_captcha(self, solve: bool = True, **_: Any) -> dict[str, Any]:
+        """Detect captchas on the current page and, by default, solve them.
+
+        Detection scans the current page HTML (reCAPTCHA, hCaptcha,
+        Turnstile, Cloudflare, GeeTest, Arkose, AWS WAF, image/audio
+        challenges). When ``solve`` is true each challenge is run
+        through the captcha solver (service backend first — the solver
+        is ON by default — falling back to an owner takeover ping when
+        it can't solve).
+
+        Solved token captchas are stashed on the session and merged
+        into the next ``submit`` automatically; solved image/audio text
+        is returned (and stashed) so the agent can ``fill`` it into the
+        visible captcha field. Challenges the solver couldn't clear come
+        back with ``takeover: true`` and the owner already pinged.
+        """
+        self._require_page()
+        from . import captcha as _cap
+
+        challenges = _cap.detect_in_session(self)
+        out: list[dict[str, Any]] = []
+        # Solver on by default — same rule as the CLI/accounts:
+        # explicit NM_CAPTCHA_SOLVER=0 goes straight to takeover.
+        solver_on = os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0"
+        for ch in challenges:
+            item: dict[str, Any] = ch.summary()
+            if not solve:
+                item["solve_attempted"] = False
+                out.append(item)
+                continue
+            try:
+                result = _cap.solve(ch, backend="auto", settings=None,
+                                    solver_enabled=solver_on,
+                                    notify_owner=True, context=None)
+            except _cap.CaptchaError as exc:
+                result = _cap.SolveResult(
+                    ok=False, kind=ch.kind, backend="error",
+                    detail=str(exc))
+            item.update(result.to_dict())
+            field = _cap.CaptchaKind.TOKEN_FIELD.get(ch.kind, "")
+            if result.ok and field and result.token:
+                self.captcha_tokens[field] = result.token
+                item["injected_into"] = field
+            elif result.ok and result.text:
+                self.captcha_text[ch.kind] = result.text
+                item["note"] = ("fill the captcha field with "
+                                "'captcha_text'")
+            out.append(item)
+        return {
+            "url": self.url,
+            "challenges": out,
+            "solved_tokens": sorted(self.captcha_tokens),
+            "captcha_text": dict(self.captcha_text),
+        }
 
     # -- cookie persistence (wave 86) ------------------------------------------
     def _session_file(self) -> str:
@@ -1058,6 +1131,7 @@ _ACTIONS = {
     "click": BrowserSession.click,
     "fill": BrowserSession.fill,
     "submit": BrowserSession.submit,
+    "check_captcha": BrowserSession.check_captcha,
     "extract": BrowserSession.extract,
     "walk": BrowserSession.walk,
     "task": BrowserSession.task,
@@ -1349,11 +1423,16 @@ def register(registry: Any) -> None:
             "(a small program of open/fill/submit/extract/click/back steps); "
             "cookies persist per session AND across restarts; transient "
             "failures on idempotent fetches are retried with backoff, "
-            "form submits and other mutating steps never auto-retry"
+            "form submits and other mutating steps never auto-retry; "
+            "'check_captcha' detects captchas on the current page and solves "
+            "them (service backend first, owner takeover as fallback — the "
+            "solver is ON by default), stashing tokens that the next "
+            "'submit' posts automatically"
         ),
         capability=Capability.NET_BROWSER,
         parameters={
-            "action": "str — open|text|markdown|links|click|fill|submit|extract|walk|task|state|close",
+            "action": "str — open|text|markdown|links|click|fill|submit|extract|walk|task|state|close|check_captcha",
+            "solve": "bool — for check_captcha: detect+ solve (default true); false = detect only",
             "url": "str — for open/walk",
             "target": "str — for click (link text/href/index), submit (form index/id), extract (tag, #id, .class)",
             "kind": "str — for extract: headings|tables|forms|meta|nav (structured views, no selector needed)",
@@ -1376,6 +1455,7 @@ def register(registry: Any) -> None:
         uploads: Any = None,
         session: str = "default",
         max_chars: int = 40000,
+        solve: bool = True,
         **_: Any,
     ) -> dict[str, Any]:
         sess = get_session(session, user_agent=user_agent, timeout=timeout,
@@ -1384,7 +1464,7 @@ def register(registry: Any) -> None:
         try:
             return sess.do(action, url=url, target=target, name=name,
                            value=value, kind=kind, steps=steps, uploads=uploads,
-                           max_chars=max_chars)
+                           max_chars=max_chars, solve=solve)
         except ToolError:
             raise
         except Exception as exc:  # noqa: BLE001 - a browser error is a result

@@ -5,9 +5,11 @@ owner — logins, forms, checkouts — and those flows regularly hit captchas.
 This module gives her a way through without paging the owner every time:
 
 * :func:`detect` — scan page HTML for reCAPTCHA v2/v2-audio/v3/enterprise,
-  hCaptcha, Cloudflare Turnstile, Cloudflare challenge pages, and
-  image/audio captchas (inline ``data:`` images are decoded on the
-  spot so the solver can use them directly).
+  hCaptcha, Cloudflare Turnstile, Cloudflare challenge pages, GeeTest
+  v3/v4, Arkose FunCaptcha, AWS WAF, FriendlyCaptcha, Yandex
+  SmartCaptcha, PerimeterX px-captcha, and image/audio captchas (inline
+  ``data:`` images are decoded on the spot so the solver can use them
+  directly).
 * :class:`CaptchaBackend` — pluggable solvers behind one interface:
   ``service`` (a 2captcha-shaped commercial solving API, key from the
   environment only), ``takeover`` (pause and hand the challenge to the
@@ -46,6 +48,9 @@ __all__ = [
     "ServiceBackend",
     "TakeoverBackend",
     "DetectOnlyBackend",
+    "SolverRateLimiter",
+    "rate_limiter",
+    "register_backend",
     "detect",
     "detect_in_session",
     "extract_image_captcha_urls",
@@ -70,14 +75,40 @@ class CaptchaKind:
     RECAPTCHA_ENTERPRISE = "recaptcha_enterprise"
     HCAPTCHA = "hcaptcha"
     TURNSTILE = "turnstile"
+    GEETEST = "geetest"              # GeeTest v3 slider / v4 behavioral
+    ARKOSE = "arkose"                # Arkose FunCaptcha
+    AWS_WAF = "aws_waf"              # AWS WAF captcha widget
+    FRIENDLY = "friendly"            # FriendlyCaptcha (PoW puzzle)
+    SMARTCAPTCHA = "smartcaptcha"    # Yandex SmartCaptcha
+    PERIMETERX = "perimeterx"        # PerimeterX/HUMAN px-captcha
     IMAGE_CAPTCHA = "image_captcha"
     AUDIO_CAPTCHA = "audio_captcha"
     UNKNOWN = "unknown"
 
     ALL = (
         RECAPTCHA_V2, RECAPTCHA_V3, RECAPTCHA_ENTERPRISE,
-        HCAPTCHA, TURNSTILE, IMAGE_CAPTCHA, AUDIO_CAPTCHA, UNKNOWN,
+        HCAPTCHA, TURNSTILE, GEETEST, ARKOSE, AWS_WAF, FRIENDLY,
+        SMARTCAPTCHA, PERIMETERX, IMAGE_CAPTCHA, AUDIO_CAPTCHA, UNKNOWN,
     )
+
+    #: kinds that resolve to a token the browser submits with the form
+    TOKEN_KINDS = frozenset({
+        RECAPTCHA_V2, RECAPTCHA_V3, RECAPTCHA_ENTERPRISE,
+        HCAPTCHA, TURNSTILE, ARKOSE,
+    })
+
+    #: field name the solved token goes into on submit
+    TOKEN_FIELD = {
+        RECAPTCHA_V2: "g-recaptcha-response",
+        RECAPTCHA_V3: "g-recaptcha-response",
+        RECAPTCHA_ENTERPRISE: "g-recaptcha-response",
+        HCAPTCHA: "h-captcha-response",
+        TURNSTILE: "cf-turnstile-response",
+        ARKOSE: "fc-token",
+    }
+
+    #: kinds that resolve to readable text (typed into a captcha field)
+    TEXT_KINDS = frozenset({IMAGE_CAPTCHA, AUDIO_CAPTCHA})
 
 
 class CaptchaError(ToolError):
@@ -151,6 +182,32 @@ _V3_EXECUTE_RE = re.compile(
     r"grecaptcha(?:\.enterprise)?\.execute\(\s*['\"]([A-Za-z0-9_\-]+)['\"]", re.I)
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
 _IMG_SRC_RE = re.compile(r'src\s*=\s*["\']([^"\']+)["\']', re.I)
+# provider-specific identifiers
+_GT_RE = re.compile(r"\bgt\s*[:=]\s*[\"']([A-Za-z0-9]{20,})[\"']", re.I)
+_GT_CHALLENGE_RE = re.compile(
+    r"\bchallenge\s*[:=]\s*[\"']([A-Za-z0-9_\-]{20,})[\"']", re.I)
+_CAPTCHAID_RE = re.compile(
+    r"\bcaptch?a-?id\s*[:=]\s*[\"']([A-Za-z0-9]{8,})[\"']", re.I)
+_PKEY_RE = re.compile(
+    r"(?:data-pkey|pkey)\s*[:=]\s*[\"']([A-Za-z0-9\-]{8,})[\"']", re.I)
+
+
+def _gt_params(html: str) -> tuple[str, str]:
+    """(gt, challenge) for a GeeTest v3 inline config, '' when absent."""
+    gt_m = _GT_RE.search(html)
+    ch_m = _GT_CHALLENGE_RE.search(html)
+    return ((gt_m.group(1) if gt_m else ""),
+            (ch_m.group(1) if ch_m else ""))
+
+
+def _captcha_id(html: str) -> str:
+    m = _CAPTCHAID_RE.search(html)
+    return m.group(1).strip() if m else ""
+
+
+def _pkey(html: str) -> str:
+    m = _PKEY_RE.search(html)
+    return m.group(1).strip() if m else ""
 
 
 def _has(html: str, *needles: str) -> bool:
@@ -201,8 +258,19 @@ def detect(html: str, url: str = "", fetch_bytes: bool = False) -> list[CaptchaC
     is_hcaptcha = _has(html, "hcaptcha.com", "h-captcha")
     is_turnstile = _has(html, "challenges.cloudflare.com/turnstile",
                         "cf-turnstile")
+    is_geetest = _has(html, "geetest.com", "initgeetest", "geetestv4",
+                      "geetest_v4", "gt.js")
+    is_arkose = _has(html, "arkoselabs.com", "funcaptcha", "fc-token")
+    is_awswaf = _has(html, "awswaf", "aws-waf")
+    is_friendly = _has(html, "friendlycaptcha", "frc-captcha")
+    is_smartcaptcha = _has(html, "smartcaptcha",
+                           "smart-captcha.yandexcloud.net")
+    is_perimeterx = _has(html, "perimeterx", "px-captcha", "_px/")
 
-    # reCAPTCHA enterprise / v2 — data-sitekey driven
+    # reCAPTCHA enterprise / v2 — data-sitekey driven. Providers that share
+    # the data-sitekey markup (hCaptcha, Turnstile, FriendlyCaptcha,
+    # Yandex SmartCaptcha) are disambiguated by surrounding markup, in
+    # order of specificity.
     for m in _SITEKEY_RE.finditer(html):
         sitekey = m.group(1).strip()
         if not sitekey or sitekey == "explicit":
@@ -211,14 +279,28 @@ def detect(html: str, url: str = "", fetch_bytes: bool = False) -> list[CaptchaC
         if is_enterprise or "enterprise" in window:
             add(CaptchaChallenge(CaptchaKind.RECAPTCHA_ENTERPRISE,
                                  sitekey=sitekey, page_url=url))
-        elif is_recaptcha or "g-recaptcha" in window:
-            add(CaptchaChallenge(CaptchaKind.RECAPTCHA_V2,
-                                 sitekey=sitekey, page_url=url))
+        elif is_geetest and "geetest" in window:
+            # GeeTest v3 inline config (gt/challenge live in metadata)
+            gt, challenge = _gt_params(html)
+            add(CaptchaChallenge(CaptchaKind.GEETEST, sitekey=sitekey,
+                                 page_url=url,
+                                 metadata={"gt": gt, "challenge": challenge,
+                                           "variant": "v3"}))
         elif is_hcaptcha or "h-captcha" in window:
             add(CaptchaChallenge(CaptchaKind.HCAPTCHA,
                                  sitekey=sitekey, page_url=url))
         elif is_turnstile or "cf-turnstile" in window:
             add(CaptchaChallenge(CaptchaKind.TURNSTILE,
+                                 sitekey=sitekey, page_url=url))
+        elif is_friendly or "frc-captcha" in window:
+            add(CaptchaChallenge(CaptchaKind.FRIENDLY,
+                                 sitekey=sitekey, page_url=url,
+                                 metadata={"note": "proof-of-work puzzle"}))
+        elif is_smartcaptcha or "smartcaptcha" in window:
+            add(CaptchaChallenge(CaptchaKind.SMARTCAPTCHA,
+                                 sitekey=sitekey, page_url=url))
+        elif is_recaptcha or "g-recaptcha" in window:
+            add(CaptchaChallenge(CaptchaKind.RECAPTCHA_V2,
                                  sitekey=sitekey, page_url=url))
 
     # reCAPTCHA v3 — render= key or grecaptcha.execute('key')
@@ -233,6 +315,48 @@ def detect(html: str, url: str = "", fetch_bytes: bool = False) -> list[CaptchaC
         kind = (CaptchaKind.RECAPTCHA_ENTERPRISE if is_enterprise
                 else CaptchaKind.RECAPTCHA_V3)
         add(CaptchaChallenge(kind, sitekey=sitekey, page_url=url))
+
+    # GeeTest v4 — initGeetest4({captchaId: "..."}) or a captcha-id attr.
+    if is_geetest:
+        cid = _captcha_id(html)
+        gt, challenge = _gt_params(html)
+        if cid:
+            add(CaptchaChallenge(
+                CaptchaKind.GEETEST, sitekey=cid, page_url=url,
+                metadata={"gt": "", "challenge": "", "variant": "v4"}))
+        elif gt and challenge:
+            add(CaptchaChallenge(
+                CaptchaKind.GEETEST, sitekey=gt, page_url=url,
+                metadata={"gt": gt, "challenge": challenge,
+                          "variant": "v3"}))
+        else:
+            add(CaptchaChallenge(
+                CaptchaKind.GEETEST, page_url=url,
+                metadata={"note": "geetest markup present, "
+                                  "no gt/captchaId extracted"}))
+
+    # Arkose FunCaptcha — api.js with a public key (data-pkey).
+    if is_arkose:
+        pkey = _pkey(html)
+        add(CaptchaChallenge(
+            CaptchaKind.ARKOSE, sitekey=pkey, page_url=url,
+            metadata={"note": "public key extracted" if pkey
+                              else "no public key extracted"}))
+
+    # AWS WAF captcha — the captcha.js widget on a WAF-fronted page.
+    if is_awswaf and _has(html, "captcha"):
+        add(CaptchaChallenge(
+            CaptchaKind.AWS_WAF, page_url=url,
+            metadata={"provider": "aws_waf",
+                      "note": "WAF captcha widget — interactive, "
+                              "token injected by the widget itself"}))
+
+    # PerimeterX / HUMAN px-captcha — cookie-clearance interstitial.
+    if is_perimeterx:
+        add(CaptchaChallenge(
+            CaptchaKind.PERIMETERX, page_url=url,
+            metadata={"provider": "perimeterx",
+                      "note": "interactive challenge page"}))
 
     # Cloudflare challenge / "verify you are human" interstitials
     if _has(html, "cf-challenge", "__cf_chl", "cf_clearance") and _has(
@@ -352,20 +476,189 @@ class TakeoverBackend(CaptchaBackend):
     """Pause the session and hand the challenge to the owner.
 
     Used when no solving service is configured (or the owner prefers to
-    click the checkbox herself). Never auto-solves anything.
+    click the checkbox herself). Never auto-solves anything. The
+    ``detail`` carries everything the owner needs: where the challenge
+    is, what kind it is, and exactly what to do.
     """
 
     name = "takeover"
 
+    _HINTS = {
+        CaptchaKind.RECAPTCHA_V2: "tick the 'I'm not a robot' checkbox",
+        CaptchaKind.RECAPTCHA_ENTERPRISE: "complete the reCAPTCHA widget",
+        CaptchaKind.HCAPTCHA: "complete the hCaptcha checkbox",
+        CaptchaKind.TURNSTILE: "tick the Cloudflare checkbox",
+        CaptchaKind.GEETEST: "drag the slider (or complete the GeeTest "
+                             "puzzle) in the page",
+        CaptchaKind.ARKOSE: "complete the FunCaptcha puzzle",
+        CaptchaKind.AWS_WAF: "complete the AWS WAF captcha widget",
+        CaptchaKind.FRIENDLY: "wait for the FriendlyCaptcha proof-of-work "
+                              "(solves itself, just wait)",
+        CaptchaKind.SMARTCAPTCHA: "complete the SmartCaptcha",
+        CaptchaKind.PERIMETERX: "complete the PerimeterX challenge",
+        CaptchaKind.IMAGE_CAPTCHA: "read the image and type the characters",
+        CaptchaKind.AUDIO_CAPTCHA: "listen to the audio and type the words",
+        CaptchaKind.UNKNOWN: "complete the challenge in the browser",
+    }
+
     def solve(self, challenge: CaptchaChallenge) -> SolveResult:
-        hint = {
-            CaptchaKind.RECAPTCHA_V2: "tick the 'I'm not a robot' checkbox",
-            CaptchaKind.IMAGE_CAPTCHA: "read the image and type the characters",
-        }.get(challenge.kind, "complete the challenge in the browser")
+        hint = self._HINTS.get(challenge.kind, self._HINTS[CaptchaKind.UNKNOWN])
+        where = challenge.page_url or challenge.domain or "the page"
+        detail = (f"owner takeover: {challenge.kind} on {where} — "
+                  f"{hint}. Reply when done and the automation will resume.")
         return SolveResult(
             ok=False, kind=challenge.kind, backend=self.name, takeover=True,
-            detail=(f"owner takeover needed on {challenge.domain or 'the page'}: "
-                    f"{hint}"))
+            detail=detail)
+
+
+# ── rate limiting ──────────────────────────────────────────────────────────────
+
+def _rate_limit_path(settings: Any = None) -> str:
+    if settings is not None:
+        try:
+            return str(settings.resolve("data/captcha/rate_limit.json"))
+        except Exception:  # noqa: BLE001
+            pass
+    root = os.environ.get("NOMORALS_CAPTCHA_DIR") or os.path.join(
+        os.path.expanduser("~"), ".config", "nomorals", "captcha")
+    return os.path.join(root, "rate_limit.json")
+
+
+class SolverRateLimiter:
+    """Keep the solver from hammering a commercial solving service.
+
+    Budgets are configurable through the environment and persist to a
+    JSON state file so they survive restarts:
+
+    * ``NM_CAPTCHA_PER_MINUTE`` — max task submissions per rolling
+      minute (default 30).
+    * ``NM_CAPTCHA_PER_DAY`` — max task submissions per rolling
+      24 hours (default 1000).
+    * ``NM_CAPTCHA_ERROR_COOLDOWN`` — base seconds of backoff after a
+      failed solve; doubles per consecutive failure, capped at 30
+      minutes (default 30).
+
+    Hard-stop failures (bad key, zero balance, banned IP) trip a
+    6-hour global cooldown: no point spending against a dead account.
+    """
+
+    _HARD_COOLDOWN_S = 6 * 3600
+    _BACKOFF_CAP_S = 1800
+
+    def __init__(self, settings: Any = None, *,
+                 per_minute: int | None = None,
+                 per_day: int | None = None,
+                 error_cooldown_s: float | None = None) -> None:
+        self._path = _rate_limit_path(settings)
+        self._per_minute = per_minute if per_minute is not None else int(
+            os.environ.get("NM_CAPTCHA_PER_MINUTE", "30"))
+        self._per_day = per_day if per_day is not None else int(
+            os.environ.get("NM_CAPTCHA_PER_DAY", "1000"))
+        self._error_cooldown = (error_cooldown_s if error_cooldown_s
+                                is not None else float(
+                                    os.environ.get(
+                                        "NM_CAPTCHA_ERROR_COOLDOWN", "30")))
+
+    # -- state ----------------------------------------------------------------
+    def _load(self) -> dict[str, Any]:
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                state = json.load(fh)
+            if isinstance(state, dict):
+                return state
+        except Exception:  # noqa: BLE001 — missing/corrupt state is fine
+            pass
+        return {}
+
+    def _save(self, state: dict[str, Any]) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, self._path)
+        except Exception:  # noqa: BLE001 — best effort
+            _log.warning("captcha rate-limit state write failed")
+
+    # -- checks -----------------------------------------------------------------
+    def check(self) -> None:
+        """Raise :class:`CaptchaError` when a new solve must not be sent."""
+        now = time.time()
+        state = self._load()
+        cooldown_until = float(state.get("cooldown_until", 0.0) or 0.0)
+        if now < cooldown_until:
+            wait = int(cooldown_until - now)
+            raise CaptchaError(
+                f"solver cooling down — next solve allowed in {wait}s")
+        stamps = [s for s in state.get("submits", [])
+                  if now - float(s) < 86400.0]
+        if len(stamps) >= self._per_day:
+            raise CaptchaError(
+                f"daily solving budget reached ({self._per_day})")
+        minute = [s for s in stamps if now - float(s) < 60.0]
+        if len(minute) >= self._per_minute:
+            raise CaptchaError(
+                f"solve rate too high (>{self._per_minute}/min) — backing off")
+
+    def record_submit(self) -> None:
+        state = self._load()
+        now = time.time()
+        stamps = [s for s in state.get("submits", [])
+                  if now - float(s) < 86400.0]
+        stamps.append(now)
+        state["submits"] = stamps
+        self._save(state)
+
+    def record_success(self) -> None:
+        state = self._load()
+        state["consecutive_failures"] = 0
+        self._save(state)
+
+    def record_failure(self, hard: bool = False) -> None:
+        """Note a failed solve. ``hard`` = account-level failure —
+        trip the long cooldown."""
+        state = self._load()
+        if hard:
+            state["cooldown_until"] = time.time() + self._HARD_COOLDOWN_S
+            state["hard_failure"] = True
+            _log.warning("captcha solver hard-stop: 6h cooldown")
+        else:
+            failures = int(state.get("consecutive_failures", 0) or 0) + 1
+            state["consecutive_failures"] = failures
+            backoff = min(self._error_cooldown * (2 ** (failures - 1)),
+                          self._BACKOFF_CAP_S)
+            state["cooldown_until"] = time.time() + backoff
+            _log.info("captcha solver backoff %.0fs after failure #%d",
+                      backoff, failures)
+        self._save(state)
+
+    def status(self) -> dict[str, Any]:
+        """Snapshot for ``nm captcha status``."""
+        now = time.time()
+        state = self._load()
+        stamps = [s for s in state.get("submits", [])
+                  if now - float(s) < 86400.0]
+        return {
+            "submits_last_24h": len(stamps),
+            "per_minute": self._per_minute,
+            "per_day": self._per_day,
+            "cooldown_until": state.get("cooldown_until", 0.0),
+            "cooling_down": now < float(state.get("cooldown_until", 0.0) or 0),
+            "consecutive_failures": int(
+                state.get("consecutive_failures", 0) or 0),
+            "hard_failure": bool(state.get("hard_failure", False)),
+        }
+
+
+_LIMITERS: dict[str, SolverRateLimiter] = {}
+
+
+def rate_limiter(settings: Any = None) -> SolverRateLimiter:
+    """Process-wide shared limiter (one per state-file path)."""
+    path = _rate_limit_path(settings)
+    if path not in _LIMITERS:
+        _LIMITERS[path] = SolverRateLimiter(settings)
+    return _LIMITERS[path]
 
 
 # 2captcha-shaped commercial solving service ────────────────────────────────
@@ -380,9 +673,55 @@ _METHOD_FOR_KIND = {
     CaptchaKind.RECAPTCHA_ENTERPRISE: "userrecaptcha",
     CaptchaKind.HCAPTCHA: "hcaptcha",
     CaptchaKind.TURNSTILE: "turnstile",
+    CaptchaKind.GEETEST: "geetest",
+    CaptchaKind.ARKOSE: "funcaptcha",
     CaptchaKind.IMAGE_CAPTCHA: "base64",
     CaptchaKind.AUDIO_CAPTCHA: "audio",
 }
+
+#: API errors that mean the account itself is dead — never retry, and
+#: trip the 6h limiter cooldown instead of spending more tasks.
+_HARD_STOP_ERRORS = {
+    "ERROR_ZERO_BALANCE",
+    "ERROR_KEY_DOES_NOT_EXIST",
+    "ERROR_WRONG_USER_KEY",
+    "ERROR_IP_NOT_ALLOWED",
+    "ERROR_IP_BLOCKED",
+}
+
+
+def _hard_error(error_text: str) -> bool:
+    """Is this a 2captcha-shaped error code we must never retry?"""
+    up = (error_text or "").upper()
+    return any(code in up for code in _HARD_STOP_ERRORS)
+
+
+_FRIENDLY_ERRORS = {
+    "ERROR_ZERO_BALANCE": "solving account has zero balance — "
+                          "add funds before retrying",
+    "ERROR_KEY_DOES_NOT_EXIST": "CAPTCHA_API_KEY is invalid/unknown — "
+                                "check the key",
+    "ERROR_WRONG_USER_KEY": "CAPTCHA_API_KEY is wrong — check the key",
+    "ERROR_IP_NOT_ALLOWED": "solving account blocks this IP",
+    "ERROR_IP_BLOCKED": "solving account blocked this IP",
+    "ERROR_NO_SLOT_AVAILABLE": "solver busy — retry shortly",
+    "ERROR_TASK_ABSENT": "task expired at the solver — retry",
+    "ERROR_WRONG_CAPTCHA_ID": "stale task id — retry",
+    "ERROR_IMAGE_TYPE_NOT_SUPPORTED": "image type unsupported — "
+                                      "convert to PNG/JPG first",
+    "ERROR_CAPTCHA_UNSOLVABLE": "solver workers could not solve it",
+    "ERROR_BAD_TOKEN_OR_PAGEURL": "sitekey/pageurl rejected by the solver",
+}
+
+
+def _friendly_error(error_text: str) -> str:
+    """Turn a raw solver error code into a human-usable message."""
+    up = (error_text or "").strip().upper()
+    msg = _FRIENDLY_ERRORS.get(up)
+    if msg:
+        return f"solver API error: {msg}"
+    short = (error_text or "").strip()[:120] or "unknown error"
+    return f"solver API rejected the request ({short})"
 
 
 class ServiceBackend(CaptchaBackend):
@@ -390,18 +729,29 @@ class ServiceBackend(CaptchaBackend):
 
     The API key comes **only** from the ``CAPTCHA_API_KEY`` environment
     variable (``CAPTCHA_API_URL`` optionally overrides the endpoint for
-    compatible services). The key is never logged, never stored in the
-    audit trail, and never echoed back in errors.
+    compatible services, e.g. capmonster — its 2captcha-compatible mode
+    uses the same in.php/res.php calls). The key is never logged, never
+    stored in the audit trail, and never echoed back in errors.
+
+    A shared :class:`SolverRateLimiter` guards submissions: per-minute
+    and per-day budgets plus exponential backoff on failures. Hard
+    account-level errors (bad key, zero balance) trip a 6-hour global
+    cooldown so we never burn against a dead account.
     """
 
     name = "service"
 
     def __init__(self, api_key: str = "", api_url: str = "",
-                 sleeper: Callable[[float], None] | None = None) -> None:
+                 sleeper: Callable[[float], None] | None = None,
+                 limiter: "SolverRateLimiter | None" = None,
+                 proxy: str = "", settings: Any = None) -> None:
         self._key = api_key or os.environ.get("CAPTCHA_API_KEY", "")
         self._api_url = (api_url or os.environ.get("CAPTCHA_API_URL", "")
                          or _DEFAULT_API_URL).rstrip("/")
         self._sleep = sleeper or time.sleep
+        self._limiter = limiter if limiter is not None else rate_limiter(
+            settings)
+        self._proxy = proxy or os.environ.get("CAPTCHA_PROXY", "")
 
     # -- availability -------------------------------------------------------
     def available(self) -> bool:
@@ -416,7 +766,16 @@ class ServiceBackend(CaptchaBackend):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            # a 429 from the solving service is a hard stop for this task
+            if exc.code == 429:
+                self._limiter.record_failure(hard=False)
+                raise CaptchaError(
+                    "solver API rate-limited us (429) — backing off") from exc
+            self._limiter.record_failure()
+            raise CaptchaError(f"solver API unreachable: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
+            self._limiter.record_failure()
             raise CaptchaError(f"solver API unreachable: {exc}") from exc
         try:
             data = json.loads(body)
@@ -426,23 +785,17 @@ class ServiceBackend(CaptchaBackend):
                 return {"status": 1, "request": body[3:].strip()}
             if body.strip() == "CAPCHA_NOT_READY":
                 return {"status": 0, "request": "CAPCHA_NOT_READY"}
-            raise CaptchaError("solver API returned an unreadable response")
+            self._limiter.record_failure(hard=_hard_error(body))
+            raise CaptchaError(_friendly_error(body))
         if data.get("status") != 1 and data.get("request") != "CAPCHA_NOT_READY":
-            raise CaptchaError("solver API rejected the request")
+            error = str(data.get("request", ""))
+            self._limiter.record_failure(hard=_hard_error(error))
+            raise CaptchaError(_friendly_error(error))
         return data
 
     # -- solve --------------------------------------------------------------
-    def solve(self, challenge: CaptchaChallenge) -> SolveResult:
-        started = time.time()
-        if not self.available():
-            raise CaptchaError(
-                "no CAPTCHA_API_KEY configured — set the environment "
-                "variable or use the takeover backend")
-        method = _METHOD_FOR_KIND.get(challenge.kind)
-        if not method:
-            raise CaptchaError(f"service backend cannot solve kind "
-                               f"{challenge.kind!r}")
-
+    def _task_params(self, challenge: CaptchaChallenge,
+                     method: str) -> dict[str, str]:
         params: dict[str, str] = {"key": self._key, "json": "1",
                                   "method": method}
         if method in ("base64", "audio"):
@@ -451,6 +804,32 @@ class ServiceBackend(CaptchaBackend):
                     f"{challenge.kind} needs audio/image bytes "
                     "(detect(..., fetch_bytes=True) or supply image_bytes)")
             params["body"] = base64.b64encode(challenge.image_bytes).decode()
+        elif method == "funcaptcha":
+            if not challenge.sitekey:
+                raise CaptchaError("arkose/funcaptcha needs a public key")
+            params["publickey"] = challenge.sitekey
+            domain = challenge.domain or ""
+            params["surl"] = (challenge.metadata.get("surl")
+                              or f"https://{domain}" if domain else "")
+            params["pageurl"] = challenge.page_url or "about:blank"
+        elif method == "geetest":
+            variant = challenge.metadata.get("variant", "v4")
+            if variant == "v3":
+                gt = challenge.metadata.get("gt") or challenge.sitekey
+                ch = challenge.metadata.get("challenge", "")
+                if not gt or not ch:
+                    raise CaptchaError(
+                        "geetest v3 needs gt + challenge parameters")
+                params["gt"] = gt
+                params["challenge"] = ch
+                params["geetest"] = "1"
+            else:
+                if not challenge.sitekey:
+                    raise CaptchaError("geetest v4 needs a captchaId")
+                params = {"key": self._key, "json": "1",
+                          "method": "geetest_v4",
+                          "captcha_id": challenge.sitekey}
+            params.setdefault("pageurl", challenge.page_url or "about:blank")
         else:
             if not challenge.sitekey:
                 raise CaptchaError(f"{challenge.kind} needs a sitekey")
@@ -465,6 +844,32 @@ class ServiceBackend(CaptchaBackend):
                 params["min_score"] = str(challenge.min_score)
             elif challenge.kind == CaptchaKind.RECAPTCHA_ENTERPRISE:
                 params["enterprise"] = "1"
+        if self._proxy and method not in ("base64", "audio"):
+            ptype, _, paddr = self._proxy.partition("://")
+            params["proxy"] = paddr or self._proxy
+            params["proxytype"] = (ptype.upper() if ptype in
+                                   ("http", "https", "socks4", "socks5")
+                                   else "HTTP")
+        return params
+
+    def solve(self, challenge: CaptchaChallenge) -> SolveResult:
+        started = time.time()
+        if not self.available():
+            raise CaptchaError(
+                "no CAPTCHA_API_KEY configured — set the environment "
+                "variable or use the takeover backend")
+        method = _METHOD_FOR_KIND.get(challenge.kind)
+        if not method:
+            raise CaptchaError(f"service backend cannot solve kind "
+                               f"{challenge.kind!r} "
+                               f"(try takeover)")
+
+        params = self._task_params(challenge, method)
+
+        # rate-limit check happens right before submission, and the
+        # submission is recorded, so rapid-fire callers get blocked.
+        self._limiter.check()
+        self._limiter.record_submit()
 
         created = self._get("/in.php", params)
         task_id = str(created["request"])
@@ -480,13 +885,20 @@ class ServiceBackend(CaptchaBackend):
             # status 0 + CAPCHA_NOT_READY → keep polling; anything else
             # already raised inside _get.
         if not token:
+            self._limiter.record_failure()
             raise CaptchaError("solver timed out waiting for a token")
 
+        self._limiter.record_success()
         elapsed = int((time.time() - started) * 1000)
         if challenge.kind in (CaptchaKind.IMAGE_CAPTCHA,
                               CaptchaKind.AUDIO_CAPTCHA):
             return SolveResult(ok=True, kind=challenge.kind,
                                backend=self.name, text=token,
+                               elapsed_ms=elapsed)
+        if challenge.kind == CaptchaKind.ARKOSE:
+            # funcaptcha answers are tokens for the fc-token field
+            return SolveResult(ok=True, kind=challenge.kind,
+                               backend=self.name, token=token,
                                elapsed_ms=elapsed)
         return SolveResult(ok=True, kind=challenge.kind, backend=self.name,
                            token=token, elapsed_ms=elapsed)
@@ -525,6 +937,19 @@ _BACKENDS: dict[str, type[CaptchaBackend]] = {
 }
 
 
+def register_backend(name: str, cls: type[CaptchaBackend]) -> None:
+    """Register a custom backend (e.g. a local OCR solver) under ``name``.
+
+    ``cls`` must subclass :class:`CaptchaBackend`. Use with
+    ``backend="<name>"`` in :func:`solve`.
+    """
+    if not (isinstance(name, str) and name.strip()):
+        raise CaptchaError("backend name must be a non-empty string")
+    if not (isinstance(cls, type) and issubclass(cls, CaptchaBackend)):
+        raise CaptchaError("backend class must subclass CaptchaBackend")
+    _BACKENDS[name.strip().lower()] = cls
+
+
 def backend_for(name: str, **kwargs: Any) -> CaptchaBackend:
     """Build a backend by name; ``auto`` picks service when a key exists,
     otherwise takeover."""
@@ -538,8 +963,36 @@ def backend_for(name: str, **kwargs: Any) -> CaptchaBackend:
     return cls(**kwargs)
 
 
+def _notify_takeover(challenge: CaptchaChallenge, detail: str,
+                     context: Any = None) -> dict[str, Any]:
+    """Ping the owner when auto-solve fails or was never available.
+
+    Best-effort: never raises. Without a live gateway the notification
+    is persisted so the owner still sees it (redeliverable later).
+    Identical challenges dedupe inside the notifier's 10-minute window.
+    """
+    title = (f"CAPTCHA needs you — {challenge.kind} "
+             f"@ {challenge.domain or 'a page'}")
+    body = (
+        f"Auto-solve could not clear the challenge on "
+        f"{challenge.page_url or challenge.domain or 'a page'}.\n\n"
+        f"Kind: {challenge.kind}\n"
+        f"Sitekey: {challenge.sitekey or 'n/a'}\n"
+        f"{detail}\n\n"
+        f"Solve it in the browser, then the flow will resume "
+        f"(re-run the step — detection finds nothing once it's cleared)."
+    )
+    try:
+        from ..agents.notifier import notify as _notify
+        return _notify(context, "captcha", title, body, critical=True)
+    except Exception as exc:  # noqa: BLE001 — notification never breaks flow
+        _log.warning("captcha takeover notification failed: %s", exc)
+        return {"delivered": False, "error": str(exc)}
+
+
 def solve(challenge: CaptchaChallenge, backend: str = "auto",
           settings: Any = None, solver_enabled: bool = True,
+          notify_owner: bool = True, context: Any = None,
           **backend_kwargs: Any) -> SolveResult:
     """Solve one challenge through the named backend, audit-logging it.
 
@@ -550,6 +1003,12 @@ def solve(challenge: CaptchaChallenge, backend: str = "auto",
     tries the service backend first; if it fails, falls back to takeover
     (owner solves by hand). Set solver_enabled=False to skip the service
     and go straight to takeover.
+
+    ``notify_owner`` (default True): whenever the outcome is a
+    takeover, ping the owner with the challenge details through the
+    notifier. Pass ``context`` from a runtime context when one is
+    available so the ping can deliver live; without one it is
+    persisted for the owner to see.
     """
     backend_name = (backend or "auto").lower()
     # Resolve auto: service if enabled and key available, else takeover.
@@ -596,10 +1055,22 @@ def solve(challenge: CaptchaChallenge, backend: str = "auto",
         result = takeover.solve(challenge)
         ok, detail = result.ok, result.detail
 
+    if result.takeover and notify_owner:
+        # Owner must solve by hand — make sure they hear about it.
+        _notify_takeover(challenge, result.detail, context)
+        _audit({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": challenge.kind, "domain": challenge.domain,
+            "sitekey": challenge.sitekey, "backend": result.backend,
+            "ok": False, "takeover": True,
+            "elapsed_ms": result.elapsed_ms or int((time.time() - started) * 1000),
+            "error": "owner notified of takeover",
+        }, settings)
+
     _audit({
         "ts": datetime.now(timezone.utc).isoformat(),
         "kind": challenge.kind, "domain": challenge.domain,
-        "sitekey": challenge.sitekey, "backend": solver.name,
+        "sitekey": challenge.sitekey, "backend": result.backend,
         "ok": ok, "takeover": result.takeover,
         "elapsed_ms": result.elapsed_ms or int((time.time() - started) * 1000),
         "error": "" if ok else detail[:200],
@@ -664,11 +1135,15 @@ def register(registry: Any) -> None:
         description=(
             "captcha handling for owner-directed browser automation: detect "
             "captchas in page HTML (reCAPTCHA v2/v3/enterprise, hCaptcha, "
-            "Turnstile, Cloudflare challenges, image and audio captchas) and solve "
+            "Turnstile, Cloudflare challenges, GeeTest v3/v4, Arkose "
+            "FunCaptcha, AWS WAF, FriendlyCaptcha, Yandex SmartCaptcha, "
+            "PerimeterX, image and audio captchas) and solve "
             "them via a pluggable backend — 'service' (commercial solving "
-            "API, key from CAPTCHA_API_KEY env only), 'takeover' (pause and "
-            "hand the challenge to the owner), or 'detect' (report only). "
-            "Every attempt is audit-logged."
+            "API, key from CAPTCHA_API_KEY env only, rate-limited with "
+            "budgets + error backoff), 'takeover' (pause, notify the owner, "
+            "hand the challenge to them), or 'detect' (report only). "
+            "Auto mode tries the service first, then owner takeover with "
+            "a clear notification. Every attempt is audit-logged."
         ),
         capability=Capability.NET_OUT,
         parameters={
@@ -681,6 +1156,8 @@ def register(registry: Any) -> None:
                     "audio_captcha",
             "sitekey": "str — for solve: the data-sitekey",
             "backend": "str — service|takeover|detect|auto (default auto)",
+            "notify_owner": "bool — ping the owner when a takeover is "
+                            "needed (default true)",
             "image": "str — for solve of image_captcha: path or URL",
             "v3_action": "str — reCAPTCHA v3 action name",
             "min_score": "float — reCAPTCHA v3 score floor (default 0.3)",
@@ -688,7 +1165,8 @@ def register(registry: Any) -> None:
     )
     def captcha(action: str = "detect", html: str = "", url: str = "",
                 session: str = "", kind: str = "", sitekey: str = "",
-                backend: str = "auto", image: str = "",
+                backend: str = "auto", notify_owner: bool = True,
+                image: str = "",
                 v3_action: str = "", min_score: float = 0.3,
                 **_: Any) -> dict[str, Any]:
         action = (action or "detect").lower()
@@ -701,6 +1179,8 @@ def register(registry: Any) -> None:
                 "backends": sorted(_BACKENDS),
                 "service_available": svc.available(),
                 "api_key_configured": svc.available(),
+                "solver_enabled": os.environ.get("NM_CAPTCHA_SOLVER", "1") != "0",
+                "rate_limit": rate_limiter(settings).status(),
                 "audit_log": _audit_path(settings),
                 "kinds": list(CaptchaKind.ALL),
             }
@@ -734,7 +1214,8 @@ def register(registry: Any) -> None:
                 kind=kind, sitekey=sitekey, page_url=url,
                 image_url=image_url, image_bytes=image_bytes,
                 action=v3_action, min_score=min_score)
-            result = solve(challenge, backend=backend, settings=settings)
+            result = solve(challenge, backend=backend, settings=settings,
+                           notify_owner=notify_owner, context=context)
             return result.to_dict()
 
         raise ToolError(f"unknown captcha action {action!r} "
