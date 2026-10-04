@@ -139,7 +139,7 @@ class RoleAllowlistTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         router = ScriptedRouter([
             _json_block({"files": []}),  # plan -> default single file
-            "```python\nX = 1\n```\n",  # new-file draft
+            "```python\nX = 1\nprint(X)\n```\n",  # new-file draft (must produce output for accept gate)
         ])
         self.ctx = StubContext(router)
         self.registry = ToolRegistry(context=self.ctx).register_builtins()
@@ -275,7 +275,8 @@ class CriticGateTests(unittest.TestCase):
         with mock.patch("nomorals.agents.reasoning.review_text",
                         side_effect=review):
             result = self.agent.run("Fix add() to add", max_iterations=5,
-                                    timeout=30)
+                                    timeout=30,
+                                    accept='python3 -c "import calc; print(calc.add(2,3))"')
         self.assertTrue(result.ok, f"loop failed: {result.error}")
         body = (self.fx.root / "calc.py").read_text()
         self.assertIn("return a + b", body)
@@ -315,7 +316,8 @@ class CriticBoundTests(unittest.TestCase):
     def test_two_rounds_then_stop_with_objections(self):
         with mock.patch("nomorals.agents.reasoning.review_text",
                         side_effect=_gate_only_review({"flaws": ["nope"]})):
-            result = self.agent.run("Bump V", max_iterations=6, timeout=30)
+            result = self.agent.run("Bump V", max_iterations=6, timeout=30,
+                                    accept='python3 -c "import f; print(f.V)"')
         self.assertTrue(result.ok)
         self.assertFalse(result.review["passed"])
         self.assertEqual(result.review["rounds"], 2)
