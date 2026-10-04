@@ -979,7 +979,7 @@ class TelegramBotAdapter(ChatAdapter):
             mentioned=False,
             ts=time.time(),
             message_id=f"cb_{query_id}",
-            meta={"callback_query": True, "is_owner": True},
+            meta={"callback_query": True},
         )
         self._deliver(handler, message)
 

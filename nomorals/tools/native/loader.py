@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -57,7 +58,7 @@ def _load() -> Any:
                 continue
     if not _SRC.exists():
         return None
-    compiler = "g++" if os.popen("which g++").read().strip() else "gcc"
+    compiler = "g++" if shutil.which("g++") else "gcc"
     out = _build_out()
     try:
         proc = subprocess.run(
