@@ -415,7 +415,15 @@ class BattleArenaGame(MultiGame):
         foe_gear = self._house_gear_note(room)
         foe_skills = s.get("house_skills", {})
         myth_foe = bool(s.get("myth_foe"))
+        difficulty = str(s.get("difficulty") or "normal")
+        try:
+            from ..enemies import DIFFICULTY_BLURB
+            diff_note = DIFFICULTY_BLURB.get(difficulty, "")
+        except Exception:  # noqa: BLE001
+            diff_note = ""
         foe_line = (f"a {rank}-rank hunter, {foe}, blocks your path."
+                    + (f" 🎯 {difficulty} — {diff_note}"
+                       if difficulty != "normal" and diff_note else "")
                     + (" 👹 a MYTH-FOE — they rose to kill a legend."
                        if myth_foe else "")
                     + (f" {foe_gear}" if foe_gear else "")
@@ -548,6 +556,10 @@ class BattleArenaGame(MultiGame):
         tiers = s.get("skill_tiers", {}).get(pkey, {})
         player_power = fighter_power(s["you"], slugs, tiers)
         s["player_power"] = player_power
+        # difficulty is a real dial: easy/normal/hard/expert changes the
+        # hunter's stats, gear grades, and technique counts.
+        difficulty = str(s.get("_difficulty") or "normal").lower()
+        s["difficulty"] = difficulty
         # myth check: if the player brought myth-tier gear, the house
         # answers with a myth-foe hunter — same Cutyp legacy stays
         # player-exclusive, but the fight scales up to meet it.
@@ -560,7 +572,7 @@ class BattleArenaGame(MultiGame):
             rng, rank_idx, player_power,
             foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
                       "def": h["def"]},
-            myth_foe=myth_foe)
+            myth_foe=myth_foe, difficulty=difficulty)
         # house_skills must land before _apply_house_gear: the 20%
         # power cap counts skill power when it measures.
         s["house_skills"] = enemy["skills"]
@@ -575,9 +587,11 @@ class BattleArenaGame(MultiGame):
     def _apply_house_gear(self, room, enemy) -> None:
         """Fold the rolled enemy gear into the house fighter's stats.
 
-        Enemy gear fights at 50% effectiveness — the hunter's kit is
-        battle-worn and notched, not shop-fresh — except for myth-foe
-        hunters, whose myth-forged kit is maintained at full power.
+        Enemy gear fights at the rank's effectiveness (see
+        ``enemies.GEAR_EFFECTIVENESS``) — an S-rank's legendary blade
+        bites far harder than an E-rank's rusty common one — except for
+        myth-foe hunters, whose myth-forged kit is maintained at full
+        power.
         After gear and any set bonus land, a power cap trims the house
         back when it would otherwise wall the player: the house may
         out-power the player by at most 20%.  The fight stays
@@ -589,8 +603,15 @@ class BattleArenaGame(MultiGame):
         myth_foe = bool(enemy.get("myth_foe"))
         weapon = gear.get("weapon") or {}
         armor = gear.get("armor") or {}
-        # myth-foe hunters maintain their kit at full effectiveness
-        effectiveness = 1.0 if myth_foe else 0.5
+        # rank-classed effectiveness: higher ranks maintain their kit.
+        # myth-foe hunters maintain theirs at full power.
+        try:
+            from ..enemies import GEAR_EFFECTIVENESS
+            rank_idx = max(0, min(7, int(enemy.get("rank_idx", 2))))
+            rank_eff = GEAR_EFFECTIVENESS.get(rank_idx, 0.5)
+        except Exception:  # noqa: BLE001
+            rank_eff = 0.5
+        effectiveness = 1.0 if myth_foe else rank_eff
         h["atk"] += int(int(weapon.get("atk", 0)) * effectiveness)
         h["def"] += int(int(armor.get("def", 0)) * effectiveness)
         h["combo_every"], h["combo_count"], h["combo_name"] = 0, 0, ""
@@ -658,7 +679,7 @@ class BattleArenaGame(MultiGame):
             except Exception:  # noqa: BLE001
                 has_forbidden = False
             cap = 1.3 if has_forbidden else 1.2
-            for _ in range(10):
+            for _ in range(25):
                 if fighter_power(h, tuple(skills), skills) \
                         <= player_power * cap:
                     break

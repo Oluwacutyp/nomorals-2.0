@@ -117,6 +117,8 @@ class GameEconomy:
                  "(/inventory, /equip):"]
         by_slot: dict[str, list] = {}
         for defn in GEAR_CATALOG.values():
+            if defn.raid_only:
+                continue  # raid drops only — never for sale
             by_slot.setdefault(defn.slot, []).append(defn)
         for slot in ("weapon", "armor"):
             pieces = sorted(by_slot.get(slot, []),
@@ -155,6 +157,10 @@ class GameEconomy:
             slug = LEGACY_GEAR_MAP[slug]
         gear_defn = GEAR_CATALOG.get(slug)
         if gear_defn is not None and self.gear is not None:
+            if gear_defn.raid_only:
+                return False, (f"{gear_defn.name} isn't for sale — it "
+                               f"drops from raid bosses. /raid and get "
+                               f"lucky.")
             new_balance = self.store.spend_coins(
                 player, gear_defn.cost, f"buy:{slug}")
             if new_balance is None:

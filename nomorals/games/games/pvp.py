@@ -578,25 +578,42 @@ class RaidGame(_ArenaCombat, MultiGame):
                 "consumed": {}, "gear_equipped": {},
                 "round": 0, "round_moves": 0, "done": False, "won": None}
 
-    def _boss_for(self, n: int, rng: random.Random) -> dict[str, Any]:
-        boss = new_fighter(hp=300 + 200 * n, atk=14 + 2 * n,
-                           dfn=6 + n)
+    def _boss_for(self, n: int, rng: random.Random,
+                  difficulty: str = "normal") -> dict[str, Any]:
+        """The raid boss, scaled by party size and difficulty.
+
+        Harder modes field a meaner boss — difficulty is a real dial
+        here too, not a label.
+        """
+        mods = {"easy": (250, 150, 12, 2, 5),
+                "normal": (300, 200, 14, 2, 6),
+                "hard": (350, 250, 16, 2, 7),
+                "expert": (400, 300, 18, 3, 8),
+                }.get(difficulty, (300, 200, 14, 2, 6))
+        base_hp, per_hp, base_atk, per_atk, base_def = mods
+        boss = new_fighter(hp=base_hp + per_hp * n, atk=base_atk + per_atk * n,
+                           dfn=base_def + n)
         boss["potions"] = 0
         boss["name"] = rng.choice(BOSS_NAMES)
         boss["enraged"] = False
+        boss["difficulty"] = difficulty
         return boss
 
     def setup(self, room: Room, mind: GameMind) -> str:
         s = room.state
         for p in room.humans:
             self._build_fighter(room, p)
+        difficulty = str(s.get("_difficulty") or "normal").lower()
+        s["difficulty"] = difficulty
         s["fighters"]["boss"] = self._boss_for(
-            len(room.humans), self.rng(room))
+            len(room.humans), self.rng(room), difficulty=difficulty)
         b = s["fighters"]["boss"]
         party = ", ".join(p.name for p in room.humans)
+        diff_note = (f" 🎯 {difficulty} — a meaner beast."
+                     if difficulty in ("hard", "expert") else "")
         return (
             f"🐲 RAID — {b['name']} rises! "
-            f"({b['hp']} HP · {b['atk']} atk · {b['def']} def)\n"
+            f"({b['hp']} HP · {b['atk']} atk · {b['def']} def){diff_note}\n"
             f"party: {party} — more hunters can /game join, "
             f"but the boss grows with them.\n"
             f"{MOVE_HELP} — everything hits the boss.\n"
@@ -782,6 +799,34 @@ class RaidGame(_ArenaCombat, MultiGame):
             return (f"💀 {b.get('name', 'the boss')} stands over the "
                     "fallen party.")
         return "the raid disperses."
+
+    #: raid-exclusive drop odds — base chance plus a damage-share kicker.
+    #: The MVP (100% share) rolls at 15%; a bystander (0%) at 5%.  Low
+    #: enough to feel lucky, high enough to keep raiders coming back.
+    DROP_BASE = 0.05
+    DROP_SHARE_BONUS = 0.10
+
+    def victory_loot(self, room: Room) -> dict[str, list[str]]:
+        """Raid-exclusive gear drops, rolled on a boss kill.
+
+        Returns {player_key: [gear_slug, ...]}.  Only raid bosses drop
+        these pieces — they're never sold in the shop.  The engine
+        grants them via GearStore (see ``_grant_victory_loot``).
+        """
+        from ..gear import RAID_EXCLUSIVE_GEAR
+        s = room.state
+        if s.get("won") is not True or not RAID_EXCLUSIVE_GEAR:
+            return {}
+        rng = self.rng(room)
+        shares = self._shares(room)
+        out: dict[str, list[str]] = {}
+        for p in room.humans:
+            share = shares.get(p.key, 0)
+            chance = self.DROP_BASE + self.DROP_SHARE_BONUS * (share / 100.0)
+            if rng.random() < chance:
+                out.setdefault(p.key, []).append(
+                    rng.choice(RAID_EXCLUSIVE_GEAR))
+        return out
 
     def describe_state(self, room: Room) -> str:
         s = room.state

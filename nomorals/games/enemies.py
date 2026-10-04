@@ -77,6 +77,47 @@ SKILL_COUNTS: dict[int, int] = {
     7: 4,   # X
 }
 
+#: gear effectiveness by hunter rank — the fraction of a rolled piece's
+#: stats the house actually fights with.  Higher ranks maintain their
+#: kit better; myth-foe hunters fight at full power (handled in
+#: _apply_house_gear).  This is the "class" of each rank: an S-rank's
+#: legendary blade bites far harder than an E-rank's common one, even
+#: before grades differ.
+GEAR_EFFECTIVENESS: dict[int, float] = {
+    0: 0.40,  # E — rusty, notched
+    1: 0.45,  # D
+    2: 0.50,  # C
+    3: 0.55,  # B — veterans keep their kit
+    4: 0.60,  # A
+    5: 0.65,  # S — near shop-fresh
+    6: 0.70,  # SS
+    7: 0.75,  # X — legends maintain their arms
+}
+
+#: difficulty → enemy adjustments.  The arena's /game arena <difficulty>
+#: flag isn't a label: harder modes field genuinely stronger hunters.
+#: stat_mult scales the hunter's base stats; pool_shift moves the gear
+#: grade pool up/down a rank; skill_shift / xskill_shift adjust how
+#: many techniques (and forbidden arts) they bring.
+DIFFICULTY_MODS: dict[str, dict[str, float]] = {
+    "easy":   {"stat_mult": 0.80, "pool_shift": -1,
+               "skill_shift": -1, "xskill_shift": -1},
+    "normal": {"stat_mult": 1.00, "pool_shift": 0,
+               "skill_shift": 0, "xskill_shift": 0},
+    "hard":   {"stat_mult": 1.15, "pool_shift": 1,
+               "skill_shift": 0, "xskill_shift": 0},
+    "expert": {"stat_mult": 1.30, "pool_shift": 1,
+               "skill_shift": 1, "xskill_shift": 1},
+}
+
+#: human one-liner per difficulty for the arena intro.
+DIFFICULTY_BLURB: dict[str, str] = {
+    "easy": "the hunter looks green — an easy mark.",
+    "normal": "",
+    "hard": "the hunter fights at 115% — careful.",
+    "expert": "the hunter fights at 130% with extra techniques — good luck.",
+}
+
 #: potion count by rank — veterans pack more.
 POTIONS: dict[int, int] = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 2, 5: 3,
@@ -147,22 +188,34 @@ def roll_enemy_name(rng: random.Random, rank_idx: int,
             f"{rng.choice(titles)}")
 
 
-def _gear_pool(rank_idx: int) -> tuple[str, ...]:
-    return GRADE_POOLS[max(0, min(7, int(rank_idx)))]
+def _gear_pool(rank_idx: int, difficulty: str = "normal") -> tuple[str, ...]:
+    """Grade pool for a rank, shifted by difficulty.
+
+    Hard/expert hunters roll a rank up; easy hunters roll a rank down —
+    difficulty genuinely changes what the house brings.
+    """
+    shift = int(DIFFICULTY_MODS.get(difficulty,
+                                    DIFFICULTY_MODS["normal"])["pool_shift"])
+    return GRADE_POOLS[max(0, min(7, int(rank_idx) + shift))]
 
 
 def roll_enemy_gear(rng: random.Random,
                     rank_idx: int,
-                    myth_foe: bool = False) -> dict[str, dict[str, Any]]:
+                    myth_foe: bool = False,
+                    difficulty: str = "normal") -> dict[str, dict[str, Any]]:
     """Roll ``{"weapon": gear_dict, "armor": gear_dict}`` for an enemy.
 
     Gear dicts match the shop ``to_dict()`` shape (slug, name, atk,
     def, grade, ...).  C+-rank enemies sometimes roll a matched
-    storm/shadow set for the combo attack.
+    storm/shadow set for the combo attack.  B-rank and up always bring
+    both a weapon and armor — veterans don't show up empty-handed.
 
     When ``myth_foe`` is true (the player brought myth gear), S-rank
     hunters roll from the enemy-only myth-forged kit instead — the
     Cutyp legacy set itself is never wielded by the house.
+
+    ``difficulty`` shifts the grade pool: hard/expert hunters roll one
+    rank higher, easy hunters one rank lower.
     """
     from .gear import GEAR_CATALOG
     rank_idx = max(0, min(7, int(rank_idx)))
@@ -183,13 +236,15 @@ def roll_enemy_gear(rng: random.Random,
         weapon = GEAR_CATALOG[f"{set_name}_{'katana' if set_name == 'storm' else 'rapier'}"].to_dict()
         armor = GEAR_CATALOG[f"{set_name}_{'plate' if set_name == 'storm' else 'mail'}"].to_dict()
         return {"weapon": weapon, "armor": armor}
-    pool = _gear_pool(rank_idx)
+    pool = _gear_pool(rank_idx, difficulty)
     weapons = [d for d in GEAR_CATALOG.values()
                if d.slot == "weapon" and d.grade in pool
-               and not d.set_name and not d.unbreakable]
+               and not d.set_name and not d.unbreakable
+               and not d.raid_only]
     armors = [d for d in GEAR_CATALOG.values()
               if d.slot == "armor" and d.grade in pool
-              and not d.set_name and not d.unbreakable]
+              and not d.set_name and not d.unbreakable
+              and not d.raid_only]
     # X-rank forges its own myth: supplement the catalog pool with the
     # enemy-only myth kit when the grade pool includes myth.
     if "myth" in pool:
@@ -214,17 +269,23 @@ def roll_enemy_gear(rng: random.Random,
 
 def roll_enemy_skills(rng: random.Random,
                       rank_idx: int,
-                      myth_foe: bool = False) -> dict[str, int]:
+                      myth_foe: bool = False,
+                      difficulty: str = "normal") -> dict[str, int]:
     """Roll ``{slug: tier}`` active skills for an enemy of this rank.
 
     Higher ranks also roll forbidden techniques — the house's own
     martial arts that players can never learn.  Myth-foe hunters
     (S-rank vs a myth-equipped player) roll a third forbidden art:
     they came to kill a legend, and they brought everything.
+
+    ``difficulty`` shifts the counts: easy hunters bring fewer
+    techniques, expert hunters bring more.
     """
     rank_idx = max(0, min(7, int(rank_idx)))
+    mods = DIFFICULTY_MODS.get(difficulty, DIFFICULTY_MODS["normal"])
     skills: dict[str, int] = {}
-    count = SKILL_COUNTS[rank_idx]
+    count = max(0, SKILL_COUNTS[rank_idx]
+                + int(mods["skill_shift"]))
     if count > 0:
         picks = rng.sample(ENEMY_SKILL_POOL,
                            k=min(count, len(ENEMY_SKILL_POOL)))
@@ -237,7 +298,8 @@ def roll_enemy_skills(rng: random.Random,
                 tier = 1
             skills[slug] = tier
     # forbidden techniques: B+ hunters fight dirty
-    xcount = ENEMY_EXCLUSIVE_COUNTS[rank_idx]
+    xcount = max(0, ENEMY_EXCLUSIVE_COUNTS[rank_idx]
+                 + int(mods["xskill_shift"]))
     if myth_foe and rank_idx >= 5:
         xcount = 3
     if xcount > 0:
@@ -248,47 +310,70 @@ def roll_enemy_skills(rng: random.Random,
     return skills
 
 
-def _gear_power(gear: dict[str, Any]) -> tuple[int, int]:
-    """(atk, def) a gear set contributes at 50% battle-worn effectiveness."""
+def _gear_power(gear: dict[str, Any],
+                rank_idx: int = 2) -> tuple[int, int]:
+    """(atk, def) a gear set contributes at the rank's effectiveness.
+
+    Higher ranks maintain their kit better (see GEAR_EFFECTIVENESS) —
+    an S-rank's legendary blade bites harder than an E-rank's common
+    one even before grades differ.
+    """
+    eff = GEAR_EFFECTIVENESS.get(max(0, min(7, int(rank_idx))), 0.5)
     weapon = gear.get("weapon") or {}
     armor = gear.get("armor") or {}
-    return (int(weapon.get("atk", 0)) // 2, int(armor.get("def", 0)) // 2)
+    return (int(int(weapon.get("atk", 0)) * eff),
+            int(int(armor.get("def", 0)) * eff))
 
 
 def roll_enemy(rng: random.Random, rank_idx: int,
                player_power: int = 0,
                foe_base: dict[str, Any] | None = None,
-               myth_foe: bool = False) -> dict[str, Any]:
+               myth_foe: bool = False,
+               difficulty: str = "normal") -> dict[str, Any]:
     """Roll a complete enemy: name, gear, skills, potions.
 
     ``player_power`` feeds the anti-triviality backstop, measured with
-    the enemy's real pre-gear stats (``foe_base``) plus 50%-effective
-    gear: if the enemy would land below 85% of the player's power the
-    gear is re-rolled one grade pool up; above 125% it's re-rolled one
-    pool down.  One adjustment each way, then accept whatever lands —
-    the fight stays competitive but never a foregone conclusion.
+    the enemy's real pre-gear stats (``foe_base``) plus rank-scaled gear
+    effectiveness: if the enemy would land below 85% of the player's
+    power the gear is re-rolled one grade pool up; above 125% it's
+    re-rolled one pool down.  One adjustment each way, then accept
+    whatever lands — the fight stays competitive but never a foregone
+    conclusion.
 
     ``myth_foe`` marks a hunter spawned against a myth-equipped
     player: S-rank rolls myth-forged gear, a darker title, and an
     extra forbidden technique.  The Cutyp legacy set itself is never
     wielded by the house.
+
+    ``difficulty`` (easy/normal/hard/expert) scales the hunter's base
+    stats, shifts their gear grade pool, and adjusts their technique
+    counts — the flag is a real dial, not a label.
     """
     rank_idx = max(0, min(7, int(rank_idx)))
+    mods = DIFFICULTY_MODS.get(difficulty, DIFFICULTY_MODS["normal"])
+    mult = float(mods["stat_mult"])
     enemy: dict[str, Any] = {
         "name": roll_enemy_name(rng, rank_idx, myth_foe=myth_foe),
         "rank_idx": rank_idx,
-        "gear": roll_enemy_gear(rng, rank_idx, myth_foe=myth_foe),
-        "skills": roll_enemy_skills(rng, rank_idx, myth_foe=myth_foe),
-        "potions": POTIONS[rank_idx],
+        "difficulty": difficulty,
+        "gear": roll_enemy_gear(rng, rank_idx, myth_foe=myth_foe,
+                                difficulty=difficulty),
+        "skills": roll_enemy_skills(rng, rank_idx, myth_foe=myth_foe,
+                                    difficulty=difficulty),
+        "potions": POTIONS[rank_idx] + (1 if difficulty == "expert"
+                                        and rank_idx >= 3 else 0),
         "myth_foe": myth_foe and rank_idx >= 5,
     }
     if player_power > 0:
         from .power import fighter_power
-        base = dict(foe_base) if foe_base else {"max_hp": 50,
-                                               "atk": 10, "def": 5}
+        raw = dict(foe_base) if foe_base else {"max_hp": 50,
+                                              "atk": 10, "def": 5}
+        base = {k: (int(round(v * mult)) if k in ("max_hp", "atk", "def")
+                   else v)
+                for k, v in raw.items()}
 
         def _with_gear(gear: dict[str, Any]) -> int:
-            gatk, gdef = _gear_power(gear)
+            gatk, gdef = _gear_power(gear, rank_idx)
             stats = dict(base)
             stats["atk"] = int(stats.get("atk", 10)) + gatk
             stats["def"] = int(stats.get("def", 5)) + gdef
@@ -298,8 +383,10 @@ def roll_enemy(rng: random.Random, rank_idx: int,
         power = _with_gear(enemy["gear"])
         if power < player_power * 0.85:
             enemy["gear"] = roll_enemy_gear(
-                rng, min(7, rank_idx + 1), myth_foe=myth_foe)
+                rng, min(7, rank_idx + 1), myth_foe=myth_foe,
+                difficulty=difficulty)
         elif power > player_power * 1.25:
             enemy["gear"] = roll_enemy_gear(
-                rng, max(0, rank_idx - 1), myth_foe=myth_foe)
+                rng, max(0, rank_idx - 1), myth_foe=myth_foe,
+                difficulty=difficulty)
     return enemy

@@ -914,6 +914,14 @@ class GameEngine:
                 msgs.append(game.final_message(room, self._mind))
             except Exception:  # noqa: BLE001
                 msgs.append("game over.")
+            # victory loot: games with exclusive drops (raid bosses)
+            # roll them here; grants go through GearStore so pieces
+            # persist like any other gear.
+            try:
+                for line in self._grant_victory_loot(room, game):
+                    msgs.append(line)
+            except Exception:  # noqa: BLE001
+                _log.debug("victory loot failed", exc_info=True)
             try:
                 winner = game.winner(room)
                 for p in list(room.players):
@@ -1065,6 +1073,36 @@ class GameEngine:
                 _log.debug("rematch reseat failed for %s", p.key,
                            exc_info=True)
         return room, ["🔁 rematch — same game, same table."] + joined + msgs
+
+    def _grant_victory_loot(self, room: Room, game: Any) -> list[str]:
+        """Grant exclusive gear drops from a game's ``victory_loot``.
+
+        Games opt in by defining ``victory_loot(room)`` returning
+        ``{player_key: [gear_slug, ...]}``.  Pieces are granted through
+        ``GearStore`` so they persist, wear, and repair like shop gear.
+        """
+        loot = getattr(game, "victory_loot", None)
+        if loot is None:
+            return []
+        try:
+            drops = loot(room) or {}
+        except Exception:  # noqa: BLE001
+            _log.debug("victory_loot roll failed", exc_info=True)
+            return []
+        lines: list[str] = []
+        names = {p.key: p.name for p in room.humans}
+        for key, slugs in drops.items():
+            for slug in slugs or ():
+                try:
+                    inst = self.gear.grant(key, slug)
+                except Exception:  # noqa: BLE001
+                    _log.debug("victory loot grant failed for %s", slug,
+                               exc_info=True)
+                    continue
+                who = names.get(key, "you")
+                lines.append(f"🎁 {who} loots {inst.display_name()} "
+                             f"from the fallen boss! /equip {slug}")
+        return lines
 
     def _award_achievements(self, room: Room, game: Any, player: Player,
                             won: bool | None, score: int) -> list[str]:

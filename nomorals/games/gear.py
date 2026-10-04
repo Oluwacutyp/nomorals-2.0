@@ -31,7 +31,7 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "GRADES", "GRADE_MULT", "GRADE_DURABILITY", "SLOTS",
     "GearDef", "GearInstance", "GEAR_CATALOG", "SET_BONUSES",
-    "LEGACY_GEAR_MAP", "GearStore",
+    "LEGACY_GEAR_MAP", "GearStore", "RAID_EXCLUSIVE_GEAR",
     "effective_stats", "detect_set_bonus", "durability_bar",
     "durability_display",
 ]
@@ -87,6 +87,7 @@ class GearDef:
     base_atk: int = 0
     base_def: int = 0
     unbreakable: bool = False  # never wears, never breaks (legacy pieces)
+    raid_only: bool = False  # never sold — drops from raid bosses only
 
     @property
     def max_durability(self) -> int:
@@ -97,7 +98,8 @@ class GearDef:
         return {"slug": self.slug, "name": self.name, "cost": self.cost,
                 "slot": self.slot, "kind": self.kind, "grade": self.grade,
                 "set": self.set_name, "atk": atk, "def": df,
-                "durability": self.max_durability}
+                "durability": self.max_durability,
+                "raid_only": self.raid_only}
 
 
 def effective_stats(defn: GearDef) -> tuple[int, int]:
@@ -112,12 +114,14 @@ def _build_catalog() -> dict[str, GearDef]:
 
     def add(slug: str, name: str, base_cost: int, slot: str, kind: str,
             grade: str, base_atk: int = 0, base_def: int = 0,
-            set_name: str = "", unbreakable: bool = False) -> None:
+            set_name: str = "", unbreakable: bool = False,
+            raid_only: bool = False) -> None:
         cost = int(base_cost * _GRADE_COST_MULT[grade])
         defn[slug] = GearDef(slug=slug, name=f"{name} [{grade}]",
                              cost=cost, slot=slot, kind=kind, grade=grade,
                              set_name=set_name, base_atk=base_atk,
-                             base_def=base_def, unbreakable=unbreakable)
+                             base_def=base_def, unbreakable=unbreakable,
+                             raid_only=raid_only)
 
     weapons = (("katana", "Katana", 300, 12),
                ("broadsword", "Broadsword", 350, 15),
@@ -158,10 +162,28 @@ def _build_catalog() -> dict[str, GearDef]:
         unbreakable=True)
     add("cutyp_robe", "Cutyp Robe", 650, "armor", "robe", "myth",
         base_def=30, set_name="cutyp", unbreakable=True)
+
+    # ── raid-exclusive gear ─────────────────────────────────────────
+    # Never sold in the shop — the only way to earn these is to bring
+    # down a raid boss and get lucky.  The bossbane set is the best
+    # non-myth kit in the game, which is exactly why raiders chase it.
+    add("bossbane_cleaver", "Bossbane Cleaver", 0, "weapon", "cleaver",
+        "legendary", base_atk=24, set_name="bossbane", raid_only=True)
+    add("bossbane_plate", "Bossbane Plate", 0, "armor", "bossplate",
+        "legendary", base_def=34, set_name="bossbane", raid_only=True)
+    add("rustfang_dagger", "Rustfang Dagger", 0, "weapon", "dagger",
+        "epic", base_atk=16, raid_only=True)
+    add("hollow_greaves", "Hollow Greaves", 0, "armor", "greaves",
+        "epic", base_def=26, raid_only=True)
     return defn
 
 
 GEAR_CATALOG: dict[str, GearDef] = _build_catalog()
+
+#: raid-exclusive gear slugs — the only pieces with raid_only=True.
+#: Roll a drop from these; the shop never lists them.
+RAID_EXCLUSIVE_GEAR: tuple[str, ...] = tuple(
+    slug for slug, defn in GEAR_CATALOG.items() if defn.raid_only)
 
 
 @dataclass(frozen=True)
@@ -188,6 +210,11 @@ SET_BONUSES: dict[str, SetBonus] = {
     "cutyp": SetBonus("cutyp", ("weapon", "armor"), atk_pct=0.50,
                       def_pct=0.50, combo_name="cutyp's fury",
                       combo_every=2),
+    # Bossbane — forged from raid bosses, the best non-myth kit.
+    # Only earnable as a raid drop, never bought.
+    "bossbane": SetBonus("bossbane", ("weapon", "armor"), atk_pct=0.30,
+                         def_pct=0.30, combo_name="bossbane rend",
+                         combo_every=3),
 }
 
 
