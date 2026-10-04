@@ -351,7 +351,21 @@ else:
     api.create_repo(HF_REPO, private=True, exist_ok=True)
     api.upload_folder(folder_path=merged_dir, repo_id=HF_REPO,
                       commit_message="codebeast 3.8B merged — Phi-3.5-mini-instruct QLoRA")
-    print("✅ Pushed:", f"https://huggingface.co/{HF_REPO}")""")
+    print("✅ Pushed:", f"https://huggingface.co/{HF_REPO}")
+    # also push any GGUFs from cell 8 so the phone can download from HF
+    # (far more reliable than Kaggle's file browser for a 2.3GB file)
+    import glob
+    ggufs = sorted(glob.glob(f"{RUN_DIR}/codebeast_gguf_gguf/*.gguf")
+                   + glob.glob(f"{RUN_DIR}/codebeast_gguf/*.gguf"))
+    for g in ggufs:
+        print(f"uploading {os.path.basename(g)} ({os.path.getsize(g)/1e9:.2f} GB)...")
+        api.upload_file(path_or_fileobj=g, path_in_repo=os.path.basename(g),
+                        repo_id=HF_REPO,
+                        commit_message=f"codebeast GGUF {os.path.basename(g)}")
+    if ggufs:
+        print(f"✅ GGUFs on HF: https://huggingface.co/{HF_REPO}/tree/main")
+    else:
+        print("(no GGUF files found — run cell 8 first if you want the phone build)")""")
 
 md("""# 📱 Deploy on your 12GB Samsung
 1. **ChatterUI** (Play Store) → Add model → pick the `.gguf` → paste the CODE BEAST persona as the system prompt. Also works in **PocketPal**, **Layla**, **LLM Farm**, **Maid**.
