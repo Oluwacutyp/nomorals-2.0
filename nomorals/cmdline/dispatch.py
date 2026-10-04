@@ -77,6 +77,8 @@ from .commands.tools import _cmd_tools
 from .commands.trade import _cmd_trade
 from .commands.train import _cmd_train
 from .commands.trigger import _cmd_trigger
+from .commands.schedule import _cmd_schedule
+from .commands.db import _cmd_db
 from .commands.tui import _cmd_tui
 from .commands.update import _cmd_update
 from .commands.vision import _cmd_vision
@@ -367,6 +369,10 @@ def _dispatch(args: argparse.Namespace) -> int:
 
         if args.command == "trigger":
             return _cmd_trigger(args, context)
+        if args.command == "schedule":
+            return _cmd_schedule(args, context)
+        if args.command == "db":
+            return _cmd_db(args, context)
         if args.command == "search":
             return _cmd_search(args, context)
         if args.command == "browse":

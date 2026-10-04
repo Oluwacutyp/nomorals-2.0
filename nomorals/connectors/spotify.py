@@ -808,6 +808,19 @@ class SpotifyConnector(Connector):
         expires_at = float(meta.get("access_expires_at", 0) or 0)
         if access and client_id and expires_at - time.time() > _REFRESH_LEEWAY:
             return access
+        return self._force_refresh_access()
+
+    def _force_refresh_access(self) -> str:
+        """Refresh the access token right now and store the new pair.
+
+        Used by ``_access_token`` when the leeway check fails, and by
+        ``_raw`` when Spotify rejected the leeway-checked token anyway
+        (clock skew, an early-revoked grant, or a server-side token
+        rotation the leeway check cannot see).
+        """
+        cred = self._require_credential()
+        meta = cred.metadata or {}
+        client_id = str(meta.get("client_id", ""))
         secret = self._client_secret(None)
         tokens = self._refresh(client_id, secret, cred.password)
         new_access = str(tokens.get("access_token", ""))
@@ -882,6 +895,33 @@ class SpotifyConnector(Connector):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._access_token()}"}
 
+    def _send(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        *,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        """One HTTP exchange against the Spotify API."""
+        try:
+            if method == "GET":
+                resp = self.http.get(url, headers=headers, params=params)
+            elif method == "POST":
+                resp = self.http.post_json(url, body or {}, headers=headers,
+                                           params=params)
+            elif method == "PUT":
+                resp = self.http.put_json(url, body or {}, headers=headers,
+                                          params=params)
+            else:
+                raise ConnectorError(f"unsupported method {method}")
+        except ConnectorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - network layer is opaque
+            raise SpotifyError(f"spotify request failed: {exc}") from exc
+        return resp
+
     def _raw(
         self,
         method: str,
@@ -892,36 +932,32 @@ class SpotifyConnector(Connector):
     ) -> Any:
         """One Spotify Web API call; errors become SpotifyError."""
         url = f"{API_BASE}{path}"
-        try:
-            if method == "GET":
-                resp = self.http.get(
-                    url, headers=self._headers(), params=params
+        resp = self._send(method, url, self._headers(), params=params,
+                          body=body)
+        if resp.status == 401:
+            # The leeway-checked token was rejected anyway (clock skew,
+            # an early-revoked grant, a server-side rotation).  Refresh
+            # once and retry the exact same request transparently —
+            # only when the retry also fails do we fail loudly.
+            _log.info("spotify 401 on %s %s — forcing token refresh and "
+                      "retrying once", method, path)
+            try:
+                headers = {"Authorization":
+                           f"Bearer {self._force_refresh_access()}"}
+            except (ConnectorError, SpotifyError):
+                raise  # the refresh itself failed — surface the real cause
+            resp = self._send(method, url, headers, params=params, body=body)
+            if resp.status == 401:
+                raise SpotifyError(
+                    "spotify rejected the access token (401) — the grant was "
+                    "revoked; reconnect with a fresh grant",
+                    status_code=401,
                 )
-            elif method == "POST":
-                resp = self.http.post_json(
-                    url, body or {}, headers=self._headers(), params=params
-                )
-            elif method == "PUT":
-                resp = self.http.put_json(
-                    url, body or {}, headers=self._headers(), params=params
-                )
-            else:
-                raise ConnectorError(f"unsupported method {method}")
-        except ConnectorError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - network layer is opaque
-            raise SpotifyError(f"spotify request failed: {exc}") from exc
         if resp.status == 204:
             # 204 is success for play/pause (empty body). For
             # currently-playing it means "nothing playing" — the caller
             # decides via resp.status.
             return resp
-        if resp.status == 401:
-            raise SpotifyError(
-                "spotify rejected the access token (401) — the grant was "
-                "revoked; reconnect with a fresh grant",
-                status_code=401,
-            )
         if resp.status == 403:
             raise SpotifyError(
                 "spotify refused (403): the grant lacks this scope — "

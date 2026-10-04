@@ -95,6 +95,10 @@ CLI_ALIASES: dict[str, list[str]] = {
     "stream": ["strm"],
 
     "search": ["s"],
+
+    # R14 CLI mirrors of the /schedule and /db chat commands.
+    "schedule": ["sched"],
+    "db": ["database"],
 }
 
 
@@ -2679,6 +2683,37 @@ def _parser() -> argparse.ArgumentParser:
     trigger.add_argument("--limit", type=int, default=0,
                          help="history: max rows")
     trigger.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # R14: CLI mirror of /schedule (nomorals/agents/scheduler.py).
+    schedule = sub.add_parser("schedule", aliases=CLI_ALIASES["schedule"],
+        help="cron-style jobs that run in-process: at / every / daily",
+        description=("nm schedule list [--json]\n"
+                     "nm schedule add <name> <when> message <text...>\n"
+                     "nm schedule add <name> <when> tool <tool-name> [<json-args>]\n"
+                     "nm schedule add <name> <when> command <shell-command...>\n"
+                     "nm schedule rm <name-or-id>\n"
+                     "nm schedule enable|disable <name-or-id>\n"
+                     "nm schedule run <name-or-id>\n"
+                     "when: 'at 2026-12-25 09:00' | 'every 30m' | "
+                     "'daily 02:00' | '22:00' | '30m'"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    schedule.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    schedule.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # R14: CLI mirror of /db (database.py db_* tools).
+    db = sub.add_parser("db", aliases=CLI_ALIASES["db"],
+        help="inspect the database: tables, schema, counts, or a query",
+        description=("nm db tables [--json]\n"
+                     "nm db schema <table> [--json]\n"
+                     "nm db query <select sql>\n"
+                     "nm db counts [--top N]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    db.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    db.add_argument("--top", type=int, default=12,
+                    help="counts: number of largest tables to show")
+    db.add_argument("--json", action="store_true", help="Output as JSON")
 
     return parser
 

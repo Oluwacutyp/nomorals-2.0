@@ -639,5 +639,102 @@ class TrackLookupTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+class _SeqHttp(FakeHttp):
+    """FakeHttp that can return scripted per-call responses in order.
+
+    ``route()`` still works as a fallback; ``queue()`` entries are
+    consumed one per matching call, so the same path can 401 once and
+    then succeed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._queue: list[tuple[str, str, FakeResponse]] = []
+
+    def queue(self, method: str, path: str, response: FakeResponse) -> None:
+        self._queue.append((method.upper(), path, response))
+
+    def _dispatch(
+        self, method: str, url: str, payload: Any = None, **kw: Any
+    ) -> FakeResponse:
+        self.calls.append((method.upper(), url, payload, kw.get("headers")))
+        for i, (m, p, resp) in enumerate(self._queue):
+            if m == method.upper() and p in url:
+                del self._queue[i]
+                return resp
+        return super()._dispatch(method, url, payload, **kw)
+
+
+class Retry401Tests(unittest.TestCase):
+    """R14: ``_raw`` gets one transparent refresh retry on a 401 before
+    failing loudly."""
+
+    def test_401_retries_once_after_refresh(self) -> None:
+        seq = _SeqHttp()
+        conn, _ = _connected(seq)
+        seq.routes.clear()
+        seq.queue("GET", "/v1/playlists",
+                  FakeResponse(401, {"error": {"message": "expired"}}))
+        seq.route("POST", "accounts.spotify.com/api/token",
+                  FakeResponse(200, {
+                      "access_token": "BQD.retry",
+                      "refresh_token": "AQD.retry2",
+                      "expires_in": 3600,
+                  }))
+        seq.queue("GET", "/v1/playlists", FakeResponse(200, PLAYLISTS))
+        with mock.patch.dict(os.environ,
+                             {"SPOTIFY_CLIENT_SECRET": "csecret"}):
+            data = conn._api("GET", "/v1/playlists")
+        self.assertEqual(data["total"], 1)
+        get_calls = [c for c in seq.calls
+                     if c[0] == "GET" and "/v1/playlists" in c[1]]
+        self.assertEqual(len(get_calls), 2)  # one retry, not a loop
+        first_auth = get_calls[0][3].get("Authorization", "")
+        second_auth = get_calls[1][3].get("Authorization", "")
+        self.assertNotEqual(first_auth, second_auth)
+        self.assertIn("BQD.retry", second_auth)
+        # the new pair is stored for the next call
+        cred = conn._load_credential()
+        self.assertIsNotNone(cred)
+        self.assertEqual((cred.metadata or {}).get("access_token"),
+                         "BQD.retry")
+
+    def test_401_after_refresh_fails_loudly(self) -> None:
+        seq = _SeqHttp()
+        conn, _ = _connected(seq)
+        seq.routes.clear()
+        seq.queue("GET", "/v1/playlists",
+                  FakeResponse(401, {"error": {"message": "expired"}}))
+        seq.route("POST", "accounts.spotify.com/api/token",
+                  FakeResponse(200, {
+                      "access_token": "BQD.retry",
+                      "refresh_token": "AQD.retry2",
+                      "expires_in": 3600,
+                  }))
+        seq.queue("GET", "/v1/playlists",
+                  FakeResponse(401, {"error": {"message": "revoked"}}))
+        with mock.patch.dict(os.environ,
+                             {"SPOTIFY_CLIENT_SECRET": "csecret"}):
+            with self.assertRaises(SpotifyError) as ctx:
+                conn._api("GET", "/v1/playlists")
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("reconnect", str(ctx.exception))
+
+    def test_401_refresh_failure_surfaces_real_cause(self) -> None:
+        seq = _SeqHttp()
+        conn, _ = _connected(seq)
+        seq.routes.clear()
+        seq.queue("GET", "/v1/playlists",
+                  FakeResponse(401, {"error": {"message": "expired"}}))
+        seq.route("POST", "accounts.spotify.com/api/token",
+                  FakeResponse(400, {"error": "invalid_grant"}))
+        with mock.patch.dict(os.environ,
+                             {"SPOTIFY_CLIENT_SECRET": "csecret"}):
+            with self.assertRaises(SpotifyError) as ctx:
+                conn._api("GET", "/v1/playlists")
+        # the refresh error, not the generic "reconnect" text
+        self.assertIn("token request", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

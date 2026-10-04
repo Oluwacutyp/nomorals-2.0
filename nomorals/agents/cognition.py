@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from .notifier import Notifier
 
 __all__ = ["CognitiveLoop", "ModelBudget", "autonomy_enabled",
            "set_autonomy_enabled", "SelfImprovementStatus", "register"]
@@ -878,8 +879,18 @@ class CognitiveLoop:
         # Announced at info so an automatic run is never a mystery in the
         # logs: the policy reasons say exactly what triggered it.
         reasons = decision.get("reasons", [])
-        _log.info("automatic training run starting (%s)",
-                  "; ".join(reasons) or "policy due")
+        reason_text = "; ".join(reasons) or "policy due"
+        _log.info("automatic training run starting (%s)", reason_text)
+        # R14: the automatic-training policy can surprise — a run starting
+        # at 3am reads as the bot acting on its own.  The owner gets a DM
+        # (via the durable notifier, which redelivers later when no gateway
+        # is live), not just a log line.
+        Notifier(self.context).publish(
+            "training",
+            "🏋️ automatic training run starting",
+            f"policy due: {reason_text}\n"
+            "I'll report when it finishes — `nm train status` any time.",
+        )
         result = job.run(force=True)
         return {"status": result.status, "run_id": result.run_id,
                 "dataset_id": result.dataset_id,
