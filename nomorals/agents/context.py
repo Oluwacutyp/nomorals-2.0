@@ -19,7 +19,7 @@ from ..core.logging_setup import get_logger
 from ..core.observability import Metrics, Tracer
 from ..core.policy import CapabilitySet, Policy
 from ..core.ratelimit import SemaphorePool
-from ..storage.db import Database
+from ..storage.db import Database, open_database
 
 __all__ = ["AgentContext", "build_context", "build_router",
            "persist_provider_override", "ensure_local_gguf"]
@@ -196,13 +196,21 @@ def build_context(
     # Ensure data directories exist before the database tries to open.
     # (Fresh installs and new profiles won't have them yet.)
     settings.ensure_dirs()
-    database = db or Database(
-        settings.db_path,
-        wal=settings.storage.wal,
-        busy_timeout_ms=settings.storage.busy_timeout_ms,
-        synchronous=settings.storage.synchronous,
-    )
-    database.migrate()
+    # open_database quarantines a corrupt file (moved aside, never deleted)
+    # instead of bricking the boot — a killed-mid-checkpoint phone DB must
+    # not require the owner to SSH in and hand-delete it.
+    db_recovered = False
+    db_backup_path: str | None = None
+    if db is None:
+        database, db_recovered, db_backup_path = open_database(
+            settings.db_path,
+            wal=settings.storage.wal,
+            busy_timeout_ms=settings.storage.busy_timeout_ms,
+            synchronous=settings.storage.synchronous,
+        )
+    else:
+        database = db
+        database.migrate()
     event_bus = bus or EventBus().start()
 
     context = AgentContext(
@@ -255,6 +263,16 @@ def build_context(
     from .blackboard import Blackboard
 
     context.blackboard = Blackboard()
+    if db_recovered:
+        # Surfaced in status/diagnostics: the owner should know their data
+        # was quarantined, and where the old file went.
+        context.extras["db_recovered_from_corrupt"] = True
+        context.extras["db_corrupt_backup"] = db_backup_path
+        _log.warning(
+            "database was corrupt at boot; quarantined to %s and started "
+            "fresh — old data is preserved in the quarantine file",
+            db_backup_path,
+        )
     return context
 
 

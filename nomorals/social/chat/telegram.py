@@ -119,6 +119,18 @@ class TelegramAdapter(ChatAdapter):
         # messages. We cache those so outbound sends can reply to DM chats
         # from users we've heard from but can't fully resolve.
         self._input_entity_cache: dict[str, Any] = {}
+        #: Hard cap on the input-entity cache: it gains an entry per new
+        #: contact/dialog, and an uncapped dict on a years-running userbot is
+        #: a slow memory leak. Eviction is oldest-first (dict insertion order).
+        self._input_entity_cache_max = 2000
+
+    def _cache_input_entity(self, chat_id: str, entity: Any) -> None:
+        """Store an input entity, evicting the oldest entries past the cap."""
+        self._input_entity_cache[chat_id] = entity
+        overflow = len(self._input_entity_cache) - self._input_entity_cache_max
+        if overflow > 0:
+            for old in list(self._input_entity_cache)[:overflow]:
+                self._input_entity_cache.pop(old, None)
 
     def _run_on_loop(self, coro: Any, timeout: float = 60.0) -> Any:
         """Run a coroutine on the connection's loop from another thread.
@@ -299,7 +311,7 @@ class TelegramAdapter(ChatAdapter):
                         if entity is not None and input_entity is not None:
                             eid = str(getattr(entity, "id", ""))
                             if eid:
-                                self._input_entity_cache[eid] = input_entity
+                                self._cache_input_entity(eid, input_entity)
                     _log.info("telegram: pre-cached %d dialogs (%d input entities)",
                               dialog_count, len(self._input_entity_cache))
                 except Exception as exc:  # noqa: BLE001
@@ -469,7 +481,7 @@ class TelegramAdapter(ChatAdapter):
         if input_entity is not None:
             entity_id = str(getattr(entity, "id", ""))
             if entity_id:
-                self._input_entity_cache[entity_id] = input_entity
+                self._cache_input_entity(entity_id, input_entity)
                 _log.debug("telegram: cached input entity for chat_id=%s", entity_id)
         
         chat_id = str(getattr(entity, "id", ""))
@@ -861,6 +873,7 @@ class TelegramBotAdapter(ChatAdapter):
                 _log.info("telegram-bot: skipped %d stale updates", len(pending))
         except Exception as exc:  # noqa: BLE001 - non-fatal, polling continues
             _log.debug("telegram-bot: stale-skip failed: %s", exc)
+        poll_fail_delay = 5.0
         while not self._stopped.is_set():
             try:
                 updates = self._api("getUpdates", offset=self._offset,
@@ -868,9 +881,15 @@ class TelegramBotAdapter(ChatAdapter):
                                     allowed_updates=["message", "edited_message",
                                                      "channel_post", "callback_query"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
-                _log.debug("telegram-bot poll failed: %s", exc)
-                self._stopped.wait(5)
+                # A persistent failure (revoked token, dead DNS) must not
+                # hot-spin the poll loop every 5s — back off exponentially,
+                # reset on the next success.
+                _log.warning("telegram-bot poll failed (%s); retry in %.0fs",
+                             exc, poll_fail_delay)
+                self._stopped.wait(poll_fail_delay)
+                poll_fail_delay = min(poll_fail_delay * 2.0, 300.0)
                 continue
+            poll_fail_delay = 5.0
             for update in updates:
                 self._offset = max(self._offset, update.get("update_id", 0) + 1)
                 # Callback queries (inline button taps) get their own path.

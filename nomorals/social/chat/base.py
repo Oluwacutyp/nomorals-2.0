@@ -209,11 +209,36 @@ class ChatAdapter(ABC):
     #: Kinds of chats this adapter can deliver/receive.
     supported_kinds: tuple[str, ...] = (ChatKind.DM, ChatKind.GROUP, ChatKind.CHANNEL)
 
+    #: Restart policy for a crashed adapter thread (see ``_run_guarded``).
+    #: A platform that dies must come back on its own — on a phone nobody is
+    #: watching the logs. Backoff keeps a persistently broken config (revoked
+    #: token, dead network) from hot-spinning the CPU.
+    RESTART_INITIAL_DELAY_S = 5.0
+    RESTART_MAX_DELAY_S = 300.0
+    #: Consecutive crashes before the adapter gives up and stays down. A run
+    #: that survives ``RESTART_RESET_AFTER_S`` resets the counter, so only a
+    #: genuinely broken adapter exhausts it.
+    RESTART_MAX_CRASHES = 10
+    RESTART_RESET_AFTER_S = 60.0
+
+    #: Media cache bounds (see ``_prune_media_dir``). Inbound photos/voice
+    #: notes land on disk and were never cleaned up — on a phone that is a
+    #: slow disk-exhaustion bug. Age is the primary bound; the size cap is
+    #: the backstop for a flood of fresh files.
+    MEDIA_MAX_AGE_DAYS = 7.0
+    MEDIA_MAX_TOTAL_MB = 512.0
+
     def __init__(self, *, media_dir: str = "data/media") -> None:
         self.media_dir = media_dir
         self._thread: threading.Thread | None = None
         self._stopped = threading.Event()
         self.stats = {"received": 0, "sent": 0, "send_errors": 0, "started_at": 0.0}
+        #: Consecutive crashes of the adapter thread; reset by a healthy run
+        #: or a manual ``start()``.
+        self._crash_count = 0
+        self._last_crash = ""
+        self._last_crash_at = 0.0
+        self._gave_up = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def run(self, handler: IncomingHandler) -> None:  # pragma: no cover - abstract
@@ -233,20 +258,129 @@ class ChatAdapter(ABC):
         if self._thread is not None and self._thread.is_alive():
             return False
         self._stopped.clear()
+        # A manual (re)start is a fresh lease: the operator may have fixed
+        # whatever was crashing it.
+        self._crash_count = 0
+        self._gave_up = False
         self._thread = threading.Thread(
             target=self._run_guarded, args=(handler,), name=f"chat-{self.name}", daemon=True
         )
         self._thread.start()
         return True
 
+    def _note_crash(self, exc: BaseException) -> None:
+        self._crash_count += 1
+        self._last_crash = f"{type(exc).__name__}: {exc}"
+        self._last_crash_at = time.time()
+
     def _run_guarded(self, handler: IncomingHandler) -> None:
         self.stats["started_at"] = time.time()
-        try:
-            self.run(handler)
-        except Exception as exc:  # noqa: BLE001 - an adapter dying must not kill the process
-            _log.exception("adapter %s crashed: %s", self.name, exc)
-        finally:
+        # Inbound media accumulates on disk forever without this; prune once
+        # per thread start (not per restart — a crash loop must not re-walk
+        # a huge directory on every attempt).
+        self._prune_media_dir()
+        delay = self.RESTART_INITIAL_DELAY_S
+        while True:
+            run_started = time.time()
+            try:
+                self.run(handler)
+            except Exception as exc:  # noqa: BLE001 - a crashed adapter restarts, it never kills the process
+                if self.stopped:
+                    return
+                # A run that lived long enough was healthy; only consecutive
+                # quick deaths count toward giving up.
+                if time.time() - run_started >= self.RESTART_RESET_AFTER_S:
+                    self._crash_count = 0
+                self._note_crash(exc)
+                if self._crash_count >= self.RESTART_MAX_CRASHES:
+                    _log.error(
+                        "adapter %s crashed %d times in a row (%s) — giving up; "
+                        "fix the config then restart it",
+                        self.name, self._crash_count, self._last_crash,
+                    )
+                    self._gave_up = True
+                    self._stopped.set()
+                    return
+                _log.warning(
+                    "adapter %s crashed (%s) — restarting in %.0fs (crash %d/%d)",
+                    self.name, self._last_crash, delay,
+                    self._crash_count, self.RESTART_MAX_CRASHES,
+                )
+                if self._stopped.wait(delay):
+                    return
+                delay = min(delay * 2.0, self.RESTART_MAX_DELAY_S)
+                self._stopped.clear()
+                continue
+            # run() returned cleanly (not via stop): mark stopped and exit.
             self._stopped.set()
+            return
+
+    def _prune_media_dir(
+        self,
+        *,
+        max_age_days: float | None = None,
+        max_total_mb: float | None = None,
+    ) -> int:
+        """Delete stale inbound media so the disk can't fill up silently.
+
+        Removes files older than ``max_age_days`` (default
+        :attr:`MEDIA_MAX_AGE_DAYS`), then — if the directory is still over
+        ``max_total_mb`` — evicts oldest-first until under the cap. Hidden
+        files (``.greeted.json`` and friends) are adapter state, not media,
+        and are never touched. Returns the number of files removed; never
+        raises.
+        """
+        import os
+
+        if max_age_days is None:
+            max_age_days = self.MEDIA_MAX_AGE_DAYS
+        if max_total_mb is None:
+            max_total_mb = self.MEDIA_MAX_TOTAL_MB
+        removed = 0
+        try:
+            root = self.media_dir
+            if not root or not os.path.isdir(root):
+                return 0
+            now = time.time()
+            cutoff = now - max_age_days * 86400.0
+            entries: list[tuple[float, int, str]] = []  # (mtime, size, path)
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for fname in filenames:
+                    if fname.startswith("."):
+                        continue
+                    path = os.path.join(dirpath, fname)
+                    try:
+                        st = os.stat(path)
+                    except OSError:
+                        continue
+                    if st.st_mtime < cutoff:
+                        try:
+                            os.unlink(path)
+                            removed += 1
+                        except OSError:
+                            pass
+                    else:
+                        entries.append((st.st_mtime, st.st_size, path))
+            cap_bytes = max_total_mb * 1024 * 1024
+            if cap_bytes > 0:
+                total = sum(size for _, size, _ in entries)
+                if total > cap_bytes:
+                    entries.sort(key=lambda e: e[0])  # oldest first
+                    for _mtime, _size, path in entries:
+                        if total <= cap_bytes:
+                            break
+                        try:
+                            os.unlink(path)
+                            removed += 1
+                            total -= _size
+                        except OSError:
+                            pass
+            if removed:
+                _log.info("adapter %s: pruned %d stale media file(s) from %s",
+                          self.name, removed, root)
+        except Exception as exc:  # noqa: BLE001 - pruning must never break the adapter
+            _log.debug("adapter %s: media prune failed: %s", self.name, exc)
+        return removed
 
     def stop(self) -> None:
         self._stopped.set()
@@ -284,5 +418,8 @@ class ChatAdapter(ABC):
         return {
             "name": self.name,
             "running": self._thread is not None and self._thread.is_alive(),
+            "restart_crashes": self._crash_count,
+            "last_crash": self._last_crash,
+            "gave_up": self._gave_up,
             **self.stats,
         }

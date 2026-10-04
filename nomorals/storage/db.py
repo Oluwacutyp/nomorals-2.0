@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 from ..core.errors import ConstraintViolation, NotFound, StorageError
 from ..core.logging_setup import get_logger
 
-__all__ = ["Database", "Row", "split_sql", "transaction"]
+__all__ = ["Database", "Row", "split_sql", "transaction", "open_database"]
 
 _log = get_logger(__name__)
 
@@ -601,3 +601,79 @@ def release_thread_connection(db: "Database | None") -> None:
             db.release_thread()
     except Exception:  # noqa: BLE001 - never break thread teardown
         pass
+
+
+_CORRUPT_MARKERS = (
+    "file is not a database",
+    "database disk image is malformed",
+    "file is corrupted",
+    "is encrypted or is not a database",
+    "not a database",
+)
+
+
+def _looks_corrupt(exc: BaseException) -> bool:
+    """True when ``exc`` smells like a corrupt/unreadable SQLite file rather
+    than a transient failure (locked/busy) or a schema problem."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _CORRUPT_MARKERS)
+
+
+def open_database(path: str | os.PathLike[str], **kwargs: Any) -> tuple["Database", bool, str | None]:
+    """Open ``path`` and run migrations, quarantining a corrupt file instead
+    of dying.
+
+    A phone bot that refuses to boot because its SQLite file got clobbered
+    (killed mid-checkpoint, dying flash) is a brick until the owner SSHes in
+    and deletes it by hand — and deleting it loses everything. So: on a
+    *corruption* signature the file (plus WAL/journal sidecars) is moved
+    aside to ``<name>.corrupt-<timestamp>`` and a fresh database is created.
+    The owner's data survives in the quarantine for later forensics.
+
+    Returns ``(database, recovered, backup_path)`` — ``recovered`` is True
+    only when a corrupt file was quarantined. Non-corruption errors raise
+    unchanged.
+    """
+    from pathlib import Path as _Path
+
+    target = _Path(path)
+    database: Database | None = None
+    corrupt_error: Exception | None = None
+    try:
+        database = Database(target, **kwargs)
+        database.migrate()
+        return database, False, None
+    except Exception as exc:  # noqa: BLE001 - inspect before deciding
+        if target.name == ":memory:" or not _looks_corrupt(exc):
+            raise
+        corrupt_error = exc  # the except-block name is deleted after the block
+    # Corrupt: quarantine the file and its sidecars, then start fresh.
+    # NOTE: the quarantine runs BEFORE database.close() — closing the last
+    # connection to a WAL database makes SQLite delete the -wal/-shm
+    # sidecars, which would destroy the very files we're preserving.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = target.with_name(f"{target.name}.corrupt-{stamp}")
+    moved: list[str] = []
+    for candidate in (target, target.with_name(target.name + "-wal"),
+                      target.with_name(target.name + "-shm"),
+                      target.with_name(target.name + "-journal")):
+        if candidate.exists():
+            try:
+                dest = backup.parent / (candidate.name + ".corrupt-" + stamp)
+                candidate.replace(dest)
+                moved.append(str(dest))
+            except OSError as move_exc:
+                _log.warning("could not quarantine %s: %s", candidate, move_exc)
+    if database is not None:
+        try:
+            database.close()
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+    _log.error(
+        "database file %s is corrupt (%s); quarantined %d file(s), starting "
+        "fresh. The quarantined copy keeps the old data for forensics.",
+        target, corrupt_error, len(moved),
+    )
+    fresh = Database(target, **kwargs)
+    fresh.migrate()
+    return fresh, True, str(backup)

@@ -281,6 +281,22 @@ class ChatGateway:
                 total += window.pending()
         return total
 
+    def _prune_windows(self, now: float) -> None:
+        """Drop rate windows idle for a day. One entry per chat key seen is
+        otherwise a slow unbounded leak on a years-running bot. Acquires
+        ``_locks_guard`` itself — never call while holding it."""
+        with self._locks_guard:
+            if len(self._windows) <= 1000:
+                return
+            stale = [
+                key for key, window in self._windows.items()
+                if not window._events or window._events[-1] < now - 86400.0
+            ]
+            for key in stale:
+                self._windows.pop(key, None)
+        if stale:
+            _log.info("chat gateway: pruned %d idle rate windows", len(stale))
+
     # ── registry ─────────────────────────────────────────────────────────────
     def register_chat(self, chat: ChatRef) -> dict[str, Any]:
         """Upsert a chat into the registry; returns the row (or a local one)."""
@@ -337,11 +353,15 @@ class ChatGateway:
         # with less information.
         message.meta["is_owner"] = is_owner
         if not is_owner:
+            prune_windows = False
             with self._locks_guard:
                 window = self._windows.get(message.chat.key)
                 if window is None:
                     window = _HourWindow(self._max_per_hour)
                     self._windows[message.chat.key] = window
+                    prune_windows = len(self._windows) > 1000
+            if prune_windows:
+                self._prune_windows(self.clock())
             if not window.allow(self.clock()):
                 self._bump("dropped_rate_limited")
                 _log.warning("rate limit: dropping inbound from %s (>%s/h in this chat)",
