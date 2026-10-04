@@ -48,6 +48,10 @@ _CLEAR_PROXY_ENV = {
     "ALL_PROXY": "",
     "no_proxy": "",
     "NO_PROXY": "",
+    # Node-style flag that urllib's getproxies_environment() mistakes for
+    # a proxy definition (it ends in _proxy); must not leak into the
+    # test's proxy resolution.
+    "NODE_USE_ENV_PROXY": "",
 }
 
 
@@ -102,26 +106,28 @@ class _ForwardProxyHandler(_QuietHandler):
         # 502 — a 502 here must mean genuinely unreachable, not a slow
         # test double. Total retry budget stays well under the caller's
         # health-check timeout (10s): 6 attempts, backoff capped at 1s.
+        #
+        # Use a hermetic opener (empty ProxyHandler) instead of
+        # urllib.request.urlopen: urlopen uses the process-global opener,
+        # which an earlier test may have installed via install_opener()
+        # with a ProxyHandler built from the outer environment's proxy
+        # vars. That poisoned opener would route our loopback fetch
+        # through a dead egress proxy. An explicit empty ProxyHandler
+        # guarantees direct loopback with no env/global dependence.
+        _hermetic_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
         body = b"bad gateway"
         code = 502
         for attempt in range(6):
             try:
-                with urllib.request.urlopen(
+                with _hermetic_opener.open(
                     self.path, timeout=10
                 ) as upstream:
                     body = upstream.read()
                     code = int(upstream.status)
                 break
-            except Exception as exc:  # noqa: BLE001 - test double, retry then 502
-                # DIAGNOSTIC (cifix-4.0): log the real upstream failure so
-                # full-suite flakes can be root-caused. Remove after green.
-                try:
-                    with open("/home/hatch/workspace/devon-cifix/.proxydiag.log",
-                              "a") as f:
-                        f.write(f"{time.time():.1f} upstream fail "
-                                f"{type(exc).__name__}: {exc}\n")
-                except Exception:
-                    pass
+            except Exception:  # noqa: BLE001 - test double, retry then 502
                 time.sleep(min(0.2 * (2 ** attempt), 1.0))
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
@@ -183,6 +189,22 @@ class _ProxyNetCase(unittest.TestCase):
         self._env = mock.patch.dict(os.environ, _CLEAR_PROXY_ENV)
         self._env.start()
         self.addCleanup(self._env.stop)
+        # Reset the process-global urllib opener: an earlier test may have
+        # called urllib.request.urlopen(), which installs a global opener
+        # whose ProxyHandler was built from the OUTER environment's proxy
+        # vars (pointing at a dead egress proxy). Rebuilding from the
+        # cleared env guarantees direct loopback for urlopen() calls.
+        import urllib.request
+        self._prev_opener = urllib.request._opener
+        urllib.request.install_opener(urllib.request.build_opener())
+        self.addCleanup(self._restore_opener)
+
+    def _restore_opener(self) -> None:
+        import urllib.request
+        if self._prev_opener is None:
+            urllib.request._opener = None
+        else:
+            urllib.request.install_opener(self._prev_opener)
 
 
 # ── fake network: SOCKS servers ─────────────────────────────────────
