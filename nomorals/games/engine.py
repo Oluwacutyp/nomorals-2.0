@@ -791,12 +791,19 @@ class GameEngine:
                 return
 
     def _handle_timeout(self, room: Room) -> None:
+        # Narrow the engine lock to the liveness check: the sweep selected
+        # this room before the tick ran, so it may have been quit/finished
+        # since — never tick a dead room. Everything below runs under the
+        # room guard (like move()): on_timeout and AI turns may call the
+        # model, and the global lock must never be held across that or one
+        # chat's timeout stalls every other chat.
         with self._lock:
-            # the sweep selected this room before the tick ran — it may
-            # have been quit/finished since. Never tick a dead room.
             if (self._rooms.get(room.chat_key) is not room
                     or room.status != "active"):
                 return
+        with room.guard:
+            if room.status != "active":
+                return  # a move/quit closed it while we waited for the guard
             game = self.games.get(room.game)
             cur = room.current
             if game is None or cur is None or cur.is_ai:

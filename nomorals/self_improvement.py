@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .missions import MissionRunner, MissionStatus, MissionStore, StepOutcome
+from .missions import (
+    MissionRunner,
+    MissionStatus,
+    MissionStore,
+    StepOutcome,
+    mission_liveness,
+)
 from .training.collect import CollectionResult, TrainingCollector
 from .training.dataset import DatasetRegistry
 from .training.policy import PolicyDecision, RetrainingPolicy, policy_status
@@ -158,6 +164,28 @@ class SelfImprovementJob:
         self._collection = result
         return result
 
+    def _live_pipeline_mission_ids(self) -> set[str]:
+        """Ids of automatic-training missions genuinely still running.
+
+        ``MissionStore.resumable()`` returns every non-terminal mission,
+        including one another thread is driving right now.  Resuming — or
+        duplicating — a live pipeline would double-drive the train step and
+        burn CPU twice, so liveness (fresh runner heartbeat or a live
+        runner process) decides, not the status column alone.  A mission
+        whose runner died (stale heartbeat, gone process) is *not* live:
+        that one is a crash victim and stays resumable.
+        """
+        live: set[str] = set()
+        for mission in self.store.list(active_only=True):
+            if mission.metadata.get("pipeline") != "collect-curate-train-evaluate-promote":
+                continue
+            try:
+                if mission_liveness(mission).get("alive"):
+                    live.add(mission.id)
+            except Exception:  # noqa: BLE001 - a bad row must not block training
+                continue
+        return live
+
     def run(
         self,
         *,
@@ -174,6 +202,11 @@ class SelfImprovementJob:
         ``force`` bypasses only the trigger policy.  It never bypasses the model
         regression gate; promotion remains controlled by ``TrainingRegistry``.
 
+        A pipeline that is already running is never duplicated: when another
+        thread (or an earlier tick) is driving a live training mission, this
+        returns a skipped result instead of resuming it a second time or
+        starting a concurrent run.
+
         ``dataset_id`` seeds the mission with a specific registered corpus
         (e.g. an account-history export) instead of collecting live-use rows.
 
@@ -182,6 +215,18 @@ class SelfImprovementJob:
         ``base_model`` is the HF id the external backends finetune; required
         for anything but ``native``.
         """
+        # Never double-drive a live pipeline: an overlapping scheduler tick
+        # or a manual ``nm train --run`` while the automatic run is in flight
+        # must wait, not burn a second CPU-heavy train beside the first.
+        live = self._live_pipeline_mission_ids()
+        if live:
+            return TrainingJobResult(
+                status="skipped",
+                skipped=True,
+                reason="training already in flight "
+                f"(mission {sorted(live)[0]})",
+                decision=self.status()["decision"],
+            )
         # A scheduler invocation after a process restart first gives interrupted
         # pipeline missions their durable continuation.  This is important when
         # the dataset was created just before the crash: trigger metrics alone
@@ -231,10 +276,18 @@ class SelfImprovementJob:
         return self._result(mission_result, self.status()["decision"])
 
     def resume_all(self, *, max_iterations: int = 8) -> list[TrainingJobResult]:
-        """Resume every interrupted automatic-training mission, newest first."""
+        """Resume every interrupted automatic-training mission, newest first.
+
+        Missions that are genuinely still running (fresh heartbeat / live
+        runner — see :meth:`_live_pipeline_mission_ids`) are left alone:
+        resuming one would drive it twice.
+        """
         results: list[TrainingJobResult] = []
+        live = self._live_pipeline_mission_ids()
         for mission in self.store.resumable():
             if mission.metadata.get("pipeline") != "collect-curate-train-evaluate-promote":
+                continue
+            if mission.id in live:
                 continue
             runner = _PipelineRunner(self, self.context, store=self.store)
             mission_result = runner.resume(mission.id, max_iterations=max_iterations, reflect=True)

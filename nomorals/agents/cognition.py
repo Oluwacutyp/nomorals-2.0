@@ -435,7 +435,7 @@ class CognitiveLoop:
         if do_train:
             try:
                 summary["stages"]["training"] = _run(
-                    "training", lambda: self._tick_train(cap=cap), guard=False)
+                    "training", self._tick_train, guard=False)
             except Exception as exc:  # noqa: BLE001
                 summary["stages"]["training"] = {"error": str(exc)}
         else:
@@ -863,7 +863,7 @@ class CognitiveLoop:
         return {"action": rec.action, "status": rec.status,
                 "dimension": rec.dimension}
 
-    def _tick_train(self, *, cap: int = 0) -> dict[str, Any]:
+    def _tick_train(self) -> dict[str, Any]:
         from ..self_improvement import SelfImprovementJob
 
         job = SelfImprovementJob(self.context)
@@ -874,7 +874,12 @@ class CognitiveLoop:
         if not decision.get("should_retrain"):
             return {"skipped": "policy not due",
                     "reasons": decision.get("reasons", [])}
-        # due: run the durable pipeline (it re-checks the gate on promote)
+        # Due: run the durable pipeline (it re-checks the gate on promote).
+        # Announced at info so an automatic run is never a mystery in the
+        # logs: the policy reasons say exactly what triggered it.
+        reasons = decision.get("reasons", [])
+        _log.info("automatic training run starting (%s)",
+                  "; ".join(reasons) or "policy due")
         result = job.run(force=True)
         return {"status": result.status, "run_id": result.run_id,
                 "dataset_id": result.dataset_id,

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -548,6 +550,72 @@ class CLITrainingFlagsTests(unittest.TestCase):
         self.assertIn("ok   native", out)
         for name in ("unsloth", "llama_factory"):
             self.assertIn(name, out)
+
+
+# ── in-flight guard: never double-drive a live training pipeline ───────────
+
+
+class PipelineInflightGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from nomorals.agents.context import build_context
+        from nomorals.core.config import Settings
+
+        self.home = tempfile.mkdtemp(prefix="nm-inflight-")
+        self.context = build_context(
+            Settings(home=self.home),
+            with_executor=False, with_router=False,
+            with_memory=False, with_tools=False,
+        )
+        self.context.__enter__()
+
+    def tearDown(self) -> None:
+        self.context.__exit__(None, None, None)
+
+    def _job(self):
+        from nomorals.self_improvement import SelfImprovementJob
+
+        return SelfImprovementJob(self.context)
+
+    def _pipeline_mission(self, *, alive: bool):
+        from nomorals.missions import MissionStatus
+
+        job = self._job()
+        mission = job.store.create_new(
+            "self-improvement training loop",
+            name="automatic-training",
+            metadata={"pipeline": "collect-curate-train-evaluate-promote"},
+        )
+        mission.status = MissionStatus.RUNNING
+        if alive:
+            mission.state["heartbeat"] = {
+                "pid": os.getpid(), "at": time.time()}
+        else:
+            # crash victim: stale heartbeat, no such process
+            mission.state["heartbeat"] = {
+                "pid": 2 ** 30, "at": time.time() - 10 ** 6}
+        job.store.save(mission)
+        return mission
+
+    def test_live_pipeline_mission_is_detected(self) -> None:
+        mission = self._pipeline_mission(alive=True)
+        self.assertEqual(
+            self._job()._live_pipeline_mission_ids(), {mission.id})
+
+    def test_dead_pipeline_mission_is_not_live(self) -> None:
+        self._pipeline_mission(alive=False)
+        self.assertEqual(self._job()._live_pipeline_mission_ids(), set())
+
+    def test_run_skips_when_pipeline_already_live(self) -> None:
+        mission = self._pipeline_mission(alive=True)
+        result = self._job().run(force=True)
+        self.assertTrue(result.skipped)
+        self.assertIn("already in flight", result.reason)
+        self.assertIn(mission.id, result.reason)
+
+    def test_resume_all_leaves_live_pipeline_alone(self) -> None:
+        self._pipeline_mission(alive=True)
+        # must not try to drive the live mission a second time
+        self.assertEqual(self._job().resume_all(), [])
 
 
 if __name__ == "__main__":
