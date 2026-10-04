@@ -11,7 +11,7 @@ skill, or ``default`` for titles everyone starts with.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.ids import new_id
@@ -20,6 +20,7 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "Title", "TITLE_CATALOG", "TitleStore",
     "active_title", "display_name",
+    "title_battle_effects", "describe_title_effects",
 ]
 
 _log = get_logger(__name__)
@@ -33,48 +34,82 @@ class Title:
     name: str
     desc: str
     unlock: str  # achievement id | "skill:<slug>" | "default"
+    # ── battle effects: meaningful choices, not just cosmetic ──
+    # Keys: "atk", "def", "max_hp" (flat bonuses), "boss_dmg_pct"
+    # (extra damage vs raid bosses), "xp_pct" (bonus XP),
+    # "combo_pct" (dual-cast success bonus, 0-1).
+    effects: dict = field(default_factory=dict)
+
+
+#: Title id → human-readable effect description (shown in /title).
+def _fx(**kw: Any) -> dict:
+    return dict(kw)
 
 
 TITLE_CATALOG: tuple[Title, ...] = (
     Title("novice", "Novice", "Where every legend starts.", "default"),
-    Title("gladiator", "Gladiator", "Win an arena battle.", "arena_win"),
-    Title("on_fire", "On Fire", "Reach a 5-win streak.", "arena_streak_5"),
+    Title("gladiator", "Gladiator", "Win an arena battle.", "arena_win",
+          _fx(atk=2)),
+    Title("on_fire", "On Fire", "Reach a 5-win streak.", "arena_streak_5",
+          _fx(atk=3)),
     Title("unstoppable", "Unstoppable", "Reach a 10-win streak.",
-          "arena_streak_10"),
+          "arena_streak_10", _fx(atk=5)),
     Title("relentless", "Relentless", "Reach a 15-win streak.",
-          "arena_streak_15"),
+          "arena_streak_15", _fx(atk=7)),
     Title("war_machine", "War Machine", "Reach a 20-win streak.",
-          "arena_streak_20"),
+          "arena_streak_20", _fx(atk=10)),
     Title("immortal", "Immortal", "Reach a 25-win streak.",
-          "arena_streak_25"),
+          "arena_streak_25", _fx(atk=12, max_hp=20)),
     Title("dragonslayer", "Dragonslayer", "Defeat an S-rank hunter.",
-          "arena_s_rank"),
+          "arena_s_rank", _fx(atk=5, boss_dmg_pct=0.05)),
     Title("stormbreaker", "Stormbreaker", "Defeat an SS-rank hunter.",
-          "arena_ss_rank"),
+          "arena_ss_rank", _fx(atk=8, boss_dmg_pct=0.08)),
     Title("legend_killer", "Legend Killer", "Defeat an X-rank hunter.",
-          "arena_x_rank"),
+          "arena_x_rank", _fx(atk=12, boss_dmg_pct=0.12)),
     Title("mythslayer", "Mythslayer", "Defeat a myth-foe hunter.",
-          "arena_myth_foe"),
+          "arena_myth_foe", _fx(atk=15, boss_dmg_pct=0.15)),
     Title("untouched", "Untouched", "Win without taking damage.",
-          "arena_flawless"),
+          "arena_flawless", _fx(def_=8, atk=-3)),
     Title("giant_slayer", "Giant Slayer", "Defeat a stronger foe.",
-          "arena_upset"),
-    Title("brutal", "Brutal", "Land a brutal finish.", "arena_brutal"),
-    Title("duelist", "Duelist", "Win a PvP duel.", "arena_pvp_win"),
+          "arena_upset", _fx(atk=4, xp_pct=0.10)),
+    Title("brutal", "Brutal", "Land a brutal finish.", "arena_brutal",
+          _fx(atk=6)),
+    Title("duelist", "Duelist", "Win a PvP duel.", "arena_pvp_win",
+          _fx(atk=4, def_=4)),
     Title("boss_hunter", "Boss Hunter", "Defeat a raid boss.",
-          "arena_raid_win"),
+          "arena_raid_win", _fx(boss_dmg_pct=0.10)),
     Title("raid_mvp", "Raid MVP", "Deal the most damage in a raid.",
-          "arena_raid_mvp"),
+          "arena_raid_mvp", _fx(atk=6, boss_dmg_pct=0.05)),
     Title("centurion", "Centurion", "Win 100 arena battles.",
-          "arena_100_wins"),
+          "arena_100_wins", _fx(atk=8, max_hp=30)),
     Title("master_of_arts", "Master of Arts", "Upgrade a skill to tier III.",
-          "arena_tier3"),
+          "arena_tier3", _fx(combo_pct=0.10)),
     Title("myth_forged", "Myth Forged", "Equip a full myth-tier set.",
-          "arena_myth_set"),
+          "arena_myth_set", _fx(atk=10, def_=10)),
     Title("purist", "Purist", "Win without using a potion.",
-          "arena_no_potion"),
+          "arena_no_potion", _fx(def_=6)),
     Title("cutyps_heir", "Cutyp's Heir", "Learn the Slaying Force.",
-          "skill:slaying_force"),
+          "skill:slaying_force", _fx(atk=8, combo_pct=0.05)),
+    # ── unlikely scenarios: the strange glories ──
+    Title("phoenix", "Phoenix", "Win with exactly 1 HP remaining.",
+          "arena_1hp_win", _fx(max_hp=25)),
+    Title("comeback_king", "Comeback King",
+          "Win after falling below 20% HP.", "arena_comeback",
+          _fx(atk=5, def_=5)),
+    Title("persistent", "Persistent", "Lose 10 battles in a row — and keep "
+          "fighting.", "arena_lose_10", _fx(xp_pct=0.15)),
+    Title("underdog", "Underdog", "Win as the weaker fighter 5 times.",
+          "arena_underdog_5", _fx(atk=6)),
+    Title("pacifist", "Pacifist", "Win using only skills, never a basic "
+          "attack.", "arena_skills_only", _fx(combo_pct=0.08)),
+    Title("speedster", "Speedster", "Win in 3 turns or fewer.",
+          "arena_fast_win", _fx(atk=7)),
+    Title("survivor", "Survivor", "Survive 20 turns in one battle.",
+          "arena_marathon", _fx(max_hp=40, def_=5)),
+    Title("dual_master", "Dual Master", "Land 10 successful dual-casts.",
+          "arena_dual_10", _fx(combo_pct=0.15)),
+    Title("gambler", "Gambler", "Win a dual-cast with under 30% odds.",
+          "arena_lucky_dual", _fx(combo_pct=0.10)),
 )
 
 
@@ -223,6 +258,47 @@ def active_title(db: Any, player_key: str) -> str:
         return TitleStore(db).active(player_key)
     except Exception:  # noqa: BLE001
         return ""
+
+
+def title_battle_effects(title_name: str) -> dict[str, Any]:
+    """Battle bonuses granted by an equipped title.
+
+    Returns flat stat bonuses (``atk``, ``def``, ``max_hp``) plus
+    special keys: ``boss_dmg_pct``, ``xp_pct``, ``combo_pct``.
+    Unknown titles grant nothing.
+    """
+    if not title_name:
+        return {}
+    name = title_name.strip().lower()
+    for title in TITLE_CATALOG:
+        if title.name.lower() == name or title.id == name:
+            out: dict[str, Any] = {}
+            for key, val in (title.effects or {}).items():
+                # ``def_`` avoids the Python keyword in the catalog
+                out["def" if key == "def_" else key] = val
+            return out
+    return {}
+
+
+def describe_title_effects(title_name: str) -> str:
+    """Human-readable effect line for a title, or ''."""
+    fx = title_battle_effects(title_name)
+    if not fx:
+        return ""
+    bits = []
+    if fx.get("atk"):
+        bits.append(f"{fx['atk']:+d} atk")
+    if fx.get("def"):
+        bits.append(f"{fx['def']:+d} def")
+    if fx.get("max_hp"):
+        bits.append(f"{fx['max_hp']:+d} max HP")
+    if fx.get("boss_dmg_pct"):
+        bits.append(f"+{int(fx['boss_dmg_pct'] * 100)}% vs bosses")
+    if fx.get("xp_pct"):
+        bits.append(f"+{int(fx['xp_pct'] * 100)}% XP")
+    if fx.get("combo_pct"):
+        bits.append(f"+{int(fx['combo_pct'] * 100)}% dual-cast")
+    return ", ".join(bits)
 
 
 def display_name(db: Any, player_key: str, name: str) -> str:

@@ -361,6 +361,10 @@ class PartnerRuntime(
                         reply = self._control_titles(
                             command.tail or command.arg,
                             player=self._game_player(message))
+                    elif command.kind == "stats":
+                        reply = self._control_stats(
+                            command.tail or command.arg,
+                            player=self._game_player(message))
                     elif command.kind == "daily":
                         reply = self._control_daily(
                             player=self._game_player(message))
@@ -1243,6 +1247,11 @@ class PartnerRuntime(
         # ── titles ───────────────────────────────────────────────────────────
         if kind == "title":
             return self._control_titles(
+                command.tail or arg,
+                player=self._game_player_for_key(chat_key))
+        # ── RPG attributes ───────────────────────────────────────────────────
+        if kind == "stats":
+            return self._control_stats(
                 command.tail or arg,
                 player=self._game_player_for_key(chat_key))
         # ── daily hunt ───────────────────────────────────────────────────────

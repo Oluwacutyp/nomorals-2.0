@@ -46,7 +46,8 @@ BOB = Player.from_sender("telegram", "789", "Bob")
 
 UPGRADEABLE = {"war_cry", "dragon_punch", "whirlwind", "thousand_fists",
                "pressure_point", "shadow_step", "second_wind",
-               "slaying_force"}
+               "slaying_force", "iron_palm", "viper_strike",
+               "smoke_bomb", "crane_dance"}
 
 
 # ── catalog tiers ────────────────────────────────────────────────────────────

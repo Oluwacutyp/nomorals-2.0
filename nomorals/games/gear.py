@@ -88,6 +88,11 @@ class GearDef:
     base_def: int = 0
     unbreakable: bool = False  # never wears, never breaks (legacy pieces)
     raid_only: bool = False  # never sold — drops from raid bosses only
+    # ── RPG attribute bonuses: folded into the fighter at battle setup ──
+    stat_strength: int = 0
+    stat_stamina: int = 0
+    stat_mana: int = 0
+    stat_intelligence: int = 0
 
     @property
     def max_durability(self) -> int:
@@ -99,7 +104,11 @@ class GearDef:
                 "slot": self.slot, "kind": self.kind, "grade": self.grade,
                 "set": self.set_name, "atk": atk, "def": df,
                 "durability": self.max_durability,
-                "raid_only": self.raid_only}
+                "raid_only": self.raid_only,
+                "stat_strength": self.stat_strength,
+                "stat_stamina": self.stat_stamina,
+                "stat_mana": self.stat_mana,
+                "stat_intelligence": self.stat_intelligence}
 
 
 def effective_stats(defn: GearDef) -> tuple[int, int]:
@@ -115,18 +124,29 @@ def _build_catalog() -> dict[str, GearDef]:
     def add(slug: str, name: str, base_cost: int, slot: str, kind: str,
             grade: str, base_atk: int = 0, base_def: int = 0,
             set_name: str = "", unbreakable: bool = False,
-            raid_only: bool = False) -> None:
+            raid_only: bool = False, stat_strength: int = 0,
+            stat_stamina: int = 0, stat_mana: int = 0,
+            stat_intelligence: int = 0) -> None:
         cost = int(base_cost * _GRADE_COST_MULT[grade])
         defn[slug] = GearDef(slug=slug, name=f"{name} [{grade}]",
                              cost=cost, slot=slot, kind=kind, grade=grade,
                              set_name=set_name, base_atk=base_atk,
                              base_def=base_def, unbreakable=unbreakable,
-                             raid_only=raid_only)
+                             raid_only=raid_only,
+                             stat_strength=stat_strength,
+                             stat_stamina=stat_stamina,
+                             stat_mana=stat_mana,
+                             stat_intelligence=stat_intelligence)
 
     weapons = (("katana", "Katana", 300, 12),
                ("broadsword", "Broadsword", 350, 15),
                ("rapier", "Rapier", 200, 8),
-               ("warhammer", "Warhammer", 450, 20))
+               ("warhammer", "Warhammer", 450, 20),
+               # ── new blood: heavier steel for higher ranks ──
+               ("odachi", "Odachi", 550, 24),
+               ("spear", "Spear", 400, 17),
+               ("twin_daggers", "Twin Daggers", 380, 16),
+               ("battle_axe", "Battle Axe", 500, 22))
     # myth is reserved for the named legacy set — ordinary kinds stop at
     # legendary.
     shop_grades = ("common", "rare", "epic", "legendary")
@@ -138,11 +158,38 @@ def _build_catalog() -> dict[str, GearDef]:
     armors = (("leather", "Leather Armor", 150, 8),
               ("chainmail", "Chainmail", 300, 15),
               ("plate", "Plate Armor", 450, 22),
-              ("dragonscale", "Dragonscale Mail", 600, 30))
+              ("dragonscale", "Dragonscale Mail", 600, 30),
+              # ── new blood ──
+              ("samurai", "Samurai Armor", 520, 26),
+              ("mithril", "Mithril Mail", 700, 34))
     for kind, label, base_cost, base_def in armors:
         for grade in shop_grades:
             add(f"{kind}_{grade}", label, base_cost, "armor", kind,
                 grade, base_def=base_def)
+
+    # ── trinkets: the third slot, finally stocked ──
+    # Trinkets grant RPG attribute bonuses instead of raw stats —
+    # the warlord's belt makes you hit harder, the sage's amulet
+    # sharpens your techniques.
+    trinkets = (
+        # kind, label, base_cost, stat bonuses
+        ("warlord_belt", "Warlord's Belt", 400,
+         {"stat_strength": 4}),
+        ("titan_heart", "Titan's Heart", 400,
+         {"stat_stamina": 4}),
+        ("mana_crystal", "Mana Crystal", 400,
+         {"stat_mana": 4}),
+        ("sage_amulet", "Sage's Amulet", 450,
+         {"stat_intelligence": 4}),
+    )
+    trinket_grades = ("rare", "epic", "legendary")
+    _trinket_scale = {"rare": 1, "epic": 2, "legendary": 3}
+    for kind, label, base_cost, bonuses in trinkets:
+        for grade in trinket_grades:
+            scale = _trinket_scale[grade]
+            scaled = {k: v * scale for k, v in bonuses.items()}
+            add(f"{kind}_{grade}", label, base_cost, "trinket", kind,
+                grade, **scaled)
 
     # Named sets — matching weapon + armor unlock the set bonus.
     # NOTE: base_cost is pre-grade; the grade multiplier applies on top.
@@ -155,6 +202,12 @@ def _build_catalog() -> dict[str, GearDef]:
         base_atk=10, set_name="shadow")
     add("shadow_mail", "Shadow Mail", 600, "armor", "chainmail", "epic",
         base_def=17, set_name="shadow")
+    # Dragon set — for those who hunt the great wyrms. Carries a
+    # strength bonus on top of the set stats.
+    add("dragon_fang", "Dragon Fang Blade", 700, "weapon", "odachi", "epic",
+        base_atk=26, set_name="dragon", stat_strength=3)
+    add("dragon_scale", "Dragon Scale Armor", 1000, "armor", "dragonscale",
+        "epic", base_def=32, set_name="dragon", stat_stamina=3)
 
     # The Cutyp legacy set — myth-tier, unbreakable, endgame priced.
     add("cutyp_steel_katana", "Cutyp Steel Katana", 800, "weapon",
@@ -215,6 +268,10 @@ SET_BONUSES: dict[str, SetBonus] = {
     "bossbane": SetBonus("bossbane", ("weapon", "armor"), atk_pct=0.30,
                          def_pct=0.30, combo_name="bossbane rend",
                          combo_every=3),
+    # Dragon — the wyrm hunter's pride. Hits hard, endures harder.
+    "dragon": SetBonus("dragon", ("weapon", "armor"), atk_pct=0.35,
+                       def_pct=0.35, combo_name="dragon's wrath",
+                       combo_every=3),
 }
 
 

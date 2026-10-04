@@ -82,7 +82,11 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(resolve_skill("Dragon Punch").slug, "dragon_punch")
 
     def test_substring(self):
-        self.assertEqual(resolve_skill("iron").slug, "iron_skin")
+        # "iron" is now ambiguous (iron_palm vs iron_skin) — the
+        # resolver takes the first catalog hit; specific substrings
+        # still find their skill.
+        self.assertEqual(resolve_skill("iron_s").slug, "iron_skin")
+        self.assertEqual(resolve_skill("iron_p").slug, "iron_palm")
 
     def test_unknown_returns_none(self):
         self.assertIsNone(resolve_skill("banana kamehameha"))

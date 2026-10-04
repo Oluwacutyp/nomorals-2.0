@@ -576,6 +576,55 @@ class RuntimeGamesMixin:
             return (f"{match.name} isn't unlocked yet — {match.desc}")
         return f"👑 you now fight as {match.name} {player.name}."
 
+    def _control_stats(self, tail: str, *, player: Any = None) -> str:
+        """RPG attributes: /stats | /stats <attr> [points].
+
+        Each level grants attribute points — spend them on strength
+        (attack), stamina (HP/defense), mana (skill fuel), or
+        intelligence (skill power + combo luck).
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here — run this from the chat where you play."
+        from ...games.stats import (STAT_NAMES, StatStore, describe_stats,
+                                    gear_stat_bonuses)
+        engine = self._game_engine()
+        store = StatStore(engine.db)
+        # top up any pending level-up points first
+        try:
+            from ...games.progression import level_for_xp
+            prof = engine.store.get(player.key)
+            new_pts = store.grant_level_points(player.key,
+                                               level_for_xp(prof.xp))
+        except Exception:  # noqa: BLE001
+            new_pts = 0
+        stats = store.get(player.key)
+        tail = (tail or "").strip().lower()
+        lines: list[str] = []
+        if new_pts:
+            lines.append(f"📊 +{new_pts} attribute point(s) from leveling!")
+        if not tail or tail in ("show", "list"):
+            gear_bonus = {n: 0 for n in STAT_NAMES}
+            try:
+                from ...games.gear import GearStore
+                gs = GearStore(engine.db)
+                loadout = gs.loadout(player.key)
+                gear_bonus = gear_stat_bonuses(loadout)
+            except Exception:  # noqa: BLE001
+                pass
+            lines.append(f"📊 {player.name}'s attributes")
+            lines.append(describe_stats(stats, gear_bonus))
+            lines.append("spend: /stats <strength|stamina|mana|intelligence> "
+                         "[points]")
+            return "\n".join(lines)
+        parts = tail.split()
+        attr = parts[0]
+        pts = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+        ok, msg = store.spend(player.key, attr, pts)
+        return ("📊 " if ok else "") + msg
+
     def _control_daily(self, *, player: Any = None) -> str:
         """The daily hunt: /daily shows today's double-XP status."""
         from ..features import feature_enabled

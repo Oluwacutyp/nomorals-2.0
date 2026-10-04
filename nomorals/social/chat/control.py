@@ -86,6 +86,8 @@ GAME_COMMANDS = (
     "skill",
     # earnable titles (arena flair)
     "title",
+    # RPG attributes (strength/stamina/mana/intelligence)
+    "stats",
     # daily hunt (double-XP arena challenge)
     "daily",
 )
@@ -150,6 +152,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "level": (0, 0),       # /level — XP, level, stat growth
     "skill": (0, 3),       # /skill [learn|upgrade <name>] — battle skills
     "title": (0, 3),       # /title [set <name>] — earnable titles
+    "stats": (0, 2),       # /stats [<attr> [points]] — RPG attributes
     "daily": (0, 0),       # /daily — today's double-XP hunt
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
@@ -670,10 +673,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "example": "/skill  ·  /skill learn dragon_punch",
               "related": "level, inventory, game"},
     "title": {"what": "earnable titles — flair worn next to your name. "
-                      "Unlocked through arena achievements and milestones.",
+                      "Unlocked through arena achievements and milestones. "
+                      "Some titles grant battle buffs.",
               "usage": "/title [set <name>]",
               "example": "/title  ·  /title set dragonslayer",
               "related": "skill, level, game"},
+    "stats": {"what": "RPG attributes — strength (attack), stamina "
+                      "(HP/defense), mana (skill fuel), intelligence "
+                      "(skill power + combo luck). Each level grants "
+                      "points to spend.",
+              "usage": "/stats [<attribute> [points]]",
+              "example": "/stats  ·  /stats strength 2",
+              "related": "skill, level, title"},
     "daily": {"what": "the daily hunt — win any arena battle today for "
                       "double XP. One hunt per day.",
               "usage": "/daily",
@@ -1064,7 +1075,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "skill", "title", "stats", "daily",
+      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
@@ -1274,7 +1286,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["remember", "recall", "forget", "think", "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
+      "skill", "title", "stats", "daily",
+      "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
@@ -1373,6 +1386,8 @@ LIST_ONELINERS: dict[str, str] = {
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>)",
+    "title": "earnable titles — flair with battle buffs (/title set <name>)",
+    "stats": "RPG attributes — strength/stamina/mana/intelligence (/stats)",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",

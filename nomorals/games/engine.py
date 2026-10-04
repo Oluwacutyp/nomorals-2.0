@@ -481,6 +481,22 @@ class GameEngine:
                 self.db, key)
         except Exception:  # noqa: BLE001
             _log.debug("title mirror failed", exc_info=True)
+        # RPG attributes, so combat games apply them store-free
+        try:
+            from .stats import StatStore
+            store = StatStore(self.db)
+            stats = store.get(key)
+            # grant any pending level-up points before the fight
+            try:
+                from .progression import level_for_xp
+                prof = self.store.get(key)
+                store.grant_level_points(key, level_for_xp(prof.xp))
+                stats = store.get(key)  # re-read after grant
+            except Exception:  # noqa: BLE001
+                pass
+            room.state.setdefault("rpg_stats", {})[key] = stats.to_dict()
+        except Exception:  # noqa: BLE001
+            _log.debug("rpg stats mirror failed", exc_info=True)
 
     def _reconcile_items(self, room: Room) -> None:
         consumed = room.state.get("consumed", {})
@@ -953,6 +969,16 @@ class GameEngine:
                     coins, coin_why = GameEconomy.coin_breakdown(
                         won, score=score, difficulty=difficulty,
                         streak_after=streak_after)
+                    # boosters: coin charm is consumed on use
+                    try:
+                        prof_items = self.store.get(p.key).items
+                        if int(prof_items.get("coin_charm", 0)) > 0:
+                            coins = int(coins * 1.5)
+                            coin_why += " + coin charm"
+                            msgs.append("✨ Coin Charm consumed!")
+                            self.store.consume_item(p, "coin_charm")
+                    except Exception:  # noqa: BLE001
+                        _log.debug("booster apply failed", exc_info=True)
                     self.store.record_outcome(
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
@@ -1015,6 +1041,15 @@ class GameEngine:
                             except Exception:  # noqa: BLE001
                                 _log.debug("daily hunt failed",
                                            exc_info=True)
+                        # Double XP Charm: consumed for the next finished game
+                        try:
+                            _prof_items = self.store.get(p.key).items
+                            if int(_prof_items.get("double_xp", 0)) > 0:
+                                amount *= 2
+                                msgs.append("✨ Double XP Charm consumed!")
+                                self.store.consume_item(p, "double_xp")
+                        except Exception:  # noqa: BLE001
+                            _log.debug("double xp charm failed", exc_info=True)
                         new_level, gained = award_xp(
                             self.store, p, amount,
                             reason=f"{room.game}:{'win' if won else 'loss' if won is False else 'draw'}")
@@ -1024,6 +1059,21 @@ class GameEngine:
                                 f"+{amount} XP {xp_bar(prof.xp)}")
                         for lvl in gained:
                             msgs.append(describe_level_up(lvl))
+                            # RPG attributes: each level grants points
+                            try:
+                                from .stats import (StatStore,
+                                                    POINTS_PER_LEVEL)
+                                pts = StatStore(self.db).grant_level_points(
+                                    p.key, lvl)
+                                if pts:
+                                    msgs.append(
+                                        f"📊 +{pts} attribute points! "
+                                        f"Spend with /stats "
+                                        f"(strength · stamina · mana · "
+                                        f"intelligence).")
+                            except Exception:  # noqa: BLE001
+                                _log.debug("stat points grant failed",
+                                           exc_info=True)
                     except Exception:  # noqa: BLE001
                         _log.debug("xp award failed", exc_info=True)
                 msgs.append(
@@ -1209,6 +1259,96 @@ class GameEngine:
                 # purist: no potions used
                 if int(room.state.get("potions_used", 0)) <= 0:
                     grant("arena_no_potion")
+                # ── unlikely scenarios: the strange glories ──
+                if int(you.get("hp", 0)) == 1:
+                    grant("arena_1hp_win")
+                if int(room.state.get("turns", 99)) <= 3:
+                    grant("arena_fast_win")
+                if int(room.state.get("turns", 0)) >= 20:
+                    grant("arena_marathon")
+                if not bool(room.state.get("used_basic_attack", True)):
+                    grant("arena_skills_only")
+                if bool(room.state.get("mana_hit_zero", False)):
+                    grant("arena_mana_starved")
+                duals = int(room.state.get("dual_casts", 0))
+                if duals >= 10:
+                    grant("arena_dual_10")
+                if float(room.state.get("dual_lowest_odds", 1.0)) < 0.30 \
+                        and duals > 0:
+                    grant("arena_lucky_dual")
+                if float(room.state.get("dual_lowest_odds", 1.0)) >= 0.95 \
+                        and duals > 0:
+                    grant("arena_perfect_dual")
+                ks = str(room.state.get("killing_skill", ""))
+                if ks.startswith("combo:"):
+                    grant("arena_dual_kill")
+                # barehanded: no gear equipped at battle start
+                try:
+                    loadout = room.state.get("loadout", {}).get(
+                        player.key, {})
+                    if not loadout:
+                        grant("arena_no_gear")
+                except Exception:  # noqa: BLE001
+                    pass
+                # underdog: track wins as the weaker fighter (persistent)
+                if you_pow > 0 and foe_pow >= you_pow * 1.1:
+                    try:
+                        db.execute(
+                            "CREATE TABLE IF NOT EXISTS game_counters ("
+                            "player_key TEXT NOT NULL, "
+                            "counter TEXT NOT NULL, "
+                            "value INTEGER NOT NULL DEFAULT 0, "
+                            "PRIMARY KEY (player_key, counter))")
+                        rows = db.query(
+                            "SELECT value FROM game_counters "
+                            "WHERE player_key = ? AND counter = ?",
+                            (player.key, "underdog_wins"))
+                        cur = int(rows[0]["value"]) + 1 if rows else 1
+                        db.execute(
+                            "INSERT INTO game_counters "
+                            "(player_key, counter, value) VALUES (?, ?, ?) "
+                            "ON CONFLICT(player_key, counter) DO UPDATE SET "
+                            "value = excluded.value",
+                            (player.key, "underdog_wins", cur))
+                        if cur >= 5:
+                            grant("arena_underdog_5")
+                    except Exception:  # noqa: BLE001
+                        _log.debug("underdog counter failed", exc_info=True)
+            # losing streak: 10 in a row earns a strange glory
+        if game_name == "arena" and not won:
+            try:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS game_counters ("
+                    "player_key TEXT NOT NULL, "
+                    "counter TEXT NOT NULL, "
+                    "value INTEGER NOT NULL DEFAULT 0, "
+                    "PRIMARY KEY (player_key, counter))")
+                rows = db.query(
+                    "SELECT value FROM game_counters "
+                    "WHERE player_key = ? AND counter = ?",
+                    (player.key, "loss_streak"))
+                cur = int(rows[0]["value"]) + 1 if rows else 1
+                db.execute(
+                    "INSERT INTO game_counters "
+                    "(player_key, counter, value) VALUES (?, ?, ?) "
+                    "ON CONFLICT(player_key, counter) DO UPDATE SET "
+                    "value = excluded.value",
+                    (player.key, "loss_streak", cur))
+                if cur >= 10:
+                    grant("arena_lose_10")
+            except Exception:  # noqa: BLE001
+                _log.debug("loss streak counter failed", exc_info=True)
+        # a win resets the losing streak
+        if game_name == "arena" and won:
+            try:
+                db.execute(
+                    "INSERT INTO game_counters (player_key, counter, value) "
+                    "VALUES (?, ?, 0) "
+                    "ON CONFLICT(player_key, counter) DO UPDATE SET "
+                    "value = 0",
+                    (player.key, "loss_streak"))
+            except Exception:  # noqa: BLE001
+                pass
                 if prof is not None:
                     if prof.streak >= 5:
                         grant("arena_streak_5")

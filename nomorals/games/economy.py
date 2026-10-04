@@ -60,6 +60,30 @@ DEFAULT_SHOP: tuple[ShopItem, ...] = (
              "cancel one vote once per game", "political"),
     ShopItem("fast_pass", "Fast Pass", 100,
              "skip one waiting turn", "any"),
+    # ── puzzle power-ups: for the thinking games ──
+    ShopItem("xray", "X-Ray", 150,
+             "sudoku: reveal one cell", "sudoku"),
+    ShopItem("pencil", "Pencil Marks", 100,
+             "sudoku: auto-fill all pencil marks", "sudoku"),
+    ShopItem("letter_reveal", "Letter Reveal", 120,
+             "anagram/cryptogram/wordle: reveal one letter", "any"),
+    ShopItem("word_bank", "Word Bank", 200,
+             "anagram: show 3 candidate words", "anagram"),
+    ShopItem("code_crack", "Code Cracker", 180,
+             "cryptogram: reveal the most common letter", "cryptogram"),
+    # ── board game aids: for the strategy tables ──
+    ShopItem("second_chance", "Second Chance", 150,
+             "undo your last move", "any"),
+    ShopItem("oracle", "Oracle", 250,
+             "ttt/gomoku/checkers/chess: the house suggests its best move",
+             "any"),
+    ShopItem("time_freeze", "Time Freeze", 100,
+             "pause the clock for one turn", "any"),
+    # ── boosters: for every game ──
+    ShopItem("double_xp", "Double XP Charm", 300,
+             "next game pays double XP", "any"),
+    ShopItem("coin_charm", "Coin Charm", 250,
+             "next game pays +50% coins", "any"),
 )
 
 

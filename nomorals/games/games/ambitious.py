@@ -388,13 +388,21 @@ class BattleArenaGame(MultiGame):
         return {"you": fighter(), "house": fighter(),
                 "done": False, "consumed": {}, "gear_wear": {},
                 "combo_triggers": 0,
-                "gear_base": {"atk": 10, "def": 5}, "set_bonus": None}
+                "gear_base": {"atk": 10, "def": 5}, "set_bonus": None,
+                # ── achievement tracking ──
+                "turns": 0,              # player turns taken
+                "used_basic_attack": False,
+                "dual_casts": 0,         # successful dual-casts
+                "dual_lowest_odds": 1.0,  # lowest success chance attempted
+                "mana_hit_zero": False,
+                "underdog_wins": 0}  # (persisted per player elsewhere)
 
     def setup(self, room, mind):
         s = room.state
         self._apply_progression(room)
         self._apply_loadout(room)
         self._apply_skills(room)
+        self._apply_stats(room)
         self._spawn_enemy(room, getattr(mind, "rng", None))
         # power is finalized once both fighters are fully kitted
         try:
@@ -828,6 +836,47 @@ class BattleArenaGame(MultiGame):
             names.append(effective_def(s_, tiers.get(s_, 1)).name)
         return "🥋 skills: " + ", ".join(names) + " — cast with skill <name>."
 
+    def _apply_stats(self, room) -> None:
+        """Fold RPG attributes into the fighter's stats.
+
+        Reads the engine-mirrored ``state["rpg_stats"][player_key]`` so
+        game code stays store-free.  Strength feeds attack, stamina
+        feeds HP/defense, mana sets the technique pool, intelligence
+        sharpens combos.
+        """
+        s = room.state
+        y = s["you"]
+        try:
+            from ..stats import (StatBlock, apply_stats_to_fighter,
+                                 gear_stat_bonuses)
+        except Exception:  # noqa: BLE001
+            return
+        pkey = ""
+        for p in room.humans:
+            pkey = p.key
+            break
+        if not pkey:
+            return
+        raw = s.get("rpg_stats", {}).get(pkey)
+        stats = StatBlock.from_dict(raw)
+        loadout = s.get("loadout", {}).get(pkey, {})
+        gear_bonus = gear_stat_bonuses(loadout)
+        apply_stats_to_fighter(y, stats, gear_bonus)
+        # title effects: some titles grant battle buffs
+        try:
+            from ..titles import title_battle_effects
+            title = s.get("titles", {}).get(pkey, "")
+            effects = title_battle_effects(title)
+            for key, val in effects.items():
+                if key in ("atk", "def", "max_hp"):
+                    y[key] = int(y.get(key, 0)) + int(val)
+                    if key == "max_hp":
+                        y["hp"] = int(y.get("hp", 0)) + int(val)
+            if effects:
+                s["title_effects"] = effects
+        except Exception:  # noqa: BLE001
+            pass
+
     def _gear_note(self, room) -> str:
         loadout = self._loadout(room)
         if not loadout:
@@ -1073,6 +1122,16 @@ class BattleArenaGame(MultiGame):
             if src == "you":
                 return f"{defn.name} is spent for this battle."
             return None
+        # mana: techniques burn fuel — the house fights on instinct,
+        # only the player manages a pool. Fighters without a mana pool
+        # (legacy saves, unit tests) cast freely.
+        if src == "you" and "max_mana" in me:
+            need = int(defn.mana_cost)
+            have = int(me.get("mana", 0))
+            if have < need:
+                return (f"not enough mana — {defn.name} needs {need}, "
+                        f"you have {have}. It regenerates each turn.")
+            me["mana"] = have - need
         # ── effects ──
         msg = ""
         if defn.slug == "shadow_step":
@@ -1165,6 +1224,156 @@ class BattleArenaGame(MultiGame):
         if defn.once_per_battle:
             used.append(defn.slug)
         return msg
+
+    def _dual_cast(self, room, player, ref: str, mind) -> str | None:
+        """Cast two complementary skills as one dual-cast combo.
+
+        ``ref`` is ``"<skill1> + <skill2>"`` or ``"<skill1> <skill2>"``.
+        Only ordered pairs in the combo catalog chain — the setup must
+        come first.  Costs: HP sacrifice, mana, and extra cooldown on
+        both skills.  Higher tiers make the weave harder; on failure
+        the HP is lost and the turn is wasted.
+        """
+        from ..skills import (SKILL_CATALOG, effective_def, resolve_skill,
+                              find_combo, combo_success_chance)
+        from ..stats import MANA_REGEN_PER_TURN  # noqa: F401 (doc anchor)
+        s = room.state
+        me = s["you"]
+        foe = s["house"]
+        # parse "a + b" or "a b"
+        ref = (ref or "").strip()
+        if "+" in ref:
+            first_ref, second_ref = [p.strip() for p in ref.split("+", 1)]
+        else:
+            bits = ref.split()
+            if len(bits) < 2:
+                return None
+            first_ref, second_ref = bits[0], " ".join(bits[1:])
+        d1 = resolve_skill(first_ref)
+        d2 = resolve_skill(second_ref)
+        if d1 is None or d2 is None or d1.kind != "active" \
+                or d2.kind != "active":
+            return None
+        # the player must know both techniques
+        learned: list[str] = []
+        pkey = ""
+        for p in room.humans:
+            pkey = p.key
+            learned = s.get("skills", {}).get(p.key, [])
+            break
+        tiers = s.get("skill_tiers", {}).get(pkey, {})
+        if d1.slug not in learned or d2.slug not in learned:
+            known = [SKILL_CATALOG[x].name for x in learned
+                     if x in SKILL_CATALOG]
+            hint = (f"you know: {', '.join(known)}."
+                    if known else "you haven't learned any skills yet.")
+            return (f"dual-cast needs both techniques learned. {hint}")
+        combo = find_combo(d1.slug, d2.slug)
+        if combo is None:
+            # maybe they had the order backwards — say so
+            if find_combo(d2.slug, d1.slug) is not None:
+                return (f"{d2.name} → {d1.name} chains, not the reverse — "
+                        f"the setup must come first.")
+            return (f"{d1.name} and {d2.name} don't chain — only "
+                    f"complementary techniques combo. /skill combos "
+                    f"lists every pairing.")
+        cd = s.setdefault("skill_cd", {})
+        used = s.setdefault("skill_used", [])
+        t1 = int(tiers.get(d1.slug, 1))
+        t2 = int(tiers.get(d2.slug, 1))
+        e1 = effective_def(d1, t1)
+        e2 = effective_def(d2, t2)
+        # cooldowns: both skills must be ready
+        for e in (e1, e2):
+            if int(cd.get(e.slug, 0)) > 0:
+                return (f"{e.name} is recovering — "
+                        f"{cd[e.slug]} turn(s) left.")
+            if e.once_per_battle and e.slug in used:
+                return f"{e.name} is spent for this battle."
+        # mana: both skills' costs plus the combo's weave cost.
+        # Fighters without a mana pool (legacy, tests) weave freely.
+        mana_need = int(e1.mana_cost) + int(e2.mana_cost) + combo.mana_cost
+        if "max_mana" in me:
+            mana_have = int(me.get("mana", 0))
+            if mana_have < mana_need:
+                return (f"not enough mana — the weave needs {mana_need}, "
+                        f"you have {mana_have}.")
+            me["mana"] = mana_have - mana_need
+        hp_cost = max(1, int(me["max_hp"] * combo.hp_cost_pct))
+        me["hp"] = max(1, int(me["hp"]) - hp_cost)
+        # both skills go on cooldown, plus the combo's extra burn
+        cd[e1.slug] = int(e1.cooldown) + combo.extra_cd
+        cd[e2.slug] = int(e2.cooldown) + combo.extra_cd
+        if e1.once_per_battle:
+            used.append(e1.slug)
+        if e2.once_per_battle:
+            used.append(e2.slug)
+        # ── the weave: can you hold both techniques at once? ──
+        intel = int(me.get("intelligence", 0))
+        chance = combo_success_chance(combo, t1, t2, intel)
+        # track the riskiest weave attempted (for the gambler)
+        if chance < float(s.get("dual_lowest_odds", 1.0)):
+            s["dual_lowest_odds"] = chance
+        roll = mind.rng.random()
+        if roll >= chance:
+            return (f"💔 the dual-cast unravels! You wove {e1.name} into "
+                    f"{e2.name} and it slipped — −{hp_cost} HP, both "
+                    f"techniques recovering. ({int(chance * 100)}% chance)")
+        # success: count it
+        s["dual_casts"] = int(s.get("dual_casts", 0)) + 1
+        # ── success: setup effect, then the combined strike ──
+        parts = [f"⚡ DUAL-CAST — {combo.name}! {combo.desc}"]
+        parts.append(f"🩸 −{hp_cost} HP sacrificed.")
+        # setup: apply the first skill's non-strike effect
+        if e1.slug == "war_cry":
+            me["atk"] += int(e1.atk_buff)
+            me["warcry_turns"] = int(e1.buff_turns)
+            me["warcry_amt"] = int(e1.atk_buff)
+            parts.append(f"🗣️ +{e1.atk_buff} attack for "
+                         f"{e1.buff_turns} turns!")
+        elif e1.slug in ("shadow_step", "smoke_bomb", "crane_dance"):
+            me["dodge_next"] = True
+            parts.append("🌫️ you vanish — their next attack will miss.")
+            if e1.slug == "smoke_bomb" and e1.atk_debuff:
+                amt = int(e1.atk_debuff)
+                foe["atk"] = max(1, int(foe["atk"]) - amt)
+                foe["atk_debuff"] = {"turns": int(e1.debuff_turns),
+                                    "amt": amt}
+                parts.append(f"🌑 −{amt} enemy attack for "
+                             f"{e1.debuff_turns} turns.")
+            if e1.slug == "crane_dance" and e1.heal_pct:
+                heal = int(me["max_hp"] * float(e1.heal_pct))
+                me["hp"] = min(me["max_hp"], int(me["hp"]) + heal)
+                parts.append(f"💚 +{heal} HP as you flow.")
+        elif e1.slug == "second_wind":
+            heal = int(me["max_hp"] * float(e1.heal_pct))
+            me["hp"] = min(me["max_hp"], int(me["hp"]) + heal)
+            parts.append(f"💚 +{heal} HP — breath returns.")
+            if combo.second == "war_cry":
+                # Phoenix Rising: the combo's own payoff is the buff
+                me["atk"] += 5
+                me["warcry_turns"] = 4
+                me["warcry_amt"] = 5
+                parts.append("🔥 +5 attack for 4 turns — risen!")
+                s["killing_skill"] = f"combo:{combo.name}"
+                return " ".join(parts)
+        # payoff: the combined strike
+        if combo.mult > 0:
+            for _ in range(max(1, combo.hits)):
+                parts.append(self._hit(room, "you", "house", mind,
+                                       mult=combo.mult,
+                                       ignore_def=combo.ignore_def_pct))
+                win = self._check(room)
+                if win:
+                    parts.append(win)
+                    s["killing_skill"] = f"combo:{combo.name}"
+                    break
+        # intelligence sharpens the telling, not just the landing
+        if intel >= 10:
+            parts.append(f"(woven at {int(chance * 100)}% — "
+                         f"intelligence steadied your hands)")
+        return " ".join(parts)
+
     def on_move(self, room, player, text, mind):
         s = room.state
         t = text.strip().lower()
@@ -1173,12 +1382,28 @@ class BattleArenaGame(MultiGame):
         # poison burns, debuff expiry
         from ..combat import tick_fighter
         out.extend(tick_fighter(s["you"], s.get("skill_cd")))
+        # mana regenerates a little every turn — the well refills
+        try:
+            from ..stats import MANA_REGEN_PER_TURN
+            y = s["you"]
+            if "max_mana" in y:
+                before = int(y.get("mana", 0))
+                y["mana"] = min(int(y["max_mana"]),
+                                before + MANA_REGEN_PER_TURN)
+        except Exception:  # noqa: BLE001
+            pass
         # venom can finish the job before you even move
         win = self._check(room)
         if win:
             out.append(win)
             return out
+        # achievement tracking: count the turn
+        s["turns"] = int(s.get("turns", 0)) + 1
+        # mana starvation: note if the well ran dry
+        if int(s["you"].get("mana", 1)) <= 0:
+            s["mana_hit_zero"] = True
         if t == "attack":
+            s["used_basic_attack"] = True
             out.append(self._hit(room, "you", "house", mind))
             win = self._check(room)
             if win:
@@ -1229,7 +1454,20 @@ class BattleArenaGame(MultiGame):
             if msg is None:
                 out.append("no such skill — your moves: attack · focus · "
                            "fury · defend · potion · skill <name> · "
-                           "item <gear>.")
+                           "combo <a> + <b> · item <gear>.")
+                return out
+            out.append(msg)
+            win = self._check(room)
+            if win:
+                out.append(win)
+                return out
+        elif t.startswith("combo ") or t.startswith("dual "):
+            ref = t[6:].strip() if t.startswith("combo ") else t[5:].strip()
+            msg = self._dual_cast(room, player, ref, mind)
+            if msg is None:
+                out.append("no such pairing — your moves: attack · focus · "
+                           "fury · defend · potion · skill <name> · "
+                           "combo <a> + <b> · item <gear>.")
                 return out
             out.append(msg)
             win = self._check(room)
