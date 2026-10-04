@@ -40,14 +40,17 @@ from ..base import (
 
 
 # Curated fallback models for the intelligent router
-# These should be models commonly available on HF Inference API.
+# Verified Oct 2026 against the live HF router catalog
+# (https://router.huggingface.co/v1/models).  These are all present in
+# the catalog; listed models can still 400 if the provider deploys them,
+# so the router tries each in order.
 # The live catalog (fetch_catalog) is the primary source; this list
 # is only used if the catalog API is unreachable.
 ROUTER_FALLBACK_MODELS = [
     "meta-llama/Llama-3.1-8B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-    "mistralai/Mistral-7B-Instruct-v0.3",
-    "google/gemma-2-9b-it",
+    "google/gemma-3-4b-it",
+    "Qwen/Qwen3-4B-Instruct-2507",
+    "openai/gpt-oss-20b",
 ]
 
 SERVERLESS_URL = "https://api-inference.huggingface.co"
