@@ -419,7 +419,16 @@ class BattleArenaGame(MultiGame):
                     + (f" they know {len(foe_skills)} "
                        f"{'skill' if len(foe_skills) == 1 else 'skills'}."
                        if foe_skills else ""))
+        # the champion's entrance: wear your earned title
+        who = ""
+        for p in room.humans:
+            title = s.get("titles", {}).get(p.key, "")
+            pname = getattr(p, "name", "") or "you"
+            who = f"{title} {pname}".strip() if title else pname
+            break
+        intro_name = f"{who} enters" if who else "you enter"
         return ("⚔️ battle arena — "
+                f"{intro_name}: "
                 f"{s['you']['max_hp']} HP, {s['you']['atk']} atk, "
                 f"{s['you']['def']} def, 1 potion.\n"
                 + (lvl_note if lvl_note else "")
@@ -588,16 +597,27 @@ class BattleArenaGame(MultiGame):
                 s["house_set_bonus"] = set_name
                 break
         s["house_gear"] = gear
-        # ── the 20% power cap ─────────────────────────────────────────
+        # ── the power cap ─────────────────────────────────────────────
+        # The house may out-power the player by at most 20% — 30% when
+        # it fights with forbidden techniques (they're meant to be
+        # scary, but they have cooldowns and the player has their own
+        # arts).  The fight stays competitive; never a foregone
+        # conclusion either way.
         try:
             player_power = int(s.get("player_power") or 0)
         except Exception:  # noqa: BLE001
             player_power = 0
         if player_power > 0:
             skills = s.get("house_skills", {})
+            try:
+                from ..skills import is_enemy_skill
+                has_forbidden = any(is_enemy_skill(sl) for sl in skills)
+            except Exception:  # noqa: BLE001
+                has_forbidden = False
+            cap = 1.3 if has_forbidden else 1.2
             for _ in range(10):
                 if fighter_power(h, tuple(skills), skills) \
-                        <= player_power * 1.2:
+                        <= player_power * cap:
                     break
                 h["atk"] = max(1, int(h["atk"] * 0.9))
                 h["def"] = max(0, int(h["def"] * 0.9))
@@ -630,6 +650,9 @@ class BattleArenaGame(MultiGame):
         # set combos actually fired
         bonus += 5 * int(s.get("combo_triggers", 0))
         total = xp + min(30, bonus)
+        # a brutal finish — overkill pays outside the bonus cap
+        if s.get("brutal_finish") == "you":
+            total += 10
         # the opponent's strength sets the stakes
         rank_idx = max(0, min(5, int(s.get("house_skill", 0))))
         total = int(round(total * self.RANK_XP_MULT[rank_idx]))
@@ -789,6 +812,16 @@ class BattleArenaGame(MultiGame):
             return (f"{src} swings — and hits only air. "
                     f"shadow step dodged it clean.")
         raw, crit, focused = rep["dmg"], rep["crit"], rep["focused"]
+        # track the beating the human takes (flawless-win achievements)
+        # and the truly excessive kills (brutal finishes)
+        if dst == "you":
+            s["dmg_taken"] = int(s.get("dmg_taken", 0)) + raw
+        hp_before = d["hp"] + raw  # strike already applied
+        if d["hp"] <= 0 and raw >= 2 * max(1, hp_before):
+            s["brutal_finish"] = src
+            msg_brutal = " 💀 BRUTAL FINISH!"
+        else:
+            msg_brutal = ""
         # gear wear: the attacker's weapon and the defender's armor
         wear_notes: list[str] = []
         if src == "you" or dst == "you":
@@ -802,7 +835,7 @@ class BattleArenaGame(MultiGame):
         kind = "CRIT — " if crit else ""
         tag = " (focused)" if focused else ""
         msg = (f"{kind}{src} lands {raw}{tag} — "
-               f"{dst} at {max(0, d['hp'])} HP.")
+               f"{dst} at {max(0, d['hp'])} HP.{msg_brutal}")
         # set combo: every Nth attack strikes twice — both seats can combo
         if d["hp"] > 0 and a.get("combo_every"):
             a["combo_count"] = int(a.get("combo_count", 0)) + 1
@@ -913,13 +946,21 @@ class BattleArenaGame(MultiGame):
         """Cast a learned active skill. Returns the result message, or
         None if the ref isn't a usable skill (so the caller can fall
         through to the move list).  ``src``/``dst`` let the house cast
-        its own rolled skills with the same code path."""
-        from ..skills import SKILL_CATALOG, effective_def, resolve_skill
+        its own rolled skills — including forbidden techniques — with
+        the same code path."""
+        from ..skills import (SKILL_CATALOG, effective_def, resolve_skill,
+                              lookup_skill, is_enemy_skill)
         s = room.state
         me = s[src]
+        foe = s[dst]
         foe_name = "the house" if dst == "house" else "you"
         my_name = "the house" if src == "house" else "you"
-        defn = resolve_skill(ref)
+        if src == "you":
+            # players can only cast what they learned — the forbidden
+            # catalog is invisible to them
+            defn = resolve_skill(ref)
+        else:
+            defn = lookup_skill(ref)
         if defn is None or defn.kind != "active":
             return None
         if src == "you":
@@ -947,7 +988,11 @@ class BattleArenaGame(MultiGame):
             if defn.slug not in learned:
                 return None
             pkey = "house"
+            if is_enemy_skill(defn.slug):
+                # the player just witnessed a forbidden technique
+                s["enemy_skill_cast"] = True
         # upgrades fight: fold the caster's tier into the blueprint
+        # (forbidden arts have no tiers — they fight as written)
         tier = int(tiers.get(defn.slug, 1))
         defn = effective_def(defn, tier)
         if int(cd.get(defn.slug, 0)) > 0:
@@ -987,17 +1032,66 @@ class BattleArenaGame(MultiGame):
                    f"deep — +{heal} HP ({me['hp']}/{me['max_hp']}).")
         else:
             # striking skills: dragon_punch / whirlwind / thousand_fists /
-            # pressure_point — N hits at mult×, optionally ignoring defense
+            # pressure_point — N hits at mult×, optionally ignoring
+            # defense.  Forbidden techniques add their own horrors:
+            # lifesteal, venom, debuffs, frenzy, executions.
             parts = []
-            for _ in range(max(1, defn.hits)):
-                parts.append(self._hit(room, src, dst, mind,
-                                       mult=defn.mult or 1.0,
-                                       ignore_def=defn.ignore_def_pct))
-                win = self._check(room)
-                if win:
-                    parts.append(win)
-                    break
-            msg = f"🥋 {my_name} unleashes {defn.name}! " + " ".join(parts)
+            mult = float(defn.mult or 0.0)
+            # frenzy: the bloodied hit harder
+            if defn.frenzy and me["hp"] < me["max_hp"] * 0.5:
+                mult = (mult * 1.5) if mult > 0 else 1.5
+                parts.append("🩸 blood frenzy — the wounds only "
+                             "feed it!")
+            # execution: the mercy stroke lands heaviest on the dying
+            if defn.execute_mult:
+                foe_frac = foe["hp"] / max(1, foe["max_hp"])
+                if foe_frac < (defn.execute_below or 0.3):
+                    mult = defn.execute_mult
+                    parts.append("⚰️ it smells the end — EXECUTION!")
+            target_before = foe["hp"]
+            if mult > 0:
+                for _ in range(max(1, defn.hits)):
+                    parts.append(self._hit(room, src, dst, mind,
+                                           mult=mult,
+                                           ignore_def=defn.ignore_def_pct))
+                    win = self._check(room)
+                    if win:
+                        parts.append(win)
+                        # a skill landed the killing blow
+                        s["killing_skill"] = defn.slug
+                        break
+            # lifesteal: drink what you dealt
+            if defn.lifesteal_pct:
+                dealt = max(0, target_before - foe["hp"])
+                if dealt > 0:
+                    heal = int(dealt * defn.lifesteal_pct)
+                    me["hp"] = min(me["max_hp"], me["hp"] + heal)
+                    parts.append(f"🩸 {my_name} drinks {heal} HP "
+                                 f"from the wound.")
+            # venom: the wound keeps bleeding
+            if defn.poison_turns and defn.poison_dmg and foe["hp"] > 0:
+                foe["poison"] = {"turns": defn.poison_turns,
+                                 "dmg": defn.poison_dmg}
+                parts.append(f"☠️ venom seeps in — {defn.poison_dmg} "
+                             f"dmg for {defn.poison_turns} turns.")
+            # debuffs: take their strength while it lasts
+            if defn.debuff_turns:
+                if defn.atk_debuff and not foe.get("atk_debuff"):
+                    amt = defn.atk_debuff
+                    foe["atk"] = max(1, foe["atk"] - amt)
+                    foe["atk_debuff"] = {"turns": defn.debuff_turns,
+                                         "amt": amt}
+                    parts.append(f"🌑 dread settles — {foe_name}'s "
+                                 f"attack withers (−{amt}).")
+                if defn.def_debuff and not foe.get("def_debuff"):
+                    amt = defn.def_debuff
+                    foe["def"] = max(0, foe["def"] - amt)
+                    foe["def_debuff"] = {"turns": defn.debuff_turns,
+                                         "amt": amt}
+                    parts.append(f"🦴 armor cracks — {foe_name}'s "
+                                 f"defense crumbles (−{amt}).")
+            head = ("🥋" if not is_enemy_skill(defn.slug) else "😈")
+            msg = f"{head} {my_name} unleashes {defn.name}! " + " ".join(parts)
         cd[defn.slug] = defn.cooldown
         if defn.once_per_battle:
             used.append(defn.slug)
@@ -1006,9 +1100,15 @@ class BattleArenaGame(MultiGame):
         s = room.state
         t = text.strip().lower()
         out: list[str] = []
-        # start-of-turn decay: fury/skill cooldowns, war-cry expiry
+        # start-of-turn decay: fury/skill cooldowns, war-cry expiry,
+        # poison burns, debuff expiry
         from ..combat import tick_fighter
         out.extend(tick_fighter(s["you"], s.get("skill_cd")))
+        # venom can finish the job before you even move
+        win = self._check(room)
+        if win:
+            out.append(win)
+            return out
         if t == "attack":
             out.append(self._hit(room, "you", "house", mind))
             win = self._check(room)
@@ -1093,9 +1193,10 @@ class BattleArenaGame(MultiGame):
         E-rank hunters are bare-knuckle brawlers; D+ cast.  The pick is
         tactical, not random: heal when bleeding, dodge when the player
         is focused (or a small feint chance), buff early, otherwise the
-        hardest-hitting ready strike.
+        hardest-hitting ready strike.  Forbidden techniques get their
+        own instincts: siphon when hurt, dread early, execute the dying.
         """
-        from ..skills import SKILL_CATALOG, effective_def
+        from ..skills import lookup_skill, effective_def
         s = room.state
         if int(s.get("house_skill", 0)) < 1:
             return None
@@ -1107,7 +1208,8 @@ class BattleArenaGame(MultiGame):
         house, you = s["house"], s["you"]
         ready = []
         for slug, tier in skills.items():
-            defn = SKILL_CATALOG.get(slug)
+            # forbidden techniques live outside the learnable catalog
+            defn = lookup_skill(slug)
             if defn is None:
                 continue
             if int(cd.get(slug, 0)) > 0:
@@ -1118,25 +1220,53 @@ class BattleArenaGame(MultiGame):
         if not ready:
             return None
         by_slug = {slug: d for slug, d in ready}
-        # bleeding: the breath that saves lives
+        # bleeding: the breath that saves lives — or the drink that
+        # steals them back
         if "second_wind" in by_slug and \
                 house["hp"] < house["max_hp"] * 0.45:
             return "second_wind"
+        if "soul_siphon" in by_slug and \
+                house["hp"] < house["max_hp"] * 0.6:
+            return "soul_siphon"
+        # the kill is close: no mercy
+        if "executioner" in by_slug and \
+                you["hp"] < you["max_hp"] * 0.35:
+            return "executioner"
         # the player is winding up something big: vanish
         if "shadow_step" in by_slug and \
                 (you.get("focused") or mind.rng.random() < 0.12):
             return "shadow_step"
-        # roar early while there's still fight left in it
-        if "war_cry" in by_slug and not house.get("warcry_turns") \
-                and house["hp"] > house["max_hp"] * 0.6:
-            return "war_cry"
+        # roar — or dread — early while there's still fight left in it
+        if house["hp"] > house["max_hp"] * 0.6 and not house.get("warcry_turns"):
+            if "war_cry" in by_slug:
+                return "war_cry"
+            if "dread_aura" in by_slug and not you.get("atk_debuff"):
+                return "dread_aura"
+        # soften them up before the big swings
+        if "bone_crusher" in by_slug and not you.get("def_debuff") \
+                and mind.rng.random() < 0.5:
+            return "bone_crusher"
+        if "venom_fang" in by_slug and not you.get("poison") \
+                and mind.rng.random() < 0.4:
+            return "venom_fang"
         # otherwise the hardest ready strike
         strikes = [(slug, d) for slug, d in ready
-                   if (d.mult or 0) > 0]
+                   if (d.mult or 0) > 0 or d.execute_mult > 0]
         if strikes:
-            strikes.sort(key=lambda sd: (sd[1].mult or 0) * (sd[1].hits or 1),
-                         reverse=True)
+            def _threat(sd):
+                slug, d = sd
+                base = (d.mult or 0) * (d.hits or 1)
+                if slug == "executioner" and \
+                        you["hp"] < you["max_hp"] * 0.5:
+                    base = d.execute_mult
+                if d.frenzy and house["hp"] < house["max_hp"] * 0.5:
+                    base *= 1.5
+                return base
+            strikes.sort(key=_threat, reverse=True)
             return strikes[0][0]
+        # pure debuff with no strike left to cast
+        if "dread_aura" in by_slug:
+            return "dread_aura"
         return None
 
     def _house_act(self, room: Room, mind: GameMind,
@@ -1147,6 +1277,9 @@ class BattleArenaGame(MultiGame):
         s = room.state
         house = s["house"]
         out.extend(tick_fighter(house, s.get("house_skill_cd")))
+        # venom can finish the house before it acts
+        if self._check(room):
+            return
         if house["fury_cd"] > 0:
             house["fury_cd"] -= 1
         # a skilled hunter opens with technique, not fists

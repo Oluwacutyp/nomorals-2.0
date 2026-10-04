@@ -142,7 +142,9 @@ class SpawnIntegrationTest(unittest.TestCase):
 
     def test_power_cap_holds(self) -> None:
         # across ranks and seeds the house never out-powers the
-        # player by more than 20%
+        # player by more than 20% — 30% when it fights with forbidden
+        # techniques (they're scary, but cooldown-gated)
+        from nomorals.games.skills import is_enemy_skill
         for level, prog in (
                 (1, {"level": 1, "max_hp": 0, "atk": 0, "def": 0}),
                 (8, {"level": 8, "max_hp": 40, "atk": 8, "def": 4}),
@@ -152,8 +154,11 @@ class SpawnIntegrationTest(unittest.TestCase):
                 _game, room, _mind = make_room(prog, seed=seed)
                 you = room.state["player_power"]
                 foe = room.state["house_power"]
+                skills = room.state.get("house_skills", {})
+                cap = 1.3 if any(is_enemy_skill(s) for s in skills) \
+                    else 1.2
                 self.assertLessEqual(
-                    foe, you * 1.2 + 1,
+                    foe, you * cap + 1,
                     f"level {level} seed {seed}: {foe} vs {you}")
 
     def test_enemy_gear_is_battle_worn(self) -> None:

@@ -84,6 +84,10 @@ GAME_COMMANDS = (
     "inventory", "equip", "unequip", "repair", "level",
     # battle skills (learnable martial arts)
     "skill",
+    # earnable titles (arena flair)
+    "title",
+    # daily hunt (double-XP arena challenge)
+    "daily",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -144,6 +148,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "repair": (0, 1),      # /repair [gear] — restore durability for coins
     "level": (0, 0),       # /level — XP, level, stat growth
     "skill": (0, 2),       # /skill [learn <name>] — battle skills
+    "title": (0, 1),       # /title [set <name>] — earnable titles
+    "daily": (0, 0),       # /daily — today's double-XP hunt
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
@@ -657,6 +663,16 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/skill [learn <name>]",
               "example": "/skill  ·  /skill learn dragon_punch",
               "related": "level, inventory, game"},
+    "title": {"what": "earnable titles — flair worn next to your name. "
+                      "Unlocked through arena achievements and milestones.",
+              "usage": "/title [set <name>]",
+              "example": "/title  ·  /title set dragonslayer",
+              "related": "skill, level, game"},
+    "daily": {"what": "the daily hunt — win any arena battle today for "
+                      "double XP. One hunt per day.",
+              "usage": "/daily",
+              "example": "/daily",
+              "related": "game, skill, title"},
     "mind": {"what": "the Core Mind — the always-on layer that turns a "
                     "natural-language goal into routed work: research swarm, "
                     "builder, browser, downloader, missions, games, "

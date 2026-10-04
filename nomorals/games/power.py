@@ -46,6 +46,25 @@ def skill_power_score(defn: Any, tier: int = 1) -> int:
     ignore = float(getattr(defn, "ignore_def_pct", 0.0) or 0.0)
     if ignore:
         score += ignore * 50.0
+    # forbidden techniques: the scary stuff counts too (conservatively —
+    # their terror is in the effects, not raw numbers)
+    lifesteal = float(getattr(defn, "lifesteal_pct", 0.0) or 0.0)
+    if lifesteal:
+        score += lifesteal * 30.0
+    pturns = int(getattr(defn, "poison_turns", 0) or 0)
+    pdmg = int(getattr(defn, "poison_dmg", 0) or 0)
+    if pturns and pdmg:
+        score += pturns * pdmg * 2.0
+    adeb = int(getattr(defn, "atk_debuff", 0) or 0)
+    ddeb = int(getattr(defn, "def_debuff", 0) or 0)
+    dturns = int(getattr(defn, "debuff_turns", 0) or 0)
+    if (adeb or ddeb) and dturns:
+        score += (adeb + ddeb) * dturns * 3.0
+    if getattr(defn, "frenzy", False):
+        score += 20.0
+    emult = float(getattr(defn, "execute_mult", 0.0) or 0.0)
+    if emult:
+        score += emult * 12.0
     score *= 1.0 + 0.25 * (max(1, int(tier)) - 1)
     return int(round(score))
 
@@ -54,13 +73,14 @@ def skills_power(slugs: list[str] | tuple[str, ...],
                  tiers: dict[str, int] | None = None) -> int:
     """Total power of a fighter's learned active skills."""
     try:
-        from .skills import SKILL_CATALOG, effective_def
+        from .skills import SKILL_CATALOG, ENEMY_SKILL_CATALOG, effective_def
     except Exception:  # noqa: BLE001
         return 0
     tiers = tiers or {}
     total = 0
     for slug in slugs or ():
-        defn = SKILL_CATALOG.get(slug)
+        # the house fights with forbidden techniques too
+        defn = SKILL_CATALOG.get(slug) or ENEMY_SKILL_CATALOG.get(slug)
         if defn is None or getattr(defn, "kind", "") != "active":
             continue
         # effective_def already folds the tier's knobs into the

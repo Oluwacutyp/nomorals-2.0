@@ -61,6 +61,16 @@ ACHIEVEMENTS: tuple[Achievement, ...] = (
     # Arena
     Achievement("arena_win", "Gladiator", "Win a Battle Arena match", "common"),
     Achievement("arena_crit_kill", "Critical Finish", "Win Arena with a crit", "rare"),
+    Achievement("arena_streak_5", "On Fire", "Win 5 arena battles in a row", "rare"),
+    Achievement("arena_streak_10", "Unstoppable", "Win 10 arena battles in a row", "epic"),
+    Achievement("arena_s_rank", "Dragonslayer", "Defeat an S-rank hunter", "epic"),
+    Achievement("arena_flawless", "Untouched", "Win an arena battle without taking damage", "rare"),
+    Achievement("arena_upset", "Giant Slayer", "Defeat a stronger opponent in the arena", "rare"),
+    Achievement("arena_skill_kill", "Technique Finish", "Win an arena battle with a skill as the killing blow", "common"),
+    Achievement("arena_brutal", "Brutal", "Land a brutal finish (2× overkill) in the arena", "rare"),
+    Achievement("arena_forbidden", "Seen the Forbidden", "Survive an enemy's forbidden technique", "common"),
+    Achievement("arena_pvp_win", "Duelist", "Win a PvP duel", "rare"),
+    Achievement("arena_raid_win", "Boss Hunter", "Defeat a raid boss", "epic"),
     # RPG
     Achievement("rpg_finish", "Campaign Complete", "Finish the RPG campaign", "common"),
     Achievement("rpg_level_5", "Veteran", "Reach level 5 in the RPG", "rare"),
@@ -134,9 +144,17 @@ def unlock_achievement(db: Database, player_key: str, achievement_id: str) -> bo
         )
         # INSERT OR IGNORE inserts exactly one row on a new unlock and
         # zero when the player already has it — no timestamp guessing.
-        return cursor.rowcount > 0
+        new = cursor.rowcount > 0
     except Exception:  # noqa: BLE001
         return False
+    if new:
+        # achievements unlock titles — check what this one earned
+        try:
+            from .titles import TitleStore
+            TitleStore(db).check_unlocks(player_key)
+        except Exception:  # noqa: BLE001
+            pass
+    return new
 
 
 def get_achievements(db: Database, player_key: str) -> list[dict[str, Any]]:

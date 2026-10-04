@@ -32,6 +32,7 @@ __all__ = [
     "SkillDef", "SkillTier", "SKILL_CATALOG", "SkillStore",
     "passive_bonuses", "resolve_skill",
     "max_tier", "effective_def", "tier_name",
+    "ENEMY_SKILL_CATALOG", "lookup_skill", "is_enemy_skill",
 ]
 
 _log = get_logger(__name__)
@@ -78,6 +79,16 @@ class SkillDef:
     counter_mult: float = 0.0  # dodge-style skills: strike back at mult
     ignore_def_pct: float = 0.0  # strike ignores this much enemy def
     once_per_battle: bool = False
+    # ── forbidden techniques (enemy-only) ──
+    lifesteal_pct: float = 0.0  # heal this fraction of damage dealt
+    poison_turns: int = 0       # venom: damage-over-time duration
+    poison_dmg: int = 0         # venom: damage per turn
+    atk_debuff: int = 0         # dread: reduce target attack
+    def_debuff: int = 0         # crusher: reduce target defense
+    debuff_turns: int = 0       # how long debuffs last
+    frenzy: bool = False        # +50% damage when caster below half HP
+    execute_mult: float = 0.0   # bonus mult when target is near death
+    execute_below: float = 0.0  # ...below this HP fraction
     tiers: tuple = field(default=())  # SkillTier steps above the base
 
 
@@ -224,6 +235,70 @@ def _catalog() -> dict[str, SkillDef]:
 
 #: slug → SkillDef, the full learnable catalog.
 SKILL_CATALOG: dict[str, SkillDef] = _catalog()
+
+
+def _enemy_catalog() -> dict[str, SkillDef]:
+    """Forbidden techniques — the house's own martial arts.
+
+    These are NEVER learnable.  They exist so high-rank hunters feel
+    genuinely alien: life drain, venom, debuffs, frenzy, executions.
+    The arena resolves them for the house only; ``resolve_skill`` will
+    not find them, ``SkillStore.learn`` rejects them, and ``/skill``
+    never lists them.
+    """
+    defs: dict[str, SkillDef] = {}
+
+    def add(slug: str, name: str, desc: str, cooldown: int,
+            **kw: Any) -> None:
+        defs[slug] = SkillDef(slug=slug, name=name, school="forbidden",
+                              kind="active", desc=desc, level_req=99,
+                              cost=0, cooldown=cooldown, **kw)
+
+    add("soul_siphon", "Soul Siphon",
+        "A 1.2× strike that drinks 60% of the damage as HP. "
+        "The hunter feeds on you.",
+        4, mult=1.2, lifesteal_pct=0.6)
+    add("venom_fang", "Venom Fang",
+        "A 0.8× bite that poisons — 6 damage a turn for 3 turns. "
+        "The wound keeps bleeding.",
+        5, mult=0.8, poison_turns=3, poison_dmg=6)
+    add("bone_crusher", "Bone Crusher",
+        "A 1.0× smash that cracks armor — −4 defense for 3 turns. "
+        "Your guard means less and less.",
+        4, mult=1.0, def_debuff=4, debuff_turns=3)
+    add("blood_frenzy", "Blood Frenzy",
+        "Five wild 0.45× strikes — and the bloodied hunter hits 50% "
+        "harder below half HP. Do not let it bleed.",
+        5, mult=0.45, hits=5, frenzy=True)
+    add("dread_aura", "Dread Aura",
+        "No strike — pure malice. −4 attack for 3 turns. "
+        "Your arms feel like lead.",
+        5, atk_debuff=4, debuff_turns=3)
+    add("executioner", "Executioner's Mercy",
+        "A 1.0× axe-fall — 2.5× when you are below 30% HP. "
+        "It can smell the end.",
+        4, mult=1.0, execute_mult=2.5, execute_below=0.30)
+    return defs
+
+
+#: slug → SkillDef, the forbidden catalog.  House-only.
+ENEMY_SKILL_CATALOG: dict[str, SkillDef] = _enemy_catalog()
+
+
+def lookup_skill(slug: str) -> SkillDef | None:
+    """Find a skill in either catalog (learnable or forbidden).
+
+    The house uses this; players go through ``resolve_skill``, which
+    only sees the learnable catalog.
+    """
+    if not slug:
+        return None
+    return SKILL_CATALOG.get(slug) or ENEMY_SKILL_CATALOG.get(slug)
+
+
+def is_enemy_skill(slug: str) -> bool:
+    """True if this is a forbidden technique players can never learn."""
+    return slug in ENEMY_SKILL_CATALOG
 
 #: effect knobs a SkillTier may override on the base SkillDef.
 _TIER_KNOBS = ("cooldown", "mult", "hits", "heal_pct", "atk_buff",

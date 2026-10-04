@@ -1333,6 +1333,21 @@ CREATE INDEX IF NOT EXISTS idx_game_skills_player
     ON game_skills(player_key);
 """
 
+_V74_GAME_TITLES = """
+-- Earnable titles: flair the player wears next to their name.
+-- One row per unlocked title per player; exactly one active at a time.
+CREATE TABLE IF NOT EXISTS game_titles (
+    id          TEXT PRIMARY KEY,
+    player_key  TEXT NOT NULL,
+    title_id    TEXT NOT NULL,
+    unlocked_at REAL NOT NULL DEFAULT 0,
+    active      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(player_key, title_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_titles_player
+    ON game_titles(player_key);
+"""
+
 
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
@@ -2388,6 +2403,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(71, "trial_assist_runs", sql=_V71_TRIAL_ASSIST_RUNS),
     Migration(72, "trial_sms_watches", sql=_V72_TRIAL_SMS_WATCHES),
     Migration(73, "game_skills", sql=_V73_GAME_SKILLS),
+    Migration(74, "game_titles", sql=_V74_GAME_TITLES),
 )
 
 

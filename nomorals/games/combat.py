@@ -74,7 +74,8 @@ def strike(attacker: dict[str, Any], defender: dict[str, Any],
 def tick_fighter(fighter: dict[str, Any],
                  skill_cd: dict[str, int] | None = None) -> list[str]:
     """Start-of-turn decay: fury cooldown, skill cooldowns, war-cry
-    expiry. Returns narrative notes (worn-off buffs)."""
+    expiry, poison damage, debuff expiry. Returns narrative notes
+    (worn-off buffs, poison burns)."""
     notes: list[str] = []
     if int(fighter.get("fury_cd", 0)) > 0:
         fighter["fury_cd"] = int(fighter["fury_cd"]) - 1
@@ -90,4 +91,24 @@ def tick_fighter(fighter: dict[str, Any],
             amt = int(fighter.pop("warcry_amt", 0) or 3)
             fighter["atk"] = max(1, int(fighter["atk"]) - amt)
             notes.append("the war cry fades — the attack settles.")
+    # venom: the poison keeps burning until it runs its course
+    poison = fighter.get("poison")
+    if isinstance(poison, dict) and int(poison.get("turns", 0)) > 0:
+        dmg = max(1, int(poison.get("dmg", 0)))
+        fighter["hp"] = int(fighter.get("hp", 0)) - dmg
+        poison["turns"] = int(poison["turns"]) - 1
+        notes.append(f"☠️ poison burns — {dmg} damage.")
+        if int(poison["turns"]) <= 0:
+            fighter.pop("poison", None)
+            notes.append("the venom runs its course.")
+    # debuffs: give back what was taken when they expire
+    for key, stat in (("atk_debuff", "atk"), ("def_debuff", "def")):
+        deb = fighter.get(key)
+        if isinstance(deb, dict) and int(deb.get("turns", 0)) > 0:
+            deb["turns"] = int(deb["turns"]) - 1
+            if int(deb["turns"]) <= 0:
+                fighter[stat] = int(fighter.get(stat, 0)) + int(
+                    deb.get("amt", 0))
+                fighter.pop(key, None)
+                notes.append(f"the {stat} drain wears off.")
     return notes

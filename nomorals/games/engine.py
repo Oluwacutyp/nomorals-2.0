@@ -473,6 +473,13 @@ class GameEngine:
                 store.tiers(key)
         except Exception:  # noqa: BLE001
             _log.debug("skills mirror failed", exc_info=True)
+        # earned title, so the arena can wear it next to your name
+        try:
+            from .titles import active_title
+            room.state.setdefault("titles", {})[key] = active_title(
+                self.db, key)
+        except Exception:  # noqa: BLE001
+            _log.debug("title mirror failed", exc_info=True)
 
     def _reconcile_items(self, room: Room) -> None:
         consumed = room.state.get("consumed", {})
@@ -986,6 +993,19 @@ class GameEngine:
                         from .progression import (
                             award_xp, describe_level_up, xp_bar)
                         amount = game.xp_reward(won, room, p)
+                        # daily hunt: the first arena win of the day
+                        # pays double XP
+                        if room.game == "arena" and won is True:
+                            try:
+                                from .daily import complete_daily_hunt
+                                if complete_daily_hunt(self.db, p.key):
+                                    amount *= 2
+                                    msgs.append(
+                                        "🎯 daily hunt complete! "
+                                        "double XP today.")
+                            except Exception:  # noqa: BLE001
+                                _log.debug("daily hunt failed",
+                                           exc_info=True)
                         new_level, gained = award_xp(
                             self.store, p, amount,
                             reason=f"{room.game}:{'win' if won else 'loss' if won is False else 'draw'}")
@@ -1111,6 +1131,34 @@ class GameEngine:
                 grant("arena_win")
                 if room.state.get("crit_kill_by") == "you":
                     grant("arena_crit_kill")
+                if room.state.get("house_rank") == "S":
+                    grant("arena_s_rank")
+                if int(room.state.get("dmg_taken", 0)) <= 0:
+                    grant("arena_flawless")
+                you_pow = int(room.state.get("player_power", 0))
+                foe_pow = int(room.state.get("house_power", 0))
+                if you_pow > 0 and foe_pow >= you_pow * 1.1:
+                    grant("arena_upset")
+                if room.state.get("killing_skill"):
+                    grant("arena_skill_kill")
+                if room.state.get("brutal_finish") == "you":
+                    grant("arena_brutal")
+                if prof is not None:
+                    if prof.streak >= 5:
+                        grant("arena_streak_5")
+                    if prof.streak >= 10:
+                        grant("arena_streak_10")
+            # witnessing a forbidden technique counts win or lose
+            if room.state.get("enemy_skill_cast"):
+                grant("arena_forbidden")
+
+        # PvP / raid achievements
+        elif game_name == "pvp":
+            if won:
+                grant("arena_pvp_win")
+        elif game_name == "raid":
+            if won:
+                grant("arena_raid_win")
 
         # 2048 achievements
         elif game_name == "2048":

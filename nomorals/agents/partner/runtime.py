@@ -357,6 +357,13 @@ class PartnerRuntime(
                         reply = self._control_skills(
                             command.tail or command.arg,
                             player=self._game_player(message))
+                    elif command.kind == "title":
+                        reply = self._control_titles(
+                            command.tail or command.arg,
+                            player=self._game_player(message))
+                    elif command.kind == "daily":
+                        reply = self._control_daily(
+                            player=self._game_player(message))
                     else:
                         verb = (command.tail or command.arg) \
                             if command.kind == "game" \
@@ -1229,6 +1236,15 @@ class PartnerRuntime(
         if kind == "skill":
             return self._control_skills(
                 command.tail or arg,
+                player=self._game_player_for_key(chat_key))
+        # ── titles ───────────────────────────────────────────────────────────
+        if kind == "title":
+            return self._control_titles(
+                command.tail or arg,
+                player=self._game_player_for_key(chat_key))
+        # ── daily hunt ───────────────────────────────────────────────────────
+        if kind == "daily":
+            return self._control_daily(
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)

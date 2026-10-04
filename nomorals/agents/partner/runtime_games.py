@@ -475,13 +475,23 @@ class RuntimeGamesMixin:
                 store.add_coins(player, defn.cost,
                                 f"skill-refund:{defn.slug}")
                 return "learning failed — coins refunded."
+            # the legacy recognizes its heir
+            title_note = ""
+            if defn.slug == "slaying_force":
+                try:
+                    from ...games.titles import TitleStore
+                    if TitleStore(engine.db).unlock(player.key,
+                                                    "cutyps_heir"):
+                        title_note = " 👑 title unlocked: Cutyp's Heir!"
+                except Exception:  # noqa: BLE001
+                    pass
             up = (" ⬆️ upgradeable — /skill upgrade later"
                   if max_tier(defn) > 1 else "")
             use = ("cast it in the arena with "
                    f"skill {defn.slug}." if defn.kind == "active"
                    else "it's passive — always on in the arena.")
             return (f"🥋 learned {defn.name}! ({defn.school} school){up} — "
-                    f"{new_balance}c left. {use}")
+                    f"{new_balance}c left. {use}{title_note}")
         # ── upgrade ──
         if defn.slug not in learned:
             return (f"you haven't learned {defn.name} yet — "
@@ -510,6 +520,72 @@ class RuntimeGamesMixin:
                 else " — more power waits at the next tier.")
         return (f"⬆️ {defn.name} → {nxt_name}! {up.desc} "
                 f"({new_balance}c left){more}")
+
+    def _control_titles(self, tail: str, *, player: Any = None) -> str:
+        """Earnable titles: /title | /title set <name>.
+
+        Titles unlock through arena achievements and milestones.  The
+        active title is worn next to your name in the arena.
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here — run this from the chat where you play."
+        from ...games.titles import TITLE_CATALOG, TitleStore
+        engine = self._game_engine()
+        store = TitleStore(engine.db)
+        # refresh unlocks — achievements earned since last check
+        new = store.check_unlocks(player.key)
+        tail = (tail or "").strip()
+        lines: list[str] = []
+        for name in new:
+            lines.append(f"👑 new title unlocked: {name}!")
+        if not tail or tail.lower() in ("list", "show"):
+            cmap = {t.id: t for t in TITLE_CATALOG}
+            unlocked = store.unlocked(player.key)
+            active = store.active(player.key)
+            lines.append(f"👑 {player.name}'s titles")
+            for tid in unlocked:
+                t = cmap.get(tid)
+                if not t:
+                    continue
+                mark = " ⭐ active" if t.name == active else ""
+                lines.append(f"  ✅ {t.name}{mark} — {t.desc}")
+            locked = [t for t in TITLE_CATALOG if t.id not in unlocked]
+            if locked:
+                lines.append("still to earn:")
+                for t in locked:
+                    lines.append(f"  🔒 {t.name} — {t.desc}")
+            lines.append("wear one: /title set <name>")
+            return "\n".join(lines)
+        parts = tail.split(None, 1)
+        if parts[0].lower() not in ("set", "wear", "use") or len(parts) < 2:
+            return "usage: /title  ·  /title set <name>"
+        want = parts[1].strip().lower()
+        cmap = {t.id: t for t in TITLE_CATALOG}
+        match = None
+        for t in TITLE_CATALOG:
+            if want == t.id or want == t.name.lower() \
+                    or want in t.name.lower():
+                match = t
+                break
+        if match is None:
+            return f"no such title {parts[1]!r} — /title lists them."
+        if not store.set_active(player.key, match.id):
+            return (f"{match.name} isn't unlocked yet — {match.desc}")
+        return f"👑 you now fight as {match.name} {player.name}."
+
+    def _control_daily(self, *, player: Any = None) -> str:
+        """The daily hunt: /daily shows today's double-XP status."""
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here — run this from the chat where you play."
+        from ...games.daily import daily_hunt_status
+        engine = self._game_engine()
+        return daily_hunt_status(engine.db, player.key)
 
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:

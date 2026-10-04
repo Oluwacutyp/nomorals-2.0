@@ -53,6 +53,19 @@ ENEMY_SKILL_POOL = (
     "pressure_point", "shadow_step", "second_wind",
 )
 
+#: forbidden techniques each rank may roll — the house's own martial
+#: arts, never learnable.  Only veterans know them.
+ENEMY_EXCLUSIVE_POOL = (
+    "soul_siphon", "venom_fang", "bone_crusher",
+    "blood_frenzy", "dread_aura", "executioner",
+)
+
+#: how many forbidden techniques each rank rolls on top of the normal
+#: skill count.  E–C hunters fight clean; B+ fight dirty.
+ENEMY_EXCLUSIVE_COUNTS: dict[int, int] = {
+    0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 2,
+}
+
 _ENEMY_FIRST = (
     "Gore", "Mara", "Vex", "Rusk", "Dain", "Sable", "Korr", "Juno",
     "Pike", "Tarn", "Vessa", "Odo", "Rin", "Kess", "Bran", "Zev",
@@ -113,21 +126,32 @@ def roll_enemy_gear(rng: random.Random,
 
 def roll_enemy_skills(rng: random.Random,
                       rank_idx: int) -> dict[str, int]:
-    """Roll ``{slug: tier}`` active skills for an enemy of this rank."""
+    """Roll ``{slug: tier}`` active skills for an enemy of this rank.
+
+    Higher ranks also roll forbidden techniques — the house's own
+    martial arts that players can never learn.
+    """
     rank_idx = max(0, min(5, int(rank_idx)))
-    count = SKILL_COUNTS[rank_idx]
-    if count <= 0:
-        return {}
-    picks = rng.sample(ENEMY_SKILL_POOL, k=min(count, len(ENEMY_SKILL_POOL)))
     skills: dict[str, int] = {}
-    for slug in picks:
-        if rank_idx >= 4:
-            tier = rng.choice((2, 2, 3))
-        elif rank_idx >= 2:
-            tier = rng.choice((1, 1, 2))
-        else:
-            tier = 1
-        skills[slug] = tier
+    count = SKILL_COUNTS[rank_idx]
+    if count > 0:
+        picks = rng.sample(ENEMY_SKILL_POOL,
+                           k=min(count, len(ENEMY_SKILL_POOL)))
+        for slug in picks:
+            if rank_idx >= 4:
+                tier = rng.choice((2, 2, 3))
+            elif rank_idx >= 2:
+                tier = rng.choice((1, 1, 2))
+            else:
+                tier = 1
+            skills[slug] = tier
+    # forbidden techniques: B+ hunters fight dirty
+    xcount = ENEMY_EXCLUSIVE_COUNTS[rank_idx]
+    if xcount > 0:
+        xpicks = rng.sample(ENEMY_EXCLUSIVE_POOL,
+                            k=min(xcount, len(ENEMY_EXCLUSIVE_POOL)))
+        for slug in xpicks:
+            skills[slug] = 1  # forbidden arts have no tiers
     return skills
 
 
