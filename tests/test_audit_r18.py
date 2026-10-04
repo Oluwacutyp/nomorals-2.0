@@ -193,5 +193,78 @@ class SmsWatchRecoveryDigestTests(unittest.TestCase):
         self.assertEqual(self._recovery_titles(), [])
 
 
+class CognitionRetentionTests(unittest.TestCase):
+    """Fresh-eyes review of nomorals/cognition (never audited before R18)."""
+
+    def _store(self):
+        from nomorals.cognition.trajectories import TrajectoryStore
+        return TrajectoryStore()
+
+    def test_prune_deletes_only_stale_rows(self):
+        from nomorals.cognition.trajectories import TrajectoryStore
+        store = self._store()
+        day = 86_400.0
+        now = time.time()
+        for _ in range(3):
+            store._add(task_kind="chat", capability="g", model_id="m",
+                       success=False, error="old bug",
+                       created_at=now - 100 * day)
+        for _ in range(2):
+            store._add(task_kind="chat", capability="g", model_id="m",
+                       success=True, created_at=now - 10 * day)
+        dropped = store.prune(older_than_days=90.0)
+        self.assertEqual(dropped, 3)
+        rows = store.db.query("SELECT COUNT(*) AS n FROM cog_trajectories")
+        self.assertEqual(rows[0]["n"], 2)
+        # second prune is a no-op
+        self.assertEqual(store.prune(older_than_days=90.0), 0)
+
+    def test_record_auto_prunes_stale_rows(self):
+        store = self._store()
+        day = 86_400.0
+        now = time.time()
+        store._add(task_kind="chat", capability="g", model_id="m",
+                   success=False, error="ancient", created_at=now - 120 * day)
+        store._add(task_kind="chat", capability="g", model_id="m",
+                   success=True, created_at=now - 60 * day)
+        # first record() on a fresh store runs the retention prune
+        store.record(task_kind="chat", capability="g", model_id="m",
+                     success=True)
+        rows = store.db.query(
+            "SELECT error FROM cog_trajectories WHERE success=0")
+        self.assertEqual(rows, [])
+        # 60-day-old rows survive the 90-day window (decay still applies)
+        self.assertEqual(
+            store.db.query(
+                "SELECT COUNT(*) AS n FROM cog_trajectories")[0]["n"], 2)
+
+    def test_prune_does_not_move_scoring(self):
+        store = self._store()
+        day = 86_400.0
+        now = time.time()
+        store._add(task_kind="chat", capability="g", model_id="m",
+                   success=False, created_at=now - 120 * day)
+        for _ in range(4):
+            store.record(task_kind="chat", capability="g", model_id="m",
+                         success=True)
+        before = store.success_rate("chat", "g", model_id="m")
+        store.prune(older_than_days=90.0)
+        after = store.success_rate("chat", "g", model_id="m")
+        self.assertAlmostEqual(before, after, places=6)
+
+    def test_normalize_error_collapses_bare_dates(self):
+        from nomorals.cognition.trajectories import normalize_error
+        a = normalize_error("sync failed on 2026-10-04, will retry")
+        b = normalize_error("sync failed on 2026-11-19, will retry")
+        self.assertIn("<date>", a)
+        self.assertEqual(a, b)
+
+    def test_failure_kb_rejects_contradictory_store_and_db(self):
+        from nomorals.cognition.failure_kb import FailureKB
+        from nomorals.cognition.trajectories import TrajectoryStore
+        with self.assertRaises(ValueError):
+            FailureKB(store=TrajectoryStore(), db=":memory:")
+
+
 if __name__ == "__main__":
     unittest.main()

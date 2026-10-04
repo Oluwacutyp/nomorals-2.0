@@ -324,6 +324,8 @@ class BattleArenaGame(MultiGame):
              "durability that wears down and can be repaired. "
              "Matching gear sets unlock combo attacks. "
              "Winning earns XP — level up for +max HP, +atk, +def. "
+             "The house ranks up with you, E-rank to S-rank: higher ranks "
+             "hit harder and fight smarter. "
              "First to 0 HP loses.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
@@ -346,16 +348,42 @@ class BattleArenaGame(MultiGame):
         lvl_note = (f"level {prog['level']} — +{prog['max_hp']} HP, "
                     f"+{prog['atk']} atk, +{prog['def']} def. "
                     if prog["level"] > 1 else "")
+        rank = s.get("house_rank", "E")
         return ("⚔️ battle arena — "
                 f"{s['you']['max_hp']} HP, {s['you']['atk']} atk, "
                 f"{s['you']['def']} def, 1 potion.\n"
                 + (lvl_note if lvl_note else "")
+                + f"a {rank}-rank hunter blocks your path.\n"
                 + "attack · focus · fury · defend · potion · "
                 "item <gear|potion|shield>\n"
                 + (gear_note + "\n" if gear_note else "")
                 + "the house is already warming up.")
 
     # ── progression ──────────────────────────────────────────────────────────
+    #: Solo-Leveling-style hunter ranks for the house AI. Higher player
+    #: level → higher rank → the house mirrors a bigger share of the
+    #: player's progression bonus, gains flat rank stats, and fights with
+    #: a higher combat skill (see GameMind.combat_move).
+    #: (rank, min_player_level, bonus_share, flat_hp, flat_atk, flat_def)
+    HUNTER_RANKS: tuple = (
+        ("E", 1, 0.40, 0, 0, 0),
+        ("D", 3, 0.50, 4, 1, 0),
+        ("C", 5, 0.60, 8, 1, 1),
+        ("B", 8, 0.70, 12, 2, 1),
+        ("A", 12, 0.80, 16, 2, 2),
+        ("S", 16, 0.90, 24, 3, 3),
+    )
+
+    @classmethod
+    def house_rank_for(cls, level: int) -> tuple[str, int]:
+        """(rank_name, rank_index) for a player level."""
+        idx = 0
+        for i, (_name, min_level, _sh, _hp, _atk, _df) in enumerate(
+                cls.HUNTER_RANKS):
+            if level >= min_level:
+                idx = i
+        return cls.HUNTER_RANKS[idx][0], idx
+
     def _prog_bonus(self, room) -> dict[str, int]:
         """The human's mirrored level bonus (engine fills state)."""
         for p in room.humans:
@@ -370,20 +398,26 @@ class BattleArenaGame(MultiGame):
     def _apply_progression(self, room) -> None:
         """Fold the player's persistent level into base stats.
 
-        The house scales at half the player's bonus — progression always
-        feels powerful, but fights stay competitive.
+        The house ranks up Solo-Leveling style: each hunter rank mirrors a
+        bigger share of the player's bonus, adds flat rank stats, and
+        fights smarter. Progression always feels powerful — but the house
+        never falls too far behind.
         """
         s = room.state
         prog = self._prog_bonus(room)
+        rank, rank_idx = self.house_rank_for(prog["level"])
+        _name, _min, share, fhp, fatk, fdef = self.HUNTER_RANKS[rank_idx]
         s["gear_base"] = {"atk": 10 + prog["atk"], "def": 5 + prog["def"]}
         y, h = s["you"], s["house"]
         y["max_hp"] = 50 + prog["max_hp"]
         y["hp"] = y["max_hp"]
-        h["max_hp"] = 50 + prog["max_hp"] // 2
+        h["max_hp"] = 50 + int(prog["max_hp"] * share) + fhp
         h["hp"] = h["max_hp"]
-        h["atk"] = 10 + prog["atk"] // 2
-        h["def"] = 5 + prog["def"] // 2
+        h["atk"] = 10 + int(prog["atk"] * share) + fatk
+        h["def"] = 5 + int(prog["def"] * share) + fdef
         s["player_level"] = prog["level"]
+        s["house_rank"] = rank
+        s["house_skill"] = rank_idx
 
     def xp_reward(self, won: bool | None, room, player) -> int:
         """Rich arena XP: wins pay, losses still move the bar, and clean
@@ -709,7 +743,8 @@ class BattleArenaGame(MultiGame):
         house = s["house"]
         if house["fury_cd"] > 0:
             house["fury_cd"] -= 1
-        move = mind.combat_move(house, s["you"])
+        move = mind.combat_move(house, s["you"],
+                                skill=int(s.get("house_skill", 0)))
         if move["action"] == "potion" and house["potions"] > 0:
             house["potions"] -= 1
             house["hp"] = min(house["max_hp"], house["hp"] + 30)

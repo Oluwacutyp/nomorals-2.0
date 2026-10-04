@@ -46,6 +46,11 @@ class FailureKB:
         store: TrajectoryStore | None = None,
         db: Database | str | Path | None = None,
     ) -> None:
+        if store is not None and db is not None:
+            raise ValueError(
+                "pass either store or db, not both — they would point at "
+                "different databases and notes would land in the wrong one"
+            )
         self.store = store if store is not None else TrajectoryStore(db)
         self.db = self.store.db
         self.db.executescript(_NOTES_DDL)

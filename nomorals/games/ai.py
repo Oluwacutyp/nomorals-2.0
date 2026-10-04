@@ -239,13 +239,19 @@ class GameMind:
         )
 
     def combat_move(self, self_stats: dict[str, int],
-                    foe_stats: dict[str, int]) -> dict[str, Any]:
+                    foe_stats: dict[str, int],
+                    skill: int = 0) -> dict[str, Any]:
         """Battle arena AI: attack/focus/fury/defend/potion by math.
 
         Stats use the arena's key names (``atk``/``def``); the old
         ``attack``/``defense`` names are tolerated so external callers
         keep working.
+
+        ``skill`` 0–5 is the hunter rank index (E→S). Higher ranks potion
+        earlier, fury more freely, and guard less panicky — the same brain,
+        but the S-rank version fights like it means it.
         """
+        skill = max(0, min(5, int(skill or 0)))
         hp = self_stats.get("hp", 1)
         max_hp = self_stats.get("max_hp", max(hp, 1))
         my_atk = self_stats.get("atk", self_stats.get("attack", 0))
@@ -255,8 +261,9 @@ class GameMind:
         foe_def = foe_stats.get("def", foe_stats.get("defense", 0))
         if hp <= 0 or foe_hp <= 0:
             return {"action": "attack"}
-        # bleeding badly and holding a potion: drink
-        if hp < max_hp * 0.35 and self_stats.get("potions", 0) > 0:
+        # bleeding and holding a potion: drink — veterans drink earlier
+        if hp < max_hp * (0.30 + 0.03 * skill) \
+                and self_stats.get("potions", 0) > 0:
             return {"action": "potion"}
         # a focused hit that finishes the fight: set it up (or spend it)
         focused_raw = max(1, int((my_atk - foe_def // 2) * 1.5))
@@ -264,11 +271,14 @@ class GameMind:
             if self_stats.get("focused"):
                 return {"action": "attack"}
             return {"action": "focus"}
-        # the foe out-hits us badly: guard instead of trading
-        if foe_atk > my_def + 8:
+        # the foe out-hits us badly: guard instead of trading — veterans
+        # hold their nerve a little longer before turtling
+        if foe_atk > my_def + 8 - skill:
             return {"action": "defend"}
-        # healthy and off cooldown: fury swings are worth it
-        if self_stats.get("fury_cd", 0) <= 0 and hp >= max_hp * 0.7:
+        # healthy and off cooldown: fury swings are worth it — veterans
+        # commit even when slightly chipped
+        if self_stats.get("fury_cd", 0) <= 0 \
+                and hp >= max_hp * (0.70 - 0.02 * skill):
             return {"action": "fury"}
         return {"action": "attack"}
 

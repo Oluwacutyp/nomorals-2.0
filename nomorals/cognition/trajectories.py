@@ -35,6 +35,12 @@ __all__ = ["TrajectoryStore", "normalize_error", "cluster_key_for"]
 _DEFAULT_HALF_LIFE_DAYS = 14.0
 _EMPTY_PRIOR = 0.5
 _SECONDS_PER_DAY = 86_400.0
+#: Rows older than this are dropped by the retention prune.  With the
+#: default 14-day half-life a 90-day-old outcome carries ~1% weight, so
+#: pruning it does not move scoring — it just bounds table growth.
+DEFAULT_RETENTION_DAYS = 90.0
+#: At most one opportunistic prune per record() call chain per hour.
+_PRUNE_INTERVAL_S = 3600.0
 
 _TRAJECTORIES_DDL = """
 CREATE TABLE IF NOT EXISTS cog_trajectories (
@@ -56,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_cog_traj_model
     ON cog_trajectories(model_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cog_traj_skill
     ON cog_trajectories(skill_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_cog_traj_created
+    ON cog_trajectories(created_at);
 """
 
 # ── error normalization ──────────────────────────────────────────────────
@@ -67,6 +75,7 @@ _RE_ISO_TS = re.compile(
     r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
     r"(?:Z|[+-]\d{2}:?\d{2})?"
 )
+_RE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _RE_TIME = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\b")
 _RE_UUID = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -98,6 +107,7 @@ def normalize_error(error: str) -> str:
         return "(no error message)"
     sig = _RE_HEX_ADDR.sub("<addr>", first_line)
     sig = _RE_ISO_TS.sub("<ts>", sig)
+    sig = _RE_DATE.sub("<date>", sig)
     sig = _RE_TIME.sub("<ts>", sig)
     sig = _RE_UUID.sub("<id>", sig)
     sig = _RE_HEX_BLOB.sub("<id>", sig)
@@ -130,6 +140,9 @@ class TrajectoryStore:
             self.db = Database(":memory:" if db is None else str(db))
         self.db.executescript(_TRAJECTORIES_DDL)
         self._lock = threading.RLock()
+        # -inf so the first record() always runs the retention prune,
+        # regardless of process uptime (monotonic clocks start near 0).
+        self._last_prune = float("-inf")
 
     # ── recording ────────────────────────────────────────────────────────
     def record(
@@ -146,6 +159,7 @@ class TrajectoryStore:
         error: str = "",
     ) -> None:
         """Record one execution outcome."""
+        self._maybe_prune()
         self._add(
             task_kind=task_kind,
             capability=capability,
@@ -196,6 +210,39 @@ class TrajectoryStore:
                 ),
             )
         return row_id
+
+    # ── retention ────────────────────────────────────────────────────────
+    def _maybe_prune(self) -> None:
+        """Opportunistic retention prune — at most once an hour, never raises."""
+        now_m = time.monotonic()
+        if now_m - self._last_prune < _PRUNE_INTERVAL_S:
+            return
+        self._last_prune = now_m
+        try:
+            dropped = self.prune()
+        except Exception:  # noqa: BLE001 - pruning is hygiene, not load-bearing
+            _log.debug("trajectory auto-prune failed", exc_info=True)
+        else:
+            if dropped:
+                _log.info("trajectory prune dropped %d stale rows", dropped)
+
+    def prune(self, older_than_days: float = DEFAULT_RETENTION_DAYS) -> int:
+        """Delete trajectories older than ``older_than_days``.
+
+        Returns the number of rows deleted.  The store is otherwise
+        append-only, so without this the table — and the full-scan in
+        :meth:`failure_clusters` — grows without bound on a long-running
+        bot.  Rows past the retention window carry ~zero scoring weight
+        (14-day half-life → a 90-day-old outcome weighs ~1%), so scoring
+        is unaffected; failure-cluster *counts* reflect the window.
+        """
+        cutoff = time.time() - float(older_than_days) * _SECONDS_PER_DAY
+        with self._lock:
+            cur = self.db.execute(
+                "DELETE FROM cog_trajectories WHERE created_at < ?",
+                (cutoff,),
+            )
+            return int(cur.rowcount or 0)
 
     # ── scoring ──────────────────────────────────────────────────────────
     def _slice(self, task_kind: str, capability: str, model_id: str,
