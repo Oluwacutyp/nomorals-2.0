@@ -111,6 +111,10 @@ class _RuntimeStub:
         # attribute access already yields the plain function — no __get__.
         self._find_mission = PartnerRuntime._find_mission
         self._mission_template_spec = PartnerRuntime._mission_template_spec
+        # _resume_job/_retry_job one-shot threads call this in a finally
+        # block to drop their per-thread DB connection; bind the real
+        # method so the stub exercises the same release path.
+        self._release_db_thread = PartnerRuntime._release_db_thread.__get__(self)
 
 
 # ── verb tests ───────────────────────────────────────────────────────────────

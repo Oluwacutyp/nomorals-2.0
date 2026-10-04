@@ -239,6 +239,10 @@ class ReviewEveryDiffTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         self.fx.write("one.py", "A = 1\n")
         self.fx.write("two.py", "B = 1\n")
+        # CodingAgent.run() defaults its acceptance command to
+        # `python3 "main.py"`: without the entrypoint the accept step can
+        # never go green and the loop exhausts its budget failing loudly.
+        self.fx.write("main.py", "print('ready')\n")
         router = ScriptedRouter([
             _json_block({"files": [
                 {"path": "one.py", "why": "bump A", "new_file": False},

@@ -16,7 +16,7 @@ from nomorals.agents.search.engine import SearchEngine
 from nomorals.agents.search.summarize import extractive_summarize, model_summarize
 from nomorals.cli import _cmd_models_doctor
 from nomorals.core.config import load_settings
-from nomorals.core.errors import ToolError
+from nomorals.core.errors import ConfigError, ToolError
 from nomorals.core.result import Ok
 from nomorals.llm.base import LLMResponse, Message, SamplingParams
 
@@ -104,7 +104,15 @@ class NoSilentMockTest(unittest.TestCase):
         ]
 
     def test_broken_chain_boots_model_less_not_fake(self) -> None:
-        settings = _settings(self.tmp.name, **{"llm.provider": "banana", "llm.fallback_chain": ""})
+        # A known provider with no credentials is skipped by the chain
+        # builder (the real production path — groq without a key can only
+        # fail at call time, so it is never registered). The boot must be
+        # model-less, never a silent scripted mock.
+        settings = _settings(
+            self.tmp.name,
+            **{"llm.provider": "groq", "llm.fallback_chain": "",
+               "llm.groq_api_key": ""},
+        )
         context = build_context(settings, with_executor=False, with_tools=False)
         try:
             self.assertNotIn("mock", context.router.providers())
@@ -113,8 +121,11 @@ class NoSilentMockTest(unittest.TestCase):
             context.close()
 
     def test_opt_in_mock_restores_old_behavior(self) -> None:
-        settings = _settings(self.tmp.name, **{"llm.provider": "banana", "llm.fallback_chain": "",
-                             "llm.allow_mock_fallback": "1"})
+        settings = _settings(
+            self.tmp.name,
+            **{"llm.provider": "groq", "llm.fallback_chain": "",
+               "llm.groq_api_key": "", "llm.allow_mock_fallback": "1"},
+        )
         context = build_context(settings, with_executor=False, with_tools=False)
         try:
             self.assertEqual(self._chat_capable(context), ["mock"])
@@ -149,12 +160,17 @@ class DoctorTest(unittest.TestCase):
             context.close()
 
     def test_unknown_provider_fails_loudly(self) -> None:
-        settings = _settings(self.tmp.name, **{"llm.provider": "banana", "llm.fallback_chain": ""})
-        context = build_context(settings, with_executor=False, with_tools=False)
-        try:
-            self.assertEqual(_cmd_models_doctor(self.args, context), 1)
-        finally:
-            context.close()
+        # Fail-fast config validation: an unknown provider name is rejected
+        # at settings load — a clear ConfigError naming the offender and
+        # listing the known providers — instead of booting model-less. The
+        # CLI's top-level handler turns this into exit code 1 with the
+        # message on stderr.
+        with self.assertRaises(ConfigError) as cm:
+            _settings(self.tmp.name,
+                      **{"llm.provider": "banana", "llm.fallback_chain": ""})
+        message = str(cm.exception)
+        self.assertIn("banana", message)
+        self.assertIn("known", message)
 
 
 class CurateTest(unittest.TestCase):

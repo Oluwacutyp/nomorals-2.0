@@ -249,6 +249,10 @@ class APIServer:
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
         # (method, path) -> human description, surfaced by GET /docs.
         self._route_docs: dict[tuple[str, str], str] = {}
+        # (method, path) keys that skip bearer auth entirely — tokenless
+        # liveness only. Anything registered here must return a static
+        # payload with no DB, version, or provider facts (see /live).
+        self._public_routes: set[tuple[str, str]] = set()
         self._register_defaults()
 
     # ── principals ─────────────────────────────────────────────────────────
@@ -316,13 +320,16 @@ class APIServer:
         finally:
             self._tls.principal = previous
 
-    def route(self, method: str, path: str, *, description: str = ""):
+    def route(self, method: str, path: str, *, description: str = "",
+              public: bool = False):
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             key = (method.upper(), path)
             self._routes[key] = fn
             # An explicit description wins; otherwise fall back to the
             # handler's name so /docs never shows a blank line.
             self._route_docs[key] = description or fn.__name__
+            if public:
+                self._public_routes.add(key)
             return fn
 
         return decorator
@@ -332,6 +339,17 @@ class APIServer:
     def _register_defaults(self) -> None:
         context = self.context
         server = self
+
+        @self.route("GET", "/live", public=True,
+                   description="Tokenless liveness probe for dumb supervisors "
+                               "(systemd, Docker HEALTHCHECK): static "
+                               "{\"ok\": true}, no auth, no DB, no version, "
+                               "no provider facts")
+        def live(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            # Deliberately static: a supervisor only needs alive/dead.
+            # Anything informative (providers, beacon state, last_error)
+            # stays behind the bearer token on /health.
+            return {"ok": True}
 
         @self.route("GET", "/health", description="Health check: version, schema, process and bot runtime state")
         def health(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
@@ -836,12 +854,18 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             if not _ROUTE.match(parsed.path):
                 self._respond(400, {"error": "malformed path"})
                 return
-            principal = server.resolve_principal(
-                self.headers.get("Authorization", "")
-            )
-            if principal is None:
-                self._respond(401, {"error": "missing or invalid bearer token"})
-                return
+            if (method.upper(), parsed.path) in server._public_routes:
+                # Tokenless liveness: skip bearer auth and serve the static
+                # route under the bounded default principal (dispatch fills
+                # it in when principal is None).
+                principal = None
+            else:
+                principal = server.resolve_principal(
+                    self.headers.get("Authorization", "")
+                )
+                if principal is None:
+                    self._respond(401, {"error": "missing or invalid bearer token"})
+                    return
             if method == "GET" and parsed.path == "/stream":
                 # SSE cannot go through the JSON dispatch: the connection is
                 # held open and framed as text/event-stream. Reuse the stream

@@ -422,6 +422,24 @@ class HttpLimitTests(unittest.TestCase):
                                     self._authed(), body)
         self.assertEqual(status, 413)
 
+    def test_live_probe_needs_no_token(self) -> None:
+        # Dumb supervisors (systemd, Docker HEALTHCHECK) cannot mint a
+        # bearer token: GET /live answers 200 with a static payload,
+        # with no token, a wrong token, or a valid one.
+        for headers in ({}, {"Authorization": "Bearer nope"},
+                        self._authed()):
+            status, raw = self.live.raw("GET", "/live", headers)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw), {"ok": True})
+
+    def test_health_still_requires_token(self) -> None:
+        # The informative /health stays behind bearer auth.
+        status, _ = self.live.raw("GET", "/health", {})
+        self.assertEqual(status, 401)
+        status, raw = self.live.raw("GET", "/health", self._authed())
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(raw)["ok"])
+
     def test_unauthorized_without_token(self) -> None:
         body = json.dumps({"name": "note_read"}).encode()
         status, _ = self.live.raw(
