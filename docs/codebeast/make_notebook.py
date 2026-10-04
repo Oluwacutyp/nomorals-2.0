@@ -210,7 +210,13 @@ trainer = SFTTrainer(
     tokenizer=tokenizer,
     train_dataset=train_ds,
     eval_dataset=val_ds,
-    dataset_text_field=None,       # "messages" column + chat template
+    # Newer Unsloth/TRL *requires* formatting_func when there is no plain
+    # text column. Our data has a "messages" column -> render it through
+    # the model's chat template into text.
+    formatting_func=lambda examples: {"text": [
+        tokenizer.apply_chat_template(c, tokenize=False,
+                                      add_generation_prompt=False)
+        for c in examples["messages"]]},
     max_seq_length=SEQ_LEN,
     args=TrainingArguments(**args),
 )
