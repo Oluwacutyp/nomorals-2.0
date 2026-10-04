@@ -152,8 +152,14 @@ def describe_stats(stats: StatBlock,
 class StatStore:
     """Persistent per-player RPG attributes. Backed by ``game_stats``.
 
-    Level-up points are granted lazily: when the store sees a player
-    whose level exceeds ``level_applied``, it tops up ``unspent``.
+    Level-up points are granted at the actual level-up event in the
+    game engine (see ``engine.py`` award path). The grant is idempotent:
+    the atomic UPDATE only fires when ``level_applied`` still matches,
+    so points for a level can never be granted twice.
+
+    Display paths (``/stats``) must NEVER grant — they only read.
+    A battle-setup mirror in the engine tops up any points missed due
+    to transient failures, as a safety net.
     """
 
     def __init__(self, db: Any) -> None:

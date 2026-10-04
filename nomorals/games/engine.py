@@ -501,7 +501,9 @@ class GameEngine:
             from .stats import StatStore
             store = StatStore(self.db)
             stats = store.get(key)
-            # grant any pending level-up points before the fight
+            # Safety net: top up any level-up points missed due to
+            # transient failures at the level-up event. Idempotent —
+            # never double-grants.
             try:
                 from .progression import level_for_xp
                 prof = self.store.get(key)
