@@ -276,6 +276,10 @@ class ChatGateway:
             owner_chats=self.owner_chats,
             db_is_owner=bool(row.get("is_owner")),
         )
+        # Stash the owner verdict on the message so downstream (runtime
+        # command gating) uses the same answer instead of recomputing it
+        # with less information.
+        message.meta["is_owner"] = is_owner
         if not is_owner:
             with self._locks_guard:
                 window = self._windows.get(message.chat.key)

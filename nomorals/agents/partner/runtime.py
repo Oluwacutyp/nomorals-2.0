@@ -863,6 +863,10 @@ class PartnerRuntime(
     def _is_operator(self, message: ChatMessage) -> bool:
         # Same single owner test as reply gating — a control command from a
         # chat the gating layer doesn't call owner must not run.
+        # Prefer the gateway's verdict (stashed in meta) which includes the
+        # DB-registered owner chats; fall back to the config-only check.
+        if message.meta.get("is_owner") is True:
+            return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
 
     def _build_adapter(self, name: str) -> Any:
