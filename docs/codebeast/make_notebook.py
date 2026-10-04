@@ -74,19 +74,48 @@ import glob as _glob
 
 train_file, val_file = "codebeast500k_train.jsonl.gz", "codebeast500k_val.jsonl.gz"
 
+def _find_input(want):
+    # Robust Kaggle-input search: recursive, case-insensitive, .jsonl or
+    # .jsonl.gz, any filename containing 'train' / 'val'. The exact-name
+    # lookup kept failing on real uploads (different case, no .gz, ...).
+    for f in sorted(_glob.glob("/kaggle/input/**/*", recursive=True)):
+        p = Path(f)
+        if not p.is_file():
+            continue
+        n = p.name.lower()
+        if n.endswith((".jsonl", ".jsonl.gz")) and want in n:
+            return f
+    return None
+
 def _find(name):
     for cand in (name, RUN_DIR + "/" + name, "/content/" + name):
         if Path(cand).exists():
             return cand
     hits = _glob.glob(f"/kaggle/input/*/{name}")
-    return hits[0] if hits else None
+    if hits:
+        return hits[0]
+    # fall back to the fuzzy search for the standard filenames
+    if "train" in name:
+        return _find_input("train")
+    if "val" in name:
+        return _find_input("val")
+    return None
 
 tf, vf = _find(train_file), _find(val_file)
+if tf is None:
+    tf = _find_input("train")
+if vf is None:
+    vf = _find_input("val")
 
 if tf and vf:
-    print("✅ Using prebuilt 500K dataset.")
+    print(f"✅ Using prebuilt files:\\n   train: {tf}\\n   val:   {vf}")
     train_ds = load_dataset("json", data_files=tf, split="train")
     val_ds   = load_dataset("json", data_files=vf, split="train")
+elif tf:
+    print(f"✅ Found train file ({tf}) but no val file — carving 400 val rows off train.")
+    full = load_dataset("json", data_files=tf, split="train")
+    split = full.train_test_split(test_size=min(400, len(full) // 10), seed=42)
+    train_ds, val_ds = split["train"], split["test"]
 else:
     bf = _find("build_500k.py")
     if bf:
