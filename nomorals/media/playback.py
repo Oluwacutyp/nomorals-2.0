@@ -554,12 +554,18 @@ class PlaybackEngine:
             has_module = False
         if has_module:
             import yt_dlp
+            import contextlib
+            import io
             try:
-                with yt_dlp.YoutubeDL(
-                        {"quiet": True, "no_warnings": True,
-                         "skip_download": True}) as ydl:
-                    info = ydl.extract_info(f"ytsearch1:{query}",
-                                            download=False)
+                # Suppress yt-dlp's stderr — it writes "ERROR:" lines that
+                # pollute test output and CI logs. We raise ToolError on
+                # failure anyway.
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with yt_dlp.YoutubeDL(
+                            {"quiet": True, "no_warnings": True,
+                             "skip_download": True}) as ydl:
+                        info = ydl.extract_info(f"ytsearch1:{query}",
+                                                download=False)
             except Exception as exc:  # noqa: BLE001
                 raise ToolError(f"youtube search failed: {exc}") from exc
             entries = ((info or {}).get("entries") or [])

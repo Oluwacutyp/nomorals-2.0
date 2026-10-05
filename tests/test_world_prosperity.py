@@ -293,6 +293,10 @@ class WorldEventTests(unittest.TestCase):
         return s["pending_choice"]
 
     def test_refugees_choice(self):
+        # Seed the room's RNG for determinism — the test was flaky because
+        # the day tick uses random events that can affect pop/food.
+        self.room.seed = 42
+        self.room._rng_instance = None  # force re-seed on next rng() call
         pc = self._offer("refugees")
         self.assertIsNotNone(pc)
         s = self.room.state
