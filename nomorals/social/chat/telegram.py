@@ -664,9 +664,14 @@ class TelegramAdapter(ChatAdapter):
             # Stable numeric Telegram user id — game identity keys off
             # this so display-name changes don't split profiles.
             sender_id = str(getattr(sender_entity, "id", "") or "")
+            # Platform handle (no "@") — stored on the game profile for
+            # @mention lookup. Same on every endpoint.
+            sender_username = str(
+                getattr(sender_entity, "username", None) or "")
         else:
             sender_name = title
             sender_id = ""
+            sender_username = ""
         # Forum-topic detection (best effort): in a forum supergroup, replies
         # inside a topic carry reply_to pointing at the topic's anchor.
         thread_id = ""
@@ -692,6 +697,7 @@ class TelegramAdapter(ChatAdapter):
             text=text,
             sender=str(sender_name),
             sender_id=sender_id,
+            sender_username=sender_username,
             mentioned=self._mentions_me(text),
             media=media,
             reply_to=str(getattr(getattr(message, "reply_to", None), "id", "") or ""),
@@ -1062,6 +1068,7 @@ class TelegramBotAdapter(ChatAdapter):
         # Stable numeric Telegram user id — game identity keys off this
         # so username/display-name changes don't split profiles.
         who_id = str(sender.get("id", "") or "")
+        who_username = str(sender.get("username") or "")
         return ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
                          title=chat.get("title", "") or who, peer=who),
@@ -1069,6 +1076,7 @@ class TelegramBotAdapter(ChatAdapter):
             text=text,
             sender=who,
             sender_id=who_id,
+            sender_username=who_username,
             media=media,
             reply_to=reply_to,
             mentioned=mentioned,
@@ -1130,6 +1138,7 @@ class TelegramBotAdapter(ChatAdapter):
             text=data if data.startswith("/") else f"/{data}",
             sender=who,
             sender_id=str(sender.get("id", "") or ""),
+            sender_username=str(sender.get("username") or ""),
             media=[],
             reply_to="",
             mentioned=False,

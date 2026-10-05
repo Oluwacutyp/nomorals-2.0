@@ -27,9 +27,33 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 
 __all__ = ["AI_PLAYER", "Player", "PlayerStore", "Leaderboard",
-           "GAME_IDENTITY_ALIASES"]
+           "GAME_IDENTITY_ALIASES", "SOFT_DELETE_RESTORE_S"]
 
 _log = get_logger(__name__)
+
+def _caller_sets_username(caller_platform: str,
+                          stored_username: str) -> bool:
+    """True when a sighting from ``caller_platform`` may overwrite the
+    stored Telegram username.
+
+    Both endpoints see the same @handle, so either may report it — but
+    the userbot (``telegram``) is the authority on conflicts, mirroring
+    the display-name rule.  A ``telegram-bot`` sighting only fills in a
+    username when none is stored yet; it never overwrites one.
+    """
+    caller = (caller_platform or "").strip().lower()
+    if not caller:
+        return False
+    canonical = GAME_IDENTITY_ALIASES.get(caller)
+    if canonical is not None:
+        return not (stored_username or "").strip()
+    return True
+
+
+#: Soft-deleted profiles auto-restore when the player plays again inside
+#: this window; afterwards the row may be purged and a fresh profile
+#: starts from zero.
+SOFT_DELETE_RESTORE_S = 48 * 3600
 
 #: The house seat. The AI joins, plays, and is ranked like anyone else.
 AI_PLAYER = "ai"
@@ -81,9 +105,13 @@ class Player:
     platform: str       # telegram|whatsapp|discord|local|ai
     name: str           # display name
     is_ai: bool = False
+    username: str = ""  # platform handle without "@" (Telegram username);
+    # stored on the profile and used for @mention lookup (gifting, pvp).
+    # Same value on every endpoint of one network.
 
     @classmethod
-    def from_sender(cls, platform: str, sender: str, name: str = "") -> "Player":
+    def from_sender(cls, platform: str, sender: str, name: str = "",
+                    username: str = "") -> "Player":
         sender = (sender or "").strip() or "unknown"
         # One human, one game identity: aliased platforms (telegram-bot →
         # telegram) share the same underlying network IDs, so the key
@@ -96,6 +124,7 @@ class Player:
             platform=platform,
             name=(name or sender)[:40],
             is_ai=False,
+            username=(username or "").strip().lstrip("@")[:32],
         )
 
     @classmethod
@@ -110,6 +139,11 @@ class Profile:
     key: str
     name: str = ""
     platform: str = ""
+    username: str = ""          # Telegram handle without "@"; the @mention
+    # lookup key for gifting/pvp. Same on every endpoint.
+    deleted_at: float = 0.0     # soft-delete timestamp; 0 = live. A
+    # deleted profile auto-restores if the player plays again within
+    # SOFT_DELETE_RESTORE_S, and may be purged after that window.
     coins: int = 0
     points: int = 0
     wins: int = 0
@@ -132,6 +166,7 @@ class Profile:
     def to_dict(self) -> dict[str, Any]:
         return {
             "key": self.key, "name": self.name, "platform": self.platform,
+            "username": self.username, "deleted_at": self.deleted_at,
             "coins": self.coins, "points": self.points, "wins": self.wins,
             "losses": self.losses, "draws": self.draws, "streak": self.streak,
             "best_streak": self.best_streak, "games_played": self.games_played,
@@ -149,6 +184,8 @@ class Profile:
         return cls(
             key=row["player_key"], name=row.get("display") or "",
             platform=row.get("platform") or "",
+            username=(row.get("username") or "").strip().lstrip("@"),
+            deleted_at=float(row.get("deleted_at") or 0.0),
             coins=int(row.get("coins") or 0), points=int(row.get("points") or 0),
             wins=int(row.get("wins") or 0), losses=int(row.get("losses") or 0),
             draws=int(row.get("draws") or 0), streak=int(row.get("streak") or 0),
@@ -187,7 +224,8 @@ class PlayerStore:
         self._lock = PlayerStore._LOCK
 
     # ── reads ────────────────────────────────────────────────────────────────
-    def get(self, key: str, *, name: str = "", platform: str = "") -> Profile:
+    def get(self, key: str, *, name: str = "", platform: str = "",
+            username: str = "") -> Profile:
         """Fetch a profile, creating a fresh one on first sight.
 
         Row creation is atomic (INSERT OR IGNORE under the store lock)
@@ -206,8 +244,15 @@ class PlayerStore:
         the userbot (``telegram``) is the name authority for the aliased
         Telegram endpoints, so its sightings always update the name (a
         rename takes effect); a ``telegram-bot`` sighting never
-        overwrites a userbot-set name.
+        overwrites a userbot-set name.  The Telegram ``username``
+        follows the same authority rule and is stored for @mention
+        lookup (gifting, PvP challenges).
+
+        Soft-delete: a profile deleted via ``/game delete`` auto-restores
+        when the player plays again within ``SOFT_DELETE_RESTORE_S``;
+        after that window the row is purged and a fresh profile starts.
         """
+        username = (username or "").strip().lstrip("@")[:32]
         with self._lock:
             # ID-keyed lookup: sweep every legacy name-keyed profile
             # ever sighted for this sender_id into the ID key (records
@@ -227,6 +272,22 @@ class PlayerStore:
                 _log.debug("game_players read failed", exc_info=True)
             if row is not None:
                 prof = Profile.from_row(row)
+                if prof.deleted_at:
+                    if (time.time() - prof.deleted_at
+                            <= SOFT_DELETE_RESTORE_S):
+                        # Back within the restore window: resurrect.
+                        self._clear_deleted(key)
+                        prof.deleted_at = 0.0
+                        _log.info("game profile %s restored from soft-delete",
+                                  key)
+                    else:
+                        # Window expired: purge and start fresh below.
+                        self._purge_profile(key)
+                        _log.info("game profile %s purged after delete window",
+                                  key)
+                        row = None
+            if row is not None:
+                prof = Profile.from_row(row)
                 if (name and name != prof.name
                         and _caller_sets_display_name(prof.platform,
                                                       platform)):
@@ -235,19 +296,27 @@ class PlayerStore:
                     if platform:
                         prof.platform = platform
                     prof.updated_at = time.time()
+                if (username and username.lower() != (prof.username or "").lower()
+                        and _caller_sets_username(platform, prof.username)):
+                    self._refresh_username(key, username)
+                    prof.username = username
+                    prof.updated_at = time.time()
                 return prof
-            prof = Profile(key=key, name=name, platform=platform)
+            prof = Profile(key=key, name=name, platform=platform,
+                           username=username)
             if key != AI_PLAYER and self.db is not None:
                 try:
                     with self.db.transaction():
                         self.db.execute(
                             "INSERT OR IGNORE INTO game_players (player_key, "
-                            "platform, display, coins, points, wins, losses, "
+                            "platform, display, username, deleted_at, coins, "
+                            "points, wins, losses, "
                             "draws, streak, best_streak, games_played, xp, "
                             "per_game, items, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
-                                prof.key, prof.platform, prof.name, prof.coins,
+                                prof.key, prof.platform, prof.name,
+                                prof.username, 0.0, prof.coins,
                                 prof.points, prof.wins, prof.losses, prof.draws,
                                 prof.streak, prof.best_streak, prof.games_played,
                                 prof.xp, json.dumps(prof.per_game),
@@ -309,6 +378,106 @@ class PlayerStore:
                     )
         except Exception:  # noqa: BLE001
             _log.debug("game_players display refresh failed", exc_info=True)
+
+    def _refresh_username(self, key: str, username: str) -> None:
+        """Targeted username UPDATE. Caller must hold ``self._lock``."""
+        username = (username or "").strip().lstrip("@")[:32]
+        if self.db is None or not username:
+            return
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE game_players SET username = ?, updated_at = ? "
+                    "WHERE player_key = ?",
+                    (username, time.time(), key),
+                )
+        except Exception:  # noqa: BLE001
+            _log.debug("game_players username refresh failed", exc_info=True)
+
+    def find_by_username(self, username: str) -> Profile | None:
+        """Find a live profile by Telegram username (no "@", any case).
+
+        Usernames are unique per Telegram account, so unlike display
+        names this is unambiguous.  Soft-deleted profiles are skipped.
+        """
+        label = (username or "").strip().lstrip("@").lower()
+        if not label or self.db is None:
+            return None
+        try:
+            row = self.db.query_one(
+                "SELECT * FROM game_players WHERE lower(username) = ? "
+                "AND COALESCE(deleted_at, 0) = 0 LIMIT 1",
+                (label,),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        return Profile.from_row(row) if row else None
+
+    # ── soft delete ───────────────────────────────────────────────────
+    # Deleting a profile marks it with a timestamp instead of dropping
+    # the row.  Playing again within SOFT_DELETE_RESTORE_S resurrects
+    # it untouched (see get()); after the window the row is purged and
+    # a fresh profile starts from zero.
+
+    def soft_delete(self, key: str) -> bool:
+        """Mark a profile deleted. Returns False when no live row exists."""
+        with self._lock:
+            if self.db is None:
+                return False
+            try:
+                cur = self.db.execute(
+                    "UPDATE game_players SET deleted_at = ?, updated_at = ? "
+                    "WHERE player_key = ? AND COALESCE(deleted_at, 0) = 0",
+                    (time.time(), time.time(), key),
+                )
+                return cur.rowcount > 0
+            except Exception:  # noqa: BLE001
+                _log.debug("game_players soft_delete failed", exc_info=True)
+                return False
+
+    def _clear_deleted(self, key: str) -> None:
+        """Resurrect a soft-deleted profile. Caller must hold the lock."""
+        if self.db is None:
+            return
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE game_players SET deleted_at = 0, updated_at = ? "
+                    "WHERE player_key = ?",
+                    (time.time(), key),
+                )
+        except Exception:  # noqa: BLE001
+            _log.debug("game_players clear_deleted failed", exc_info=True)
+
+    def _purge_profile(self, key: str) -> None:
+        """Hard-delete a profile and its per-player rows.
+
+        Only called after the soft-delete restore window expired.
+        Caller must hold the lock.
+        """
+        if self.db is None:
+            return
+        try:
+            tables = [str(r["name"]) for r in (
+                self.db.query(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+                or [])]
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            with self.db.transaction():
+                for t in ("game_players", "game_gear", "game_skills",
+                          "game_attributes", "game_titles", "game_stats",
+                          "game_wallet"):
+                    if t in tables:
+                        try:
+                            self.db.execute(
+                                f"DELETE FROM {t} WHERE player_key = ?", (key,))
+                        except Exception:  # noqa: BLE001
+                            _log.debug("purge %s failed for %s", t, key,
+                                       exc_info=True)
+        except Exception:  # noqa: BLE001
+            _log.debug("game_players purge failed", exc_info=True)
 
     # ── stable-ID identity: sighting registry ──────────────────────────
     # One human can be sighted under several display names (userbot
@@ -822,7 +991,9 @@ class PlayerStore:
     def all(self, limit: int = 500) -> list[Profile]:
         try:
             rows = self.db.query(
-                "SELECT * FROM game_players ORDER BY points DESC LIMIT ?",
+                "SELECT * FROM game_players "
+                "WHERE COALESCE(deleted_at, 0) = 0 "
+                "ORDER BY points DESC LIMIT ?",
                 (limit,),
             )
         except Exception:  # noqa: BLE001
@@ -868,7 +1039,8 @@ class PlayerStore:
         """
         with self._lock:
             prof = self.get(player.key, name=player.name,
-                            platform=player.platform)
+                            platform=player.platform,
+                            username=getattr(player, "username", ""))
             prof.games_played += 1
             prof.points += max(0, points)
             prof.coins = max(0, prof.coins + coins)
@@ -895,7 +1067,8 @@ class PlayerStore:
     def add_coins(self, player: Player, amount: int, reason: str = "") -> int:
         with self._lock:
             prof = self.get(player.key, name=player.name,
-                            platform=player.platform)
+                            platform=player.platform,
+                            username=getattr(player, "username", ""))
             prof.coins = max(0, prof.coins + amount)
             prof.updated_at = time.time()
             self._write(prof, ledger=[(amount, reason)] if reason else [])
@@ -913,7 +1086,8 @@ class PlayerStore:
             raise ValueError("spend_coins amount must be >= 0")
         with self._lock:
             prof = self.get(player.key, name=player.name,
-                            platform=player.platform)
+                            platform=player.platform,
+                            username=getattr(player, "username", ""))
             if prof.coins < amount:
                 return None
             prof.coins -= amount
@@ -924,7 +1098,8 @@ class PlayerStore:
     def grant_item(self, player: Player, item: str, count: int = 1) -> dict[str, int]:
         with self._lock:
             prof = self.get(player.key, name=player.name,
-                            platform=player.platform)
+                            platform=player.platform,
+                            username=getattr(player, "username", ""))
             prof.items[item] = int(prof.items.get(item) or 0) + count
             prof.updated_at = time.time()
             self._write(prof)
@@ -934,7 +1109,8 @@ class PlayerStore:
         """Spend one owned item. False if they don't have one."""
         with self._lock:
             prof = self.get(player.key, name=player.name,
-                            platform=player.platform)
+                            platform=player.platform,
+                            username=getattr(player, "username", ""))
             if int(prof.items.get(item) or 0) <= 0:
                 return False
             prof.items[item] = int(prof.items.get(item) or 0) - 1
@@ -958,12 +1134,17 @@ class PlayerStore:
         try:
             with self.db.transaction():
                 self.db.execute(
-                    "INSERT INTO game_players (player_key, platform, display, coins, "
+                    "INSERT INTO game_players (player_key, platform, display, username, "
+                    "deleted_at, coins, "
                     "points, wins, losses, draws, streak, best_streak, games_played, "
                     "xp, per_game, items, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(player_key) DO UPDATE SET platform = excluded.platform, "
-                    "display = excluded.display, coins = excluded.coins, "
+                    "display = excluded.display, "
+                    "username = CASE WHEN excluded.username <> '' THEN excluded.username "
+                    "ELSE game_players.username END, "
+                    "deleted_at = excluded.deleted_at, "
+                    "coins = excluded.coins, "
                     "points = excluded.points, wins = excluded.wins, "
                     "losses = excluded.losses, draws = excluded.draws, "
                     "streak = excluded.streak, best_streak = excluded.best_streak, "
@@ -971,7 +1152,8 @@ class PlayerStore:
                     "per_game = excluded.per_game, "
                     "items = excluded.items, updated_at = excluded.updated_at",
                     (
-                        p.key, p.platform, p.name, p.coins, p.points, p.wins,
+                        p.key, p.platform, p.name, p.username, p.deleted_at,
+                        p.coins, p.points, p.wins,
                         p.losses, p.draws, p.streak, p.best_streak,
                         p.games_played, p.xp, json.dumps(p.per_game),
                         json.dumps(p.items), p.created_at, p.updated_at,

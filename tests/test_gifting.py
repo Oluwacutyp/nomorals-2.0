@@ -50,7 +50,9 @@ def _db():
     q.execute(
         "CREATE TABLE IF NOT EXISTS game_players ("
         "player_key TEXT PRIMARY KEY, platform TEXT NOT NULL DEFAULT '', "
-        "display TEXT NOT NULL DEFAULT '', coins INTEGER NOT NULL DEFAULT 0, "
+        "display TEXT NOT NULL DEFAULT '', username TEXT NOT NULL DEFAULT '', "
+        "deleted_at REAL NOT NULL DEFAULT 0, "
+        "coins INTEGER NOT NULL DEFAULT 0, "
         "points INTEGER NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, "
         "losses INTEGER NOT NULL DEFAULT 0, draws INTEGER NOT NULL DEFAULT 0, "
         "streak INTEGER NOT NULL DEFAULT 0, "

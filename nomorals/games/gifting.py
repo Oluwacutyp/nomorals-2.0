@@ -206,26 +206,44 @@ def _sender_of(key: str) -> str:
 
 
 def resolve_recipient(store: Any, name: str) -> tuple[Any | None, str]:
-    """Find a player profile by display-name mention.
+    """Find a player profile by @mention.
 
-    Returns (profile, message). Strips a leading @. Exact
-    case-insensitive match wins; a single partial match is accepted;
-    zero or many matches return (None, helpful message).
+    Returns (profile, message). Strips a leading @. Match priority:
 
-    Matching is done against the display name AND the sender portion of
-    the player key (with telegram-bot → telegram folded), so a player
-    whose profile name differs from their handle is still findable.
+    1. Telegram username (exact, case-insensitive) — usernames are
+       unique per account, so this is unambiguous.
+    2. Display name (exact, case-insensitive).
+    3. Sender portion of the player key (telegram-bot → telegram folded).
+    4. A single partial match across username/display/key.
+
+    Zero or many matches return (None, helpful message).
     """
     label = (name or "").strip().lstrip("@")
     if not label:
         return None, "gift to whom? /gift @name <coins|gear|item>"
+    low = label.lower()
+
+    # 1. Username first — the unambiguous handle.
+    find_by_username = getattr(store, "find_by_username", None)
+    if callable(find_by_username):
+        try:
+            prof = find_by_username(label)
+        except Exception:  # noqa: BLE001
+            prof = None
+        if prof is not None:
+            return prof, ""
+
     try:
         profiles = store.all(limit=500)
     except Exception:  # noqa: BLE001
         profiles = []
-    low = label.lower()
+
+    def _uname(p: Any) -> str:
+        return (getattr(p, "username", "") or "").lower()
 
     def _matches(p: Any) -> bool:
+        if _uname(p) == low:
+            return True
         if (p.name or "").lower() == low:
             return True
         # Match the sender portion of the key, folding identity aliases
@@ -234,6 +252,8 @@ def resolve_recipient(store: Any, name: str) -> tuple[Any | None, str]:
         return sender == low
 
     def _partial(p: Any) -> bool:
+        if low in _uname(p):
+            return True
         if low in (p.name or "").lower():
             return True
         sender = _sender_of(_canonical_key(p.key or "")).lower()

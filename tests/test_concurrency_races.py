@@ -29,6 +29,7 @@ class FakeDB:
         self.conn.executescript("""
             CREATE TABLE game_players (
                 player_key TEXT PRIMARY KEY, platform TEXT, display TEXT,
+                username TEXT DEFAULT '', deleted_at REAL DEFAULT 0,
                 coins INTEGER DEFAULT 0, points INTEGER DEFAULT 0,
                 wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0,
                 draws INTEGER DEFAULT 0, streak INTEGER DEFAULT 0,

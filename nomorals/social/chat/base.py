@@ -148,6 +148,9 @@ class ChatMessage:
     sender_id: str = ""  # stable platform user id (numeric on Telegram);
     # when present, game identity keys off this instead of the display
     # name, so renames don't split profiles.
+    sender_username: str = ""  # platform handle without "@" (Telegram
+    # username); stored on the game profile and used for @mention lookup
+    # (gifting, pvp challenges). Same value on every endpoint.
     media: list[MediaRef] = field(default_factory=list)
     reply_to: str = ""
     mentioned: bool = False  # the platform tagged/mentioned our account in this message
@@ -168,6 +171,10 @@ class ChatMessage:
             self.sender_id = ""
         else:
             self.sender_id = str(self.sender_id)
+        if self.sender_username is None:
+            self.sender_username = ""
+        else:
+            self.sender_username = str(self.sender_username).lstrip("@")
         if self.reply_to is None:
             self.reply_to = ""
         if self.message_id is None:
@@ -180,6 +187,7 @@ class ChatMessage:
             "text": self.text,
             "sender": self.sender,
             "sender_id": self.sender_id,
+            "sender_username": self.sender_username,
             "media": [m.to_dict() for m in self.media],
             "reply_to": self.reply_to,
             "mentioned": self.mentioned,

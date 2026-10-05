@@ -1367,6 +1367,153 @@ CREATE INDEX IF NOT EXISTS idx_game_identity_names_sender
 """
 
 
+_V78_GAME_PLAYERS_USERNAME = """
+-- Username + soft-delete on game_players.  The Telegram @handle is
+-- stored per profile for @mention lookup (gifting, PvP challenges);
+-- usernames are unique per account, so unlike display names they are
+-- unambiguous.  deleted_at implements soft-delete: /game delete marks
+-- the row, playing again within 48h restores it, afterwards it may be
+-- purged and a fresh profile starts.
+ALTER TABLE game_players ADD COLUMN username TEXT NOT NULL DEFAULT '';
+ALTER TABLE game_players ADD COLUMN deleted_at REAL NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_game_players_username
+    ON game_players(username);
+"""
+
+
+def _apply_game_identity_untangle(db: object) -> None:
+    """Untangle the chfjdhx/peacethefirst identity mix-up (one-time repair).
+
+    History: the lazy legacy-name merge folded several display-name
+    profiles into ``telegram:5478650254`` (the owner's main account),
+    including ``telegram:Mary`` — the owner's alt account
+    (ID 7541672134, @chfjdhx).  That left the alt with no profile and
+    left the main account's stored data carrying the alt's username, so
+    ``/gift @chfjdhx`` resolved to the owner ("that's you") while
+    ``/gift @peacethefirst`` found nobody.
+
+    This repair, run once:
+    1. Sets the main profile's username to ``peacethefirst`` (its real
+       handle) when it is empty or still ``chfjdhx`` — never clobbers
+       a correct value.
+    2. Restores the alt as its own ``telegram:7541672134`` profile with
+       its pre-merge values (116 XP, 5076 coins, 85 points, 1W/2L/0D,
+       3 games, @chfjdhx / Mary) — but only when that row is missing
+       or still fresh (never overwrites a profile the alt built since).
+    3. Moves one ``katana_legendary`` gear instance from the main
+       profile back to the alt (the gifted item), when present.
+    4. Subtracts the alt's summed counters (coins/points/wins/losses/
+       games) from the main profile, floored at zero — the exact
+       inverse of the merge.  XP used max(), so nothing is subtracted.
+
+    Every step is precondition-checked; on any unexpected state the
+    repair logs and skips instead of guessing.
+    """
+    import time as _time
+
+    def _q1(sql: str, args: tuple = ()):  # type: ignore[no-untyped-def]
+        try:
+            return db.query_one(sql, args)  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
+    def _tables() -> set:
+        try:
+            rows = db.query(  # type: ignore[attr-defined]
+                "SELECT name FROM sqlite_master WHERE type = 'table'") or []
+            return {str(r["name"]) for r in rows}
+        except Exception:
+            return set()
+
+    have = _tables()
+    if "game_players" not in have:
+        return
+    MAIN = "telegram:5478650254"
+    ALT = "telegram:7541672134"
+    now = _time.time()
+
+    main = _q1("SELECT * FROM game_players WHERE player_key = ?", (MAIN,))
+    if main is None:
+        return  # not the expected DB — nothing to repair
+
+    def _num(d: dict, k: str) -> int:
+        try:
+            return int(d.get(k, 0) or 0)
+        except Exception:
+            return 0
+
+    try:
+        with db.transaction():  # type: ignore[attr-defined]
+            # 1. Main's username: peacethefirst, never chfjdhx.
+            cur_un = str(main.get("username") or "").strip().lower()
+            if cur_un in ("", "chfjdhx"):
+                db.execute(  # type: ignore[attr-defined]
+                    "UPDATE game_players SET username = ?, updated_at = ? "
+                    "WHERE player_key = ?",
+                    ("peacethefirst", now, MAIN))
+            if not str(main.get("display") or "").strip():
+                db.execute(  # type: ignore[attr-defined]
+                    "UPDATE game_players SET display = ?, updated_at = ? "
+                    "WHERE player_key = ?",
+                    ("Peacethefirst", now, MAIN))
+            elif str(main.get("display") or "").strip().lower() == "chfjdhx":
+                # Stale alt username left by the bad merge — restore the
+                # owner's handle. (The userbot sighting would fix this on
+                # the next interaction anyway; do it now for consistency.)
+                db.execute(  # type: ignore[attr-defined]
+                    "UPDATE game_players SET display = ?, updated_at = ? "
+                    "WHERE player_key = ?",
+                    ("Peacethefirst", now, MAIN))
+
+            # 2/3/4. Restore the alt profile (only when missing or fresh).
+            alt = _q1("SELECT * FROM game_players WHERE player_key = ?",
+                      (ALT,))
+            alt_fresh = (
+                alt is None
+                or (_num(alt, "xp") == 0 and _num(alt, "coins") == 0
+                    and _num(alt, "games_played") == 0))
+            if alt_fresh:
+                if alt is None:
+                    db.execute(  # type: ignore[attr-defined]
+                        "INSERT INTO game_players (player_key, platform, "
+                        "display, username, deleted_at, coins, points, wins, "
+                        "losses, draws, streak, best_streak, games_played, "
+                        "xp, per_game, items, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 0, 0, 0, ?, ?, "
+                        "'{}', '{}', ?, ?)",
+                        (ALT, "telegram", "Mary", "chfjdhx",
+                         5076, 85, 1, 2, 3, 116, now, now))
+                else:
+                    db.execute(  # type: ignore[attr-defined]
+                        "UPDATE game_players SET display = ?, username = ?, "
+                        "coins = ?, points = ?, wins = ?, losses = ?, draws = 0, "
+                        "games_played = ?, xp = ?, updated_at = ? "
+                        "WHERE player_key = ?",
+                        ("Mary", "chfjdhx", 5076, 85, 1, 2, 3, 116,
+                         now, ALT))
+                # Move one katana_legendary instance back to the alt.
+                if "game_gear" in have:
+                    row = _q1(
+                        "SELECT id FROM game_gear WHERE player_key = ? "
+                        "AND slug = ? LIMIT 1", (MAIN, "katana_legendary"))
+                    if row is not None:
+                        db.execute(  # type: ignore[attr-defined]
+                            "UPDATE game_gear SET player_key = ? WHERE id = ?",
+                            (ALT, row["id"]))
+                # Inverse of the merge sums (floored at zero).
+                db.execute(  # type: ignore[attr-defined]
+                    "UPDATE game_players SET "
+                    "coins = max(0, coins - 5076), "
+                    "points = max(0, points - 85), "
+                    "wins = max(0, wins - 1), "
+                    "losses = max(0, losses - 2), "
+                    "games_played = max(0, games_played - 3), "
+                    "updated_at = ? WHERE player_key = ?",
+                    (now, MAIN))
+    except Exception as exc:  # noqa: BLE001 - repair must never break boot
+        get_logger(__name__).debug("identity untangle repair skipped: %s", exc)
+
+
 def _apply_game_attributes_rename(db: object) -> None:
     """Fix the game_stats table-name collision.
 
@@ -2732,6 +2879,10 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_game_identity_alias_merge),
     Migration(77, "game_identity_sightings",
               sql=_V77_GAME_IDENTITY_SIGHTINGS),
+    Migration(78, "game_players_username_softdelete",
+              sql=_V78_GAME_PLAYERS_USERNAME),
+    Migration(79, "game_identity_untangle",
+              fn=_apply_game_identity_untangle),
 )
 
 

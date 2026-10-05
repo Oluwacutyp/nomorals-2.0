@@ -40,6 +40,10 @@ def _pop_opt(toks: list, *names: str) -> tuple:
 class RuntimeGamesMixin:
     """RuntimeGamesMixin for :class:`PartnerRuntime`."""
 
+    #: Pending /game delete confirmations: player_key -> expiry timestamp.
+    #: In-memory is fine — if the bot restarts, the user just runs
+    #: /game delete again.  Mirrors the gift flow's 5-minute window.
+    _delete_pending: dict[str, float] = {}
 
     def _control_game(self, tail: str, chat_key: str, *,
                        player: Any = None, kind: str = "dm") -> str:
@@ -78,6 +82,7 @@ class RuntimeGamesMixin:
             lines.append("  /gift confirm · /gift cancel · /gift history")
             lines.append("  /game stats [name] · /game balance · /game shop · "
                          "/game leaderboard")
+            lines.append("  /game delete — delete your profile (48h to undo)")
             return "\n".join(lines)
         if verb == "quit":
             # capture the relay (if any) BEFORE quitting — the engine
@@ -239,6 +244,44 @@ class RuntimeGamesMixin:
                 pass
             body = "\n".join(msgs) or engine.describe(room)
             return f"{diff_line}\n{body}"
+        if verb == "delete":
+            if player is None:
+                return "delete needs a chat sender — run it where you play."
+            rest = " ".join(parts[1:]).strip().lower()
+            store = engine.store
+            if rest == "confirm":
+                exp = self._delete_pending.pop(player.key, 0)
+                if exp < time.time():
+                    return ("nothing to confirm — /game delete to start over "
+                            "(confirmations expire after 5 minutes).")
+                prof = store.get(player.key)
+                if store.soft_delete(player.key):
+                    return (
+                        f"🗑️ {prof.name or 'your'} profile is deleted.\n"
+                        f"changed your mind? just play any game within 48 hours "
+                        f"and it comes back untouched.\n"
+                        f"after 48h it's gone for good and a fresh profile starts.")
+                return "nothing to delete — no live profile found."
+            if rest == "cancel":
+                self._delete_pending.pop(player.key, None)
+                return "cancelled — your profile is safe."
+            prof = store.get(player.key)
+            if not prof.games_played and not prof.coins and not prof.xp:
+                return "nothing to delete — you don't have a profile yet."
+            self._delete_pending[player.key] = time.time() + 5 * 60
+            try:
+                from ...games.progression import level_for_xp
+                lvl = level_for_xp(prof.xp)
+            except Exception:  # noqa: BLE001
+                lvl = 1
+            return (
+                f"⚠️ delete your game profile?\n"
+                f"level {lvl} · {prof.coins} coins · "
+                f"{prof.games_played} games · {prof.wins}W-{prof.losses}L\n"
+                f"this wipes XP, coins, gear, skills and stats.\n"
+                f"you have 48 hours to undo it — just play any game.\n"
+                f"/game delete confirm — do it\n"
+                f"/game delete cancel — keep everything")
         return (f"unknown game {verb!r} — /game list to see the table.")
 
     def _challenge_player(self, game_name: str, to_label: str,
@@ -774,7 +817,10 @@ class RuntimeGamesMixin:
                     "  /gift @ada 100 · /gift @ada katana_rare · "
                     "/gift @ada potion")
         target_label, what = parts[0], parts[1].strip()
-        if target_label.lstrip("@").lower() == (player.name or "").lower():
+        _tlow = target_label.lstrip("@").lower()
+        _me_names = {(player.name or "").lower(),
+                     getattr(player, "username", "").lower()}
+        if _tlow and _tlow in _me_names:
             return "gifting yourself? bold. (no — pick someone else.)"
 
         prof, err = resolve_recipient(engine.store, target_label)
@@ -783,7 +829,8 @@ class RuntimeGamesMixin:
         if prof.key == player.key:
             return "that's you — pick someone else."
         recipient = Player(key=prof.key, platform=prof.platform or "local",
-                           name=prof.name or target_label.lstrip("@"))
+                           name=prof.name or target_label.lstrip("@"),
+                           username=getattr(prof, "username", "") or "")
 
         # coins: a bare number
         if what.replace(",", "").isdigit():
@@ -1182,13 +1229,17 @@ class RuntimeGamesMixin:
 
         sender = (message.sender or "").strip() or "unknown"
         sender_id = (getattr(message, "sender_id", "") or "").strip()
+        username = (getattr(message, "sender_username", "") or "").strip()
         if sender_id:
             # Stable platform user id: one human, one game identity —
             # display-name changes and the telegram/telegram-bot endpoint
             # split can no longer fork profiles.  The display name rides
-            # along as the label (name-authority rules in PlayerStore).
-            return Player.from_sender(message.chat.platform, sender_id, sender)
-        return Player.from_sender(message.chat.platform, sender, sender)
+            # along as the label (name-authority rules in PlayerStore);
+            # the Telegram username rides along for @mention lookup.
+            return Player.from_sender(message.chat.platform, sender_id,
+                                      sender, username=username)
+        return Player.from_sender(message.chat.platform, sender, sender,
+                                  username=username)
 
     @staticmethod
     def _game_player_for_key(chat_key: str) -> Any:
