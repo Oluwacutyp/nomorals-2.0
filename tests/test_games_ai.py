@@ -384,5 +384,42 @@ class EconomyShopTests(unittest.TestCase):
         self.assertGreaterEqual(after, before)
 
 
+class GroupHowtoTests(unittest.TestCase):
+    """Multiplayer games started in a group append a brief how-to-play
+    blurb (join + core loop). DM/solo starts don't."""
+
+    def test_group_start_appends_howto(self):
+        engine, _db, _sent = make_engine()
+        try:
+            _room, msgs = engine.start("t:howto1", "mafia", ADA,
+                                       kind="group")
+            self.assertTrue(any("Mafia is live" in m for m in msgs),
+                            msgs)
+            self.assertTrue(any("/game join" in m for m in msgs))
+        finally:
+            engine.shutdown()
+
+    def test_dm_start_has_no_howto(self):
+        engine, _db, _sent = make_engine()
+        try:
+            _room, msgs = engine.start("t:howto2", "connect4", ADA,
+                                       kind="dm")
+            self.assertFalse(any("Connect 4 —" in m for m in msgs),
+                             msgs)
+        finally:
+            engine.shutdown()
+
+    def test_solo_game_group_start_has_no_howto(self):
+        engine, _db, _sent = make_engine()
+        try:
+            _room, msgs = engine.start("t:howto3", "wordchain", ADA,
+                                       kind="group")
+            # wordchain defines no howto: nothing extra appended
+            self.assertFalse(any("/game join" in m for m in msgs),
+                             msgs)
+        finally:
+            engine.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

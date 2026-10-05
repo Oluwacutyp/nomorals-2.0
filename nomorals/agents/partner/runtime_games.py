@@ -1223,9 +1223,10 @@ class RuntimeGamesMixin:
             chunks.append(text)
         return chunks
 
-    @staticmethod
-    def _game_player(message: Any) -> Any:
-        from ...games.players import Player
+    def _game_player(self, message: Any) -> Any:
+        from dataclasses import replace
+
+        from ...games.players import Player, is_placeholder_name
 
         sender = (message.sender or "").strip() or "unknown"
         sender_id = (getattr(message, "sender_id", "") or "").strip()
@@ -1236,23 +1237,39 @@ class RuntimeGamesMixin:
             # split can no longer fork profiles.  The display name rides
             # along as the label (name-authority rules in PlayerStore);
             # the Telegram username rides along for @mention lookup.
-            return Player.from_sender(message.chat.platform, sender_id,
-                                      sender, username=username)
-        # No numeric sender ID and NOT a DM: the sender is a channel/group
-        # entity (or otherwise unresolvable). Never mint a name-keyed game
-        # profile for it — that's how phantom rows like
-        # `telegram:xauusd_sentinel_signal` were created. Callers already
-        # handle player=None (see _control_game / _route_game_move).
-        kind = getattr(getattr(message, "chat", None), "kind", "")
-        if str(kind).lower() != ChatKind.DM:
-            _log.debug(
-                "game: refusing name-keyed profile for non-DM sender %r "
-                "(kind=%s) — no sender_id",
-                sender, kind,
-            )
-            return None
-        return Player.from_sender(message.chat.platform, sender, sender,
-                                  username=username)
+            player = Player.from_sender(message.chat.platform, sender_id,
+                                        sender, username=username)
+        else:
+            # No numeric sender ID and NOT a DM: the sender is a channel/group
+            # entity (or otherwise unresolvable). Never mint a name-keyed game
+            # profile for it — that's how phantom rows like
+            # `telegram:xauusd_sentinel_signal` were created. Callers already
+            # handle player=None (see _control_game / _route_game_move).
+            kind = getattr(getattr(message, "chat", None), "kind", "")
+            if str(kind).lower() != ChatKind.DM:
+                _log.debug(
+                    "game: refusing name-keyed profile for non-DM sender %r "
+                    "(kind=%s) — no sender_id",
+                    sender, kind,
+                )
+                return None
+            player = Player.from_sender(message.chat.platform, sender, sender,
+                                        username=username)
+        # Canonical display name: the per-message sender label can be a
+        # synthetic `user_<id>` placeholder when the sender entity was
+        # unresolvable (e.g. group messages).  The stored profile holds
+        # the real display name — prefer it so game text says "Mary",
+        # not the placeholder.  Best-effort: without an engine backing
+        # this mixin (unit tests), the per-message label stands.
+        if is_placeholder_name(player.name):
+            try:
+                prof = self._game_engine().store.get_for(player)
+            except Exception:  # noqa: BLE001
+                prof = None
+            if (prof is not None and prof.name
+                    and not is_placeholder_name(prof.name)):
+                player = replace(player, name=prof.name)
+        return player
 
     @staticmethod
     def _game_player_for_key(chat_key: str) -> Any:

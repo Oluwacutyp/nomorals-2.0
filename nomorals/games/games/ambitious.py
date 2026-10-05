@@ -2455,6 +2455,12 @@ class PoliticalGame(MultiGame):
              "the election; ties void it. After 3, the most election "
              "wins makes mayor. One 'veto <name>' per game cancels one "
              "vote (if you own a veto token).")
+    howto = ("\U0001f5f3\ufe0f Political is live — /game join to run (up to 6 candidates).\n"
+             "3 elections. Each: campaign (your turn: make a pledge), then vote "
+             "(name a candidate — yourself counts).\n"
+             "Most votes takes the election; ties void it. Most election wins "
+             "becomes mayor.\n"
+             "One 'veto <name>' per game cancels a single vote.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         return {"election": 1, "elections": 3, "phase": "campaign",

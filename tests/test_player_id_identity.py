@@ -90,7 +90,7 @@ class SenderIdPlumbingTests(unittest.TestCase):
                                        kind=ChatKind.DM),
                           incoming=True, text="/duel", sender="Mary",
                           sender_id="12345")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         self.assertEqual(player.key, "telegram:12345")
         self.assertEqual(player.name, "Mary")
 
@@ -99,7 +99,7 @@ class SenderIdPlumbingTests(unittest.TestCase):
         msg = ChatMessage(chat=ChatRef(platform="telegram", chat_id="1",
                                        kind=ChatKind.DM),
                           incoming=True, text="/duel", sender="Mary")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         self.assertEqual(player.key, "telegram:Mary")
 
     def test_game_player_folds_bot_platform(self):
@@ -108,7 +108,7 @@ class SenderIdPlumbingTests(unittest.TestCase):
                                        kind=ChatKind.DM),
                           incoming=True, text="/duel", sender="chfjdhx",
                           sender_id="12345")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         # Same human as the userbot sighting above: one key.
         self.assertEqual(player.key, "telegram:12345")
 

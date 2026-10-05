@@ -637,6 +637,12 @@ class MafiaGame(MultiGame):
              "or outliving the mafia's credibility; the mafia wins "
              "when the table stops trusting itself. It's a social game "
              "— argue, misdirect, survive.")
+    howto = ("🔪 Mafia is live — /game join to sit at the table.\n"
+             "The house plays the mafia; you're all town. Each night it "
+             "claims one of you.\n"
+             "Days: speak your mind on your turn, then vote by naming a "
+             "suspect (or 'skip').\n"
+             "Survive 5 nights. Argue, misdirect, live.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         ai = [p for p in [] ]  # filled in setup

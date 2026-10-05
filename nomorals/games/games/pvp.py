@@ -623,6 +623,11 @@ class DuelGame(_ArenaCombat, MultiGame):
              "you auto-guard, stall a third time and you forfeit. "
              "Start one in a group (/pvp) or challenge DM-to-DM "
              "(/pvp @user, /arena challenge @user).")
+    howto = ("\u2694\ufe0f PvP duel lobby open — /game join to step in (2 fighters).\n"
+             "Your level, gear, skills and titles all fight with you.\n"
+             "Moves: attack \u00b7 focus \u00b7 fury \u00b7 defend \u00b7 potion "
+             "\u00b7 skill <name> \u00b7 combo <a> + <b> \u00b7 item <gear>.\n"
+             "120s per move — stall twice: auto-guard. Third stall: forfeit.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         return {"fighters": {}, "base": {}, "skill_cd": {},
@@ -825,6 +830,12 @@ class RaidGame(_ArenaCombat, MultiGame):
              "cleaves the whole party every 3rd round, and ENRAGES at "
              "30% HP. Bring friends: the boss scales with party size, "
              "and loot splits by damage dealt. 120s per move.")
+    howto = ("\U0001f432 Raid boss is live — /game join to fight (up to 6).\n"
+             "Everyone hits the boss: attack \u00b7 focus \u00b7 fury \u00b7 defend "
+             "\u00b7 potion \u00b7 skill <name> \u00b7 combo <a> + <b>.\n"
+             "It slams back every round and ENRAGES at 30% HP. "
+             "Loot splits by damage dealt.\n"
+             "120s per move.")
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         return {"fighters": {}, "base": {}, "skill_cd": {},

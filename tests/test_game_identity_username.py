@@ -69,18 +69,18 @@ def make_msg(sender: str, sender_id: str, username: str,
 
 class UsernamePlumbingTests(unittest.TestCase):
     def test_game_player_carries_username(self):
-        p = RuntimeGamesMixin._game_player(
+        p = RuntimeGamesMixin()._game_player(
             make_msg("Mary", "7541672134", "chfjdhx"))
         self.assertEqual(p.key, "telegram:7541672134")
         self.assertEqual(p.username, "chfjdhx")
 
     def test_game_player_strips_at(self):
-        p = RuntimeGamesMixin._game_player(
+        p = RuntimeGamesMixin()._game_player(
             make_msg("Mary", "7541672134", "@chfjdhx"))
         self.assertEqual(p.username, "chfjdhx")
 
     def test_bot_platform_folds_key_keeps_username(self):
-        p = RuntimeGamesMixin._game_player(
+        p = RuntimeGamesMixin()._game_player(
             make_msg("chfjdhx", "7541672134", "chfjdhx",
                      platform="telegram-bot"))
         self.assertEqual(p.key, "telegram:7541672134")
@@ -478,13 +478,13 @@ class GamePlayerGroupGuardTests(unittest.TestCase):
     def test_group_channel_post_returns_none(self):
         # Channel post: sender is the channel name, no numeric ID.
         msg = make_group_msg("xauusd_sentinel_signal", "")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         self.assertIsNone(player)
 
     def test_group_human_sender_uses_id(self):
         # Mary sends /game in a group: her ID-keyed profile is used.
         msg = make_group_msg("Mary", "7541672134", "chfjdhx")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         self.assertIsNotNone(player)
         self.assertEqual(player.key, "telegram:7541672134")
 
@@ -493,7 +493,7 @@ class GamePlayerGroupGuardTests(unittest.TestCase):
         # (the telegram.py DM fallback should prevent this in practice,
         # but the guard must not break DMs).
         msg = make_msg("Someone", "", "")
-        player = RuntimeGamesMixin._game_player(msg)
+        player = RuntimeGamesMixin()._game_player(msg)
         self.assertIsNotNone(player)
         self.assertEqual(player.key, "telegram:Someone")
 
@@ -542,6 +542,52 @@ class PhantomCleanupMigrationTests(unittest.TestCase):
         keys = [r["player_key"] for r in rows]
         self.assertIn("telegram:5478650254", keys)
         self.assertIn("telegram:7541672134", keys)
+
+
+class PlaceholderNameTests(unittest.TestCase):
+    """Synthetic ``user_<id>`` sender labels (emitted by the Telegram
+    adapter when the sender entity can't be resolved, e.g. group
+    messages) must never clobber a real display name, and game text
+    must show the stored canonical name — never the group title, never
+    the placeholder."""
+
+    def test_is_placeholder_name(self):
+        from nomorals.games.players import is_placeholder_name
+        self.assertTrue(is_placeholder_name("user_7541672134"))
+        self.assertFalse(is_placeholder_name("Mary"))
+        self.assertFalse(is_placeholder_name("xauusd_sentinel_signal"))
+        self.assertFalse(is_placeholder_name(""))
+        self.assertFalse(is_placeholder_name("user_"))
+        self.assertFalse(is_placeholder_name("user_abc"))
+
+    def test_placeholder_never_overwrites_canonical_name(self):
+        store = make_store()
+        seed_profile(store, "telegram:7541672134", name="Mary",
+                     username="chfjdhx")
+        prof = store.get("telegram:7541672134", name="user_7541672134",
+                         platform="telegram", username="chfjdhx")
+        self.assertEqual(prof.name, "Mary")
+
+    def test_placeholder_not_recorded_as_sighting(self):
+        store = make_store()
+        seed_profile(store, "telegram:7541672134", name="Mary")
+        store.get("telegram:7541672134", name="user_7541672134",
+                  platform="telegram")
+        names = store._known_names("telegram", "7541672134")
+        self.assertNotIn("user_7541672134", names)
+
+    def test_game_player_resolves_canonical_name(self):
+        # Mary sends /game in a group; the sender entity is unresolvable
+        # so the adapter labels her `user_7541672134`. The Player must
+        # still carry her canonical display name.
+        store = make_store()
+        seed_profile(store, "telegram:7541672134", name="Mary",
+                     username="chfjdhx")
+        harness = _DeleteHarness(store)
+        msg = make_group_msg("user_7541672134", "7541672134", "")
+        player = harness._game_player(msg)
+        self.assertEqual(player.key, "telegram:7541672134")
+        self.assertEqual(player.name, "Mary")
 
 
 if __name__ == "__main__":

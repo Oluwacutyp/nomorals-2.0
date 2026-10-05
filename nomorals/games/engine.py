@@ -399,6 +399,12 @@ class GameEngine:
             intro = game.setup(room, self._mind)
             if intro:
                 msgs.append(intro)
+            # Group starts get a brief how-to-play blurb (join + core
+            # loop) so nobody stares at the table wondering what to do.
+            # Solo/DM games don't need it — the intro is enough there.
+            howto = (getattr(game, "howto", "") or "").strip()
+            if howto and kind != "dm":
+                msgs.append(howto)
             room.status = "active"
             room.turn_started = time.time()
             room.last_activity = time.time()

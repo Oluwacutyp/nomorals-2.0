@@ -97,6 +97,20 @@ def _caller_sets_display_name(stored_platform: str,
     return True
 
 
+def is_placeholder_name(name: str) -> bool:
+    """True for synthetic ``user_<numeric_id>`` sender labels.
+
+    The Telegram adapter emits these when the sender entity can't be
+    resolved (e.g. group messages from uncached users).  They carry no
+    real display information: they must never overwrite a stored
+    display name, and they must never be recorded as identity
+    sightings (which would then try to merge a nonexistent legacy
+    ``telegram:user_<id>`` profile on every read).
+    """
+    n = (name or "").strip()
+    return n.startswith("user_") and n[5:].isdigit() and len(n) > 5
+
+
 @dataclass(frozen=True)
 class Player:
     """One seat at the table: who they are and where they're playing."""
@@ -289,6 +303,7 @@ class PlayerStore:
             if row is not None:
                 prof = Profile.from_row(row)
                 if (name and name != prof.name
+                        and not is_placeholder_name(name)
                         and _caller_sets_display_name(prof.platform,
                                                       platform)):
                     self._refresh_display(key, name, platform)
@@ -572,6 +587,11 @@ class PlayerStore:
             return
         name = (name or "").strip()
         username = (username or "").strip().lstrip("@").lower()
+        if is_placeholder_name(name):
+            # Synthetic label, not a real sighting — don't record it and
+            # don't try to merge a nonexistent `telegram:user_<id>` legacy
+            # row on every read.
+            name = ""
         plat_part, _, sender_part = (id_key or "").partition(":")
         if not sender_part.isdigit():
             return  # not an ID key — nothing to merge into

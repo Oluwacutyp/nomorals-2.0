@@ -313,6 +313,9 @@ class ConnectFourGame(MultiGame):
     ai_seats = 1
     move_timeout = 60
     difficulties = DIFFICULTY_LEVELS
+    howto = ("\U0001f534 Connect 4 — /game join to play (2 players).\n"
+             "Drop a disc on your turn: just send a column number 1–7.\n"
+             "First to line up four — across, down, or diagonal — wins.")
     rules = ("Drop a disc into columns 1–7. First to align four "
              "(horizontal, vertical, or diagonal) wins. The board "
              "is 6 rows × 7 columns. The house thinks ahead — deeper "

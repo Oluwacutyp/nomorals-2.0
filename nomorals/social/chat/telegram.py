@@ -750,7 +750,6 @@ class TelegramAdapter(ChatAdapter):
             sender_username = str(
                 getattr(sender_entity, "username", None) or "")
         else:
-            sender_name = title
             sender_id = ""
             sender_username = ""
             # Sender entity unresolvable — fall back to numeric IDs on the
@@ -772,6 +771,21 @@ class TelegramAdapter(ChatAdapter):
             elif kind == ChatKind.DM and not event_is_group:
                 if chat_id and chat_id.lstrip("-").isdigit():
                     sender_id = chat_id
+            # Display name for an unresolvable sender: in a DM the chat
+            # title IS the peer (= the sender), so it's the right label.
+            # In a group the title is the GROUP's name — using it as the
+            # sender's name misattributes the message ("xauusd_sentinel_
+            # signal is already at the table") and, under the userbot's
+            # name authority, clobbers the sender's canonical game profile
+            # name with the group title.  Use a neutral `user_<id>`
+            # placeholder instead; downstream layers resolve the real
+            # display name from the stored profile.
+            if kind == ChatKind.DM and not event_is_group:
+                sender_name = title
+            elif sender_id:
+                sender_name = f"user_{sender_id}"
+            else:
+                sender_name = title
             if sender_id:
                 _log.debug(
                     "telegram: sender_id fallback — using %s "

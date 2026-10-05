@@ -208,6 +208,10 @@ class MultiGame:
     #: (one message per turn, days between moves) set this to days.
     idle_ttl: float | None = None
     rules: str = ""             # shown by /help and in the intro
+    #: short how-to-play blurb (3-4 lines) posted when a multiplayer
+    #: game starts in a group: how to join and the core loop. Empty =
+    #: no blurb (solo/DM games don't need one).
+    howto: str = ""
     #: difficulty ladder this game actually honors (subset of
     #: DIFFICULTY_LEVELS). Empty = the game doesn't take a difficulty.
     difficulties: tuple[str, ...] = ()
