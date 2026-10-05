@@ -13,6 +13,10 @@ explicitly.
     python3 scripts/game_recover.py merge --into telegram:5478650254 \\
         --name "Vrede peace" --name "Mary"
 
+``--name`` matches by contains, so ``--name "Vrede peace"`` folds
+``telegram:Vrede peace`` with any emoji/suffix even when it can't be
+retyped.
+
 Merge rules (same as the in-bot merge): xp keeps the HIGHER value,
 coins/points/wins are summed, gear instances are all preserved,
 skills union by slug, attributes take the max.  Nothing is deleted

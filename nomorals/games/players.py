@@ -400,8 +400,12 @@ class PlayerStore:
                            names: list[str]) -> dict[str, Any]:
         """Fold named legacy profiles into an ID key (recovery entry point).
 
-        Used by ``scripts/game_recover.py`` on the phone.  Safe to call
-        any time — already-merged names are cheap no-ops.  Returns
+        Used by ``scripts/game_recover.py`` on the phone.  Names are
+        matched with a contains/``LIKE`` sweep (not exact match), so
+        ``--name "Vrede peace"`` finds
+        ``telegram:Vrede peace 🥷🟫🖤`` even when the emoji can't be
+        retyped.  Safe to call any time — already-merged names are
+        cheap no-ops.  Returns
         ``{"id_key": ..., "merged": [legacy keys actually folded]}``.
         """
         merged: list[str] = []
@@ -409,14 +413,18 @@ class PlayerStore:
             plat_part, _, sender_part = (id_key or "").partition(":")
             canon = GAME_IDENTITY_ALIASES.get(plat_part.strip().lower(),
                                               plat_part.strip())
+            platforms = [canon]
+            for alias, target in GAME_IDENTITY_ALIASES.items():
+                if target == canon and alias != canon:
+                    platforms.append(alias)
             for n in names or []:
                 n = (n or "").strip()
                 if not n:
                     continue
                 if sender_part.isdigit():
                     self._record_identity_sighting(canon, sender_part, n)
-                for legacy_key in self._legacy_candidate_keys(canon, n):
-                    if legacy_key == id_key:
+                for legacy_key in self._resolve_legacy_keys(platforms, n):
+                    if legacy_key == id_key or legacy_key in merged:
                         continue
                     try:
                         row = self.db.query_one(
@@ -428,6 +436,40 @@ class PlayerStore:
                         self._merge_one_legacy_key(id_key, legacy_key)
                         merged.append(legacy_key)
         return {"id_key": id_key, "merged": merged}
+
+    def _resolve_legacy_keys(self, platforms: list[str],
+                             name: str) -> list[str]:
+        """Legacy keys matching one display name, exact-first then LIKE.
+
+        Exact candidates come first so a real ``telegram:Mary`` row is
+        preferred; the ``LIKE`` sweep then catches names with emoji or
+        suffixes (``telegram:Vrede peace 🥷🟫🖤`` from ``--name
+        "Vrede peace"``).  Names are matched against the name part of
+        the key only — an ID-style name can never fold a stranger's
+        numeric-keyed row.
+        """
+        if self.db is None:
+            return []
+        keys: list[str] = []
+        for p in platforms:
+            keys.append(f"{p}:{name}")
+        # LIKE sweep for emoji/suffix variants; escape wildcards.
+        esc = (name.replace("\\", "\\\\")
+                   .replace("%", "\\%")
+                   .replace("_", "\\_"))
+        try:
+            for p in platforms:
+                rows = self.db.query(
+                    "SELECT player_key FROM game_players "
+                    "WHERE player_key LIKE ? ESCAPE '\\'",
+                    (f"{p}:{esc}%",)) or []
+                for r in rows:
+                    k = r["player_key"]
+                    if k not in keys:
+                        keys.append(k)
+        except Exception:  # noqa: BLE001
+            pass
+        return keys
 
     def _merge_legacy_name_key(self, id_key: str, name: str,
                                platform: str) -> None:

@@ -290,6 +290,30 @@ class MultiNameMergeTests(unittest.TestCase):
         self.assertEqual(p.xp, 300)
         self.assertEqual(p.coins, 25)
 
+    def test_fuzzy_emoji_name_matches_legacy_row(self):
+        # --name "Vrede peace" folds "telegram:Vrede peace 🥷🟫🖤"
+        store = make_store()
+        seed_player(store, "telegram:Vrede peace 🥷🟫🖤", xp=22625,
+                    coins=24208, name="Vrede peace 🥷🟫🖤")
+        result = store.merge_legacy_names("telegram:5478650254",
+                                          ["Vrede peace"])
+        self.assertEqual(result["merged"],
+                         ["telegram:Vrede peace 🥷🟫🖤"])
+        p = store.get("telegram:5478650254")
+        self.assertEqual(p.xp, 22625)
+        self.assertEqual(p.coins, 24208)
+
+    def test_like_wildcards_escaped_no_false_merge(self):
+        store = make_store()
+        seed_player(store, "telegram:100% legit", xp=10, coins=10,
+                    name="100% legit")
+        # underscore/% in the name must be treated literally, not as
+        # LIKE wildcards — nothing should match a nonsense query.
+        result = store.merge_legacy_names("telegram:4242", ["zzz_nobody"])
+        self.assertEqual(result["merged"], [])
+        p = store.get("telegram:100% legit")
+        self.assertEqual(p.xp, 10)
+
 
 if __name__ == "__main__":
     unittest.main()
