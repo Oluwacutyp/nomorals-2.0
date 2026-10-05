@@ -92,14 +92,20 @@ def render_dashboard(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
-    """Render the full dashboard for ``snap``."""
+    """Render the full dashboard for ``snap``.
+
+    With ``bare=True`` the outer frame (rule/end borders and hints) is
+    skipped — the watch screen draws its own pane borders around it.
+    """
     snap = snap or {}
     theme = theme or get_theme((snap.get("theme") or None))
     t = lambda s, role: paint(s, theme.get(role, ""), color=color)  # noqa: E731
     lines: list[str] = []
-    lines.append("")
-    lines.append(_rule("DEVON · live status"))
+    if not bare:
+        lines.append("")
+        lines.append(_rule("DEVON · live status"))
 
     # ── system ──
     uptime = _fmt_uptime(float(snap.get("uptime_s", 0) or 0))
@@ -182,9 +188,10 @@ def render_dashboard(
         extra = f" · {tables} active" if tables else ""
         lines.append(_bar("players", f"{players} game profiles{extra}", BRIGHT_WHITE))
 
-    lines.append(_end())
-    lines.append(paint("  type 'dashboard --watch' for live mode · 'help' for commands", DIM))
-    lines.append("")
+    if not bare:
+        lines.append(_end())
+        lines.append(paint("  type 'dashboard --watch' for live mode · 'help' for commands", DIM))
+        lines.append("")
     out = "\n".join(lines)
     if color is False:
         return strip_ansi(out)
@@ -219,18 +226,23 @@ def render_view(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
-    """Render one watch-mode view: status | games | jobs | brain | debug."""
+    """Render one watch-mode view: status | games | jobs | brain | debug.
+
+    ``bare=True`` skips each view's own frame — the watch screen draws
+    pane borders itself.
+    """
     view = (view or "status").lower()
     if view == "games":
-        return render_games_view(snap, color=color, theme=theme)
+        return render_games_view(snap, color=color, theme=theme, bare=bare)
     if view == "jobs":
-        return render_scheduler_view(snap, color=color, theme=theme)
+        return render_scheduler_view(snap, color=color, theme=theme, bare=bare)
     if view == "brain":
-        return render_llm_view(snap, color=color, theme=theme)
+        return render_llm_view(snap, color=color, theme=theme, bare=bare)
     if view == "debug":
-        return render_debug_view(snap, color=color, theme=theme)
-    return render_dashboard(snap, color=color, theme=theme)
+        return render_debug_view(snap, color=color, theme=theme, bare=bare)
+    return render_dashboard(snap, color=color, theme=theme, bare=bare)
 
 
 def render_games_view(
@@ -238,6 +250,7 @@ def render_games_view(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
     """Games-focused watch view: tables, players, activity bars."""
     from .widgets import barchart, sparkline
@@ -246,8 +259,9 @@ def render_games_view(
     theme = theme or get_theme((snap.get("theme") or None))
     t = lambda s, role: paint(s, theme.get(role, ""), color=color)  # noqa: E731
     lines: list[str] = []
-    lines.append("")
-    lines.append(_rule("games"))
+    if not bare:
+        lines.append("")
+        lines.append(_rule("games"))
 
     games = snap.get("games") or {}
     players = games.get("players", "—")
@@ -292,7 +306,8 @@ def render_games_view(
         )
     if not activity and not top and not gstarts:
         lines.append(f"  {paint('(no game activity yet — play a game to light this up)', DIM)}")
-    lines.append(_end())
+    if not bare:
+        lines.append(_end())
     out = "\n".join(lines)
     return strip_ansi(out) if color is False else out
 
@@ -302,13 +317,15 @@ def render_scheduler_view(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
     """Scheduler-focused watch view: every job, full detail."""
     snap = snap or {}
     theme = theme or get_theme((snap.get("theme") or None))
     lines: list[str] = []
-    lines.append("")
-    lines.append(_rule("scheduler"))
+    if not bare:
+        lines.append("")
+        lines.append(_rule("scheduler"))
 
     sched = snap.get("scheduler") or {}
     running = bool(sched.get("running"))
@@ -345,7 +362,8 @@ def render_scheduler_view(
             lines.append(f"    {paint(f'… +{len(jobs) - 12} more', SUBTLE)}")
     else:
         lines.append(f"  {paint('(no jobs scheduled)', DIM)}")
-    lines.append(_end())
+    if not bare:
+        lines.append(_end())
     out = "\n".join(lines)
     return strip_ansi(out) if color is False else out
 
@@ -355,6 +373,7 @@ def render_llm_view(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
     """Brain-focused watch view: provider chain, health, active model."""
     from .widgets import barchart
@@ -362,8 +381,9 @@ def render_llm_view(
     snap = snap or {}
     theme = theme or get_theme((snap.get("theme") or None))
     lines: list[str] = []
-    lines.append("")
-    lines.append(_rule("brain · LLM providers"))
+    if not bare:
+        lines.append("")
+        lines.append(_rule("brain · LLM providers"))
 
     llm = snap.get("llm") or {}
     active = str(llm.get("active") or "—")
@@ -403,7 +423,8 @@ def render_llm_view(
         )
     if not chain:
         lines.append(f"  {paint('(no providers configured)', DIM)}")
-    lines.append(_end())
+    if not bare:
+        lines.append(_end())
     out = "\n".join(lines)
     return strip_ansi(out) if color is False else out
 
@@ -413,42 +434,63 @@ def render_debug_view(
     *,
     color: bool | None = None,
     theme: Theme | None = None,
+    bare: bool = False,
 ) -> str:
     """Debug-focused watch view: log tail, level counts, slow ops, LLM calls.
 
     Fed by :class:`nomorals.console.debug.DebugHub` — the watch screen
     installs it automatically, so the pane fills as soon as watch mode
-    starts.
+    starts. With ``bare=True`` the outer frame is skipped (the watch
+    screen draws its own pane borders).
     """
     from .debug import DebugHub
+    from .widgets import barchart
 
     snap = snap or {}
     theme = theme or get_theme((snap.get("theme") or None))
     lines: list[str] = []
-    lines.append("")
-    lines.append(_rule("debug · telemetry"))
+    if not bare:
+        lines.append("")
+        lines.append(_rule("debug · telemetry"))
 
     stats = DebugHub.stats()
     captured = stats["captured"]
     err = stats["errors"]
     warn = stats["warnings"]
-    err_color = WARN + BOLD if err else SUBTLE
-    warn_color = WARN if warn else SUBTLE
+    err_c = WARN + BOLD if err else SUBTLE
+    warn_c = WARN if warn else SUBTLE
+    level_legend = (
+        f"{paint('ERRO', WARN + BOLD, color=color)} "
+        f"{paint('WARN', WARN, color=color)} "
+        f"{paint('INFO', SUBTLE, color=color)} "
+        f"{paint('DEBU', DIM, color=color)}"
+    )
     lines.append(
         _bar(
-            "logs",
-            f"{captured} captured · "
-            f"{paint(str(err), err_color)} errors · "
-            f"{paint(str(warn), warn_color)} warnings",
+            "telemetry",
+            f"{captured} logs · "
+            f"{paint(str(err), err_c)} errors · "
+            f"{paint(str(warn), warn_c)} warnings",
         )
     )
+    lines.append(f"    {level_legend}")
+
+    # ── noisiest loggers ──
+    top = DebugHub.top_loggers(5)
+    if top:
+        lines.append("")
+        lines.append(f"  {paint('noisiest loggers', CYAN)}")
+        lines.extend(
+            barchart([(name, float(cnt)) for name, cnt in top],
+                     color=color, bar_color=MAGENTA, width=14)
+        )
 
     # ── recent log lines ──
     lines.append("")
     lines.append(f"  {paint('recent logs', CYAN)}")
-    recent = DebugHub.recent(12)
+    recent = DebugHub.recent(10)
     if recent:
-        for ts, level, logger_name, msg in recent[-12:]:
+        for ts, level, logger_name, msg in recent[-10:]:
             tstr = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
             if level in {"ERROR", "CRITICAL"}:
                 lc = paint(level[:4], WARN + BOLD)
@@ -458,34 +500,30 @@ def render_debug_view(
                 lc = paint(level[:4], DIM)
             else:
                 lc = paint(level[:4], SUBTLE)
-            short_logger = logger_name.split(".")[-1][:18]
+            short_logger = logger_name.split(".")[-1][:16]
             text = " ".join(msg.split())
-            if len(text) > 76:
-                text = text[:73] + "…"
+            if len(text) > 72:
+                text = text[:69] + "…"
             lines.append(
                 f"    {paint(tstr, DIM)} {lc} "
-                f"{paint(short_logger, CYAN)} {text}"
+                f"{paint(short_logger, ACCENT)} {text}"
             )
     else:
         lines.append(
-            f"    {paint('(no logs captured yet — logging starts when watch mode runs)', DIM)}"
+            f"    {paint('(capturing — logs appear here while watch mode runs)', DIM)}"
         )
 
     # ── slowest operations ──
     lines.append("")
     lines.append(f"  {paint('slowest ops', CYAN)}")
-    slow = DebugHub.slow_ops()[:8]
+    slow = DebugHub.slow_ops()[:6]
     if slow:
-        for entry in slow:
-            dur = entry["duration_s"]
-            name = str(entry["name"])[:44]
-            age = int(max(0, time.time() - entry["ts"]))
-            age_s = f"{age}s ago" if age < 90 else f"{age // 60}m ago"
-            dc = WARN + BOLD if dur >= 5 else (WARN if dur >= 1 else SUBTLE)
-            lines.append(
-                f"    {paint(name, BRIGHT_WHITE):<46} "
-                f"{paint(f'{dur:.2f}s', dc)} {paint(age_s, DIM)}"
+        lines.extend(
+            barchart(
+                [(str(e["name"])[:30], float(e["duration_s"])) for e in slow],
+                color=color, bar_color=WARN, width=14,
             )
+        )
     else:
         lines.append(f"    {paint('(none recorded)', DIM)}")
 
@@ -501,10 +539,10 @@ def render_debug_view(
             prov = str(call["provider"])[:16]
             op = str(call["operation"])[:12]
             lat = call["latency_s"]
-            latc = WARN if lat >= 10 else SUBTLE
+            latc = WARN + BOLD if lat >= 10 else (WARN if lat >= 3 else SUBTLE)
             err_txt = ""
             if not ok and call.get("error"):
-                err_txt = f" {paint(str(call['error'])[:40], DIM)}"
+                err_txt = f" {paint(str(call['error'])[:36], DIM)}"
             lines.append(
                 f"    {paint(tstr, DIM)} {mark} "
                 f"{paint(prov, BRIGHT_WHITE):<18} {paint(op, CYAN):<14} "
@@ -513,7 +551,8 @@ def render_debug_view(
     else:
         lines.append(f"    {paint('(no LLM calls recorded)', DIM)}")
 
-    lines.append(_end())
+    if not bare:
+        lines.append(_end())
     out = "\n".join(lines)
     return strip_ansi(out) if color is False else out
 

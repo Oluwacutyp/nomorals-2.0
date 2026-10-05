@@ -831,8 +831,189 @@ class DebugViewTests(unittest.TestCase):
                            color=True, out=out_buf)
         screen._render_frame()
         frame = strip_ansi(out_buf.getvalue())
-        self.assertIn("🥷", frame)
+        # Wide header shows the ASCII ninja (hood + amber eye), not a
+        # lone emoji — the owner's explicit design request.
+        self.assertIn("◉", frame)
+        self.assertIn("/\\", frame)
         self.assertIn("[d] debug", frame)
+
+
+class NinjaAvatarTests(unittest.TestCase):
+    def test_dimensions(self):
+        from nomorals.console.avatar import (
+            NINJA_HEIGHT,
+            NINJA_MINI_HEIGHT,
+            NINJA_MINI_WIDTH,
+            NINJA_WIDTH,
+            render_ninja,
+            render_ninja_mini,
+        )
+
+        full = render_ninja(color=False).splitlines()
+        self.assertEqual(len(full), NINJA_HEIGHT)
+        self.assertEqual(NINJA_HEIGHT, 13)
+        mini = render_ninja_mini(color=False).splitlines()
+        self.assertEqual(len(mini), NINJA_MINI_HEIGHT)
+        self.assertEqual(NINJA_MINI_HEIGHT, 7)
+        for ln in full:
+            self.assertLessEqual(len(ln), NINJA_WIDTH)
+        for ln in mini:
+            self.assertLessEqual(len(ln), NINJA_MINI_WIDTH)
+
+    def test_eye_and_no_banned_colors(self):
+        from nomorals.console.avatar import render_ninja, render_ninja_mini
+
+        for fn in (render_ninja, render_ninja_mini):
+            colored = fn(color=True)
+            self.assertIn("◉", colored)  # the amber eye
+            self.assertNotIn("\033[31m", colored)  # no red text
+            self.assertNotIn("\033[40m", colored)  # no black background
+            plain = fn(color=False)
+            self.assertNotIn("\033[", plain)
+
+
+class KeyReaderTests(unittest.TestCase):
+    def test_canonical_fallback_reads_line(self):
+        import io as _io
+        import unittest.mock as mock
+
+        from nomorals.console.widgets import _KeyReader
+
+        reader = _KeyReader()
+        reader._fd = None  # force canonical path
+        fake_stdin = _io.StringIO("2\n")
+        with mock.patch("sys.stdin", fake_stdin):
+            with mock.patch("select.select", return_value=([fake_stdin], [], [])):
+                self.assertEqual(reader.get(1.0), "2")
+
+    def test_canonical_timeout_returns_none(self):
+        import unittest.mock as mock
+
+        from nomorals.console.widgets import _KeyReader
+
+        reader = _KeyReader()
+        reader._fd = None
+        with mock.patch("select.select", return_value=([], [], [])):
+            self.assertIsNone(reader.get(0.01))
+
+    def test_raw_mode_parses_escape_as_esc(self):
+        import unittest.mock as mock
+
+        from nomorals.console.widgets import _KeyReader
+
+        reader = _KeyReader()
+        reader._fd = 99  # fake fd; os.read/select mocked
+        with mock.patch("select.select", return_value=([99], [], [])), \
+             mock.patch("os.read", return_value=b"\x1b[A"):
+            self.assertEqual(reader._get_raw(1.0), "esc")
+        with mock.patch("select.select", return_value=([99], [], [])), \
+             mock.patch("os.read", return_value=b"d"):
+            self.assertEqual(reader._get_raw(1.0), "d")
+        with mock.patch("select.select", return_value=([99], [], [])), \
+             mock.patch("os.read", return_value=b"\x03"):
+            self.assertEqual(reader._get_raw(1.0), "q")  # Ctrl-C → quit
+
+
+class ScreenGuardTests(unittest.TestCase):
+    def test_mutes_logging_but_keeps_debug_capture(self):
+        import io as _io
+        import logging
+
+        from nomorals.console.debug import DebugHub
+        from nomorals.console.widgets import WatchHub, _ScreenGuard
+
+        stream = _io.StringIO()
+        handler = logging.StreamHandler(stream)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            DebugHub.install()
+            DebugHub.reset()
+            WatchHub.set_active(True)
+            with _ScreenGuard(isolate=False, out=_io.StringIO()):
+                logging.getLogger("test.guard").warning("muted line")
+            WatchHub.set_active(False)
+            # Nothing reached the terminal handler…
+            self.assertNotIn("muted line", stream.getvalue())
+            # …but DebugHub still captured it.
+            recent = DebugHub.recent(5)
+            self.assertTrue(any("muted line" in r[3] for r in recent))
+            # After exit, logging works again.
+            logging.getLogger("test.guard").warning("loud line")
+            self.assertIn("loud line", stream.getvalue())
+        finally:
+            root.removeHandler(handler)
+            WatchHub.set_active(False)
+            DebugHub.uninstall()
+
+    def test_debug_capture_handler_never_muted(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+        from nomorals.console.widgets import WatchHub, _ScreenGuard
+
+        DebugHub.install()
+        try:
+            WatchHub.set_active(True)
+            with _ScreenGuard(isolate=False):
+                dh = DebugHub._handler
+                self.assertTrue(getattr(dh, "_devon_debug_capture", False))
+                self.assertEqual(
+                    [f for f in dh.filters
+                     if type(f).__name__ == "_WatchMuteFilter"], [])
+        finally:
+            WatchHub.set_active(False)
+            DebugHub.uninstall()
+
+
+class GodScreenLayoutTests(unittest.TestCase):
+    def test_frame_pinned_to_terminal_height(self):
+        import io as _io
+        import shutil
+        import unittest.mock as mock
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen
+
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: {"uptime_s": 5},
+                           color=True, out=out)
+        with mock.patch.object(shutil, "get_terminal_size",
+                               return_value=(100, 30)):
+            screen._render_frame()
+        frame = strip_ansi(out.getvalue())
+        content = frame.split("\x1b[H", 1)[-1].split("\x1b[J")[0]
+        self.assertEqual(len(content.splitlines()), 30)
+
+    def test_pane_borders_and_status_bar(self):
+        import io as _io
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen
+
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: {"uptime_s": 5},
+                           color=True, out=out)
+        screen._render_frame()
+        frame = strip_ansi(out.getvalue())
+        self.assertIn("┌─", frame)
+        self.assertIn("messages (live)", frame)
+        self.assertIn("logs muted", frame)
+
+    def test_view_switch_changes_pane_title(self):
+        import io as _io
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen, WATCH_VIEW_KEYS
+
+        for key, view in WATCH_VIEW_KEYS.items():
+            out = _io.StringIO()
+            screen = GodScreen(interval=0.1, snapshot=lambda: {},
+                               color=True, out=out)
+            screen._view = view
+            screen._render_frame()
+            frame = strip_ansi(out.getvalue())
+            self.assertIn(view, frame)
 
 
 if __name__ == "__main__":

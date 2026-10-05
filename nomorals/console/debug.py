@@ -58,6 +58,7 @@ class DebugHub:
     _handler: _DebugHandler | None = None
     _records: deque[tuple[float, str, str, str]] = deque(maxlen=_LOG_CAPACITY)
     _level_counts: dict[str, int] = {}
+    _logger_counts: dict[str, int] = {}
     _llm: deque[dict[str, Any]] = deque(maxlen=_LLM_CAPACITY)
     _slow: list[dict[str, Any]] = []  # top-K slowest, sorted desc
     _started_ts = time.time()
@@ -72,6 +73,10 @@ class DebugHub:
                 return
             handler = _DebugHandler()
             handler.setLevel(logging.DEBUG)
+            # Marked so the watch-mode output guard (which mutes every other
+            # logging handler to keep the dashboard clean) never mutes this
+            # one — telemetry keeps flowing while the screen owns the tty.
+            handler._devon_debug_capture = True  # noqa: SLF001
             logging.getLogger().addHandler(handler)
             cls._handler = handler
 
@@ -93,6 +98,7 @@ class DebugHub:
         with cls._lock:
             cls._records.clear()
             cls._level_counts.clear()
+            cls._logger_counts.clear()
             cls._llm.clear()
             cls._slow.clear()
             cls._started_ts = time.time()
@@ -116,6 +122,8 @@ class DebugHub:
             cls._level_counts[record.levelname] = (
                 cls._level_counts.get(record.levelname, 0) + 1
             )
+            short = record.name.split(".")[-1][:24] or "?"
+            cls._logger_counts[short] = cls._logger_counts.get(short, 0) + 1
         cls._maybe_slow_from_log(msg, record.created)
 
     @classmethod
@@ -235,6 +243,14 @@ class DebugHub:
     def level_counts(cls) -> dict[str, int]:
         with cls._lock:
             return dict(cls._level_counts)
+
+    @classmethod
+    def top_loggers(cls, n: int = 6) -> list[tuple[str, int]]:
+        """Noisiest loggers, most records first."""
+        with cls._lock:
+            items = sorted(cls._logger_counts.items(),
+                           key=lambda kv: kv[1], reverse=True)
+            return items[:max(0, n)]
 
     @classmethod
     def llm_calls(cls, n: int = 10) -> list[dict[str, Any]]:

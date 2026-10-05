@@ -6,6 +6,7 @@ hates both. Blues, greens, cyans, purples, whites and yellows only.
 
 from __future__ import annotations
 
+from .avatar import render_ninja, render_ninja_mini
 from .banner import render_banner, tip_of_the_day
 from .commands import ConsoleCommands
 from .debug import DebugHub
@@ -58,6 +59,8 @@ __all__ = [
     "render_debug_view",
     "render_games_view",
     "render_llm_view",
+    "render_ninja",
+    "render_ninja_mini",
     "render_scheduler_view",
     "render_status_line",
     "render_statusbar",

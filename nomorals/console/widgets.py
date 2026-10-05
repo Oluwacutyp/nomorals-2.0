@@ -6,9 +6,12 @@ unavailable (plain-text fallbacks), and never use black backgrounds or red.
 
 from __future__ import annotations
 
+import logging
+import os
 import select
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -16,6 +19,8 @@ from typing import Any, Callable, Iterable
 
 from .palette import (
     BOLD,
+    BRIGHT_CYAN,
+    BRIGHT_WHITE,
     CYAN,
     DIM,
     GREEN,
@@ -27,6 +32,7 @@ from .palette import (
     strip_ansi,
     supports_color,
     truncate_visible,
+    visible_width,
 )
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -416,6 +422,237 @@ def gradient_text(
     return "".join(out)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Watch-mode terminal ownership: real single-keypress input + output guard.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _KeyReader:
+    """Single-keypress input for watch mode.
+
+    Uses termios raw mode when available (Linux/Termux) so ``1/2/3/4/d/q``
+    fire on a bare keypress — no Enter needed. Falls back to canonical
+    line input (key + Enter) when raw mode is unavailable. Always
+    restores the terminal on exit.
+    """
+
+    def __init__(self) -> None:
+        self._fd: int | None = None
+        self._old: Any = None
+        try:
+            import termios
+
+            fd = sys.stdin.fileno()
+            self._old = termios.tcgetattr(fd)
+            self._fd = fd
+        except Exception:  # noqa: BLE001 - not a tty / no termios
+            self._fd = None
+
+    @property
+    def raw(self) -> bool:
+        """True when single-keypress mode is available."""
+        return self._fd is not None
+
+    def __enter__(self) -> "_KeyReader":
+        if self._fd is not None:
+            try:
+                import tty
+
+                tty.setraw(self._fd)
+            except Exception:  # noqa: BLE001 - fall back to canonical
+                self._fd = None
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._fd is not None and self._old is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+            except Exception:  # noqa: BLE001 - teardown is best-effort
+                pass
+
+    def get(self, timeout: float) -> str | None:
+        """Wait up to ``timeout`` seconds for one keypress.
+
+        Returns the key character (lowercased), ``"esc"`` for escape
+        sequences, or None on timeout / EOF / error.
+        """
+        if self._fd is not None:
+            return self._get_raw(timeout)
+        return self._get_canonical(timeout)
+
+    def _get_raw(self, timeout: float) -> str | None:
+        try:
+            ready, _, _ = select.select([self._fd], [], [], max(0.0, timeout))
+        except Exception:  # noqa: BLE001
+            return None
+        if not ready:
+            return None
+        try:
+            data = os.read(self._fd, 16)
+        except OSError:
+            return None
+        if not data:
+            return None  # EOF
+        ch = data[:1].decode("utf-8", "replace")
+        if ch == "\x1b":
+            return "esc"  # arrow keys etc. — swallow the whole sequence
+        if ch == "\x03":
+            return "q"  # Ctrl-C arrives as ETX in raw mode
+        return ch.lower() or None
+
+    def _get_canonical(self, timeout: float) -> str | None:
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], max(0.0, timeout))
+        except Exception:  # noqa: BLE001
+            return None
+        if not ready:
+            return None
+        try:
+            line = sys.stdin.readline()
+        except Exception:  # noqa: BLE001
+            return None
+        if not line:
+            return None  # EOF
+        return line.strip().lower()[:1] or None
+
+
+class _WatchMuteFilter(logging.Filter):
+    """Drops log records while the watch screen owns the terminal.
+
+    Attached to every logging handler except DebugHub's capture handler,
+    so the debug view keeps receiving telemetry while nothing prints.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not WatchHub.is_active()
+
+
+class _ScreenGuard:
+    """Gives the watch dashboard exclusive ownership of the terminal.
+
+    The alternate-screen buffer alone proved insufficient on the owner's
+    phone: gateway threads write to the same fd, so log lines landed
+    inside the alt-screen buffer mid-frame. Two stronger layers:
+
+    1. **Logging mute** — every logging handler except DebugHub's capture
+       handler gets a mute filter while the guard is active. Logging
+       produces zero terminal output, but telemetry still flows to the
+       debug view (key ``d``).
+    2. **fd redirect** — fds 1 and 2 are redirected to a spill file; the
+       dashboard writes through a private duplicate of the original
+       stdout fd. Any stray ``print()`` or C-level write lands in the
+       spill file, never on screen.
+
+    On exit everything is restored: fds, logging filters, cursor.
+    When ``isolate`` is False (tests pass their own stream) only the
+    logging mute applies — no fd games.
+    """
+
+    def __init__(self, *, isolate: bool = True, out: Any = None) -> None:
+        self._isolate = isolate
+        self._filter = _WatchMuteFilter()
+        self._muted: list[logging.Handler] = []
+        self._fd_out: int | None = None
+        self._fd_err: int | None = None
+        self._spill: Any = None
+        self.tty: Any = out if out is not None else sys.stdout
+
+    # ── logging mute ──
+
+    def _mute_logging(self) -> None:
+        seen: set[int] = set()
+        handlers: list[logging.Handler] = list(logging.root.handlers)
+        for lg in logging.Logger.manager.loggerDict.values():
+            if isinstance(lg, logging.Logger):
+                handlers.extend(lg.handlers)
+        for handler in handlers:
+            if id(handler) in seen:
+                continue
+            seen.add(id(handler))
+            if getattr(handler, "_devon_debug_capture", False):
+                continue  # DebugHub keeps capturing for the debug view
+            try:
+                handler.addFilter(self._filter)
+                self._muted.append(handler)
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+
+    def _unmute_logging(self) -> None:
+        for handler in self._muted:
+            try:
+                handler.removeFilter(self._filter)
+            except Exception:  # noqa: BLE001 - teardown is best-effort
+                pass
+        self._muted.clear()
+
+    # ── lifecycle ──
+
+    def __enter__(self) -> "_ScreenGuard":
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001
+                pass
+        self._mute_logging()
+        if not self._isolate:
+            return self
+        try:
+            if not os.isatty(1):
+                return self
+        except Exception:  # noqa: BLE001
+            return self
+        try:
+            self._fd_out = os.dup(1)
+            self._fd_err = os.dup(2)
+            spill_path = os.path.join(tempfile.gettempdir(),
+                                      "devon-watch-spill.log")
+            self._spill = open(spill_path, "ab", buffering=0)
+            os.dup2(self._spill.fileno(), 1)
+            os.dup2(self._spill.fileno(), 2)
+            # Private line-buffered handle to the real terminal — the
+            # dashboard's only way out while fds 1/2 point at the spill.
+            self.tty = os.fdopen(os.dup(self._fd_out), "w", buffering=1)
+        except Exception:  # noqa: BLE001 - isolation is best-effort
+            self.tty = sys.stdout
+            self._fd_out = self._fd_err = None
+            self._spill = None
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        try:
+            self.tty.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        if self._fd_out is not None:
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                os.dup2(self._fd_out, 1)
+                os.dup2(self._fd_err, 2)
+            except Exception:  # noqa: BLE001
+                pass
+            for fh in (self.tty, self._spill):
+                try:
+                    if fh is not None:
+                        fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            for fd in (self._fd_out, self._fd_err):
+                try:
+                    if fd is not None:
+                        os.close(fd)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.tty = sys.stdout
+            self._fd_out = self._fd_err = None
+            self._spill = None
+        self._unmute_logging()
+
+
 # View ids for the watch screen's keyboard switching.
 WATCH_VIEWS = ("status", "games", "jobs", "brain", "debug")
 WATCH_VIEW_KEYS = {
@@ -433,28 +670,29 @@ _VIEW_HOTKEY = {"status": "1", "games": "2", "jobs": "3", "brain": "4",
 #: owner's real ninja avatar, so this stands in next to the DEVON title.
 AVATAR = "🥷"
 
-
 class GodScreen:
-    """Split-pane live console: dashboard on top, message feed below.
+    """Full-screen live console: ninja header, view pane, message feed.
 
-    Layout (terminal-height aware)::
+    Layout (terminal-size aware, every line width-truncated)::
 
-        ┌─ header (view tabs, spinner) ─────────────────────────────┐
-        │ dashboard view content (status/games/jobs/brain)           │
-        ├─ messages ────────────────────────────────────────────────┤
-        │ feed lines (compact cards)                                 │
-        ├─ status bar ──────────────────────────────────────────────┤
-        │ uptime · msg rate · games · brain · unread · key hints     │
+        ┌─ header: ASCII ninja + gradient DEVON · live + view tabs ─┐
+        ┌─ <view> ──────────────────────────────────────────────────┐
+        │ view content (status / games / jobs / brain / debug)       │
         └───────────────────────────────────────────────────────────┘
+        ┌─ messages (live) ─────────────────────────────────────────┐
+        │ compact feed lines                                          │
+        └───────────────────────────────────────────────────────────┘
+        status bar · key hints
 
-    Keys (canonical mode — type + Enter): 1/2/3/4/d switch views, q quits.
-    Ctrl-C also quits. Incoming messages never print over the screen —
-    the mirror routes them into :class:`WatchHub`'s feed instead.
+    Keys work on a bare keypress (termios raw mode; canonical fallback):
+    ``1/2/3/4/d`` switch views, ``q``/Esc/Ctrl-C quits. While active the
+    :class:`_ScreenGuard` owns the terminal: logging is muted (except the
+    debug telemetry capture) and fds 1/2 are redirected to a spill file,
+    so no log line can ever corrupt the frame.
     """
 
-    HEADER_H = 2
+    HEADER_H = 8   # 7-row ninja + separator
     STATUS_H = 2
-    FEED_H = 7
 
     def __init__(
         self,
@@ -468,6 +706,8 @@ class GodScreen:
         self._snapshot = snapshot or (lambda: {})
         self.color = supports_color() if color is None else color
         self.out = out or sys.stdout
+        # fd isolation only when writing to the real stdout (not tests).
+        self._isolate = out is None
         self._stop = False
         self._view = "status"
         self._frame = 0
@@ -493,36 +733,49 @@ class GodScreen:
                 DIM,
             )
         WatchHub.set_active(True)
-        # Debug telemetry starts with watch mode so the debug view (key d)
-        # has log lines, slow ops and LLM traces to show.
         from .debug import DebugHub
 
         DebugHub.install()
+        guard = _ScreenGuard(isolate=self._isolate, out=self.out)
+        tty_out = self.out
         try:
-            # Alternate screen buffer: the dashboard owns its own screen,
-            # completely isolated from Python logging / prints on the main
-            # screen. Exit restores the main screen exactly as it was.
-            self.out.write(_ALT_SCREEN_ON + _HIDE_CURSOR)
-            self.out.flush()
-            while not self._stop:
-                self._render_frame()
-                if not self._wait_key():
-                    break
-        except KeyboardInterrupt:
-            self._stop = True  # Ctrl-C is the documented way out of watch mode
+            with guard:
+                tty_out = guard.tty
+                # Alternate screen buffer: isolated screen, restored on
+                # exit. (The guard's fd redirect + log mute are the real
+                # corruption fix; this keeps the main screen pristine.)
+                tty_out.write(_ALT_SCREEN_ON + _HIDE_CURSOR)
+                tty_out.flush()
+                try:
+                    with _KeyReader() as keys:
+                        while not self._stop:
+                            self._render_frame(tty_out)
+                            if not self._wait_key(keys):
+                                break
+                except KeyboardInterrupt:
+                    self._stop = True  # Ctrl-C is a documented way out
+                finally:
+                    # Exit the alt screen BEFORE the guard closes the
+                    # tty handle — otherwise this write is swallowed.
+                    try:
+                        tty_out.write(_SHOW_CURSOR + _ALT_SCREEN_OFF)
+                        tty_out.flush()
+                    except Exception:  # noqa: BLE001 - best-effort
+                        pass
         finally:
             WatchHub.set_active(False)
-            try:
-                self.out.write(_SHOW_CURSOR + _ALT_SCREEN_OFF)
-                self.out.flush()
-            except Exception:  # noqa: BLE001 - teardown is best-effort
-                pass
         return paint("exited live dashboard", DIM)
 
     # ── internals ──
 
-    def _wait_key(self) -> bool:
+    def _wait_key(self, keys: "_KeyReader | None" = None) -> bool:
         """Wait up to ``interval`` for a keypress. False = quit requested."""
+        if keys is None:  # pragma: no cover - tests patch this method
+            try:
+                time.sleep(self.interval)
+            except KeyboardInterrupt:
+                return False
+            return not self._stop
         if not self._stdin_ok:
             try:
                 time.sleep(self.interval)
@@ -530,19 +783,12 @@ class GodScreen:
                 return False
             return not self._stop
         try:
-            ready, _, _ = select.select([sys.stdin], [], [], self.interval)
-        except (OSError, ValueError, KeyboardInterrupt):
+            key = keys.get(self.interval)
+        except KeyboardInterrupt:
             return False
-        if not ready:
+        if key is None:  # timeout → refresh
             return not self._stop
-        try:
-            line = sys.stdin.readline()
-        except (OSError, KeyboardInterrupt):
-            return False
-        if not line:  # EOF
-            return False
-        key = line.strip().lower()[:1]
-        if key in ("q", "\x03"):  # q or Ctrl-C
+        if key in ("q", "esc", "\x03"):
             return False
         if key in WATCH_VIEW_KEYS:
             self._view = WATCH_VIEW_KEYS[key]
@@ -555,69 +801,172 @@ class GodScreen:
         except Exception:  # noqa: BLE001 - dashboard is best-effort
             return {}
 
-    def _render_frame(self) -> None:
+    # ── frame assembly ──
+
+    def _render_frame(self, out: Any = None) -> None:
         from . import dashboard as _d
 
+        out = out if out is not None else self.out
         snap = self._snap()
         cols, rows = shutil.get_terminal_size((80, 24))
-        feed_h = min(self.FEED_H, max(3, rows // 4))
-        dash_h = max(6, rows - self.HEADER_H - feed_h - self.STATUS_H)
-        width = max(40, cols)
+        width = max(48, cols)
+        height = max(20, rows)
 
         lines: list[str] = []
-        # Header with spinner + view tabs.
-        spin = _SPINNER[self._frame % len(_SPINNER)]
-        self._frame += 1
-        title = gradient_text("DEVON · live", 51, 201, color=self.color)
-        tabs = "  ".join(
-            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
-                  BOLD if v == self._view else DIM, color=self.color)
-            for v in WATCH_VIEWS
-        )
-        lines.append(
-            f"  {AVATAR} {title} {paint(spin, CYAN, color=self.color)}   {tabs}"
-        )
-        lines.append(paint("─" * min(width, 100), SUBTLE, color=self.color))
+        if width >= 72:
+            lines.extend(self._header_wide(snap, width))
+        else:
+            lines.extend(self._header_narrow(width))
+        header_h = len(lines)
 
-        # Dashboard view — truncated to its pane so it can never push
-        # the feed / status bar off screen.
-        view_text = _d.render_view(snap, self._view, color=self.color)
-        view_lines = view_text.splitlines()[:dash_h]
-        lines.extend(truncate_visible(ln, width) for ln in view_lines)
+        # Feed box height adapts to terminal size.
+        feed_inner = 5 if height < 32 else 7
+        feed_box_h = feed_inner + 2
+        content_box_h = max(6, height - header_h - feed_box_h - self.STATUS_H)
+        content_inner = content_box_h - 2
 
-        # Feed pane.
+        # ── content pane ──
+        view_text = _d.render_view(snap, self._view, color=self.color,
+                                   bare=True)
+        content_lines = [
+            truncate_visible(ln, width - 4) for ln in view_text.splitlines()
+        ][:content_inner]
+        while len(content_lines) < content_inner:
+            content_lines.append("")
+        view_title = paint(f" {self._view} ", TITLE + BOLD, color=self.color)
+        top = (paint("┌─", SUBTLE, color=self.color) + view_title
+               + paint("─" * max(2, width - 4 - visible_width(view_title))
+                       + "┐", SUBTLE, color=self.color))
+        lines.append(truncate_visible(top, width))
+        bar_l = paint("│ ", SUBTLE, color=self.color)
+        bar_r = paint(" │", SUBTLE, color=self.color)
+        for ln in content_lines:
+            pad = " " * max(0, (width - 4) - visible_width(ln))
+            lines.append(truncate_visible(bar_l + ln + pad + bar_r, width))
+        lines.append(paint("└" + "─" * (width - 2) + "┘", SUBTLE,
+                           color=self.color))
+
+        # ── feed pane ──
         feed = WatchHub.feed()
         unread = feed.unread
         feed.mark_read()
-        lines.append(
-            paint("─ messages (live) ─", SUBTLE, color=self.color)
+        feed_title = paint(" messages (live) ", TITLE + BOLD, color=self.color)
+        ftop = (paint("┌─", SUBTLE, color=self.color) + feed_title
+                + paint("─" * max(2, width - 4 - visible_width(feed_title))
+                        + "┐", SUBTLE, color=self.color))
+        lines.append(truncate_visible(ftop, width))
+        events = feed.recent(feed_inner)
+        feed_lines = (
+            [truncate_visible(format_feed_line(ev, color=self.color),
+                              width - 4)
+             for ev in events[-feed_inner:]]
+            if events
+            else [paint("  (quiet — new messages appear here)", DIM,
+                        color=self.color)]
         )
-        events = feed.recent(feed_h - 1)
-        if events:
-            for ev in events[-(feed_h - 1):]:
-                lines.append(
-                    truncate_visible(
-                        format_feed_line(ev, color=self.color), width
-                    )
-                )
-        else:
-            lines.append(paint("  (quiet — new messages appear here)", DIM, color=self.color))
+        while len(feed_lines) < feed_inner:
+            feed_lines.append("")
+        for ln in feed_lines[:feed_inner]:
+            pad = " " * max(0, (width - 4) - visible_width(ln))
+            lines.append(truncate_visible(bar_l + ln + pad + bar_r, width))
+        lines.append(paint("└" + "─" * (width - 2) + "┘", SUBTLE,
+                           color=self.color))
 
-        # Status bar — always the last two lines, real stats from snapshot.
-        lines.append(paint("─" * min(width, 100), SUBTLE, color=self.color))
+        # ── status bar (always pinned to the bottom) ──
         lines.append(
             truncate_visible(
-                _d.render_statusbar(snap, self._view, unread=unread, color=self.color),
+                _d.render_statusbar(snap, self._view, unread=unread,
+                                    color=self.color),
+                width,
+            )
+        )
+        lines.append(
+            truncate_visible(
+                paint("  dashboard owns the terminal · logs muted "
+                      "· spill: $TMPDIR/devon-watch-spill.log",
+                      DIM, color=self.color),
                 width,
             )
         )
 
-        # Never exceed the terminal height; every line fits the width, so
-        # nothing wraps and the layout can't garble.
-        frame_lines = [truncate_visible(ln, width) for ln in lines[:rows]]
+        # Pin to exactly the terminal height; every line already fits the
+        # width, so nothing wraps and the layout can't garble.
+        while len(lines) < height:
+            lines.append("")
+        frame = "\n".join(
+            truncate_visible(ln, width) for ln in lines[:height]
+        )
+        out.write(_HOME + frame + _CLEAR_BELOW)
+        out.flush()
 
-        # One atomic write: home, full frame, clear below. Any log line
-        # that slipped in between frames is wiped by the next redraw, and
-        # the alternate screen keeps the main terminal untouched.
-        self.out.write(_HOME + "\n".join(frame_lines) + _CLEAR_BELOW)
-        self.out.flush()
+    def _header_wide(self, snap: dict[str, Any], width: int) -> list[str]:
+        """8-row header: ASCII ninja + title block + view tabs."""
+        from .avatar import NINJA_MINI_HEIGHT, NINJA_MINI_WIDTH, render_ninja_mini
+
+        ninja = render_ninja_mini(color=self.color).splitlines()
+        spin = _SPINNER[self._frame % len(_SPINNER)]
+        self._frame += 1
+        title = (gradient_text("DEVON", 51, 201, color=self.color)
+                 + paint(" · live ", TITLE, color=self.color)
+                 + paint(spin, CYAN, color=self.color))
+        subtitle = paint("universal agent os · no-morals 2.0", DIM,
+                         color=self.color)
+        traffic = snap.get("traffic") or {}
+        llm = snap.get("llm") or {}
+        active = str(llm.get("active") or "—")
+        quick = (
+            f"{paint('⏱', CYAN, color=self.color)} "
+            f"{paint(_fmt_uptime(snap.get('uptime_s', 0)), BRIGHT_WHITE, color=self.color)}   "
+            f"{paint('📨', CYAN, color=self.color)} "
+            f"{paint(str(traffic.get('messages', 0)), BRIGHT_WHITE, color=self.color)}   "
+            f"{paint('🧠', CYAN, color=self.color)} "
+            f"{paint(active, GREEN if active != '—' else MAGENTA, color=self.color)}"
+        )
+        tabs = "  ".join(
+            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
+                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
+                  color=self.color)
+            for v in WATCH_VIEWS
+        )
+        right = [title, subtitle, "", quick, tabs, "", ""]
+        lines: list[str] = []
+        for i in range(NINJA_MINI_HEIGHT):
+            left = ninja[i] if i < len(ninja) else ""
+            left_w = visible_width(left)
+            pad = " " * max(0, NINJA_MINI_WIDTH - left_w)
+            row = left + pad + "  " + (right[i] if i < len(right) else "")
+            lines.append(truncate_visible(row, width))
+        lines.append(paint("─" * width, SUBTLE, color=self.color))
+        return lines
+
+    def _header_narrow(self, width: int) -> list[str]:
+        """Fallback header for narrow terminals: title + tabs, one row."""
+        spin = _SPINNER[self._frame % len(_SPINNER)]
+        self._frame += 1
+        title = (paint("🥷 ", CYAN, color=self.color)
+                 + gradient_text("DEVON · live", 51, 201, color=self.color)
+                 + paint(f" {spin} ", CYAN, color=self.color))
+        tabs = " ".join(
+            paint(f"[{_VIEW_HOTKEY[v]}]",
+                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
+                  color=self.color)
+            for v in WATCH_VIEWS
+        )
+        return [
+            truncate_visible(f"  {title}  {tabs}", width),
+            paint("─" * width, SUBTLE, color=self.color),
+        ]
+
+
+def _fmt_uptime(seconds: float) -> str:
+    seconds = max(0, int(seconds or 0))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
