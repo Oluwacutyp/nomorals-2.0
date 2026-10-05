@@ -2,10 +2,13 @@
 
 A *player* is one human (or the AI, ``ai``) identified per platform by
 ``platform:sender``.  The same person on Telegram and Discord is two
-player keys — platforms don't share identity, and we don't pretend they
-do — but the *profile* system is global: every game played in any chat
-on any platform updates one per-player ledger of wins, losses, points,
-streaks and per-game stats, which is what the leaderboard ranks.
+player keys — genuinely different networks don't share identity — but
+endpoints on the *same* network do: ``telegram`` (userbot) and
+``telegram-bot`` (BotFather bot) see the same Telegram user IDs, so
+``GAME_IDENTITY_ALIASES`` folds them into one game key.  The *profile*
+system is global: every game played in any chat on any platform updates
+one per-player ledger of wins, losses, points, streaks and per-game
+stats, which is what the leaderboard ranks.
 
 Everything persists to ``game_players`` so a player's record survives
 restarts and accumulates across sessions.  The store is deliberately
@@ -23,12 +26,24 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 
-__all__ = ["AI_PLAYER", "Player", "PlayerStore", "Leaderboard"]
+__all__ = ["AI_PLAYER", "Player", "PlayerStore", "Leaderboard",
+           "GAME_IDENTITY_ALIASES"]
 
 _log = get_logger(__name__)
 
 #: The house seat. The AI joins, plays, and is ranked like anyone else.
 AI_PLAYER = "ai"
+
+#: Platforms that share one underlying network identity. ``telegram``
+#: (the userbot) and ``telegram-bot`` (the BotFather bot) both see the
+#: same Telegram user IDs, so a human's XP, gear, skills and attributes
+#: must follow them across the two endpoints — otherwise a duel started
+#: from one side sees a fresh level-1 profile from the other.
+#: The alias applies to the *game key* only; ``Player.platform`` keeps
+#: the real endpoint so message routing is untouched.
+GAME_IDENTITY_ALIASES = {
+    "telegram-bot": "telegram",
+}
 
 
 @dataclass(frozen=True)
@@ -43,8 +58,14 @@ class Player:
     @classmethod
     def from_sender(cls, platform: str, sender: str, name: str = "") -> "Player":
         sender = (sender or "").strip() or "unknown"
+        # One human, one game identity: aliased platforms (telegram-bot →
+        # telegram) share the same underlying network IDs, so the key
+        # uses the canonical platform. ``platform`` itself is kept as
+        # the real endpoint for message routing.
+        key_platform = GAME_IDENTITY_ALIASES.get(
+            (platform or "").lower(), platform)
         return cls(
-            key=f"{platform}:{sender}",
+            key=f"{key_platform}:{sender}",
             platform=platform,
             name=(name or sender)[:40],
             is_ai=False,

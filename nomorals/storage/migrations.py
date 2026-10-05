@@ -1390,6 +1390,263 @@ def _apply_game_attributes_rename(db: object) -> None:
     )
 
 
+def _apply_game_identity_alias_merge(db: object) -> None:
+    """Merge ``telegram-bot:`` player rows into ``telegram:``.
+
+    ``Player.from_sender`` now canonicalizes ``telegram-bot`` to
+    ``telegram`` for game keys (both endpoints see the same Telegram
+    user IDs), so one human has one profile.  Pre-existing rows under
+    the old ``telegram-bot:<sender>`` keys are merged into their
+    canonical ``telegram:<sender>`` twins — or renamed outright when
+    no twin exists — across every per-player game table.  Nothing is
+    dropped: counters are summed, bests take the max, JSON ledgers
+    union with the canonical side winning conflicts.
+    """
+    import json as _json
+
+    ex = db.execute
+
+    def tables() -> set[str]:
+        try:
+            rows = ex(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        except Exception:
+            return set()
+        return {str(r[0]) for r in rows}
+
+    have = tables()
+    if "game_players" not in have:
+        return
+    # alias senders can surface in any per-player table (gear earned
+    # before a profile row was ever read is possible in theory) —
+    # collect from all of them.
+    alias_keys: set[str] = set()
+    for t in ("game_players", "game_gear", "game_skills",
+              "game_attributes", "game_titles", "game_stats"):
+        if t not in have:
+            continue
+        try:
+            for (k,) in ex(
+                    f"SELECT DISTINCT player_key FROM {t} "
+                    "WHERE player_key LIKE 'telegram-bot:%'").fetchall():
+                alias_keys.add(str(k))
+        except Exception:
+            pass
+    if not alias_keys:
+        return
+
+    def cols(table: str) -> list[str]:
+        try:
+            return [str(r[1]) for r in
+                    ex(f"PRAGMA table_info({table})").fetchall()]
+        except Exception:
+            return []
+
+    player_col_list = cols("game_players")
+    player_cols = set(player_col_list)
+
+    def q1(sql: str, args: tuple = ()) -> object:
+        try:
+            rows = ex(sql, args).fetchall()
+        except Exception:
+            return None
+        return rows[0] if rows else None
+
+    def qall(sql: str, args: tuple = ()) -> list:
+        try:
+            return ex(sql, args).fetchall()
+        except Exception:
+            return []
+
+    for alias_key in sorted(alias_keys):
+        sender = alias_key.split(":", 1)[1] if ":" in alias_key else ""
+        if not sender:
+            continue
+        canon = f"telegram:{sender}"
+        if alias_key == canon:
+            continue
+
+        alias = q1("SELECT * FROM game_players WHERE player_key = ?",
+                   (alias_key,))
+        a = dict(zip(player_col_list, alias)) if (player_col_list and alias) else {}
+        c_row = q1("SELECT * FROM game_players WHERE player_key = ?",
+                   (canon,))
+        c = dict(zip(player_col_list, c_row)) if (player_col_list and c_row) else None
+
+        def rename(table: str) -> None:
+            if table in have:
+                try:
+                    ex("UPDATE " + table + " SET player_key = ? "
+                       "WHERE player_key = ?", (canon, alias_key))
+                except Exception:
+                    pass
+
+        if c is None:
+            # No twin — pure rename across every per-player table.
+            for t in ("game_players", "game_gear", "game_skills",
+                      "game_attributes", "game_titles", "game_stats"):
+                rename(t)
+            continue
+
+        # ── both exist: merge game_players ──────────────────────────
+        def num(key: str) -> int:
+            try:
+                return int(a.get(key, 0) or 0) + int(c.get(key, 0) or 0)
+            except Exception:
+                return 0
+
+        def jmerge(key: str) -> str:
+            try:
+                da = _json.loads(a.get(key) or "{}")
+            except Exception:
+                da = {}
+            try:
+                dc = _json.loads(c.get(key) or "{}")
+            except Exception:
+                dc = {}
+            if not isinstance(da, dict):
+                da = {}
+            if not isinstance(dc, dict):
+                dc = {}
+            merged = dict(da)
+            merged.update(dc)  # canonical side wins conflicts
+            return _json.dumps(merged)
+
+        a_streak = int(a.get("streak", 0) or 0)
+        c_streak = int(c.get("streak", 0) or 0)
+        streak = a_streak if abs(a_streak) > abs(c_streak) else c_streak
+        display = c.get("display") or a.get("display") or ""
+        created = min(float(a.get("created_at", 0) or 0),
+                      float(c.get("created_at", 0) or 0))
+        updated = max(float(a.get("updated_at", 0) or 0),
+                      float(c.get("updated_at", 0) or 0))
+        sets = {
+            "coins": num("coins"), "points": num("points"),
+            "wins": num("wins"), "losses": num("losses"),
+            "draws": num("draws"), "games_played": num("games_played"),
+            "streak": streak,
+            "best_streak": max(int(a.get("best_streak", 0) or 0),
+                               int(c.get("best_streak", 0) or 0)),
+            "display": display, "created_at": created,
+            "updated_at": updated,
+            "per_game": jmerge("per_game"), "items": jmerge("items"),
+        }
+        if "xp" in player_cols:
+            sets["xp"] = num("xp")
+        set_sql = ", ".join(f"{k} = ?" for k in sets)
+        try:
+            ex(f"UPDATE game_players SET {set_sql} WHERE player_key = ?",
+               (*sets.values(), canon))
+            ex("DELETE FROM game_players WHERE player_key = ?",
+               (alias_key,))
+        except Exception:
+            pass
+
+        # ── gear: instance ids are globally unique — plain rename ────
+        rename("game_gear")
+
+        # ── skills: drop alias dupes, then rename ────────────────────
+        if "game_skills" in have:
+            try:
+                canon_slugs = {str(r[0]) for r in qall(
+                    "SELECT slug FROM game_skills WHERE player_key = ?",
+                    (canon,))}
+                for (slug,) in qall(
+                        "SELECT slug FROM game_skills WHERE player_key = ?",
+                        (alias_key,)):
+                    if str(slug) in canon_slugs:
+                        ex("DELETE FROM game_skills WHERE player_key = ? "
+                           "AND slug = ?", (alias_key, str(slug)))
+                rename("game_skills")
+            except Exception:
+                pass
+
+        # ── attributes: UNIQUE(player_key) — merge, keep max ─────────
+        if "game_attributes" in have:
+            try:
+                ar = q1("SELECT strength, stamina, mana, intelligence, "
+                        "unspent, level_applied FROM game_attributes "
+                        "WHERE player_key = ?", (alias_key,))
+                cr = q1("SELECT strength, stamina, mana, intelligence, "
+                        "unspent, level_applied FROM game_attributes "
+                        "WHERE player_key = ?", (canon,))
+                if ar and cr:
+                    merged = [max(int(ar[i] or 0), int(cr[i] or 0))
+                              for i in range(6)]
+                    ex("UPDATE game_attributes SET strength = ?, "
+                       "stamina = ?, mana = ?, intelligence = ?, "
+                       "unspent = ?, level_applied = ? "
+                       "WHERE player_key = ?",
+                       (*merged, canon))
+                    ex("DELETE FROM game_attributes WHERE player_key = ?",
+                       (alias_key,))
+                else:
+                    rename("game_attributes")
+            except Exception:
+                pass
+
+        # ── titles: UNIQUE(player_key, title_id) — dedupe, rename ────
+        if "game_titles" in have:
+            try:
+                canon_titles = {str(r[0]) for r in qall(
+                    "SELECT title_id FROM game_titles WHERE player_key = ?",
+                    (canon,))}
+                alias_active = [str(r[0]) for r in qall(
+                    "SELECT title_id FROM game_titles WHERE player_key = ? "
+                    "AND active = 1", (alias_key,))]
+                canon_has_active = bool(q1(
+                    "SELECT 1 FROM game_titles WHERE player_key = ? "
+                    "AND active = 1", (canon,)))
+                for (tid,) in qall(
+                        "SELECT title_id FROM game_titles WHERE player_key = ?",
+                        (alias_key,)):
+                    if str(tid) in canon_titles:
+                        ex("DELETE FROM game_titles WHERE player_key = ? "
+                           "AND title_id = ?", (alias_key, str(tid)))
+                rename("game_titles")
+                if alias_active and not canon_has_active:
+                    ex("UPDATE game_titles SET active = 1 WHERE player_key = ? "
+                       "AND title_id = ?", (canon, alias_active[0]))
+                    ex("UPDATE game_titles SET active = 0 WHERE player_key = ? "
+                       "AND title_id != ?", (canon, alias_active[0]))
+            except Exception:
+                pass
+
+        # ── per-game stats: PK(player_key, game_name) — sum, max best ─
+        if "game_stats" in have:
+            try:
+                for row in qall(
+                        "SELECT game_name, games_played, games_won, "
+                        "total_score, best_score, total_time, created_at, "
+                        "updated_at FROM game_stats WHERE player_key = ?",
+                        (alias_key,)):
+                    gname = str(row[0])
+                    cr2 = q1(
+                        "SELECT games_played, games_won, total_score, "
+                        "best_score, total_time, created_at, updated_at "
+                        "FROM game_stats WHERE player_key = ? AND "
+                        "game_name = ?", (canon, gname))
+                    if cr2:
+                        ex("UPDATE game_stats SET games_played = ?, "
+                           "games_won = ?, total_score = ?, best_score = ?, "
+                           "total_time = ?, created_at = ?, updated_at = ? "
+                           "WHERE player_key = ? AND game_name = ?",
+                           (int(row[1] or 0) + int(cr2[0] or 0),
+                            int(row[2] or 0) + int(cr2[1] or 0),
+                            int(row[3] or 0) + int(cr2[2] or 0),
+                            max(int(row[4] or 0), int(cr2[3] or 0)),
+                            float(row[5] or 0) + float(cr2[4] or 0),
+                            min(float(row[6] or 0), float(cr2[5] or 0)),
+                            max(float(row[7] or 0), float(cr2[6] or 0)),
+                            canon, gname))
+                        ex("DELETE FROM game_stats WHERE player_key = ? "
+                           "AND game_name = ?", (alias_key, gname))
+                rename("game_stats")
+            except Exception:
+                pass
+
+
 _V67_PLAYER_LIBRARY = """
 -- Player library: named playlists, play history, favorites.
 CREATE TABLE IF NOT EXISTS media_playlists (
@@ -2446,6 +2703,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(73, "game_skills", sql=_V73_GAME_SKILLS),
     Migration(74, "game_titles", sql=_V74_GAME_TITLES),
     Migration(75, "game_attributes_rename", fn=_apply_game_attributes_rename),
+    Migration(76, "game_identity_alias_merge",
+              fn=_apply_game_identity_alias_merge),
 )
 
 

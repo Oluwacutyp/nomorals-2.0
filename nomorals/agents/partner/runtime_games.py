@@ -68,9 +68,16 @@ class RuntimeGamesMixin:
             lines.append("  /game <name> [daily|timed|<variant>] — modes & mastery unlocks")
             lines.append("  /mastery — your per-game mastery tiers")
             lines.append("  /game invite <game> [who] · /game accept <code> — DM duels")
+            lines.append("  /game relay — live DM-to-DM connection status")
             lines.append("  /pvp · /pvp @user — 1v1 PvP lobby or DM-to-DM challenge")
-            lines.append("  /raid — team up against the raid boss")
             lines.append("  /arena challenge @user · /arena raid — same, arena-branded")
+            lines.append("  /raid — team up against the raid boss")
+            lines.append("  duel moves: attack · focus · fury · defend · potion · "
+                         "skill <name> · combo <a> + <b> · item <gear|potion|shield>")
+            lines.append("  /gift @user 100 — gift coins · /gift @user <gear|item>")
+            lines.append("  /gift confirm · /gift cancel · /gift history")
+            lines.append("  /game stats [name] · /game balance · /game shop · "
+                         "/game leaderboard")
             return "\n".join(lines)
         if verb == "quit":
             # capture the relay (if any) BEFORE quitting — the engine

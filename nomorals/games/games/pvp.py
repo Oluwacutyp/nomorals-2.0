@@ -27,7 +27,7 @@ from .base import MultiGame, Room
 __all__ = ["DuelGame", "RaidGame", "PVP_GAMES"]
 
 MOVE_HELP = ("attack · focus · fury · defend · potion · "
-             "skill <name> · item <gear|potion|shield>")
+             "skill <name> · combo <a> + <b> · item <gear|potion|shield>")
 
 #: raid boss names — one is drawn per raid
 BOSS_NAMES: tuple[str, ...] = (
@@ -74,8 +74,8 @@ class _ArenaCombat:
     # ── fighter construction ──────────────────────────────────────────
     def _build_fighter(self, room: Room, player: Player) -> dict[str, Any]:
         """Build one human's fighter from the engine mirrors
-        (progression / loadout / skills). Idempotent — safe to call on
-        join and on accept."""
+        (progression / loadout / skills / RPG attributes / titles).
+        Idempotent — safe to call on join and on accept."""
         from ..skills import passive_bonuses
         s = room.state
         key = player.key
@@ -88,7 +88,7 @@ class _ArenaCombat:
             dfn=5 + int(prog.get("def", 0)) + int(pb["def"]),
         )
         s.setdefault("base", {})[key] = {
-            "atk": f["atk"], "def": f["def"]}
+            "atk": f["atk"], "def": f["def"], "max_hp": f["max_hp"]}
         s.setdefault("fighters", {})[key] = f
         s.setdefault("skill_cd", {})[key] = {}
         s.setdefault("skill_used", {})[key] = []
@@ -96,16 +96,62 @@ class _ArenaCombat:
         s.setdefault("dmg", {}).setdefault(key, 0)
         s.setdefault("misses", {}).setdefault(key, 0)
         self._recache_fighter(room, key, key)
+        # a fresh fighter starts at full HP (recaches preserve damage)
+        s["fighters"][key]["hp"] = s["fighters"][key]["max_hp"]
         return f
+
+    def _apply_rpg_and_titles(self, room: Room, player_key: str,
+                              seat: str) -> None:
+        """Fold RPG attributes + active-title battle effects into a
+        fighter — the same kit the solo arena applies (see
+        ``BattleArenaGame._apply_stats``).
+
+        Runs at the end of ``_recache_fighter``, which resets atk/def/
+        max_hp to base first, so re-application is idempotent.  The
+        stamina HP only *widens* the pool: current HP is restored to
+        its pre-apply value (clamped to the new max) so a mid-duel
+        recache — gear shattering or being equipped — never heals.
+        """
+        s = room.state
+        f = s["fighters"][seat]
+        hp_before = int(f.get("hp", 0))
+        try:
+            from ..stats import (StatBlock, apply_stats_to_fighter,
+                                 gear_stat_bonuses)
+            raw = s.get("rpg_stats", {}).get(player_key)
+            stats = StatBlock.from_dict(raw)
+            loadout = s.get("loadout", {}).get(player_key, {})
+            apply_stats_to_fighter(
+                f, stats, gear_stat_bonuses(loadout))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from ..titles import title_battle_effects
+            title = s.get("titles", {}).get(player_key, "")
+            effects = title_battle_effects(title)
+            for ek, val in effects.items():
+                if ek in ("atk", "def", "max_hp"):
+                    f[ek] = int(f.get(ek, 0)) + int(val)
+        except Exception:  # noqa: BLE001
+            pass
+        # apply_stats_to_fighter bumps current HP by the stamina gain —
+        # undo it so recaches never heal; only the pool widens.
+        f["hp"] = min(hp_before, int(f.get("max_hp", hp_before)))
 
     def _recache_fighter(self, room: Room, player_key: str,
                          seat: str) -> None:
-        """Re-fold gear + set bonus into a fighter (equip/break)."""
+        """Re-fold gear + set bonus into a fighter (equip/break).
+
+        Resets to base first (now including max_hp) so RPG attributes
+        and title effects re-apply cleanly without stacking."""
         from ..gear import SET_BONUSES
         s = room.state
         f = s["fighters"][seat]
-        base = s.get("base", {}).get(seat, {"atk": 10, "def": 5})
+        base = s.get("base", {}).get(seat, {"atk": 10, "def": 5,
+                                            "max_hp": 50})
         f["atk"], f["def"] = int(base["atk"]), int(base["def"])
+        f["max_hp"] = int(base.get("max_hp", 50))
+        f["hp"] = min(int(f.get("hp", f["max_hp"])), int(f["max_hp"]))
         f["combo_every"], f["combo_count"], f["combo_name"] = 0, 0, ""
         loadout = s.get("loadout", {}).get(player_key, {})
         for slot, piece in loadout.items():
@@ -127,6 +173,9 @@ class _ArenaCombat:
                 f["combo_name"] = bonus.combo_name
                 s["set_bonus"][seat] = sname
                 break
+        # RPG attributes + title effects ride on every recache
+        self._apply_rpg_and_titles(room, player_key, seat)
+        f["hp"] = min(int(f.get("hp", 0)), int(f["max_hp"]))
 
     # ── strikes ───────────────────────────────────────────────────────
     def _strike_msg(self, room: Room, mind: GameMind,
@@ -240,6 +289,15 @@ class _ArenaCombat:
         used = s.setdefault("skill_used", {}).setdefault(seat, [])
         if defn.once_per_battle and defn.slug in used:
             return f"{defn.name} is spent for this battle."
+        # mana: techniques burn fuel — same rule as the solo arena.
+        # Fighters without a mana pool (legacy, unit tests) cast freely.
+        if "max_mana" in me:
+            need = int(defn.mana_cost)
+            have = int(me.get("mana", 0))
+            if have < need:
+                return (f"not enough mana — {defn.name} needs {need}, "
+                        f"you have {have}. It regenerates each turn.")
+            me["mana"] = have - need
         msg = ""
         if defn.slug == "shadow_step":
             me["dodge_next"] = True
@@ -280,6 +338,141 @@ class _ArenaCombat:
         if defn.once_per_battle:
             used.append(defn.slug)
         return msg
+
+    def _dual_cast(self, room: Room, player: Player, seat: str,
+                   foe_seat: str, ref: str, mind: GameMind,
+                   me_name: str, foe_name: str,
+                   foe_key: str | None = None) -> str | None:
+        """Weave two complementary skills as one dual-cast combo.
+
+        ``ref`` is ``"<skill1> + <skill2>"`` or ``"<skill1> <skill2>"`` —
+        the same ordered-pair catalog the solo arena uses (including
+        ``war_cry → slaying_force``, "Cutyp's Judgment").  None = not a
+        usable pairing ref, so the caller falls through to the move list.
+        """
+        from ..skills import (SKILL_CATALOG, effective_def, resolve_skill,
+                              find_combo, combo_success_chance)
+        s = room.state
+        me = s["fighters"][seat]
+        foe = s["fighters"][foe_seat]
+        ref = (ref or "").strip()
+        if "+" in ref:
+            first_ref, second_ref = [p.strip() for p in ref.split("+", 1)]
+        else:
+            bits = ref.split()
+            if len(bits) < 2:
+                return None
+            first_ref, second_ref = bits[0], " ".join(bits[1:])
+        d1 = resolve_skill(first_ref)
+        d2 = resolve_skill(second_ref)
+        if d1 is None or d2 is None or d1.kind != "active" \
+                or d2.kind != "active":
+            return None
+        learned = s.get("skills", {}).get(player.key, [])
+        tiers = s.get("skill_tiers", {}).get(player.key, {})
+        if d1.slug not in learned or d2.slug not in learned:
+            known = [SKILL_CATALOG[x].name for x in learned
+                     if x in SKILL_CATALOG]
+            hint = (f"you know: {', '.join(known)}."
+                    if known else "you haven't learned any skills yet.")
+            return f"dual-cast needs both techniques learned. {hint}"
+        combo = find_combo(d1.slug, d2.slug)
+        if combo is None:
+            if find_combo(d2.slug, d1.slug) is not None:
+                return (f"{d2.name} → {d1.name} chains, not the reverse — "
+                        f"the setup must come first.")
+            return (f"{d1.name} and {d2.name} don't chain — only "
+                    f"complementary techniques combo. /skill combos "
+                    f"lists every pairing.")
+        cd = s.setdefault("skill_cd", {}).setdefault(seat, {})
+        used = s.setdefault("skill_used", {}).setdefault(seat, [])
+        t1 = int(tiers.get(d1.slug, 1))
+        t2 = int(tiers.get(d2.slug, 1))
+        e1 = effective_def(d1, t1)
+        e2 = effective_def(d2, t2)
+        for e in (e1, e2):
+            if int(cd.get(e.slug, 0)) > 0:
+                return (f"{e.name} is recovering — "
+                        f"{cd[e.slug]} turn(s) left.")
+            if e.once_per_battle and e.slug in used:
+                return f"{e.name} is spent for this battle."
+        # mana: both skills' costs plus the combo's weave cost.
+        # Fighters without a mana pool (legacy, tests) weave freely.
+        mana_need = int(e1.mana_cost) + int(e2.mana_cost) + combo.mana_cost
+        if "max_mana" in me:
+            mana_have = int(me.get("mana", 0))
+            if mana_have < mana_need:
+                return (f"not enough mana — the weave needs {mana_need}, "
+                        f"you have {mana_have}. It regenerates each turn.")
+            me["mana"] = mana_have - mana_need
+        hp_cost = max(1, int(me["max_hp"] * combo.hp_cost_pct))
+        me["hp"] = max(1, int(me["hp"]) - hp_cost)
+        cd[e1.slug] = int(e1.cooldown) + combo.extra_cd
+        cd[e2.slug] = int(e2.cooldown) + combo.extra_cd
+        if e1.once_per_battle:
+            used.append(e1.slug)
+        if e2.once_per_battle:
+            used.append(e2.slug)
+        # ── the weave: can you hold both techniques at once? ──
+        intel = int(me.get("intelligence", 0))
+        chance = combo_success_chance(combo, t1, t2, intel)
+        if chance < float(s.get("dual_lowest_odds", 1.0)):
+            s["dual_lowest_odds"] = chance
+        if mind.rng.random() >= chance:
+            return (f"💔 the dual-cast unravels! You wove {e1.name} into "
+                    f"{e2.name} and it slipped — −{hp_cost} HP, both "
+                    f"techniques recovering. ({int(chance * 100)}% chance)")
+        s["dual_casts"] = int(s.get("dual_casts", 0)) + 1
+        parts = [f"⚡ DUAL-CAST — {combo.name}! {combo.desc}"]
+        parts.append(f"🩸 −{hp_cost} HP sacrificed.")
+        # setup: apply the first skill's non-strike effect
+        if e1.slug == "war_cry":
+            me["atk"] += int(e1.atk_buff)
+            me["warcry_turns"] = int(e1.buff_turns)
+            me["warcry_amt"] = int(e1.atk_buff)
+            parts.append(f"🗣️ +{e1.atk_buff} attack for "
+                         f"{e1.buff_turns} turns!")
+        elif e1.slug in ("shadow_step", "smoke_bomb", "crane_dance"):
+            me["dodge_next"] = True
+            parts.append("🌫️ you vanish — their next attack will miss.")
+            if e1.slug == "smoke_bomb" and e1.atk_debuff:
+                amt = int(e1.atk_debuff)
+                foe["atk"] = max(1, int(foe["atk"]) - amt)
+                foe["atk_debuff"] = {"turns": int(e1.debuff_turns),
+                                    "amt": amt}
+                parts.append(f"🌑 −{amt} enemy attack for "
+                             f"{e1.debuff_turns} turns.")
+            if e1.slug == "crane_dance" and e1.heal_pct:
+                heal = int(me["max_hp"] * float(e1.heal_pct))
+                me["hp"] = min(me["max_hp"], int(me["hp"]) + heal)
+                parts.append(f"💚 +{heal} HP as you flow.")
+        elif e1.slug == "second_wind":
+            heal = int(me["max_hp"] * float(e1.heal_pct))
+            me["hp"] = min(me["max_hp"], int(me["hp"]) + heal)
+            parts.append(f"💚 +{heal} HP — breath returns.")
+            if combo.second == "war_cry":
+                # Phoenix Rising: the combo's own payoff is the buff
+                me["atk"] += 5
+                me["warcry_turns"] = 4
+                me["warcry_amt"] = 5
+                parts.append("🔥 +5 attack for 4 turns — risen!")
+                return " ".join(parts)
+        # payoff: the combined strike
+        if combo.mult > 0:
+            for _ in range(max(1, combo.hits)):
+                pm, rep = self._strike_msg(
+                    room, mind, seat, foe_seat, me_name, foe_name,
+                    atk_key=player.key, dfn_key=foe_key,
+                    mult=combo.mult, ignore_def=combo.ignore_def_pct)
+                parts.append(pm)
+                if rep.get("crit") and s["fighters"][foe_seat]["hp"] <= 0:
+                    s["crit_kill_by"] = seat
+                if s["fighters"][foe_seat]["hp"] <= 0:
+                    break
+        if intel >= 10:
+            parts.append(f"(woven at {int(chance * 100)}% — "
+                         f"intelligence steadied your hands)")
+        return " ".join(parts)
 
     # ── items ─────────────────────────────────────────────────────────
     def _use_item(self, room: Room, player: Player, seat: str,
@@ -342,6 +535,15 @@ class _ArenaCombat:
         t = text.strip().lower()
         out: list[str] = []
         out.extend(tick_fighter(me, s.get("skill_cd", {}).get(seat)))
+        # mana regenerates a little every turn — the well refills
+        try:
+            from ..stats import MANA_REGEN_PER_TURN
+            if "max_mana" in me:
+                me["mana"] = min(int(me["max_mana"]),
+                                 int(me.get("mana", 0))
+                                 + MANA_REGEN_PER_TURN)
+        except Exception:  # noqa: BLE001
+            pass
         if t == "attack":
             msg, rep = self._strike_msg(
                 room, mind, seat, foe_seat, me_name, foe_name,
@@ -390,6 +592,13 @@ class _ArenaCombat:
             if msg is None:
                 return [f"no such skill — your moves: {MOVE_HELP}."]
             out.append(msg)
+        elif t.startswith("combo ") or t.startswith("dual "):
+            ref = t[6:].strip() if t.startswith("combo ") else t[5:].strip()
+            msg = self._dual_cast(room, player, seat, foe_seat, ref,
+                                  mind, me_name, foe_name, foe_key=foe_key)
+            if msg is None:
+                return [f"no such pairing — your moves: {MOVE_HELP}."]
+            out.append(msg)
         else:
             return [f"your moves: {MOVE_HELP}."]
         return out
@@ -408,8 +617,9 @@ class DuelGame(_ArenaCombat, MultiGame):
     move_timeout = 120.0
     rules = ("A duel to the death against another human — no house AI. "
              "attack · focus · fury · defend · potion · skill <name> · "
-             "item <gear>. Your level, equipped gear, and learned skills "
-             "all fight with you. 120 seconds per move: stall twice and "
+             "combo <a> + <b> · item <gear>. Your level, equipped gear, "
+             "learned skills, RPG attributes and title all fight with you. "
+             "120 seconds per move: stall twice and "
              "you auto-guard, stall a third time and you forfeit. "
              "Start one in a group (/pvp) or challenge DM-to-DM "
              "(/pvp @user, /arena challenge @user).")
@@ -434,16 +644,41 @@ class DuelGame(_ArenaCombat, MultiGame):
                     "DM-to-DM: /pvp @user or /arena challenge @user.")
         room.state["lobby"] = False
         a, b = room.humans[0], room.humans[1]
-        fa, fb = room.state["fighters"][a.key], room.state["fighters"][b.key]
-        return self._intro(a, b, fa, fb)
+        return self._intro(room, a, b)
 
-    def _intro(self, a: Player, b: Player,
-               fa: dict, fb: dict) -> str:
+    def _intro(self, room: Room, a: Player, b: Player) -> str:
         return (
             f"⚔️ DUEL — {a.name} vs {b.name}!\n"
-            f"{a.name}: {fa['hp']} HP · {fa['atk']} atk · {fa['def']} def\n"
-            f"{b.name}: {fb['hp']} HP · {fb['atk']} atk · {fb['def']} def\n"
+            f"{self._fighter_line(room, a)}\n"
+            f"{self._fighter_line(room, b)}\n"
             f"{MOVE_HELP}\n{a.name} moves first — 120s on the clock.")
+
+    def _fighter_line(self, room: Room, p: Player) -> str:
+        """One-liner for a duelist: stats + level, gear, skills."""
+        from ..skills import SKILL_CATALOG, effective_def
+        s = room.state
+        f = s["fighters"][p.key]
+        bits = [f"{p.name}: {f['hp']} HP · {f['atk']} atk · {f['def']} def"]
+        lvl = s.get("progression", {}).get(p.key, {}).get("level", 1)
+        if int(lvl) > 1:
+            bits.append(f"level {lvl}")
+        loadout = s.get("loadout", {}).get(p.key, {})
+        worn = [pc["name"] for sl, pc in
+                (("weapon", loadout.get("weapon")),
+                 ("armor", loadout.get("armor")))
+                if pc and pc.get("name")]
+        if worn:
+            bits.append("wielding " + " + ".join(worn))
+        slugs = s.get("skills", {}).get(p.key, [])
+        tiers = s.get("skill_tiers", {}).get(p.key, {})
+        names = [effective_def(sl, tiers.get(sl, 1)).name
+                 for sl in slugs if sl in SKILL_CATALOG]
+        if names:
+            bits.append("🥋 " + ", ".join(names))
+        title = s.get("titles", {}).get(p.key, "")
+        if title:
+            bits[0] = f"{title} " + bits[0]
+        return " — ".join(bits)
 
     def on_join(self, room: Room, player: Player,
                 mind: GameMind) -> str | None:
@@ -453,9 +688,7 @@ class DuelGame(_ArenaCombat, MultiGame):
         if self._ready(room) and room.state.get("lobby"):
             room.state["lobby"] = False
             a, b = room.humans[0], room.humans[1]
-            fa = room.state["fighters"][a.key]
-            fb = room.state["fighters"][b.key]
-            return self._intro(a, b, fa, fb)
+            return self._intro(room, a, b)
         return None
 
     def on_move(self, room: Room, player: Player, text: str,
@@ -587,7 +820,7 @@ class RaidGame(_ArenaCombat, MultiGame):
     ai_seats = 0
     move_timeout = 120.0
     rules = ("The party vs one raid boss. attack · focus · fury · "
-             "defend · potion · skill <name> · item <gear> — everything "
+             "defend · potion · skill <name> · combo <a> + <b> · item <gear> — everything "
              "hits the boss. It slams back after every full round, "
              "cleaves the whole party every 3rd round, and ENRAGES at "
              "30% HP. Bring friends: the boss scales with party size, "
