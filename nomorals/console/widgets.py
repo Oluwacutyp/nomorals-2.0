@@ -807,100 +807,88 @@ class GodScreen:
     # ── frame assembly ──
 
     def _render_frame(self, out: Any = None) -> None:
+        """Render one frame: header, content, feed, status. Simple layout.
+
+        No box-drawing panes — just clean sections separated by rules.
+        Every line is width-truncated so nothing wraps or overlaps.
+        """
         from . import dashboard as _d
 
         out = out if out is not None else self.out
         snap = self._snap()
         cols, rows = shutil.get_terminal_size((80, 24))
-        width = max(48, cols)
-        height = max(20, rows)
+        width = max(40, cols)
+        height = max(16, rows)
+
+        def _t(line: str) -> str:
+            return truncate_visible(line, width)
 
         lines: list[str] = []
-        if width >= 72:
-            lines.extend(self._header_wide(snap, width))
-        else:
-            lines.extend(self._header_narrow(width))
+
+        # ── header (2 lines): title + tabs, then a rule ──
+        spin = _SPINNER[self._frame % len(_SPINNER)]
+        self._frame += 1
+        title = (paint("🥷 ", CYAN, color=self.color)
+                 + gradient_text("DEVON", 51, 201, color=self.color)
+                 + paint(" · live ", TITLE, color=self.color)
+                 + paint(spin, CYAN, color=self.color))
+        tabs = "  ".join(
+            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
+                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
+                  color=self.color)
+            for v in WATCH_VIEWS
+        )
+        lines.append(_t(f"  {title}   {tabs}"))
+        lines.append(_t(paint("─" * width, SUBTLE, color=self.color)))
         header_h = len(lines)
 
-        # Feed box height adapts to terminal size.
-        feed_inner = 5 if height < 32 else 7
-        feed_box_h = feed_inner + 2
-        content_box_h = max(6, height - header_h - feed_box_h - self.STATUS_H)
-        content_inner = content_box_h - 2
-
-        # ── content pane ──
+        # ── content: the current view, plain lines ──
+        # Fixed heights: 2 header + 1 rule + content + 1 rule +
+        # 1 feed-title + 5 feed + 1 rule + 1 status = height.
+        feed_h = 5
+        # Fixed lines: 2 header + 1 view label + 1 feed label + feed_h +
+        # 1 separator + 1 status = 6 + feed_h. Content fills the rest.
+        content_h = max(4, height - (6 + feed_h))
         view_text = _d.render_view(snap, self._view, color=self.color,
                                    bare=True)
         content_lines = [
-            truncate_visible(ln, width - 4) for ln in view_text.splitlines()
-        ][:content_inner]
-        while len(content_lines) < content_inner:
+            _t(ln) for ln in view_text.splitlines()[:content_h]
+        ]
+        while len(content_lines) < content_h:
             content_lines.append("")
-        view_title = paint(f" {self._view} ", TITLE + BOLD, color=self.color)
-        top = (paint("┌─", SUBTLE, color=self.color) + view_title
-               + paint("─" * max(2, width - 3 - visible_width(view_title))
-                       + "┐", SUBTLE, color=self.color))
-        lines.append(truncate_visible(top, width))
-        bar_l = paint("│ ", SUBTLE, color=self.color)
-        bar_r = paint(" │", SUBTLE, color=self.color)
-        for ln in content_lines:
-            pad = " " * max(0, (width - 4) - visible_width(ln))
-            lines.append(truncate_visible(bar_l + ln + pad + bar_r, width))
-        lines.append(paint("└" + "─" * (width - 2) + "┘", SUBTLE,
-                           color=self.color))
+        view_label = paint(f"── {self._view} ", TITLE + BOLD, color=self.color)
+        lines.append(_t(view_label + paint("─" * width, SUBTLE, color=self.color)))
+        lines.extend(content_lines)
 
-        # ── feed pane ──
+        # ── feed: title + up to 5 recent messages ──
         feed = WatchHub.feed()
         unread = feed.unread
         feed.mark_read()
-        feed_title = paint(" messages (live) ", TITLE + BOLD, color=self.color)
-        ftop = (paint("┌─", SUBTLE, color=self.color) + feed_title
-                + paint("─" * max(2, width - 3 - visible_width(feed_title))
-                        + "┐", SUBTLE, color=self.color))
-        lines.append(truncate_visible(ftop, width))
-        events = feed.recent(feed_inner)
-        feed_lines = (
-            [truncate_visible(format_feed_line(ev, color=self.color),
-                              width - 4)
-             for ev in events[-feed_inner:]]
-            if events
-            else [paint("  (quiet — new messages appear here)", DIM,
-                        color=self.color)]
-        )
-        while len(feed_lines) < feed_inner:
-            feed_lines.append("")
-        for ln in feed_lines[:feed_inner]:
-            pad = " " * max(0, (width - 4) - visible_width(ln))
-            lines.append(truncate_visible(bar_l + ln + pad + bar_r, width))
-        lines.append(paint("└" + "─" * (width - 2) + "┘", SUBTLE,
-                           color=self.color))
+        lines.append(_t(paint("── messages ", TITLE + BOLD, color=self.color)
+                        + paint("─" * width, SUBTLE, color=self.color)))
+        events = feed.recent(feed_h)
+        if events:
+            for ev in events[-feed_h:]:
+                lines.append(_t("  " + format_feed_line(ev, color=self.color)))
+            for _ in range(feed_h - len(events)):
+                lines.append("")
+        else:
+            lines.append(_t(paint("  (quiet — new messages appear here)", DIM,
+                                  color=self.color)))
+            for _ in range(feed_h - 1):
+                lines.append("")
 
-        # ── status bar (always pinned to the bottom) ──
-        # Truncate to width-1: a line exactly at the width boundary can
-        # wrap on some terminals, smearing the next frame.
+        # ── status bar (1 line, pinned to bottom) ──
+        lines.append(_t(paint("─" * width, SUBTLE, color=self.color)))
         lines.append(
-            truncate_visible(
-                _d.render_statusbar(snap, self._view, unread=unread,
-                                    color=self.color),
-                width - 1,
-            )
-        )
-        lines.append(
-            truncate_visible(
-                paint("  dashboard owns the terminal · logs muted "
-                      "· spill: $TMPDIR/devon-watch-spill.log",
-                      DIM, color=self.color),
-                width - 1,
-            )
+            _t(_d.render_statusbar(snap, self._view, unread=unread,
+                                   color=self.color))
         )
 
-        # Pin to exactly the terminal height; every line already fits the
-        # width, so nothing wraps and the layout can't garble.
+        # Pin to exactly the terminal height.
         while len(lines) < height:
             lines.append("")
-        frame = "\n".join(
-            truncate_visible(ln, width) for ln in lines[:height]
-        )
+        frame = "\n".join(_t(ln) for ln in lines[:height])
         out.write(_HOME + frame + _CLEAR_BELOW)
         out.flush()
 

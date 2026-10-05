@@ -995,9 +995,10 @@ class GodScreenLayoutTests(unittest.TestCase):
                            color=True, out=out)
         screen._render_frame()
         frame = strip_ansi(out.getvalue())
-        self.assertIn("┌─", frame)
-        self.assertIn("messages (live)", frame)
-        self.assertIn("logs muted", frame)
+        # Simplified layout: section labels, not box borders.
+        self.assertIn("── status", frame)
+        self.assertIn("── messages", frame)
+        self.assertIn("[1-4] views", frame)
 
     def test_view_switch_changes_pane_title(self):
         import io as _io
