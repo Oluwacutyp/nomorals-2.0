@@ -413,3 +413,32 @@ class GroupCachePoisoningTests(unittest.TestCase):
         self.assertNotEqual(str(entity.id), str(sender_id))
         # And it must classify as a group, not a DM
         self.assertEqual(_kind_for(entity), "group")
+
+    def test_input_chat_tried_before_input_sender(self):
+        """Regression: input_sender-first ordering misclassified groups as DMs.
+
+        In the "last resort" entity resolution path, the old code tried
+        input_sender BEFORE input_chat. For a group message, input_sender
+        is the SENDER's peer (their DM) — if it resolved, the message was
+        treated as a DM from the sender and replies went to their inbox
+        instead of the group. input_chat (the group peer) must be tried
+        first.
+        """
+        # This test verifies the ORDERING by checking the source code
+        # directly — the fix is a one-line reorder that's hard to test
+        # behaviorally without a full Telethon mock.
+        import inspect
+        from nomorals.social.chat import telegram as tg_module
+        src = inspect.getsource(tg_module.TelegramAdapter._handle_inbound)
+        # Find the "Last resort" block and verify input_chat comes first
+        last_resort_idx = src.find("Last resort")
+        self.assertGreater(last_resort_idx, 0, "Last resort block not found")
+        block = src[last_resort_idx:last_resort_idx + 2000]
+        chat_first = block.find("input_chat is not None")
+        sender_first = block.find("input_sender is not None")
+        self.assertGreater(chat_first, 0, "input_chat check not found")
+        self.assertGreater(sender_first, 0, "input_sender check not found")
+        self.assertLess(
+            chat_first, sender_first,
+            "input_chat must be tried BEFORE input_sender in the last-resort path",
+        )

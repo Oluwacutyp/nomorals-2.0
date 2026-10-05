@@ -461,20 +461,41 @@ class TelegramAdapter(ChatAdapter):
         elif event_sender is not None:
             entity = event_sender
             
-        # Last resort: try input_chat or input_sender
+        # Last resort: try input_chat or input_sender.
+        # CRITICAL ORDER: input_chat FIRST. For a group message, input_sender
+        # is the SENDER's peer (their DM), not the group. If we resolve
+        # input_sender first and it succeeds, the message gets misclassified
+        # as a DM and replies go to the sender's inbox instead of the group.
+        # (This was the persistent group→DM redirect bug.)
         if entity is None:
             input_chat = getattr(event, "input_chat", None)
             input_sender = getattr(event, "input_sender", None)
-            
-            if input_sender is not None:
-                try:
-                    entity = await client.get_entity(input_sender)
-                except Exception:  # noqa: BLE001
-                    pass
-            
-            if entity is None and input_chat is not None:
+
+            _log.debug(
+                "telegram: entity resolve via input peers chat_id=%s "
+                "input_chat=%r input_sender=%r is_group=%r is_channel=%r",
+                chat_id, input_chat, input_sender,
+                getattr(event, "is_group", None),
+                getattr(event, "is_channel", None),
+            )
+
+            if input_chat is not None:
                 try:
                     entity = await client.get_entity(input_chat)
+                    _log.debug(
+                        "telegram: entity resolved via input_chat chat_id=%s -> %r",
+                        chat_id, getattr(entity, "id", None),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if entity is None and input_sender is not None:
+                try:
+                    entity = await client.get_entity(input_sender)
+                    _log.debug(
+                        "telegram: entity resolved via input_sender chat_id=%s -> %r",
+                        chat_id, getattr(entity, "id", None),
+                    )
                 except Exception:  # noqa: BLE001
                     pass
         
@@ -576,6 +597,26 @@ class TelegramAdapter(ChatAdapter):
             )
             return
         kind = _kind_for(entity)
+        # ── diagnostic: log full routing decision for group messages ──
+        # The user reported group commands going to DM. This logs every
+        # data point in the routing chain so we can see exactly where a
+        # group message gets misclassified.
+        _log.debug(
+            "telegram: inbound routing decision "
+            "event.chat_id=%r event.sender_id=%r event.is_group=%r event.is_channel=%r "
+            "entity.id=%r entity.megagroup=%r entity.channel=%r entity.title=%r "
+            "kind=%r final_chat_id=%r",
+            getattr(event, "chat_id", None),
+            getattr(event, "sender_id", None),
+            getattr(event, "is_group", None),
+            getattr(event, "is_channel", None),
+            getattr(entity, "id", None),
+            getattr(entity, "megagroup", None),
+            getattr(entity, "channel", None),
+            getattr(entity, "title", None),
+            kind,
+            chat_id,
+        )
         text = getattr(message, "raw_text", None) or ""
         media: list[MediaRef] = []
         if getattr(message, "media", None):
