@@ -598,6 +598,17 @@ class PartnerBrain:
             return True
         return False
 
+    def should_speak_in_group(self, message: ChatMessage) -> bool:
+        """Public, side-effect-free pre-check: would this group message earn a
+        reply?
+
+        The runtime consults this BEFORE showing any typing indicator, so a
+        group message she'll stay quiet on never flashes "typing..." with no
+        reply after it. Cheap — no model call, no state changes, safe to
+        call twice (``handle_message`` runs the same check again).
+        """
+        return self._should_speak_in_group(message)
+
     # ── curator ──────────────────────────────────────────────────────────────
     def _maybe_curate(self, chat_key: str, is_owner: bool) -> None:
         if not is_owner:

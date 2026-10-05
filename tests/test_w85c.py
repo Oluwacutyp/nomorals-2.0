@@ -438,6 +438,56 @@ class RuntimeTypingTest(unittest.TestCase):
         self.assertTrue(self.adapter.sent, "no reply was sent")
         self.assertTrue(self.adapter.typing_calls, "no typing indicator while thinking")
 
+    def test_group_quiet_no_thinking_typing(self) -> None:
+        """A group message she'll stay quiet on must never show typing.
+
+        Regression: the thinking keepalive used to start before the brain's
+        group-quiet decision, so every unmentioned group message flashed
+        "typing..." with no reply after it.
+        """
+        self.settings.partner.typing_keepalive_seconds = 0.1
+        real_handle = self.brain.handle_message
+
+        def slow_handle(message):
+            time.sleep(0.3)
+            return real_handle(message)
+
+        self.brain.handle_message = slow_handle  # type: ignore[method-assign]
+        try:
+            chat = ChatRef(platform="local", chat_id="g1", kind=ChatKind.GROUP)
+            # no mention, no reply-to, persona name absent -> she stays quiet
+            message = ChatMessage(chat=chat, incoming=True,
+                                  text="anyone up for lunch?", sender="x")
+            self.assertFalse(self.brain.should_speak_in_group(message))
+            self.runtime._process(message)
+            time.sleep(0.3)  # give a stray keepalive thread time to fire, if any
+            self.assertEqual(self.adapter.typing_calls, [],
+                             "typing indicator fired in a group she stayed quiet in")
+            self.assertEqual(self.adapter.sent, [])
+        finally:
+            self.brain.handle_message = real_handle
+
+    def test_group_mentioned_thinking_typing(self) -> None:
+        """A group message addressing her still shows typing while thinking."""
+        self.settings.partner.typing_keepalive_seconds = 0.1
+        real_handle = self.brain.handle_message
+
+        def slow_handle(message):
+            time.sleep(0.3)
+            return real_handle(message)
+
+        self.brain.handle_message = slow_handle  # type: ignore[method-assign]
+        try:
+            chat = ChatRef(platform="local", chat_id="g1", kind=ChatKind.GROUP)
+            message = ChatMessage(chat=chat, incoming=True, text="hey everyone",
+                                  sender="x", mentioned=True)
+            self.assertTrue(self.brain.should_speak_in_group(message))
+            self.runtime._process(message)
+            self.assertTrue(self.adapter.typing_calls,
+                            "no typing indicator while thinking about a mentioned group message")
+        finally:
+            self.brain.handle_message = real_handle
+
 
 class DiscordTypingRefreshTest(unittest.TestCase):
     """Discord clears typing after ~10s — the adapter must re-send it."""

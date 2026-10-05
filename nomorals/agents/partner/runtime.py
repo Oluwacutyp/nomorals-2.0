@@ -548,8 +548,15 @@ class PartnerRuntime(
                 return
         # While the brain works, the indicator stays up (own thread — the
         # model call must not be delayed by a blocking typing window).
+        # In groups she only speaks when addressed — decide BEFORE showing
+        # any typing indicator, so a message she'll stay quiet on never
+        # flashes "typing..." with no reply after it.
         keepalive_stop = threading.Event()
-        if self.settings.partner.typing_while_thinking and not self.dry_run:
+        _will_answer = (
+            message.chat.kind != ChatKind.GROUP
+            or self.brain.should_speak_in_group(message)
+        )
+        if self.settings.partner.typing_while_thinking and not self.dry_run and _will_answer:
             threading.Thread(
                 target=self._typing_keepalive,
                 args=(message.chat, keepalive_stop),
