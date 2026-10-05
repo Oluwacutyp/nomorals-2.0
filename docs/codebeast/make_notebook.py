@@ -324,41 +324,63 @@ _sh("pip install -q /kaggle/working/llama.cpp/gguf-py/")
 # 3. fp16 safetensors -> F16 GGUF (converter no longer takes k-quant outtypes)
 F16_GGUF = f"{RUN_DIR}/codebeast-f16.gguf"
 OUT_GGUF = f"{RUN_DIR}/codebeast.Q4_K_M.gguf"
-assert shutil.disk_usage("/kaggle/working").free / 1e9 > 10, \
-    "need ~10GB free for F16 + Q4_K_M — clear more checkpoints first"
-_sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
-    f"--outfile {F16_GGUF} --outtype f16")
+
+def _valid_gguf(p):
+    try:
+        with open(p, "rb") as _f:
+            return _f.read(4) == b"GGUF" and os.path.getsize(p) > 1e9
+    except OSError:
+        return False
+
+if _valid_gguf(OUT_GGUF):
+    print(f"♻️ {OUT_GGUF} already exists and is valid — skipping export entirely")
+elif not os.path.isfile(F16_GGUF):
+    assert shutil.disk_usage("/kaggle/working").free / 1e9 > 10, \
+        "need ~10GB free for F16 + Q4_K_M — clear more checkpoints first"
+    _sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
+        f"--outfile {F16_GGUF} --outtype f16")
+else:
+    print(f"♻️ reusing existing {F16_GGUF} — convert step skipped")
 
 # 4. prebuilt llama-quantize (no cmake build): scan recent releases for a
 #    ubuntu x64 binary TARBALL — 'latest' is often binary-less and names
 #    change (2026-10-05: b11433 'llama-b11433-bin-ubuntu-cuda-12.8-x64.tar.gz').
 #    The binary needs its sibling .so files -> run with LD_LIBRARY_PATH.
-import json, urllib.request
-def _gh(path):
-    _rq = urllib.request.Request(f"https://api.github.com{path}",
-                                 headers={"User-Agent": "codebeast"})
-    return json.load(urllib.request.urlopen(_rq))
-_cands = []
-for _rel in _gh("/repos/ggerganov/llama.cpp/releases?per_page=25"):
-    for _a in _rel.get("assets", []):
-        _n = _a["name"]
-        if (_n.startswith("llama-b") and "-bin-ubuntu-" in _n
-                and _n.endswith("-x64.tar.gz")):
-            _cands.append((_n, _a["browser_download_url"], _rel["tag_name"]))
-_cands.sort(key=lambda c: c[0].startswith("cudart-"))  # smaller plain build first
-assert _cands, "no ubuntu x64 binary in recent llama.cpp releases"
-_n, _zurl, _ztag = _cands[0]
-print("llama.cpp build:", _ztag, _n)
-_sh(f"curl -sL -o /tmp/llama.tgz {_zurl} && mkdir -p {RUN_DIR}/llama-rel "
-    f"&& tar xzf /tmp/llama.tgz -C {RUN_DIR}/llama-rel")
-_q = subprocess.run(f"find {RUN_DIR}/llama-rel -name llama-quantize | head -1",
-                    shell=True, capture_output=True, text=True).stdout.strip()
-assert _q, "quantize binary not found in release tarball"
-_qlib = os.path.dirname(_q)
-_sh(f"chmod +x {_q} && LD_LIBRARY_PATH={_qlib} {_q} {F16_GGUF} {OUT_GGUF} q4_k_m")
+#    Only downloaded when we actually need to quantize.
+def _find_q():
+    return subprocess.run(
+        f"find {RUN_DIR}/llama-rel -name llama-quantize | head -1",
+        shell=True, capture_output=True, text=True).stdout.strip()
+
+_q = _find_q()
+if not _valid_gguf(OUT_GGUF) and not _q:
+    import json, urllib.request
+    def _gh(path):
+        _rq = urllib.request.Request(f"https://api.github.com{path}",
+                                     headers={"User-Agent": "codebeast"})
+        return json.load(urllib.request.urlopen(_rq))
+    _cands = []
+    for _rel in _gh("/repos/ggerganov/llama.cpp/releases?per_page=25"):
+        for _a in _rel.get("assets", []):
+            _n = _a["name"]
+            if (_n.startswith("llama-b") and "-bin-ubuntu-" in _n
+                    and _n.endswith("-x64.tar.gz")):
+                _cands.append((_n, _a["browser_download_url"], _rel["tag_name"]))
+    _cands.sort(key=lambda c: c[0].startswith("cudart-"))  # smaller plain build first
+    assert _cands, "no ubuntu x64 binary in recent llama.cpp releases"
+    _n, _zurl, _ztag = _cands[0]
+    print("llama.cpp build:", _ztag, _n)
+    _sh(f"curl -sL -o /tmp/llama.tgz {_zurl} && mkdir -p {RUN_DIR}/llama-rel "
+        f"&& tar xzf /tmp/llama.tgz -C {RUN_DIR}/llama-rel")
+    _q = _find_q()
+if not _valid_gguf(OUT_GGUF):
+    assert _q, "quantize binary not found"
+    _qlib = os.path.dirname(_q)
+    _sh(f"chmod +x {_q} && LD_LIBRARY_PATH={_qlib} {_q} {F16_GGUF} {OUT_GGUF} q4_k_m")
 
 # 5. drop the 7.6GB F16 intermediate, verify the final file
-os.remove(F16_GGUF)
+if os.path.isfile(F16_GGUF):
+    os.remove(F16_GGUF)
 with open(OUT_GGUF, "rb") as _f:
     assert _f.read(4) == b"GGUF", "not a valid GGUF file!"
 print(f"✅ {OUT_GGUF} ({os.path.getsize(OUT_GGUF)/1e9:.2f} GB) — valid GGUF")
