@@ -50,7 +50,11 @@ class OpenRouterProvider(OpenAICompatProvider):
         app_title: str = "Devon",
         **kwargs: Any,
     ) -> None:
-        key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        key = (
+            api_key
+            or os.environ.get("OPENROUTER_API_KEY", "")
+            or os.environ.get("NM_OPENROUTER_API_KEY", "")
+        )
         headers = dict(kwargs.pop("extra_headers", None) or {})
         headers.setdefault("HTTP-Referer", app_url)
         # X-Title is the long-standing name; X-OpenRouter-Title is the newer

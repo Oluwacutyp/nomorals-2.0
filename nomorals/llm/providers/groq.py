@@ -68,7 +68,11 @@ class GroqProvider(OpenAICompatProvider):
         max_retries: int = 3,
         **kwargs: Any,
     ) -> None:
-        key = api_key or os.environ.get("GROQ_API_KEY", "")
+        key = (
+            api_key
+            or os.environ.get("GROQ_API_KEY", "")
+            or os.environ.get("NM_GROQ_API_KEY", "")
+        )
         super().__init__(
             base_url=base_url or GROQ_BASE_URL,
             api_key=key,

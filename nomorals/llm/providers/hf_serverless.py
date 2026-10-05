@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
 from typing import Any, Sequence
 
@@ -86,7 +87,11 @@ class HFServerlessProvider(LLMProvider):
         vision_model: str = "",
     ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
-        self.token = token
+        self.token = (
+            token
+            or os.environ.get("HF_TOKEN", "")
+            or os.environ.get("NM_HF_TOKEN", "")
+        )
         self.model = model
         # A dedicated vision repo (e.g. Qwen/Qwen2.5-VL-7B-Instruct): on the
         # legacy serverless API each model owns its /models/<repo>/ URL, so a
