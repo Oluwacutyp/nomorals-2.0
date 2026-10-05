@@ -720,7 +720,7 @@ class RuntimeGamesMixin:
         # Display-only: points are granted at the actual level-up event
         # in the game engine, never here. This just shows the current
         # state.
-        stats = store.get_for(player)
+        stats = store.get(player.key)
         tail = (tail or "").strip().lower()
         lines: list[str] = []
         if not tail or tail in ("show", "list"):
@@ -1049,6 +1049,11 @@ class RuntimeGamesMixin:
             if not text:
                 return None
             if not feature_enabled(self.context, "games"):
+                return None
+            # Channels don't identify individual senders, so channel
+            # posts can never be player moves. (Game commands in
+            # channels get a friendly redirect in runtime.py instead.)
+            if str(kind).lower() == ChatKind.CHANNEL:
                 return None
             
             # Check for relay room first (DM-to-DM multiplayer)
