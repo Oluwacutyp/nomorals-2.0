@@ -46,6 +46,33 @@ GAME_IDENTITY_ALIASES = {
 }
 
 
+def _caller_sets_display_name(stored_platform: str,
+                              caller_platform: str) -> bool:
+    """True when a sighting from ``caller_platform`` may overwrite the
+    stored display name.
+
+    Endpoints on the same network share one profile (see
+    ``GAME_IDENTITY_ALIASES``), but they don't see the same name: the
+    userbot reports the account display name (``Mary``) while the
+    BotFather bot reports the username (``chfjdhx``).  The canonical
+    endpoint — the userbot (``telegram``) — is the name authority: its
+    sightings always refresh the stored name, so a rename takes effect
+    everywhere.  A sighting from an aliased endpoint (``telegram-bot``)
+    may only fill in a name when no canonical name exists yet; it must
+    never clobber one.  Sightings from unrelated platforms always
+    refresh (each network owns its own profile).
+    """
+    caller = (caller_platform or "").strip().lower()
+    stored = (stored_platform or "").strip().lower()
+    if not caller:
+        return False
+    canonical = GAME_IDENTITY_ALIASES.get(caller)
+    if canonical is not None:
+        # Aliased endpoint: only set when the canonical name isn't set.
+        return stored != canonical
+    return True
+
+
 @dataclass(frozen=True)
 class Player:
     """One seat at the table: who they are and where they're playing."""
@@ -166,6 +193,12 @@ class PlayerStore:
         Row creation is atomic (INSERT OR IGNORE under the store lock)
         so two threads racing to create the same player can't clobber
         each other's subsequent writes with a stale xp=0 profile.
+
+        The display name is refreshed when the caller is authoritative:
+        the userbot (``telegram``) is the name authority for the aliased
+        Telegram endpoints, so its sightings always update the name (a
+        rename takes effect); a ``telegram-bot`` sighting never
+        overwrites a userbot-set name.
         """
         with self._lock:
             row = None
@@ -176,7 +209,16 @@ class PlayerStore:
             except Exception:  # noqa: BLE001
                 _log.debug("game_players read failed", exc_info=True)
             if row is not None:
-                return Profile.from_row(row)
+                prof = Profile.from_row(row)
+                if (name and name != prof.name
+                        and _caller_sets_display_name(prof.platform,
+                                                      platform)):
+                    self._refresh_display(key, name, platform)
+                    prof.name = name
+                    if platform:
+                        prof.platform = platform
+                    prof.updated_at = time.time()
+                return prof
             prof = Profile(key=key, name=name, platform=platform)
             if key != AI_PLAYER and self.db is not None:
                 try:
@@ -208,6 +250,48 @@ class PlayerStore:
                 if row is not None:
                     return Profile.from_row(row)
             return prof
+
+    def set_display_name(self, key: str, name: str,
+                         *, platform: str = "") -> Profile:
+        """Explicitly rename a profile (e.g. the user changed their name).
+
+        Unlike the guarded refresh inside :meth:`get`, this is
+        authoritative — it always applies.  Prefer userbot-sourced
+        names: a name set here from the ``telegram-bot`` endpoint will
+        be overwritten again on the next userbot sighting.
+        """
+        name = (name or "").strip()[:40]
+        with self._lock:
+            prof = self.get(key)  # ensure the row exists; no name touch
+            if not name or name == prof.name:
+                return prof
+            self._refresh_display(key, name, platform or prof.platform)
+            prof.name = name
+            if platform:
+                prof.platform = platform
+            prof.updated_at = time.time()
+            return prof
+
+    def _refresh_display(self, key: str, name: str, platform: str) -> None:
+        """Targeted display/platform UPDATE. Caller must hold ``self._lock``."""
+        if self.db is None:
+            return
+        try:
+            with self.db.transaction():
+                if platform:
+                    self.db.execute(
+                        "UPDATE game_players SET display = ?, platform = ?, "
+                        "updated_at = ? WHERE player_key = ?",
+                        (name, platform, time.time(), key),
+                    )
+                else:
+                    self.db.execute(
+                        "UPDATE game_players SET display = ?, "
+                        "updated_at = ? WHERE player_key = ?",
+                        (name, time.time(), key),
+                    )
+        except Exception:  # noqa: BLE001
+            _log.debug("game_players display refresh failed", exc_info=True)
 
     def all(self, limit: int = 500) -> list[Profile]:
         try:
