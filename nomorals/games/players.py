@@ -601,6 +601,39 @@ class PlayerStore:
                 ) or []
             except Exception:  # noqa: BLE001
                 rows = []
+            # ALSO match by key: legacy profiles created before username
+            # tracking have NULL/empty username columns, but their key's
+            # name part IS the username (e.g. telegram:chfjdhx for a user
+            # whose username is chfjdhx). Check candidate keys across all
+            # aliased platforms, case-insensitively.
+            try:
+                key_rows = self.db.query(
+                    "SELECT player_key FROM game_players "
+                    "WHERE COALESCE(deleted_at, 0) = 0",
+                ) or []
+            except Exception:  # noqa: BLE001
+                key_rows = []
+            seen_keys = set()
+            for r in rows:
+                try:
+                    seen_keys.add(str(r["player_key"]))
+                except Exception:  # noqa: BLE001
+                    pass
+            for r in key_rows:
+                try:
+                    k = str(r["player_key"])
+                except Exception:  # noqa: BLE001
+                    continue
+                if k in seen_keys:
+                    continue
+                k_plat, _, k_name = k.partition(":")
+                k_canon = GAME_IDENTITY_ALIASES.get(k_plat.strip().lower(),
+                                                    k_plat.strip())
+                # Key matches if canonical platform matches and the name
+                # part equals the username (case-insensitive).
+                if k_canon == canon and k_name.strip().lower() == username:
+                    seen_keys.add(k)
+                    rows.append(r)
             for r in rows:
                 try:
                     legacy_key = str(r["player_key"])
