@@ -213,5 +213,26 @@ class TitleEffectTests(unittest.TestCase):
         self.assertGreater(fx.get("combo_pct", 0), 0)
 
 
+class ComboListingTests(unittest.TestCase):
+    """The /skill combos listing covers every combo in the catalog."""
+
+    def test_every_combo_listable(self):
+        # Mirror the /skill combos formatting: every catalog entry
+        # must have the fields the listing renders.
+        for (first, second), combo in COMBO_CATALOG.items():
+            self.assertTrue(combo.name, f"{first}->{second}")
+            self.assertTrue(combo.desc, combo.name)
+            self.assertGreaterEqual(combo.hp_cost_pct, 0)
+            self.assertGreaterEqual(combo.mana_cost, 0)
+            self.assertGreaterEqual(combo.extra_cd, 0)
+
+    def test_signature_combo_present(self):
+        names = {c.name for c in COMBO_CATALOG.values()}
+        self.assertIn("Cutyp's Judgment", names)
+
+    def test_catalog_nonempty(self):
+        self.assertGreater(len(COMBO_CATALOG), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

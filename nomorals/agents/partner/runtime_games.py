@@ -411,7 +411,7 @@ class RuntimeGamesMixin:
 
     def _control_skills(self, tail: str, *, player: Any = None) -> str:
         """Learnable battle skills: /skill | /skill learn <name> |
-        /skill upgrade <name>.
+        /skill upgrade <name> | /skill combos.
 
         Skills persist in ``game_skills`` — learned once, yours forever.
         Active skills are cast in the arena with ``skill <name>``;
@@ -506,9 +506,25 @@ class RuntimeGamesMixin:
 
         parts = tail.split(None, 1)
         verb = parts[0].lower()
+        if verb == "combos":
+            from ...games.skills import COMBO_CATALOG
+            if not COMBO_CATALOG:
+                return "no dual-cast combos exist yet."
+            lines = ["⚡ dual-cast combos — setup first, payoff second:"]
+            for (first, second), combo in sorted(
+                    COMBO_CATALOG.items(), key=lambda kv: kv[1].name):
+                costs = (f"{int(combo.hp_cost_pct * 100)}% HP, "
+                         f"{combo.mana_cost} mana, +{combo.extra_cd} cd")
+                lines.append(
+                    f"  🔥 {combo.name}\n"
+                    f"     {first} → {second}\n"
+                    f"     {combo.desc}\n"
+                    f"     costs: {costs}")
+            lines.append("cast with: combo <first> + <second>")
+            return "\n".join(lines)
         if verb not in ("learn", "upgrade") or len(parts) < 2:
             return ("usage: /skill  ·  /skill learn <name>  ·  "
-                    "/skill upgrade <name>")
+                    "/skill upgrade <name>  ·  /skill combos")
         defn = resolve_skill(parts[1])
         if defn is None:
             return (f"no such skill {parts[1]!r} — /skill lists the "

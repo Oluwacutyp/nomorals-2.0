@@ -675,8 +675,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "arena. Active skills are cast mid-fight with "
                       "skill <name>; passives are always on. Learning "
                       "costs coins and may need a level.",
-              "usage": "/skill [learn <name>]",
-              "example": "/skill  ·  /skill learn dragon_punch",
+              "usage": "/skill [learn <name>] [combos]",
+              "example": "/skill  ·  /skill learn dragon_punch  ·  /skill combos",
               "related": "level, inventory, game"},
     "title": {"what": "earnable titles — flair worn next to your name. "
                       "Unlocked through arena achievements and milestones. "
@@ -1406,7 +1406,7 @@ LIST_ONELINERS: dict[str, str] = {
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
-    "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>)",
+    "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",
     "stats": "RPG attributes — strength/stamina/mana/intelligence (/stats)",
     "gift": "send coins, gear, or items to another player (/gift @name 100)",

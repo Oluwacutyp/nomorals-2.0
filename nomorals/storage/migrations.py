@@ -1431,8 +1431,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                     f"SELECT DISTINCT player_key FROM {t} "
                     "WHERE player_key LIKE 'telegram-bot:%'").fetchall():
                 alias_keys.add(str(k))
-        except Exception:
-            pass
+        except Exception as exc:
+            from ..core.logging_setup import get_logger
+            get_logger(__name__).debug("identity merge: alias key probe failed: %s", exc)
     if not alias_keys:
         return
 
@@ -1479,8 +1480,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                 try:
                     ex("UPDATE " + table + " SET player_key = ? "
                        "WHERE player_key = ?", (canon, alias_key))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    from ..core.logging_setup import get_logger
+                    get_logger(__name__).debug("identity merge: rename %s failed: %s", table, exc)
 
         if c is None:
             # No twin — pure rename across every per-player table.
@@ -1540,8 +1542,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                (*sets.values(), canon))
             ex("DELETE FROM game_players WHERE player_key = ?",
                (alias_key,))
-        except Exception:
-            pass
+        except Exception as exc:
+            from ..core.logging_setup import get_logger
+            get_logger(__name__).debug("identity merge: game_players merge failed: %s", exc)
 
         # ── gear: instance ids are globally unique — plain rename ────
         rename("game_gear")
@@ -1559,8 +1562,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                         ex("DELETE FROM game_skills WHERE player_key = ? "
                            "AND slug = ?", (alias_key, str(slug)))
                 rename("game_skills")
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logging_setup import get_logger
+                get_logger(__name__).debug("identity merge: game_skills merge failed: %s", exc)
 
         # ── attributes: UNIQUE(player_key) — merge, keep max ─────────
         if "game_attributes" in have:
@@ -1583,8 +1587,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                        (alias_key,))
                 else:
                     rename("game_attributes")
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logging_setup import get_logger
+                get_logger(__name__).debug("identity merge: game_attributes merge failed: %s", exc)
 
         # ── titles: UNIQUE(player_key, title_id) — dedupe, rename ────
         if "game_titles" in have:
@@ -1610,8 +1615,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                        "AND title_id = ?", (canon, alias_active[0]))
                     ex("UPDATE game_titles SET active = 0 WHERE player_key = ? "
                        "AND title_id != ?", (canon, alias_active[0]))
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logging_setup import get_logger
+                get_logger(__name__).debug("identity merge: game_titles merge failed: %s", exc)
 
         # ── per-game stats: PK(player_key, game_name) — sum, max best ─
         if "game_stats" in have:
@@ -1643,8 +1649,9 @@ def _apply_game_identity_alias_merge(db: object) -> None:
                         ex("DELETE FROM game_stats WHERE player_key = ? "
                            "AND game_name = ?", (alias_key, gname))
                 rename("game_stats")
-            except Exception:
-                pass
+            except Exception as exc:
+                from ..core.logging_setup import get_logger
+                get_logger(__name__).debug("identity merge: game_stats merge failed: %s", exc)
 
 
 _V67_PLAYER_LIBRARY = """
