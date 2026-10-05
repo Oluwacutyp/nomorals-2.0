@@ -283,30 +283,47 @@ if __name__ == "__main__":
 class BotLoopGuardTests(unittest.TestCase):
     """The userbot must ignore messages sent by bot accounts (self-reply loop)."""
 
-    def _adapter(self):
+    def _adapter(self, companion_bot_id=None):
         from nomorals.social.chat.telegram import TelegramAdapter
-        return TelegramAdapter.__new__(TelegramAdapter)
+        adapter = TelegramAdapter.__new__(TelegramAdapter)
+        adapter._companion_bot_id = companion_bot_id
+        return adapter
 
     def test_bot_sender_is_detected(self) -> None:
         from types import SimpleNamespace
-        from nomorals.social.chat.telegram import TelegramAdapter
         adapter = self._adapter()
         # Telethon resolves event.sender to a User with .bot=True for bots.
         event = SimpleNamespace(sender=SimpleNamespace(bot=True, id=123))
         message = SimpleNamespace(from_id=SimpleNamespace(user_id=123))
-        self.assertTrue(TelegramAdapter._sender_is_bot(event, message))
+        self.assertTrue(adapter._sender_is_bot(event, message))
 
     def test_human_sender_passes(self) -> None:
         from types import SimpleNamespace
-        from nomorals.social.chat.telegram import TelegramAdapter
+        adapter = self._adapter()
         event = SimpleNamespace(sender=SimpleNamespace(bot=False, id=456))
         message = SimpleNamespace(from_id=SimpleNamespace(user_id=456))
-        self.assertFalse(TelegramAdapter._sender_is_bot(event, message))
+        self.assertFalse(adapter._sender_is_bot(event, message))
 
     def test_missing_sender_info_passes(self) -> None:
         from types import SimpleNamespace
-        from nomorals.social.chat.telegram import TelegramAdapter
+        adapter = self._adapter()
         # No sender info at all — don't drop, the message might be legit.
         event = SimpleNamespace(sender=None)
         message = SimpleNamespace(from_id=None)
-        self.assertFalse(TelegramAdapter._sender_is_bot(event, message))
+        self.assertFalse(adapter._sender_is_bot(event, message))
+
+    def test_companion_bot_id_match_drops(self) -> None:
+        from types import SimpleNamespace
+        adapter = self._adapter(companion_bot_id=987654321)
+        # Sender entity NOT resolved (sender=None) — the old .bot-flag check
+        # would miss this, but the explicit ID match catches it.
+        event = SimpleNamespace(sender=None, sender_id=987654321)
+        message = SimpleNamespace(from_id=None)
+        self.assertTrue(adapter._sender_is_bot(event, message))
+
+    def test_companion_bot_id_mismatch_passes(self) -> None:
+        from types import SimpleNamespace
+        adapter = self._adapter(companion_bot_id=987654321)
+        event = SimpleNamespace(sender=None, sender_id=111222333)
+        message = SimpleNamespace(from_id=None)
+        self.assertFalse(adapter._sender_is_bot(event, message))

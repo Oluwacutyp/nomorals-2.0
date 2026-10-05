@@ -317,3 +317,29 @@ class MultiNameMergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ProfileLineDisplayNameTests(unittest.TestCase):
+    """_profile_line prefers the live sender name over a stale DB name."""
+
+    def test_live_name_preferred(self):
+        from types import SimpleNamespace
+        from nomorals.agents.partner.runtime_games import RuntimeGamesMixin
+        prof = SimpleNamespace(
+            name="chfjdhx", key="telegram:5478650254",
+            wins=190, losses=20, draws=12, streak=10,
+            games_played=222, coins=29578, points=29925, items={},
+        )
+        line = RuntimeGamesMixin._profile_line(prof, display_name="Peacethefirst")
+        self.assertIn("Peacethefirst", line)
+        self.assertNotIn("chfjdhx", line)
+
+    def test_falls_back_to_db_name(self):
+        from types import SimpleNamespace
+        from nomorals.agents.partner.runtime_games import RuntimeGamesMixin
+        prof = SimpleNamespace(
+            name="chfjdhx", key="telegram:5478650254",
+            wins=1, losses=0, draws=0, streak=0,
+            games_played=1, coins=10, points=5, items={},
+        )
+        line = RuntimeGamesMixin._profile_line(prof)
+        self.assertIn("chfjdhx", line)

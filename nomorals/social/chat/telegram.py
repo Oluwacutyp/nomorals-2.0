@@ -91,10 +91,20 @@ class TelegramAdapter(ChatAdapter):
         media_in_groups: bool = False,
         media_max_mb: float = 20.0,
         threads_enabled: bool = True,
+        companion_bot_id: int | str | None = None,
     ) -> None:
         super().__init__(media_dir=media_dir)
         self.media_in_groups = bool(media_in_groups)
         self.media_max_mb = float(media_max_mb)
+        # ID of the companion BotFather bot (if any). The bot's messages
+        # arrive at this userbot as incoming — without this, the
+        # _sender_is_bot guard relies solely on Telethon's .bot flag,
+        # which isn't always populated (unresolved senders, certain
+        # chat types). An explicit ID match is bulletproof.
+        try:
+            self._companion_bot_id = int(companion_bot_id) if companion_bot_id else None
+        except (TypeError, ValueError):
+            self._companion_bot_id = None
         try:
             self.api_id = int(api_id)
         except (TypeError, ValueError) as exc:
@@ -196,16 +206,28 @@ class TelegramAdapter(ChatAdapter):
             mid = 0
         return mid not in self._sent_ids
 
-    @staticmethod
-    def _sender_is_bot(event: Any, message: Any) -> bool:
+    def _sender_is_bot(self, event: Any, message: Any) -> bool:
         """True iff the sender of this inbound message is a bot account.
 
         The companion BotFather bot runs as a separate Telegram account. When
         both adapters are live, the bot's messages arrive at this userbot as
         incoming — without this guard the bot would reply to its own output
-        in a loop. Telethon marks bot accounts via ``User.bot``.
+        in a loop.
         """
-        # Primary: Telethon resolves event.sender to a User with .bot flag.
+        # Primary: explicit companion bot ID match — bulletproof even when
+        # Telethon hasn't resolved the sender entity.
+        if self._companion_bot_id:
+            for candidate in (
+                getattr(event, "sender_id", None),
+                getattr(getattr(event, "message", None), "sender_id", None),
+                getattr(message, "sender_id", None),
+            ):
+                try:
+                    if candidate is not None and int(candidate) == self._companion_bot_id:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+        # Secondary: Telethon resolves event.sender to a User with .bot flag.
         sender = getattr(event, "sender", None)
         if sender is not None and bool(getattr(sender, "bot", False)):
             return True

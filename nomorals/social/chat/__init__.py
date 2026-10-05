@@ -56,6 +56,10 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> Cha
         try:
             from .telegram import TelegramAdapter
 
+            # Companion bot ID for the self-reply loop guard: the BotFather
+            # token is "<bot_id>:<secret>", so the ID is the part before ':'.
+            _bot_token = str(chat.telegram_bot_token or "")
+            _companion_bot_id = _bot_token.split(":")[0] if ":" in _bot_token else None
             return TelegramAdapter(
                 api_id=chat.telegram_api_id,
                 api_hash=chat.telegram_api_hash,
@@ -65,6 +69,7 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> Cha
                 media_in_groups=chat.media_in_groups,
                 media_max_mb=chat.media_max_mb,
                 threads_enabled=chat.threads_enabled,
+                companion_bot_id=_companion_bot_id,
             )
         except Exception as exc:  # noqa: BLE001 - optional dependency or bad creds
             raise ValueError(f"telegram unavailable: {exc}") from exc

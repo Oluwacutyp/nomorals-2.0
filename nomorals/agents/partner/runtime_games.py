@@ -111,7 +111,10 @@ class RuntimeGamesMixin:
                         return self._profile_line(prof)
                 return f"no player found matching {want!r}."
             if player is not None:
-                return self._profile_line(engine.store.get(player.key))
+                return self._profile_line(
+                    engine.store.get(player.key),
+                    display_name=getattr(player, "name", ""),
+                )
             return "usage: /game stats [name]"
         if verb == "balance":
             if player is None:
@@ -1192,7 +1195,8 @@ class RuntimeGamesMixin:
         return Player.from_sender(ref.platform, ref.chat_id, ref.chat_id[:40])
 
     @staticmethod
-    def _profile_line(prof: Any) -> str:
+    @staticmethod
+    def _profile_line(prof: Any, display_name: str = "") -> str:
         items = ", ".join(f"{k}×{v}" for k, v in (prof.items or {}).items()) or "none"
         games = prof.games_played or 0
         pct = round(100 * prof.wins / games) if games else 0
@@ -1202,7 +1206,11 @@ class RuntimeGamesMixin:
             streak = f"loss streak {-prof.streak}"
         else:
             streak = "no streak"
-        return (f"📊 {prof.name or prof.key} — {prof.wins}W {prof.losses}L "
+        # Prefer the live sender name (from the current message) over the
+        # stored DB name, which can go stale after merges — this keeps
+        # /game stats consistent with /inventory and /skill.
+        name = (display_name or "").strip() or prof.name or prof.key
+        return (f"📊 {name} — {prof.wins}W {prof.losses}L "
                 f"{prof.draws}D · {pct}% · {streak}\n"
                 f"   {games} games · {prof.coins} coins · {prof.points} points "
                 f"· items: {items}")
