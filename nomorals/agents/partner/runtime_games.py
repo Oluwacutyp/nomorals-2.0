@@ -124,14 +124,14 @@ class RuntimeGamesMixin:
                 return f"no player found matching {want!r}."
             if player is not None:
                 return self._profile_line(
-                    engine.store.get(player.key),
+                    engine.store.get_for(player),
                     display_name=getattr(player, "name", ""),
                 )
             return "usage: /game stats [name]"
         if verb == "balance":
             if player is None:
                 return "balance needs a chat sender — run it where you play."
-            prof = engine.store.get(player.key)
+            prof = engine.store.get_for(player)
             items = ", ".join(f"{k}×{v}" for k, v in (prof.items or {}).items()) or "none"
             return f"🪙 {prof.coins} coins · {prof.points} points · items: {items}"
         if verb == "shop":
@@ -254,7 +254,7 @@ class RuntimeGamesMixin:
                 if exp < time.time():
                     return ("nothing to confirm — /game delete to start over "
                             "(confirmations expire after 5 minutes).")
-                prof = store.get(player.key)
+                prof = store.get_for(player)
                 if store.soft_delete(player.key):
                     return (
                         f"🗑️ {prof.name or 'your'} profile is deleted.\n"
@@ -265,7 +265,7 @@ class RuntimeGamesMixin:
             if rest == "cancel":
                 self._delete_pending.pop(player.key, None)
                 return "cancelled — your profile is safe."
-            prof = store.get(player.key)
+            prof = store.get_for(player)
             if not prof.games_played and not prof.coins and not prof.xp:
                 return "nothing to delete — you don't have a profile yet."
             self._delete_pending[player.key] = time.time() + 5 * 60
@@ -329,7 +329,7 @@ class RuntimeGamesMixin:
             return "no player here — run this from the chat where you play."
         engine = self._game_engine()
         store, gear = engine.store, engine.gear
-        prof = store.get(player.key)
+        prof = store.get_for(player)
         ref = (ref or "").strip().lower()
 
         def _piece_line(inst: Any) -> str:
@@ -411,7 +411,7 @@ class RuntimeGamesMixin:
             new_balance = store.spend_coins(player, cost,
                                             f"repair:{inst.slug}")
             if new_balance is None:
-                prof_now = store.get(player.key)
+                prof_now = store.get_for(player)
                 return (f"repairing {name} costs {cost}c — "
                         f"you have {prof_now.coins}c.")
             if gear.apply_repair(inst.id):
@@ -437,7 +437,7 @@ class RuntimeGamesMixin:
             xp_progress,
         )
         engine = self._game_engine()
-        prof = engine.store.get(player.key)
+        prof = engine.store.get_for(player)
         level, into, span = xp_progress(prof.xp)
         bonus = level_stat_bonus(level)
         nxt = xp_for_level(level + 1)
@@ -484,7 +484,7 @@ class RuntimeGamesMixin:
         engine = self._game_engine()
         store = engine.store
         skills = SkillStore(engine.db)
-        prof = store.get(player.key)
+        prof = store.get_for(player)
         level = level_for_xp(prof.xp)
         learned = skills.learned(player.key)
         tiers = skills.tiers(player.key)
@@ -720,7 +720,7 @@ class RuntimeGamesMixin:
         # Display-only: points are granted at the actual level-up event
         # in the game engine, never here. This just shows the current
         # state.
-        stats = store.get(player.key)
+        stats = store.get_for(player)
         tail = (tail or "").strip().lower()
         lines: list[str] = []
         if not tail or tail in ("show", "list"):
@@ -839,7 +839,7 @@ class RuntimeGamesMixin:
                 return "gift a positive amount of coins."
             if amount > 1_000_000:
                 return "that's a lot — keep gifts under 1,000,000 coins."
-            bal = engine.store.get(player.key).coins
+            bal = engine.store.get_for(player).coins
             if bal < amount:
                 return (f"you have {bal} coins — not enough for {amount}. "
                         f"win games to earn more.")

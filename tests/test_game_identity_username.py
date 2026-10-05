@@ -40,6 +40,7 @@ def make_store() -> PlayerStore:
 
 
 def seed_profile(store: PlayerStore, key: str, **kw: object) -> None:
+    import json as _json
     db = store.db
     cols = ["player_key", "platform", "display", "username", "coins",
             "points", "wins", "losses", "draws", "games_played", "xp"]
@@ -47,14 +48,15 @@ def seed_profile(store: PlayerStore, key: str, **kw: object) -> None:
             kw.get("username", ""), kw.get("coins", 0), kw.get("points", 0),
             kw.get("wins", 0), kw.get("losses", 0), kw.get("draws", 0),
             kw.get("games_played", 0), kw.get("xp", 0)]
+    items_json = _json.dumps(kw.get("items", {}))
     with db.transaction():
         db.execute(
             "INSERT OR REPLACE INTO game_players "
             "(player_key, platform, display, username, coins, points, wins, "
             "losses, draws, games_played, xp, per_game, items, created_at, "
-            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, "
             "1.0, 2.0)",
-            tuple(vals))
+            tuple(vals) + (items_json,))
 
 
 def make_msg(sender: str, sender_id: str, username: str,
@@ -412,6 +414,46 @@ class UntangleRepairTests(unittest.TestCase):
             ("telegram:7541672134",))
         self.assertEqual(alt["coins"], 999)
         self.assertEqual(alt["xp"], 2000)
+
+
+class GetForTests(unittest.TestCase):
+    """PlayerStore.get_for() must pass username through so the
+    username-based legacy merge actually runs.
+
+    Regression: the game engine called store.get(player.key) with just
+    the key, dropping the username — so _merge_all_legacy_names never
+    saw it and Mary's orphaned telegram:chfjdhx profile was never
+    folded into telegram:7541672134.
+    """
+
+    def test_get_for_merges_unsighted_username_profile(self):
+        store = make_store()
+        # Mary's orphaned Tgbot profile: name-keyed, never sighted under
+        # the numeric ID, holds her coins + katana.
+        seed_profile(store, "telegram:chfjdhx", name="chfjdhx",
+                     username="chfjdhx", coins=6076, points=85,
+                     wins=1, losses=2, games_played=3, xp=116,
+                     items={"katana_legendary": 1})
+        # What _game_player builds for Mary's Tgbot /game message.
+        player = Player.from_sender("telegram-bot", "7541672134",
+                                    "Mary", username="chfjdhx")
+        prof = store.get_for(player)
+        self.assertEqual(prof.key, "telegram:7541672134")
+        self.assertEqual(prof.coins, 6076)
+        self.assertEqual(prof.items.get("katana_legendary"), 1)
+        # Legacy row is gone.
+        rows = store.db.query("SELECT player_key FROM game_players")
+        self.assertEqual([r["player_key"] for r in rows],
+                         ["telegram:7541672134"])
+
+    def test_get_for_passes_identity_fields(self):
+        store = make_store()
+        player = Player.from_sender("telegram", "5478650254",
+                                    "Vrede peace", username="peacethefirst")
+        prof = store.get_for(player)
+        self.assertEqual(prof.key, "telegram:5478650254")
+        self.assertEqual(prof.username, "peacethefirst")
+        self.assertEqual(prof.name, "Vrede peace")
 
 
 if __name__ == "__main__":

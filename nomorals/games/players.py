@@ -337,6 +337,22 @@ class PlayerStore:
                     return Profile.from_row(row)
             return prof
 
+    def get_for(self, player: "Player") -> Profile:
+        """Fetch a profile for a Player object, passing through identity.
+
+        Convenience wrapper around :meth:`get` that extracts key, name,
+        platform, and username from the Player.  This ensures the
+        username-based legacy merge in :meth:`_merge_all_legacy_names`
+        actually runs — calling ``get(player.key)`` with just the key
+        drops the username and the merge is silently skipped.
+        """
+        return self.get(
+            player.key,
+            name=getattr(player, "name", "") or "",
+            platform=getattr(player, "platform", "") or "",
+            username=getattr(player, "username", "") or "",
+        )
+
     def set_display_name(self, key: str, name: str,
                          *, platform: str = "") -> Profile:
         """Explicitly rename a profile (e.g. the user changed their name).

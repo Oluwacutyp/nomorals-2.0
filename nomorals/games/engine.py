@@ -440,7 +440,7 @@ class GameEngine:
         key = player.key
         try:
             room.state.setdefault("inventory", {})[key] = dict(
-                self.store.get(key).items)
+                self.store.get_for(player).items)
         except Exception:  # noqa: BLE001
             room.state.setdefault("inventory", {}).setdefault(key, {})
         try:
@@ -473,7 +473,7 @@ class GameEngine:
         # so games apply it store-free (see progression.level_stat_bonus)
         try:
             from .progression import level_for_xp, level_stat_bonus
-            prof = self.store.get(key)
+            prof = self.store.get_for(player)
             level = level_for_xp(prof.xp)
             room.state.setdefault("progression", {})[key] = {
                 "level": level, **level_stat_bonus(level)}
@@ -506,7 +506,7 @@ class GameEngine:
             # never double-grants.
             try:
                 from .progression import level_for_xp
-                prof = self.store.get(key)
+                prof = self.store.get_for(player)
                 _, stats = store.grant_level_points(
                     key, level_for_xp(prof.xp))
             except Exception:  # noqa: BLE001
@@ -719,7 +719,7 @@ class GameEngine:
                     try:
                         inv = room.state.setdefault("inventory", {})
                         inv[sender.key] = dict(
-                            self.store.get(sender.key).items)
+                            self.store.get_for(sender).items)
                         # same for the gear closet (arena equips mid-fight)
                         from .gear import GEAR_CATALOG, effective_stats
                         owned: list[dict[str, Any]] = []
@@ -745,7 +745,7 @@ class GameEngine:
                 return [msg]
             return [self.economy.catalog_text(game.name, sender)]
         if cmd == "balance":
-            prof = self.store.get(sender.key)
+            prof = self.store.get_for(sender)
             items = ", ".join(f"{k}×{v}" for k, v in prof.items.items()) or "none"
             return [f"🪙 {prof.coins} coins · {prof.points} points · items: {items}"]
         if cmd == "leave":
@@ -976,8 +976,7 @@ class GameEngine:
                     except Exception:  # noqa: BLE001
                         difficulty = "normal"
                     try:
-                        pre = self.store.get(p.key, name=p.name,
-                                             platform=p.platform)
+                        pre = self.store.get_for(p)
                         streak_after = pre.streak + 1 if won is True else pre.streak
                     except Exception:  # noqa: BLE001
                         streak_after = 1 if won is True else 0
@@ -986,7 +985,7 @@ class GameEngine:
                         streak_after)
                     # boosters: coin charm is consumed on use
                     try:
-                        prof_items = self.store.get(p.key).items
+                        prof_items = self.store.get_for(p).items
                         if int(prof_items.get("coin_charm", 0)) > 0:
                             coins = int(coins * 1.5)
                             coin_why += " + coin charm"
@@ -1075,7 +1074,7 @@ class GameEngine:
                                            exc_info=True)
                         # Double XP Charm: consumed for the next finished game
                         try:
-                            _prof_items = self.store.get(p.key).items
+                            _prof_items = self.store.get_for(p).items
                             if int(_prof_items.get("double_xp", 0)) > 0:
                                 amount *= 2
                                 msgs.append("✨ Double XP Charm consumed!")
@@ -1086,7 +1085,7 @@ class GameEngine:
                             self.store, p, amount,
                             reason=f"{room.game}:{'win' if won else 'loss' if won is False else 'draw'}")
                         if amount > 0:
-                            prof = self.store.get(p.key)
+                            prof = self.store.get_for(p)
                             msgs.append(
                                 f"+{amount} XP {xp_bar(prof.xp)}")
                         for lvl in gained:
@@ -1262,7 +1261,7 @@ class GameEngine:
         # milestones come from the ledger (already includes this game —
         # record_outcome runs before this)
         try:
-            prof = self.store.get(player.key)
+            prof = self.store.get_for(player)
         except Exception:  # noqa: BLE001
             prof = None
 

@@ -164,7 +164,7 @@ class GameEconomy:
 
     # ── wallet ───────────────────────────────────────────────────────────────
     def balance(self, player: Player) -> int:
-        return self.store.get(player.key).coins
+        return self.store.get_for(player).coins
 
     def purchase(self, player: Player, slug: str) -> tuple[bool, str]:
         """Buy one item. Returns (ok, message).
@@ -188,7 +188,7 @@ class GameEconomy:
             new_balance = self.store.spend_coins(
                 player, gear_defn.cost, f"buy:{slug}")
             if new_balance is None:
-                prof = self.store.get(player.key)
+                prof = self.store.get_for(player)
                 return False, (f"{gear_defn.name} costs {gear_defn.cost}c — "
                                f"you have {prof.coins}c. win games to earn more.")
             try:
@@ -213,7 +213,7 @@ class GameEconomy:
         new_balance = self.store.spend_coins(player, item.cost,
                                              f"buy:{slug}")
         if new_balance is None:
-            prof = self.store.get(player.key)
+            prof = self.store.get_for(player)
             return False, (f"{item.name} costs {item.cost}c — you have "
                            f"{prof.coins}c. win games to earn more.")
         self.store.grant_item(player, slug)
@@ -222,7 +222,7 @@ class GameEconomy:
                       f"{self.count(player, slug)}).")
 
     def count(self, player: Player, slug: str) -> int:
-        return int(self.store.get(player.key).items.get(slug) or 0)
+        return int(self.store.get_for(player).items.get(slug) or 0)
 
     def consume(self, player: Player, slug: str) -> bool:
         """Spend one owned item. False if they don't have one."""
