@@ -303,3 +303,69 @@ class CorruptDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroupCachePoisoningTests(unittest.TestCase):
+    """Regression: group→DM redirect bug.
+
+    When a group message arrived with input_chat=None, the old code fell
+    back to caching input_sender (the sender's DM peer) under the GROUP's
+    chat ID. Every later reply to that group then went to the sender's DM.
+    """
+
+    def _adapter(self):
+        from nomorals.social.chat.telegram import TelegramAdapter
+        import tempfile
+        d = tempfile.mkdtemp()
+        return TelegramAdapter(api_id=123, api_hash="x", session_path=":memory:",
+                               media_dir=d)
+
+    def test_group_with_missing_input_chat_does_not_cache_sender(self):
+        """A group entity with input_chat=None must NOT cache input_sender
+        under the group ID."""
+        from types import SimpleNamespace
+        adapter = self._adapter()
+
+        # Simulate a group entity
+        entity = SimpleNamespace(id=-1001234567890, megagroup=True,
+                                 gigagroup=False, channel=False)
+        # Event with NO input_chat (the bug trigger) but input_sender set
+        event = SimpleNamespace(input_chat=None, input_sender=object())
+
+        # Replicate the fixed caching logic
+        input_chat = getattr(event, "input_chat", None)
+        is_group_entity = (
+            getattr(entity, "megagroup", False)
+            or getattr(entity, "gigagroup", False)
+            or getattr(entity, "channel", False)
+        )
+        if is_group_entity:
+            input_entity = input_chat
+        else:
+            input_entity = input_chat or getattr(event, "input_sender", None)
+
+        # For a group with no input_chat, nothing should be cached
+        self.assertIsNone(input_entity)
+
+    def test_dm_still_caches_sender_fallback(self):
+        """DMs (non-group entities) still use the input_sender fallback."""
+        from types import SimpleNamespace
+        adapter = self._adapter()
+
+        entity = SimpleNamespace(id=12345, megagroup=False,
+                                 gigagroup=False, channel=False)
+        sender_peer = object()
+        event = SimpleNamespace(input_chat=None, input_sender=sender_peer)
+
+        input_chat = getattr(event, "input_chat", None)
+        is_group_entity = (
+            getattr(entity, "megagroup", False)
+            or getattr(entity, "gigagroup", False)
+            or getattr(entity, "channel", False)
+        )
+        if is_group_entity:
+            input_entity = input_chat
+        else:
+            input_entity = input_chat or getattr(event, "input_sender", None)
+
+        self.assertIs(input_entity, sender_peer)

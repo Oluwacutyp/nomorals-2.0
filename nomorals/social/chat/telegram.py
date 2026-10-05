@@ -530,7 +530,22 @@ class TelegramAdapter(ChatAdapter):
         # Cache the input entity for outbound sends. Telethon's get_entity()
         # fails for users not in the session cache, but we can use the input
         # peer from received messages to send replies.
-        input_entity = getattr(event, "input_chat", None) or getattr(event, "input_sender", None)
+        #
+        # CRITICAL: never cache input_sender under a group chat's ID. If
+        # input_chat is missing on a group message and we fall back to
+        # input_sender, the group's cache entry points at the sender's DM
+        # peer — and every later reply to that group lands in the DM instead.
+        # (This was the group→DM redirect bug.)
+        input_chat = getattr(event, "input_chat", None)
+        is_group_entity = (
+            getattr(entity, "megagroup", False)
+            or getattr(entity, "gigagroup", False)
+            or getattr(entity, "channel", False)
+        )
+        if is_group_entity:
+            input_entity = input_chat
+        else:
+            input_entity = input_chat or getattr(event, "input_sender", None)
         if input_entity is not None:
             entity_id = str(getattr(entity, "id", ""))
             if entity_id:
