@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from .banner import render_banner, tip_of_the_day
 from .commands import ConsoleCommands
+from .debug import DebugHub
 from .dashboard import (
     render_dashboard,
+    render_debug_view,
     render_games_view,
     render_llm_view,
     render_scheduler_view,
@@ -20,6 +22,7 @@ from .dashboard import (
 from .palette import paint, strip_ansi, supports_color, truncate_visible, visible_width
 from .themes import get_theme, list_themes, theme_name
 from .widgets import (
+    AVATAR,
     GodScreen,
     LiveScreen,
     MessageEvent,
@@ -34,7 +37,9 @@ from .widgets import (
 )
 
 __all__ = [
+    "AVATAR",
     "ConsoleCommands",
+    "DebugHub",
     "GodScreen",
     "LiveScreen",
     "MessageEvent",
@@ -50,6 +55,7 @@ __all__ = [
     "paint",
     "render_banner",
     "render_dashboard",
+    "render_debug_view",
     "render_games_view",
     "render_llm_view",
     "render_scheduler_view",

@@ -24,6 +24,7 @@ Snapshot shape (all keys optional — missing sections render as "n/a")::
 from __future__ import annotations
 
 import datetime
+import time
 from typing import Any
 
 from .palette import (
@@ -219,7 +220,7 @@ def render_view(
     color: bool | None = None,
     theme: Theme | None = None,
 ) -> str:
-    """Render one watch-mode view: status | games | jobs | brain."""
+    """Render one watch-mode view: status | games | jobs | brain | debug."""
     view = (view or "status").lower()
     if view == "games":
         return render_games_view(snap, color=color, theme=theme)
@@ -227,6 +228,8 @@ def render_view(
         return render_scheduler_view(snap, color=color, theme=theme)
     if view == "brain":
         return render_llm_view(snap, color=color, theme=theme)
+    if view == "debug":
+        return render_debug_view(snap, color=color, theme=theme)
     return render_dashboard(snap, color=color, theme=theme)
 
 
@@ -405,6 +408,116 @@ def render_llm_view(
     return strip_ansi(out) if color is False else out
 
 
+def render_debug_view(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+) -> str:
+    """Debug-focused watch view: log tail, level counts, slow ops, LLM calls.
+
+    Fed by :class:`nomorals.console.debug.DebugHub` — the watch screen
+    installs it automatically, so the pane fills as soon as watch mode
+    starts.
+    """
+    from .debug import DebugHub
+
+    snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    lines: list[str] = []
+    lines.append("")
+    lines.append(_rule("debug · telemetry"))
+
+    stats = DebugHub.stats()
+    captured = stats["captured"]
+    err = stats["errors"]
+    warn = stats["warnings"]
+    err_color = WARN + BOLD if err else SUBTLE
+    warn_color = WARN if warn else SUBTLE
+    lines.append(
+        _bar(
+            "logs",
+            f"{captured} captured · "
+            f"{paint(str(err), err_color)} errors · "
+            f"{paint(str(warn), warn_color)} warnings",
+        )
+    )
+
+    # ── recent log lines ──
+    lines.append("")
+    lines.append(f"  {paint('recent logs', CYAN)}")
+    recent = DebugHub.recent(12)
+    if recent:
+        for ts, level, logger_name, msg in recent[-12:]:
+            tstr = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            if level in {"ERROR", "CRITICAL"}:
+                lc = paint(level[:4], WARN + BOLD)
+            elif level == "WARNING":
+                lc = paint(level[:4], WARN)
+            elif level == "DEBUG":
+                lc = paint(level[:4], DIM)
+            else:
+                lc = paint(level[:4], SUBTLE)
+            short_logger = logger_name.split(".")[-1][:18]
+            text = " ".join(msg.split())
+            if len(text) > 76:
+                text = text[:73] + "…"
+            lines.append(
+                f"    {paint(tstr, DIM)} {lc} "
+                f"{paint(short_logger, CYAN)} {text}"
+            )
+    else:
+        lines.append(
+            f"    {paint('(no logs captured yet — logging starts when watch mode runs)', DIM)}"
+        )
+
+    # ── slowest operations ──
+    lines.append("")
+    lines.append(f"  {paint('slowest ops', CYAN)}")
+    slow = DebugHub.slow_ops()[:8]
+    if slow:
+        for entry in slow:
+            dur = entry["duration_s"]
+            name = str(entry["name"])[:44]
+            age = int(max(0, time.time() - entry["ts"]))
+            age_s = f"{age}s ago" if age < 90 else f"{age // 60}m ago"
+            dc = WARN + BOLD if dur >= 5 else (WARN if dur >= 1 else SUBTLE)
+            lines.append(
+                f"    {paint(name, BRIGHT_WHITE):<46} "
+                f"{paint(f'{dur:.2f}s', dc)} {paint(age_s, DIM)}"
+            )
+    else:
+        lines.append(f"    {paint('(none recorded)', DIM)}")
+
+    # ── LLM call traces ──
+    lines.append("")
+    lines.append(f"  {paint('LLM calls', CYAN)}")
+    calls = DebugHub.llm_calls(8)
+    if calls:
+        for call in calls:
+            tstr = datetime.datetime.fromtimestamp(call["ts"]).strftime("%H:%M:%S")
+            ok = call["success"]
+            mark = paint("✓", GREEN) if ok else paint("✗", WARN + BOLD)
+            prov = str(call["provider"])[:16]
+            op = str(call["operation"])[:12]
+            lat = call["latency_s"]
+            latc = WARN if lat >= 10 else SUBTLE
+            err_txt = ""
+            if not ok and call.get("error"):
+                err_txt = f" {paint(str(call['error'])[:40], DIM)}"
+            lines.append(
+                f"    {paint(tstr, DIM)} {mark} "
+                f"{paint(prov, BRIGHT_WHITE):<18} {paint(op, CYAN):<14} "
+                f"{paint(f'{lat:.2f}s', latc)}{err_txt}"
+            )
+    else:
+        lines.append(f"    {paint('(no LLM calls recorded)', DIM)}")
+
+    lines.append(_end())
+    out = "\n".join(lines)
+    return strip_ansi(out) if color is False else out
+
+
 def render_statusbar(
     snap: dict[str, Any] | None,
     view: str = "status",
@@ -439,5 +552,5 @@ def render_statusbar(
             f"{paint('📬', WARN, color=color)} "
             f"{paint(f'{unread} new', WARN + BOLD, color=color)}"
         )
-    keys = paint("[1-4] views · q quit", DIM, color=color)
+    keys = paint("[1-4] views · d debug · q quit", DIM, color=color)
     return "  ".join(parts) + "    " + keys

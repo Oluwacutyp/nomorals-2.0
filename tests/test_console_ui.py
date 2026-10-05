@@ -531,9 +531,11 @@ class GodTierTests(unittest.TestCase):
     def test_godscreen_view_switch_keys(self):
         from nomorals.console.widgets import WATCH_VIEW_KEYS, WATCH_VIEWS
 
-        self.assertEqual(len(WATCH_VIEWS), 4)
+        self.assertEqual(len(WATCH_VIEWS), 5)
         self.assertEqual(WATCH_VIEW_KEYS["1"], "status")
         self.assertEqual(WATCH_VIEW_KEYS["4"], "brain")
+        self.assertEqual(WATCH_VIEW_KEYS["d"], "debug")
+        self.assertIn("debug", WATCH_VIEWS)
 
 
 class TruncateVisibleTests(unittest.TestCase):
@@ -654,6 +656,183 @@ class AlternateScreenTests(unittest.TestCase):
             self.assertLessEqual(visible_width(line), 80,
                                  f"line wraps: {line[:60]!r}")
         WatchHub.feed().mark_read()
+
+
+class DebugHubTests(unittest.TestCase):
+    def setUp(self):
+        from nomorals.console.debug import DebugHub
+
+        DebugHub.reset()
+        DebugHub.install()
+        self.addCleanup(DebugHub.uninstall)
+        self.addCleanup(DebugHub.reset)
+
+    def test_install_is_idempotent(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+
+        root = logging.getLogger()
+        before = len(root.handlers)
+        DebugHub.install()
+        DebugHub.install()
+        self.assertEqual(len(root.handlers), before)
+        self.assertTrue(DebugHub.installed())
+
+    def test_log_capture_and_level_counts(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+
+        log = logging.getLogger("test.debughub")
+        log.setLevel(logging.DEBUG)
+        log.info("hello world")
+        log.warning("a warning")
+        log.error("an error")
+        counts = DebugHub.level_counts()
+        self.assertGreaterEqual(counts.get("INFO", 0), 1)
+        self.assertGreaterEqual(counts.get("WARNING", 0), 1)
+        self.assertGreaterEqual(counts.get("ERROR", 0), 1)
+        msgs = [m for _, _, _, m in DebugHub.recent(10)]
+        self.assertTrue(any("hello world" in m for m in msgs))
+
+    def test_slow_op_mined_from_log(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+
+        log = logging.getLogger("test.debughub.slow")
+        log.setLevel(logging.DEBUG)
+        log.debug("telegram: slow get_entity('x') took 1.23s")
+        slow = DebugHub.slow_ops()
+        self.assertTrue(slow)
+        self.assertGreaterEqual(slow[0]["duration_s"], 1.0)
+        self.assertIn("get_entity", slow[0]["name"])
+
+    def test_fast_ops_ignored_from_log(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+
+        log = logging.getLogger("test.debughub.fast")
+        log.setLevel(logging.DEBUG)
+        log.debug("cache lookup took 0.01s")
+        self.assertEqual(DebugHub.slow_ops(), [])
+
+    def test_record_llm_and_timed(self):
+        import time
+
+        from nomorals.console.debug import DebugHub
+
+        DebugHub.record_llm(operation="chat", provider_name="groq",
+                            success=True, latency_s=1.5)
+        DebugHub.record_llm(operation="chat", provider_name="groq",
+                            success=False, latency_s=0.2, error="boom")
+        calls = DebugHub.llm_calls(5)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["provider"], "groq")
+        self.assertFalse(calls[1]["success"])
+        with DebugHub.timed("unit op"):
+            time.sleep(0.01)
+        self.assertTrue(any(e["name"] == "unit op" for e in DebugHub.slow_ops()))
+
+    def test_install_llm_hook_chains_existing(self):
+        from nomorals.console.debug import DebugHub
+
+        seen = []
+
+        class FakeRouter:
+            def __init__(self):
+                self._hook = None
+
+            def set_learning(self, hook):
+                self._hook = hook
+
+            def learning(self):
+                return self._hook
+
+        router = FakeRouter()
+        router.set_learning(lambda **kw: seen.append(kw["provider_name"]))
+        self.assertTrue(DebugHub.install_llm_hook(router))
+        router._hook(operation="chat", provider_name="p1",
+                     success=True, latency_s=0.5, error="")
+        self.assertEqual(seen, ["p1"])  # existing hook still ran
+        self.assertEqual(len(DebugHub.llm_calls(5)), 1)
+
+    def test_handler_never_breaks_logging(self):
+        import logging
+
+        from nomorals.console.debug import DebugHub
+
+        DebugHub.reset()
+        DebugHub.install()
+        log = logging.getLogger("test.debughub.broken")
+        log.setLevel(logging.DEBUG)
+        # A record whose getMessage raises must not propagate.
+        rec = logging.LogRecord("x", logging.INFO, __file__, 1, "%s", ("ok",),
+                                None)
+        logging.getLogger().handle(rec)  # goes through all handlers
+        log.info("still works")
+
+
+class DebugViewTests(unittest.TestCase):
+    def setUp(self):
+        from nomorals.console.debug import DebugHub
+
+        DebugHub.reset()
+        DebugHub.install()
+        self.addCleanup(DebugHub.uninstall)
+        self.addCleanup(DebugHub.reset)
+
+    def test_render_debug_view_sections(self):
+        import logging
+
+        from nomorals.console import render_debug_view, render_view
+        from nomorals.console.palette import strip_ansi
+
+        log = logging.getLogger("test.view")
+        log.setLevel(logging.DEBUG)
+        log.error("something broke")
+        out = strip_ansi(render_debug_view({}, color=False))
+        for section in ("recent logs", "slowest ops", "LLM calls", "errors"):
+            self.assertIn(section, out)
+        self.assertIn("something broke", out)
+
+    def test_render_view_dispatches_debug(self):
+        from nomorals.console import render_view
+        from nomorals.console.palette import strip_ansi
+
+        out = strip_ansi(render_view({}, "debug", color=False))
+        self.assertIn("telemetry", out)
+
+    def test_render_debug_view_no_red(self):
+        from nomorals.console import render_debug_view
+
+        out = render_debug_view({}, color=True)
+        self.assertNotIn("\033[31m", out)
+        self.assertNotIn("\033[41m", out)
+
+    def test_statusbar_shows_debug_hint(self):
+        from nomorals.console.dashboard import render_statusbar
+        from nomorals.console.palette import strip_ansi
+
+        out = strip_ansi(render_statusbar({}, "status", color=False))
+        self.assertIn("d debug", out)
+
+    def test_godscreen_header_has_avatar_and_debug_tab(self):
+        import io as _io
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import AVATAR, GodScreen
+
+        self.assertEqual(AVATAR, "🥷")
+        out_buf = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: {},
+                           color=True, out=out_buf)
+        screen._render_frame()
+        frame = strip_ansi(out_buf.getvalue())
+        self.assertIn("🥷", frame)
+        self.assertIn("[d] debug", frame)
 
 
 if __name__ == "__main__":

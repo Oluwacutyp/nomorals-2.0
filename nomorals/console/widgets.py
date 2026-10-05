@@ -234,6 +234,7 @@ __all__ = [
     "MessageEvent",
     "MessageFeed",
     "WatchHub",
+    "AVATAR",
     "sparkline",
     "barchart",
     "gradient_text",
@@ -416,8 +417,21 @@ def gradient_text(
 
 
 # View ids for the watch screen's keyboard switching.
-WATCH_VIEWS = ("status", "games", "jobs", "brain")
-WATCH_VIEW_KEYS = {"1": "status", "2": "games", "3": "jobs", "4": "brain"}
+WATCH_VIEWS = ("status", "games", "jobs", "brain", "debug")
+WATCH_VIEW_KEYS = {
+    "1": "status",
+    "2": "games",
+    "3": "jobs",
+    "4": "brain",
+    "d": "debug",
+}
+#: Hotkey shown in the header tabs, per view.
+_VIEW_HOTKEY = {"status": "1", "games": "2", "jobs": "3", "brain": "4",
+                "debug": "d"}
+
+#: Miniature ninja avatar for the header — the terminal can't show the
+#: owner's real ninja avatar, so this stands in next to the DEVON title.
+AVATAR = "🥷"
 
 
 class GodScreen:
@@ -433,7 +447,7 @@ class GodScreen:
         │ uptime · msg rate · games · brain · unread · key hints     │
         └───────────────────────────────────────────────────────────┘
 
-    Keys (canonical mode — type + Enter): 1/2/3/4 switch views, q quits.
+    Keys (canonical mode — type + Enter): 1/2/3/4/d switch views, q quits.
     Ctrl-C also quits. Incoming messages never print over the screen —
     the mirror routes them into :class:`WatchHub`'s feed instead.
     """
@@ -479,6 +493,11 @@ class GodScreen:
                 DIM,
             )
         WatchHub.set_active(True)
+        # Debug telemetry starts with watch mode so the debug view (key d)
+        # has log lines, slow ops and LLM traces to show.
+        from .debug import DebugHub
+
+        DebugHub.install()
         try:
             # Alternate screen buffer: the dashboard owns its own screen,
             # completely isolated from Python logging / prints on the main
@@ -549,12 +568,15 @@ class GodScreen:
         # Header with spinner + view tabs.
         spin = _SPINNER[self._frame % len(_SPINNER)]
         self._frame += 1
-        title = gradient_text("  DEVON · live", 51, 201, color=self.color)
+        title = gradient_text("DEVON · live", 51, 201, color=self.color)
         tabs = "  ".join(
-            paint(f"[{i + 1}] {v}", BOLD if v == self._view else DIM, color=self.color)
-            for i, v in enumerate(WATCH_VIEWS)
+            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
+                  BOLD if v == self._view else DIM, color=self.color)
+            for v in WATCH_VIEWS
         )
-        lines.append(f"{title} {paint(spin, CYAN, color=self.color)}   {tabs}")
+        lines.append(
+            f"  {AVATAR} {title} {paint(spin, CYAN, color=self.color)}   {tabs}"
+        )
         lines.append(paint("─" * min(width, 100), SUBTLE, color=self.color))
 
         # Dashboard view — truncated to its pane so it can never push

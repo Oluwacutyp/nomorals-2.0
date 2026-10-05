@@ -492,6 +492,14 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         attach_learning(router, db=db)
     except Exception:  # noqa: BLE001
         _log.warning("learning attach failed; continuing without it", exc_info=True)
+    # Console debug view (key d): record LLM call traces. Chain-safe —
+    # the learning hook above keeps working; this only adds telemetry.
+    # Best-effort — must never break boot or routing.
+    try:
+        from ..console.debug import DebugHub
+        DebugHub.install_llm_hook(router)
+    except Exception:  # noqa: BLE001
+        pass
     return router
 
 
