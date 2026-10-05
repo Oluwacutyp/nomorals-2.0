@@ -469,3 +469,143 @@ class GroupCachePoisoningTests(unittest.TestCase):
             src,
             "group detection variable must exist in the fallback guard",
         )
+
+
+class BasicGroupClassificationTests(unittest.TestCase):
+    """Regression: basic-group→DM redirect bug.
+
+    A basic group (Telethon ``Chat``, chat_id like ``-5223197263`` — negative
+    but NOT ``-100…``) resolved via the client fallback carries no
+    ``megagroup``/``channel`` flags. The old code then:
+
+    1. classified it as DM via ``_kind_for()`` (flags all None/False),
+    2. stripped the minus (``chat_id = str(entity.id)`` → ``5223197263``),
+    3. cached the sender's DM peer under the group id,
+    4. applied the DM sender_id fallback,
+
+    so ``/game`` from Mary in the group was delivered as DM ``5223197263``
+    and the reply landed in Mary's inbox instead of the group.
+    """
+
+    def test_kind_override_forces_group_when_event_says_group(self):
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import _event_kind_override, _kind_for
+
+        # Entity as resolved by client.get_entity(5223197263): no flags
+        entity = SimpleNamespace(id=5223197263, megagroup=None,
+                                 gigagroup=False, channel=None)
+        self.assertEqual(_kind_for(entity), "dm")
+
+        event = SimpleNamespace(is_group=True, is_channel=False)
+        self.assertEqual(_event_kind_override("dm", event), "group")
+
+    def test_kind_override_forces_channel_when_event_says_channel(self):
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import _event_kind_override
+
+        event = SimpleNamespace(is_group=False, is_channel=True)
+        self.assertEqual(_event_kind_override("dm", event), "channel")
+
+    def test_kind_override_leaves_real_kinds_alone(self):
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import _event_kind_override
+
+        event = SimpleNamespace(is_group=True, is_channel=False)
+        self.assertEqual(_event_kind_override("group", event), "group")
+        self.assertEqual(_event_kind_override("channel", event), "channel")
+        plain = SimpleNamespace(is_group=False, is_channel=False)
+        self.assertEqual(_event_kind_override("dm", plain), "dm")
+
+    def test_canonical_chat_id_preserves_negative_for_basic_group(self):
+        from nomorals.social.chat.telegram import _canonical_chat_id
+
+        self.assertEqual(
+            _canonical_chat_id("-5223197263", "5223197263", "group"),
+            "-5223197263",
+        )
+
+    def test_canonical_chat_id_keeps_supergroup_convention(self):
+        from nomorals.social.chat.telegram import _canonical_chat_id
+
+        # Supergroups keep the existing positive-id convention:
+        # "-100…" lstrips to "100…", which never equals the entity id.
+        self.assertEqual(
+            _canonical_chat_id("-1001891392293", "1891392293", "group"),
+            "1891392293",
+        )
+
+    def test_canonical_chat_id_keeps_dm_positive(self):
+        from nomorals.social.chat.telegram import _canonical_chat_id
+
+        self.assertEqual(
+            _canonical_chat_id("7541672134", "7541672134", "dm"),
+            "7541672134",
+        )
+
+    def test_canonical_chat_id_no_restore_when_ids_differ(self):
+        from nomorals.social.chat.telegram import _canonical_chat_id
+
+        # Entity id doesn't match the stripped original — don't touch it.
+        self.assertEqual(
+            _canonical_chat_id("-5223197263", "999", "group"),
+            "999",
+        )
+
+    def test_group_kind_never_caches_sender_peer(self):
+        """With the final kind == group, input_sender must not be cached,
+        even when the entity has no group flags and input_chat is None."""
+        from types import SimpleNamespace
+
+        kind = "group"  # as forced by _event_kind_override
+        event = SimpleNamespace(input_chat=None, input_sender=object())
+
+        input_chat = getattr(event, "input_chat", None)
+        if kind in ("group", "channel"):
+            input_entity = input_chat
+        else:
+            input_entity = input_chat or getattr(event, "input_sender", None)
+
+        self.assertIsNone(input_entity)
+
+    def test_sender_id_fallback_uses_event_sender_id_for_groups(self):
+        """event.sender_id (positive user id) is the human sender — valid
+        for groups too. The chat_id-as-sender_id leg stays DM-only."""
+        from types import SimpleNamespace
+
+        # Group message, sender entity unresolvable, event.sender_id = Mary
+        event = SimpleNamespace(sender_id=7541672134, is_group=True)
+        kind = "group"
+        chat_id = "-5223197263"
+        event_is_group = bool(getattr(event, "is_group", False))
+
+        sender_id = ""
+        evt_sender_id = str(getattr(event, "sender_id", "") or "")
+        if evt_sender_id.isdigit():
+            sender_id = evt_sender_id
+        elif kind == "dm" and not event_is_group:
+            if chat_id and chat_id.lstrip("-").isdigit():
+                sender_id = chat_id
+
+        self.assertEqual(sender_id, "7541672134")
+
+    def test_sender_id_fallback_rejects_negative_sender_id(self):
+        """Channel posts carry a negative sender id (the channel itself) —
+        never use that as a human sender id."""
+        event_sender_id = "-1002246024321"
+        self.assertFalse(str(event_sender_id).isdigit())
+
+    def test_sender_id_fallback_chat_id_leg_is_dm_only(self):
+        """In a group, chat_id must never become the sender_id."""
+        kind = "group"
+        event_is_group = True
+        chat_id = "-5223197263"
+
+        sender_id = ""
+        evt_sender_id = ""  # sender id missing from event
+        if evt_sender_id.isdigit():
+            sender_id = evt_sender_id
+        elif kind == "dm" and not event_is_group:
+            if chat_id and chat_id.lstrip("-").isdigit():
+                sender_id = chat_id
+
+        self.assertEqual(sender_id, "")

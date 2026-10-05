@@ -75,6 +75,48 @@ def _kind_for(entity: Any) -> str:
     return ChatKind.DM
 
 
+def _event_kind_override(kind: str, event: Any) -> str:
+    """Force group/channel classification when the event says so.
+
+    Basic groups (Telethon ``Chat``, not ``Channel``) resolved via a
+    fallback carry no ``megagroup``/``channel`` flags, so :func:`_kind_for`
+    defaults them to DM. Trust the event: if Telegram says it's a group,
+    it's a group. Without this, a basic group like ``-5223197263`` was
+    delivered as DM ``5223197263`` and every reply left the group.
+    """
+    if kind != ChatKind.DM:
+        return kind
+    if bool(getattr(event, "is_group", False)):
+        _log.debug(
+            "telegram: event.is_group=True but entity has no group flags — "
+            "forcing kind=group"
+        )
+        return ChatKind.GROUP
+    if bool(getattr(event, "is_channel", False)):
+        _log.debug(
+            "telegram: event.is_channel=True but entity has no channel flags — "
+            "forcing kind=channel"
+        )
+        return ChatKind.CHANNEL
+    return kind
+
+
+def _canonical_chat_id(orig_chat_id: str, entity_id: str, kind: str) -> str:
+    """Canonical chat id after entity resolution.
+
+    Basic groups: Telethon ``Chat`` entities carry the positive id, but the
+    real Telegram id is negative (``-5223197263``). Preserve the minus so
+    routing, replies, and the allowlist target the group — not a phantom DM.
+
+    Supergroups are unaffected and keep the existing positive-id convention:
+    ``-100…`` lstrips to ``100…``, which never equals the entity id.
+    """
+    orig = (orig_chat_id or "").strip()
+    if orig.startswith("-") and entity_id == orig.lstrip("-") and kind != ChatKind.DM:
+        return orig
+    return entity_id
+
+
 class TelegramAdapter(ChatAdapter):
     """A Telethon userbot: full account control over MTProto."""
 
@@ -255,6 +297,16 @@ class TelegramAdapter(ChatAdapter):
         if chat_id in self._input_entity_cache:
             _log.debug("telegram: using cached input entity for chat_id=%s", chat_id)
             return self._input_entity_cache[chat_id]
+        # 1b. Basic groups are cached under their positive entity id by the
+        # dialog pre-fetch, while inbound routing uses the true negative id
+        # (e.g. "-5223197263" vs "5223197263"). Accept either form.
+        stripped = chat_id.lstrip("-")
+        if stripped != chat_id and stripped in self._input_entity_cache:
+            _log.debug(
+                "telegram: using cached input entity for chat_id=%s (via %s)",
+                chat_id, stripped,
+            )
+            return self._input_entity_cache[stripped]
         
         # 2. Try get_input_entity (uses Telethon's internal peer cache)
         if self._client is not None:
@@ -588,34 +640,17 @@ class TelegramAdapter(ChatAdapter):
                 )
                 return
         
-        # Cache the input entity for outbound sends. Telethon's get_entity()
-        # fails for users not in the session cache, but we can use the input
-        # peer from received messages to send replies.
-        #
-        # CRITICAL: never cache input_sender under a group chat's ID. If
-        # input_chat is missing on a group message and we fall back to
-        # input_sender, the group's cache entry points at the sender's DM
-        # peer — and every later reply to that group lands in the DM instead.
-        # (This was the group→DM redirect bug.)
-        input_chat = getattr(event, "input_chat", None)
-        is_group_entity = (
-            getattr(entity, "megagroup", False)
-            or getattr(entity, "gigagroup", False)
-            or getattr(entity, "channel", False)
-        )
-        if is_group_entity:
-            input_entity = input_chat
-        else:
-            input_entity = input_chat or getattr(event, "input_sender", None)
-        if input_entity is not None:
-            entity_id = str(getattr(entity, "id", ""))
-            if entity_id:
-                self._cache_input_entity(entity_id, input_entity)
-                _log.debug("telegram: cached input entity for chat_id=%s", entity_id)
-        
-        chat_id = str(getattr(entity, "id", ""))
-        if allow_check and self.chat_allow and chat_id not in self.chat_allow and not any(
-            c == chat_id for c in self.chat_allow
+        # ── Finalize chat identity: kind + canonical chat_id ──
+        # NOTE on ordering: kind must be resolved BEFORE the input-entity
+        # cache below, because the cache decision depends on whether this
+        # is a group (never cache the sender's DM peer under a group id).
+        orig_chat_id = (chat_id or "").strip()
+        entity_id = str(getattr(entity, "id", ""))
+        kind = _event_kind_override(_kind_for(entity), event)
+        event_is_group = bool(getattr(event, "is_group", False))
+        chat_id = _canonical_chat_id(orig_chat_id, entity_id, kind)
+        if allow_check and self.chat_allow and not any(
+            c == chat_id or c == chat_id.lstrip("-") for c in self.chat_allow
         ):
             _log.info(
                 "telegram: ignoring message in %s (id=%s) — not in NM_CHAT_TELEGRAM_CHATS",
@@ -623,7 +658,6 @@ class TelegramAdapter(ChatAdapter):
                 chat_id,
             )
             return
-        kind = _kind_for(entity)
         # ── diagnostic: log full routing decision for group messages ──
         # The user reported group commands going to DM. This logs every
         # data point in the routing chain so we can see exactly where a
@@ -644,6 +678,26 @@ class TelegramAdapter(ChatAdapter):
             kind,
             chat_id,
         )
+
+        # Cache the input entity for outbound sends. Telethon's get_entity()
+        # fails for users not in the session cache, but we can use the input
+        # peer from received messages to send replies.
+        #
+        # CRITICAL: never cache input_sender under a group chat's ID. If
+        # input_chat is missing on a group message and we fall back to
+        # input_sender, the group's cache entry points at the sender's DM
+        # peer — and every later reply to that group lands in the DM instead.
+        # (This was the group→DM redirect bug.) The check below uses the
+        # FINAL kind (which accounts for basic groups resolved without
+        # entity flags), not the raw entity flags.
+        input_chat = getattr(event, "input_chat", None)
+        if kind in (ChatKind.GROUP, ChatKind.CHANNEL):
+            input_entity = input_chat
+        else:
+            input_entity = input_chat or getattr(event, "input_sender", None)
+        if input_entity is not None:
+            self._cache_input_entity(chat_id, input_entity)
+            _log.debug("telegram: cached input entity for chat_id=%s", chat_id)
         text = getattr(message, "raw_text", None) or ""
         media: list[MediaRef] = []
         if getattr(message, "media", None):
@@ -699,23 +753,32 @@ class TelegramAdapter(ChatAdapter):
             sender_name = title
             sender_id = ""
             sender_username = ""
-            # DM fallback: if the sender entity couldn't be resolved, fall
-            # back to the numeric IDs on the event. In a DM, chat_id IS the
-            # user's Telegram ID, so this keeps game identity (and anything
-            # else keyed on sender_id) from forking into name-keyed phantom
-            # profiles like `telegram:Mary`.
-            if kind == ChatKind.DM:
-                evt_sender_id = str(getattr(event, "sender_id", "") or "")
-                if evt_sender_id and evt_sender_id.lstrip("-").isdigit():
-                    sender_id = evt_sender_id
-                elif chat_id and chat_id.lstrip("-").isdigit():
+            # Sender entity unresolvable — fall back to numeric IDs on the
+            # event so game identity (and anything else keyed on sender_id)
+            # doesn't fork into name-keyed phantom profiles like
+            # `telegram:Mary`.
+            #
+            # Two legs, different scope:
+            # 1. event.sender_id — the human who sent the message. Valid for
+            #    DMs AND groups (a group /game must still attribute to the
+            #    human sender). Only positive ids: negative sender ids are
+            #    channel/group entities, not humans — never use those.
+            # 2. chat_id as sender_id — DM-ONLY. In a DM the chat IS the user;
+            #    in a group the chat is the group, and using it here would
+            #    misattribute the message. Explicitly excluded for groups.
+            evt_sender_id = str(getattr(event, "sender_id", "") or "")
+            if evt_sender_id.isdigit():
+                sender_id = evt_sender_id
+            elif kind == ChatKind.DM and not event_is_group:
+                if chat_id and chat_id.lstrip("-").isdigit():
                     sender_id = chat_id
-                if sender_id:
-                    _log.debug(
-                        "telegram: DM sender_id fallback — using %s "
-                        "(sender entity unresolvable)",
-                        sender_id,
-                    )
+            if sender_id:
+                _log.debug(
+                    "telegram: sender_id fallback — using %s "
+                    "(sender entity unresolvable, kind=%s)",
+                    sender_id,
+                    kind,
+                )
         # Forum-topic detection (best effort): in a forum supergroup, replies
         # inside a topic carry reply_to pointing at the topic's anchor.
         thread_id = ""
