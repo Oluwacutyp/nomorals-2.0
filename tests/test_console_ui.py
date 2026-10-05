@@ -536,5 +536,125 @@ class GodTierTests(unittest.TestCase):
         self.assertEqual(WATCH_VIEW_KEYS["4"], "brain")
 
 
+class TruncateVisibleTests(unittest.TestCase):
+    def test_plain_truncation(self):
+        from nomorals.console.palette import truncate_visible, visible_width
+
+        t = truncate_visible("hello world", 5)
+        self.assertLessEqual(visible_width(t), 5)
+        self.assertIn("…", t)
+
+    def test_no_truncation_when_fits(self):
+        from nomorals.console.palette import truncate_visible
+
+        self.assertEqual(truncate_visible("hi", 10), "hi")
+
+    def test_ansi_width_ignored_and_reset_added(self):
+        from nomorals.console.palette import (
+            RESET,
+            CYAN,
+            paint,
+            truncate_visible,
+            visible_width,
+        )
+
+        colored = paint("hello world", CYAN)
+        t = truncate_visible(colored, 5)
+        self.assertLessEqual(visible_width(t), 5)
+        self.assertTrue(t.endswith(RESET))
+
+    def test_wide_chars_count_double(self):
+        from nomorals.console.palette import truncate_visible, visible_width
+
+        self.assertGreaterEqual(visible_width("✈️"), 2)
+        t = truncate_visible("✈️abcdefghij", 6)
+        self.assertLessEqual(visible_width(t), 6)
+
+    def test_gradient_sequence_survives(self):
+        from nomorals.console.palette import truncate_visible, visible_width
+        from nomorals.console.widgets import gradient_text
+
+        g = gradient_text("DEVON LIVE", 51, 201, color=True)
+        t = truncate_visible(g, 5)
+        self.assertLessEqual(visible_width(t), 5)
+        self.assertIn("38;5;", t)  # 256-color escapes preserved
+
+
+class AlternateScreenTests(unittest.TestCase):
+    def _run_one_frame(self, screen):
+        import unittest.mock as mock
+
+        # One frame renders, then quit.
+        with mock.patch.object(
+            type(screen), "_wait_key", side_effect=[True, False]
+        ):
+            return screen.run()
+
+    def test_godscreen_uses_alternate_screen(self):
+        import io as _io
+
+        from nomorals.console.widgets import (
+            _ALT_SCREEN_OFF,
+            _ALT_SCREEN_ON,
+            GodScreen,
+        )
+
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.01, snapshot=lambda: {"uptime_s": 5},
+                           color=True, out=out)
+        msg = self._run_one_frame(screen)
+        self.assertIn("exited live dashboard", msg)
+        data = out.getvalue()
+        self.assertIn(_ALT_SCREEN_ON, data)
+        self.assertIn(_ALT_SCREEN_OFF, data)
+        # Enter comes before exit.
+        self.assertLess(data.index(_ALT_SCREEN_ON),
+                        data.index(_ALT_SCREEN_OFF))
+
+    def test_livescreen_uses_alternate_screen(self):
+        import io as _io
+
+        from nomorals.console.widgets import (
+            _ALT_SCREEN_OFF,
+            _ALT_SCREEN_ON,
+            LiveScreen,
+        )
+
+        out = _io.StringIO()
+        screen = LiveScreen(interval=0.01, color=True, out=out)
+        with screen:
+            screen.draw("hello")
+            screen.stop()
+        data = out.getvalue()
+        self.assertIn("hello", data)
+        self.assertIn(_ALT_SCREEN_ON, data)
+        self.assertIn(_ALT_SCREEN_OFF, data)
+        self.assertLess(data.index(_ALT_SCREEN_ON),
+                        data.index(_ALT_SCREEN_OFF))
+
+    def test_godscreen_frame_fits_terminal(self):
+        import io as _io
+        import unittest.mock as mock
+
+        from nomorals.console.palette import visible_width
+        from nomorals.console.widgets import GodScreen, MessageEvent, WatchHub
+
+        # Long feed lines must not wrap: every rendered line fits 80 cols.
+        WatchHub.feed().push(MessageEvent(
+            platform="telegram", sender="Spammer",
+            text="x" * 500, chat_title="y" * 100))
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.01,
+                           snapshot=lambda: {"uptime_s": 3723,
+                                             "traffic": {"messages": 40}},
+                           color=True, out=out)
+        with mock.patch("shutil.get_terminal_size", return_value=(80, 24)):
+            screen._render_frame()
+        for line in out.getvalue().split("\n"):
+            self.assertLessEqual(visible_width(line), 80,
+                                 f"line wraps: {line[:60]!r}")
+        WatchHub.feed().mark_read()
+
+
 if __name__ == "__main__":
     unittest.main()

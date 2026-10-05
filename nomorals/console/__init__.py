@@ -17,7 +17,7 @@ from .dashboard import (
     render_statusbar,
     render_view,
 )
-from .palette import paint, strip_ansi, supports_color
+from .palette import paint, strip_ansi, supports_color, truncate_visible, visible_width
 from .themes import get_theme, list_themes, theme_name
 from .widgets import (
     GodScreen,
@@ -61,4 +61,6 @@ __all__ = [
     "supports_color",
     "theme_name",
     "tip_of_the_day",
+    "truncate_visible",
+    "visible_width",
 ]

@@ -26,6 +26,7 @@ from .palette import (
     paint,
     strip_ansi,
     supports_color,
+    truncate_visible,
 )
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -43,6 +44,14 @@ _UP_ARROW = "\033[A"
 _CLEAR_LINE = "\033[2K\r"
 _HIDE_CURSOR = "\033[?25l"
 _SHOW_CURSOR = "\033[?25h"
+# Alternate screen buffer: the watch dashboard gets its own screen,
+# fully isolated from log lines on the main screen. On exit the main
+# screen (and cursor) is restored exactly as it was — no bleed-through,
+# no residual corruption. Termux-safe (standard xterm sequence).
+_ALT_SCREEN_ON = "\x1b[?1049h"
+_ALT_SCREEN_OFF = "\x1b[?1049l"
+_HOME = "\033[H"
+_CLEAR_BELOW = "\033[J"
 
 
 def sparkline(values: Iterable[float], *, width: int = 24, color: bool | None = None) -> str:
@@ -144,17 +153,17 @@ class LiveScreen:
         self.color = supports_color() if color is None else color
         self.out = out or sys.stdout
         self._stop = False
-        self._first = True
 
     def __enter__(self) -> "LiveScreen":
         if self.color:
-            self.out.write(_HIDE_CURSOR)
+            # Alternate screen: isolated buffer, restored on exit.
+            self.out.write(_ALT_SCREEN_ON + _HIDE_CURSOR)
             self.out.flush()
         return self
 
     def __exit__(self, *exc: Any) -> None:
         if self.color:
-            self.out.write(_SHOW_CURSOR + "\n")
+            self.out.write(_SHOW_CURSOR + _ALT_SCREEN_OFF)
             self.out.flush()
         self._stop = True
 
@@ -173,14 +182,10 @@ class LiveScreen:
             self.out.write(text + "\n")
             self.out.flush()
             return
-        if self._first:
-            self.out.write("\033[2J\033[H")
-            self._first = False
-        else:
-            self.out.write("\033[H")
-        self.out.write(text)
-        # Clear any leftover lines below.
-        self.out.write("\033[J")
+        # One atomic write: home, full frame, clear below. Any log line
+        # that slipped in between frames is wiped by the next redraw,
+        # and the alternate screen keeps the main terminal untouched.
+        self.out.write(_HOME + text + _CLEAR_BELOW)
         self.out.flush()
 
     def stop(self) -> None:
@@ -475,7 +480,10 @@ class GodScreen:
             )
         WatchHub.set_active(True)
         try:
-            self.out.write("\033[2J\033[H\033[?25l")
+            # Alternate screen buffer: the dashboard owns its own screen,
+            # completely isolated from Python logging / prints on the main
+            # screen. Exit restores the main screen exactly as it was.
+            self.out.write(_ALT_SCREEN_ON + _HIDE_CURSOR)
             self.out.flush()
             while not self._stop:
                 self._render_frame()
@@ -486,7 +494,7 @@ class GodScreen:
         finally:
             WatchHub.set_active(False)
             try:
-                self.out.write("\033[?25h\n")
+                self.out.write(_SHOW_CURSOR + _ALT_SCREEN_OFF)
                 self.out.flush()
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
@@ -549,31 +557,45 @@ class GodScreen:
         lines.append(f"{title} {paint(spin, CYAN, color=self.color)}   {tabs}")
         lines.append(paint("─" * min(width, 100), SUBTLE, color=self.color))
 
-        # Dashboard view.
+        # Dashboard view — truncated to its pane so it can never push
+        # the feed / status bar off screen.
         view_text = _d.render_view(snap, self._view, color=self.color)
         view_lines = view_text.splitlines()[:dash_h]
-        lines.extend(view_lines)
+        lines.extend(truncate_visible(ln, width) for ln in view_lines)
 
         # Feed pane.
         feed = WatchHub.feed()
         unread = feed.unread
         feed.mark_read()
         lines.append(
-            paint(f"─ messages (live) ─", SUBTLE, color=self.color)
+            paint("─ messages (live) ─", SUBTLE, color=self.color)
         )
         events = feed.recent(feed_h - 1)
         if events:
             for ev in events[-(feed_h - 1):]:
-                lines.append(format_feed_line(ev, color=self.color)[:width])
+                lines.append(
+                    truncate_visible(
+                        format_feed_line(ev, color=self.color), width
+                    )
+                )
         else:
             lines.append(paint("  (quiet — new messages appear here)", DIM, color=self.color))
 
-        # Status bar.
+        # Status bar — always the last two lines, real stats from snapshot.
         lines.append(paint("─" * min(width, 100), SUBTLE, color=self.color))
-        lines.append(_d.render_statusbar(snap, self._view, unread=unread, color=self.color)[:width])
+        lines.append(
+            truncate_visible(
+                _d.render_statusbar(snap, self._view, unread=unread, color=self.color),
+                width,
+            )
+        )
 
-        # Write: home, all lines, clear leftovers.
-        self.out.write("\033[H")
-        self.out.write("\n".join(lines))
-        self.out.write("\033[J")
+        # Never exceed the terminal height; every line fits the width, so
+        # nothing wraps and the layout can't garble.
+        frame_lines = [truncate_visible(ln, width) for ln in lines[:rows]]
+
+        # One atomic write: home, full frame, clear below. Any log line
+        # that slipped in between frames is wiped by the next redraw, and
+        # the alternate screen keeps the main terminal untouched.
+        self.out.write(_HOME + "\n".join(frame_lines) + _CLEAR_BELOW)
         self.out.flush()
