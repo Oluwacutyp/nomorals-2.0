@@ -11,10 +11,13 @@ Snapshot shape (all keys optional — missing sections render as "n/a")::
         "uptime_s": 3723.5,
         "adapters": {"telegram": {"running": True, "received": 12, "sent": 9}, ...},
         "traffic": {"messages": 40, "replies": 32, "errors": 1, "controls": 0},
+        "history": [3, 5, 2, ...],          # per-minute inbound counts (sparkline)
+        "llm": {"active": "groq", "chain": [...], "health": {...}},
         "scheduler": {"running": True, "jobs": [
             {"name": "briefing", "enabled": True, "next_run": 1760000000.0}, ...]},
-        "games": {"players": 7},
+        "games": {"players": 7, "active_tables": 2},
         "extras": {"autonomy": "on", "arena": "off"},
+        "theme": "ocean",
     }
 """
 
@@ -38,6 +41,8 @@ from .palette import (
     paint,
     strip_ansi,
 )
+from .themes import Theme, get_theme
+from .widgets import sparkline
 
 _WIDTH = 58
 
@@ -81,9 +86,16 @@ def _end() -> str:
     return paint("└" + "─" * (_WIDTH - 2) + "┘", SUBTLE)
 
 
-def render_dashboard(snap: dict[str, Any] | None, *, color: bool | None = None) -> str:
+def render_dashboard(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+) -> str:
     """Render the full dashboard for ``snap``."""
     snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    t = lambda s, role: paint(s, theme.get(role, ""), color=color)  # noqa: E731
     lines: list[str] = []
     lines.append("")
     lines.append(_rule("DEVON · live status"))
@@ -98,6 +110,18 @@ def render_dashboard(snap: dict[str, Any] | None, *, color: bool | None = None) 
             vc = GREEN if val.lower() in {"on", "up", "ok", "ready"} else SUBTLE
             lines.append(_bar(key, val, vc))
 
+    # ── brain (LLM) ──
+    llm = snap.get("llm") or {}
+    if llm:
+        active = str(llm.get("active") or "—")
+        chain = llm.get("chain") or []
+        health = llm.get("health") or {}
+        bad = [n for n, h in health.items() if isinstance(h, dict) and h.get("cooldown_until")]
+        brain_color = GREEN if active and active != "—" else MAGENTA
+        lines.append(_bar("brain", f"{active}  ({len(chain)} in chain)", brain_color))
+        if bad:
+            lines.append(f"    {t('cooling down:', 'warn')} {t(', '.join(bad[:4]), 'subtle')}")
+
     # ── adapters ──
     adapters = snap.get("adapters") or {}
     lines.append(_bar("adapters", f"{len(adapters)} configured"))
@@ -107,14 +131,13 @@ def render_dashboard(snap: dict[str, Any] | None, *, color: bool | None = None) 
         dot = paint("●", GREEN) if running else paint("○", SUBTLE)
         recv = info.get("received", "—")
         sent = info.get("sent", "—")
-        # Pad to a fixed *visible* width: ANSI codes add 9 chars.
         label = paint(f"{name:<14}", BRIGHT_WHITE)
         lines.append(
             f"    {dot} {label} "
             f"{paint('in', SUBTLE)} {recv} {paint('out', SUBTLE)} {sent}"
         )
 
-    # ── traffic ──
+    # ── traffic + sparkline ──
     traffic = snap.get("traffic") or {}
     msgs = traffic.get("messages", "—")
     replies = traffic.get("replies", "—")
@@ -128,6 +151,9 @@ def render_dashboard(snap: dict[str, Any] | None, *, color: bool | None = None) 
             f"{paint(str(errors), err_color + BOLD)} errors · {ctrls} controls",
         )
     )
+    history = snap.get("history") or []
+    if history:
+        lines.append(f"    {paint('activity', CYAN):<21} {sparkline(history, color=color)}")
 
     # ── scheduler ──
     sched = snap.get("scheduler") or {}
@@ -151,10 +177,12 @@ def render_dashboard(snap: dict[str, Any] | None, *, color: bool | None = None) 
     games = snap.get("games") or {}
     if games:
         players = games.get("players", "—")
-        lines.append(_bar("players", f"{players} game profiles", BRIGHT_WHITE))
+        tables = games.get("active_tables")
+        extra = f" · {tables} active" if tables else ""
+        lines.append(_bar("players", f"{players} game profiles{extra}", BRIGHT_WHITE))
 
     lines.append(_end())
-    lines.append(paint("  type 'dashboard' to refresh · 'help' for console commands", DIM))
+    lines.append(paint("  type 'dashboard --watch' for live mode · 'help' for commands", DIM))
     lines.append("")
     out = "\n".join(lines)
     if color is False:

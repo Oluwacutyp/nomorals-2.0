@@ -38,6 +38,7 @@ See ``docs/SERV00_DEPLOY.md`` for the full Serv00 walkthrough.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import signal
@@ -50,7 +51,34 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _build_snapshot_provider(runtime, context, boot_mono):
+class _MessageHistory:
+    """Ring buffer of inbound timestamps for the dashboard sparkline.
+
+    Thread-safe. Buckets into per-minute counts for the last 30 minutes.
+    """
+
+    def __init__(self, minutes: int = 30) -> None:
+        self.minutes = minutes
+        self._lock = threading.Lock()
+        self._stamps: collections.deque[float] = collections.deque(maxlen=4096)
+
+    def record(self) -> None:
+        with self._lock:
+            self._stamps.append(time.time())
+
+    def per_minute(self) -> list[int]:
+        now = time.time()
+        buckets = [0] * self.minutes
+        with self._lock:
+            stamps = list(self._stamps)
+        for ts in stamps:
+            age_min = int((now - ts) // 60)
+            if 0 <= age_min < self.minutes:
+                buckets[self.minutes - 1 - age_min] += 1
+        return buckets
+
+
+def _build_snapshot_provider(runtime, context, boot_mono, history: _MessageHistory):
     """Assemble the live-status snapshot for the console dashboard."""
 
     def _snapshot():
@@ -99,9 +127,28 @@ def _build_snapshot_provider(runtime, context, boot_mono):
         # ── games ──
         try:
             row = context.db.query_one("SELECT COUNT(*) AS n FROM game_players")
-            snap["games"] = {"players": (row or {}).get("n", "—")}
+            players = (row or {}).get("n", "—")
         except Exception:  # noqa: BLE001
-            snap["games"] = {}
+            players = "—"
+        snap["games"] = {"players": players}
+        # ── activity sparkline ──
+        try:
+            snap["history"] = history.per_minute()
+        except Exception:  # noqa: BLE001
+            snap["history"] = []
+        # ── brain (LLM router health) ──
+        try:
+            router = getattr(getattr(runtime, "_brain", None), "router", None) or getattr(
+                runtime, "_router", None
+            )
+            if router is not None and hasattr(router, "stats_snapshot"):
+                snap["llm"] = router.stats_snapshot()
+            else:
+                snap["llm"] = {}
+        except Exception:  # noqa: BLE001
+            snap["llm"] = {}
+        # ── theme ──
+        snap["theme"] = os.environ.get("NM_CONSOLE_THEME", "ocean")
         # ── extras ──
         extras: dict = {}
         try:
@@ -119,25 +166,58 @@ def _build_snapshot_provider(runtime, context, boot_mono):
 
 
 def _print_banner(started, *, color=True):
-    from nomorals.console.palette import (
-        ACCENT,
-        BOLD,
-        BRIGHT_WHITE,
-        CYAN,
-        DIM,
-        GREEN,
-        TITLE,
-        paint,
-    )
+    from nomorals.console.banner import render_banner
+    from nomorals.console.themes import get_theme
 
-    bar = paint("─" * 46, DIM)
-    print(bar)
-    print(f"  {paint('D E V O N', TITLE + BOLD)} {paint('· chat gateway live', DIM)}")
-    print(bar)
-    for name in started:
-        print(f"  {paint('●', GREEN)} {paint(name, BRIGHT_WHITE)} {paint('connected', DIM)}")
-    print(f"  {paint('console commands:', ACCENT)} {paint('dashboard · status · jobs · clear · help', CYAN)}")
-    print(bar, flush=True)
+    try:
+        version = ""
+        try:
+            from nomorals import __version__  # type: ignore
+
+            version = str(__version__)
+        except Exception:  # noqa: BLE001 - version is cosmetic
+            pass
+        print(render_banner([str(s) for s in started], version=version, theme=get_theme(), color=color), flush=True)
+    except Exception:  # noqa: BLE001 - banner must never break boot
+        print("  DEVON · chat gateway live", flush=True)
+
+
+def _install_console_mirror(runtime, history: _MessageHistory) -> None:
+    """Rich inbound message cards on the local terminal + activity history.
+
+    Best-effort: any failure disables the mirror silently.
+    """
+    try:
+        from nomorals.console.palette import supports_color
+        from nomorals.console.widgets import format_message_card
+
+        gateway = getattr(runtime, "gateway", None)
+        if gateway is None:
+            return
+        color_ok = supports_color()
+
+        def _mirror(message: object) -> None:
+            history.record()
+            if not color_ok:
+                return
+            try:
+                chat = getattr(message, "chat", None)
+                card = format_message_card(
+                    platform=str(getattr(chat, "platform", "?") or "?"),
+                    sender=str(getattr(message, "sender", "?") or "?"),
+                    text=str(getattr(message, "text", "") or "")[:400],
+                    chat_title=str(getattr(chat, "title", "") or ""),
+                    timestamp=float(getattr(message, "ts", 0) or 0) or None,
+                    incoming=bool(getattr(message, "incoming", True)),
+                    color=True,
+                )
+                print(f"\n{card}", flush=True)
+            except Exception:  # noqa: BLE001 - mirror is cosmetic
+                pass
+
+        gateway.console_mirror = _mirror
+    except Exception:  # noqa: BLE001 - mirror is optional
+        pass
 
 
 def main() -> int:
@@ -182,8 +262,11 @@ def main() -> int:
             )
         # Console-only commands (dashboard, status, jobs, …) for the local
         # terminal adapter. Anything else flows to the brain untouched.
+        # Also: rich inbound mirror + activity history for the dashboard.
+        history = _MessageHistory()
+        _install_console_mirror(runtime, history)
         try:
-            snapshot = _build_snapshot_provider(runtime, context, boot_mono)
+            snapshot = _build_snapshot_provider(runtime, context, boot_mono, history)
             commands = ConsoleCommands(snapshot)
             local = None
             try:

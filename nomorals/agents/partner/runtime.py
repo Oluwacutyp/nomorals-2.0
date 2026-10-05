@@ -396,7 +396,14 @@ class PartnerRuntime(
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
                           message.text[:40], message.sender or "?", message.chat.key)
                 try:
-                    if command.kind in ("inventory", "equip", "unequip",
+                    if message.chat.kind == ChatKind.CHANNEL:
+                        # Telegram doesn't identify individual senders in
+                        # channels (the sender IS the channel), so per-player
+                        # game state can't work there. Friendly redirect
+                        # instead of minting a channel-named phantom profile.
+                        reply = ("Games work in groups and DMs, not channels — "
+                                 "Telegram doesn't tell me who's sending in a channel.")
+                    elif command.kind in ("inventory", "equip", "unequip",
                                         "repair"):
                         reply = self._control_gear(
                             command.kind, command.tail or command.arg,

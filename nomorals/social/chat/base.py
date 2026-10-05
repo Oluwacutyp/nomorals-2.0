@@ -416,8 +416,14 @@ class ChatAdapter(ABC):
 
     # ── sending ──────────────────────────────────────────────────────────────
     @abstractmethod
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
-        """Send one text message. Returns a result, never raises for ordinary failure."""
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+        """Send one text message. Returns a result, never raises for ordinary failure.
+
+        ``buttons`` is ``[[(label, callback_data), ...], ...]`` — an inline
+        keyboard. Adapters whose platform has no button concept ignore it;
+        TelegramBotAdapter renders it as an inline keyboard.
+        """
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
         return SendResult(ok=False, platform=self.name, error="media not supported")

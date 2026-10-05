@@ -24,6 +24,15 @@ class RuntimeScheduleMixin:
                 state = "on " if job["enabled"] else "off"
                 nxt = job.get("next_run_iso") or ("past" if job["kind"] == "at" else "—")
                 lines.append(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} (next: {nxt})")
+                extras = []
+                if job.get("depends_on"):
+                    extras.append(f"after:{job['depends_on'][:8]}")
+                if job.get("max_retries"):
+                    extras.append(f"retry×{job['max_retries']}")
+                if job.get("retry_count"):
+                    extras.append(f"retrying({job['retry_count']})")
+                if extras:
+                    lines[-1] += " [" + ", ".join(extras) + "]"
                 if job.get("last_result"):
                     lines.append(f"        last: {job['last_result'][:80]}")
             return "\n".join(lines)
@@ -56,10 +65,12 @@ class RuntimeScheduleMixin:
             except (LookupError, AmbiguousRef) as exc:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
-        return ("usage: /schedule add <name> <when> <message|tool|command> <...> | list | "
+        return ("usage: /schedule add <name> <when> <message|tool|command> <...> [options] | list | "
                 "rm <name> | enable|disable <name> | run <name>\n"
-                "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00'\n"
-                "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V")
+                "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00' | 'daily 22:00 America/New_York'\n"
+                "        | 'cron 0 22 * * *' (minute hour day month weekday)\n"
+                "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V\n"
+                "  options: tz <IANA> | after <job> | retry <n> [delay <secs>]")
 
     def _schedule_add(self, parts: list[str], scheduler: Any) -> str:
         """parts = the tail after 'add': [name, spec..., verb, payload...]"""
@@ -79,6 +90,34 @@ class RuntimeScheduleMixin:
             return "add needs an action: message <text> | tool <name> <json> | command <cmd>"
         spec = " ".join(rest[:split_at])
         payload_parts = rest[split_at + 1:]
+        # ── trailing options: tz <IANA> | after <job> | retry <n> | delay <s>
+        # stripped from the end of the payload so free-form message text
+        # isn't polluted.
+        timezone, depends_on = "", ""
+        max_retries, retry_delay = 0, 60.0
+        while len(payload_parts) >= 2:
+            key = payload_parts[-2].lower()
+            val = payload_parts[-1]
+            if key == "tz":
+                timezone = val
+                payload_parts = payload_parts[:-2]
+            elif key == "after":
+                depends_on = val
+                payload_parts = payload_parts[:-2]
+            elif key == "retry":
+                try:
+                    max_retries = max(0, int(val))
+                except ValueError:
+                    break
+                payload_parts = payload_parts[:-2]
+            elif key == "delay":
+                try:
+                    retry_delay = max(10.0, float(val))
+                except ValueError:
+                    break
+                payload_parts = payload_parts[:-2]
+            else:
+                break
         payload: dict[str, Any]
         if payload_kind == "message":
             payload = {"text": " ".join(payload_parts)}
@@ -100,11 +139,21 @@ class RuntimeScheduleMixin:
                         "/schedule add backup every 1h command \"python3 backup.py\"")
             payload = {"command": " ".join(payload_parts)}
         try:
-            job = scheduler.add(name, spec, payload_kind, payload)
+            job = scheduler.add(name, spec, payload_kind, payload,
+                                timezone=timezone, depends_on=depends_on,
+                                max_retries=max_retries, retry_delay=retry_delay)
         except (ValueError, RuntimeError) as exc:
             return f"scheduling failed: {exc}"
         when = time.strftime("%m-%d %H:%M", time.localtime(job["next_run"]))
-        return f"⏰ scheduled {job['name']} — {job['kind']} ({spec}) — next {when}"
+        extras = []
+        if timezone:
+            extras.append(f"tz={timezone}")
+        if depends_on:
+            extras.append(f"after={depends_on}")
+        if max_retries:
+            extras.append(f"retry×{max_retries}")
+        extra_s = (" [" + ", ".join(extras) + "]") if extras else ""
+        return f"⏰ scheduled {job['name']} — {job['kind']} ({spec}) — next {when}{extra_s}"
 
     # ── scheduler: /schedule ─────────────────────────────────────────────────
     def _scheduler_or_build(self) -> Any:

@@ -1193,7 +1193,9 @@ class TelegramAdapter(ChatAdapter):
         self._deliver(handler, handler_msg)
 
     # ── outbound ─────────────────────────────────────────────────────────────
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
@@ -1496,7 +1498,8 @@ class TelegramBotAdapter(ChatAdapter):
                 updates = self._api("getUpdates", offset=self._offset,
                                     timeout=self.poll_timeout,
                                     allowed_updates=["message", "edited_message",
-                                                     "channel_post", "callback_query"])
+                                                     "channel_post", "callback_query",
+                                                     "inline_query"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 # A persistent failure (revoked token, dead DNS) must not
                 # hot-spin the poll loop every 5s — back off exponentially,
@@ -1512,6 +1515,10 @@ class TelegramBotAdapter(ChatAdapter):
                 # Callback queries (inline button taps) get their own path.
                 if "callback_query" in update:
                     self._handle_callback(update["callback_query"], handler)
+                    continue
+                # Inline queries (@BotName <query> in any chat).
+                if "inline_query" in update:
+                    self._handle_inline_query(update["inline_query"])
                     continue
                 message = self._convert(update)
                 if message is not None:
@@ -1641,6 +1648,30 @@ class TelegramBotAdapter(ChatAdapter):
             self._api("answerCallbackQuery", **params)
         except Exception as exc:  # noqa: BLE001 - non-fatal
             _log.debug("telegram-bot: answerCallbackQuery failed: %s", exc)
+
+    # ── inline mode (@BotName <query> in any chat) ─────────────────────
+    # NOTE: inline mode must be enabled for the bot via BotFather
+    # (/setinline). Until then Telegram simply never sends inline_query
+    # updates — everything else keeps working.
+    def _handle_inline_query(self, query: dict[str, Any]) -> None:
+        """Answer an inline query with tappable command articles."""
+        from .tgbot_buttons import inline_results_for
+
+        query_id = query.get("id", "")
+        if not query_id:
+            return
+        sender = query.get("from") or {}
+        if sender.get("is_bot"):
+            return
+        qtext = query.get("query", "") or ""
+        try:
+            results = inline_results_for(qtext)
+            self._api("answerInlineQuery", inline_query_id=query_id,
+                      results=results, cache_time=300, is_personal=True)
+            _log.info("telegram-bot: answered inline query %r from %s",
+                      qtext[:40], sender.get("username") or sender.get("id"))
+        except Exception as exc:  # noqa: BLE001 - non-fatal
+            _log.debug("telegram-bot: answerInlineQuery failed: %s", exc)
 
     def _inbound_media(self, msg: dict[str, Any], kind: str) -> list[MediaRef]:
         """Download the largest attached file, when the gates allow it."""

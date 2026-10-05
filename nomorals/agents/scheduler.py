@@ -1,10 +1,12 @@
 """Scheduler: durable cron-style jobs, run in-process.
 
-Three schedule kinds, parsed from one flexible spec string:
+Schedule kinds, parsed from one flexible spec string:
 
 * ``at 2026-09-12 09:00`` (or ISO ``2026-09-12T09:00``) — one-shot
 * ``every 30m`` / ``2h`` / ``45s`` — repeating interval
 * ``daily 22:00`` (or just ``22:00``) — repeating wall-clock time
+* ``daily 22:00 America/New_York`` — daily in a specific IANA timezone
+* ``cron 0 22 * * *`` (or bare ``0 22 * * *``) — standard cron expression
 
 Three payload kinds:
 
@@ -12,10 +14,20 @@ Three payload kinds:
 * ``tool``    — call any registered tool with JSON args
 * ``command`` — run a shell command through the sandboxed shell tool
 
-Jobs live in the ``schedule_jobs`` table (migration 15): a restart resumes
-them, a disabled job stays put, and one-shot jobs disable themselves after
-firing. The tick loop runs on a daemon thread and every due job's outcome is
-published through the Notifier, so alerts are durable and multi-channel.
+Advanced features:
+
+* **Dependencies** — a job can declare ``depends_on`` (another job's id);
+  it only fires when the dependency's last run succeeded.
+* **Retries** — ``max_retries`` + ``retry_delay``: failed jobs retry with
+  linear backoff before the failure is reported.
+* **Missed-job catch-up** — ``catch_up_on_startup()`` runs jobs whose
+  ``next_run`` passed while the bot was down (within a max age).
+
+Jobs live in the ``schedule_jobs`` table (migration 15, upgraded by 81):
+a restart resumes them, a disabled job stays put, and one-shot jobs
+disable themselves after firing. The tick loop runs on a daemon thread
+and every due job's outcome is published through the Notifier, so alerts
+are durable and multi-channel.
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.errors import AmbiguousRef
 from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
@@ -45,12 +58,20 @@ _UNIT_SECONDS = {
     "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
     "d": 86400, "day": 86400, "days": 86400,
 }
+# cron: 5 fields (minute hour day month weekday)
+_CRON_RE = re.compile(
+    r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$"
+)
+# IANA timezone-ish: letters, digits, underscore, slash, hyphen, plus
+_TZ_RE = re.compile(r"^[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)*$")
 
 
 def parse_schedule_spec(spec: str) -> tuple[str, Any]:
     """Parse a schedule spec → (kind, detail).
 
-    kind: ``at`` (detail = unix ts) | ``every`` (detail = seconds) | ``daily`` (detail = "HH:MM")
+    kind: ``at`` (detail = unix ts) | ``every`` (detail = seconds) |
+    ``daily`` (detail = "HH:MM" or "HH:MM <tz>") |
+    ``cron`` (detail = cron expression string)
     """
     s = (spec or "").strip()
     if not s:
@@ -63,12 +84,24 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
     if lowered.startswith("every "):
         return "every", _parse_interval(s[6:].strip())
     if lowered.startswith("daily "):
-        return "daily", _parse_hhmm(s[6:].strip())
-    # bare forms: "22:00" → daily, "30m" → every, ISO timestamp → at
+        return "daily", _parse_daily_spec(s[6:].strip())
+    if lowered.startswith("cron "):
+        return "cron", _parse_cron(s[5:].strip())
+    # bare forms: "22:00" → daily, "30m" → every, ISO timestamp → at,
+    # "0 22 * * *" → cron
     if _TIME_RE.match(s):
         return "daily", _parse_hhmm(s)
+    # bare "HH:MM <tz>"
+    parts = s.split()
+    if len(parts) == 2 and _TIME_RE.match(parts[0]) and _TZ_RE.match(parts[1]):
+        return "daily", _parse_daily_spec(s)
     if _INTERVAL_RE.match(s):
         return "every", _parse_interval(s)
+    if _CRON_RE.match(s):
+        try:
+            return "cron", _parse_cron(s)
+        except ValueError:
+            pass
     ts = _parse_timestamp(s)
     return "at", ts
 
@@ -113,12 +146,168 @@ def _parse_hhmm(text: str) -> str:
     return f"{hour:02d}:{minute:02d}"  # pads "9:5" → "09:05"
 
 
-def _next_daily(hhmm: str, now: datetime) -> float:
-    hour, minute = (int(x) for x in hhmm.split(":"))
+def _parse_daily_spec(text: str) -> str:
+    """Parse ``HH:MM [timezone]`` → ``"HH:MM"`` or ``"HH:MM <tz>"``.
+
+    The timezone must be a valid IANA name (validated eagerly so a
+    typo fails at schedule time, not at 3am).
+    """
+    parts = text.strip().split()
+    if not parts:
+        raise ValueError("expected HH:MM [timezone]")
+    hhmm = _parse_hhmm(parts[0])
+    if len(parts) == 1:
+        return hhmm
+    tz = " ".join(parts[1:])
+    # allow one slash-separated IANA name; reject junk early
+    if not _TZ_RE.match(tz):
+        raise ValueError(f"not a valid timezone: {tz!r}")
+    try:
+        ZoneInfo(tz)
+    except ZoneInfoNotFoundError:
+        raise ValueError(f"unknown timezone: {tz!r}")
+    return f"{hhmm} {tz}"
+
+
+def _split_daily_detail(detail: str) -> tuple[str, str]:
+    """Split a daily detail ``"HH:MM"`` / ``"HH:MM <tz>"`` → (hhmm, tz)."""
+    parts = str(detail or "").strip().split(None, 1)
+    hhmm = parts[0] if parts else "00:00"
+    tz = parts[1].strip() if len(parts) > 1 else ""
+    return hhmm, tz
+
+
+def _next_daily(hhmm: str, now: datetime, timezone: str = "") -> float:
+    """Next wall-clock ``HH:MM`` at/after ``now``.
+
+    ``hhmm`` may itself carry a trailing IANA timezone
+    (``"22:00 America/New_York"``); the explicit ``timezone`` argument
+    wins when both are given.  An empty timezone means server-local.
+    """
+    # detail may embed the tz: "22:00 America/New_York"
+    embedded_hhmm, embedded_tz = _split_daily_detail(hhmm)
+    tz_name = (timezone or "").strip() or embedded_tz
+    if tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            _log.warning("scheduler: unknown timezone %r, using local", tz_name)
+            tz = None
+        if tz is not None:
+            # do the wall-clock math in the target zone
+            now_tz = now.astimezone(tz)
+            hour, minute = (int(x) for x in embedded_hhmm.split(":"))
+            candidate = now_tz.replace(hour=hour, minute=minute,
+                                       second=0, microsecond=0)
+            if candidate <= now_tz:
+                candidate += timedelta(days=1)
+            return candidate.timestamp()
+    hour, minute = (int(x) for x in embedded_hhmm.split(":"))
     candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate.timestamp()
+
+
+# ── cron ─────────────────────────────────────────────────────────────────
+
+def _parse_cron_field(field: str, lo: int, hi: int) -> set[int]:
+    """Parse one cron field → set of matching ints.
+
+    Supports ``*``, ``*/n``, ``a,b,c``, ``a-b``, ``a-b/n``, and literals.
+    """
+    field = field.strip()
+    out: set[int] = set()
+    if field == "*":
+        return set(range(lo, hi + 1))
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            part, step_s = part.split("/", 1)
+            step = int(step_s)
+            if step < 1:
+                raise ValueError(f"bad cron step in {field!r}")
+        if part == "*" or part == "":
+            lo_p, hi_p = lo, hi
+        elif "-" in part:
+            a_s, b_s = part.split("-", 1)
+            lo_p, hi_p = int(a_s), int(b_s)
+        else:
+            lo_p = hi_p = int(part)
+        if lo_p < lo or hi_p > hi or lo_p > hi_p:
+            raise ValueError(f"cron value out of range in {field!r}")
+        out.update(range(lo_p, hi_p + 1, step))
+    if not out:
+        raise ValueError(f"empty cron field {field!r}")
+    return out
+
+
+def _parse_cron(expr: str) -> str:
+    """Validate a 5-field cron expression → normalized string.
+
+    Fields: minute hour day month weekday.  Weekday 0 and 7 both mean
+    Sunday.  Returns the canonical ``"m h dom mon dow"`` string.
+    """
+    m = _CRON_RE.match(expr.strip())
+    if not m:
+        raise ValueError(f"not a 5-field cron expression: {expr!r}")
+    minute, hour, dom, month, dow = m.groups()
+    # validate each field eagerly (raises on garbage)
+    _parse_cron_field(minute, 0, 59)
+    _parse_cron_field(hour, 0, 23)
+    _parse_cron_field(dom, 1, 31)
+    _parse_cron_field(month, 1, 12)
+    _parse_cron_field(dow, 0, 7)
+    return f"{minute} {hour} {dom} {month} {dow}"
+
+
+def _cron_matches(expr: str, dt: datetime) -> bool:
+    """True if ``dt`` (minute precision) matches the cron expression."""
+    minute, hour, dom, month, dow = _parse_cron(expr).split()
+    mins = _parse_cron_field(minute, 0, 59)
+    hrs = _parse_cron_field(hour, 0, 23)
+    doms = _parse_cron_field(dom, 1, 31)
+    mons = _parse_cron_field(month, 1, 12)
+    dows = _parse_cron_field(dow, 0, 7)
+    # cron: dow 0 and 7 both Sunday
+    py_dow = (dt.weekday() + 1) % 7  # Monday=0 → Sunday=6 → map to 0
+    dow_match = py_dow in dows or (py_dow == 0 and 7 in dows)
+    # classic cron semantics: dom AND dow both restricted → OR them;
+    # otherwise each restricted field must match.
+    dom_star = dom.strip() == "*"
+    dow_star = dow.strip() == "*"
+    if not dom_star and not dow_star:
+        day_ok = (dt.day in doms) or dow_match
+    else:
+        day_ok = (dt.day in doms) and dow_match
+    return (dt.minute in mins and dt.hour in hrs
+            and dt.month in mons and day_ok)
+
+
+def _next_cron(expr: str, now: datetime, timezone: str = "") -> float:
+    """Next minute at/after ``now`` matching the cron expression.
+
+    Scans forward minute-by-minute (cap: 366 days) — no external deps.
+    """
+    tz: Any = None
+    if (timezone or "").strip():
+        try:
+            tz = ZoneInfo(timezone.strip())
+        except ZoneInfoNotFoundError:
+            _log.warning("scheduler: unknown timezone %r, using local",
+                         timezone)
+    probe = now.astimezone(tz) if tz else now
+    # start at the next minute boundary strictly after now
+    probe = probe.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    limit = probe + timedelta(days=366)
+    while probe <= limit:
+        if _cron_matches(expr, probe):
+            return probe.timestamp()
+        probe += timedelta(minutes=1)
+    raise ValueError(f"cron expression never matches within a year: {expr!r}")
 
 
 def _like_escape(text: str) -> str:
@@ -152,6 +341,11 @@ class Scheduler:
         spec: str,
         payload_kind: str,
         payload: dict[str, Any],
+        *,
+        timezone: str = "",
+        depends_on: str = "",
+        max_retries: int = 0,
+        retry_delay: float = 60.0,
     ) -> dict[str, Any]:
         if self.db is None:
             raise RuntimeError("scheduler needs a database context")
@@ -164,21 +358,46 @@ class Scheduler:
             raise ValueError("tool payloads need a 'tool' name")
         if payload_kind == "command" and not str(payload.get("command") or "").strip():
             raise ValueError("command payloads need a 'command'")
+        # dependency must name an existing job
+        depends_on = (depends_on or "").strip()
+        if depends_on:
+            dep = self._find(depends_on)
+            if dep is None:
+                raise ValueError(f"depends_on: no job {depends_on!r}")
+            depends_on = dep["id"]  # canonicalize to the full id
+        max_retries = max(0, int(max_retries))
+        retry_delay = max(10.0, float(retry_delay))
+        # explicit timezone arg wins; daily spec may also embed one
+        timezone = (timezone or "").strip()
+        if timezone:
+            try:
+                ZoneInfo(timezone)
+            except ZoneInfoNotFoundError:
+                raise ValueError(f"unknown timezone: {timezone!r}")
         now = time.time()
         if kind == "at" and detail <= now:
             raise ValueError("one-shot time is in the past")
-        next_run = self._initial_next_run(kind, detail, now)
+        next_run = self._initial_next_run(kind, detail, now, timezone)
         job_id = new_id()
+        # store the detail; for daily keep "HH:MM [tz]" so the tz survives
+        if kind == "every":
+            spec_str = str(int(detail))
+        elif kind == "daily" and timezone and " " not in str(detail):
+            spec_str = f"{detail} {timezone}"
+        else:
+            spec_str = str(detail)
         with self.db.transaction():
             self.db.execute(
                 "INSERT INTO schedule_jobs (id, name, kind, spec, payload_kind, payload, "
-                "enabled, next_run, last_run, last_result, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?)",
+                "enabled, next_run, last_run, last_result, created_at, updated_at, "
+                "timezone, depends_on, max_retries, retry_delay, retry_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?, ?, ?, ?, ?, 0)",
                 (
                     job_id, (name or "").strip() or "job", kind,
-                    str(detail) if kind != "every" else str(int(detail)),
+                    spec_str,
                     payload_kind, json.dumps(payload),
                     next_run, now, now,
+                    timezone, depends_on, max_retries, retry_delay,
                 ),
             )
         return {"id": job_id, "name": (name or "").strip() or "job", "kind": kind,
@@ -281,21 +500,91 @@ class Scheduler:
         return None
 
     # ── scheduling math ──────────────────────────────────────────────────────
-    def _initial_next_run(self, kind: str, detail: Any, now: float) -> float:
+    def _initial_next_run(self, kind: str, detail: Any, now: float,
+                          timezone: str = "") -> float:
         if kind == "at":
             return float(detail)
         if kind == "every":
             return now + float(detail)
-        return _next_daily(str(detail), datetime.fromtimestamp(now))
+        if kind == "cron":
+            return _next_cron(str(detail), datetime.fromtimestamp(now), timezone)
+        return _next_daily(str(detail), datetime.fromtimestamp(now), timezone)
 
     def _next_after_run(self, row: dict[str, Any], now: float) -> tuple[float | None, bool]:
         """(next_run, still_enabled) after a job fires."""
         kind = row["kind"]
+        tz = str(row.get("timezone") or "")
         if kind == "at":
             return None, False
         if kind == "every":
             return now + float(row["spec"]), True
-        return _next_daily(str(row["spec"]), datetime.fromtimestamp(now)), True
+        if kind == "cron":
+            return _next_cron(str(row["spec"]), datetime.fromtimestamp(now), tz), True
+        return _next_daily(str(row["spec"]), datetime.fromtimestamp(now), tz), True
+
+    def _dependency_ok(self, row: dict[str, Any]) -> bool:
+        """True when the job's ``depends_on`` target last succeeded (or none)."""
+        dep_id = str(row.get("depends_on") or "").strip()
+        if not dep_id:
+            return True
+        if self.db is None:
+            return False
+        dep = self.db.query_one(
+            "SELECT last_result FROM schedule_jobs WHERE id = ?", (dep_id,))
+        if not dep:
+            # dependency was deleted — treat as unmet, don't silently run
+            return False
+        last = str(dep.get("last_result") or "")
+        # never ran counts as unmet; only an explicit success opens the gate
+        return bool(last) and not last.startswith("job failed")
+
+    def catch_up_on_startup(self, *, max_age_hours: float = 24.0) -> list[dict[str, Any]]:
+        """Run jobs whose ``next_run`` passed while the bot was down.
+
+        Only catches up jobs missed within ``max_age_hours`` — anything
+        older is assumed stale and just gets rescheduled forward.
+        Returns the outcomes of the catch-up runs.
+        """
+        if self.db is None:
+            return []
+        now = time.time()
+        cutoff = now - max(0.0, float(max_age_hours)) * 3600
+        try:
+            rows = self.db.query(
+                "SELECT * FROM schedule_jobs WHERE enabled = 1 "
+                "AND next_run IS NOT NULL AND next_run <= ? "
+                "AND next_run >= ? ORDER BY next_run ASC",
+                (now, cutoff),
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        results = []
+        for row in rows:
+            row = dict(row)
+            if not self._dependency_ok(row):
+                continue
+            try:
+                results.append(self._execute(row))
+            except Exception:  # noqa: BLE001
+                _log.exception("scheduler catch-up crashed: %s", row.get("id"))
+        # reschedule anything missed *before* the cutoff (too stale to run)
+        try:
+            with self.db.transaction():
+                stale = self.db.query(
+                    "SELECT * FROM schedule_jobs WHERE enabled = 1 "
+                    "AND next_run IS NOT NULL AND next_run < ?",
+                    (cutoff,),
+                )
+                for row in stale:
+                    nxt, _ = self._next_after_run(dict(row), now)
+                    self.db.execute(
+                        "UPDATE schedule_jobs SET next_run = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (nxt, now, row["id"]),
+                    )
+        except Exception:  # noqa: BLE001
+            _log.debug("scheduler stale reschedule failed")
+        return results
 
     # ── execution ────────────────────────────────────────────────────────────
     def tick(self) -> list[dict[str, Any]]:
@@ -313,13 +602,17 @@ class Scheduler:
             return []
         results = []
         for row in due:
+            row = dict(row)
+            if not self._dependency_ok(row):
+                # dependency hasn't succeeded yet — leave for a later tick
+                continue
             with self._lock:
                 if self._running_jobs >= self.max_concurrent:
                     # leave it for the next tick rather than dropping it
                     continue
                 self._running_jobs += 1
             try:
-                results.append(self._execute(dict(row)))
+                results.append(self._execute(row))
             except Exception:  # noqa: BLE001 - one job must not kill the tick
                 _log.exception("scheduler job crashed: %s", row.get("id"))
             finally:
@@ -348,7 +641,26 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001
             summary = f"job failed: {exc}"
             ok = False
-        next_run, still_enabled = self._next_after_run(row, now)
+        # ── retry policy ──────────────────────────────────────────────
+        # On failure, if retries remain, schedule the retry with linear
+        # backoff instead of reporting the failure.  retry_count tracks
+        # consecutive failures; it resets on success.
+        max_retries = int(row.get("max_retries") or 0)
+        retry_delay = max(10.0, float(row.get("retry_delay") or 60))
+        retry_count = int(row.get("retry_count") or 0)
+        will_retry = False
+        if not ok and retry_count < max_retries:
+            will_retry = True
+            retry_count += 1
+            next_run = now + retry_delay * retry_count  # linear backoff
+            still_enabled = True
+            # mark the in-flight retry in the result so the owner sees it
+            summary = (f"{summary} (retry {retry_count}/{max_retries} "
+                       f"in {int(retry_delay * retry_count)}s)")
+        else:
+            if ok:
+                retry_count = 0  # success resets the streak
+            next_run, still_enabled = self._next_after_run(row, now)
         # transition-only failure alerts: a job that keeps failing pages
         # ONCE (on the first failure of the streak), not on every run.
         # The previous result is read before the row is updated.
@@ -357,9 +669,9 @@ class Scheduler:
         with self.db.transaction():
             self.db.execute(
                 "UPDATE schedule_jobs SET last_run = ?, last_result = ?, next_run = ?, "
-                "enabled = ?, updated_at = ? WHERE id = ?",
+                "enabled = ?, retry_count = ?, updated_at = ? WHERE id = ?",
                 (now, summary[:2000], next_run, 1 if still_enabled else 0,
-                 time.time(), row["id"]),
+                 retry_count, time.time(), row["id"]),
             )
         # alert the owner — durable + multi-channel via the notifier.
         # Failures alert on the failure transition only (a stuck job must
@@ -371,6 +683,8 @@ class Scheduler:
         job_name = row['name'].lower()
         is_routine_tick = 'tick' in job_name or 'heartbeat' in job_name or 'sweep' in job_name
         alert = True
+        if will_retry:
+            alert = False  # retry pending — don't page until retries exhaust
         if not ok and prev_failed:
             alert = False  # still failing — the owner already knows
         if ok and is_routine_tick:
@@ -389,7 +703,8 @@ class Scheduler:
         return {
             "id": row["id"], "name": row["name"], "ok": ok,
             "result": summary[:2000], "seconds": round(time.time() - started, 2),
-            "next_run": next_run,
+            "next_run": next_run, "will_retry": will_retry,
+            "retry_count": retry_count,
         }
 
     def _run_message(self, payload: dict[str, Any]) -> str:
@@ -447,9 +762,18 @@ class Scheduler:
         return f"exit={value.get('exit_code')}\n{stdout}".strip()
 
     # ── loop ─────────────────────────────────────────────────────────────────
-    def start(self) -> bool:
+    def start(self, *, catch_up: bool = True,
+              catch_up_max_age_hours: float = 24.0) -> bool:
         if self._thread is not None and self._thread.is_alive():
             return False
+        if catch_up:
+            try:
+                caught = self.catch_up_on_startup(
+                    max_age_hours=catch_up_max_age_hours)
+                if caught:
+                    _log.info("scheduler caught up %d missed job(s)", len(caught))
+            except Exception:  # noqa: BLE001
+                _log.exception("scheduler catch-up failed")
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
         self._thread.start()
@@ -478,6 +802,11 @@ class Scheduler:
         spec = row.get("spec", "")
         if row.get("kind") == "every":
             spec = f"every {int(float(spec))}s" if spec else spec
+        elif row.get("kind") == "cron":
+            spec = f"cron {spec}" if spec else spec
+        tz = str(row.get("timezone") or "")
+        if tz and row.get("kind") in ("daily", "cron") and tz not in str(spec):
+            spec = f"{spec} [{tz}]"
         next_run = row.get("next_run")
         return {
             "id": row["id"],
@@ -492,6 +821,11 @@ class Scheduler:
             ),
             "last_run": row.get("last_run"),
             "last_result": (row.get("last_result") or "")[:300],
+            "timezone": tz,
+            "depends_on": str(row.get("depends_on") or ""),
+            "max_retries": int(row.get("max_retries") or 0),
+            "retry_delay": float(row.get("retry_delay") or 60),
+            "retry_count": int(row.get("retry_count") or 0),
         }
 
 

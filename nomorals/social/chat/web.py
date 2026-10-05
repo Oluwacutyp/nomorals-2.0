@@ -53,7 +53,9 @@ class WebAdapter(ChatAdapter):
 
     # ── sending (reply capture) ──────────────────────────────────────────────
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         with self._lock:
             self._parts.setdefault(chat.key, []).append(text)
             self._last_send[chat.key] = time.time()

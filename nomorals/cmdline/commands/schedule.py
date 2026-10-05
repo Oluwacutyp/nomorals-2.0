@@ -38,11 +38,12 @@ def _usage() -> int:
           "       nm schedule add <name> <when> message <text...> |\n"
           "                              tool <tool-name> [<json-args>] |\n"
           "                              command <shell-command...>\n"
+          "                              [tz <IANA>] [after <job>] [retry <n>] [delay <s>]\n"
           "       nm schedule rm <name-or-id>\n"
           "       nm schedule enable|disable <name-or-id>\n"
           "       nm schedule run <name-or-id>\n"
           "when: 'at 2026-12-25 09:00' | 'every 30m' | 'daily 02:00' | "
-          "'22:00' | '30m'",
+          "'22:00' | '30m' | 'daily 22:00 America/New_York' | 'cron 0 22 * * *'",
           file=sys.stderr)
     return 2
 
@@ -118,6 +119,32 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
         return 2
     spec = " ".join(rest[:split_at])
     payload_parts = rest[split_at + 1:]
+    # trailing options: tz <IANA> | after <job> | retry <n> | delay <s>
+    timezone, depends_on = "", ""
+    max_retries, retry_delay = 0, 60.0
+    while len(payload_parts) >= 2:
+        key = payload_parts[-2].lower()
+        val = payload_parts[-1]
+        if key == "tz":
+            timezone = val
+            payload_parts = payload_parts[:-2]
+        elif key == "after":
+            depends_on = val
+            payload_parts = payload_parts[:-2]
+        elif key == "retry":
+            try:
+                max_retries = max(0, int(val))
+            except ValueError:
+                break
+            payload_parts = payload_parts[:-2]
+        elif key == "delay":
+            try:
+                retry_delay = max(10.0, float(val))
+            except ValueError:
+                break
+            payload_parts = payload_parts[:-2]
+        else:
+            break
     payload: dict[str, Any]
     if payload_kind == "message":
         payload = {"text": " ".join(payload_parts)}
@@ -145,7 +172,9 @@ def _schedule_add(context: Any, parts: list[str]) -> int:
         payload = {"command": " ".join(payload_parts)}
     sched = _scheduler(context)
     try:
-        job = sched.add(name, spec, payload_kind, payload)
+        job = sched.add(name, spec, payload_kind, payload,
+                        timezone=timezone, depends_on=depends_on,
+                        max_retries=max_retries, retry_delay=retry_delay)
     except (ValueError, RuntimeError) as exc:
         print(f"scheduling failed: {exc}", file=sys.stderr)
         return 1

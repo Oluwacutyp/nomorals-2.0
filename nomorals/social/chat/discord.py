@@ -254,7 +254,9 @@ class DiscordAdapter(ChatAdapter):
             return await user.create_dm()
         return await self._bot.fetch_channel(int(chat.chat_id))
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         started = time.perf_counter()
         try:
 

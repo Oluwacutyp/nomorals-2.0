@@ -590,5 +590,54 @@ class PlaceholderNameTests(unittest.TestCase):
         self.assertEqual(player.name, "Mary")
 
 
+class ChannelGameGuardTests(unittest.TestCase):
+    """Game commands and moves are disabled in Telegram channels.
+
+    In a channel the sender IS the channel (Telegram doesn't identify
+    the individual poster), so per-player game state can't work. Game
+    commands get a friendly redirect; plain-text moves are ignored.
+    """
+
+    def _harness(self) -> _DeleteHarness:
+        store = make_store()
+        seed_profile(store, "telegram:1", name="Ada", username="ada",
+                     coins=100)
+        return _DeleteHarness(store)
+
+    def test_channel_move_is_ignored(self):
+        h = self._harness()
+        out = h._route_game_move(
+            "telegram:-100123", "attack",
+            player=_player("telegram:1", "Ada", "ada"),
+            kind=ChatKind.CHANNEL)
+        self.assertIsNone(out)
+
+    def test_channel_move_ignored_case_insensitive(self):
+        h = self._harness()
+        out = h._route_game_move(
+            "telegram:-100123", "attack",
+            player=_player("telegram:1", "Ada", "ada"),
+            kind="Channel")
+        self.assertIsNone(out)
+
+    def test_dm_move_still_routed(self):
+        # No live game in this chat, so None — but it must NOT be
+        # rejected by the channel guard (it reaches the engine).
+        h = self._harness()
+        out = h._route_game_move(
+            "telegram:1", "attack",
+            player=_player("telegram:1", "Ada", "ada"),
+            kind=ChatKind.DM)
+        self.assertIsNone(out)
+
+    def test_group_move_still_routed(self):
+        h = self._harness()
+        out = h._route_game_move(
+            "telegram:-555", "attack",
+            player=_player("telegram:1", "Ada", "ada"),
+            kind=ChatKind.GROUP)
+        self.assertIsNone(out)
+
+
 if __name__ == "__main__":
     unittest.main()

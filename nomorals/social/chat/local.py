@@ -73,14 +73,28 @@ class LocalAdapter(ChatAdapter):
                 )
             )
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         label = ""
         if self.mood_label_provider is not None:
             try:
                 label = f"  [{self.mood_label_provider()}]"
             except Exception:  # noqa: BLE001 - label is cosmetic
                 label = ""
-        print(f"her{label}: {text}", file=self._out)
+        # Rich reply line: timestamp + colored speaker, mood tag stays.
+        try:
+            from nomorals.console.palette import BOLD, DIM, MAGENTA, paint, supports_color
+
+            ts = time.strftime("%H:%M:%S")
+            if supports_color():
+                who = paint("her", MAGENTA + BOLD)
+                when = paint(ts, DIM)
+                print(f"{when} {who}{label}: {text}", file=self._out)
+            else:
+                print(f"[{ts}] her{label}: {text}", file=self._out)
+        except Exception:  # noqa: BLE001 - formatting is cosmetic
+            print(f"her{label}: {text}", file=self._out)
         self.stats["sent"] += 1
         return SendResult(ok=True, platform=self.name, message_id=f"local-{int(time.time() * 1000)}")
 

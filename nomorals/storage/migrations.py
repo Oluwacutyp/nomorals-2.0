@@ -1381,6 +1381,21 @@ CREATE INDEX IF NOT EXISTS idx_game_players_username
 """
 
 
+_V81_SCHEDULER_UPGRADES = """
+-- Scheduler upgrades: timezones, dependencies, retries.
+-- timezone: IANA name for daily/cron jobs ('' = server local time).
+-- depends_on: job id that must have succeeded last run before this fires.
+-- max_retries / retry_delay: failure retry policy (0 = no retries).
+-- retry_count: runtime state, current consecutive retry attempt.
+ALTER TABLE schedule_jobs ADD COLUMN timezone TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_jobs ADD COLUMN depends_on TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE schedule_jobs ADD COLUMN retry_delay INTEGER NOT NULL DEFAULT 60;
+ALTER TABLE schedule_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_schedule_depends ON schedule_jobs(depends_on);
+"""
+
+
 def _apply_game_identity_untangle(db: object) -> None:
     """Untangle the chfjdhx/peacethefirst identity mix-up (one-time repair).
 
@@ -2950,6 +2965,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_game_identity_untangle),
     Migration(80, "game_phantom_cleanup",
               fn=_apply_game_phantom_cleanup),
+    Migration(81, "scheduler_upgrades",
+              sql=_V81_SCHEDULER_UPGRADES),
 )
 
 

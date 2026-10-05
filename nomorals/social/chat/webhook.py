@@ -147,7 +147,9 @@ class WebhookAdapter(ChatAdapter):
         threading.Thread(target=_close, daemon=True).start()
 
     # ── outbound ──────────────────────────────────────────────────────────
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         started = time.perf_counter()
         payload = {"chat": chat.key, "chat_id": chat.chat_id,
                    "text": text, "reply_to": reply_to}

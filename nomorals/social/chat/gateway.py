@@ -122,6 +122,10 @@ class ChatGateway:
         self.owner_chats = set(owner_chats or ())
         self.us_chats = set(us_chats or ())
         self._inbound: IncomingHandler | None = None
+        #: Optional console mirror: called with each inbound ChatMessage so
+        #: the local terminal can show a rich card. Best-effort — never
+        #: raises, never blocks the feed. Set by scripts/run_chat_bot.py.
+        self.console_mirror: Callable[[Any], None] | None = None
         self._chat_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         #: Guards ``adapters``/``_known``: start_one/stop_one mutate them from
@@ -387,6 +391,14 @@ class ChatGateway:
                 handler(message)
             except Exception as exc:  # noqa: BLE001 - brain errors must not kill the feed
                 _log.exception("inbound brain failed for %s: %s", message.chat.key, exc)
+        # Console mirror: rich inbound card on the local terminal.
+        # Best-effort, never raises, never blocks.
+        mirror = self.console_mirror
+        if mirror is not None and message.chat.platform != "local":
+            try:
+                mirror(message)
+            except Exception:  # noqa: BLE001 - mirror must never break the feed
+                pass
 
     # ── outbound ────────────────────────────────────────────────────────────
     def _lock_for(self, chat: ChatRef) -> threading.Lock:
@@ -405,8 +417,14 @@ class ChatGateway:
         *,
         reply_to: str = "",
         ordered: bool = True,
+        buttons: list[list[tuple[str, str]]] | None = None,
     ) -> SendResult:
-        """Send one message on one platform. Ordered per chat by default."""
+        """Send one message on one platform. Ordered per chat by default.
+
+        ``buttons`` is ``[[(label, callback_data), ...], ...]`` — rendered
+        as an inline keyboard by adapters whose platform supports it
+        (TelegramBotAdapter); ignored elsewhere.
+        """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         text = text if text is not None else ""
         adapter = self._adapter_for(chat.platform)
@@ -420,7 +438,8 @@ class ChatGateway:
             return SendResult(ok=True, platform=platform, message_id=new_short_id("dry"))
 
         def _do() -> SendResult:
-            result = adapter.send(chat, text, reply_to=reply_to)
+            result = adapter.send(chat, text, reply_to=reply_to,
+                                  buttons=buttons)
             if result.ok:
                 self.touch(chat)
             return result

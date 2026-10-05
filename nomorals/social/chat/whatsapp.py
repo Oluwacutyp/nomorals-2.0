@@ -327,7 +327,9 @@ class WhatsAppAdapter(ChatAdapter):
         return SendResult(ok=False, platform=self.name, error=last_error,
                           seconds=time.perf_counter() - started)
 
-    def send(self, chat: ChatRef, text: str, *, reply_to: str = "") -> SendResult:
+    def send(self, chat: ChatRef, text: str, *,
+             reply_to: str = "",
+             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
             return SendResult(ok=False, platform=self.name, error="bridge not connected",
