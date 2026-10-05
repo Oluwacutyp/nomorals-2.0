@@ -215,5 +215,81 @@ class LegacyMergeTests(unittest.TestCase):
         self.assertEqual(second.coins, 350)
 
 
+class MultiNameMergeTests(unittest.TestCase):
+    """The 'lost level 24' regression: one human, several legacy names.
+
+    ``telegram:Vrede peace`` (level 24), ``telegram:Mary`` (katana +
+    coins) and ``telegram:chfjdhx`` all belong to sender 5478650254.
+    The old single-name merge only folded the row matching the current
+    sighting name; the others stayed orphaned.  The sighting registry
+    fixes it: every name ever sighted for the sender_id is swept.
+    """
+
+    def test_rename_does_not_orphan_older_profiles(self):
+        store = make_store()
+        seed_player(store, "telegram:Vrede peace", xp=20000, coins=100,
+                    name="Vrede peace")
+        seed_player(store, "telegram:Mary", xp=500, coins=5076, name="Mary")
+        seed_gear(store, "telegram:Mary", "gear-1", "katana_legendary")
+        # Sighting under the first name merges only that row...
+        p = store.get("telegram:5478650254", name="Mary",
+                      platform="telegram")
+        self.assertEqual(p.coins, 5076)
+        # ...but the second sighting recovers the level-24 profile too.
+        p = store.get("telegram:5478650254", name="Vrede peace",
+                      platform="telegram")
+        self.assertEqual(p.xp, 20000)  # higher XP kept
+        self.assertEqual(p.coins, 5176)  # summed
+        gear = store.db.query(
+            "SELECT slug FROM game_gear WHERE player_key = ?",
+            ("telegram:5478650254",)) or []
+        self.assertEqual([r["slug"] for r in gear], ["katana_legendary"])
+        leftovers = store.db.query(
+            "SELECT player_key FROM game_players "
+            "WHERE player_key LIKE 'telegram:%' "
+            "AND player_key != 'telegram:5478650254'") or []
+        self.assertEqual(leftovers, [])
+
+    def test_sighting_registry_accumulates_names(self):
+        store = make_store()
+        store.get("telegram:999", name="Mary", platform="telegram")
+        store.get("telegram:999", name="Vrede peace",
+                  platform="telegram-bot")
+        names = store._known_names("telegram", "999")
+        self.assertEqual(sorted(names), ["Mary", "Vrede peace"])
+
+    def test_stranger_name_rows_are_never_touched(self):
+        store = make_store()
+        seed_player(store, "telegram:Bob", xp=700, coins=50, name="Bob")
+        p = store.get("telegram:111", name="Alice", platform="telegram")
+        self.assertEqual(p.xp, 0)
+        bob = store.db.query_one(
+            "SELECT xp FROM game_players WHERE player_key = ?",
+            ("telegram:Bob",))
+        self.assertEqual(bob["xp"], 700)
+
+    def test_merge_legacy_names_recovery_entry(self):
+        store = make_store()
+        seed_player(store, "telegram:Vrede peace", xp=20000, coins=100,
+                    name="Vrede peace")
+        seed_player(store, "telegram:Mary", xp=500, coins=5076, name="Mary")
+        result = store.merge_legacy_names(
+            "telegram:5478650254", ["Vrede peace", "Mary", "Nobody"])
+        self.assertEqual(sorted(result["merged"]),
+                         ["telegram:Mary", "telegram:Vrede peace"])
+        p = store.get("telegram:5478650254")
+        self.assertEqual(p.xp, 20000)
+        self.assertEqual(p.coins, 5176)
+
+    def test_bot_platform_legacy_key_is_swept(self):
+        store = make_store()
+        seed_player(store, "telegram-bot:OldName", xp=300, coins=25,
+                    name="OldName")
+        p = store.get("telegram:4242", name="OldName",
+                      platform="telegram-bot")
+        self.assertEqual(p.xp, 300)
+        self.assertEqual(p.coins, 25)
+
+
 if __name__ == "__main__":
     unittest.main()

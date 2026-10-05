@@ -195,9 +195,12 @@ class PlayerStore:
         each other's subsequent writes with a stale xp=0 profile.
 
         When the key is a stable-ID key (``telegram:<numeric_id>``) and a
-        display name is supplied, any legacy display-name-keyed profile
-        (``telegram:Mary``) for the same human is folded into the ID key
-        first — see :meth:`_merge_legacy_name_key`.
+        display name is supplied, the sighting is recorded and EVERY
+        legacy display-name-keyed profile ever sighted for that
+        sender_id is folded into the ID key first — see
+        :meth:`_merge_all_legacy_names`.  A rename (or the
+        userbot/bot username split) can no longer orphan the older
+        profiles.
 
         The display name is refreshed when the caller is authoritative:
         the userbot (``telegram``) is the name authority for the aliased
@@ -206,10 +209,15 @@ class PlayerStore:
         overwrites a userbot-set name.
         """
         with self._lock:
-            if name:
-                # ID-keyed lookup carrying the current display name: fold
-                # any legacy name-keyed profile for the same human.
-                self._merge_legacy_name_key(key, name, platform)
+            # ID-keyed lookup: sweep every legacy name-keyed profile
+            # ever sighted for this sender_id into the ID key (records
+            # the current sighting when a name is supplied).  Runs on
+            # every ID-keyed read so orphaned profiles are recovered on
+            # any game interaction — not just XP/coin-granting ones.
+            # The userbot-canonical ``telegram:<id>`` profile is always
+            # the survivor; aliased ``telegram-bot`` sightings resolve
+            # to it via Player.from_sender.
+            self._merge_all_legacy_names(key, name, platform)
             row = None
             try:
                 row = self.db.query_one(
@@ -302,17 +310,136 @@ class PlayerStore:
         except Exception:  # noqa: BLE001
             _log.debug("game_players display refresh failed", exc_info=True)
 
+    # ── stable-ID identity: sighting registry ──────────────────────────
+    # One human can be sighted under several display names (userbot
+    # reports "Mary", the BotFather bot reports "chfjdhx", and renames
+    # happen).  Every (platform, sender_id, name) sighting is recorded
+    # so the lazy legacy-name merge can fold ALL of one human's
+    # name-keyed profiles into their ID key — not just the row matching
+    # the current display name.  Without this, a rename orphans the
+    # older profiles (they stay in the DB, invisible to ID-keyed
+    # lookups — exactly the "lost level 24" incident).
+
+    def _record_identity_sighting(self, canon: str, sender_id: str,
+                                  name: str) -> None:
+        """Remember that ``sender_id`` was sighted as ``name``.
+
+        Best-effort: never raises.  No-op when the sightings table
+        doesn't exist yet (pre-migration-77 DBs degrade to the
+        single-name merge).
+        """
+        name = (name or "").strip()
+        if not name or self.db is None:
+            return
+        try:
+            self.db.execute(
+                "INSERT OR REPLACE INTO game_identity_names "
+                "(platform, sender_id, name, last_seen) VALUES (?, ?, ?, ?)",
+                (canon, sender_id, name, time.time()))
+        except Exception:  # noqa: BLE001
+            _log.debug("identity sighting record failed", exc_info=True)
+
+    def _known_names(self, canon: str, sender_id: str) -> list[str]:
+        """Every display name ever sighted for one sender_id."""
+        if self.db is None:
+            return []
+        try:
+            rows = self.db.query(
+                "SELECT name FROM game_identity_names "
+                "WHERE platform = ? AND sender_id = ?",
+                (canon, sender_id)) or []
+            return [str(r["name"]) for r in rows
+                    if str(r["name"]).strip()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _legacy_candidate_keys(self, canon: str, name: str) -> list[str]:
+        """Legacy name-keyed candidates for one display name.
+
+        The canonical-platform key plus every aliased platform's key —
+        a DB that missed migration 76 may still hold
+        ``telegram-bot:<name>`` rows.
+        """
+        keys = [f"{canon}:{name}"]
+        for alias, target in GAME_IDENTITY_ALIASES.items():
+            if target == canon and alias != canon:
+                keys.append(f"{alias}:{name}")
+        return keys
+
+    def _merge_all_legacy_names(self, id_key: str, name: str,
+                                platform: str) -> None:
+        """Fold EVERY legacy name-keyed profile for one human into the ID key.
+
+        Records the current sighting, then merges the legacy rows for
+        ALL names ever sighted for this sender_id — not just the
+        current display name.  Only names sighted with THIS sender_id
+        are merged, so another player's ``telegram:Bob`` is never
+        touched.  Caller must hold ``self._lock``.
+        """
+        if self.db is None:
+            return
+        name = (name or "").strip()
+        plat_part, _, sender_part = (id_key or "").partition(":")
+        if not sender_part.isdigit():
+            return  # not an ID key — nothing to merge into
+        canon = GAME_IDENTITY_ALIASES.get(plat_part.strip().lower(),
+                                          plat_part.strip())
+        if name:
+            self._record_identity_sighting(canon, sender_part, name)
+        names = {name} if name else set()
+        names.update(self._known_names(canon, sender_part))
+        for n in sorted(names):
+            if not n:
+                continue
+            for legacy_key in self._legacy_candidate_keys(canon, n):
+                if legacy_key == id_key:
+                    continue
+                self._merge_one_legacy_key(id_key, legacy_key)
+
+    def merge_legacy_names(self, id_key: str,
+                           names: list[str]) -> dict[str, Any]:
+        """Fold named legacy profiles into an ID key (recovery entry point).
+
+        Used by ``scripts/game_recover.py`` on the phone.  Safe to call
+        any time — already-merged names are cheap no-ops.  Returns
+        ``{"id_key": ..., "merged": [legacy keys actually folded]}``.
+        """
+        merged: list[str] = []
+        with self._lock:
+            plat_part, _, sender_part = (id_key or "").partition(":")
+            canon = GAME_IDENTITY_ALIASES.get(plat_part.strip().lower(),
+                                              plat_part.strip())
+            for n in names or []:
+                n = (n or "").strip()
+                if not n:
+                    continue
+                if sender_part.isdigit():
+                    self._record_identity_sighting(canon, sender_part, n)
+                for legacy_key in self._legacy_candidate_keys(canon, n):
+                    if legacy_key == id_key:
+                        continue
+                    try:
+                        row = self.db.query_one(
+                            "SELECT 1 FROM game_players "
+                            "WHERE player_key = ?", (legacy_key,))
+                    except Exception:  # noqa: BLE001
+                        row = None
+                    if row is not None:
+                        self._merge_one_legacy_key(id_key, legacy_key)
+                        merged.append(legacy_key)
+        return {"id_key": id_key, "merged": merged}
+
     def _merge_legacy_name_key(self, id_key: str, name: str,
                                platform: str) -> None:
-        """Fold a legacy display-name-keyed profile into an ID-keyed one.
+        """Fold the legacy display-name-keyed profile(s) for one name.
 
         Before stable ``sender_id`` keys, profiles were keyed by display
         name (``telegram:Mary``), so one human could own several profiles
         — ``telegram:Mary`` (userbot sighting) vs ``telegram:chfjdhx``
-        (BotFather sighting).  When an ID-keyed lookup arrives carrying
-        the current display name, any legacy profile under
-        ``<canon_platform>:<name>`` belongs to the same human: merge it
-        into the ID key.  Nothing is dropped:
+        (BotFather sighting).  This folds the legacy row(s) for a single
+        display name into the ID key; :meth:`_merge_all_legacy_names`
+        sweeps every name ever sighted for the sender.  Nothing is
+        dropped:
 
         - xp: keep the HIGHER (same human — don't double-count levels)
         - coins/points/wins/losses/draws/games_played: summed
@@ -342,6 +469,29 @@ class PlayerStore:
         legacy_key = f"{canon}:{name}"
         if legacy_key == id_key:
             return
+        for legacy_key in self._legacy_candidate_keys(canon, name):
+            if legacy_key != id_key:
+                self._merge_one_legacy_key(id_key, legacy_key)
+
+    def _merge_one_legacy_key(self, id_key: str, legacy_key: str) -> None:
+        """Fold a single legacy name-keyed profile row into an ID key.
+
+        Merge rules — nothing is dropped:
+
+        - xp: keep the HIGHER (same human — don't double-count levels)
+        - coins/points/wins/losses/draws/games_played: summed
+        - streak: larger absolute value wins; best_streak: max
+        - per_game/items JSON ledgers: union, ID side wins conflicts
+        - gear: renamed (instance ids are globally unique, no clashes)
+        - skills: union by slug
+        - attributes: max per column
+        - titles: union by title_id, preserving an active title
+        - game_stats: summed counters, max best_score
+
+        Caller must hold ``self._lock``.  No-op when the legacy row
+        doesn't exist or the DB is down.  After the merge the legacy
+        row is gone, so repeat calls are a single cheap SELECT.
+        """
 
         def _q1(sql: str, args: tuple = ()) -> Any:
             try:

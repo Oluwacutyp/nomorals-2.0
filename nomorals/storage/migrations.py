@@ -1349,6 +1349,24 @@ CREATE INDEX IF NOT EXISTS idx_game_titles_player
 """
 
 
+_V77_GAME_IDENTITY_SIGHTINGS = """
+-- Stable-ID identity sightings: every (platform, sender_id, name)
+-- sighting is recorded so the lazy legacy-name merge can fold ALL of
+-- one human's display-name-keyed profiles into their ID key — not just
+-- the one matching the current display name.  Without this, a rename
+-- (or the userbot/bot username split) orphans the older profiles.
+CREATE TABLE IF NOT EXISTS game_identity_names (
+    platform  TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    last_seen REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (platform, sender_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_game_identity_names_sender
+    ON game_identity_names (platform, sender_id);
+"""
+
+
 def _apply_game_attributes_rename(db: object) -> None:
     """Fix the game_stats table-name collision.
 
@@ -2712,6 +2730,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(75, "game_attributes_rename", fn=_apply_game_attributes_rename),
     Migration(76, "game_identity_alias_merge",
               fn=_apply_game_identity_alias_merge),
+    Migration(77, "game_identity_sightings",
+              sql=_V77_GAME_IDENTITY_SIGHTINGS),
 )
 
 
