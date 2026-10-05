@@ -78,12 +78,21 @@ def _undouble(word: str) -> str:
 
 
 class Embedder:
-    """Produces fixed-dimension vectors for text."""
+    """Produces fixed-dimension vectors for text.
+
+    Provider modes:
+    - ``"hashing"``: deterministic feature-hashing (default, offline, zero deps).
+    - ``"auto"``: probe the router for a working embedding backend on first
+      use; use it if available, otherwise fall back to hashing. The probe
+      result is cached so we don't pay for a failed probe on every call.
+    - Any other string: use the router's embedding backend directly, falling
+      back to hashing on failure (existing behavior).
+    """
 
     def __init__(
         self,
         *,
-        provider: str = "hashing",
+        provider: str = "auto",
         model: str = "",
         dimensions: int = 512,
         router: Any = None,
@@ -98,11 +107,65 @@ class Embedder:
         self._cache: dict[str, list[float]] = {}
         self._cache_size = cache_size
         self.stats = {"calls": 0, "texts": 0, "cache_hits": 0, "fallbacks": 0}
+        # Auto-mode probe state: None = not probed yet, True/False = result.
+        self._auto_probed: bool | None = None
+        self._auto_works: bool = False
 
     # ── public API ───────────────────────────────────────────────────────────
     @property
     def is_semantic(self) -> bool:
-        return self.provider != "hashing" and self.router is not None
+        if self.provider == "hashing":
+            return False
+        if self.provider == "auto":
+            # In auto mode, we're semantic if the probe succeeded.
+            # If not probed yet, check router availability optimistically.
+            if self._auto_probed is not None:
+                return self._auto_works
+            return self.router is not None
+        return self.router is not None
+
+    def _probe_auto(self) -> bool:
+        """Probe the router for working embeddings (auto mode only).
+
+        Called once on first use. Returns True if embeddings work.
+        Skips mock providers — their embeddings are just a different hash,
+        not semantic, so hashing is equally good (and faster).
+        """
+        if self._auto_probed is not None:
+            return self._auto_works
+        self._auto_probed = True
+        if self.router is None:
+            self._auto_works = False
+            return False
+        # Skip if the only embedding providers are mocks.
+        try:
+            providers = self.router.providers()
+            # Check if there's a non-mock provider with embed capability.
+            has_real = False
+            for name in providers:
+                if name == "mock":
+                    continue
+                provider = self.router.get(name)
+                if provider is not None and "embed" in provider.capabilities:
+                    has_real = True
+                    break
+            if not has_real:
+                self._auto_works = False
+                return False
+        except Exception:
+            pass
+        try:
+            vectors = self.router.embed(["probe"])
+            if vectors and len(vectors[0]) > 0:
+                self._auto_works = True
+                self.dimensions = len(vectors[0])
+                _log.info("embedding auto-mode: using router backend (dim=%d)", self.dimensions)
+                return True
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("embedding auto-mode probe failed (%s); using hashing", classify(exc).message)
+        self._auto_works = False
+        self.stats["fallbacks"] += 1
+        return False
 
     def embed(self, text: str) -> list[float]:
         return self.embed_many([text])[0]
@@ -134,6 +197,18 @@ class Embedder:
 
     # ── backends ─────────────────────────────────────────────────────────────
     def _produce(self, texts: Sequence[str]) -> list[list[float]]:
+        # Auto mode: probe once, then use the cached result.
+        if self.provider == "auto":
+            if self._probe_auto():
+                try:
+                    vectors = self.router.embed(list(texts))
+                    if vectors and all(len(v) == len(vectors[0]) for v in vectors):
+                        self.dimensions = len(vectors[0])
+                        return [_l2(v) for v in vectors]
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("embedding backend failed (%s); using hashing", classify(exc).message)
+                self.stats["fallbacks"] += 1
+            return [self._hash(text) for text in texts]
         if self.is_semantic:
             try:
                 vectors = self.router.embed(list(texts))

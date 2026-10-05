@@ -52,6 +52,35 @@ __all__ = ["Signal", "detect_signals", "ReplyBundle", "PartnerResponder", "FALLB
 
 _log = get_logger(__name__)
 
+#: Minimum score for a memory to be considered relevant. The adaptive filter
+#: below uses this as a floor, but raises the bar when scores cluster high.
+MIN_MEMORY_SCORE = 0.25
+
+
+def _adaptive_filter(records: list, limit: int) -> list[str]:
+    """Filter recalled memories by adaptive relevance threshold.
+
+    Instead of a fixed 0.05 (which admits noise), this looks at the score
+    distribution:
+    - If the top score is below MIN_MEMORY_SCORE, return nothing (no confident match).
+    - Otherwise, take all records scoring >= max(MIN_MEMORY_SCORE, top_score * 0.5).
+      This keeps the clearly-relevant cluster while dropping the long tail.
+    - Always respect the limit.
+
+    This is the "precision" half of recall — the memory manager's scoring is
+    the "recall" half. Together they surface memories that are both found
+    AND worth mentioning.
+    """
+    if not records:
+        return []
+    # Records are already sorted by score descending (manager guarantees this).
+    top_score = records[0].score if records else 0.0
+    if top_score < MIN_MEMORY_SCORE:
+        return []
+    # Keep the cluster near the top; drop the tail.
+    cutoff = max(MIN_MEMORY_SCORE, top_score * 0.5)
+    return [r.content for r in records if r.score >= cutoff][:limit]
+
 #: Interactive reply budget (seconds). The provider chain behind
 #: ``router.chat`` can stall for minutes (per-provider timeout × retries ×
 #: failover); the chat thread must never inherit that. When the budget is
@@ -401,6 +430,11 @@ class PartnerResponder:
         #: persona/style preferences: it only *adds* terms to the owner's
         #: configured banks.
         self.lexicon = lexicon
+        #: Delivery scorer for memory timing/room-reading. Tracks which
+        #: memories were recently surfaced to avoid repetition, and scores
+        #: candidates on conversational appropriateness (not just relevance).
+        #: Lazily imported to avoid a hard dependency at module load.
+        self._delivery_scorer: Any = None
 
     # ── sampling by mood ─────────────────────────────────────────────────────
     def _sampling(self) -> SamplingParams:
@@ -826,12 +860,74 @@ class PartnerResponder:
         return [pick], used
 
     # ── convenience: recall shared memories for a message ───────────────────
-    def recall(self, text: str, limit: int = 5, origin: str = "") -> list[str]:
+    def recall(
+        self,
+        text: str,
+        limit: int = 5,
+        origin: str = "",
+        recent_texts: list[str] | None = None,
+    ) -> list[str]:
         if self.memory is None or not text.strip():
             return []
         try:
             result = self.memory.recall(text, limit=limit, origin=origin)
-            return [r.content for r in result.records if r.score > 0.05][:limit]
+            filtered = _adaptive_filter(result.records, limit)
+            # Delivery scoring: rank by conversational appropriateness,
+            # not just relevance. This is the "read the room" layer.
+            if filtered and len(filtered) > 1:
+                scored = self._score_delivery(
+                    result.records, filtered,
+                    current_text=text, recent_texts=recent_texts,
+                )
+                return scored
+            return filtered
         except Exception as exc:  # noqa: BLE001 - memory must never break a reply
             _log.warning("memory recall failed: %s", exc)
             return []
+
+    def _score_delivery(
+        self,
+        records: list,
+        filtered_contents: list[str],
+        *,
+        current_text: str = "",
+        recent_texts: list[str] | None = None,
+    ) -> list[str]:
+        """Re-rank filtered memories by delivery appropriateness.
+
+        Maps filtered contents back to their records, scores each on
+        timing/tone/topic fit, and returns contents ordered by delivery
+        score. Marks surfaced memories to prevent near-term repetition.
+        """
+        try:
+            from ..memory.delivery import DeliveryScorer
+        except ImportError:
+            return filtered_contents
+        if self._delivery_scorer is None:
+            self._delivery_scorer = DeliveryScorer()
+        scorer: Any = self._delivery_scorer
+
+        # Map content -> record (contents are unique enough for this).
+        by_content = {r.content: r for r in records if r.content in filtered_contents}
+        candidates = [by_content[c] for c in filtered_contents if c in by_content]
+        if not candidates:
+            return filtered_contents
+
+        scored = scorer.score(
+            candidates, recent_texts=recent_texts, current_text=current_text
+        )
+        # Only surface memories with a reasonable delivery score.
+        # A relevant memory at the wrong moment is worse than silence.
+        good = [s for s in scored if s.score >= 0.35]
+        if not good:
+            # Fall back to the single best, rather than nothing — the
+            # adaptive filter already judged these relevant.
+            good = scored[:1]
+        scorer.mark_surfaced_many([s.memory_id for s in good])
+        id_to_content = {getattr(r, "id", ""): r.content for r in candidates}
+        # Fall back to content matching if ids are missing.
+        content_by_id = {}
+        for r in candidates:
+            rid = getattr(r, "id", "") or r.content
+            content_by_id[rid] = r.content
+        return [content_by_id.get(s.memory_id, "") for s in good if content_by_id.get(s.memory_id)]

@@ -119,6 +119,9 @@ class LLMSettings:
                                     # llama-server on local_model automatically
     local_host: str = "127.0.0.1"  # NM_LLM_LOCAL_HOST
     local_port: int = 8080  # NM_LLM_LOCAL_PORT; must match llama_cpp_url
+    verify_at_startup: bool = True  # NM_LLM_VERIFY_AT_STARTUP=0: skip provider
+                                   # probe at boot (faster startup, but bad
+                                   # model names surface at chat time instead)
     #: Groq's model IDs churn (they retired llama-3.3-70b-versatile & co. on
     #: 2026-08-16) — the default must be a live ID, and NM_GROQ_MODEL exists
     #: so a drift event is a .env edit, not a re-release.
@@ -143,7 +146,7 @@ class LLMSettings:
 
 @dataclass
 class EmbeddingSettings:
-    provider: str = "hashing"
+    provider: str = "auto"
     model: str = ""
     dimensions: int = 512
     batch_size: int = 32
@@ -333,7 +336,7 @@ class ArenaSettings:
 @dataclass
 class PartnerSettings:
     enabled: bool = True
-    autonomy_mode: str = "suggest"
+    autonomy_mode: str = "auto"
     typing_cap_seconds: float = 0.0
     platforms: str = "local"
     #: Power mode default.  When True (the default), power mode auto-activates
@@ -728,6 +731,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_LOCAL_AUTO_START": "llm.local_auto_start",
     "NM_LLM_LOCAL_HOST": "llm.local_host",
     "NM_LLM_LOCAL_PORT": "llm.local_port",
+    "NM_LLM_VERIFY_AT_STARTUP": "llm.verify_at_startup",
     "NM_LLAMA_CPP_URL": "llm.llama_cpp_url",
     "HF_TOKEN": "llm.hf_token",
     "NM_HF_TOKEN": "llm.hf_token",

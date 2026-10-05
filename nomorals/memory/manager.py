@@ -126,7 +126,7 @@ class MemoryManager:
             vectors=self.vectors,
         )
         self.embedder = embedder or Embedder(
-            provider=getattr(getattr(settings, "embedding", None), "provider", "hashing") if settings else "hashing",
+            provider=getattr(getattr(settings, "embedding", None), "provider", "auto") if settings else "auto",
             model=getattr(getattr(settings, "embedding", None), "model", "") if settings else "",
             dimensions=getattr(getattr(settings, "embedding", None), "dimensions", 512) if settings else 512,
             router=getattr(context, "router", None),

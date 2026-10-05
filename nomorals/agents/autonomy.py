@@ -13,11 +13,11 @@ Modes (``partner.autonomy_mode``):
 * ``off``     — the agent does not start.
 * ``suggest`` — every intended send becomes a *proposal* in ``proactive_log``
   (status=pending). Nothing leaves the machine until the owner approves it
-  (``nm partner --approve <id>``). This is the default and the safe one.
+  (``nm partner --approve <id>``). Opt-in for cautious setups.
 * ``auto``    — sends go out directly, subject to quiet hours, per-day caps,
   per-chat minimum intervals, and the gateway's hourly window. Everything is
   still journaled in ``proactive_log`` and the audit trail.  A cap of ``0``
-  means *unlimited* (the owner accepts the volume).
+  means *unlimited* (the owner accepts the volume). This is the default.
 
 Rules this agent will not break, in any mode:
 
@@ -74,7 +74,7 @@ class AutonomyAgent:
         brain: Any,
         gateway: ChatGateway,
         *,
-        mode: str = "suggest",
+        mode: str = "auto",
         owner_chats: set[str] | None = None,
         group_chats: set[str] | None = None,
         quiet_start: int = 22,

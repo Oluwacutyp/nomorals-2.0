@@ -187,7 +187,7 @@ class MemoryManagerTests(unittest.TestCase):
     def test_stats_reflects_embedder_backend(self):
         self.memory.remember("probe", source="test")
         stats = self.memory.stats_snapshot()
-        self.assertEqual(stats["embedder"]["provider"], "hashing")
+        self.assertEqual(stats["embedder"]["provider"], "auto")
         self.assertGreater(stats["embedder"]["dimensions"], 0)
 
 

@@ -235,6 +235,19 @@ def build_context(
 
     if with_router:
         context.router = build_router(settings, event_bus, db=context.db)
+        # Startup provider verification: probe each provider with a cheap
+        # call to catch config errors (bad model names, bad keys) at boot
+        # instead of at chat time. Best-effort — never breaks startup.
+        if getattr(settings.llm, "verify_at_startup", True):
+            try:
+                report = context.router.verify()
+                if not report.get("ok"):
+                    _log.error(
+                        "startup: no working LLM providers! "
+                        "Devon will use fallbacks until a provider is fixed."
+                    )
+            except Exception as exc:  # noqa: BLE001 - verification is advisory
+                _log.warning("startup provider verification failed: %s", exc)
         # Local GGUF auto-start: if the operator promoted a local model
         # (NM_LLM_PROVIDER=llama_cpp + NM_LLM_LOCAL_AUTO_START=1), make sure
         # llama-server is actually running before any chat traffic hits it.

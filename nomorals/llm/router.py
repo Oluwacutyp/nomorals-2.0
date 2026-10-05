@@ -218,6 +218,78 @@ class LLMRouter:
         with self._lock:
             return self._broker
 
+    # ── startup verification ───────────────────────────────────────────────
+    def verify(self, *, timeout_seconds: float = 10.0) -> dict[str, Any]:
+        """Probe each provider at startup to catch config errors early.
+
+        Makes a cheap probe call against every registered provider. Providers
+        that fail with a 4xx (bad model name, bad key, not hosted) are marked
+        unhealthy immediately with a clear message naming the problem —
+        instead of discovering it at chat time when the user is waiting.
+
+        Returns a report dict:
+            {"ok": [...], "failed": [...], "details": {name: ...}}
+        where each detail has "ok" (bool) and "error" (str, if failed).
+
+        This would have prevented the "no working brain" outage: invalid
+        model names (e.g. a stale Groq model, an unhosted HF model) are
+        caught here, at boot, with the bad model named in the log.
+        """
+        from .base import Message, SamplingParams
+
+        report: dict[str, Any] = {"ok": [], "failed": [], "details": {}}
+        probe_messages = [Message.user("ping")]
+        probe_params = SamplingParams(max_tokens=4, temperature=0.0)
+
+        for provider in list(self._providers):
+            name = provider.name
+            model = getattr(provider, "model", "")
+            detail: dict[str, Any] = {"model": model}
+            try:
+                provider.chat(
+                    probe_messages, probe_params, timeout=timeout_seconds,
+                )
+                detail["ok"] = True
+                report["ok"].append(name)
+                _log.info("llm verify: %s ok (model=%s)", name, model or "?")
+            except Exception as exc:  # noqa: BLE001 - probe must not raise
+                err = classify(exc)
+                msg = err.message
+                detail["ok"] = False
+                detail["error"] = msg
+                report["failed"].append(name)
+                # 4xx = config error (bad model, bad key). Mark unhealthy
+                # with a long cooldown so we don't hammer a broken config.
+                # Name the model so the user knows what to fix.
+                status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                is_config_error = (
+                    (isinstance(status, int) and 400 <= status < 500)
+                    or "404" in msg or "not found" in msg.lower()
+                    or "not hosted" in msg.lower() or "invalid" in msg.lower()
+                )
+                if is_config_error:
+                    self._note_failure(name, f"config error: {msg} (model={model})")
+                    # Extend the cooldown: this isn't transient.
+                    health = self._health.get(name)
+                    if health is not None:
+                        health.cooldown_until = self._clock() + 3600.0
+                    _log.warning(
+                        "llm verify: %s FAILED — config error (model=%r): %s. "
+                        "Marked unhealthy for 1h. Fix the model name or key.",
+                        name, model, msg,
+                    )
+                else:
+                    _log.warning("llm verify: %s probe failed (transient?): %s", name, msg)
+            report["details"][name] = detail
+
+        if not report["ok"]:
+            _log.error(
+                "llm verify: NO working providers! Devon has no brain. "
+                "Check model names and API keys. Failed: %s",
+                ", ".join(report["failed"]) or "none registered",
+            )
+        return report
+
     # ── learning hook ────────────────────────────────────────────────────
     def set_learning(self, hook: Any | None) -> LLMRouter:
         """Attach/detach the learning hook.
