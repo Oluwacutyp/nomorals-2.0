@@ -306,6 +306,11 @@ for ckpt_root in glob.glob("/kaggle/working/**/checkpoints", recursive=True):
         shutil.rmtree(s, ignore_errors=True)
     print(f"checkpoints: deleted {max(0, len(subs)-1)}, kept "
           f"{os.path.basename(subs[-1]) if subs else None}")
+# 1b. stale/partial GGUF exports (e.g. from re-running the cell when the UI
+# lagged) — safe to delete, the merge they were built from is untouched
+for d in glob.glob(f"{RUN_DIR}/codebeast_gguf*"):
+    shutil.rmtree(d, ignore_errors=True)
+    print(f"cleared stale export dir: {d}")
 print(f"disk free: {shutil.disk_usage('/kaggle/working').free/1e9:.1f} GB")
 
 # 2. llama.cpp converter (shallow clone) + its matching gguf python package
