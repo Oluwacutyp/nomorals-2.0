@@ -57,6 +57,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install system dependencies (ffmpeg for video tests)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
       - name: Install package + dev tooling
         run: |
           python3 -m pip install --upgrade pip
