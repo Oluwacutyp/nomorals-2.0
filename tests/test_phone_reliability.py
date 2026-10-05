@@ -609,3 +609,74 @@ class BasicGroupClassificationTests(unittest.TestCase):
                 sender_id = chat_id
 
         self.assertEqual(sender_id, "")
+
+
+class SenderEntityMismatchTests(unittest.TestCase):
+    """Regression tests: `event.sender` can be the GROUP/CHANNEL entity
+    instead of the human sender (channels, channel-like supergroups).
+    The entity must be cross-checked against `event.sender_id`; on
+    mismatch it is treated as unresolvable so the event.sender_id
+    fallback supplies the human's id and a neutral placeholder name.
+
+    Live case: Mary's group message had event.sender_id=7541672134
+    but event.sender resolved to the group (id=5223197263,
+    title='xauusd_sentinel_signal'), which misattributed the game
+    player to the group name.
+    """
+
+    @staticmethod
+    def _resolve_sender(event):
+        """Apply the production mismatch rule via the real helper."""
+        from nomorals.social.chat.telegram import _sender_entity_matches
+
+        sender_entity = getattr(event, "sender", None)
+        if not _sender_entity_matches(
+            sender_entity, getattr(event, "sender_id", None)
+        ):
+            return None
+        return sender_entity
+
+    def test_mismatched_sender_entity_is_discarded(self):
+        """Group entity as event.sender + human event.sender_id ->
+        entity treated as unresolvable."""
+        from types import SimpleNamespace
+
+        group = SimpleNamespace(id=5223197263, title="xauusd_sentinel_signal")
+        event = SimpleNamespace(sender=group, sender_id=7541672134)
+        self.assertIsNone(self._resolve_sender(event))
+
+    def test_matching_sender_entity_is_kept(self):
+        """Normal DM/group: sender entity id == event.sender_id ->
+        entity kept."""
+        from types import SimpleNamespace
+
+        mary = SimpleNamespace(id=7541672134, first_name="Mary")
+        event = SimpleNamespace(sender=mary, sender_id=7541672134)
+        self.assertIsNotNone(self._resolve_sender(event))
+
+    def test_mismatch_check_skipped_without_event_sender_id(self):
+        """No event.sender_id (e.g. service messages) -> no basis to
+        invalidate; keep existing trust-the-entity behaviour."""
+        from types import SimpleNamespace
+
+        group = SimpleNamespace(id=5223197263, title="xauusd_sentinel_signal")
+        event = SimpleNamespace(sender=group, sender_id=None)
+        self.assertIsNotNone(self._resolve_sender(event))
+
+    def test_mismatch_check_skipped_for_channel_sender_id(self):
+        """Channel posts carry a negative sender_id (the channel itself)
+        -> .isdigit() is False -> entity trusted as before (there is no
+        human sender to fall back to)."""
+        from types import SimpleNamespace
+
+        channel = SimpleNamespace(id=1002246024321, title="xauusd_sentinel_signal")
+        event = SimpleNamespace(sender=channel, sender_id=-1002246024321)
+        self.assertIsNotNone(self._resolve_sender(event))
+
+    def test_sender_id_types_int_vs_str_compare_equal(self):
+        """Telethon may hand ints; string comparison must hold."""
+        from types import SimpleNamespace
+
+        mary = SimpleNamespace(id=7541672134, first_name="Mary")
+        event = SimpleNamespace(sender=mary, sender_id="7541672134")
+        self.assertIsNotNone(self._resolve_sender(event))

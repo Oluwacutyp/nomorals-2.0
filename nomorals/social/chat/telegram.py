@@ -117,6 +117,33 @@ def _canonical_chat_id(orig_chat_id: str, entity_id: str, kind: str) -> str:
     return entity_id
 
 
+def _sender_entity_matches(sender_entity: Any, event_sender_id: Any) -> bool:
+    """True when ``event.sender`` really is the message's author.
+
+    Telethon can populate ``event.sender`` with the GROUP/CHANNEL entity
+    instead of the human sender (channels, channel-like supergroups where
+    the post's author isn't a resolvable user). The numeric
+    ``event.sender_id`` is authoritative for the human author; if the
+    entity's id disagrees with it, the entity is the group itself and
+    must not be used — it would set ``sender_id``/``sender_name`` to the
+    group's id/title (e.g. entity.id=5223197263 vs
+    event.sender_id=7541672134 → "xauusd_sentinel_signal" as the player
+    name) and corrupt downstream identity lookups.
+
+    Returns True (trust the entity) when there is no positive numeric
+    ``event.sender_id`` to cross-check against — e.g. channel posts,
+    whose sender id is the channel itself (negative), carry no human
+    author to fall back to.
+    """
+    if sender_entity is None:
+        return False
+    evt_sender_id = str(event_sender_id or "")
+    if not evt_sender_id.isdigit():
+        return True
+    ent_id = str(getattr(sender_entity, "id", "") or "")
+    return not ent_id or ent_id == evt_sender_id
+
+
 class TelegramAdapter(ChatAdapter):
     """A Telethon userbot: full account control over MTProto."""
 
@@ -736,6 +763,23 @@ class TelegramAdapter(ChatAdapter):
         # For DMs, the sender is the same as the chat entity. For groups, we need
         # to get the actual sender from the message.
         sender_entity = getattr(event, "sender", None)
+        # Cross-check: Telethon can hand us the GROUP/CHANNEL entity as
+        # `event.sender` instead of the human sender (channels and
+        # channel-like supergroups). A mismatch against the event's
+        # numeric sender id means the entity is NOT the message's author —
+        # treat it as unresolvable so the event.sender_id fallback below
+        # attributes the message to the real human sender.
+        if not _sender_entity_matches(
+            sender_entity, getattr(event, "sender_id", None)
+        ):
+            if sender_entity is not None:
+                _log.debug(
+                    "telegram: sender entity mismatch — entity.id=%s != "
+                    "event.sender_id=%s; treating sender as unresolvable",
+                    getattr(sender_entity, "id", "?"),
+                    getattr(event, "sender_id", "?"),
+                )
+                sender_entity = None
         if sender_entity is not None:
             first = getattr(sender_entity, "first_name", None) or ""
             last = getattr(sender_entity, "last_name", None) or ""
