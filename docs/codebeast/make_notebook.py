@@ -329,20 +329,33 @@ assert shutil.disk_usage("/kaggle/working").free / 1e9 > 10, \
 _sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
     f"--outfile {F16_GGUF} --outtype f16")
 
-# 4. prebuilt llama-quantize from the latest release (no cmake build)
+# 4. prebuilt llama-quantize (no cmake build): scan recent releases for a
+#    ubuntu x64 binary TARBALL — 'latest' is often binary-less and names
+#    change (2026-10-05: b11433 'llama-b11433-bin-ubuntu-cuda-12.8-x64.tar.gz').
+#    The binary needs its sibling .so files -> run with LD_LIBRARY_PATH.
 import json, urllib.request
-_req = urllib.request.Request(
-    "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest",
-    headers={"User-Agent": "codebeast"})
-_rel = json.load(urllib.request.urlopen(_req))
-_zurl = [a["browser_download_url"] for a in _rel["assets"]
-         if "bin-ubuntu-x64" in a["name"]][0]
-print("llama.cpp release:", _rel["tag_name"])
-_sh(f"curl -sL -o /tmp/llama.zip {_zurl} && unzip -o -q /tmp/llama.zip -d /tmp/llama-rel")
-_q = subprocess.run("find /tmp/llama-rel -name llama-quantize -o -name quantize | head -1",
+def _gh(path):
+    _rq = urllib.request.Request(f"https://api.github.com{path}",
+                                 headers={"User-Agent": "codebeast"})
+    return json.load(urllib.request.urlopen(_rq))
+_cands = []
+for _rel in _gh("/repos/ggerganov/llama.cpp/releases?per_page=25"):
+    for _a in _rel.get("assets", []):
+        _n = _a["name"]
+        if (_n.startswith("llama-b") and "-bin-ubuntu-" in _n
+                and _n.endswith("-x64.tar.gz")):
+            _cands.append((_n, _a["browser_download_url"], _rel["tag_name"]))
+_cands.sort(key=lambda c: c[0].startswith("cudart-"))  # smaller plain build first
+assert _cands, "no ubuntu x64 binary in recent llama.cpp releases"
+_n, _zurl, _ztag = _cands[0]
+print("llama.cpp build:", _ztag, _n)
+_sh(f"curl -sL -o /tmp/llama.tgz {_zurl} && mkdir -p {RUN_DIR}/llama-rel "
+    f"&& tar xzf /tmp/llama.tgz -C {RUN_DIR}/llama-rel")
+_q = subprocess.run(f"find {RUN_DIR}/llama-rel -name llama-quantize | head -1",
                     shell=True, capture_output=True, text=True).stdout.strip()
-assert _q, "quantize binary not found in release zip"
-_sh(f"chmod +x {_q} && {_q} {F16_GGUF} {OUT_GGUF} q4_k_m")
+assert _q, "quantize binary not found in release tarball"
+_qlib = os.path.dirname(_q)
+_sh(f"chmod +x {_q} && LD_LIBRARY_PATH={_qlib} {_q} {F16_GGUF} {OUT_GGUF} q4_k_m")
 
 # 5. drop the 7.6GB F16 intermediate, verify the final file
 os.remove(F16_GGUF)
