@@ -76,6 +76,10 @@ class PartnerRuntime(
         self.context = context
         self.settings = context.settings
         self.brain = brain or PartnerBrain(context)
+        #: Monotonic boot time — drives the console dashboard uptime.
+        import time as _time
+
+        self._boot_mono = _time.monotonic()
         # wave 87: the Core Mind — the always-on layer that routes a
         # natural-language goal to the right organ (owner DMs only;
         # commands remain the manual override everywhere).
@@ -150,11 +154,127 @@ class PartnerRuntime(
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
 
+        # Console-only commands (dashboard, status, jobs, …) for the local
+        # terminal adapter. Wired here — not just in run_chat_bot.py — so
+        # EVERY entrypoint gets a working `dashboard --watch`, not only the
+        # one script that remembered to set the hook.
+        self._wire_console_commands()
+
         # Power mode persists across restarts: re-widen on boot if unlocked.
         # Runs AFTER the gateway exists — calling it earlier hit
         # `'NoneType' object has no attribute 'set_rate_limit'` on boots
         # where no gateway was injected.
         self._adopt_power_mode()
+
+    # ── Console commands: `dashboard`, `dashboard --watch`, `status`… ─────
+    def _wire_console_commands(self) -> None:
+        """Attach the console command handler to the local adapter.
+
+        This is what makes `dashboard --watch` enter the live GodScreen.
+        It lives on the runtime (not just run_chat_bot.py) so every
+        entrypoint gets it. Best-effort: never breaks boot.
+        """
+        try:
+            from ...console import ConsoleCommands
+
+            local = None
+            try:
+                local = self.gateway.adapters.get("local")
+            except Exception:  # noqa: BLE001 - gateway internals are best-effort
+                local = None
+            if local is None:
+                return
+            # Don't clobber a hook an entrypoint set deliberately (e.g.
+            # run_chat_bot.py wires its own richer snapshot with history).
+            if getattr(local, "command_hook", None) is not None:
+                return
+            local.command_hook = ConsoleCommands(self.console_snapshot).handle
+        except Exception:  # noqa: BLE001 - console commands are optional
+            _log.debug("console commands unavailable", exc_info=True)
+
+    def console_snapshot(self) -> dict:
+        """Live-status snapshot for the console dashboard / GodScreen.
+
+        Same shape as scripts/run_chat_bot.py's provider (all keys
+        optional — the renderers degrade gracefully).
+        """
+        import os
+        import time as _time
+
+        snap: dict = {}
+        snap["uptime_s"] = _time.monotonic() - getattr(self, "_boot_mono", _time.monotonic())
+        # ── adapters ──
+        adapters: dict = {}
+        try:
+            status = self.gateway.status()
+            for name, info in status.items():
+                if str(name).startswith("_"):
+                    continue
+                adapters[str(name)] = {
+                    "running": bool(info.get("running_in_session", True)),
+                    "received": info.get("received", "—"),
+                    "sent": info.get("sent", "—"),
+                }
+        except Exception:  # noqa: BLE001 - dashboard is best-effort
+            pass
+        snap["adapters"] = adapters
+        # ── traffic ──
+        try:
+            with self._stats_lock:
+                snap["traffic"] = dict(self.stats)
+        except Exception:  # noqa: BLE001
+            snap["traffic"] = dict(getattr(self, "stats", {}))
+        # ── scheduler ──
+        try:
+            sched = getattr(self, "_scheduler", None)
+            jobs = []
+            running = False
+            if sched is not None:
+                running = bool(sched.running())
+                for job in sched.list_jobs():
+                    jobs.append(
+                        {
+                            "name": job.get("name") or job.get("id"),
+                            "spec": job.get("spec") or job.get("schedule") or "",
+                            "enabled": job.get("enabled", True),
+                            "next_run": job.get("next_run"),
+                        }
+                    )
+            snap["scheduler"] = {"running": running, "jobs": jobs}
+        except Exception:  # noqa: BLE001
+            snap["scheduler"] = {}
+        # ── games ──
+        try:
+            row = self.context.db.query_one("SELECT COUNT(*) AS n FROM game_players")
+            players = (row or {}).get("n", "—")
+        except Exception:  # noqa: BLE001
+            players = "—"
+        snap["games"] = {"players": players}
+        # ── brain (LLM router health) ──
+        try:
+            router = getattr(getattr(self, "_brain", None), "router", None) or getattr(
+                self, "_router", None
+            )
+            if router is not None and hasattr(router, "stats_snapshot"):
+                snap["llm"] = router.stats_snapshot()
+            else:
+                snap["llm"] = {}
+        except Exception:  # noqa: BLE001
+            snap["llm"] = {}
+        # ── theme ──
+        snap["theme"] = os.environ.get("NM_CONSOLE_THEME", "ocean")
+        # ── extras ──
+        extras: dict = {}
+        try:
+            extras["autonomy"] = "on" if getattr(self, "_autonomy", None) else "off"
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            extras["arena"] = "on" if getattr(self, "_arena", None) else "off"
+        except Exception:  # noqa: BLE001
+            pass
+        snap["extras"] = extras
+        return snap
 
     def _tuned_autonomy_caps(self) -> tuple[int, int]:
         """Daily proactive-volume caps, scaled by the profile's mission

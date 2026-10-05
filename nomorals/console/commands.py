@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from .banner import tip_of_the_day
 from .dashboard import render_dashboard, render_status_line
-from .palette import ACCENT, BOLD, CYAN, DIM, GREEN, TITLE, paint
+from .palette import ACCENT, BOLD, CYAN, DIM, GREEN, TITLE, WARN, paint
 from .themes import get_theme, list_themes, theme_name
 
 SnapshotProvider = Callable[[], dict[str, Any]]
@@ -79,11 +79,23 @@ class ConsoleCommands:
             return {}
 
     def _watch(self, interval: float) -> str:
-        """Blocking split-pane live dashboard. Keys: 1-4 views, q quits."""
-        from .widgets import GodScreen
+        """Blocking split-pane live dashboard. Keys: 1-4 views, q quits.
 
-        screen = GodScreen(interval=interval, snapshot=self._safe_snapshot)
-        return screen.run()
+        Never raises: a failure returns a visible error + the static
+        dashboard instead of silently falling through to the brain.
+        """
+        try:
+            from .dashboard import render_dashboard
+            from .widgets import GodScreen
+
+            screen = GodScreen(interval=interval, snapshot=self._safe_snapshot)
+            return screen.run()
+        except Exception as exc:  # noqa: BLE001 - watch must never kill the console
+            return (
+                paint(f"watch mode failed ({exc}) — static snapshot instead", WARN)
+                + "\n"
+                + render_dashboard(self._safe_snapshot())
+            )
 
     def _handle_theme(self, args: list[str]) -> str:
         if not args:

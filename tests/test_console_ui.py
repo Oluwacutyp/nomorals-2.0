@@ -1016,5 +1016,101 @@ class GodScreenLayoutTests(unittest.TestCase):
             self.assertIn(view, frame)
 
 
+class DashboardCommandWiringTests(unittest.TestCase):
+    """`dashboard` / `dashboard --watch` reach the right handlers."""
+
+    def _commands(self):
+        from nomorals.console.commands import ConsoleCommands
+
+        return ConsoleCommands(lambda: {"uptime_s": 5})
+
+    def test_dashboard_static(self):
+        cc = self._commands()
+        out = cc.handle("dashboard")
+        self.assertIn("live status", out)
+
+    def test_dashboard_watch_invokes_godscreen(self):
+        import unittest.mock as mock
+
+        cc = self._commands()
+        with mock.patch("nomorals.console.widgets.GodScreen") as MockGS:
+            MockGS.return_value.run.return_value = "exited live dashboard"
+            out = cc.handle("dashboard --watch")
+            MockGS.assert_called_once()
+            MockGS.return_value.run.assert_called_once()
+            self.assertEqual(out, "exited live dashboard")
+            # interval parsed, snapshot wired
+            kwargs = MockGS.call_args.kwargs
+            self.assertEqual(kwargs.get("interval"), 2.0)
+            self.assertTrue(callable(kwargs.get("snapshot")))
+
+    def test_dashboard_watch_custom_interval(self):
+        import unittest.mock as mock
+
+        cc = self._commands()
+        with mock.patch("nomorals.console.widgets.GodScreen") as MockGS:
+            MockGS.return_value.run.return_value = "x"
+            cc.handle("dashboard --watch 5")
+            self.assertEqual(MockGS.call_args.kwargs.get("interval"), 5.0)
+
+    def test_dashboard_watch_failure_is_visible(self):
+        import unittest.mock as mock
+
+        from nomorals.console.palette import strip_ansi
+
+        cc = self._commands()
+        with mock.patch("nomorals.console.widgets.GodScreen",
+                        side_effect=RuntimeError("boom")):
+            out = cc.handle("dashboard --watch")
+            plain = strip_ansi(out)
+            self.assertIn("watch mode failed", plain)
+            self.assertIn("live status", plain)  # static fallback included
+
+    def test_non_command_passes_through(self):
+        cc = self._commands()
+        self.assertIsNone(cc.handle("hello there"))
+        self.assertIsNone(cc.handle(""))
+
+    def test_runtime_wires_command_hook(self):
+        import unittest.mock as mock
+
+        with mock.patch("nomorals.agents.partner.runtime.PartnerBrain"), \
+             mock.patch("nomorals.agents.coremind.CoreMind"):
+            from nomorals.agents.partner.runtime import PartnerRuntime
+
+            ctx = mock.MagicMock()
+            ctx.settings.partner.max_parallel_chats = 2
+            ctx.settings.partner.platforms = ""
+            ctx.settings.chat.local_enabled = False
+            ctx.extras = {}
+            rt = PartnerRuntime(ctx)
+            local = rt.gateway.adapters.get("local")
+            self.assertIsNotNone(local)
+            self.assertIsNotNone(getattr(local, "command_hook", None))
+            # the wired hook serves the static dashboard
+            out = local.command_hook("dashboard")
+            self.assertIn("live status", out)
+
+    def test_console_snapshot_shape(self):
+        import unittest.mock as mock
+
+        with mock.patch("nomorals.agents.partner.runtime.PartnerBrain"), \
+             mock.patch("nomorals.agents.coremind.CoreMind"):
+            from nomorals.agents.partner.runtime import PartnerRuntime
+
+            ctx = mock.MagicMock()
+            ctx.settings.partner.max_parallel_chats = 2
+            ctx.settings.partner.platforms = ""
+            ctx.settings.chat.local_enabled = False
+            ctx.extras = {}
+            ctx.db.query_one.return_value = {"n": 7}
+            rt = PartnerRuntime(ctx)
+            snap = rt.console_snapshot()
+            for key in ("uptime_s", "adapters", "traffic", "scheduler",
+                        "games", "llm", "theme", "extras"):
+                self.assertIn(key, snap)
+            self.assertEqual(snap["games"], {"players": 7})
+
+
 if __name__ == "__main__":
     unittest.main()
