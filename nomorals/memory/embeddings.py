@@ -152,8 +152,8 @@ class Embedder:
             if not has_real:
                 self._auto_works = False
                 return False
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("embedding auto-mode: provider capability check failed (%s)", exc)
         try:
             vectors = self.router.embed(["probe"])
             if vectors and len(vectors[0]) > 0:

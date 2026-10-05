@@ -294,8 +294,8 @@ class TelegramAdapter(ChatAdapter):
                 try:
                     if candidate is not None and int(candidate) == self._companion_bot_id:
                         return True
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    _log.debug("bot detection: candidate %r not numeric (%s)", candidate, exc)
         # Secondary: Telethon resolves event.sender to a User with .bot flag.
         sender = getattr(event, "sender", None)
         if sender is not None and bool(getattr(sender, "bot", False)):
