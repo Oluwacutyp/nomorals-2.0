@@ -196,6 +196,26 @@ class TelegramAdapter(ChatAdapter):
             mid = 0
         return mid not in self._sent_ids
 
+    @staticmethod
+    def _sender_is_bot(event: Any, message: Any) -> bool:
+        """True iff the sender of this inbound message is a bot account.
+
+        The companion BotFather bot runs as a separate Telegram account. When
+        both adapters are live, the bot's messages arrive at this userbot as
+        incoming — without this guard the bot would reply to its own output
+        in a loop. Telethon marks bot accounts via ``User.bot``.
+        """
+        # Primary: Telethon resolves event.sender to a User with .bot flag.
+        sender = getattr(event, "sender", None)
+        if sender is not None and bool(getattr(sender, "bot", False)):
+            return True
+        # Fallback: the raw message's from_id may carry a bot flag on some
+        # Telethon versions (PeerUser with bot attribute on the sender object).
+        from_id = getattr(message, "from_id", None)
+        if from_id is not None and bool(getattr(from_id, "bot", False)):
+            return True
+        return False
+
     # ── entity resolution ────────────────────────────────────────────────────
     async def _resolve(self, chat: ChatRef) -> Any:
         """Resolve a chat entity, using cached input entities from inbound messages.
@@ -383,6 +403,17 @@ class TelegramAdapter(ChatAdapter):
            keeps the message alive even when Telethon can't resolve the user)"""
         message = getattr(event, "message", None) or event
         chat_id = str(getattr(event, "chat_id", "") or "")
+        # ── bot self-reply loop guard ──────────────────────────────────
+        # When the companion BotFather bot runs alongside this userbot, the
+        # bot's outgoing messages arrive here as incoming (different account).
+        # Processing them would make the bot reply to itself in a loop.
+        # Drop any message sent by a bot account.
+        if self._sender_is_bot(event, message):
+            _log.debug(
+                "telegram: DROPPED inbound chat_id=%s — sender is a bot (self-reply loop guard)",
+                chat_id,
+            )
+            return
         entity = None
         
         # Try to get entity from the event first (already resolved by Telethon)

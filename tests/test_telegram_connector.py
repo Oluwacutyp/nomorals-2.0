@@ -278,3 +278,35 @@ class ApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BotLoopGuardTests(unittest.TestCase):
+    """The userbot must ignore messages sent by bot accounts (self-reply loop)."""
+
+    def _adapter(self):
+        from nomorals.social.chat.telegram import TelegramAdapter
+        return TelegramAdapter.__new__(TelegramAdapter)
+
+    def test_bot_sender_is_detected(self) -> None:
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import TelegramAdapter
+        adapter = self._adapter()
+        # Telethon resolves event.sender to a User with .bot=True for bots.
+        event = SimpleNamespace(sender=SimpleNamespace(bot=True, id=123))
+        message = SimpleNamespace(from_id=SimpleNamespace(user_id=123))
+        self.assertTrue(TelegramAdapter._sender_is_bot(event, message))
+
+    def test_human_sender_passes(self) -> None:
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import TelegramAdapter
+        event = SimpleNamespace(sender=SimpleNamespace(bot=False, id=456))
+        message = SimpleNamespace(from_id=SimpleNamespace(user_id=456))
+        self.assertFalse(TelegramAdapter._sender_is_bot(event, message))
+
+    def test_missing_sender_info_passes(self) -> None:
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import TelegramAdapter
+        # No sender info at all — don't drop, the message might be legit.
+        event = SimpleNamespace(sender=None)
+        message = SimpleNamespace(from_id=None)
+        self.assertFalse(TelegramAdapter._sender_is_bot(event, message))
