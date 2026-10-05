@@ -92,6 +92,7 @@ class LLMRouter:
         self,
         *,
         cooldown_seconds: float = 30.0,
+        rate_limit_cooldown_seconds: float = 120.0,
         failure_threshold: int = 3,
         bus: EventBus | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -103,6 +104,10 @@ class LLMRouter:
         self._active: str = ""
         self._lock = threading.RLock()
         self.cooldown_seconds = cooldown_seconds
+        # Rate limits (429) get a longer cooldown — the quota window is
+        # typically 60s, so hammering the provider every 30s just burns
+        # more quota. Back off for 2 minutes on rate limits.
+        self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self.failure_threshold = failure_threshold
         self.bus = bus
         self._clock = clock
@@ -420,7 +425,18 @@ class LLMRouter:
         health = self._health.get(name)
         if health is None:
             return
-        cooldown = self.cooldown_seconds if health.consecutive_failures + 1 >= self.failure_threshold else 0.0
+        # Rate limits get a longer cooldown — the quota window is typically
+        # 60s, so retrying every 30s just burns more quota. Other failures
+        # use the standard cooldown after the threshold.
+        low = (error or "").lower()
+        is_rate_limit = ("429" in low or "rate limit" in low
+                         or "rate_limit" in low or "ratelimit" in low)
+        if is_rate_limit:
+            cooldown = self.rate_limit_cooldown_seconds
+        else:
+            cooldown = (self.cooldown_seconds
+                        if health.consecutive_failures + 1 >= self.failure_threshold
+                        else 0.0)
         health.record_failure(error, cooldown)
 
         # Call repair hooks with cooldown

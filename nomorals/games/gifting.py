@@ -187,12 +187,34 @@ def _row_to_gift(row: Any) -> Gift:
         status=get("status") or "pending")
 
 
+def _canonical_key(key: str) -> str:
+    """Fold aliased platforms (telegram-bot → telegram) in a player key."""
+    try:
+        from .players import GAME_IDENTITY_ALIASES
+    except Exception:  # noqa: BLE001
+        return key
+    if ":" not in (key or ""):
+        return key
+    plat, _, sender = key.partition(":")
+    canon = GAME_IDENTITY_ALIASES.get(plat.lower(), plat)
+    return f"{canon}:{sender}"
+
+
+def _sender_of(key: str) -> str:
+    """The sender/user portion of a player key (after the colon)."""
+    return (key or "").partition(":")[2]
+
+
 def resolve_recipient(store: Any, name: str) -> tuple[Any | None, str]:
     """Find a player profile by display-name mention.
 
     Returns (profile, message). Strips a leading @. Exact
     case-insensitive match wins; a single partial match is accepted;
     zero or many matches return (None, helpful message).
+
+    Matching is done against the display name AND the sender portion of
+    the player key (with telegram-bot → telegram folded), so a player
+    whose profile name differs from their handle is still findable.
     """
     label = (name or "").strip().lstrip("@")
     if not label:
@@ -201,12 +223,26 @@ def resolve_recipient(store: Any, name: str) -> tuple[Any | None, str]:
         profiles = store.all(limit=500)
     except Exception:  # noqa: BLE001
         profiles = []
-    exact = [p for p in profiles
-             if (p.name or "").lower() == label.lower()]
+    low = label.lower()
+
+    def _matches(p: Any) -> bool:
+        if (p.name or "").lower() == low:
+            return True
+        # Match the sender portion of the key, folding identity aliases
+        # (telegram-bot:chfjdhx and telegram:chfjdhx are the same human).
+        sender = _sender_of(_canonical_key(p.key or "")).lower()
+        return sender == low
+
+    def _partial(p: Any) -> bool:
+        if low in (p.name or "").lower():
+            return True
+        sender = _sender_of(_canonical_key(p.key or "")).lower()
+        return low in sender
+
+    exact = [p for p in profiles if _matches(p)]
     if len(exact) == 1:
         return exact[0], ""
-    partial = [p for p in profiles
-               if label.lower() in (p.name or "").lower()]
+    partial = [p for p in profiles if _partial(p)]
     if len(exact) > 1:
         names = ", ".join(p.name for p in exact[:5])
         return None, (f"several players match {label!r}: {names} — "

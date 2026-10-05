@@ -79,6 +79,29 @@ class ResolveRecipientTests(unittest.TestCase):
         self.assertEqual(prof.key, bob.key)
         self.assertEqual(err, "")
 
+    def test_match_by_key_sender(self):
+        """A handle matching the key's sender portion resolves even when
+        the display name differs (e.g. relay-created profiles)."""
+        db = _db()
+        store = PlayerStore(db)
+        # Profile whose display name is NOT the handle
+        store.get("telegram:chfjdhx", name="Some Display Name",
+                  platform="telegram")
+        prof, err = resolve_recipient(store, "@chfjdhx")
+        self.assertIsNotNone(prof)
+        self.assertEqual(prof.key, "telegram:chfjdhx")
+        self.assertEqual(err, "")
+
+    def test_match_by_key_sender_aliased(self):
+        """telegram-bot: keys fold to telegram: for matching."""
+        db = _db()
+        store = PlayerStore(db)
+        store.get("telegram-bot:999", name="Other Name",
+                  platform="telegram-bot")
+        prof, err = resolve_recipient(store, "@999")
+        self.assertIsNotNone(prof)
+        self.assertEqual(err, "")
+
     def test_case_insensitive(self):
         store, ada, bob = _players(_db())
         prof, _ = resolve_recipient(store, "@BOB")
