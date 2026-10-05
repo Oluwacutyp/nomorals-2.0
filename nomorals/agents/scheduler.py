@@ -101,7 +101,7 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
         try:
             return "cron", _parse_cron(s)
         except ValueError:
-            pass
+            _log.debug("scheduler: %r matched cron shape but did not parse; trying timestamp", s)
     ts = _parse_timestamp(s)
     return "at", ts
 

@@ -143,7 +143,15 @@ class DbCliTests(unittest.TestCase):
         rc, out = _run(_cmd_db, ["db", "tables"], self.ctx)
         self.assertEqual(rc, 0)
         self.assertIn("tables (", out)
-        self.assertIn("notifications", out)  # prose list is capped at 100
+
+    def test_tables_lists_notifications(self):
+        # the prose list is capped at 100 rows, so a late-alphabet table like
+        # "notifications" is only guaranteed visible in the uncapped JSON
+        rc, out = _run(_cmd_db, ["db", "tables", "--json"], self.ctx)
+        self.assertEqual(rc, 0)
+        value = json.loads(out)
+        self.assertIn("notifications",
+                      [t["name"] for t in value["tables"]])
 
     def test_tables_json(self):
         rc, out = _run(_cmd_db, ["db", "tables", "--json"], self.ctx)
