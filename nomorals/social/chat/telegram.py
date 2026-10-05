@@ -144,6 +144,222 @@ def _sender_entity_matches(sender_entity: Any, event_sender_id: Any) -> bool:
     return not ent_id or ent_id == evt_sender_id
 
 
+_MISS = object()  # negative-cache sentinel: "looked up, not found"
+
+
+class EntityCache:
+    """TTL entity cache with multi-key indexing, negative caching, and stats.
+
+    One Telegram entity is reachable under several keys — numeric id
+    (``7541672134``), ``@username``, phone digits — and every one of them
+    is indexed, so a later lookup under any form is a cache hit instead
+    of another MTProto round-trip.
+
+    Failures are cached too (short TTL): a privacy-locked user that
+    ``get_entity`` can't resolve won't be re-probed on every inbound
+    message — the negative entry expires after ``negative_ttl`` so a
+    later retry can still succeed (e.g. after the dialog pre-fetch).
+
+    Thread-safe; oldest-first eviction past ``max_entries``.
+    """
+
+    def __init__(self, max_entries: int = 2000, ttl: float = 3600.0,
+                 negative_ttl: float = 300.0) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._max = max(1, int(max_entries))
+        self._ttl = float(ttl)
+        self._negative_ttl = float(negative_ttl)
+        # primary key -> [value, expires_at, [alias keys...]]
+        self._data: dict[str, list] = {}
+        # alias key -> primary key
+        self._aliases: dict[str, str] = {}
+        # insertion order for oldest-first eviction
+        self._order: list[str] = []
+        self.hits = 0
+        self.misses = 0
+        self.sets = 0
+        self.evictions = 0
+        self.neg_hits = 0
+        self.lookups = 0
+        self.total_lookup_s = 0.0
+        self.slow_lookups = 0  # > 0.5s
+
+    # -- dict-compatible surface (existing call sites / tests) --------------
+    def __len__(self) -> int:
+        now = time.monotonic()
+        with self._lock:
+            return sum(1 for v in self._data.values() if v[0] is not _MISS and v[1] > now)
+
+    def __contains__(self, key: object) -> bool:
+        return self.get(key) is not None
+
+    # -- core ----------------------------------------------------------------
+    @staticmethod
+    def _norm(key: object) -> str:
+        return str(key or "").strip()
+
+    def _primary(self, key: str) -> str:
+        return self._aliases.get(key, key)
+
+    def get(self, key: object) -> Any:
+        """Return the cached entity, or None. Negative entries -> None."""
+        k = self._norm(key)
+        if not k:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            pk = self._primary(k)
+            row = self._data.get(pk)
+            if row is None:
+                return None
+            value, expires, _aliases = row
+            if expires <= now:
+                self._drop_locked(pk)
+                return None
+            if value is _MISS:
+                return None
+            return value
+
+    def is_negative(self, key: object) -> bool:
+        """True if this key recently failed to resolve (don't re-probe yet)."""
+        k = self._norm(key)
+        if not k:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            pk = self._primary(k)
+            row = self._data.get(pk)
+            if row is None:
+                return False
+            value, expires, _aliases = row
+            if expires <= now:
+                self._drop_locked(pk)
+                return False
+            return value is _MISS
+
+    def set(self, key: object, value: Any, aliases: list[str] | None = None,
+            ttl: float | None = None) -> None:
+        """Store an entity under ``key`` plus optional alias keys."""
+        k = self._norm(key)
+        if not k or value is None:
+            return
+        now = time.monotonic()
+        expires = now + (self._ttl if ttl is None else float(ttl))
+        alias_keys = [self._norm(a) for a in (aliases or [])]
+        alias_keys = [a for a in alias_keys if a and a != k]
+        with self._lock:
+            # don't let an alias hijack an existing primary entry
+            if k in self._aliases and self._aliases[k] != k:
+                old_pk = self._aliases[k]
+                self._drop_locked(old_pk)
+            self._data[k] = [value, expires, alias_keys]
+            for a in alias_keys:
+                # never overwrite a primary entry with an alias pointer
+                if a not in self._data:
+                    self._aliases[a] = k
+                elif self._aliases.get(a, a) == a and a != k:
+                    # alias collides with another primary: keep the primary
+                    pass
+                else:
+                    self._aliases[a] = k
+            if k not in self._order:
+                self._order.append(k)
+            self.sets += 1
+            self._evict_locked()
+
+    def set_negative(self, key: object) -> None:
+        """Remember that ``key`` failed to resolve (short TTL)."""
+        k = self._norm(key)
+        if not k:
+            return
+        now = time.monotonic()
+        with self._lock:
+            pk = self._primary(k)
+            # don't overwrite a good entry with a failure
+            row = self._data.get(pk)
+            if row is not None and row[0] is not _MISS and row[1] > now:
+                return
+            self._data[pk] = [_MISS, now + self._negative_ttl, []]
+            if pk not in self._order:
+                self._order.append(pk)
+
+    def record_lookup(self, duration_s: float, hit: bool) -> None:
+        with self._lock:
+            self.lookups += 1
+            self.total_lookup_s += duration_s
+            if hit:
+                self.hits += 1
+            else:
+                self.misses += 1
+            if duration_s > 0.5:
+                self.slow_lookups += 1
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            live = sum(1 for v in self._data.values()
+                       if v[0] is not _MISS and v[1] > time.monotonic())
+            avg = self.total_lookup_s / self.lookups if self.lookups else 0.0
+            return {
+                "entries": live,
+                "max_entries": self._max,
+                "hits": self.hits,
+                "misses": self.misses,
+                "hit_rate": self.hits / (self.hits + self.misses) if (self.hits + self.misses) else 0.0,
+                "sets": self.sets,
+                "evictions": self.evictions,
+                "neg_hits": self.neg_hits,
+                "lookups": self.lookups,
+                "avg_lookup_s": round(avg, 4),
+                "slow_lookups": self.slow_lookups,
+            }
+
+    def _drop_locked(self, pk: str) -> None:
+        row = self._data.pop(pk, None)
+        if row is not None:
+            for a in row[2]:
+                if self._aliases.get(a) == pk:
+                    self._aliases.pop(a, None)
+        # also drop alias->pk pointers pointing at pk
+        for a in [a for a, p in self._aliases.items() if p == pk]:
+            self._aliases.pop(a, None)
+        if pk in self._order:
+            self._order.remove(pk)
+
+    def _evict_locked(self) -> None:
+        while len(self._data) > self._max and self._order:
+            oldest = self._order[0]
+            self._drop_locked(oldest)
+            self.evictions += 1
+
+
+def _entity_aliases(entity: Any) -> list[str]:
+    """All cache keys one entity answers to: id, @username, phone digits."""
+    out: list[str] = []
+    try:
+        eid = getattr(entity, "id", None)
+        if eid:
+            out.append(str(eid))
+        for attr in ("user_id", "chat_id", "channel_id"):
+            v = getattr(entity, attr, None)
+            if v:
+                out.append(str(v))
+                break
+        uname = getattr(entity, "username", None)
+        if uname:
+            out.append("@" + str(uname).strip().lstrip("@").lower())
+        phone = getattr(entity, "phone", None)
+        if phone:
+            digits = re.sub(r"\D", "", str(phone))
+            if digits:
+                out.append("tel:" + digits)
+    except Exception:  # noqa: BLE001 - alias extraction is best-effort
+        pass
+    # de-dupe, preserve order
+    seen: set[str] = set()
+    return [k for k in out if k and not (k in seen or seen.add(k))]
+
+
 class TelegramAdapter(ChatAdapter):
     """A Telethon userbot: full account control over MTProto."""
 
@@ -192,24 +408,34 @@ class TelegramAdapter(ChatAdapter):
         # the connection's event loop (set in run()); all outbound coroutines
         # must run on it — Telethon binds the client to that loop
         self._loop: asyncio.AbstractEventLoop | None = None
-        # Cache of input entities from inbound messages — keyed by chat_id.
-        # Telethon's get_entity() fails for users not in the session cache,
-        # but get_input_entity() works with input peers stored from received
-        # messages. We cache those so outbound sends can reply to DM chats
-        # from users we've heard from but can't fully resolve.
-        self._input_entity_cache: dict[str, Any] = {}
-        #: Hard cap on the input-entity cache: it gains an entry per new
-        #: contact/dialog, and an uncapped dict on a years-running userbot is
-        #: a slow memory leak. Eviction is oldest-first (dict insertion order).
+        # Entity cache: input entities from inbound messages + fully
+        # resolved entities, keyed by id / @username / phone, with TTL.
+        # Telethon's get_entity() fails for users not in the session cache
+        # (fresh sessions, privacy settings), but get_input_entity() works
+        # with input peers stored from received messages. We cache those so
+        # outbound sends can reply to DM chats from users we've heard from
+        # but can't fully resolve. Negative entries (failed lookups) are
+        # cached briefly so one privacy-locked user doesn't cost an MTProto
+        # round-trip on every inbound message.
+        self._input_entity_cache: EntityCache = EntityCache(max_entries=2000)
+        #: Hard cap on the entity cache (mirrors EntityCache max; kept as
+        #: a plain attribute for introspection).
         self._input_entity_cache_max = 2000
 
     def _cache_input_entity(self, chat_id: str, entity: Any) -> None:
-        """Store an input entity, evicting the oldest entries past the cap."""
-        self._input_entity_cache[chat_id] = entity
-        overflow = len(self._input_entity_cache) - self._input_entity_cache_max
-        if overflow > 0:
-            for old in list(self._input_entity_cache)[:overflow]:
-                self._input_entity_cache.pop(old, None)
+        """Store an input entity, indexed under every key it answers to."""
+        if entity is None:
+            return
+        aliases = _entity_aliases(entity)
+        # always index under the chat_id we were given, too
+        cid = str(chat_id or "").strip()
+        if cid and cid not in aliases:
+            aliases.append(cid)
+        stripped = cid.lstrip("-")
+        if stripped and stripped != cid and stripped not in aliases:
+            aliases.append(stripped)
+        self._input_entity_cache.set(cid or (aliases[0] if aliases else ""),
+                                     entity, aliases=aliases)
 
     def _run_on_loop(self, coro: Any, timeout: float = 60.0) -> Any:
         """Run a coroutine on the connection's loop from another thread.
@@ -308,33 +534,62 @@ class TelegramAdapter(ChatAdapter):
         return False
 
     # ── entity resolution ────────────────────────────────────────────────────
+    async def _timed_get_entity(self, peer: Any) -> Any | None:
+        """Single get_entity call with timing + result caching.
+
+        Successes are indexed under every key the entity answers to
+        (id, @username, phone); failures are negative-cached briefly.
+        Returns None instead of raising.
+        """
+        if self._client is None:
+            return None
+        t0 = time.perf_counter()
+        try:
+            entity = await self._client.get_entity(peer)
+        except Exception:  # noqa: BLE001
+            entity = None
+        dt = time.perf_counter() - t0
+        self._input_entity_cache.record_lookup(dt, entity is not None)
+        if dt > 0.5:
+            _log.debug("telegram: slow get_entity(%r) took %.2fs", peer, dt)
+        if entity is None:
+            self._input_entity_cache.set_negative(str(peer))
+            return None
+        aliases = _entity_aliases(entity)
+        primary = aliases[0] if aliases else str(peer)
+        self._input_entity_cache.set(primary, entity, aliases=aliases)
+        return entity
+
     async def _resolve(self, chat: ChatRef) -> Any:
         """Resolve a chat entity, using cached input entities from inbound messages.
-        
+
         Telethon's get_entity() fails for users not in the session cache (fresh
         sessions, privacy settings), causing send failures. Resolution order:
-        1. Cached input entity (from received messages — most reliable for DMs)
+        1. Entity cache (id / @username / phone — TTL'd, negative-cached)
         2. client.get_input_entity() (uses Telethon's internal peer cache)
-        3. client.get_entity() (full resolution — fails for unknown users)
+        3. client.get_entity() (full resolution — timed, result cached)
         4. Raw integer ID (Telethon can sometimes send to just the ID)
         """
         chat_id = chat.chat_id
-        
-        # 1. Check the input entity cache (from inbound messages)
-        if chat_id in self._input_entity_cache:
-            _log.debug("telegram: using cached input entity for chat_id=%s", chat_id)
-            return self._input_entity_cache[chat_id]
-        # 1b. Basic groups are cached under their positive entity id by the
-        # dialog pre-fetch, while inbound routing uses the true negative id
-        # (e.g. "-5223197263" vs "5223197263"). Accept either form.
-        stripped = chat_id.lstrip("-")
-        if stripped != chat_id and stripped in self._input_entity_cache:
-            _log.debug(
-                "telegram: using cached input entity for chat_id=%s (via %s)",
-                chat_id, stripped,
-            )
-            return self._input_entity_cache[stripped]
-        
+        t0 = time.perf_counter()
+
+        # 1. Entity cache (covers id, @username, stripped basic-group forms)
+        entity = self._input_entity_cache.get(chat_id)
+        if entity is None:
+            stripped = chat_id.lstrip("-")
+            if stripped != chat_id:
+                entity = self._input_entity_cache.get(stripped)
+        if entity is not None:
+            self._input_entity_cache.record_lookup(time.perf_counter() - t0, True)
+            _log.debug("telegram: entity cache hit for chat_id=%s", chat_id)
+            return entity
+        if self._input_entity_cache.is_negative(chat_id):
+            self._input_entity_cache.neg_hits += 1
+            _log.debug("telegram: negative cache hit for chat_id=%s — skipping probe", chat_id)
+            if chat_id.lstrip("-").isdigit():
+                return int(chat_id)
+            return None
+
         # 2. Try get_input_entity (uses Telethon's internal peer cache)
         if self._client is not None:
             try:
@@ -343,21 +598,88 @@ class TelegramAdapter(ChatAdapter):
                 return await self._client.get_input_entity(int(chat_id))
             except Exception:  # noqa: BLE001
                 pass
-        
-        # 3. Try get_entity (full resolution)
+
+        # 3. Timed full resolution (caches success + failure)
         if self._client is not None:
             try:
-                if chat_id.startswith("@"):
-                    return await self._client.get_entity(chat_id)
-                return await self._client.get_entity(int(chat_id))
-            except Exception:  # noqa: BLE001
-                pass
-        
+                peer = chat_id if chat_id.startswith("@") else int(chat_id)
+            except (TypeError, ValueError):
+                peer = chat_id
+            entity = await self._timed_get_entity(peer)
+            if entity is not None:
+                return entity
+
         # 4. Last resort: return the raw integer ID.
         # Telethon's send_message can sometimes work with just a user ID.
         if chat_id.lstrip("-").isdigit():
             _log.warning("telegram: could not resolve chat_id=%s, using raw ID", chat_id)
             return int(chat_id)
+        return None
+
+    async def resolve_username(self, username: str) -> Any | None:
+        """Fast ``@username`` → entity resolution with caching.
+
+        Returns the cached entity when seen before (no network), else a
+        single timed ``get_entity`` whose result is indexed under the
+        username, numeric id, and phone. None on failure.
+        """
+        uname = (username or "").strip().lstrip("@").lower()
+        if not uname:
+            return None
+        key = "@" + uname
+        t0 = time.perf_counter()
+        entity = self._input_entity_cache.get(key)
+        if entity is not None:
+            self._input_entity_cache.record_lookup(time.perf_counter() - t0, True)
+            return entity
+        if self._input_entity_cache.is_negative(key):
+            self._input_entity_cache.neg_hits += 1
+            return None
+        entity = await self._timed_get_entity(uname)
+        # _timed_get_entity already cached under discovered aliases; make
+        # sure the queried username form hits too
+        if entity is not None and self._input_entity_cache.get(key) is None:
+            self._input_entity_cache.set(key, entity,
+                                         aliases=_entity_aliases(entity))
+        return entity
+
+    async def resolve_many(self, keys: list[str], limit: int = 5) -> dict[str, Any]:
+        """Resolve many keys at once → ``{key: entity}`` for successes.
+
+        Cache hits return instantly; uncached keys resolve concurrently
+        (bounded by ``limit``) through the timed path, so a 50-member
+        group roster doesn't cost 50 sequential round-trips.
+        """
+        out: dict[str, Any] = {}
+        pending: list[str] = []
+        for k in keys:
+            k = str(k or "").strip()
+            if not k:
+                continue
+            ent = self._input_entity_cache.get(k)
+            if ent is not None:
+                out[k] = ent
+            elif not self._input_entity_cache.is_negative(k):
+                pending.append(k)
+        if pending and self._client is not None:
+            sem = asyncio.Semaphore(max(1, int(limit)))
+
+            async def _one(k: str) -> tuple[str, Any | None]:
+                async with sem:
+                    try:
+                        peer: Any = k if k.startswith("@") else int(k)
+                    except (TypeError, ValueError):
+                        peer = k
+                    return k, await self._timed_get_entity(peer)
+
+            for k, ent in await asyncio.gather(*(_one(k) for k in pending)):
+                if ent is not None:
+                    out[k] = ent
+        return out
+
+    def entity_cache_stats(self) -> dict[str, Any]:
+        """Cache health for the dashboard: hit rate, avg lookup time, etc."""
+        return self._input_entity_cache.stats()
         
         raise ValueError(f"cannot resolve chat_id={chat_id!r}")
 
@@ -575,14 +897,12 @@ class TelegramAdapter(ChatAdapter):
             )
 
             if input_chat is not None:
-                try:
-                    entity = await client.get_entity(input_chat)
+                entity = await self._timed_get_entity(input_chat)
+                if entity is not None:
                     _log.debug(
                         "telegram: entity resolved via input_chat chat_id=%s -> %r",
                         chat_id, getattr(entity, "id", None),
                     )
-                except Exception:  # noqa: BLE001
-                    pass
 
             if entity is None and input_sender is not None:
                 # Same guard as the event_sender fallback above: for a group
@@ -590,14 +910,12 @@ class TelegramAdapter(ChatAdapter):
                 # misclassifying the message as a DM. Only use it for DMs.
                 _cid2 = (chat_id or "").strip()
                 if not _cid2.startswith("-"):
-                    try:
-                        entity = await client.get_entity(input_sender)
+                    entity = await self._timed_get_entity(input_sender)
+                    if entity is not None:
                         _log.debug(
                             "telegram: entity resolved via input_sender chat_id=%s -> %r",
                             chat_id, getattr(entity, "id", None),
                         )
-                    except Exception:  # noqa: BLE001
-                        pass
                 else:
                     _log.debug(
                         "telegram: skipping input_sender resolve for group "
@@ -605,15 +923,16 @@ class TelegramAdapter(ChatAdapter):
                         chat_id,
                     )
         
-        # Fallback: resolve through client using chat_id
+        # Fallback: resolve through client using chat_id (timed + cached,
+        # so a later message from the same chat is instant)
         if entity is None:
             try:
-                if chat_id.lstrip("-").isdigit():
-                    entity = await client.get_entity(int(chat_id))
-                else:
-                    entity = await client.get_entity(chat_id)
-            except Exception:  # noqa: BLE001
-                pass
+                peer: Any = chat_id
+                if chat_id.lstrip("-").isdigit() and not chat_id.startswith("@"):
+                    peer = int(chat_id)
+            except (TypeError, ValueError):
+                peer = chat_id
+            entity = await self._timed_get_entity(peer)
         
         # FINAL FALLBACK: synthesize a minimal entity from event data.
         # This keeps DM messages alive even when Telethon can't resolve

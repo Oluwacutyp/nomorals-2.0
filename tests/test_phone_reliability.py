@@ -680,3 +680,143 @@ class SenderEntityMismatchTests(unittest.TestCase):
         mary = SimpleNamespace(id=7541672134, first_name="Mary")
         event = SimpleNamespace(sender=mary, sender_id="7541672134")
         self.assertIsNotNone(self._resolve_sender(event))
+
+
+class EntityCacheTTLTests(unittest.TestCase):
+    def test_multi_key_indexing(self):
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import EntityCache
+        c = EntityCache()
+        ent = SimpleNamespace(id=7541672134, username="chfjdhx", phone="+234 803 555 9147")
+        c.set("7541672134", ent, aliases=["7541672134", "@chfjdhx", "tel:2348035559147"])
+        self.assertIs(c.get("7541672134"), ent)
+        self.assertIs(c.get("@chfjdhx"), ent)
+        self.assertIs(c.get("tel:2348035559147"), ent)
+        self.assertIsNone(c.get("@nobody"))
+
+    def test_negative_caching(self):
+        from nomorals.social.chat.telegram import EntityCache
+        c = EntityCache(negative_ttl=300.0)
+        c.set_negative("999999")
+        self.assertTrue(c.is_negative("999999"))
+        self.assertIsNone(c.get("999999"))
+        self.assertNotIn("999999", c)  # negative entries aren't usable
+        # a later success overwrites the negative entry
+        c.set("999999", object())
+        self.assertFalse(c.is_negative("999999"))
+
+    def test_negative_does_not_clobber_good_entry(self):
+        from nomorals.social.chat.telegram import EntityCache
+        c = EntityCache()
+        ent = object()
+        c.set("123", ent)
+        c.set_negative("123")
+        self.assertIs(c.get("123"), ent)
+
+    def test_ttl_expiry(self):
+        import time as _t
+        from nomorals.social.chat.telegram import EntityCache
+        c = EntityCache(ttl=0.05)
+        c.set("1", object())
+        self.assertIn("1", c)
+        _t.sleep(0.08)
+        self.assertNotIn("1", c)
+        self.assertEqual(len(c), 0)
+
+    def test_stats(self):
+        from nomorals.social.chat.telegram import EntityCache
+        c = EntityCache()
+        c.set("1", object())
+        c.get("1")
+        c.get("nope")
+        c.record_lookup(0.01, True)
+        c.record_lookup(0.9, False)
+        s = c.stats()
+        self.assertEqual(s["entries"], 1)
+        self.assertEqual(s["hits"], 1)
+        self.assertEqual(s["misses"], 1)
+        self.assertEqual(s["slow_lookups"], 1)
+        self.assertGreater(s["avg_lookup_s"], 0)
+
+    def test_alias_extraction(self):
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import _entity_aliases
+        ent = SimpleNamespace(id=42, username="Bob", phone="+1 (555) 123-4567")
+        aliases = _entity_aliases(ent)
+        self.assertIn("42", aliases)
+        self.assertIn("@bob", aliases)
+        self.assertIn("tel:15551234567", aliases)
+        # input-peer style entity
+        ip = SimpleNamespace(user_id=77)
+        self.assertIn("77", _entity_aliases(ip))
+        # garbage in, empty out, no crash
+        self.assertEqual(_entity_aliases(object()), [])
+
+
+class ResolveUsernameTests(unittest.TestCase):
+    def _adapter(self):
+        import tempfile
+        from nomorals.social.chat.telegram import TelegramAdapter
+        d = tempfile.mkdtemp()
+        return TelegramAdapter(api_id=123, api_hash="x", session_path=":memory:", media_dir=d)
+
+    def test_cached_username_no_network(self):
+        import asyncio
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import TelegramAdapter
+        a = self._adapter()
+        ent = SimpleNamespace(id=7541672134, username="chfjdhx")
+        a._cache_input_entity("7541672134", ent)
+        got = asyncio.run(a.resolve_username("@chfjdhx"))
+        self.assertIs(got, ent)
+        got2 = asyncio.run(a.resolve_username("CHFJDHX"))
+        self.assertIs(got2, ent)
+
+    def test_username_miss_returns_none_without_client(self):
+        import asyncio
+        a = self._adapter()
+        self.assertIsNone(asyncio.run(a.resolve_username("@ghost")))
+        self.assertIsNone(asyncio.run(a.resolve_username("")))
+        self.assertIsNone(asyncio.run(a.resolve_username("@")))
+
+    def test_resolve_many_partitions_cache(self):
+        import asyncio
+        from types import SimpleNamespace
+        a = self._adapter()
+        ent = SimpleNamespace(id=1, username="one")
+        a._cache_input_entity("1", ent)
+        out = asyncio.run(a.resolve_many(["1", "@one", "nope", ""]))
+        self.assertIs(out["1"], ent)
+        self.assertIs(out["@one"], ent)
+        self.assertNotIn("nope", out)  # no client -> unresolvable, skipped
+
+    def test_resolve_many_uses_client(self):
+        import asyncio
+        from types import SimpleNamespace
+        a = self._adapter()
+
+        class FakeClient:
+            async def get_entity(self, peer):
+                return SimpleNamespace(id=999, username="nine")
+
+        a._client = FakeClient()
+        out = asyncio.run(a.resolve_many(["999"]))
+        self.assertIn("999", out)
+        self.assertEqual(out["999"].id, 999)
+        # second call is a cache hit (no more client calls needed)
+        calls = []
+        orig = FakeClient.get_entity
+        async def counting(self, peer):
+            calls.append(peer)
+            return await orig(self, peer)
+        FakeClient.get_entity = counting
+        out2 = asyncio.run(a.resolve_many(["999", "@nine"]))
+        self.assertEqual(calls, [])
+        self.assertIn("@nine", out2)
+
+    def test_entity_cache_stats(self):
+        a = self._adapter()
+        s = a.entity_cache_stats()
+        self.assertIn("hit_rate", s)
+        self.assertIn("avg_lookup_s", s)
+        self.assertEqual(s["entries"], 0)
