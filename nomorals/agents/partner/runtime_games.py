@@ -1171,6 +1171,13 @@ class RuntimeGamesMixin:
         from ...games.players import Player
 
         sender = (message.sender or "").strip() or "unknown"
+        sender_id = (getattr(message, "sender_id", "") or "").strip()
+        if sender_id:
+            # Stable platform user id: one human, one game identity —
+            # display-name changes and the telegram/telegram-bot endpoint
+            # split can no longer fork profiles.  The display name rides
+            # along as the label (name-authority rules in PlayerStore).
+            return Player.from_sender(message.chat.platform, sender_id, sender)
         return Player.from_sender(message.chat.platform, sender, sender)
 
     @staticmethod

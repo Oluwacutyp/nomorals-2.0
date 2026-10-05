@@ -194,6 +194,11 @@ class PlayerStore:
         so two threads racing to create the same player can't clobber
         each other's subsequent writes with a stale xp=0 profile.
 
+        When the key is a stable-ID key (``telegram:<numeric_id>``) and a
+        display name is supplied, any legacy display-name-keyed profile
+        (``telegram:Mary``) for the same human is folded into the ID key
+        first — see :meth:`_merge_legacy_name_key`.
+
         The display name is refreshed when the caller is authoritative:
         the userbot (``telegram``) is the name authority for the aliased
         Telegram endpoints, so its sightings always update the name (a
@@ -201,6 +206,10 @@ class PlayerStore:
         overwrites a userbot-set name.
         """
         with self._lock:
+            if name:
+                # ID-keyed lookup carrying the current display name: fold
+                # any legacy name-keyed profile for the same human.
+                self._merge_legacy_name_key(key, name, platform)
             row = None
             try:
                 row = self.db.query_one(
@@ -292,6 +301,331 @@ class PlayerStore:
                     )
         except Exception:  # noqa: BLE001
             _log.debug("game_players display refresh failed", exc_info=True)
+
+    def _merge_legacy_name_key(self, id_key: str, name: str,
+                               platform: str) -> None:
+        """Fold a legacy display-name-keyed profile into an ID-keyed one.
+
+        Before stable ``sender_id`` keys, profiles were keyed by display
+        name (``telegram:Mary``), so one human could own several profiles
+        — ``telegram:Mary`` (userbot sighting) vs ``telegram:chfjdhx``
+        (BotFather sighting).  When an ID-keyed lookup arrives carrying
+        the current display name, any legacy profile under
+        ``<canon_platform>:<name>`` belongs to the same human: merge it
+        into the ID key.  Nothing is dropped:
+
+        - xp: keep the HIGHER (same human — don't double-count levels)
+        - coins/points/wins/losses/draws/games_played: summed
+        - streak: larger absolute value wins; best_streak: max
+        - per_game/items JSON ledgers: union, ID side wins conflicts
+        - gear: renamed (instance ids are globally unique, no clashes)
+        - skills: union by slug
+        - attributes: max per column
+        - titles: union by title_id, preserving an active title
+        - game_stats: summed counters, max best_score
+
+        Caller must hold ``self._lock``.  No-op when the key isn't an
+        ID key, when no legacy row exists, or when the DB is down.
+        After the merge the legacy row is gone, so repeat calls are a
+        single cheap SELECT.
+        """
+        if self.db is None:
+            return
+        name = (name or "").strip()
+        if not name:
+            return
+        plat_part, _, sender_part = (id_key or "").partition(":")
+        if not sender_part.isdigit():
+            return  # not an ID key — nothing to merge into
+        canon = GAME_IDENTITY_ALIASES.get(plat_part.strip().lower(),
+                                          plat_part.strip())
+        legacy_key = f"{canon}:{name}"
+        if legacy_key == id_key:
+            return
+
+        def _q1(sql: str, args: tuple = ()) -> Any:
+            try:
+                return self.db.query_one(sql, args)
+            except Exception:  # noqa: BLE001
+                return None
+
+        def _qall(sql: str, args: tuple = ()) -> list:
+            try:
+                return self.db.query(sql, args) or []
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _cols(table: str) -> list[str]:
+            try:
+                rows = self.db.query(f"PRAGMA table_info({table})") or []
+                return [str(r["name"]) for r in rows]
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _tables() -> set[str]:
+            try:
+                rows = self.db.query(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'") or []
+                return {str(r["name"]) for r in rows}
+            except Exception:  # noqa: BLE001
+                return set()
+
+        have = _tables()
+        if "game_players" not in have:
+            return
+        legacy_row = _q1("SELECT * FROM game_players WHERE player_key = ?",
+                         (legacy_key,))
+        if legacy_row is None:
+            return
+
+        player_cols = _cols("game_players")
+        col_list = player_cols or []
+        if isinstance(legacy_row, dict):
+            leg = dict(legacy_row)
+        else:
+            leg = dict(zip(col_list, legacy_row)) if col_list else {}
+        if not leg:
+            return
+
+        # Ensure the ID-keyed row exists before merging into it.
+        id_row = _q1("SELECT * FROM game_players WHERE player_key = ?",
+                     (id_key,))
+        if id_row is None:
+            # Fresh ID key, legacy exists: rename the legacy row outright
+            # across every per-player table — nothing to combine.
+            try:
+                with self.db.transaction():
+                    for t in ("game_players", "game_gear", "game_skills",
+                              "game_attributes", "game_titles", "game_stats"):
+                        if t in have:
+                            self.db.execute(
+                                f"UPDATE {t} SET player_key = ? "
+                                "WHERE player_key = ?",
+                                (id_key, legacy_key))
+            except Exception:  # noqa: BLE001
+                _log.debug("id-identity merge: legacy rename failed",
+                           exc_info=True)
+            return
+        if isinstance(id_row, dict):
+            cur = dict(id_row)
+        else:
+            cur = dict(zip(col_list, id_row)) if col_list else {}
+
+        def _num(d: dict, k: str) -> int:
+            try:
+                return int(d.get(k, 0) or 0)
+            except Exception:  # noqa: BLE001
+                return 0
+
+        def _fnum(d: dict, k: str) -> float:
+            try:
+                return float(d.get(k, 0) or 0)
+            except Exception:  # noqa: BLE001
+                return 0.0
+
+        def _jmerge(k: str) -> str:
+            def _load(d: dict) -> dict:
+                try:
+                    v = json.loads(d.get(k) or "{}")
+                    return v if isinstance(v, dict) else {}
+                except Exception:  # noqa: BLE001
+                    return {}
+            merged = _load(leg)
+            merged.update(_load(cur))  # ID side wins conflicts
+            return json.dumps(merged)
+
+        a_streak, c_streak = _num(leg, "streak"), _num(cur, "streak")
+        streak = a_streak if abs(a_streak) > abs(c_streak) else c_streak
+        sets: dict[str, Any] = {
+            "xp": max(_num(leg, "xp"), _num(cur, "xp")),
+            "coins": _num(leg, "coins") + _num(cur, "coins"),
+            "points": _num(leg, "points") + _num(cur, "points"),
+            "wins": _num(leg, "wins") + _num(cur, "wins"),
+            "losses": _num(leg, "losses") + _num(cur, "losses"),
+            "draws": _num(leg, "draws") + _num(cur, "draws"),
+            "games_played": _num(leg, "games_played") + _num(cur, "games_played"),
+            "streak": streak,
+            "best_streak": max(_num(leg, "best_streak"),
+                               _num(cur, "best_streak")),
+            # The ID row's display was just set from the authoritative
+            # sighting; keep it, fall back to the legacy name.
+            "display": cur.get("display") or leg.get("display") or "",
+            "created_at": min(_fnum(leg, "created_at"),
+                              _fnum(cur, "created_at")),
+            "updated_at": max(_fnum(leg, "updated_at"),
+                              _fnum(cur, "updated_at")),
+            "per_game": _jmerge("per_game"),
+            "items": _jmerge("items"),
+        }
+        # Only write columns that actually exist.
+        pcols = set(col_list)
+        sets = {k: v for k, v in sets.items() if k in pcols}
+        try:
+            with self.db.transaction():
+                if sets:
+                    set_sql = ", ".join(f"{k} = ?" for k in sets)
+                    self.db.execute(
+                        f"UPDATE game_players SET {set_sql} "
+                        "WHERE player_key = ?",
+                        (*sets.values(), id_key))
+                self.db.execute(
+                    "DELETE FROM game_players WHERE player_key = ?",
+                    (legacy_key,))
+        except Exception:  # noqa: BLE001
+            _log.debug("id-identity merge: game_players merge failed",
+                       exc_info=True)
+            return
+
+        def _rename(table: str) -> None:
+            if table in have:
+                try:
+                    self.db.execute(
+                        f"UPDATE {table} SET player_key = ? "
+                        "WHERE player_key = ?",
+                        (id_key, legacy_key))
+                except Exception:  # noqa: BLE001
+                    _log.debug("id-identity merge: rename %s failed", table,
+                               exc_info=True)
+
+        # Gear: instance ids are globally unique — plain rename.
+        _rename("game_gear")
+
+        # Skills: drop legacy dupes by slug, then rename.
+        if "game_skills" in have:
+            try:
+                with self.db.transaction():
+                    canon_slugs = {str(r["slug"]) for r in _qall(
+                        "SELECT slug FROM game_skills WHERE player_key = ?",
+                        (id_key,))}
+                    for r in _qall(
+                            "SELECT slug FROM game_skills WHERE player_key = ?",
+                            (legacy_key,)):
+                        slug = str(r["slug"])
+                        if slug in canon_slugs:
+                            self.db.execute(
+                                "DELETE FROM game_skills WHERE player_key = ? "
+                                "AND slug = ?", (legacy_key, slug))
+                    self.db.execute(
+                        "UPDATE game_skills SET player_key = ? "
+                        "WHERE player_key = ?", (id_key, legacy_key))
+            except Exception:  # noqa: BLE001
+                _log.debug("id-identity merge: game_skills merge failed",
+                           exc_info=True)
+
+        # Attributes: UNIQUE(player_key) — merge, keep max per column.
+        if "game_attributes" in have:
+            try:
+                with self.db.transaction():
+                    lr = _q1("SELECT strength, stamina, mana, intelligence, "
+                             "unspent, level_applied FROM game_attributes "
+                             "WHERE player_key = ?", (legacy_key,))
+                    cr = _q1("SELECT strength, stamina, mana, intelligence, "
+                             "unspent, level_applied FROM game_attributes "
+                             "WHERE player_key = ?", (id_key,))
+                    if lr and cr:
+                        cols6 = ("strength", "stamina", "mana",
+                                 "intelligence", "unspent", "level_applied")
+                        merged = [max(int(lr.get(c, 0) or 0),
+                                      int(cr.get(c, 0) or 0)) for c in cols6]
+                        self.db.execute(
+                            "UPDATE game_attributes SET strength = ?, "
+                            "stamina = ?, mana = ?, intelligence = ?, "
+                            "unspent = ?, level_applied = ? "
+                            "WHERE player_key = ?", (*merged, id_key))
+                        self.db.execute(
+                            "DELETE FROM game_attributes WHERE player_key = ?",
+                            (legacy_key,))
+                    else:
+                        self.db.execute(
+                            "UPDATE game_attributes SET player_key = ? "
+                            "WHERE player_key = ?", (id_key, legacy_key))
+            except Exception:  # noqa: BLE001
+                _log.debug("id-identity merge: game_attributes failed",
+                           exc_info=True)
+
+        # Titles: UNIQUE(player_key, title_id) — dedupe, rename, keep active.
+        if "game_titles" in have:
+            try:
+                with self.db.transaction():
+                    id_titles = {str(r["title_id"]) for r in _qall(
+                        "SELECT title_id FROM game_titles WHERE player_key = ?",
+                        (id_key,))}
+                    legacy_active = [str(r["title_id"]) for r in _qall(
+                        "SELECT title_id FROM game_titles WHERE player_key = ? "
+                        "AND active = 1", (legacy_key,))]
+                    id_has_active = bool(_q1(
+                        "SELECT 1 FROM game_titles WHERE player_key = ? "
+                        "AND active = 1", (id_key,)))
+                    for r in _qall(
+                            "SELECT title_id FROM game_titles WHERE player_key = ?",
+                            (legacy_key,)):
+                        tid = str(r["title_id"])
+                        if tid in id_titles:
+                            self.db.execute(
+                                "DELETE FROM game_titles WHERE player_key = ? "
+                                "AND title_id = ?", (legacy_key, tid))
+                    self.db.execute(
+                        "UPDATE game_titles SET player_key = ? "
+                        "WHERE player_key = ?", (id_key, legacy_key))
+                    if legacy_active and not id_has_active:
+                        self.db.execute(
+                            "UPDATE game_titles SET active = 1 "
+                            "WHERE player_key = ? AND title_id = ?",
+                            (id_key, legacy_active[0]))
+                        self.db.execute(
+                            "UPDATE game_titles SET active = 0 "
+                            "WHERE player_key = ? AND title_id != ?",
+                            (id_key, legacy_active[0]))
+            except Exception:  # noqa: BLE001
+                _log.debug("id-identity merge: game_titles merge failed",
+                           exc_info=True)
+
+        # Per-game stats: PK(player_key, game_name) — sum, max best.
+        if "game_stats" in have:
+            try:
+                with self.db.transaction():
+                    for row in _qall(
+                            "SELECT game_name, games_played, games_won, "
+                            "total_score, best_score, total_time, created_at "
+                            "FROM game_stats WHERE player_key = ?",
+                            (legacy_key,)):
+                        gname = str(row["game_name"])
+                        cr2 = _q1(
+                            "SELECT games_played, games_won, total_score, "
+                            "best_score, total_time, created_at "
+                            "FROM game_stats WHERE player_key = ? AND "
+                            "game_name = ?", (id_key, gname))
+                        if cr2:
+                            self.db.execute(
+                                "UPDATE game_stats SET games_played = ?, "
+                                "games_won = ?, total_score = ?, "
+                                "best_score = ?, total_time = ?, "
+                                "created_at = ? "
+                                "WHERE player_key = ? AND game_name = ?",
+                                (int(row["games_played"] or 0)
+                                 + int(cr2["games_played"] or 0),
+                                 int(row["games_won"] or 0)
+                                 + int(cr2["games_won"] or 0),
+                                 int(row["total_score"] or 0)
+                                 + int(cr2["total_score"] or 0),
+                                 max(int(row["best_score"] or 0),
+                                     int(cr2["best_score"] or 0)),
+                                 float(row["total_time"] or 0)
+                                 + float(cr2["total_time"] or 0),
+                                 min(float(row["created_at"] or 0),
+                                     float(cr2["created_at"] or 0)),
+                                 id_key, gname))
+                            self.db.execute(
+                                "DELETE FROM game_stats WHERE player_key = ? "
+                                "AND game_name = ?", (legacy_key, gname))
+                    self.db.execute(
+                        "UPDATE game_stats SET player_key = ? "
+                        "WHERE player_key = ?", (id_key, legacy_key))
+            except Exception:  # noqa: BLE001
+                _log.debug("id-identity merge: game_stats merge failed",
+                           exc_info=True)
+
+        _log.info("id-identity merge: folded %s into %s", legacy_key, id_key)
 
     def all(self, limit: int = 500) -> list[Profile]:
         try:

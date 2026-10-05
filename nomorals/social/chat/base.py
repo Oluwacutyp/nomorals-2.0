@@ -145,6 +145,9 @@ class ChatMessage:
     incoming: bool
     text: str = ""
     sender: str = ""  # display name or id of the other side (inbound)
+    sender_id: str = ""  # stable platform user id (numeric on Telegram);
+    # when present, game identity keys off this instead of the display
+    # name, so renames don't split profiles.
     media: list[MediaRef] = field(default_factory=list)
     reply_to: str = ""
     mentioned: bool = False  # the platform tagged/mentioned our account in this message
@@ -161,6 +164,10 @@ class ChatMessage:
             self.text = ""
         if self.sender is None:
             self.sender = ""
+        if self.sender_id is None:
+            self.sender_id = ""
+        else:
+            self.sender_id = str(self.sender_id)
         if self.reply_to is None:
             self.reply_to = ""
         if self.message_id is None:
@@ -172,6 +179,7 @@ class ChatMessage:
             "incoming": self.incoming,
             "text": self.text,
             "sender": self.sender,
+            "sender_id": self.sender_id,
             "media": [m.to_dict() for m in self.media],
             "reply_to": self.reply_to,
             "mentioned": self.mentioned,

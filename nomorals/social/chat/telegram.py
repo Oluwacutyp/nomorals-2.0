@@ -570,8 +570,12 @@ class TelegramAdapter(ChatAdapter):
             sender_name = (first + " " + last).strip()
             if not sender_name:
                 sender_name = getattr(sender_entity, "username", None) or title
+            # Stable numeric Telegram user id — game identity keys off
+            # this so display-name changes don't split profiles.
+            sender_id = str(getattr(sender_entity, "id", "") or "")
         else:
             sender_name = title
+            sender_id = ""
         # Forum-topic detection (best effort): in a forum supergroup, replies
         # inside a topic carry reply_to pointing at the topic's anchor.
         thread_id = ""
@@ -596,6 +600,7 @@ class TelegramAdapter(ChatAdapter):
             incoming=True,
             text=text,
             sender=str(sender_name),
+            sender_id=sender_id,
             mentioned=self._mentions_me(text),
             media=media,
             reply_to=str(getattr(getattr(message, "reply_to", None), "id", "") or ""),
@@ -963,12 +968,16 @@ class TelegramBotAdapter(ChatAdapter):
         if replied.get("message_id"):
             reply_to = str(replied["message_id"])
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
+        # Stable numeric Telegram user id — game identity keys off this
+        # so username/display-name changes don't split profiles.
+        who_id = str(sender.get("id", "") or "")
         return ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
                          title=chat.get("title", "") or who, peer=who),
             incoming=True,
             text=text,
             sender=who,
+            sender_id=who_id,
             media=media,
             reply_to=reply_to,
             mentioned=mentioned,
@@ -1029,6 +1038,7 @@ class TelegramBotAdapter(ChatAdapter):
             incoming=True,
             text=data if data.startswith("/") else f"/{data}",
             sender=who,
+            sender_id=str(sender.get("id", "") or ""),
             media=[],
             reply_to="",
             mentioned=False,
