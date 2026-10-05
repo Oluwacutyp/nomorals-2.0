@@ -492,33 +492,46 @@ class TelegramAdapter(ChatAdapter):
         # This keeps DM messages alive even when Telethon can't resolve
         # the user (fresh session, user not cached, privacy settings).
         if entity is None:
-            sender_id = getattr(event, "sender_id", None) or getattr(event, "chat_id", None)
-            if sender_id is not None:
+            # CRITICAL: use the CHAT id (event.chat_id), not the sender id.
+            # The old code preferred event.sender_id here, which for a group
+            # message is the SENDER's user ID — synthesizing a DM entity for
+            # a group chat. The runtime then treated the message as a DM and
+            # every reply went to the sender's inbox instead of the group.
+            # (This was the group→DM redirect bug.)
+            target_id = chat_id or str(getattr(event, "sender_id", "") or "")
+            if target_id:
                 # Build a minimal synthetic entity
                 from types import SimpleNamespace
+                # Detect group vs DM from the event so _kind_for() classifies
+                # the synthetic entity correctly.
+                is_group = bool(
+                    getattr(event, "is_group", False)
+                    or getattr(event, "is_channel", False)
+                )
                 sender_username = ""
-                sender_first_name = f"user_{sender_id}"
-                
+                sender_first_name = f"user_{target_id}"
+
                 # Try to extract username from the message's sender info
                 msg_from = getattr(message, "from_id", None) or getattr(message, "peer_id", None)
                 if msg_from is not None:
-                    from_user_id = getattr(msg_from, "user_id", None) or sender_id
+                    from_user_id = getattr(msg_from, "user_id", None) or target_id
                     sender_first_name = f"user_{from_user_id}"
-                
+
                 entity = SimpleNamespace(
-                    id=int(str(sender_id).lstrip("-")),
+                    id=int(str(target_id).lstrip("-")),
                     first_name=sender_first_name,
                     last_name=None,
                     username=sender_username,
                     title=None,
-                    megagroup=False,
+                    megagroup=is_group,
                     gigagroup=False,
-                    channel=False,
+                    channel=is_group,
                     is_forum=False,
                 )
                 _log.info(
-                    "telegram: synthesized minimal entity for chat_id=%s (user not cached)",
+                    "telegram: synthesized minimal entity for chat_id=%s (user not cached, group=%s)",
                     chat_id,
+                    is_group,
                 )
             else:
                 _log.warning(

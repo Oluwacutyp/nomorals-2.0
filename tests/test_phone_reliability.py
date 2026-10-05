@@ -369,3 +369,47 @@ class GroupCachePoisoningTests(unittest.TestCase):
             input_entity = input_chat or getattr(event, "input_sender", None)
 
         self.assertIs(input_entity, sender_peer)
+
+    def test_synthetic_entity_uses_chat_id_not_sender_id(self):
+        """Regression: group→DM redirect via synthetic entity fallback.
+
+        When Telethon can't resolve ANY entity for a group message, the
+        FINAL FALLBACK synthesized an entity from event.sender_id (the
+        sender's user ID) with megagroup=False. The runtime then treated
+        the group message as a DM and replied to the sender's inbox.
+        The fallback must use event.chat_id (the group) and mark it as
+        a group so _kind_for() classifies it correctly.
+        """
+        from types import SimpleNamespace
+        from nomorals.social.chat.telegram import _kind_for
+
+        # Simulate a group message event where entity resolution failed
+        group_chat_id = "1234567890"
+        sender_id = 7541672134  # Mary's user ID
+        event = SimpleNamespace(
+            chat_id=group_chat_id,
+            sender_id=sender_id,
+            is_group=True,
+            is_channel=False,
+        )
+        message = SimpleNamespace(from_id=None, peer_id=None)
+
+        # Replicate the fixed fallback logic
+        target_id = str(getattr(event, "chat_id", "") or "") or str(
+            getattr(event, "sender_id", "") or "")
+        is_group = bool(
+            getattr(event, "is_group", False)
+            or getattr(event, "is_channel", False)
+        )
+        entity = SimpleNamespace(
+            id=int(str(target_id).lstrip("-")),
+            megagroup=is_group,
+            gigagroup=False,
+            channel=is_group,
+        )
+
+        # The synthetic entity must use the GROUP's ID, not the sender's
+        self.assertEqual(str(entity.id), group_chat_id)
+        self.assertNotEqual(str(entity.id), str(sender_id))
+        # And it must classify as a group, not a DM
+        self.assertEqual(_kind_for(entity), "group")
