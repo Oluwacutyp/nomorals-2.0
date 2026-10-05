@@ -29,12 +29,17 @@ class LocalAdapter(ChatAdapter):
         peer: str = "you",
         out: Any = None,
         mood_label_provider: Any = None,
+        command_hook: Any = None,
     ) -> None:
         super().__init__()
         self.chat = ChatRef(platform="local", chat_id=chat_id, kind=ChatKind.DM,
                             title=title, peer=peer)
         self._out = out or sys.stdout
         self.mood_label_provider = mood_label_provider
+        #: Optional callable(text) -> str | None. When set and it returns a
+        #: string, that string is printed and the line is NOT dispatched to
+        #: the brain. Used for console-only commands (dashboard, status…).
+        self.command_hook = command_hook
 
     def run(self, handler: IncomingHandler) -> None:
         print("─" * 46, file=self._out)
@@ -48,6 +53,16 @@ class LocalAdapter(ChatAdapter):
                 continue
             if text.lower() in {"exit", "quit", "/quit"}:
                 return
+            # Console-only commands (dashboard, status, …) are handled here
+            # and never reach the brain.
+            if self.command_hook is not None:
+                try:
+                    response = self.command_hook(text)
+                except Exception:  # noqa: BLE001 - a broken hook must not kill input
+                    response = None
+                if response is not None:
+                    print(response, file=self._out)
+                    continue
             handler(
                 ChatMessage(
                     chat=self.chat,

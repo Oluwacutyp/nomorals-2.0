@@ -43,24 +43,116 @@ import os
 import signal
 import sys
 import threading
+import time
 
 # Make the repo importable without pip install: repo root is the parent of
 # this script's directory (scripts/run_chat_bot.py -> <repo>/).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _build_snapshot_provider(runtime, context, boot_mono):
+    """Assemble the live-status snapshot for the console dashboard."""
+
+    def _snapshot():
+        snap: dict = {}
+        snap["uptime_s"] = time.monotonic() - boot_mono
+        # ── adapters ──
+        adapters: dict = {}
+        try:
+            status = runtime.gateway.status()
+            for name, info in status.items():
+                if name.startswith("_"):
+                    continue
+                adapters[name] = {
+                    "running": bool(info.get("running_in_session", True)),
+                    "received": info.get("received", "—"),
+                    "sent": info.get("sent", "—"),
+                }
+        except Exception:  # noqa: BLE001 - dashboard is best-effort
+            pass
+        snap["adapters"] = adapters
+        # ── traffic ──
+        try:
+            with runtime._stats_lock:
+                snap["traffic"] = dict(runtime.stats)
+        except Exception:  # noqa: BLE001
+            snap["traffic"] = getattr(runtime, "stats", {})
+        # ── scheduler ──
+        try:
+            sched = getattr(runtime, "_scheduler", None)
+            jobs = []
+            running = False
+            if sched is not None:
+                running = bool(sched.running())
+                for job in sched.list_jobs():
+                    jobs.append(
+                        {
+                            "name": job.get("name") or job.get("id"),
+                            "spec": job.get("spec") or job.get("schedule") or "",
+                            "enabled": job.get("enabled", True),
+                            "next_run": job.get("next_run"),
+                        }
+                    )
+            snap["scheduler"] = {"running": running, "jobs": jobs}
+        except Exception:  # noqa: BLE001
+            snap["scheduler"] = {}
+        # ── games ──
+        try:
+            row = context.db.query_one("SELECT COUNT(*) AS n FROM game_players")
+            snap["games"] = {"players": (row or {}).get("n", "—")}
+        except Exception:  # noqa: BLE001
+            snap["games"] = {}
+        # ── extras ──
+        extras: dict = {}
+        try:
+            extras["autonomy"] = "on" if getattr(runtime, "_autonomy", None) else "off"
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            extras["arena"] = "on" if getattr(runtime, "_arena", None) else "off"
+        except Exception:  # noqa: BLE001
+            pass
+        snap["extras"] = extras
+        return snap
+
+    return _snapshot
+
+
+def _print_banner(started, *, color=True):
+    from nomorals.console.palette import (
+        ACCENT,
+        BOLD,
+        BRIGHT_WHITE,
+        CYAN,
+        DIM,
+        GREEN,
+        TITLE,
+        paint,
+    )
+
+    bar = paint("─" * 46, DIM)
+    print(bar)
+    print(f"  {paint('D E V O N', TITLE + BOLD)} {paint('· chat gateway live', DIM)}")
+    print(bar)
+    for name in started:
+        print(f"  {paint('●', GREEN)} {paint(name, BRIGHT_WHITE)} {paint('connected', DIM)}")
+    print(f"  {paint('console commands:', ACCENT)} {paint('dashboard · status · jobs · clear · help', CYAN)}")
+    print(bar, flush=True)
+
+
 def main() -> int:
     from nomorals.agents.context import build_context
     from nomorals.agents.partner_runtime import PartnerRuntime
+    from nomorals.console import ConsoleCommands
     from nomorals.core.config import load_settings
+    from nomorals.core.logging_setup import setup_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # Colored, compact logs — no black backgrounds, no red text.
+    setup_logging(level=os.environ.get("NM_LOG_LEVEL", "INFO"), color=True)
     log = logging.getLogger("run_chat_bot")
 
     settings = load_settings()
+    boot_mono = time.monotonic()
 
     stop = threading.Event()
 
@@ -80,7 +172,7 @@ def main() -> int:
         bridge = SessionBridge(db=context.db)
         runtime = PartnerRuntime(context, session_bridge=bridge)
         started = runtime.start()
-        print(f"adapters started: {started}", flush=True)
+        _print_banner(started)
         log.info("adapters started: %s", started)
         if "telegram-bot" not in [str(s).lower() for s in started]:
             log.warning(
@@ -88,6 +180,20 @@ def main() -> int:
                 "NM_CHAT_TELEGRAM_BOT_ENABLED=true and "
                 "NM_CHAT_TELEGRAM_BOT_TOKEN before launching"
             )
+        # Console-only commands (dashboard, status, jobs, …) for the local
+        # terminal adapter. Anything else flows to the brain untouched.
+        try:
+            snapshot = _build_snapshot_provider(runtime, context, boot_mono)
+            commands = ConsoleCommands(snapshot)
+            local = None
+            try:
+                local = runtime.gateway.adapters.get("local")
+            except Exception:  # noqa: BLE001 - gateway internals are best-effort
+                local = None
+            if local is not None:
+                local.command_hook = commands.handle
+        except Exception:  # noqa: BLE001 - console commands are optional
+            log.debug("console commands unavailable", exc_info=True)
         try:
             stop.wait()
         finally:
