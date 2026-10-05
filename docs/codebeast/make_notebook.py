@@ -316,13 +316,13 @@ print(f"disk free: {shutil.disk_usage('/kaggle/working').free/1e9:.1f} GB")
 # 2. llama.cpp converter (shallow clone) + its matching gguf python package
 if not os.path.isdir("/kaggle/working/llama.cpp"):
     _sh("git clone --depth 1 https://github.com/ggerganov/llama.cpp "
-        "/kaggle/working/llama.cpp 2>&1 | tail -2")
-_sh("pip install -q /kaggle/working/llama.cpp/gguf-py/ 2>&1 | tail -1")
+        "/kaggle/working/llama.cpp 2>&1")
+_sh("pip install -q /kaggle/working/llama.cpp/gguf-py/")
 
 # 3. fp16 safetensors -> Q4_K_M directly (no f16 intermediate)
 OUT_GGUF = f"{RUN_DIR}/codebeast.Q4_K_M.gguf"
 _sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
-    f"--outfile {OUT_GGUF} --outtype q4_k_m 2>&1 | tail -4")
+    f"--outfile {OUT_GGUF} --outtype q4_k_m")
 
 # 4. verify it's a real GGUF before anything else touches it
 with open(OUT_GGUF, "rb") as _f:
