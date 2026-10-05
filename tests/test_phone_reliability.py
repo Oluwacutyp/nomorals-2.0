@@ -442,3 +442,30 @@ class GroupCachePoisoningTests(unittest.TestCase):
             chat_first, sender_first,
             "input_chat must be tried BEFORE input_sender in the last-resort path",
         )
+
+    def test_event_sender_fallback_skipped_for_group_chat_id(self):
+        """Regression: event_sender fallback misclassified groups as DMs.
+
+        When event.chat was None (group not resolved) but event.sender was
+        available, the old code used the SENDER as the entity. The later
+        `chat_id = str(entity.id)` overwrite then replaced the group ID
+        (e.g. -5223197263) with the sender's user ID (e.g. 7541672134),
+        redirecting every reply to the sender's DM.
+
+        The fix: only fall back to event_sender when the original chat_id
+        does NOT look like a group (negative number).
+        """
+        import inspect
+        from nomorals.social.chat import telegram as tg_module
+        src = inspect.getsource(tg_module.TelegramAdapter._handle_inbound)
+        # The guard must exist: sender fallback skipped for group chat_ids
+        self.assertIn(
+            "skipping event_sender fallback",
+            src,
+            "event_sender fallback must be guarded for group chat_ids",
+        )
+        self.assertIn(
+            '_looks_like_group',
+            src,
+            "group detection variable must exist in the fallback guard",
+        )

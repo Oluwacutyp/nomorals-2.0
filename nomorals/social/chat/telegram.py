@@ -459,8 +459,24 @@ class TelegramAdapter(ChatAdapter):
             else:
                 entity = event_chat
         elif event_sender is not None:
-            entity = event_sender
-            
+            # CRITICAL: only fall back to the sender for DMs. If the original
+            # chat_id looks like a group (negative), event_chat being None
+            # means Telethon couldn't resolve the GROUP — using event_sender
+            # here would make entity.id the sender's user ID, and the later
+            # `chat_id = str(entity.id)` overwrite would redirect the message
+            # to the sender's DM instead of the group.
+            # (This was the persistent group→DM redirect bug.)
+            _cid = (chat_id or "").strip()
+            _looks_like_group = _cid.startswith("-")
+            if not _looks_like_group:
+                entity = event_sender
+            else:
+                _log.debug(
+                    "telegram: event_chat is None for group chat_id=%s — "
+                    "skipping event_sender fallback (would redirect to DM)",
+                    chat_id,
+                )
+
         # Last resort: try input_chat or input_sender.
         # CRITICAL ORDER: input_chat FIRST. For a group message, input_sender
         # is the SENDER's peer (their DM), not the group. If we resolve
@@ -490,14 +506,25 @@ class TelegramAdapter(ChatAdapter):
                     pass
 
             if entity is None and input_sender is not None:
-                try:
-                    entity = await client.get_entity(input_sender)
+                # Same guard as the event_sender fallback above: for a group
+                # chat_id, resolving input_sender yields the sender's user —
+                # misclassifying the message as a DM. Only use it for DMs.
+                _cid2 = (chat_id or "").strip()
+                if not _cid2.startswith("-"):
+                    try:
+                        entity = await client.get_entity(input_sender)
+                        _log.debug(
+                            "telegram: entity resolved via input_sender chat_id=%s -> %r",
+                            chat_id, getattr(entity, "id", None),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
                     _log.debug(
-                        "telegram: entity resolved via input_sender chat_id=%s -> %r",
-                        chat_id, getattr(entity, "id", None),
+                        "telegram: skipping input_sender resolve for group "
+                        "chat_id=%s (would redirect to DM)",
+                        chat_id,
                     )
-                except Exception:  # noqa: BLE001
-                    pass
         
         # Fallback: resolve through client using chat_id
         if entity is None:
