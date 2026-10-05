@@ -831,10 +831,9 @@ class DebugViewTests(unittest.TestCase):
                            color=True, out=out_buf)
         screen._render_frame()
         frame = strip_ansi(out_buf.getvalue())
-        # Wide header shows the ASCII ninja (hood + amber eye), not a
-        # lone emoji — the owner's explicit design request.
-        self.assertIn("◉", frame)
-        self.assertIn("/\\", frame)
+        # Header is clean typography (no ASCII art) with the debug tab.
+        self.assertIn("DEVON", frame)
+        self.assertIn("live", frame)
         self.assertIn("[d] debug", frame)
 
 

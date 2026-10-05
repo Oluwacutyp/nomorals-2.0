@@ -671,17 +671,20 @@ _VIEW_HOTKEY = {"status": "1", "games": "2", "jobs": "3", "brain": "4",
 AVATAR = "🥷"
 
 class GodScreen:
-    """Full-screen live console: ninja header, view pane, message feed.
+    """Full-screen live console: typographic header, view pane, message feed.
 
     Layout (terminal-size aware, every line width-truncated)::
 
-        ┌─ header: ASCII ninja + gradient DEVON · live + view tabs ─┐
-        ┌─ <view> ──────────────────────────────────────────────────┐
-        │ view content (status / games / jobs / brain / debug)       │
-        └───────────────────────────────────────────────────────────┘
-        ┌─ messages (live) ─────────────────────────────────────────┐
-        │ compact feed lines                                          │
-        └───────────────────────────────────────────────────────────┘
+        DEVON · live ⠋                    ⏱ 2m 30s  📨 49  🧠 groq
+        universal agent os · no-morals 2.0
+        [1] status  [2] games  [3] jobs  [4] brain  [d] debug
+        ─────────────────────────────────────────────────────────
+        ┌─ <view> ──────────────────────────────────────────────┐
+        │ view content (status / games / jobs / brain / debug)   │
+        └───────────────────────────────────────────────────────┘
+        ┌─ messages (live) ─────────────────────────────────────┐
+        │ compact feed lines                                      │
+        └───────────────────────────────────────────────────────┘
         status bar · key hints
 
     Keys work on a bare keypress (termios raw mode; canonical fallback):
@@ -691,7 +694,7 @@ class GodScreen:
     so no log line can ever corrupt the frame.
     """
 
-    HEADER_H = 8   # 7-row ninja + separator
+    HEADER_H = 4   # 4-row typographic header + separator
     STATUS_H = 2
 
     def __init__(
@@ -835,7 +838,7 @@ class GodScreen:
             content_lines.append("")
         view_title = paint(f" {self._view} ", TITLE + BOLD, color=self.color)
         top = (paint("┌─", SUBTLE, color=self.color) + view_title
-               + paint("─" * max(2, width - 4 - visible_width(view_title))
+               + paint("─" * max(2, width - 3 - visible_width(view_title))
                        + "┐", SUBTLE, color=self.color))
         lines.append(truncate_visible(top, width))
         bar_l = paint("│ ", SUBTLE, color=self.color)
@@ -852,7 +855,7 @@ class GodScreen:
         feed.mark_read()
         feed_title = paint(" messages (live) ", TITLE + BOLD, color=self.color)
         ftop = (paint("┌─", SUBTLE, color=self.color) + feed_title
-                + paint("─" * max(2, width - 4 - visible_width(feed_title))
+                + paint("─" * max(2, width - 3 - visible_width(feed_title))
                         + "┐", SUBTLE, color=self.color))
         lines.append(truncate_visible(ftop, width))
         events = feed.recent(feed_inner)
@@ -873,11 +876,13 @@ class GodScreen:
                            color=self.color))
 
         # ── status bar (always pinned to the bottom) ──
+        # Truncate to width-1: a line exactly at the width boundary can
+        # wrap on some terminals, smearing the next frame.
         lines.append(
             truncate_visible(
                 _d.render_statusbar(snap, self._view, unread=unread,
                                     color=self.color),
-                width,
+                width - 1,
             )
         )
         lines.append(
@@ -885,7 +890,7 @@ class GodScreen:
                 paint("  dashboard owns the terminal · logs muted "
                       "· spill: $TMPDIR/devon-watch-spill.log",
                       DIM, color=self.color),
-                width,
+                width - 1,
             )
         )
 
@@ -900,44 +905,30 @@ class GodScreen:
         out.flush()
 
     def _header_wide(self, snap: dict[str, Any], width: int) -> list[str]:
-        """8-row header: ASCII ninja + title block + view tabs."""
-        from .avatar import NINJA_MINI_HEIGHT, NINJA_MINI_WIDTH, render_ninja_mini
+        """4-row typographic header: gradient title, subtitle, view tabs.
 
-        ninja = render_ninja_mini(color=self.color).splitlines()
+        Deliberately no ASCII art — clean typography beats a bad figure.
+        Stats live in the status bar; the header stays minimal.
+        """
         spin = _SPINNER[self._frame % len(_SPINNER)]
         self._frame += 1
         title = (gradient_text("DEVON", 51, 201, color=self.color)
                  + paint(" · live ", TITLE, color=self.color)
                  + paint(spin, CYAN, color=self.color))
-        subtitle = paint("universal agent os · no-morals 2.0", DIM,
+        subtitle = paint("  universal agent os · no-morals 2.0", DIM,
                          color=self.color)
-        traffic = snap.get("traffic") or {}
-        llm = snap.get("llm") or {}
-        active = str(llm.get("active") or "—")
-        quick = (
-            f"{paint('⏱', CYAN, color=self.color)} "
-            f"{paint(_fmt_uptime(snap.get('uptime_s', 0)), BRIGHT_WHITE, color=self.color)}   "
-            f"{paint('📨', CYAN, color=self.color)} "
-            f"{paint(str(traffic.get('messages', 0)), BRIGHT_WHITE, color=self.color)}   "
-            f"{paint('🧠', CYAN, color=self.color)} "
-            f"{paint(active, GREEN if active != '—' else MAGENTA, color=self.color)}"
-        )
-        tabs = "  ".join(
+        tabs = "   ".join(
             paint(f"[{_VIEW_HOTKEY[v]}] {v}",
                   BRIGHT_CYAN + BOLD if v == self._view else DIM,
                   color=self.color)
             for v in WATCH_VIEWS
         )
-        right = [title, subtitle, "", quick, tabs, "", ""]
-        lines: list[str] = []
-        for i in range(NINJA_MINI_HEIGHT):
-            left = ninja[i] if i < len(ninja) else ""
-            left_w = visible_width(left)
-            pad = " " * max(0, NINJA_MINI_WIDTH - left_w)
-            row = left + pad + "  " + (right[i] if i < len(right) else "")
-            lines.append(truncate_visible(row, width))
-        lines.append(paint("─" * width, SUBTLE, color=self.color))
-        return lines
+        return [
+            f"  {title}",
+            subtitle,
+            f"  {tabs}",
+            paint("─" * width, SUBTLE, color=self.color),
+        ]
 
     def _header_narrow(self, width: int) -> list[str]:
         """Fallback header for narrow terminals: title + tabs, one row."""
