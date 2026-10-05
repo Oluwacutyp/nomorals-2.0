@@ -426,13 +426,21 @@ class PartnerBrain:
             note = getattr(bundle, "degraded_note", "") or "provider failover"
             _log.warning("reply to %s served degraded: %s", chat.key, note)
             parts = parts + [f"⏬ {note}"]
-        self._persist_outbound(chat, parts, bundle.model, session_id=session_id)
-        self._note_reply(bundle, chat)
-        self._log_training_pair(chat, message.text, "\n".join(parts), bundle.model,
-                                self.mood.current().label)
-        self.relationship.save(self.context.db)
-        self._maybe_curate(session_id, is_owner)
-        self._maybe_extract(message, session_id, is_owner)
+        # Persist + downstream hooks. The bookkeeping tail must never break
+        # reply delivery: during shutdown the context's DB can close while a
+        # drained-but-slow worker is still here (the "database is closed"
+        # race). A dropped training pair beats a dropped reply — same
+        # contract as note_fast_turn's fast path below.
+        try:
+            self._persist_outbound(chat, parts, bundle.model, session_id=session_id)
+            self._note_reply(bundle, chat)
+            self._log_training_pair(chat, message.text, "\n".join(parts), bundle.model,
+                                    self.mood.current().label)
+            self.relationship.save(self.context.db)
+            self._maybe_curate(session_id, is_owner)
+            self._maybe_extract(message, session_id, is_owner)
+        except Exception as exc:  # noqa: BLE001 - persistence must never break a reply
+            _log.warning("reply persist tail failed: %s", exc)
         return parts
 
     def note_fast_turn(self, message: "ChatMessage", reply_text: str) -> None:

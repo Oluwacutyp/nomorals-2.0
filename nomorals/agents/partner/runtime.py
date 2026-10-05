@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable
 from ...core.logging_setup import get_logger
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
@@ -107,6 +107,12 @@ class PartnerRuntime(
         self._draining: dict[str, bool] = {}
         self._queue_guard = threading.Lock()
         self._stopped = threading.Event()
+        #: In-flight chat-pool futures (per-chat pumps + discord greeters).
+        #: Drained (bounded) in stop() so the context's Database is never
+        #: closed while a worker is mid-write — the "database is closed"
+        #: shutdown race seen on the phone gateway.
+        self._inflight: set[Future] = set()
+        self._inflight_guard = threading.Lock()
         self._autonomy: Any = None
         self.stats = {"messages": 0, "replies": 0, "errors": 0, "controls": 0}
         #: Guards ``stats``: the counters are bumped from every chat-pool
@@ -180,7 +186,12 @@ class PartnerRuntime(
         """
         if self._stopped.is_set() or self.dry_run:
             return
-        self._pool.submit(self._greet_discord_newcomer, guild_name, member)
+        try:
+            self._track_inflight(
+                self._pool.submit(self._greet_discord_newcomer, guild_name, member)
+            )
+        except RuntimeError:
+            _log.debug("discord greeter dropped: pool shut down")
 
     def _greet_discord_newcomer(self, guild_name: str, member: dict) -> None:
         from ...social.chat.base import ChatMessage, ChatRef
@@ -243,13 +254,44 @@ class PartnerRuntime(
         if draining:
             return  # a pump is already working this chat; it will pick the message up
         try:
-            self._pool.submit(self._pump, key)
+            self._track_inflight(self._pool.submit(self._pump, key))
         except RuntimeError:
             # The pool is shut down (runtime stopping): reset the flag or
             # the queued message is orphaned — no pump will ever pick it up.
             _log.warning("on_message: pool shut down, dropping inbound for %s", key)
             with self._queue_guard:
                 self._draining[key] = False
+
+    def _track_inflight(self, fut: Future) -> None:
+        """Remember a chat-pool future so stop() can drain it."""
+        with self._inflight_guard:
+            self._inflight.add(fut)
+        fut.add_done_callback(self._untrack_inflight)
+
+    def _untrack_inflight(self, fut: Future) -> None:
+        with self._inflight_guard:
+            self._inflight.discard(fut)
+
+    def _drain_chat_pool(self, timeout: float = 30.0) -> None:
+        """Bounded wait for in-flight chat handlers before teardown.
+
+        stop() runs while the AgentContext (and its Database) is still
+        alive; the context closes right after. A pump mid-reply holds no
+        lock the closer needs, but it *writes* — closing the DB first
+        turns its persist tail into StorageError("database is closed").
+        The timeout covers one interactive reply budget (25s); stragglers
+        past it are left to the brain's shutdown-tolerant persist tail.
+        """
+        with self._inflight_guard:
+            pending = [f for f in self._inflight if not f.done()]
+        if not pending:
+            return
+        _log.info("draining %d in-flight chat handler(s) (%.0fs max)",
+                  len(pending), timeout)
+        _done, not_done = wait(pending, timeout=timeout)
+        if not_done:
+            _log.warning("%d chat handler(s) still running after %.0fs drain; "
+                         "continuing shutdown", len(not_done), timeout)
 
     def _pump(self, key: str) -> None:
         try:
@@ -911,6 +953,10 @@ class PartnerRuntime(
             except Exception:  # noqa: BLE001
                 pass
         self.gateway.stop()
+        # Drain (bounded) BEFORE the pool shuts down and the context's DB
+        # closes: an in-flight pump writing after db.close() raises
+        # StorageError("database is closed") and drops the reply.
+        self._drain_chat_pool()
         self._pool.shutdown(wait=False)
         # final beacon, marked stopped — `nm status` then reports a clean
         # "stopped" instead of "went stale"
