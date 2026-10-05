@@ -752,3 +752,83 @@ class NaijaDealHunter:
             )
         
         return "\n".join(lines)
+
+
+def register(registry: Any) -> None:
+    """Expose the Naija deal hunter as agent tools."""
+    import asyncio
+
+    def _hunter() -> "NaijaDealHunter":
+        context = registry.context
+        account_manager = getattr(context, "account_manager", None)
+        db = getattr(context, "db", None)
+        return NaijaDealHunter(account_manager, db)
+
+    @registry.register(
+        "naija_deals",
+        description=(
+            "Find deals across Nigerian marketplaces (Jumia, Konga, Jiji, Slot). "
+            "Track prices, find flash sales, get top deals by category. "
+            "action=find|flash|top|summary."
+        ),
+        capability="shopping.deals",
+        parameters={
+            "action": "str — find|flash|top|summary",
+            "query": "str — product search query (for find)",
+            "category": "str — category filter (for top)",
+            "limit": "int — max results (default 10)",
+        },
+    )
+    def _naija_deals(
+        action: str = "top",
+        query: str = "",
+        category: str = "",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        hunter = _hunter()
+        action = (action or "top").strip().lower()
+        try:
+            if action == "find" and query:
+                deals = asyncio.run(hunter.find_deals(query, limit=int(limit)))
+            elif action == "flash":
+                deals = asyncio.run(hunter.find_flash_sales(limit=int(limit)))
+            elif action == "summary":
+                return {"ok": True, "summary": asyncio.run(hunter.get_deal_summary())}
+            else:
+                deals = asyncio.run(
+                    hunter.get_top_deals(limit=int(limit), category=category or "")
+                )
+            return {
+                "ok": True,
+                "deals": [d.to_dict() if hasattr(d, "to_dict") else str(d) for d in deals],
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @registry.register(
+        "naija_price_alert",
+        description=(
+            "Track a product URL for price drops across Nigerian vendors. "
+            "Alerts fire when the price drops below the target."
+        ),
+        capability="shopping.deals",
+        parameters={
+            "product_url": "str — product page URL",
+            "target_price": "float — alert when price drops to this (NGN)",
+            "user_id": "str — owner user id for the alert",
+        },
+    )
+    def _naija_price_alert(
+        product_url: str, target_price: float, user_id: str = "owner"
+    ) -> dict[str, Any]:
+        hunter = _hunter()
+        try:
+            alert = asyncio.run(
+                hunter.track_product(product_url, float(target_price), user_id)
+            )
+            return {
+                "ok": True,
+                "alert": alert.to_dict() if hasattr(alert, "to_dict") else str(alert),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

@@ -260,6 +260,18 @@ def build_context(
         # looked perfectly healthy. register_builtins() is idempotent.
         context.tools.register_builtins()
 
+        # Wire up the SideChatManager for the side_chat tool. Without this,
+        # the tool is registered but raises "SideChatManager not initialized"
+        # on every call.
+        try:
+            from ..social.chat.side_chats import SideChatManager
+            from ..tools.side_chats import init_side_chats
+
+            if getattr(context, "db", None) is not None:
+                init_side_chats(SideChatManager(context.db))
+        except Exception:  # noqa: BLE001 — side chats are optional
+            pass
+
     from .blackboard import Blackboard
 
     context.blackboard = Blackboard()

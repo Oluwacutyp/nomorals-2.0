@@ -298,3 +298,46 @@ def export_telegram(
         )
         result.dataset_id = dataset.id
     return result
+
+
+def register(registry: Any) -> None:
+    """Expose Telegram history export as an agent tool for training datasets."""
+
+    @registry.register(
+        "export_training_data",
+        description=(
+            "Harvest the owner's Telegram chat history (read-only) and register "
+            "it as a training dataset for fine-tuning. PII-scrubbed. "
+            "Useful for personalizing a model toward the owner's voice."
+        ),
+        capability="training.export",
+        parameters={
+            "max_dialogs": "int — max dialogs to harvest (default 50)",
+            "max_per_chat": "int — max messages per chat (default 300)",
+            "only_chats": "str — comma-separated chat ids to restrict to (optional)",
+        },
+    )
+    def _export_training_data(
+        max_dialogs: int = 50,
+        max_per_chat: int = 300,
+        only_chats: str = "",
+    ) -> dict[str, Any]:
+        context = registry.context
+        settings = getattr(context, "settings", None)
+        db = getattr(context, "db", None)
+        try:
+            result = export_telegram(
+                settings,
+                db=db,
+                max_dialogs=int(max_dialogs),
+                max_per_chat=int(max_per_chat),
+                only_chats=only_chats or "",
+            )
+            return {
+                "ok": True,
+                "dataset_id": getattr(result, "dataset_id", ""),
+                "examples": getattr(result, "examples", 0),
+                "stats": result.to_dict() if hasattr(result, "to_dict") else str(result),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

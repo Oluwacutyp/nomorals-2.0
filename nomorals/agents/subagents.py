@@ -1969,3 +1969,93 @@ ROSTER: dict[str, type[Subagent]] = {
     "dep_hunter": DepHunter,
     "api_designer": ApiDesigner,
 }
+
+
+def register(registry: Any) -> None:
+    """Expose the specialist subagent roster as agent tools.
+
+    The roster (planner, implementer, reviewer, tester, refactorer,
+    dep_hunter, api_designer) provides L5 orchestration workers with a
+    uniform run(input) -> result interface. This hook exposes roster
+    listing and parallel execution through the tool registry.
+    """
+
+    @registry.register(
+        "subagent_roster",
+        description=(
+            "List the specialist subagent roster (planner, implementer, "
+            "reviewer, tester, refactorer, dep_hunter, api_designer) with "
+            "their roles. These are L5 orchestration workers for coding pipelines."
+        ),
+        capability="agent.subagents",
+        parameters={},
+    )
+    def _subagent_roster() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "roster": sorted(ROSTER.keys()),
+            "description": (
+                "Specialist coding-pipeline subagents. Each has a uniform "
+                "run(input) -> result interface and is safe for parallel execution."
+            ),
+        }
+
+    @registry.register(
+        "subagent_run",
+        description=(
+            "Run a specialist subagent from the roster. role is one of: "
+            "planner, implementer, reviewer, tester, refactorer, dep_hunter, "
+            "api_designer. input_json is the JSON-encoded input dataclass."
+        ),
+        capability="agent.subagents",
+        parameters={
+            "role": "str — roster role name",
+            "input_json": "str — JSON-encoded input for the subagent",
+        },
+    )
+    def _subagent_run(role: str, input_json: str = "{}") -> dict[str, Any]:
+        import dataclasses
+        import json
+
+        cls = ROSTER.get((role or "").strip().lower())
+        if cls is None:
+            return {
+                "ok": False,
+                "error": f"unknown role {role!r}; roster: {sorted(ROSTER.keys())}",
+            }
+        try:
+            data = json.loads(input_json or "{}")
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"bad input_json: {exc}"}
+        try:
+            agent = cls()
+            # Build the input dataclass from the provided dict
+            input_cls = None
+            for attr in ("__dataclass_params__",):
+                _ = attr
+            # Find the Input dataclass: <Role>Input naming convention
+            import re as _re
+
+            input_name = f"{cls.__name__}Input"
+            input_cls = globals().get(input_name)
+            if input_cls is None or not dataclasses.is_dataclass(input_cls):
+                # Fall back: try any dataclass ending in "Input" defined here
+                for _n, _v in list(globals().items()):
+                    if (
+                        _n.endswith("Input")
+                        and dataclasses.is_dataclass(_v)
+                        and _n.lower().startswith(cls.__name__.lower()[:4])
+                    ):
+                        input_cls = _v
+                        break
+            if input_cls is None:
+                return {"ok": False, "error": f"no Input dataclass found for {role}"}
+            field_names = {f.name for f in dataclasses.fields(input_cls)}
+            kwargs = {k: v for k, v in data.items() if k in field_names}
+            inp = input_cls(**kwargs)
+            result = agent.run(inp)
+            if dataclasses.is_dataclass(result):
+                return {"ok": True, "result": dataclasses.asdict(result)}
+            return {"ok": True, "result": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

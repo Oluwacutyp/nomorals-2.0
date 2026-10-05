@@ -338,3 +338,48 @@ class DocsRenderVerifier:
                 f"{label}: README claims ~{claimed:,} but measured "
                 f"{measured:,} (drift {drift * 100:.1f}% > "
                 f"{tolerance * 100:.0f}%)")
+
+
+def register(registry: Any) -> None:
+    """Expose the verifier registry as agent tools."""
+
+    @registry.register(
+        "verify",
+        description=(
+            "Run a named verifier against a target. Verifiers: code_tests "
+            "(run python -m unittest on test_ids), docs_render (check README "
+            "metrics match measured repo state). Target is a JSON dict."
+        ),
+        capability="verify.run",
+        parameters={
+            "verifier": "str — verifier name (code_tests|docs_render)",
+            "target_json": "str — JSON-encoded target dict",
+        },
+    )
+    def _verify(verifier: str, target_json: str = "{}") -> dict[str, Any]:
+        import json
+
+        try:
+            target = json.loads(target_json or "{}")
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"bad target_json: {exc}"}
+        reg = default_registry()
+        try:
+            verdict = reg.verify((verifier or "").strip(), target)
+            return {"ok": True, "verdict": verdict.to_dict()}
+        except KeyError:
+            return {
+                "ok": False,
+                "error": f"unknown verifier {verifier!r}; available: {reg.list()}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    @registry.register(
+        "verify_list",
+        description="List available verifiers in the registry.",
+        capability="verify.run",
+        parameters={},
+    )
+    def _verify_list() -> dict[str, Any]:
+        return {"ok": True, "verifiers": default_registry().list()}

@@ -729,3 +729,36 @@ Generate the plan:"""
         """
         self._action_handlers[name] = handler
         _log.info(f"Registered custom action: {name}")
+
+
+def register(registry: Any) -> None:
+    """Expose the AgentPlanner as an agent tool for goal decomposition."""
+
+    @registry.register(
+        "plan_goal",
+        description=(
+            "Break a natural-language goal into an executable multi-step plan "
+            "and run it. Uses available integrations (email, calendar, shopping). "
+            "Returns the plan and execution results."
+        ),
+        capability="agent.plan",
+        parameters={
+            "goal": "str — natural language goal (e.g. 'Plan a dinner party for 6')",
+            "account": "str — account identifier for integrations (optional)",
+        },
+    )
+    def _plan_goal(goal: str, account: str = "") -> dict[str, Any]:
+        import asyncio
+
+        context = registry.context
+        llm = getattr(context, "llm_router", None) or getattr(context, "llm", None)
+        planner = AgentPlanner(llm_router=llm)
+        try:
+            result = asyncio.run(planner.execute(goal=goal, account=account or None))
+            return {
+                "ok": True,
+                "status": str(result.status) if hasattr(result, "status") else "done",
+                "result": result.to_dict() if hasattr(result, "to_dict") else str(result),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

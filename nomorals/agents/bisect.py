@@ -165,3 +165,38 @@ def bisect_regression(
         "date": lines[2] if len(lines) > 2 else "",
         "subject": lines[3] if len(lines) > 3 else "",
     }
+
+
+def register(registry: Any) -> None:
+    """Expose git-bisect regression hunting as an agent tool."""
+
+    @registry.register(
+        "bisect_regression",
+        description=(
+            "Find the commit that introduced a regression via git bisect. "
+            "good_ref is a ref known to pass test_cmd; bad_ref is a ref known "
+            "to fail it. Returns the culprit commit (hash, author, date, subject)."
+        ),
+        capability="code.bisect",
+        parameters={
+            "repo": "str — path to the git repository",
+            "good_ref": "str — git ref known to pass (e.g. commit hash or tag)",
+            "bad_ref": "str — git ref known to fail",
+            "test_cmd": "str — test command; exit 0=good, 125=skip, else=bad",
+            "timeout": "float — per-step timeout seconds (default 300)",
+        },
+    )
+    def _bisect_regression(
+        repo: str,
+        good_ref: str,
+        bad_ref: str,
+        test_cmd: str,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        try:
+            result = bisect_regression(
+                repo, good_ref, bad_ref, test_cmd, timeout=timeout
+            )
+            return {"ok": True, "culprit": result}
+        except BisectError as exc:
+            return {"ok": False, "error": str(exc)}
