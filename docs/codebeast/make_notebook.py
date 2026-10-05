@@ -274,60 +274,56 @@ print("----")
 print(beast("\\u1e62\\u00e9 o l\\u00e8 s\\u1ecd \\u00e8d\\u00e8 Yor\\u00f9b\\u00e1? K\\u1ecd ew\\u00ec k\\u00e9ker\\u00e9 kan f\\u00fan mi."))""")
 
 code("""#@title 8) Export GGUF for your Samsung 📱 (~2.3GB Q4_K_M)
-# Disk-smart: the 16-bit merge is done ONCE, then the GGUF is exported
-# *from the merged checkpoint* — no second 7.6GB merge, so the whole thing
-# fits Kaggle's 19.5GB /kaggle/working. (Exporting straight from the LoRA
-# model re-merges internally and blows the disk budget.)
-from unsloth import FastLanguageModel
-import glob, os, shutil, gc
-import torch
+# DISK-PROOF: Unsloth's save_pretrained_gguf writes a 16-bit merge + f16 GGUF
+# + quants all at once (~11GB) and aborts on Kaggle's /kaggle/working when the
+# merge + checkpoints are sitting next to it (2026-10-05: hit exactly this).
+# So this cell: (1) deletes redundant checkpoints (adapter saved, merge done),
+# (2) converts the existing merged fp16 safetensors STRAIGHT to Q4_K_M with
+# llama.cpp's converter — --outtype q4_k_m skips the 7.6GB f16 intermediate,
+# so only ~2.5GB free is needed.
+import glob, os, shutil, subprocess
 
-MERGED_DIR = os.path.abspath("merged_16bit")
+def _sh(cmd):
+    print("+", cmd)
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if r.stdout:
+        print(r.stdout[-1500:])
+    if r.returncode != 0:
+        print((r.stderr or "")[-2000:])
+        raise RuntimeError("failed: " + cmd)
+
+MERGED_DIR = globals().get("MERGED_DIR") or os.path.abspath("merged_16bit")
 if not os.path.isdir(MERGED_DIR):
-    try:
-        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_16bit")
-    except Exception as e:
-        print("16-bit merge hit RAM limit — using 4-bit merge:", e)
-        MERGED_DIR = os.path.abspath("merged_4bit")
-        model.save_pretrained_merged(MERGED_DIR, tokenizer, save_method="merged_4bit")
-else:
-    print(f"♻️ reusing existing {MERGED_DIR}/ — merge already done")
+    cands = glob.glob("/kaggle/working/**/merged_16bit", recursive=True)
+    assert cands, "no merged_16bit found — run the merge cell first"
+    MERGED_DIR = cands[0]
+print("merged:", MERGED_DIR)
 
-# free the 4-bit LoRA training model from VRAM before loading the 7.6GB merge
-if "model" in globals():
-    del globals()["model"]
-gc.collect()
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
+# 1. checkpoints are redundant now (adapter saved, merge done) — keep newest only
+for ckpt_root in glob.glob("/kaggle/working/**/checkpoints", recursive=True):
+    subs = sorted(glob.glob(os.path.join(ckpt_root, "checkpoint-*")))
+    for s in subs[:-1]:
+        shutil.rmtree(s, ignore_errors=True)
+    print(f"checkpoints: deleted {max(0, len(subs)-1)}, kept "
+          f"{os.path.basename(subs[-1]) if subs else None}")
+print(f"disk free: {shutil.disk_usage('/kaggle/working').free/1e9:.1f} GB")
 
-print("loading merged checkpoint (GGUF export reuses it — no re-merge)...")
-merged_model, _ = FastLanguageModel.from_pretrained(
-    model_name=MERGED_DIR,
-    max_seq_length=SEQ_LEN,
-    load_in_4bit=False,
-)
-free_gb = shutil.disk_usage(RUN_DIR).free / 1e9
-print(f"disk free: {free_gb:.1f}GB — export needs ~10GB from the merged checkpoint")
-result = merged_model.save_pretrained_gguf(
-    f"{RUN_DIR}/codebeast_gguf", tokenizer, quantization_method="q4_k_m")
+# 2. llama.cpp converter (shallow clone) + its matching gguf python package
+if not os.path.isdir("/kaggle/working/llama.cpp"):
+    _sh("git clone --depth 1 https://github.com/ggerganov/llama.cpp "
+        "/kaggle/working/llama.cpp 2>&1 | tail -2")
+_sh("pip install -q /kaggle/working/llama.cpp/gguf-py/ 2>&1 | tail -1")
 
-# locate the finished GGUFs (newer Unsloth returns them; otherwise glob)
-gguf = []
-gdirs = []
-if isinstance(result, dict):
-    gguf = list(result.get("gguf_files", []) or [])
-    if result.get("gguf_directory"):
-        gdirs.append(result["gguf_directory"])
-gdirs += [f"{RUN_DIR}/codebeast_gguf_gguf", f"{RUN_DIR}/codebeast_gguf"]
-if not gguf:
-    for d in gdirs:
-        gguf = sorted(glob.glob(f"{d}/*.gguf"))
-        if gguf:
-            break
-print("GGUF:", gguf)
-for g in gguf:
-    print(f"{g}: {os.path.getsize(g)/1e9:.2f} GB")
-print("Download the q4_k_m file from the notebook Output panel (or Files tab) — wifi only.")""")
+# 3. fp16 safetensors -> Q4_K_M directly (no f16 intermediate)
+OUT_GGUF = f"{RUN_DIR}/codebeast.Q4_K_M.gguf"
+_sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
+    f"--outfile {OUT_GGUF} --outtype q4_k_m 2>&1 | tail -4")
+
+# 4. verify it's a real GGUF before anything else touches it
+with open(OUT_GGUF, "rb") as _f:
+    assert _f.read(4) == b"GGUF", "not a valid GGUF file!"
+print(f"✅ {OUT_GGUF} ({os.path.getsize(OUT_GGUF)/1e9:.2f} GB) — valid GGUF")
+print("Cell 9 pushes this to your HF repo; or grab it from the Files tab.")""")
 
 code("""#@title 9) Push the MERGED model to YOUR Hugging Face account (optional)
 # The end product for nomorals 2.0. Needs HF_TOKEN in Add-ons → Secrets.
@@ -364,7 +360,8 @@ else:
     # (far more reliable than Kaggle's file browser for a 2.3GB file)
     import glob
     ggufs = sorted(glob.glob(f"{RUN_DIR}/codebeast_gguf_gguf/*.gguf")
-                   + glob.glob(f"{RUN_DIR}/codebeast_gguf/*.gguf"))
+                   + glob.glob(f"{RUN_DIR}/codebeast_gguf/*.gguf")
+                   + glob.glob(f"{RUN_DIR}/*.gguf"))  # cell 8 writes it here now
     for g in ggufs:
         print(f"uploading {os.path.basename(g)} ({os.path.getsize(g)/1e9:.2f} GB)...")
         api.upload_file(path_or_fileobj=g, path_in_repo=os.path.basename(g),
