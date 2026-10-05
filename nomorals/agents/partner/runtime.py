@@ -30,6 +30,15 @@ from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 _log = get_logger(__name__)
 
+#: telegram-bot is the public endpoint: conversation + games only. A known
+#: non-game slash command there gets this redirect instead of running —
+#: owner/system controls live on the userbot (``telegram`` endpoint).
+_PUBLIC_BOT_NOT_AVAILABLE = (
+    "that's not something I can do here — this is my public chat, "
+    "so I keep it to conversation and games. "
+    "try /game list to see what's on, or just talk to me."
+)
+
 
 class PartnerRuntime(
     RuntimeLiveMixin,
@@ -404,6 +413,22 @@ class PartnerRuntime(
                         _log.warning("game reply send failed: %s", exc)
                 else:
                     _log.warning("game command produced empty reply in %s", message.chat.key)
+                return
+            # telegram-bot is the public endpoint: conversation + games
+            # only. A known non-game slash here gets a friendly redirect
+            # instead of running — owner/system controls live on the
+            # userbot. Unknown slashes keep falling through to her as
+            # ordinary text, as before.
+            if message.chat.platform == "telegram-bot" and command is not None:
+                self._bump("controls")
+                _log.info("public-bot gate: blocked /%s from %s in %s",
+                          command.kind, message.sender or "?",
+                          message.chat.key)
+                try:
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      _PUBLIC_BOT_NOT_AVAILABLE)
+                except Exception:  # noqa: BLE001
+                    _log.warning("public-bot gate reply failed")
                 return
         # WisdomKeeper practice sessions own their chats while live: plain
         # words (pause/resume/stop) steer the run and the reply after a
