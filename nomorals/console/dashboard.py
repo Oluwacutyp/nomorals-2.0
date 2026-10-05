@@ -265,7 +265,7 @@ def render_games_view(
             lines.append(f"  {paint('most played', CYAN)}")
             lines.extend(barchart(items, color=color))
         except (TypeError, ValueError):
-            pass
+            lines.append(f"  {paint('(activity data unreadable)', DIM)}")
 
     # Recent results / top players.
     top = games.get("top_players") or []

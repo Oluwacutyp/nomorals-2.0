@@ -482,7 +482,7 @@ class GodScreen:
                 if not self._wait_key():
                     break
         except KeyboardInterrupt:
-            pass
+            self._stop = True  # Ctrl-C is the documented way out of watch mode
         finally:
             WatchHub.set_active(False)
             try:

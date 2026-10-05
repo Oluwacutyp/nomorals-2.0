@@ -316,10 +316,14 @@ class WatchCommandTests(unittest.TestCase):
         return ConsoleCommands(lambda: {"uptime_s": 5})
 
     def test_watch_without_tty_returns_hint(self):
+        import io as _io
         import unittest.mock as mock
 
         cmds = self._cmds()
-        with mock.patch("nomorals.console.commands.supports_color", return_value=False):
+        # GodScreen with color disabled returns the hint instead of blocking.
+        with mock.patch(
+            "nomorals.console.widgets.supports_color", return_value=False
+        ):
             out = cmds.handle("dashboard --watch")
         self.assertIsNotNone(out)
         self.assertIn("dashboard", out)
@@ -380,6 +384,156 @@ class WatchCommandTests(unittest.TestCase):
 
         src = inspect.getsource(ChatGateway.__init__)
         self.assertIn("console_mirror", src)
+
+
+class GodTierTests(unittest.TestCase):
+    def test_message_feed_push_and_recent(self):
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+
+        feed = MessageFeed(capacity=10)
+        feed.push(MessageEvent(platform="telegram", sender="Mary", text="hi"))
+        feed.push(MessageEvent(platform="telegram", sender="Devon", text="yo",
+                               incoming=False))
+        recent = feed.recent(5)
+        self.assertEqual(len(recent), 2)
+        self.assertEqual(recent[0].sender, "Mary")
+        self.assertEqual(feed.unread, 2)
+        self.assertEqual(feed.mark_read(), 2)
+        self.assertEqual(feed.unread, 0)
+
+    def test_message_feed_capacity(self):
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+
+        feed = MessageFeed(capacity=10)
+        for i in range(25):
+            feed.push(MessageEvent(sender=f"u{i}", text="x"))
+        self.assertEqual(len(feed), 10)
+        self.assertEqual(feed.recent(1)[0].sender, "u24")
+
+    def test_watch_hub_active_flag(self):
+        from nomorals.console.widgets import WatchHub
+
+        old = WatchHub.is_active()
+        try:
+            WatchHub.set_active(True)
+            self.assertTrue(WatchHub.is_active())
+            WatchHub.set_active(False)
+            self.assertFalse(WatchHub.is_active())
+        finally:
+            WatchHub.set_active(old)
+
+    def test_watch_hub_feed_shared(self):
+        from nomorals.console.widgets import MessageEvent, WatchHub
+
+        WatchHub.feed().push(MessageEvent(sender="t", text="shared"))
+        self.assertTrue(len(WatchHub.feed()) >= 1)
+
+    def test_barchart_shape(self):
+        from nomorals.console.widgets import barchart
+
+        lines = barchart([("mafia", 12), ("c4", 4)], color=False)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("mafia", lines[0])
+        self.assertIn("12", lines[0])
+        # longer bar for the bigger value
+        self.assertGreater(lines[0].count("█"), lines[1].count("█"))
+
+    def test_barchart_empty(self):
+        from nomorals.console.widgets import barchart
+
+        lines = barchart([], color=False)
+        self.assertEqual(len(lines), 1)
+
+    def test_gradient_no_banned_colors(self):
+        from nomorals.console.widgets import gradient_text
+
+        out = gradient_text("DEVON", 51, 201, color=True)
+        self.assertNotIn("31m", out)  # no red
+        self.assertIn("38;5;", out)   # 256-color codes used
+        plain = gradient_text("DEVON", 51, 201, color=False)
+        self.assertEqual(plain, "DEVON")
+
+    def test_feed_line_format(self):
+        from nomorals.console.widgets import MessageEvent, format_feed_line
+
+        ev = MessageEvent(platform="telegram", sender="Mary",
+                          text="/game stats", chat_title="grp",
+                          timestamp=1760000000.0)
+        line = format_feed_line(ev, color=False)
+        self.assertIn("Mary", line)
+        self.assertIn("/game stats", line)
+        self.assertIn("grp", line)
+
+    def test_render_view_dispatch(self):
+        from nomorals.console import render_view
+        from nomorals.console.dashboard import strip_ansi as _s
+
+        for view in ("status", "games", "jobs", "brain"):
+            out = _s(render_view({"uptime_s": 60}, view, color=True))
+            self.assertTrue(len(out) > 20, view)
+
+    def test_render_games_view(self):
+        from nomorals.console import render_games_view
+        from nomorals.console.dashboard import strip_ansi as _s
+
+        snap = {"games": {"players": 5, "active_tables": 2,
+                          "activity": {"mafia": 10, "c4": 3},
+                          "top_players": [{"name": "Mary", "score": 99}]}}
+        out = _s(render_games_view(snap, color=True))
+        self.assertIn("mafia", out)
+        self.assertIn("Mary", out)
+
+    def test_render_scheduler_view(self):
+        from nomorals.console import render_scheduler_view
+        from nomorals.console.dashboard import strip_ansi as _s
+
+        snap = {"scheduler": {"running": True, "jobs": [
+            {"name": "briefing", "spec": "daily 08:00", "enabled": True,
+             "next_run": 1760000000.0},
+            {"name": "off-job", "spec": "daily", "enabled": False},
+        ]}}
+        out = _s(render_scheduler_view(snap, color=True))
+        self.assertIn("briefing", out)
+        self.assertIn("1/2 enabled", out)
+
+    def test_render_llm_view(self):
+        from nomorals.console import render_llm_view
+        from nomorals.console.dashboard import strip_ansi as _s
+
+        snap = {"llm": {"active": "groq", "chain": ["groq", "hf"],
+                        "health": {"hf": {"cooldown_until": 9999999999}},
+                        "stats": {"groq": {"calls": 42}}}}
+        out = _s(render_llm_view(snap, color=True))
+        self.assertIn("groq", out)
+        self.assertIn("cooling down", out)
+
+    def test_render_statusbar(self):
+        from nomorals.console import render_statusbar
+        from nomorals.console.dashboard import strip_ansi as _s
+
+        snap = {"uptime_s": 3723, "traffic": {"messages": 40, "errors": 0},
+                "games": {"active_tables": 2}, "llm": {"active": "groq"}}
+        out = _s(render_statusbar(snap, "status", unread=3, color=True))
+        self.assertIn("1h 2m 3s", out)
+        self.assertIn("groq", out)
+        self.assertIn("3 new", out)
+
+    def test_godscreen_no_color_returns_hint(self):
+        import io as _io
+
+        from nomorals.console.widgets import GodScreen
+
+        screen = GodScreen(interval=0.1, snapshot=lambda: {},
+                           color=False, out=_io.StringIO())
+        out = screen.run()
+        self.assertIn("dashboard", out)
+
+    def test_godscreen_view_switch_keys(self):
+        from nomorals.console.widgets import WATCH_VIEW_KEYS, WATCH_VIEWS
+
+        self.assertEqual(len(WATCH_VIEWS), 4)
+        self.assertEqual(WATCH_VIEW_KEYS["1"], "status")
+        self.assertEqual(WATCH_VIEW_KEYS["4"], "brain")
 
 
 if __name__ == "__main__":

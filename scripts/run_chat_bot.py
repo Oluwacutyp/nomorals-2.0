@@ -185,30 +185,54 @@ def _print_banner(started, *, color=True):
 def _install_console_mirror(runtime, history: _MessageHistory) -> None:
     """Rich inbound message cards on the local terminal + activity history.
 
-    Best-effort: any failure disables the mirror silently.
+    When a ``dashboard --watch`` session is active, messages are queued
+    into the watch feed instead of printing — printing would flash over
+    the live dashboard. Best-effort: any failure disables the mirror.
     """
     try:
         from nomorals.console.palette import supports_color
-        from nomorals.console.widgets import format_message_card
+        from nomorals.console.widgets import (
+            MessageEvent,
+            WatchHub,
+            format_message_card,
+        )
 
         gateway = getattr(runtime, "gateway", None)
         if gateway is None:
             return
         color_ok = supports_color()
 
+        def _event_from(message: object) -> MessageEvent:
+            chat = getattr(message, "chat", None)
+            return MessageEvent(
+                platform=str(getattr(chat, "platform", "?") or "?"),
+                sender=str(getattr(message, "sender", "?") or "?"),
+                text=str(getattr(message, "text", "") or "")[:400],
+                chat_title=str(getattr(chat, "title", "") or ""),
+                timestamp=float(getattr(message, "ts", 0) or 0) or 0.0,
+                incoming=bool(getattr(message, "incoming", True)),
+            )
+
         def _mirror(message: object) -> None:
             history.record()
+            try:
+                event = _event_from(message)
+            except Exception:  # noqa: BLE001 - mirror is cosmetic
+                return
+            # Watch mode owns the screen: queue, don't print.
+            if WatchHub.is_active():
+                WatchHub.feed().push(event)
+                return
             if not color_ok:
                 return
             try:
-                chat = getattr(message, "chat", None)
                 card = format_message_card(
-                    platform=str(getattr(chat, "platform", "?") or "?"),
-                    sender=str(getattr(message, "sender", "?") or "?"),
-                    text=str(getattr(message, "text", "") or "")[:400],
-                    chat_title=str(getattr(chat, "title", "") or ""),
-                    timestamp=float(getattr(message, "ts", 0) or 0) or None,
-                    incoming=bool(getattr(message, "incoming", True)),
+                    platform=event.platform,
+                    sender=event.sender,
+                    text=event.text,
+                    chat_title=event.chat_title,
+                    timestamp=event.timestamp or None,
+                    incoming=event.incoming,
                     color=True,
                 )
                 print(f"\n{card}", flush=True)
