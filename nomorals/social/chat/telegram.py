@@ -1579,6 +1579,8 @@ class TelegramBotAdapter(ChatAdapter):
     # ── inline buttons ──────────────────────────────────────────────────
     def _sign_callback(self, data: str) -> str:
         """HMAC-sign callback data to prevent spoofing."""
+        from .tgbot_buttons import check_callback_data
+        check_callback_data(data)
         sig = hmac.new(self.token.encode(), data.encode(),
                        hashlib.sha256).hexdigest()[:16]
         return f"{data}|{sig}"
@@ -1720,6 +1722,8 @@ class TelegramBotAdapter(ChatAdapter):
     # ── outbound ──────────────────────────────────────────────────────────
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+        from .tgbot_buttons import buttons_for_text
+
         started = time.perf_counter()
         last_id = ""
         try:
@@ -1736,17 +1740,28 @@ class TelegramBotAdapter(ChatAdapter):
                     _log.debug("dropping bad reply_to %r: %s", reply_to, e)
             # Inline keyboard: [[(label, callback_data), ...], ...]
             # Callback data is HMAC-signed to prevent spoofing.
-            if buttons:
+            # When the caller passes no explicit buttons, derive contextual
+            # ones from the reply text (game menus, results, …) — this is
+            # what puts [Join] [Stats] under game replies without every
+            # command handler having to know about buttons.
+            resolved = buttons if buttons is not None else buttons_for_text(text)
+            keyboard = None
+            if resolved:
                 keyboard = []
-                for row in buttons:
+                for row in resolved:
                     krow = []
                     for label, data in row:
                         krow.append({"text": label,
                                      "callback_data": self._sign_callback(data)})
                     keyboard.append(krow)
-                params_base["reply_markup"] = {"inline_keyboard": keyboard}
-            for chunk in _chunk_text(text, self.MAX_TEXT):
-                result = self._api("sendMessage", text=chunk, **params_base)
+            chunks = _chunk_text(text, self.MAX_TEXT)
+            for i, chunk in enumerate(chunks):
+                params = dict(params_base)
+                # The keyboard goes on the last chunk only — every chunk
+                # carrying it would repeat the buttons N times.
+                if keyboard and i == len(chunks) - 1:
+                    params["reply_markup"] = {"inline_keyboard": keyboard}
+                result = self._api("sendMessage", text=chunk, **params)
                 last_id = str(result.get("message_id", ""))
                 # Only the first chunk carries the reply reference.
                 params_base.pop("reply_parameters", None)
