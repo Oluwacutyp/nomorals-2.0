@@ -277,10 +277,12 @@ code("""#@title 8) Export GGUF for your Samsung 📱 (~2.3GB Q4_K_M)
 # DISK-PROOF: Unsloth's save_pretrained_gguf writes a 16-bit merge + f16 GGUF
 # + quants all at once (~11GB) and aborts on Kaggle's /kaggle/working when the
 # merge + checkpoints are sitting next to it (2026-10-05: hit exactly this).
-# So this cell: (1) deletes redundant checkpoints (adapter saved, merge done),
-# (2) converts the existing merged fp16 safetensors STRAIGHT to Q4_K_M with
-# llama.cpp's converter — --outtype q4_k_m skips the 7.6GB f16 intermediate,
-# so only ~2.5GB free is needed.
+# So this cell: (1) deletes redundant checkpoints, (2) converts the existing
+# merged fp16 safetensors to F16 GGUF with llama.cpp's converter, (3) quantizes
+# F16 -> Q4_K_M with a PREBUILT llama-quantize binary from the latest release
+# (no cmake build), (4) deletes the 7.6GB F16 intermediate. Peak extra disk:
+# ~10GB — fits after step 1. (Current llama.cpp no longer accepts
+# --outtype q4_k_m in the converter; k-quants moved to llama-quantize.)
 import glob, os, shutil, subprocess
 
 def _sh(cmd):
@@ -319,12 +321,31 @@ if not os.path.isdir("/kaggle/working/llama.cpp"):
         "/kaggle/working/llama.cpp 2>&1")
 _sh("pip install -q /kaggle/working/llama.cpp/gguf-py/")
 
-# 3. fp16 safetensors -> Q4_K_M directly (no f16 intermediate)
+# 3. fp16 safetensors -> F16 GGUF (converter no longer takes k-quant outtypes)
+F16_GGUF = f"{RUN_DIR}/codebeast-f16.gguf"
 OUT_GGUF = f"{RUN_DIR}/codebeast.Q4_K_M.gguf"
+assert shutil.disk_usage("/kaggle/working").free / 1e9 > 10, \
+    "need ~10GB free for F16 + Q4_K_M — clear more checkpoints first"
 _sh(f"python /kaggle/working/llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} "
-    f"--outfile {OUT_GGUF} --outtype q4_k_m")
+    f"--outfile {F16_GGUF} --outtype f16")
 
-# 4. verify it's a real GGUF before anything else touches it
+# 4. prebuilt llama-quantize from the latest release (no cmake build)
+import json, urllib.request
+_req = urllib.request.Request(
+    "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest",
+    headers={"User-Agent": "codebeast"})
+_rel = json.load(urllib.request.urlopen(_req))
+_zurl = [a["browser_download_url"] for a in _rel["assets"]
+         if "bin-ubuntu-x64" in a["name"]][0]
+print("llama.cpp release:", _rel["tag_name"])
+_sh(f"curl -sL -o /tmp/llama.zip {_zurl} && unzip -o -q /tmp/llama.zip -d /tmp/llama-rel")
+_q = subprocess.run("find /tmp/llama-rel -name llama-quantize -o -name quantize | head -1",
+                    shell=True, capture_output=True, text=True).stdout.strip()
+assert _q, "quantize binary not found in release zip"
+_sh(f"chmod +x {_q} && {_q} {F16_GGUF} {OUT_GGUF} q4_k_m")
+
+# 5. drop the 7.6GB F16 intermediate, verify the final file
+os.remove(F16_GGUF)
 with open(OUT_GGUF, "rb") as _f:
     assert _f.read(4) == b"GGUF", "not a valid GGUF file!"
 print(f"✅ {OUT_GGUF} ({os.path.getsize(OUT_GGUF)/1e9:.2f} GB) — valid GGUF")
