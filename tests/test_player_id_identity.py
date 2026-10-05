@@ -392,3 +392,63 @@ class LeaderboardNameOverrideTests(unittest.TestCase):
         self.assertIn("Alice", names)  # untouched
         self.assertIn("Bobby", names)  # overridden
         self.assertNotIn("Bob", names)
+
+
+class UsernameBasedMergeTests(unittest.TestCase):
+    """Legacy profiles merged by Telegram username match.
+
+    Catches profiles created via the name-fallback path before
+    sightings existed: e.g. ``telegram:chfjdhx`` for a human whose
+    ID key is ``telegram:7541672134``.  When the ID key is looked up
+    with the username, the legacy row is folded in even though the
+    name was never sighted under the ID.
+    """
+
+    def test_username_merge_folds_unsighted_legacy_profile(self):
+        store = make_store()
+        # Legacy name-keyed profile from the pre-sightings era, with
+        # the username stored on it.
+        seed_player(store, "telegram:chfjdhx", xp=116, coins=5076,
+                    wins=1, name="chfjdhx")
+        store.db.execute(
+            "UPDATE game_players SET username = ? WHERE player_key = ?",
+            ("chfjdhx", "telegram:chfjdhx"))
+        # ID-keyed lookup with the same username merges it.
+        prof = store.get("telegram:7541672134", name="Mary",
+                         platform="telegram", username="chfjdhx")
+        self.assertEqual(prof.coins, 5076)
+        self.assertEqual(prof.username, "chfjdhx")
+        # Legacy row is gone.
+        row = store.db.query_one(
+            "SELECT * FROM game_players WHERE player_key = ?",
+            ("telegram:chfjdhx",))
+        self.assertIsNone(row)
+
+    def test_username_merge_skips_other_humans_id_keys(self):
+        store = make_store()
+        # Another human's ID-keyed profile that happens to share a
+        # username value must NOT be folded (different human).
+        seed_player(store, "telegram:999", xp=10, coins=100,
+                    wins=0, name="someone")
+        store.db.execute(
+            "UPDATE game_players SET username = ? WHERE player_key = ?",
+            ("chfjdhx", "telegram:999"))
+        prof = store.get("telegram:7541672134", name="Mary",
+                         platform="telegram", username="chfjdhx")
+        # The other human's ID-keyed profile is untouched.
+        other = store.db.query_one(
+            "SELECT * FROM game_players WHERE player_key = ?",
+            ("telegram:999",))
+        self.assertIsNotNone(other)
+        self.assertEqual(other["coins"], 100)
+
+    def test_username_merge_case_insensitive(self):
+        store = make_store()
+        seed_player(store, "telegram:chfjdhx", xp=0, coins=250,
+                    wins=0, name="chfjdhx")
+        store.db.execute(
+            "UPDATE game_players SET username = ? WHERE player_key = ?",
+            ("ChFjDhX", "telegram:chfjdhx"))
+        prof = store.get("telegram:7541672134", name="Mary",
+                         platform="telegram", username="CHFJDHX")
+        self.assertEqual(prof.coins, 250)

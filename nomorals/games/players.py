@@ -262,7 +262,7 @@ class PlayerStore:
             # The userbot-canonical ``telegram:<id>`` profile is always
             # the survivor; aliased ``telegram-bot`` sightings resolve
             # to it via Player.from_sender.
-            self._merge_all_legacy_names(key, name, platform)
+            self._merge_all_legacy_names(key, name, platform, username)
             row = None
             try:
                 row = self.db.query_one(
@@ -536,7 +536,7 @@ class PlayerStore:
         return keys
 
     def _merge_all_legacy_names(self, id_key: str, name: str,
-                                platform: str) -> None:
+                                platform: str, username: str = "") -> None:
         """Fold EVERY legacy name-keyed profile for one human into the ID key.
 
         Records the current sighting, then merges the legacy rows for
@@ -544,10 +544,18 @@ class PlayerStore:
         current display name.  Only names sighted with THIS sender_id
         are merged, so another player's ``telegram:Bob`` is never
         touched.  Caller must hold ``self._lock``.
+
+        Also merges legacy profiles by username match: if the caller
+        supplies a Telegram username, any legacy name-keyed profile
+        whose stored username matches (case-insensitive) is folded in.
+        This catches profiles created via the name-fallback path before
+        sightings existed (e.g. ``telegram:chfjdhx`` for a user whose
+        ID key is ``telegram:7541672134``).
         """
         if self.db is None:
             return
         name = (name or "").strip()
+        username = (username or "").strip().lstrip("@").lower()
         plat_part, _, sender_part = (id_key or "").partition(":")
         if not sender_part.isdigit():
             return  # not an ID key — nothing to merge into
@@ -562,6 +570,32 @@ class PlayerStore:
                 continue
             for legacy_key in self._legacy_candidate_keys(canon, n):
                 if legacy_key == id_key:
+                    continue
+                self._merge_one_legacy_key(id_key, legacy_key)
+        # Username-based merge: catch legacy profiles that share this
+        # human's Telegram username but were never sighted under the ID
+        # key (created via name-fallback before sightings existed).
+        if username:
+            try:
+                rows = self.db.query(
+                    "SELECT player_key FROM game_players "
+                    "WHERE lower(username) = ? "
+                    "AND COALESCE(deleted_at, 0) = 0",
+                    (username,),
+                ) or []
+            except Exception:  # noqa: BLE001
+                rows = []
+            for r in rows:
+                try:
+                    legacy_key = str(r["player_key"])
+                except Exception:  # noqa: BLE001
+                    continue
+                if legacy_key == id_key:
+                    continue
+                # Only merge name-keyed legacy profiles, never another
+                # ID-keyed profile (that would be a different human).
+                _, _, legacy_sender = legacy_key.partition(":")
+                if legacy_sender.isdigit():
                     continue
                 self._merge_one_legacy_key(id_key, legacy_key)
 
