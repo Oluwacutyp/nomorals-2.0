@@ -374,6 +374,10 @@ class Scheduler:
                 ZoneInfo(timezone)
             except ZoneInfoNotFoundError:
                 raise ValueError(f"unknown timezone: {timezone!r}")
+        elif kind == "daily":
+            # spec like "daily 22:00 America/New_York" embeds the tz in detail
+            _, embedded_tz = _split_daily_detail(str(detail))
+            timezone = embedded_tz
         now = time.time()
         if kind == "at" and detail <= now:
             raise ValueError("one-shot time is in the past")
