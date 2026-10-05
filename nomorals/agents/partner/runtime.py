@@ -372,6 +372,10 @@ class PartnerRuntime(
                         reply = self._control_mastery(
                             command.tail or command.arg,
                             player=self._game_player(message))
+                    elif command.kind == "gift":
+                        reply = self._control_gift(
+                            command.tail or command.arg,
+                            player=self._game_player(message))
                     else:
                         verb = (command.tail or command.arg) \
                             if command.kind == "game" \
@@ -1265,6 +1269,11 @@ class PartnerRuntime(
         # ── per-game mastery tiers ───────────────────────────────────────────
         if kind == "mastery":
             return self._control_mastery(
+                command.tail or arg,
+                player=self._game_player_for_key(chat_key))
+        # ── player-to-player gifting ─────────────────────────────────────────
+        if kind == "gift":
+            return self._control_gift(
                 command.tail or arg,
                 player=self._game_player_for_key(chat_key))
         if kind == "news":

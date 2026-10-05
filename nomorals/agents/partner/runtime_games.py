@@ -77,12 +77,18 @@ class RuntimeGamesMixin:
             # tears it down, and the opponent deserves to hear about it
             relay = self._game_relay()
             doomed = relay.get_relay_for_chat(chat_key)
+            # mint the rematch invite BEFORE the relay closes (it needs
+            # the room to exist)
+            rematch = (relay.rematch_invite(chat_key)
+                       if doomed is not None else None)
             out = engine.quit(chat_key)
             if doomed is not None:
                 who = player.name if player is not None else "your opponent"
-                self._relay_send(
-                    doomed.other_chat(chat_key),
-                    f"🏁 {who} closed the {doomed.game_name} duel.")
+                msg = (f"🏁 {who} closed the {doomed.game_name} duel.")
+                if rematch is not None:
+                    msg += (f"\n🔁 rematch? /game accept {rematch.code} "
+                            f"(1 hour)")
+                self._relay_send(doomed.other_chat(chat_key), msg)
             return "\n".join(out)
         if verb == "rematch":
             room, msgs = engine.rematch(chat_key)
@@ -151,10 +157,25 @@ class RuntimeGamesMixin:
                     f"🎮 {player.name} accepted your "
                     f"{relay_room.game_name} invite — game on! play in "
                     f"your DM, moves are relayed.")
-                return ("game started! play here in this chat — your moves "
-                        "are relayed to your opponent.")
+                return (f"🎮 connected! {relay_room.game_name} vs "
+                        f"{relay_room.player_a.name} — play here in this "
+                        f"chat, your moves are relayed to them.\n"
+                        f"/game relay shows the connection status anytime.")
             except ValueError as exc:
                 return str(exc)
+        if verb == "relay":
+            # /game relay — connection status for DM-to-DM multiplayer
+            relay = self._game_relay()
+            status = relay.status_text(chat_key)
+            if status is None:
+                return ("no active relay here.\n"
+                        "/game invite <game> [who] — challenge someone\n"
+                        "/game accept <code> — join their game")
+            # heartbeat: a status check proves this side is alive
+            code = relay.chat_to_relay.get(chat_key)
+            if code:
+                relay.touch(code)
+            return status
         if verb in engine.games:
             if player is None:
                 return "start a game from a chat — I need to know who's at the table."
@@ -645,6 +666,230 @@ class RuntimeGamesMixin:
         pts = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
         ok, msg = store.spend(player.key, attr, pts, stats=stats)
         return ("📊 " if ok else "") + msg
+
+    def _control_gift(self, tail: str, *, player: Any = None) -> str:
+        """Player-to-player gifting: /gift @name <coins|gear|item>.
+
+        Two-step with confirmation so nobody fat-fingers their myth
+        katana away:
+
+            /gift @ada 100            → preview a 100-coin gift
+            /gift @ada katana_rare    → preview a gear transfer
+            /gift @ada potion         → preview a shop-item gift
+            /gift confirm             → execute the pending gift
+            /gift cancel              → drop it
+            /gift history             → recent gifts sent/received
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        if player is None:
+            return "no player here — run this from the chat where you play."
+        from ...games.gifting import GiftStore, resolve_recipient
+        from ...games.players import Player
+        engine = self._game_engine()
+        store = GiftStore(engine.db)
+
+        tail = (tail or "").strip()
+        low = tail.lower()
+
+        if low in ("", "help"):
+            pending = store.pending_for(player.key)
+            lines = [
+                "🎁 gifting — send coins, gear, or items to another player:",
+                "  /gift @name 100          — gift 100 coins",
+                "  /gift @name katana_rare  — gift a gear piece you own",
+                "  /gift @name potion       — gift a shop item you own",
+                "  /gift confirm | /gift cancel",
+                "  /gift history            — recent gifts",
+            ]
+            if pending is not None:
+                lines.append(
+                    f"\n⏳ pending: {pending.describe()} — "
+                    f"/gift confirm or /gift cancel")
+            return "\n".join(lines)
+
+        if low == "history":
+            hist = store.history(player.key)
+            if not hist:
+                return "no gifts yet — be the first to give. /gift @name 100"
+            lines = ["🎁 recent gifts:"]
+            for g in hist[:10]:
+                arrow = "→" if g.giver_key == player.key else "←"
+                who = (g.recipient_name if g.giver_key == player.key
+                       else g.giver_name)
+                lines.append(f"  {arrow} {g.describe()} ({who})")
+            return "\n".join(lines)
+
+        if low == "cancel":
+            dropped = store.cancel(player.key)
+            if dropped is None:
+                return "nothing pending — /gift @name 100 to start one."
+            return f"cancelled: {dropped.describe()}. nothing moved."
+
+        if low == "confirm":
+            gift = store.pending_for(player.key)
+            if gift is None:
+                return ("nothing pending (gifts expire after 5 minutes) — "
+                        "/gift @name 100 to start one.")
+            return self._execute_gift(engine, store, gift, player)
+
+        # /gift @name <what>
+        parts = tail.split(None, 2)
+        if len(parts) < 2 or not parts[0].startswith("@"):
+            return ("usage: /gift @name <coins|gear|item>\n"
+                    "  /gift @ada 100 · /gift @ada katana_rare · "
+                    "/gift @ada potion")
+        target_label, what = parts[0], parts[1].strip()
+        if target_label.lstrip("@").lower() == (player.name or "").lower():
+            return "gifting yourself? bold. (no — pick someone else.)"
+
+        prof, err = resolve_recipient(engine.store, target_label)
+        if prof is None:
+            return err
+        if prof.key == player.key:
+            return "that's you — pick someone else."
+        recipient = Player(key=prof.key, platform=prof.platform or "local",
+                           name=prof.name or target_label.lstrip("@"))
+
+        # coins: a bare number
+        if what.replace(",", "").isdigit():
+            amount = int(what.replace(",", ""))
+            if amount <= 0:
+                return "gift a positive amount of coins."
+            if amount > 1_000_000:
+                return "that's a lot — keep gifts under 1,000,000 coins."
+            bal = engine.store.get(player.key).coins
+            if bal < amount:
+                return (f"you have {bal} coins — not enough for {amount}. "
+                        f"win games to earn more.")
+            gift = store.create(player.key, player.name, recipient.key,
+                                recipient.name, "coins", str(amount),
+                                amount=amount)
+            return (f"🎁 preview: send {amount} coins to {recipient.name}?\n"
+                    f"you'll have {bal - amount} left.\n"
+                    f"/gift confirm to send · /gift cancel to drop "
+                    f"(expires in 5 min)")
+
+        slug = what.lower()
+        # gear?
+        from ...games.gear import GEAR_CATALOG
+        if slug in GEAR_CATALOG:
+            from ...games.gear import GearStore
+            gs = GearStore(engine.db)
+            inst = gs.find(player.key, slug)
+            if inst is None:
+                return (f"you don't own {slug!r} — /inventory to see "
+                        f"your gear.")
+            gift = store.create(player.key, player.name, recipient.key,
+                                recipient.name, "gear", inst.slug)
+            return (f"🎁 preview: send {inst.display_name()} "
+                    f"({inst.slug}) to {recipient.name}?\n"
+                    f"it will be unequipped and leave your inventory.\n"
+                    f"/gift confirm to send · /gift cancel to drop "
+                    f"(expires in 5 min)")
+
+        # shop item?
+        count = engine.economy.count(player, slug)
+        if count > 0:
+            gift = store.create(player.key, player.name, recipient.key,
+                                recipient.name, "item", slug)
+            item = engine.economy._items.get(slug)
+            label = item.name if item else slug
+            return (f"🎁 preview: send {label} ×1 to {recipient.name}?\n"
+                    f"you'll have {count - 1} left.\n"
+                    f"/gift confirm to send · /gift cancel to drop "
+                    f"(expires in 5 min)")
+
+        return (f"can't gift {what!r} — not coins, not gear you own, not "
+                f"an item you own. /inventory and /game balance to check.")
+
+    def _execute_gift(self, engine: Any, store: Any, gift: Any,
+                      player: Any) -> str:
+        """Run a confirmed gift. Atomic where the stores allow it; the
+        giver is refunded on any mid-transfer failure."""
+        from ...games.players import Player
+        recipient = Player(key=gift.recipient_key,
+                           platform=(gift.recipient_key.partition(":")[0]
+                                     or "local"),
+                           name=gift.recipient_name)
+        giver = Player(key=player.key, platform=player.platform,
+                       name=player.name)
+
+        if gift.kind == "coins":
+            new_bal = engine.store.spend_coins(
+                giver, gift.amount, f"gift:out:{gift.id}")
+            if new_bal is None:
+                store.cancel(player.key)
+                return ("couldn't send — your balance changed. gift "
+                        "cancelled.")
+            try:
+                engine.store.add_coins(
+                    recipient, gift.amount,
+                    f"gift:in:{gift.id}:{giver.name}")
+            except Exception as exc:  # noqa: BLE001
+                engine.store.add_coins(
+                    giver, gift.amount, f"gift:refund:{gift.id}")
+                store.cancel(player.key)
+                return f"transfer failed ({exc}) — refunded."
+            store.mark_done(gift.id)
+            self._notify_gift(recipient, gift, player)
+            return (f"🎁 sent {gift.amount} coins to {gift.recipient_name}! "
+                    f"({new_bal} left)")
+
+        if gift.kind == "gear":
+            from ...games.gear import GearStore
+            gs = GearStore(engine.db)
+            inst = gs.find(player.key, gift.ref)
+            if inst is None:
+                store.cancel(player.key)
+                return ("that gear is gone (sold? broken?) — gift "
+                        "cancelled.")
+            ok, name = gs.transfer(inst.id, recipient.key)
+            if not ok:
+                store.cancel(player.key)
+                return f"transfer failed: {name} — gift cancelled."
+            store.mark_done(gift.id)
+            self._notify_gift(recipient, gift, player)
+            return (f"🎁 sent {name} to {gift.recipient_name}! "
+                    f"it's in their inventory now.")
+
+        # item
+        if not engine.store.consume_item(giver, gift.ref):
+            store.cancel(player.key)
+            return "that item is gone — gift cancelled."
+        try:
+            engine.store.grant_item(recipient, gift.ref)
+        except Exception as exc:  # noqa: BLE001
+            engine.store.grant_item(giver, gift.ref)  # refund
+            store.cancel(player.key)
+            return f"transfer failed ({exc}) — refunded."
+        store.mark_done(gift.id)
+        self._notify_gift(recipient, gift, player)
+        item = engine.economy._items.get(gift.ref)
+        label = item.name if item else gift.ref
+        return f"🎁 sent {label} to {gift.recipient_name}!"
+
+    def _notify_gift(self, recipient: Any, gift: Any, giver: Any) -> None:
+        """Best-effort DM to the recipient: 'you got a gift!'.
+
+        Recipient chat key == player key for DMs (platform:sender).
+        Never raises — a missed ping must not break the gift.
+        """
+        try:
+            chat_key = gift.recipient_key
+            if gift.kind == "coins":
+                what = f"{gift.amount} coins"
+            elif gift.kind == "gear":
+                what = gift.ref
+            else:
+                what = gift.ref
+            self._relay_send(
+                chat_key,
+                f"🎁 {giver.name} sent you a gift: {what}!\n"
+                f"check /game balance or /inventory.")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _control_daily(self, *, player: Any = None) -> str:
         """The daily hunt: /daily shows today's double-XP status."""

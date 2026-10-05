@@ -429,6 +429,34 @@ class GearStore:
         return None
 
     # ── mutations ──────────────────────────────────────────────────────────
+    def transfer(self, instance_id: str,
+                 new_player_key: str) -> tuple[bool, str]:
+        """Move a gear piece to another player (gifting).
+
+        The piece is unequipped first — the recipient equips it
+        themselves with /equip. Atomic single UPDATE.
+        """
+        self._ensure()
+        if self.db is None:
+            return False, "gear storage is unavailable."
+        try:
+            with self.db.transaction():
+                row = self.db.query_one(
+                    "SELECT id, slug FROM game_gear WHERE id = ?",
+                    (instance_id,))
+                if row is None:
+                    return False, "that gear piece no longer exists."
+                self.db.execute(
+                    "UPDATE game_gear SET player_key = ?, equipped = 0 "
+                    "WHERE id = ?",
+                    (new_player_key, instance_id))
+        except Exception as exc:  # noqa: BLE001
+            return False, f"transfer failed: {exc}"
+        defn = GEAR_CATALOG.get(
+            row["slug"] if hasattr(row, "get") else row[1])
+        name = defn.name if defn else "gear"
+        return True, name
+
     def grant(self, player_key: str, slug: str) -> GearInstance:
         """Give the player a fresh piece. Raises KeyError on bad slug."""
         defn = GEAR_CATALOG.get(slug)

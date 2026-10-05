@@ -409,6 +409,42 @@ class RelayDuelTests(unittest.TestCase):
         vroom = self.engine.live(room_info.virtual_chat)
         self.assertLess(vroom.state["fighters"][BOB.key]["hp"], bob_hp)
 
+    def test_status_text_live(self):
+        relay = self.engine.relay
+        inv = relay.create_invite("telegram:111", ADA, "pvp")
+        room_info = relay.accept_invite(inv.code, "telegram:222", BOB)
+        text = relay.status_text("telegram:111")
+        self.assertIsNotNone(text)
+        self.assertIn("pvp", text)
+        self.assertIn("Ada", text)
+        self.assertIn("Bob", text)
+
+    def test_status_text_none(self):
+        relay = self.engine.relay
+        self.assertIsNone(relay.status_text("telegram:999"))
+
+    def test_touch_refreshes_activity(self):
+        import time
+        relay = self.engine.relay
+        inv = relay.create_invite("telegram:111", ADA, "pvp")
+        room_info = relay.accept_invite(inv.code, "telegram:222", BOB)
+        relay.relays[room_info.room_id].last_activity = 0.0
+        relay.touch(room_info.room_id)
+        self.assertGreater(
+            relay.relays[room_info.room_id].last_activity, 0.0)
+
+    def test_rematch_invite(self):
+        relay = self.engine.relay
+        inv = relay.create_invite("telegram:111", ADA, "pvp")
+        room_info = relay.accept_invite(inv.code, "telegram:222", BOB)
+        rematch = relay.rematch_invite("telegram:111")
+        self.assertIsNotNone(rematch)
+        self.assertEqual(rematch.game_name, "pvp")
+        self.assertNotEqual(rematch.code, room_info.room_id)
+        # original relay still intact
+        self.assertIsNotNone(
+            relay.get_relay_for_chat("telegram:111"))
+
     def test_virtual_fanout_lookup(self):
         relay = self.engine.relay
         inv = relay.create_invite("telegram:111", ADA, "pvp")

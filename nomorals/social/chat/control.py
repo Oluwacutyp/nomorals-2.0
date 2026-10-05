@@ -92,6 +92,8 @@ GAME_COMMANDS = (
     "daily",
     # per-game mastery tiers (non-arena depth: ranks, unlocks)
     "mastery",
+    # player-to-player gifting (coins, gear, items — with confirmation)
+    "gift",
 )
 
 #: kind -> (min_args, max_args) — used by /help and by validation.
@@ -157,6 +159,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "stats": (0, 2),       # /stats [<attr> [points]] — RPG attributes
     "daily": (0, 0),       # /daily — today's double-XP hunt
     "mastery": (0, 1),     # /mastery [game] — per-game mastery tiers
+    "gift": (0, 4),         # /gift @name <coins|gear|item> — gifting (2-step confirm)
     # easy
     "wordchain": (0, 0), "hangman": (0, 1), "numberguess": (0, 0),
     "two_truths": (0, 0), "wyrr": (0, 0), "spy": (0, 0), "auction": (0, 0),
@@ -702,6 +705,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/mastery [game]",
                 "example": "/mastery  ·  /mastery sudoku",
                 "related": "game, daily, title"},
+    "gift": {"what": "send coins, gear, or shop items to another player. "
+                     "Two-step with confirmation so nothing moves by "
+                     "accident; gifts expire after 5 minutes.",
+             "usage": "/gift @name <coins|gear|item> · /gift confirm|cancel|history",
+             "example": "/gift @ada 100  ·  /gift @ada katana_rare",
+             "related": "game, inventory, level"},
     "mind": {"what": "the Core Mind — the always-on layer that turns a "
                     "natural-language goal into routed work: research swarm, "
                     "builder, browser, downloader, missions, games, "
@@ -1087,7 +1096,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "title", "stats", "daily", "mastery",
+      "skill", "title", "stats", "daily", "mastery", "gift",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
@@ -1298,7 +1307,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["remember", "recall", "forget", "think", "benchmark"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
-      "skill", "title", "stats", "daily", "mastery",
+      "skill", "title", "stats", "daily", "mastery", "gift",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
       "spy", "auction", "trivia", "mafia", "king", "story", "rpg", "shop",
       "duel", "case", "world", "escape", "political",
@@ -1400,6 +1409,7 @@ LIST_ONELINERS: dict[str, str] = {
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",
     "stats": "RPG attributes — strength/stamina/mana/intelligence (/stats)",
+    "gift": "send coins, gear, or items to another player (/gift @name 100)",
     "mind": "the core mind — routes a natural-language goal to the right organ (inspectable)",
     "wordchain": "word chain — last letter becomes first",
     "hangman": "hangman — guess the word before the board is full",

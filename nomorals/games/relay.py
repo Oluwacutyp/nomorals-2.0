@@ -348,6 +348,89 @@ class GameRelay:
                     return relay
             return None
 
+    # ── status & matchmaking ─────────────────────────────────────────────
+    def status_text(self, chat_key: str) -> str | None:
+        """Human-readable relay status for a chat, or None if no relay.
+
+        Shows the game, both players, whose turn it is (when the
+        engine room is live), idle time, and invite expiry — the
+        connection state at a glance.
+        """
+        with self._lock:
+            code = self.chat_to_relay.get(chat_key)
+            relay = self.relays.get(code) if code else None
+            if relay is None or not relay.active:
+                return None
+            virtual_chat = relay.virtual_chat
+            room_id = relay.room_id
+        room = self.engine.live(virtual_chat)
+        idle_s = int(time.time() - relay.last_activity)
+        idle = (f"{idle_s // 60}m {idle_s % 60}s" if idle_s >= 60
+                else f"{idle_s}s")
+        lines = [
+            f"🔗 relay {room_id} — {relay.game_name}",
+            f"  {relay.player_a.name} ↔ {relay.player_b.name}",
+        ]
+        if room is not None:
+            try:
+                turn = self._turn_line(room, chat_key, relay)
+                if turn:
+                    lines.append(f"  {turn}")
+            except Exception:  # noqa: BLE001
+                pass
+            lines.append(f"  idle {idle} · say /game quit to leave")
+        else:
+            lines.append(
+                f"  ⚠️ game room not live (idle {idle}) — send any move "
+                f"to reconnect, or /game quit to close.")
+        return "\n".join(lines)
+
+    def _turn_line(self, room: Any, chat_key: str,
+                   relay: RelayRoom) -> str:
+        """Whose turn is it, from this chat's perspective."""
+        state = getattr(room, "state", None) or {}
+        # most engine games track the current seat / turn holder
+        turn_key = (state.get("turn") or state.get("current_player")
+                    or state.get("to_move") or "")
+        me = (relay.player_a if chat_key == relay.chat_a
+              else relay.player_b)
+        foe = (relay.player_b if chat_key == relay.chat_a
+               else relay.player_a)
+        if turn_key and me.key and turn_key == me.key:
+            return "🎯 your turn — send your move."
+        if turn_key and foe.key and turn_key == foe.key:
+            return f"⏳ {foe.name}'s turn — waiting on them."
+        return ""
+
+    def touch(self, code: str) -> None:
+        """Heartbeat: mark a relay active (called on any successful
+        move or status check)."""
+        with self._lock:
+            relay = self.relays.get(code)
+            if relay is not None and relay.active:
+                relay.last_activity = time.time()
+                self._save_relay(relay)
+
+    def rematch_invite(self, chat_key: str) -> GameInvite | None:
+        """Fresh invite for the same game + opponent — one-tap rematch
+        after a duel ends or someone disconnects."""
+        with self._lock:
+            code = self.chat_to_relay.get(chat_key)
+            relay = self.relays.get(code) if code else None
+            if relay is None:
+                return None
+            me = (relay.player_a if chat_key == relay.chat_a
+                  else relay.player_b)
+            foe = (relay.player_b if chat_key == relay.chat_a
+                   else relay.player_a)
+        # create_invite takes the relay lock itself — do it outside
+        try:
+            return self.create_invite(
+                chat_key, me, relay.game_name,
+                to_label=foe.name)
+        except ValueError:
+            return None
+
     def close_relay(self, room_id: str, reason: str = "") -> None:
         with self._lock:
             self._close_locked(room_id, reason=reason)
