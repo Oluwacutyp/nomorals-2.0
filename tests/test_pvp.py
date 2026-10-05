@@ -455,5 +455,64 @@ class RelayDuelTests(unittest.TestCase):
         self.assertIsNone(relay.get_relay_for_virtual("relay:nope"))
 
 
+class MoveIntentTests(unittest.TestCase):
+    """Casual chat during a duel must not trigger game responses."""
+
+    def setUp(self):
+        self.engine, self.db, self.sent = make_engine()
+
+    def tearDown(self):
+        self.engine.shutdown()
+
+    def test_combat_verbs_are_moves(self):
+        from nomorals.games.games.pvp import DuelGame
+        game = DuelGame()
+        for verb in ("attack", "focus", "fury", "defend", "potion",
+                     "item shield", "skill fireball", "combo a + b",
+                     "Attack", "  FURY  "):
+            self.assertTrue(game.is_move_text(verb), verb)
+
+    def test_chat_is_not_a_move(self):
+        from nomorals.games.games.pvp import DuelGame
+        game = DuelGame()
+        for chat in ("say that again? i spaced",
+                     "brain's buffering, one sec",
+                     "that lands. go on",
+                     "noted. and i mean that in a good way",
+                     "hello", ""):
+            self.assertFalse(game.is_move_text(chat), chat)
+
+    def test_base_default_is_permissive(self):
+        from nomorals.games.games.base import MultiGame
+        self.assertTrue(MultiGame().is_move_text("anything at all"))
+
+    def test_chat_while_waiting_stays_silent(self):
+        relay = self.engine.relay
+        inv = relay.create_invite("telegram:111", ADA, "pvp")
+        room_info = relay.accept_invite(inv.code, "telegram:222", BOB)
+        # Bob's turn is not now — casual chat gets silence, not
+        # "waiting on" spam
+        out = self.engine.move(room_info.virtual_chat,
+                               "say that again? i spaced", BOB)
+        self.assertEqual(out, [])
+        # ...but a real move attempt still gets the nudge
+        out = self.engine.move(room_info.virtual_chat, "attack", BOB)
+        self.assertTrue(any("waiting on" in m for m in out))
+
+    def test_lobby_nudges_capped(self):
+        from nomorals.games.games.pvp import DuelGame
+        game = DuelGame()
+        # start a pvp lobby with only Ada — never becomes ready
+        self.engine.start("telegram:111", "pvp", ADA)
+        vroom = self.engine.live("telegram:111")
+        self.assertIsNotNone(vroom)
+        # 5 timeouts → only 3 "still waiting" messages, then quiet
+        nudges = 0
+        for _ in range(5):
+            out = game.on_timeout(vroom, ADA, self.engine._mind)
+            nudges += sum("still waiting" in m for m in out)
+        self.assertEqual(nudges, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,6 +55,22 @@ class _ArenaCombat:
         gear_wear / consumed / gear_equipped: engine shapes (per player key)
     """
 
+    #: first words that count as a combat move attempt. Used by
+    #: ``is_move_text`` so casual chat during a duel ("say that again?")
+    #: falls through to normal conversation instead of triggering
+    #: "waiting on X" spam.
+    MOVE_VERBS = frozenset({
+        "attack", "focus", "fury", "defend", "potion",
+        "item", "skill", "combo",
+    })
+
+    def is_move_text(self, text: str) -> bool:
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        first = t.split(None, 1)[0]
+        return first in self.MOVE_VERBS
+
     # ── fighter construction ──────────────────────────────────────────
     def _build_fighter(self, room: Room, player: Player) -> dict[str, Any]:
         """Build one human's fighter from the engine mirrors
@@ -481,7 +497,13 @@ class DuelGame(_ArenaCombat, MultiGame):
         s = room.state
         if not self._ready(room) or s.get("done"):
             room.advance_turn()
-            return ["the duel lobby is still waiting."]
+            # don't ping an empty lobby forever — 3 nudges, then quiet.
+            # the lobby stays open; anyone can still /game join.
+            nudges = int(s.get("lobby_nudges", 0)) + 1
+            s["lobby_nudges"] = nudges
+            if nudges <= 3:
+                return ["the duel lobby is still waiting."]
+            return []
         foe = next(p for p in room.humans if p.key != player.key)
         misses = int(s["misses"].get(player.key, 0)) + 1
         s["misses"][player.key] = misses

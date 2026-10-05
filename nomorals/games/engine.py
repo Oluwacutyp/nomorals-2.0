@@ -757,8 +757,16 @@ class GameEngine:
         if not self._is_turn(room, sender):
             cur = room.current
             if room.kind == "group" and cur is not None and not cur.is_ai:
-                return [f"waiting on {cur.name} — your move goes in after "
-                        "theirs. (/pass /status /help)"]
+                # only nudge when the text looks like a move attempt —
+                # casual chat ("say that again?") stays silent instead
+                # of spamming "waiting on X"
+                try:
+                    if game.is_move_text(text):
+                        return [f"waiting on {cur.name} — your move goes in after "
+                                "theirs. (/pass /status /help)"]
+                except Exception:  # noqa: BLE001 - a bad hook never breaks chat
+                    pass
+                return []
             return []
         out: list[str] = []
         try:

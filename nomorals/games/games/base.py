@@ -225,6 +225,19 @@ class MultiGame:
         game doesn't take one."""
         return normalize_difficulty(room.state.get("difficulty"))
 
+    def is_move_text(self, text: str) -> bool:
+        """Does this plain-text message look like a game move?
+
+        Used by the relay/router to decide whether non-command text
+        should be swallowed by the game engine or fall through to
+        normal chat. Default is True (every message is a potential
+        move — the historical behavior). Games with a fixed move
+        vocabulary (combat games, etc.) should override this so
+        casual chat like "say that again?" doesn't trigger
+        "waiting on X" spam while it's not your turn.
+        """
+        return True
+
     # ── lifecycle ───────────────────────────────────────────────────────────
     def new_state(self, rng: random.Random, **kw: Any) -> dict[str, Any]:
         # kw carries engine-level options (e.g. daily=True); games that

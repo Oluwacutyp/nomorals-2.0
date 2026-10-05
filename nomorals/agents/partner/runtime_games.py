@@ -928,6 +928,34 @@ class RuntimeGamesMixin:
             return describe_game_mastery(engine.db, player.key, game.name)
         return describe_mastery(engine.db, player.key, player.name)
 
+    def _is_relay_move(self, relay_room: Any, text: str) -> bool:
+        """Does this message belong to the relayed game?
+
+        Slash engine commands (/pass /status /help …) always go
+        through. Plain text only goes through when the relay's game
+        recognizes it as a move attempt — casual chat falls through
+        to the normal conversation flow instead of triggering
+        "waiting on X" spam.
+        """
+        t = (text or "").strip()
+        if not t:
+            return False
+        if t.startswith("/"):
+            from ...games.games.base import parse_command
+            cmd, _rest = parse_command(t)
+            # /game is the control plane; anything else slash-prefixed
+            # is an engine command worth forwarding (the engine itself
+            # ignores what it doesn't understand)
+            return cmd not in ("", "game")
+        try:
+            engine = self._game_engine()
+            game = engine.games.get(relay_room.game_name)
+            if game is not None:
+                return bool(game.is_move_text(t))
+        except Exception:  # noqa: BLE001 - never break chat on a lookup
+            pass
+        return True
+
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.
@@ -947,6 +975,12 @@ class RuntimeGamesMixin:
             relay = self._game_relay()
             relay_room = relay.get_relay_for_chat(chat_key)
             if relay_room is not None and player is not None:
+                # Only game moves and engine commands go through the
+                # relay. Casual chat ("say that again?") falls through
+                # to normal conversation — otherwise every message
+                # while it's not your turn spams "waiting on X".
+                if not self._is_relay_move(relay_room, text):
+                    return None
                 # route through the virtual room; the reply goes back to
                 # this chat via the normal path, the opponent gets theirs
                 # on their own platform
