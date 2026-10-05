@@ -56,6 +56,18 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
           f"integrity {health['database']['integrity']}")
     print()
     print(report_as_text(report))
+    # Surface tool modules that failed to register — a broken tool must
+    # never vanish invisibly.
+    try:
+        from ...tools.registry import ToolRegistry
+        _probe = ToolRegistry().register_builtins()
+        _failed = _probe.failed_modules()
+        if _failed:
+            print(f"\n{len(_failed)} tool module(s) failed to register:")
+            for entry in _failed:
+                print(f"  ✗ {entry['module']}: {entry['error']}")
+    except Exception:  # noqa: BLE001 — doctor must always report
+        pass
     return 0
 
 

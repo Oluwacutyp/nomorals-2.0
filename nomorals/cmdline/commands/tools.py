@@ -18,4 +18,11 @@ def _cmd_tools(args: argparse.Namespace, context: Any) -> int:
         print(f"{schema['name']:<20} [{schema['capability'] or '-'}]  {schema['description']}")
         if params:
             print(f"{'':<20} ({params})")
+    # Surface tool modules that failed to register — a broken tool must
+    # never vanish invisibly.
+    failed = tools.failed_modules()
+    if failed:
+        print(f"\n{len(failed)} tool module(s) failed to register:")
+        for entry in failed:
+            print(f"  ✗ {entry['module']}: {entry['error']}")
     return 0

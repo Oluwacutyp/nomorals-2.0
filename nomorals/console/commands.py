@@ -13,16 +13,16 @@ from typing import Any, Callable
 
 from .banner import tip_of_the_day
 from .dashboard import render_dashboard, render_status_line
-from .palette import ACCENT, BOLD, CYAN, DIM, GREEN, TITLE, paint, supports_color
+from .palette import ACCENT, BOLD, CYAN, DIM, GREEN, TITLE, paint
 from .themes import get_theme, list_themes, theme_name
-from .widgets import LiveScreen
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
 _CLEAR_SEQ = "\033[2J\033[H"
 
 _HELP_TEXT = """console commands (local terminal only):
-  dashboard [--watch [secs]]   full status · live auto-refresh with --watch
+  dashboard [--watch [secs]]   full status · live split-pane with --watch
+                               (in watch: 1=status 2=games 3=jobs 4=brain, q=quit)
   status          one-line compact status
   jobs            scheduled background jobs and next run times
   theme [name]    show/switch palette (ocean · violet · sunrise)
@@ -79,28 +79,11 @@ class ConsoleCommands:
             return {}
 
     def _watch(self, interval: float) -> str:
-        """Blocking live dashboard. Ctrl-C exits back to the prompt."""
-        if not supports_color():
-            return paint(
-                "watch mode needs a real terminal (colors off) — "
-                "type 'dashboard' for a static snapshot instead.",
-                DIM,
-            )
-        screen = LiveScreen(interval=interval)
-        header = paint(
-            f"live dashboard — refreshing every {interval:g}s · Ctrl-C to exit",
-            DIM,
-        )
-        try:
-            with screen:
-                # First frame immediately.
-                screen.draw(header + "\n" + render_dashboard(self._safe_snapshot()))
-                while screen.tick():
-                    screen.draw(header + "\n" + render_dashboard(self._safe_snapshot()))
-        except KeyboardInterrupt:
-            # Ctrl-C is the documented way out of watch mode.
-            screen.stop()
-        return paint("exited live dashboard", DIM)
+        """Blocking split-pane live dashboard. Keys: 1-4 views, q quits."""
+        from .widgets import GodScreen
+
+        screen = GodScreen(interval=interval, snapshot=self._safe_snapshot)
+        return screen.run()
 
     def _handle_theme(self, args: list[str]) -> str:
         if not args:

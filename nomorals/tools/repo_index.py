@@ -867,12 +867,29 @@ _INDEX_CACHE: dict[str, RepoIndex] = {}
 
 
 def get_repo_index(root: str | Path) -> RepoIndex:
-    """Return the cached :class:`RepoIndex` for ``root``, building on demand."""
+    """Return the cached :class:`RepoIndex` for ``root``, building on demand.
+
+    Automatically refreshes stale files: before returning the cached index,
+    checks mtimes and re-parses any files that changed since indexing.
+    This keeps symbol search correct in long-lived processes that edit
+    code (e.g. via edit_loop) — no opt-in refresh() call needed.
+    """
     key = str(Path(root).expanduser().resolve())
     idx = _INDEX_CACHE.get(key)
     if idx is None:
         idx = RepoIndex(key)
         _INDEX_CACHE[key] = idx
+        return idx
+    # Auto-refresh: re-parse files that changed since indexing.
+    try:
+        stale = idx.stale()
+        if stale:
+            refreshed = idx.refresh(stale)
+            if refreshed:
+                _log.debug("repo index auto-refresh for %s: %d file(s) re-parsed",
+                           key, len(refreshed))
+    except Exception as exc:  # noqa: BLE001 — a refresh failure must not break callers
+        _log.debug("repo index auto-refresh failed for %s: %s", key, exc)
     return idx
 
 

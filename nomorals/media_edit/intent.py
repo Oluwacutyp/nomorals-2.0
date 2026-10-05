@@ -111,7 +111,35 @@ def _gen_intent(text: str, instruction: str) -> ParsedIntent | None:
 # image intents
 # ---------------------------------------------------------------------------
 
+
+def _merge_enhance_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive ``enhance`` ops into one.
+
+    "make it brighter and increase contrast" produces two enhance ops;
+    merging them avoids running the enhance pipeline twice.  Non-enhance
+    ops pass through untouched, and enhance ops separated by other ops
+    are NOT merged (order matters: e.g. enhance → crop → enhance).
+    """
+    out: list[dict[str, Any]] = []
+    for op in ops:
+        if op.get("op") == "enhance" and out and out[-1].get("op") == "enhance":
+            merged = dict(out[-1])
+            merged.update({k: v for k, v in op.items() if k != "op"})
+            out[-1] = merged
+        else:
+            out.append(op)
+    return out
+
+
 def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
+    """Match mechanical image intents, collecting ALL that apply.
+
+    Compound instructions like "make it brighter and crop to square" now
+    produce a single op chain with every matched intent, in pattern order.
+    Previously only the first match was returned and the rest were silently
+    dropped.
+    """
+    hits: list[tuple[list[dict[str, Any]], str]] = []  # (ops, summary)
     # 1. square (instagram default 1080)
     if re.search(r"\bsquare\b", text):
         size = 1080 if "insta" in text else None
@@ -120,78 +148,59 @@ def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
         if size:
             ops.append({"op": "resize", "width": size, "height": size,
                         "mode": "exact"})
-        return ParsedIntent(kind="image", ops=ops,
-                            summary=f"square crop"
-                            + (f" at {size}x{size}" if size else ""))
+        hits.append((ops, f"square crop" + (f" at {size}x{size}" if size else "")))
     # 2. resize: "resize to 1080", "resize to 1920x1080", "resize to 720p"
     m = re.search(r"resize to (\d+)\s*x\s*(\d+)", text)
     if m:
         w, h = int(m.group(1)), int(m.group(2))
-        return ParsedIntent(kind="image", ops=[{"op": "resize", "width": w,
-                                                "height": h, "mode": "exact"}],
-                            summary=f"resize to {w}x{h}")
+        hits.append(([{"op": "resize", "width": w,
+                                                "height": h, "mode": "exact"}], f"resize to {w}x{h}"))
     m = re.search(r"resize to (\d+)\s*p\b", text)
     if m:
         h = int(m.group(1))
-        return ParsedIntent(kind="image", ops=[{"op": "resize", "width": h,
-                                                "height": h, "mode": "fit"}],
-                            summary=f"resize to {h}p (fit)")
+        hits.append(([{"op": "resize", "width": h,
+                                                "height": h, "mode": "fit"}], f"resize to {h}p (fit)"))
     m = re.search(r"resize to (\d{2,5})\b", text)
     if m:
         n = int(m.group(1))
-        return ParsedIntent(kind="image", ops=[{"op": "resize", "width": n,
-                                                "height": n, "mode": "fit"}],
-                            summary=f"resize to fit {n}x{n}")
+        hits.append(([{"op": "resize", "width": n,
+                                                "height": n, "mode": "fit"}], f"resize to fit {n}x{n}"))
     # 3. convert
     m = re.search(r"convert to (png|jpe?g|webp|avif|bmp|tiff?)", text)
     if m:
         fmt = m.group(1).upper().replace("JPG", "JPEG")
-        return ParsedIntent(kind="image", ops=[{"op": "convert", "format": fmt}],
-                            summary=f"convert to {fmt}")
+        hits.append(([{"op": "convert", "format": fmt}], f"convert to {fmt}"))
     # 4. watermark
     m = re.search(r"watermark with (\S+)", text)
     if m:
         logo = m.group(1).strip("'\"")
-        return ParsedIntent(kind="image", ops=[{"op": "watermark",
-                                                "logo": logo}],
-                            summary=f"watermark with {logo}")
+        hits.append(([{"op": "watermark",
+                                                "logo": logo}], f"watermark with {logo}"))
     # 5. rotate
     m = re.search(r"rotate (?:by )?(\d+)(?:\s*deg(?:rees)?)?", text)
     if m:
         angle = float(m.group(1))
-        return ParsedIntent(kind="image", ops=[{"op": "rotate",
-                                                "angle": angle}],
-                            summary=f"rotate {angle:g}°")
+        hits.append(([{"op": "rotate",
+                                                "angle": angle}], f"rotate {angle:g}°"))
     if re.search(r"rotate left", text):
-        return ParsedIntent(kind="image", ops=[{"op": "rotate", "angle": 90}],
-                            summary="rotate 90° left")
+        hits.append(([{"op": "rotate", "angle": 90}], "rotate 90° left"))
     if re.search(r"rotate right", text):
-        return ParsedIntent(kind="image", ops=[{"op": "rotate", "angle": -90}],
-                            summary="rotate 90° right")
+        hits.append(([{"op": "rotate", "angle": -90}], "rotate 90° right"))
     # 6. grayscale
     if re.search(r"gr[ae]yscale|black[ -]?and[ -]?white|\bb\s*&\s*w\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "grayscale": True}],
-                            summary="grayscale")
+        hits.append(([{"op": "enhance", "grayscale": True}], "grayscale"))
     # 7. brightness
-    if re.search(r"\bbrighten\b|increase brightness", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "brightness": 1.25}],
-                            summary="brighten")
-    if re.search(r"\bdarken\b|decrease brightness", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "brightness": 0.8}],
-                            summary="darken")
+    if re.search(r"\bbrighten\b|\bbrighter\b|increase brightness", text):
+        hits.append(([{"op": "enhance", "brightness": 1.25}], "brighten"))
+    if re.search(r"\bdarken\b|\bdarker\b|decrease brightness", text):
+        hits.append(([{"op": "enhance", "brightness": 0.8}], "darken"))
     # 8. circle/highlight the <thing> — needs vision locate at run time
     m = re.search(r"(?:circle|highlight|mark|point at|point out|ring) the (.+)",
                   text)
     if m:
         thing = m.group(1).strip().rstrip(".")
-        return ParsedIntent(
-            kind="image",
-            ops=[{"op": "annotate_shape", "shape": "circle",
-                  "locate": thing, "outline": "red", "width": 4}],
-            summary=f"circle the {thing} (vision locate)")
+        hits.append(([{"op": "annotate_shape", "shape": "circle",
+                  "locate": thing, "outline": "red", "width": 4}], f"circle the {thing} (vision locate)"))
     # 9. add text / caption
     m = re.search(r"(?:add\s+)?text\s+[\"'](.+?)[\"']", text)
     if not m:
@@ -201,60 +210,42 @@ def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
     if m:
         caption = m.group(1).strip().strip("\"'")
         pos = "top" if text.startswith("top") else "bottom"
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "annotate_text", "text": caption,
-                                  "position": pos}],
-                            summary=f"text overlay: {caption!r}")
+        hits.append(([{"op": "annotate_text", "text": caption,
+                                  "position": pos}], f"text overlay: {caption!r}"))
     # 10. thumbnail
     if re.search(r"\bthumbnail\b", text):
         m2 = re.search(r"(\d{2,4})\s*(?:px)?\s*thumbnail|thumbnail\s*(\d{2,4})",
                        text)
         size = int(m2.group(1) or m2.group(2)) if m2 else 256
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "thumbnail", "size": size}],
-                            summary=f"{size}px thumbnail")
+        hits.append(([{"op": "thumbnail", "size": size}], f"{size}px thumbnail"))
     # 11. flip
     m = re.search(r"flip (horizontal|vertical)", text)
     if m:
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "flip",
-                                  "direction": m.group(1)}],
-                            summary=f"flip {m.group(1)}")
+        hits.append(([{"op": "flip",
+                                  "direction": m.group(1)}], f"flip {m.group(1)}"))
     # 12. sharpen
     if re.search(r"\bsharpen\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "sharpness": 1.8}],
-                            summary="sharpen")
+        hits.append(([{"op": "enhance", "sharpness": 1.8}], "sharpen"))
     # 13. crop to aspect (not "smart crop", which is a studio intent below)
     m = re.search(r"(?<!smart )crop to (\d+\s*:\s*\d+)", text)
     if m:
         aspect = m.group(1).replace(" ", "")
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "crop", "aspect": aspect,
-                                  "anchor": "center"}],
-                            summary=f"crop to {aspect}")
+        hits.append(([{"op": "crop", "aspect": aspect,
+                                  "anchor": "center"}], f"crop to {aspect}"))
     # 14. meme
     m = re.search(r"meme.*?top\s*[:\-]\s*(.+?)\s+bottom\s*[:\-]\s*(.+)",
                   text)
     if m:
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "meme", "top": m.group(1).strip(),
-                                  "bottom": m.group(2).strip()}],
-                            summary="meme caption")
+        hits.append(([{"op": "meme", "top": m.group(1).strip(),
+                                  "bottom": m.group(2).strip()}], "meme caption"))
     # 15. auto contrast / enhance
     if re.search(r"auto[ -]?contrast|auto[ -]?enhance|\benhance\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "autocontrast": True}],
-                            summary="auto contrast")
+        hits.append(([{"op": "enhance", "autocontrast": True}], "auto contrast"))
     # 16. contrast up/down
     if re.search(r"increase contrast", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "contrast": 1.3}],
-                            summary="more contrast")
+        hits.append(([{"op": "enhance", "contrast": 1.3}], "more contrast"))
     if re.search(r"decrease contrast", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "enhance", "contrast": 0.7}],
-                            summary="less contrast")
+        hits.append(([{"op": "enhance", "contrast": 0.7}], "less contrast"))
     # -- studio mechanical intents (lazy import registers the studio ops) --
     from . import studio as _studio  # noqa: F401
     # 17. filter presets: "cinematic look", "apply vintage filter"
@@ -262,58 +253,59 @@ def _parse_image(text: str, raw: str | None = None) -> ParsedIntent | None:
                   r"teal-orange|noir|golden-hour|cool-matte|warm-fade)\b",
                   text)
     if m and re.search(r"look|filter|style|preset|apply|make it|give it", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "filter", "preset": m.group(1),
-                                  "strength": 1.0}],
-                            summary=f"filter: {m.group(1)}")
+        hits.append(([{"op": "filter", "preset": m.group(1),
+                                  "strength": 1.0}], f"filter: {m.group(1)}"))
     # 18. quick grades: warmer / cooler / moodier / more vivid
     if re.search(r"\bwarmer\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "grade", "temperature": 800}],
-                            summary="grade: warmer")
+        hits.append(([{"op": "grade", "temperature": 800}], "grade: warmer"))
     if re.search(r"\bcooler\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "grade", "temperature": -800}],
-                            summary="grade: cooler")
+        hits.append(([{"op": "grade", "temperature": -800}], "grade: cooler"))
     if re.search(r"\bmoodier\b|\bmoodier look\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "grade", "vignette": 0.6,
-                                  "lift": [-0.04, -0.04, -0.04]}],
-                            summary="grade: moodier")
+        hits.append(([{"op": "grade", "vignette": 0.6,
+                                  "lift": [-0.04, -0.04, -0.04]}], "grade: moodier"))
     if re.search(r"\bmore vivid\b|\bmore vibrant\b", text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "grade", "vibrance": 0.5,
-                                  "saturation": 1.2}],
-                            summary="grade: more vivid")
+        hits.append(([{"op": "grade", "vibrance": 0.5,
+                                  "saturation": 1.2}], "grade: more vivid"))
     # 19. letterbox: "letterbox", "cinematic bars", "anamorphic"
     if re.search(r"letterbox|cinematic bars|anamorphic|\b2\.39:1\b|\b21:9\b",
                  text):
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "letterbox", "aspect": "21:9",
-                                  "color": "black"}],
-                            summary="letterbox 21:9")
+        hits.append(([{"op": "letterbox", "aspect": "21:9",
+                                  "color": "black"}], "letterbox 21:9"))
     # 20. smart crop / reframe to an aspect
     m = re.search(r"(?:smart[ -]?crop|reframe)(?:\s+to)?\s+"
                   r"(\d+(?:\.\d+)?\s*[:x]\s*\d+(?:\.\d+)?)", text)
     if m:
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "smart_crop",
+        hits.append(([{"op": "smart_crop",
                                   "aspect": m.group(1).replace(" ", ""),
-                                  "mode": "saliency"}],
-                            summary=f"smart crop {m.group(1)}")
+                                  "mode": "saliency"}], f"smart crop {m.group(1)}"))
     # 21. title text: "title: My Day"
     m = re.search(r"^title\s*:\s*(.+)$", text)
     if m:
-        return ParsedIntent(kind="image",
-                            ops=[{"op": "text_layer", "text": m.group(1),
+        hits.append(([{"op": "text_layer", "text": m.group(1),
                                   "position": "top", "size": 72,
                                   "color": "white", "stroke_width": 3,
-                                  "shadow": True, "margin": 40}],
-                            summary=f"title: {m.group(1)}")
+                                  "shadow": True, "margin": 40}], f"title: {m.group(1)}"))
     # -- generative (AI instruction) edits --------------------------------
     # These come AFTER every mechanical intent so "make it square",
     # "make a thumbnail", "add text ..." etc. never land here.
     from . import generate as _generate  # noqa: F401
+    # Combine all matched mechanical intents into one op chain.
+    # Generative (AI) intents are only tried when NO mechanical intent
+    # matched — mixing them would send the mechanical phrasing to the
+    # generative backend.
+    if hits:
+        all_ops: list[dict[str, Any]] = []
+        summaries: list[str] = []
+        for ops, summary in hits:
+            all_ops.extend(ops)
+            summaries.append(summary)
+        # Merge adjacent enhance ops (brightness + contrast + etc.) into
+        # one op so the pipeline doesn't run enhance 3 times.
+        all_ops = _merge_enhance_ops(all_ops)
+        return ParsedIntent(
+            kind="image",
+            ops=all_ops,
+            summary=" + ".join(summaries))
     gen = _gen_intent(text, raw or text)
     if gen is not None:
         return gen

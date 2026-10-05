@@ -102,7 +102,12 @@ class ToolRegistry:
         """Wire up the standard tool set. Imports are deferred per tool."""
         if self._builtin_registered:
             return self
-        
+
+        # Modules that failed to import/register, with the error.  Surfaced
+        # via failed_modules(), `nm tools`, and `nm doctor` — a broken tool
+        # must never vanish invisibly.
+        self._failed_modules: list[dict[str, str]] = []
+
         # Import and register each tool module SEPARATELY.  A single batched
         # `from . import (…)` made every builtin sink whenever ANY one tool's
         # optional dependency was missing; per-module import + register keeps
@@ -134,7 +139,16 @@ class ToolRegistry:
             try:
                 _module = _importlib.import_module(f".{_name}", __package__)
                 _module.register(self)
-            except Exception:  # noqa: BLE001 — one broken tool is not all of them
+            except Exception as exc:  # noqa: BLE001 — one broken tool is not all of them
+                # A broken tool module must NEVER vanish invisibly.  Log it
+                # with the module name and the exception so `nm tools` and
+                # `nm doctor` can surface it.
+                _log.warning("tool module %r failed to register: %s: %s",
+                             _name, type(exc).__name__, exc)
+                self._failed_modules.append({
+                    "module": _name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
                 continue
         
         # Custom tools authored by the tool creator (toolmaker.install drops
@@ -145,8 +159,13 @@ class ToolRegistry:
         try:
             from ..books import tools as _books
             _books.register(self)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("tool module 'books' failed to register: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "books",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video
@@ -155,15 +174,31 @@ class ToolRegistry:
             for _mod in (_music, _playback, _library, _video):
                 try:
                     _mod.register(self)
-                except Exception:  # noqa: BLE001 — module-level opt-out
-                    pass
-        except Exception:  # noqa: BLE001
-            pass
+                except Exception as exc:  # noqa: BLE001 — module-level opt-out
+                    _log.warning("media tool module %r failed to register: %s: %s",
+                                 getattr(_mod, "__name__", _mod),
+                                 type(exc).__name__, exc)
+                    self._failed_modules.append({
+                        "module": getattr(_mod, "__name__", str(_mod)),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("media tool package failed to import: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "media",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
 
         try:
             self._load_custom_tools()
-        except Exception:  # noqa: BLE001 — a bad custom tool never sinks builtins
-            pass
+        except Exception as exc:  # noqa: BLE001 — a bad custom tool never sinks builtins
+            _log.warning("custom tool loading failed: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "custom",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
 
         self._builtin_registered = True
         return self
@@ -184,8 +219,24 @@ class ToolRegistry:
                 hook = getattr(module, "register", None)
                 if hook is not None:
                     hook(self)
-            except Exception:  # noqa: BLE001 — skip a broken custom tool
-                pass
+            except Exception as exc:  # noqa: BLE001 — skip a broken custom tool
+                _log.warning("custom tool %r failed to register: %s: %s",
+                             info.name, type(exc).__name__, exc)
+                if not hasattr(self, "_failed_modules"):
+                    self._failed_modules = []
+                self._failed_modules.append({
+                    "module": f"custom.{info.name}",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+    def failed_modules(self) -> list[dict[str, str]]:
+        """Modules that failed to register during ``register_builtins()``.
+
+        Each entry is ``{"module": name, "error": "ExcType: message"}``.
+        Empty when everything registered cleanly.  Surfaced by `nm tools`
+        and `nm doctor` so a broken tool never vanishes invisibly.
+        """
+        return list(getattr(self, "_failed_modules", []))
 
     def unregister(self, name: str) -> bool:
         return self._tools.pop(name, None) is not None

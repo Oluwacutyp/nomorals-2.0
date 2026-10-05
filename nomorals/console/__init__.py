@@ -8,22 +8,54 @@ from __future__ import annotations
 
 from .banner import render_banner, tip_of_the_day
 from .commands import ConsoleCommands
-from .dashboard import render_dashboard, render_status_line
+from .dashboard import (
+    render_dashboard,
+    render_games_view,
+    render_llm_view,
+    render_scheduler_view,
+    render_status_line,
+    render_statusbar,
+    render_view,
+)
 from .palette import paint, strip_ansi, supports_color
 from .themes import get_theme, list_themes, theme_name
-from .widgets import LiveScreen, ProgressBar, format_message_card, sparkline
+from .widgets import (
+    GodScreen,
+    LiveScreen,
+    MessageEvent,
+    MessageFeed,
+    ProgressBar,
+    WatchHub,
+    barchart,
+    format_feed_line,
+    format_message_card,
+    gradient_text,
+    sparkline,
+)
 
 __all__ = [
     "ConsoleCommands",
+    "GodScreen",
     "LiveScreen",
+    "MessageEvent",
+    "MessageFeed",
     "ProgressBar",
+    "WatchHub",
+    "barchart",
+    "format_feed_line",
     "format_message_card",
     "get_theme",
+    "gradient_text",
     "list_themes",
     "paint",
     "render_banner",
     "render_dashboard",
+    "render_games_view",
+    "render_llm_view",
+    "render_scheduler_view",
     "render_status_line",
+    "render_statusbar",
+    "render_view",
     "sparkline",
     "strip_ansi",
     "supports_color",

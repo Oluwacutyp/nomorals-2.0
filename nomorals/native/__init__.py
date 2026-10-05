@@ -170,6 +170,12 @@ def _load_one(slot: str) -> ctypes.CDLL | None | _NotGiven:
     target = _HERE / _lib_name({"vec": "libvecsim", "mlp": "libmlptrain",
                                 "bpe": "libbpe", "mem": "libmemextract"}[slot])
     if not target.exists():
+        # LOUD fallback: the .so isn't built (common on Termux/aarch64
+        # where the shipped .so is x86-64-only).  Log at INFO so operators
+        # see it in normal startup logs, not buried in debug.
+        _log.info("native %s not built (%s missing) — using pure-Python "
+                  "fallback (no acceleration). Run `nm native --build` "
+                  "to compile for this machine.", slot, target.name)
         value: ctypes.CDLL | None | _NotGiven = None
     else:
         try:
