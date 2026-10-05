@@ -995,12 +995,20 @@ class Leaderboard:
     def __init__(self, store: PlayerStore) -> None:
         self.store = store
 
-    def top(self, limit: int = 10, *, game: str = "") -> list[dict[str, Any]]:
+    def top(self, limit: int = 10, *, game: str = "",
+            name_overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        """Top players by points.
+
+        ``name_overrides`` maps player_key -> live display name, used to
+        prefer the live sender name over a stale stored DB name (same
+        pattern as ``_profile_line``'s display_name override).
+        """
         profiles = self.store.all(limit=500)
+        overrides = name_overrides or {}
         if game:
             rows = [
                 {
-                    "name": p.name or p.key.split(":", 1)[-1],
+                    "name": overrides.get(p.key) or p.name or p.key.split(":", 1)[-1],
                     "platform": p.platform,
                     "wins": p.per_game.get(game, {}).get("wins", 0),
                     "points": p.per_game.get(game, {}).get("points", 0),
@@ -1013,7 +1021,7 @@ class Leaderboard:
             return rows[:limit]
         rows = [
             {
-                "name": p.name or p.key.split(":", 1)[-1],
+                "name": overrides.get(p.key) or p.name or p.key.split(":", 1)[-1],
                 "platform": p.platform,
                 "points": p.points,
                 "wins": p.wins,
@@ -1028,8 +1036,9 @@ class Leaderboard:
                   reverse=True)
         return rows[:limit]
 
-    def render(self, limit: int = 10, *, game: str = "") -> str:
-        rows = self.top(limit, game=game)
+    def render(self, limit: int = 10, *, game: str = "",
+               name_overrides: dict[str, str] | None = None) -> str:
+        rows = self.top(limit, game=game, name_overrides=name_overrides)
         if not rows:
             return "the board is empty — play a game first."
         title = f"🏆 leaderboard — {game}" if game else "🏆 leaderboard"

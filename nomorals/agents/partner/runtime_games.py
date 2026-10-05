@@ -102,7 +102,14 @@ class RuntimeGamesMixin:
             return "\n".join(msgs)
         if verb in {"leaderboard", "board", "ranks"}:
             game = parts[1].lower() if len(parts) > 1 else ""
-            return engine.board.render(10, game=game)
+            # Prefer the live sender name over the stale stored DB name for
+            # the requester's own row (same pattern as _profile_line).
+            overrides: dict[str, str] = {}
+            if player is not None:
+                live = (getattr(player, "name", "") or "").strip()
+                if live:
+                    overrides[player.key] = live
+            return engine.board.render(10, game=game, name_overrides=overrides)
         if verb == "stats":
             want = " ".join(parts[1:]).strip().lower()
             if want:

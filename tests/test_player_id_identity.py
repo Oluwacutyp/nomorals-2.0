@@ -343,3 +343,52 @@ class ProfileLineDisplayNameTests(unittest.TestCase):
         )
         line = RuntimeGamesMixin._profile_line(prof)
         self.assertIn("chfjdhx", line)
+
+
+class LeaderboardNameOverrideTests(unittest.TestCase):
+    """Leaderboard prefers live sender names via name_overrides."""
+
+    def _make_board_with(self, entries):
+        """entries: list of (key, name, games_played, points)."""
+        from nomorals.games.players import PlayerStore, Leaderboard
+        import tempfile, os
+        from nomorals.storage import Database
+        tmp = tempfile.mkdtemp()
+        db = Database(os.path.join(tmp, "t.db"))
+        db.migrate()
+        store = PlayerStore(db)
+        for key, name, gp, pts in entries:
+            store.get(key, name=name, platform="telegram")
+            db.execute(
+                "UPDATE game_players SET games_played = ?, points = ? "
+                "WHERE player_key = ?",
+                (gp, pts, key),
+            )
+        return Leaderboard(store)
+
+    def test_override_replaces_stale_name(self):
+        board = self._make_board_with([("telegram:5478650254", "chfjdhx", 5, 100)])
+        rows = board.top(10, name_overrides={"telegram:5478650254": "Peacethefirst"})
+        self.assertEqual(rows[0]["name"], "Peacethefirst")
+
+    def test_no_override_uses_db_name(self):
+        board = self._make_board_with([("telegram:5478650254", "chfjdhx", 5, 100)])
+        rows = board.top(10)
+        self.assertEqual(rows[0]["name"], "chfjdhx")
+
+    def test_render_uses_override(self):
+        board = self._make_board_with([("telegram:5478650254", "chfjdhx", 5, 100)])
+        text = board.render(10, name_overrides={"telegram:5478650254": "Peacethefirst"})
+        self.assertIn("Peacethefirst", text)
+        self.assertNotIn("chfjdhx", text)
+
+    def test_other_players_unaffected(self):
+        board = self._make_board_with([
+            ("telegram:111", "Alice", 5, 200),
+            ("telegram:222", "Bob", 5, 100),
+        ])
+        rows = board.top(10, name_overrides={"telegram:222": "Bobby"})
+        names = [r["name"] for r in rows]
+        self.assertIn("Alice", names)  # untouched
+        self.assertIn("Bobby", names)  # overridden
+        self.assertNotIn("Bob", names)
