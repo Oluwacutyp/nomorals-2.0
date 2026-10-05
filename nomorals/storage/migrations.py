@@ -1514,6 +1514,71 @@ def _apply_game_identity_untangle(db: object) -> None:
         get_logger(__name__).debug("identity untangle repair skipped: %s", exc)
 
 
+def _apply_game_phantom_cleanup(db: object) -> None:
+    """Delete phantom game profiles (one-time cleanup).
+
+    Two classes of bad rows:
+    1. ``telegram:Mary`` — orphaned name-keyed profile for the alt account
+       (ID 7541672134). The real profile is ``telegram:7541672134``
+       (6076 coins after the username merge). The orphan has 0 coins /
+       0 games and is never read anymore.
+    2. ``telegram:<channel>`` rows (e.g. ``telegram:xauusd_sentinel_signal``)
+       — created when a channel post (no numeric sender_id) hit a game
+       command. Groups/channels must never get game profiles; the
+       ``_game_player`` guard now returns None for these.
+
+    Only deletes rows that are provably unused: 0 coins AND 0 games AND
+    0 XP. Any profile with real activity is left alone.
+    """
+    from ..core.logging_setup import get_logger
+    _mlog = get_logger(__name__)
+
+    def _tables() -> set:
+        try:
+            rows = db.query(  # type: ignore[attr-defined]
+                "SELECT name FROM sqlite_master WHERE type = 'table'") or []
+            return {str(r["name"]) for r in rows}
+        except Exception:
+            return set()
+
+    if "game_players" not in _tables():
+        return
+    try:
+        with db.transaction():  # type: ignore[attr-defined]
+            # 1. The known orphaned Mary profile.
+            db.execute(  # type: ignore[attr-defined]
+                "DELETE FROM game_players WHERE player_key = ? "
+                "AND COALESCE(coins, 0) = 0 "
+                "AND COALESCE(games_played, 0) = 0 "
+                "AND COALESCE(xp, 0) = 0",
+                ("telegram:Mary",))
+            # 2. Any non-numeric telegram sender part with zero activity.
+            # These are channel/group phantoms or pre-merge leftovers that
+            # were never actually played on.
+            rows = db.query(  # type: ignore[attr-defined]
+                "SELECT player_key FROM game_players "
+                "WHERE player_key LIKE 'telegram:%' "
+                "AND COALESCE(coins, 0) = 0 "
+                "AND COALESCE(games_played, 0) = 0 "
+                "AND COALESCE(xp, 0) = 0 "
+                "AND COALESCE(deleted_at, 0) = 0") or []
+            for r in rows:
+                key = str(r["player_key"])
+                _, _, sender_part = key.partition(":")
+                # Numeric sender parts are real ID-keyed profiles — keep.
+                # Also keep telegram-bot: aliases (they fold via aliases).
+                if sender_part.isdigit():
+                    continue
+                # Never delete the two known-good accounts.
+                if key in ("telegram:5478650254", "telegram:7541672134"):
+                    continue
+                db.execute(  # type: ignore[attr-defined]
+                    "DELETE FROM game_players WHERE player_key = ?", (key,))
+                _mlog.info("game phantom cleanup: deleted %s", key)
+    except Exception as exc:  # noqa: BLE001 - cleanup must never break boot
+        _mlog.debug("game phantom cleanup skipped: %s", exc)
+
+
 def _apply_game_attributes_rename(db: object) -> None:
     """Fix the game_stats table-name collision.
 
@@ -2883,6 +2948,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql=_V78_GAME_PLAYERS_USERNAME),
     Migration(79, "game_identity_untangle",
               fn=_apply_game_identity_untangle),
+    Migration(80, "game_phantom_cleanup",
+              fn=_apply_game_phantom_cleanup),
 )
 
 

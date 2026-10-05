@@ -1238,6 +1238,19 @@ class RuntimeGamesMixin:
             # the Telegram username rides along for @mention lookup.
             return Player.from_sender(message.chat.platform, sender_id,
                                       sender, username=username)
+        # No numeric sender ID and NOT a DM: the sender is a channel/group
+        # entity (or otherwise unresolvable). Never mint a name-keyed game
+        # profile for it — that's how phantom rows like
+        # `telegram:xauusd_sentinel_signal` were created. Callers already
+        # handle player=None (see _control_game / _route_game_move).
+        kind = getattr(getattr(message, "chat", None), "kind", "")
+        if str(kind).lower() != ChatKind.DM:
+            _log.debug(
+                "game: refusing name-keyed profile for non-DM sender %r "
+                "(kind=%s) — no sender_id",
+                sender, kind,
+            )
+            return None
         return Player.from_sender(message.chat.platform, sender, sender,
                                   username=username)
 

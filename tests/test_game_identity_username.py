@@ -456,5 +456,93 @@ class GetForTests(unittest.TestCase):
         self.assertEqual(prof.name, "Vrede peace")
 
 
+def make_group_msg(sender: str, sender_id: str, username: str = "",
+                   platform: str = "telegram") -> ChatMessage:
+    return ChatMessage(
+        chat=ChatRef(platform=platform, chat_id="-5223197263",
+                     kind=ChatKind.GROUP),
+        incoming=True, text="/game", sender=sender, sender_id=sender_id,
+        sender_username=username)
+
+
+class GamePlayerGroupGuardTests(unittest.TestCase):
+    """_game_player must never mint name-keyed profiles for group/channel
+    senders without a numeric sender_id.
+
+    Regression: a channel post (sender = channel, no sender_id) created
+    `telegram:xauusd_sentinel_signal` — groups/channels must never get
+    game profiles. Human senders in groups (with sender_id) still get
+    their normal ID-keyed profile.
+    """
+
+    def test_group_channel_post_returns_none(self):
+        # Channel post: sender is the channel name, no numeric ID.
+        msg = make_group_msg("xauusd_sentinel_signal", "")
+        player = RuntimeGamesMixin._game_player(msg)
+        self.assertIsNone(player)
+
+    def test_group_human_sender_uses_id(self):
+        # Mary sends /game in a group: her ID-keyed profile is used.
+        msg = make_group_msg("Mary", "7541672134", "chfjdhx")
+        player = RuntimeGamesMixin._game_player(msg)
+        self.assertIsNotNone(player)
+        self.assertEqual(player.key, "telegram:7541672134")
+
+    def test_dm_name_fallback_still_works(self):
+        # DM without sender_id keeps the legacy name-fallback path
+        # (the telegram.py DM fallback should prevent this in practice,
+        # but the guard must not break DMs).
+        msg = make_msg("Someone", "", "")
+        player = RuntimeGamesMixin._game_player(msg)
+        self.assertIsNotNone(player)
+        self.assertEqual(player.key, "telegram:Someone")
+
+
+class PhantomCleanupMigrationTests(unittest.TestCase):
+    """Migration 80 deletes phantom game profiles: the orphaned
+    `telegram:Mary` row and any zero-activity non-numeric telegram
+    profiles (channel/group phantoms like
+    `telegram:xauusd_sentinel_signal`).
+    """
+
+    def test_deletes_orphaned_mary_and_channel_phantom(self):
+        from nomorals.storage.migrations import _apply_game_phantom_cleanup
+        store = make_store()
+        # The real merged profile — must survive.
+        seed_profile(store, "telegram:7541672134", name="Mary",
+                     username="chfjdhx", coins=6076, games_played=3, xp=116)
+        # Orphaned name-keyed Mary (0 activity) — must go.
+        seed_profile(store, "telegram:Mary", name="Mary")
+        # Channel phantom (0 activity) — must go.
+        seed_profile(store, "telegram:xauusd_sentinel_signal",
+                     name="xauusd_sentinel_signal")
+        # A legacy profile WITH activity — must survive (not a phantom).
+        seed_profile(store, "telegram:OldBob", name="OldBob", coins=100,
+                     games_played=5)
+        _apply_game_phantom_cleanup(store.db)
+        rows = store.db.query(
+            "SELECT player_key FROM game_players ORDER BY player_key")
+        keys = [r["player_key"] for r in rows]
+        self.assertIn("telegram:7541672134", keys)
+        self.assertIn("telegram:OldBob", keys)
+        self.assertNotIn("telegram:Mary", keys)
+        self.assertNotIn("telegram:xauusd_sentinel_signal", keys)
+
+    def test_never_deletes_known_good_accounts(self):
+        from nomorals.storage.migrations import _apply_game_phantom_cleanup
+        store = make_store()
+        # Even with zero activity, the two real accounts are protected.
+        seed_profile(store, "telegram:5478650254", name="Vrede peace",
+                     username="peacethefirst")
+        seed_profile(store, "telegram:7541672134", name="Mary",
+                     username="chfjdhx")
+        _apply_game_phantom_cleanup(store.db)
+        rows = store.db.query(
+            "SELECT player_key FROM game_players ORDER BY player_key")
+        keys = [r["player_key"] for r in rows]
+        self.assertIn("telegram:5478650254", keys)
+        self.assertIn("telegram:7541672134", keys)
+
+
 if __name__ == "__main__":
     unittest.main()

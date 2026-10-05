@@ -699,6 +699,23 @@ class TelegramAdapter(ChatAdapter):
             sender_name = title
             sender_id = ""
             sender_username = ""
+            # DM fallback: if the sender entity couldn't be resolved, fall
+            # back to the numeric IDs on the event. In a DM, chat_id IS the
+            # user's Telegram ID, so this keeps game identity (and anything
+            # else keyed on sender_id) from forking into name-keyed phantom
+            # profiles like `telegram:Mary`.
+            if kind == ChatKind.DM:
+                evt_sender_id = str(getattr(event, "sender_id", "") or "")
+                if evt_sender_id and evt_sender_id.lstrip("-").isdigit():
+                    sender_id = evt_sender_id
+                elif chat_id and chat_id.lstrip("-").isdigit():
+                    sender_id = chat_id
+                if sender_id:
+                    _log.debug(
+                        "telegram: DM sender_id fallback — using %s "
+                        "(sender entity unresolvable)",
+                        sender_id,
+                    )
         # Forum-topic detection (best effort): in a forum supergroup, replies
         # inside a topic carry reply_to pointing at the topic's anchor.
         thread_id = ""
