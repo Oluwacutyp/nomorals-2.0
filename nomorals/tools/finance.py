@@ -22,6 +22,23 @@ def _expert_class() -> Any:
 
 def register(registry: Any) -> None:
     @registry.register(
+        "finance_price",
+        description=(
+            "Get the current live price for a symbol. "
+            "Args: symbol (e.g. BTC, XAUUSD, AAPL), market (crypto|forex|stock, default crypto)."
+        ),
+        capability="network",
+        parameters={
+            "symbol": "str — trading symbol (e.g. BTC, XAUUSD)",
+            "market": "str — crypto|forex|stock (default crypto)",
+        },
+    )
+    def finance_price(context: Any, symbol: str, market: str = "crypto") -> dict[str, Any]:
+        import importlib
+        md = importlib.import_module("nomorals.integrations.market_data")
+        return md.quote(symbol, market=market)
+
+    @registry.register(
         "finance_analyze",
         description=(
             "Analyze a symbol: regime, indicators, trade idea. "
