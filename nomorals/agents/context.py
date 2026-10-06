@@ -481,6 +481,21 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         from ..llm.broker import ModelBroker
         broker = ModelBroker()
         broker.build_from_router(router)
+        # Also register lifecycle-managed models (local GGUFs etc.)
+        try:
+            from ..llm.lifecycle import ModelLifecycle
+            from ..cmdline.commands.models import _card_for
+            lc = ModelLifecycle(db)
+            for model in lc.list():
+                try:
+                    broker.register(_card_for(model))
+                except Exception:
+                    pass
+            primary = lc.primary
+            if primary and broker.card(primary) is not None:
+                broker.promote(primary)
+        except Exception:
+            _log.warning("lifecycle model registration failed", exc_info=True)
         router.set_broker(broker)
     except Exception:  # noqa: BLE001
         _log.warning("broker attach failed; continuing without it", exc_info=True)

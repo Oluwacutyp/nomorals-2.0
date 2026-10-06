@@ -219,22 +219,6 @@ def _make_chatter(specs: list[Any], context: Any = None) -> Any:
                         router = build_chain(specs)
                         broker = ModelBroker()
                         sync_broker_cards(broker, router)
-                        # Also register lifecycle-managed models (local GGUFs etc.)
-                        try:
-                            from ..cmdline.commands.models import _broker_for as _lifecycle_broker
-                            from ..llm.lifecycle import ModelLifecycle
-                            lc = ModelLifecycle(getattr(context, "db", None))
-                            for model in lc.list():
-                                from ..cmdline.commands.models import _card_for
-                                try:
-                                    broker.register(_card_for(model))
-                                except Exception:
-                                    pass
-                            primary = lc.primary
-                            if primary and broker.card(primary) is not None:
-                                broker.promote(primary)
-                        except Exception:
-                            pass
                         router.set_broker(broker)
                         state["router"] = router
                         _log.info(
