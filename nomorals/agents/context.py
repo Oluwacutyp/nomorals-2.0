@@ -486,11 +486,13 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             from ..llm.lifecycle import ModelLifecycle
             from ..cmdline.commands.models import _card_for
             lc = ModelLifecycle(db)
+            primary_id = lc.primary
             for model in lc.list():
                 try:
                     broker.register(_card_for(model))
-                    # Also add the provider to the router so the broker can activate it
-                    if model.provider == "llama_cpp" and "llama_cpp" not in router.providers():
+                    # Only load the local model if it's the primary — otherwise skip
+                    # to avoid hanging boot on OOM-prone GGUF loads
+                    if model.provider == "llama_cpp" and model.id == primary_id and "llama_cpp" not in router.providers():
                         try:
                             # Reset if stuck in failed state from previous OOM
                             if model.status == "failed":
