@@ -44,6 +44,9 @@ GOOGLE_CLIENT_ID_ENV = "GOOGLE_CLIENT_ID"
 GOOGLE_CLIENT_SECRET_ENV = "GOOGLE_CLIENT_SECRET"
 
 #: Desktop-app OAuth clients use this fixed redirect for the manual flow.
+#: NOTE: Google deprecated the OOB flow (urn:ietf:wg:oauth:2.0:oob) on
+#: 2023-02-01. Use the loopback redirect flow instead — see
+#: ``_loopback_redirect_server`` below.
 _OOB_REDIRECT = "urn:ietf:wg:oauth:2.0:oob"
 
 #: Refresh the access token this far ahead of expiry.
@@ -82,18 +85,121 @@ class GoogleOAuth:
         )
 
     def google_authorize_url(
-        self, client_id: str, scopes: list[str]
+        self, client_id: str, scopes: list[str],
+        redirect_uri: str = "",
     ) -> str:
         """The URL the owner opens to grant access."""
         params = {
             "client_id": client_id,
-            "redirect_uri": _OOB_REDIRECT,
+            "redirect_uri": redirect_uri or _OOB_REDIRECT,
             "response_type": "code",
             "scope": " ".join(scopes),
             "access_type": "offline",  # ask for a refresh token
             "prompt": "consent",  # re-issue the refresh token every time
         }
         return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+    def google_loopback_flow(
+        self, client_id: str, client_secret: str, scopes: list[str],
+        *,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        """OAuth flow via loopback redirect (replaces deprecated OOB).
+
+        Spins up a temporary ``http://127.0.0.1:<port>/`` listener,
+        returns the auth URL for the owner to open, waits for Google's
+        redirect with the authorization code, then exchanges it for tokens.
+
+        Returns the token dict from ``_google_exchange_code``.
+        """
+        import http.server
+        import threading
+
+        code_holder: dict[str, str] = {}
+        error_holder: dict[str, str] = {}
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                query = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(query)
+                if "code" in params:
+                    code_holder["code"] = params["code"][0]
+                    self._respond(200, "Authorization complete — you can close this tab.")
+                elif "error" in params:
+                    error_holder["error"] = params["error"][0]
+                    self._respond(400, f"Authorization failed: {params['error'][0]}")
+                else:
+                    self._respond(400, "Missing authorization code.")
+
+            def _respond(self, status: int, message: str):
+                body = message.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # quiet
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        redirect_uri = f"http://127.0.0.1:{port}/"
+
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            auth_url = self.google_authorize_url(client_id, scopes, redirect_uri=redirect_uri)
+            print(f"\nOpen this URL to authorize:\n{auth_url}\n")
+            print(f"Waiting for authorization (timeout {timeout:.0f}s)...")
+
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if "code" in code_holder:
+                    break
+                if "error" in error_holder:
+                    raise ConnectorError(
+                        f"Google authorization failed: {error_holder['error']}"
+                    )
+                time.sleep(0.5)
+            else:
+                raise ConnectorError(
+                    "Timed out waiting for Google authorization. "
+                    "Make sure you opened the URL and granted access."
+                )
+
+            return self._google_exchange_code_loopback(
+                client_id, client_secret, code_holder["code"], redirect_uri,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def _google_exchange_code_loopback(
+        self,
+        client_id: str,
+        client_secret: str,
+        code: str,
+        redirect_uri: str,
+    ) -> dict[str, Any]:
+        """Swap an authorization code for tokens (loopback redirect)."""
+        code = (code or "").strip()
+        if not code:
+            raise ConnectorError("empty authorization code from loopback redirect")
+        try:
+            resp = self.http.post_form(  # type: ignore[attr-defined]
+                GOOGLE_TOKEN_URL,
+                {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+            )
+        except Exception as exc:
+            raise ConnectorError(f"Google token exchange failed: {exc}") from exc
+        return resp
 
     def _google_exchange_code(
         self,

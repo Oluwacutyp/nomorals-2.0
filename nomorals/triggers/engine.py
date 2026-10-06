@@ -24,6 +24,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import threading
 import time
 from typing import Any, Callable
@@ -393,7 +394,7 @@ class TriggerEngine:
                 f"trigger {trigger_id!r} is not a webhook trigger "
                 f"(source={trigger.source!r})")
         expected = trigger.condition.get("secret")
-        if expected and secret != expected:
+        if expected and not hmac.compare_digest(secret or "", expected):
             raise TriggerError("bad webhook secret")
         if not trigger.enabled:
             raise TriggerError(f"trigger {trigger_id!r} is disabled")

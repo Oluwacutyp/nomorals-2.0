@@ -395,6 +395,21 @@ _RE_MISSION_LIST = re.compile(
     r"\b(mission|task|directive)s?\b.{0,24}\b(status|list|pending|queued|"
     r"waiting|progress|how'?s)\b|\b(status|list|progress)\b.{0,24}"
     r"\b(mission|task|directive)s?\b|\bhow'?s (the|my) (mission|task|directive)s?\b", re.I)
+#: "remind me in 5 minutes" / "alert me when X" / "in 10 minutes tell me Y"
+#: One-time delayed reminders — routes to the scheduler, not the mission queue.
+_NUM_WORD = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_RE_SCHEDULE = re.compile(
+    r"\b(remind|alert|notify|ping)\s+me\b.{0,40}?"
+    rf"\bin\s+({_NUM_WORD})\s*(second|minute|hour)s?\b"
+    rf"|\bin\s+({_NUM_WORD})\s*(second|minute|hour)s?\b.{{0,40}}?"
+    r"\b(remind|alert|notify|tell|ping)\s+me\b"
+    r"|\b(remind|alert)\s+me\s+(when|if|about)\b",
+    re.I,
+)
+_NUM_WORD_MAP = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
 _RE_CANCEL = re.compile(r"^\s*(no|nope|never ?mind|stop|cancel|scrub|drop it|forget it)\b", re.I)
 #: "create a spotify account" — account creation, NOT code building.
 #: The service group captures the service name ("sound cloud" → "soundcloud").
@@ -868,6 +883,41 @@ def _status_intent(text: str) -> Intent | None:
     return None
 
 
+def _schedule_intent(text: str) -> Intent | None:
+    """One-time delayed reminder: "remind me in 5 minutes", "alert me when X"."""
+    m = _RE_SCHEDULE.search(text)
+    if not m:
+        return None
+    # Extract the delay if present
+    delay_mins = 0
+    for i in (2, 4):
+        num = m.group(i)
+        unit = m.group(i + 1) if m.group(i + 1) else ""
+        if num:
+            num_lower = num.lower()
+            val = _NUM_WORD_MAP.get(num_lower, 0)
+            if val == 0:
+                try:
+                    val = int(num)
+                except ValueError:
+                    continue
+            if unit.startswith("hour"):
+                val *= 60
+            elif unit.startswith("second"):
+                val = max(1, val // 60)
+            delay_mins = val
+            break
+    target = _clean_topic(text, _RE_SCHEDULE)
+    return Intent(
+        "schedule", 0.85,
+        target=target or text.strip(),
+        action="remind",
+        route="scheduler",
+        why=f"one-time reminder intent (delay ~{delay_mins}min)",
+        meta={"delay_minutes": delay_mins},
+    )
+
+
 def _confidence_bands(cands: list["Intent"]) -> tuple[float, float]:
     """Dynamic confidence thresholds: (strong_bar, check_lo).
 
@@ -897,7 +947,7 @@ def _confidence_bands(cands: list["Intent"]) -> tuple[float, float]:
 def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     """Deterministic intent pass.  Returns every candidate, best first."""
     cands: list[Intent] = []
-    for fn in (_owner_intent, _status_intent, _mission_intent, _game_intent,
+    for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _build_intent):
         if fn is _game_intent:

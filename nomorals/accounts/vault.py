@@ -1,7 +1,7 @@
 """Encrypted credential vault with SQLite backend.
 
 Credentials are encrypted at rest using AES-256-CTR with HMAC authentication.
-The master key is derived from a passphrase via PBKDF2 (200k iterations).
+The master key is derived from a passphrase via PBKDF2 (100k iterations).
 
 Security model:
 - Credentials never stored in plaintext

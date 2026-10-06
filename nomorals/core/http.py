@@ -12,9 +12,11 @@ downloads with resume, and multipart uploads.
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import json
 import mimetypes
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -236,6 +238,7 @@ class HttpClient:
         max_redirects: int = 5,
         verify_tls: bool = True,
         proxy_url: str = "",
+        allow_private_ips: bool = False,
     ) -> None:
         self.timeout = timeout
         self.user_agent = user_agent
@@ -243,7 +246,44 @@ class HttpClient:
         self.max_redirects = max_redirects
         self.verify_tls = verify_tls
         self.proxy_url = proxy_url
+        #: When False (default), requests to private/loopback/link-local IPs
+        #: are rejected — SSRF protection. Set True only for explicitly
+        #: internal tooling that needs loopback access.
+        self.allow_private_ips = allow_private_ips
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
+
+    def _check_ssrf(self, url: str) -> None:
+        """Reject URLs resolving to private/loopback/link-local addresses."""
+        if self.allow_private_ips:
+            return
+        try:
+            host = urllib.parse.urlparse(url).hostname or ""
+        except Exception:
+            raise NoMoralsError(f"SSRF block: unparseable URL {url!r}")
+        if not host:
+            raise NoMoralsError(f"SSRF block: empty hostname in {url!r}")
+        try:
+            # Try as literal IP first
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            # Resolve hostname → check all returned addresses
+            try:
+                infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC)
+            except socket.gaierror:
+                # DNS failure — let the actual request raise the real error
+                return
+            for fam, _, _, _, sockaddr in infos:
+                try:
+                    addr = ipaddress.ip_address(sockaddr[0])
+                except ValueError:
+                    continue
+                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+                    raise NoMoralsError(
+                        f"SSRF block: {host} resolves to private address {addr}"
+                    )
+            return
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+            raise NoMoralsError(f"SSRF block: private address {addr} in {url!r}")
 
     # ── core ─────────────────────────────────────────────────────────────────
     def request(
@@ -263,6 +303,9 @@ class HttpClient:
         if params:
             separator = "&" if urllib.parse.urlparse(url).query else "?"
             target = f"{url}{separator}{urllib.parse.urlencode(params)}"
+
+        # SSRF guard: check the initial URL before connecting
+        self._check_ssrf(target)
 
         merged = {
             "User-Agent": self.user_agent,

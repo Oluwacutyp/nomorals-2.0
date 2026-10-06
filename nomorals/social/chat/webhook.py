@@ -17,6 +17,7 @@ operator's call.
 
 from __future__ import annotations
 
+import hmac
 import json
 import threading
 import time
@@ -59,7 +60,7 @@ class _HookHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             given = (query.get("token", [""])[0]
                      or self.headers.get("X-Webhook-Token", ""))
-            if given != adapter.token:
+            if not hmac.compare_digest(given, adapter.token):
                 self._send_json(403, {"ok": False, "error": "bad token"})
                 return
         try:

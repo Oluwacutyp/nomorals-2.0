@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from ...core.logging_setup import get_logger
 from .approvals import _key_set
@@ -464,7 +465,10 @@ class RuntimeMetaMixin:
         verb = parts[0].lower() if parts else "show"
 
         # Get or create the AccountCreator
-        vault = CredentialVault(self.context.db if hasattr(self.context, "db") else None)
+        vault = CredentialVault(
+            self.context.db if hasattr(self.context, "db") else None,
+            os.environ.get("NM_VAULT_PASSPHRASE", ""),
+        )
         creator = AccountCreator(vault, db=getattr(self.context, "db", None))
 
         if verb == "show":
