@@ -517,8 +517,14 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                 except Exception:
                     pass
             primary = lc.primary
+            # Only promote if the provider actually loaded (not just card registered)
+            # For llama_cpp, check the provider is on the router
             if primary and broker.card(primary) is not None:
-                broker.promote(primary)
+                card = broker.card(primary)
+                if card.provider == "llama_cpp" and "llama_cpp" not in router.providers():
+                    _log.warning("not promoting %s: llama_cpp provider failed to load", primary)
+                else:
+                    broker.promote(primary)
         except Exception:
             _log.warning("lifecycle model registration failed", exc_info=True)
         router.set_broker(broker)
