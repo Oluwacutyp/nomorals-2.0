@@ -25,6 +25,9 @@ from .palette import (
     DIM,
     GREEN,
     MAGENTA,
+    STEALTH_AMBER,
+    STEALTH_CYAN,
+    STEALTH_TEXT,
     SUBTLE,
     TITLE,
     WARN,
@@ -714,6 +717,7 @@ class GodScreen:
         self._stop = False
         self._view = "status"
         self._frame = 0
+        self._last_size: tuple[int, int] | None = None  # resize → full clear
         self._stdin_ok = bool(
             getattr(sys.stdin, "isatty", lambda: False)()
         )
@@ -804,13 +808,146 @@ class GodScreen:
         except Exception:  # noqa: BLE001 - dashboard is best-effort
             return {}
 
-    # ── frame assembly ──
+    # ── frame assembly: ONE paint path (Grok layout discipline) ──
+
+    #: Short platform tags for the feed rows.
+    _PLAT_SHORT = {
+        "telegram": "TG",
+        "telegram-bot": "BOT",
+        "local": "LOC",
+        "discord": "DC",
+        "whatsapp": "WA",
+    }
+
+    #: Adapter short names for the traffic row.
+    _ADAPTER_SHORT = {
+        "telegram": "tg",
+        "telegram-bot": "bot",
+        "local": "local",
+    }
+
+    def _ninja_mark(self) -> str:
+        """Devon's face in the TUI: one ANSI glyph, cyan eye.
+
+        The full ninja avatar lives on the Telegram bot PFP; the terminal
+        gets this single mark beside the title — never a multi-row figure
+        that fights the layout.
+        """
+        c = self.color
+        return (
+            paint("\ufe5d", SUBTLE, color=c)
+            + paint("\u25c9", STEALTH_CYAN + BOLD, color=c)
+            + paint("\ufe5e", SUBTLE, color=c)
+        )
+
+    def _fill_rule(self, left: str, right: str, width: int) -> str:
+        """Join ``left``/``right`` with a ─ filler to exactly ``width``."""
+        gap = max(0, width - visible_width(left) - visible_width(right))
+        return left + paint("\u2500" * gap, STEALTH_CYAN, color=self.color) + right
+
+    def _traffic_line(self, snap: dict[str, Any]) -> str:
+        """Row 1 (status view): adapters, autonomy, arena, traffic."""
+        c = self.color
+        adapters = snap.get("adapters") or {}
+        order = ["telegram", "telegram-bot", "local"]
+        names = order + [n for n in adapters if n not in order]
+        parts: list[str] = []
+        for name in names:
+            info = adapters.get(name) or {}
+            short = self._ADAPTER_SHORT.get(name, str(name)[:8])
+            running = bool(info.get("running", True))
+            dot = (paint("\u25cf", STEALTH_CYAN, color=c) if running
+                   else paint("\u25cb", DIM, color=c))
+            rin = info.get("received", "\u2014")
+            sout = info.get("sent", "\u2014")
+            parts.append(
+                f"{dot} {paint(short, STEALTH_TEXT, color=c)} "
+                f"{paint(f'{rin}/{sout}', DIM, color=c)}"
+            )
+        extras = snap.get("extras") or {}
+        autonomy = str(extras.get("autonomy", "\u2014")).upper()
+        arena = str(extras.get("arena", "\u2014")).upper()
+        parts.append(paint(f"autonomy {autonomy}",
+                           STEALTH_CYAN if autonomy == "ON" else DIM, color=c))
+        parts.append(paint(f"arena {arena}",
+                           STEALTH_CYAN if arena == "ON" else DIM, color=c))
+        traffic = snap.get("traffic") or {}
+        msgs = traffic.get("messages", 0)
+        errs = traffic.get("errors", 0)
+        parts.append(paint(f"msgs {msgs}", STEALTH_TEXT, color=c))
+        parts.append(paint(f"err {errs}",
+                           STEALTH_AMBER + BOLD if errs else DIM, color=c))
+        return paint("\u2502 ", STEALTH_CYAN, color=c) + "  ".join(parts)
+
+    def _traffic_line_compact(self, snap: dict[str, Any]) -> str:
+        """Narrow-terminal traffic row: ``tg\u25cf bot\u25cf loc\u25cb``."""
+        c = self.color
+        adapters = snap.get("adapters") or {}
+        order = ["telegram", "telegram-bot", "local"]
+        names = order + [n for n in adapters if n not in order]
+        bits = []
+        for name in names:
+            info = adapters.get(name) or {}
+            short = self._ADAPTER_SHORT.get(name, str(name)[:8])
+            if bool(info.get("running", True)):
+                bits.append(paint(f"{short}\u25cf", STEALTH_CYAN, color=c))
+            else:
+                bits.append(paint(f"{short}\u25cb", DIM, color=c))
+        return paint("\u2502 ", STEALTH_CYAN, color=c) + " ".join(bits)
+
+    def _scheduler_line(self, snap: dict[str, Any]) -> str:
+        """Row 2 (status view): next scheduled jobs, ``name HH:MM``."""
+        from .dashboard import _fmt_ts
+
+        c = self.color
+        sched = snap.get("scheduler") or {}
+        jobs = [j for j in (sched.get("jobs") or [])
+                if j.get("enabled", True)][:3]
+        bits = []
+        for job in jobs:
+            name = str(job.get("name") or job.get("id") or "?")
+            ts = _fmt_ts(job.get("next_run"))
+            bits.append(f"{paint(name, STEALTH_TEXT, color=c)} "
+                        f"{paint(ts, STEALTH_CYAN, color=c)}")
+        body = " \u00b7 ".join(bits) if bits else paint("no jobs", DIM, color=c)
+        return (paint("\u2502 ", STEALTH_CYAN, color=c)
+                + paint("next: ", DIM, color=c) + body)
+
+    def _feed_line(self, event: "MessageEvent") -> str:
+        """One compact feed row: ``\u2502 17:04  TG  Ade  preview\u2026``."""
+        c = self.color
+        ts = time.strftime("%H:%M", time.localtime(event.timestamp or time.time()))
+        plat = self._PLAT_SHORT.get((event.platform or "").lower(), "??")
+        sender = (event.sender or "?")[:12]
+        text = " ".join((event.text or "").split())
+        if len(text) > 56:
+            text = text[:53] + "\u2026"
+        where = f" @{event.chat_title}" if event.chat_title else ""
+        return (
+            paint("\u2502 ", STEALTH_CYAN, color=c)
+            + paint(ts, DIM, color=c) + "  "
+            + paint(plat, STEALTH_CYAN, color=c) + "  "
+            + paint(sender, STEALTH_TEXT + BOLD, color=c) + "  "
+            + paint(text, STEALTH_TEXT, color=c)
+            + paint(where[:20], SUBTLE, color=c)
+        )
 
     def _render_frame(self, out: Any = None) -> None:
-        """Render one frame: header, content, feed, status. Simple layout.
+        """Render one frame — the ONLY paint path.
 
-        No box-drawing panes — just clean sections separated by rules.
-        Every line is width-truncated so nothing wraps or overlaps.
+        Fixed-region layout (Grok discipline)::
+
+            \u250c\u2500 DEVON \ufe5d\u25c9\ufe5e live \u00b7 2m30s \u00b7 no-morals 2.0 \u2500\u2500 [1][2][3][4][d][q]
+            \u2502 \u25cf tg 68/0  \u25cf bot 1/0  \u25cf local 0/0  autonomy ON  msgs 70 \u00b7 err 0
+            \u2502 next: rooms 14:16 \u00b7 watchers 14:16 \u00b7 research 16:50
+            \u251c\u2500 messages \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            \u2502 17:04  TG  Ade     Jobs\u2026  preview truncated\u2026
+            \u2502 (quiet \u2014 new messages appear here)
+            \u2514\u2500 1 status \u00b7 2 games \u00b7 3 jobs \u00b7 4 brain \u00b7 d debug \u00b7 q quit \u2500\u2500
+
+        Enforced: ONE status block (never drawn twice), logs muted by the
+        :class:`_ScreenGuard`, fixed rows, full clear + redraw on resize,
+        no partial overwrites, every line width-truncated.
         """
         from . import dashboard as _d
 
@@ -820,139 +957,98 @@ class GodScreen:
         width = max(40, cols)
         height = max(16, rows)
 
+        # Resize → clear + full redraw once. No partial overwrites.
+        size = (cols, rows)
+        if size != getattr(self, "_last_size", None):
+            self._last_size = size
+            try:
+                out.write("\033[2J")
+                out.flush()
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+
+        c = self.color
+
         def _t(line: str) -> str:
             return truncate_visible(line, width)
 
-        lines: list[str] = []
-
-        # ── header: ninja avatar beside title + tabs, then a rule ──
-        # The owner's ninja (7 rows) sits left of the title block.
-        # On narrow terminals (<64 cols) fall back to the plain title line.
         spin = _SPINNER[self._frame % len(_SPINNER)]
         self._frame += 1
-        title = (gradient_text("DEVON", 51, 201, color=self.color)
-                 + paint(" · live ", TITLE, color=self.color)
-                 + paint(spin, CYAN, color=self.color))
-        tabs = "  ".join(
-            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
-                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
-                  color=self.color)
+        uptime = _fmt_uptime(float(snap.get("uptime_s", 0) or 0))
+
+        # ── row 0: header ──
+        head_left = (
+            paint("\u250c\u2500 ", STEALTH_CYAN, color=c)
+            + paint("DEVON", STEALTH_CYAN + BOLD, color=c)
+            + " " + self._ninja_mark() + " "
+            + paint(f"live \u00b7 {uptime} \u00b7 no-morals 2.0", DIM, color=c)
+            + " "
+        )
+        tabs = "".join(
+            paint(f"[{_VIEW_HOTKEY[v]}]",
+                  STEALTH_CYAN + BOLD if v == self._view else DIM,
+                  color=c)
             for v in WATCH_VIEWS
         )
-        subtitle = paint("universal agent os · no-morals 2.0", DIM,
-                         color=self.color)
-        if width >= 64:
-            from .avatar import NINJA_MINI_HEIGHT, ninja_mini_lines
-            from .palette import visible_width
+        lines = [_t(self._fill_rule(head_left, tabs, width))]
 
-            ninja = ninja_mini_lines(color=self.color)
-            avatar_w = max(visible_width(ln) for ln in ninja)
-            # Right-side block: title, tabs, subtitle, then blank rows
-            # to match the avatar height.
-            right = [f"  {title}", f"  {tabs}", f"  {subtitle}"]
-            while len(right) < NINJA_MINI_HEIGHT:
-                right.append("")
-            for i in range(NINJA_MINI_HEIGHT):
-                left = ninja[i]
-                pad = " " * max(0, avatar_w - visible_width(left))
-                gap = "   "
-                lines.append(_t(f"{left}{pad}{gap}{right[i]}"))
-        else:
-            lines.append(_t(f"  {title}   {tabs}"))
-        lines.append(_t(paint("─" * width, SUBTLE, color=self.color)))
-        header_h = len(lines)
-
-        # ── content: the current view, plain lines ──
-        # Fixed lines: header_h + 1 view label + 1 feed label + feed_h +
-        # 1 separator + 1 status. Content fills the rest.
-        feed_h = 5
-        content_h = max(4, height - (header_h + 4 + feed_h))
-        view_text = _d.render_view(snap, self._view, color=self.color,
-                                   bare=True)
-        content_lines = [
-            _t(ln) for ln in view_text.splitlines()[:content_h]
-        ]
-        while len(content_lines) < content_h:
-            content_lines.append("")
-        view_label = paint(f"── {self._view} ", TITLE + BOLD, color=self.color)
-        lines.append(_t(view_label + paint("─" * width, SUBTLE, color=self.color)))
-        lines.extend(content_lines)
-
-        # ── feed: title + up to 5 recent messages ──
         feed = WatchHub.feed()
         unread = feed.unread
         feed.mark_read()
-        lines.append(_t(paint("── messages ", TITLE + BOLD, color=self.color)
-                        + paint("─" * width, SUBTLE, color=self.color)))
-        events = feed.recent(feed_h)
-        if events:
-            for ev in events[-feed_h:]:
-                lines.append(_t("  " + format_feed_line(ev, color=self.color)))
-            for _ in range(feed_h - len(events)):
-                lines.append("")
+
+        if self._view == "status":
+            # ── rows 1-2: traffic + scheduler (the ONE status block) ──
+            if width < 60:
+                lines.append(_t(self._traffic_line_compact(snap)))
+            else:
+                lines.append(_t(self._traffic_line(snap)))
+            lines.append(_t(self._scheduler_line(snap)))
+            # ── separator ──
+            sep_left = (paint("\u251c\u2500 ", STEALTH_CYAN, color=c)
+                        + paint("messages", STEALTH_CYAN + BOLD, color=c) + " ")
+            lines.append(_t(self._fill_rule(sep_left, "", width)))
+            # ── feed takes the rest ──
+            feed_h = max(3, height - len(lines) - 1)  # minus footer
+            events = feed.recent(feed_h)
+            shown = events[-feed_h:] if events else []
+            for ev in shown:
+                lines.append(_t(self._feed_line(ev)))
+            for _ in range(feed_h - len(shown) - (0 if shown else 1)):
+                lines.append(_t(paint("\u2502", SUBTLE, color=c)))
+            if not shown:
+                lines.append(_t(paint("\u2502 ", STEALTH_CYAN, color=c)
+                                + paint("(quiet \u2014 new messages appear here)",
+                                        DIM, color=c)))
         else:
-            lines.append(_t(paint("  (quiet — new messages appear here)", DIM,
-                                  color=self.color)))
-            for _ in range(feed_h - 1):
-                lines.append("")
+            # ── other views: label + content, no status duplication ──
+            sep_left = (paint("\u251c\u2500 ", STEALTH_CYAN, color=c)
+                        + paint(self._view, STEALTH_CYAN + BOLD, color=c) + " ")
+            lines.append(_t(self._fill_rule(sep_left, "", width)))
+            content_h = max(3, height - len(lines) - 1)  # minus footer
+            view_text = _d.render_view(snap, self._view, color=c, bare=True)
+            view_lines = view_text.splitlines()[:content_h]
+            for ln in view_lines:
+                lines.append(_t(paint("\u2502 ", STEALTH_CYAN, color=c) + ln))
+            for _ in range(content_h - len(view_lines)):
+                lines.append(_t(paint("\u2502", SUBTLE, color=c)))
 
-        # ── status bar (1 line, pinned to bottom) ──
-        lines.append(_t(paint("─" * width, SUBTLE, color=self.color)))
-        lines.append(
-            _t(_d.render_statusbar(snap, self._view, unread=unread,
-                                   color=self.color))
-        )
+        # ── footer (1 row, pinned) ──
+        foot_left = (paint("\u2514\u2500 ", STEALTH_CYAN, color=c)
+                     + paint("1 status \u00b7 2 games \u00b7 3 jobs \u00b7 4 brain \u00b7 "
+                             "d debug \u00b7 q quit", DIM, color=c))
+        foot_right = ""
+        if unread:
+            foot_right += " " + paint(f"\U0001f4ec {unread} new",
+                                      STEALTH_AMBER + BOLD, color=c)
+        lines.append(_t(self._fill_rule(foot_left, foot_right, width)))
 
-        # Pin to exactly the terminal height.
+        # Pin to exactly the terminal height; every line fits the width,
+        # so nothing wraps and the layout cannot garble.
         while len(lines) < height:
             lines.append("")
         frame = "\n".join(_t(ln) for ln in lines[:height])
         out.write(_HOME + frame + _CLEAR_BELOW)
         out.flush()
-
-    def _header_wide(self, snap: dict[str, Any], width: int) -> list[str]:
-        """4-row typographic header: gradient title, subtitle, view tabs.
-
-        Deliberately no ASCII art — clean typography beats a bad figure.
-        Stats live in the status bar; the header stays minimal.
-        """
-        spin = _SPINNER[self._frame % len(_SPINNER)]
-        self._frame += 1
-        title = (gradient_text("DEVON", 51, 201, color=self.color)
-                 + paint(" · live ", TITLE, color=self.color)
-                 + paint(spin, CYAN, color=self.color))
-        subtitle = paint("  universal agent os · no-morals 2.0", DIM,
-                         color=self.color)
-        tabs = "   ".join(
-            paint(f"[{_VIEW_HOTKEY[v]}] {v}",
-                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
-                  color=self.color)
-            for v in WATCH_VIEWS
-        )
-        return [
-            f"  {title}",
-            subtitle,
-            f"  {tabs}",
-            paint("─" * width, SUBTLE, color=self.color),
-        ]
-
-    def _header_narrow(self, width: int) -> list[str]:
-        """Fallback header for narrow terminals: title + tabs, one row."""
-        spin = _SPINNER[self._frame % len(_SPINNER)]
-        self._frame += 1
-        title = (paint("🥷 ", CYAN, color=self.color)
-                 + gradient_text("DEVON · live", 51, 201, color=self.color)
-                 + paint(f" {spin} ", CYAN, color=self.color))
-        tabs = " ".join(
-            paint(f"[{_VIEW_HOTKEY[v]}]",
-                  BRIGHT_CYAN + BOLD if v == self._view else DIM,
-                  color=self.color)
-            for v in WATCH_VIEWS
-        )
-        return [
-            truncate_visible(f"  {title}  {tabs}", width),
-            paint("─" * width, SUBTLE, color=self.color),
-        ]
 
 
 def _fmt_uptime(seconds: float) -> str:

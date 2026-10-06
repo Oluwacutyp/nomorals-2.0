@@ -819,7 +819,7 @@ class DebugViewTests(unittest.TestCase):
         out = strip_ansi(render_statusbar({}, "status", color=False))
         self.assertIn("d debug", out)
 
-    def test_godscreen_header_has_avatar_and_debug_tab(self):
+    def test_godscreen_header_has_mark_and_debug_tab(self):
         import io as _io
 
         from nomorals.console.palette import strip_ansi
@@ -831,10 +831,11 @@ class DebugViewTests(unittest.TestCase):
                            color=True, out=out_buf)
         screen._render_frame()
         frame = strip_ansi(out_buf.getvalue())
-        # Header is clean typography (no ASCII art) with the debug tab.
+        # Header: ninja mark + live + compact debug tab.
         self.assertIn("DEVON", frame)
         self.assertIn("live", frame)
-        self.assertIn("[d] debug", frame)
+        self.assertIn("﹝◉﹞", frame)
+        self.assertIn("[d]", frame)
 
 
 class NinjaAvatarTests(unittest.TestCase):
@@ -995,10 +996,13 @@ class GodScreenLayoutTests(unittest.TestCase):
                            color=True, out=out)
         screen._render_frame()
         frame = strip_ansi(out.getvalue())
-        # Simplified layout: section labels, not box borders.
-        self.assertIn("── status", frame)
-        self.assertIn("── messages", frame)
-        self.assertIn("[1-4] views", frame)
+        # Grok layout discipline: box-drawing frame, one status block.
+        self.assertIn("┌─ DEVON", frame)   # header corner
+        self.assertIn("├─ messages", frame)  # feed separator
+        self.assertIn("└─", frame)           # footer corner
+        self.assertIn("q quit", frame)
+        # status block drawn exactly once
+        self.assertEqual(frame.count("├─ messages"), 1)
 
     def test_view_switch_changes_pane_title(self):
         import io as _io
@@ -1015,8 +1019,8 @@ class GodScreenLayoutTests(unittest.TestCase):
             frame = strip_ansi(out.getvalue())
             self.assertIn(view, frame)
 
-    def test_ninja_avatar_in_header(self):
-        """The owner's 7-row ninja sits beside the title on wide terminals."""
+    def test_ninja_mark_in_header(self):
+        """Devon's face is one ANSI mark (﹝◉﹞), not multi-row art."""
         import io as _io
         import shutil
         import unittest.mock as mock
@@ -1031,15 +1035,13 @@ class GodScreenLayoutTests(unittest.TestCase):
                                return_value=(80, 30)):
             screen._render_frame()
         frame = strip_ansi(out.getvalue())
-        # The ninja's distinctive lines are present...
-        self.assertIn("/\\", frame)
-        self.assertIn("◉", frame)  # the amber eye
-        self.assertIn("/ || \\", frame)
-        # ...and the title sits on the same rows (side-by-side layout).
+        self.assertIn("﹝◉﹞", frame)
         self.assertIn("DEVON", frame)
+        # the old 7-row figure is gone from the header
+        self.assertNotIn("/ || \\", frame)
 
-    def test_ninja_avatar_hidden_on_narrow_terminal(self):
-        """Below 64 cols the header falls back to the plain title line."""
+    def test_ninja_mark_shown_on_narrow_terminal(self):
+        """The one-glyph mark fits even on narrow terminals."""
         import io as _io
         import shutil
         import unittest.mock as mock
@@ -1051,11 +1053,72 @@ class GodScreenLayoutTests(unittest.TestCase):
         screen = GodScreen(interval=0.1, snapshot=lambda: {},
                            color=False, out=out)
         with mock.patch.object(shutil, "get_terminal_size",
-                               return_value=(60, 24)):
+                               return_value=(50, 24)):
             screen._render_frame()
         frame = strip_ansi(out.getvalue())
-        self.assertNotIn("◉", frame)
+        self.assertIn("◉", frame)
         self.assertIn("DEVON", frame)
+        # compact traffic row on narrow terminals
+        self.assertIn("tg●", frame)
+
+    def test_stealth_palette_in_frame(self):
+        """Cyber-Stealth truecolor codes present; banned codes absent."""
+        import io as _io
+        import shutil
+        import unittest.mock as mock
+
+        from nomorals.console.palette import (
+            STEALTH_AMBER,
+            STEALTH_CYAN,
+            STEALTH_TEXT,
+            visible_width,
+        )
+        from nomorals.console.widgets import GodScreen
+
+        snap = {"uptime_s": 60, "traffic": {"messages": 1, "errors": 2},
+                "adapters": {"telegram": {"running": True,
+                                          "received": 1, "sent": 0}}}
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: snap,
+                           color=True, out=out)
+        with mock.patch.object(shutil, "get_terminal_size",
+                               return_value=(80, 24)):
+            screen._render_frame()
+        raw = out.getvalue()
+        self.assertIn(STEALTH_CYAN, raw)   # borders, tabs, eye
+        self.assertIn(STEALTH_AMBER, raw)  # err > 0 warning
+        self.assertIn(STEALTH_TEXT, raw)   # body text
+        for bad in ("[31m", "[40m", "[41m"):
+            self.assertNotIn(bad, raw)
+        for line in raw.split("\n"):
+            self.assertLessEqual(visible_width(line), 80)
+
+    def test_traffic_and_scheduler_rows(self):
+        """Status view shows the one traffic row and next-jobs row."""
+        import io as _io
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen
+
+        snap = {
+            "adapters": {"telegram": {"running": True,
+                                       "received": 68, "sent": 0}},
+            "traffic": {"messages": 70, "errors": 0},
+            "scheduler": {"jobs": [
+                {"name": "rooms tick", "enabled": True,
+                 "next_run": 1760000000}]},
+            "extras": {"autonomy": "on", "arena": "off"},
+        }
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: snap,
+                           color=False, out=out)
+        screen._render_frame()
+        frame = strip_ansi(out.getvalue())
+        self.assertIn("tg", frame)
+        self.assertIn("68/0", frame)
+        self.assertIn("autonomy ON", frame)
+        self.assertIn("next:", frame)
+        self.assertIn("rooms tick", frame)
 
 
 class DashboardCommandWiringTests(unittest.TestCase):

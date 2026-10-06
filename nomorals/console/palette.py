@@ -2,7 +2,9 @@
 
 Hard rule from the owner: NO black backgrounds, NO red text. The palette is
 blues, greens, cyans, purples/magentas, whites and yellows — 256-color safe
-for Termux. Everything degrades gracefully when color is unsupported.
+for Termux — plus the Gemini "Cyber-Stealth" truecolor accents (24-bit SGR,
+still stdlib-only, no rich). Everything degrades gracefully when color is
+unsupported. The terminal's own background is never overridden.
 """
 
 from __future__ import annotations
@@ -38,6 +40,14 @@ CRIT = BRIGHT_MAGENTA
 TITLE = BRIGHT_CYAN
 SUBTLE = GRAY
 ACCENT = BRIGHT_BLUE
+
+# Gemini "Cyber-Stealth" accents — truecolor 24-bit SGR sequences, no
+# third-party library. Circuit cyan for primary borders / active
+# indicators, amber for warnings (sparingly), icy grey-blue for body
+# text instead of pure white. No background codes anywhere.
+STEALTH_CYAN = "\033[38;2;0;240;255m"      # #00F0FF
+STEALTH_AMBER = "\033[38;2;255;176;0m"     # #FFB000
+STEALTH_TEXT = "\033[38;2;163;184;204m"    # #A3B8CC
 
 
 def supports_color() -> bool:
