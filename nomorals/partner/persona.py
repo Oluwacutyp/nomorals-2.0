@@ -291,7 +291,7 @@ def persona_from_dict(data: Mapping[str, Any]) -> Persona:
     baselines = dict(DEFAULT_BASLINES)
     baselines.update({k: float(v) for k, v in (data.get("baselines") or {}).items()})
     return Persona(
-        name=str(data.get("name", "Wren")),
+        name=str(data.get("name", "Devon")),
         pronouns=str(data.get("pronouns", "she/her")),
         age=int(data.get("age", 27)),
         occupation=str(data.get("occupation", "a freelance programmer")),
@@ -307,7 +307,7 @@ def persona_from_dict(data: Mapping[str, Any]) -> Persona:
 
 
 def default_persona() -> Persona:
-    """Wren — the default partner persona.
+    """Devon — the default partner persona.
 
     A 27-year-old freelance programmer in a mountain town in Colorado. The
     background details (trails, clients, altitude, the one stoplight) live in
@@ -315,7 +315,7 @@ def default_persona() -> Persona:
     in every reply.
     """
     return Persona(
-        name="Wren",
+        name="Devon",
         pronouns="she/her",
         age=27,
         occupation="a freelance programmer",

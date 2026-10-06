@@ -77,7 +77,7 @@ class RuntimeMetaMixin:
             if int(b_health.get("failures") or 0):
                 backup_reasons.append(f"{p} failed too ({self._plain_model_reason(str(b_health.get('last_error') or 'unknown error'))})")
             else:
-                backup_reasons.append(f"{p} has not been tried yet")
+                backup_reasons.append(f"{p} in chain (not yet verified this session)")
         if backup_reasons:
             return (f"no model is answering — {active} is down ({reason}); "
                     + "; ".join(backup_reasons)
