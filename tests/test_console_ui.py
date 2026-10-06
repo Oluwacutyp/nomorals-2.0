@@ -1015,6 +1015,48 @@ class GodScreenLayoutTests(unittest.TestCase):
             frame = strip_ansi(out.getvalue())
             self.assertIn(view, frame)
 
+    def test_ninja_avatar_in_header(self):
+        """The owner's 7-row ninja sits beside the title on wide terminals."""
+        import io as _io
+        import shutil
+        import unittest.mock as mock
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen
+
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: {},
+                           color=False, out=out)
+        with mock.patch.object(shutil, "get_terminal_size",
+                               return_value=(80, 30)):
+            screen._render_frame()
+        frame = strip_ansi(out.getvalue())
+        # The ninja's distinctive lines are present...
+        self.assertIn("/\\", frame)
+        self.assertIn("◉", frame)  # the amber eye
+        self.assertIn("/ || \\", frame)
+        # ...and the title sits on the same rows (side-by-side layout).
+        self.assertIn("DEVON", frame)
+
+    def test_ninja_avatar_hidden_on_narrow_terminal(self):
+        """Below 64 cols the header falls back to the plain title line."""
+        import io as _io
+        import shutil
+        import unittest.mock as mock
+
+        from nomorals.console.palette import strip_ansi
+        from nomorals.console.widgets import GodScreen
+
+        out = _io.StringIO()
+        screen = GodScreen(interval=0.1, snapshot=lambda: {},
+                           color=False, out=out)
+        with mock.patch.object(shutil, "get_terminal_size",
+                               return_value=(60, 24)):
+            screen._render_frame()
+        frame = strip_ansi(out.getvalue())
+        self.assertNotIn("◉", frame)
+        self.assertIn("DEVON", frame)
+
 
 class DashboardCommandWiringTests(unittest.TestCase):
     """`dashboard` / `dashboard --watch` reach the right handlers."""

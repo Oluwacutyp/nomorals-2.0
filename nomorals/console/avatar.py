@@ -22,6 +22,7 @@ __all__ = [
     "NINJA_MINI_HEIGHT",
     "NINJA_MINI_WIDTH",
     "NINJA_WIDTH",
+    "ninja_mini_lines",
     "render_ninja",
     "render_ninja_mini",
 ]
@@ -48,14 +49,16 @@ _FULL: list[list[tuple[str, str]]] = [
     [(r"   |   |    |   |   ", _CLOAK)],
 ]
 
+#: The owner's chosen 7-row mini ninja (exact art, do not redesign).
+#: Hood in electric blue, the single eye in amber.
 _MINI: list[list[tuple[str, str]]] = [
-    [(r"    /\    ", _HOOD)],
-    [(r"   /  \   ", _HOOD)],
-    [(r"  | /\ |  ", _FACE)],
-    [(r"  | ", _FACE), ("◉", _EYE), (r" |  ", _FACE)],
-    [(r"  | \/ |  ", _FACE)],
-    [(r"   \  /   ", _FACE)],
-    [(r"  /|  |\  ", _CLOAK)],
+    [(r"     /\    ", _HOOD)],
+    [(r"    /  \   ", _HOOD)],
+    [(r"   / || \  ", _HOOD)],
+    [(r"  |  ", _FACE), ("◉", _EYE), (r"  |  ", _FACE)],
+    [(r"   \ || /  ", _FACE)],
+    [(r"    \  /   ", _FACE)],
+    [(r"   / \/ \  ", _CLOAK)],
 ]
 
 NINJA_WIDTH = max(
@@ -73,6 +76,19 @@ def _render(lines: list[list[tuple[str, str]]], *, color: bool | None) -> str:
         "".join(paint(text, code, color=color) for text, code in segs)
         for segs in lines
     )
+
+
+def ninja_mini_lines(*, color: bool | None = None) -> list[str]:
+    """The 7-row mini ninja as individual painted lines.
+
+    For side-by-side layouts (e.g. avatar next to the dashboard title).
+    Each line is fully painted; use ``visible_width`` from palette to
+    measure (the ◉ eye is a wide char).
+    """
+    return [
+        "".join(paint(text, code, color=color) for text, code in segs)
+        for segs in _MINI
+    ]
 
 
 def render_ninja(*, color: bool | None = None) -> str:

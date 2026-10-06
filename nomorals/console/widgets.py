@@ -825,11 +825,12 @@ class GodScreen:
 
         lines: list[str] = []
 
-        # ── header (2 lines): title + tabs, then a rule ──
+        # ── header: ninja avatar beside title + tabs, then a rule ──
+        # The owner's ninja (7 rows) sits left of the title block.
+        # On narrow terminals (<64 cols) fall back to the plain title line.
         spin = _SPINNER[self._frame % len(_SPINNER)]
         self._frame += 1
-        title = (paint("🥷 ", CYAN, color=self.color)
-                 + gradient_text("DEVON", 51, 201, color=self.color)
+        title = (gradient_text("DEVON", 51, 201, color=self.color)
                  + paint(" · live ", TITLE, color=self.color)
                  + paint(spin, CYAN, color=self.color))
         tabs = "  ".join(
@@ -838,17 +839,34 @@ class GodScreen:
                   color=self.color)
             for v in WATCH_VIEWS
         )
-        lines.append(_t(f"  {title}   {tabs}"))
+        subtitle = paint("universal agent os · no-morals 2.0", DIM,
+                         color=self.color)
+        if width >= 64:
+            from .avatar import NINJA_MINI_HEIGHT, ninja_mini_lines
+            from .palette import visible_width
+
+            ninja = ninja_mini_lines(color=self.color)
+            avatar_w = max(visible_width(ln) for ln in ninja)
+            # Right-side block: title, tabs, subtitle, then blank rows
+            # to match the avatar height.
+            right = [f"  {title}", f"  {tabs}", f"  {subtitle}"]
+            while len(right) < NINJA_MINI_HEIGHT:
+                right.append("")
+            for i in range(NINJA_MINI_HEIGHT):
+                left = ninja[i]
+                pad = " " * max(0, avatar_w - visible_width(left))
+                gap = "   "
+                lines.append(_t(f"{left}{pad}{gap}{right[i]}"))
+        else:
+            lines.append(_t(f"  {title}   {tabs}"))
         lines.append(_t(paint("─" * width, SUBTLE, color=self.color)))
         header_h = len(lines)
 
         # ── content: the current view, plain lines ──
-        # Fixed heights: 2 header + 1 rule + content + 1 rule +
-        # 1 feed-title + 5 feed + 1 rule + 1 status = height.
+        # Fixed lines: header_h + 1 view label + 1 feed label + feed_h +
+        # 1 separator + 1 status. Content fills the rest.
         feed_h = 5
-        # Fixed lines: 2 header + 1 view label + 1 feed label + feed_h +
-        # 1 separator + 1 status = 6 + feed_h. Content fills the rest.
-        content_h = max(4, height - (6 + feed_h))
+        content_h = max(4, height - (header_h + 4 + feed_h))
         view_text = _d.render_view(snap, self._view, color=self.color,
                                    bare=True)
         content_lines = [
