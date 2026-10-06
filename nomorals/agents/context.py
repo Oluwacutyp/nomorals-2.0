@@ -489,6 +489,24 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             for model in lc.list():
                 try:
                     broker.register(_card_for(model))
+                    # Also add the provider to the router so the broker can activate it
+                    if model.provider == "llama_cpp" and "llama_cpp" not in router.providers():
+                        try:
+                            # Ensure the model is loaded (server running)
+                            lc.load(model.id)
+                            from ..llm.providers.llama_cpp import LlamaCppProvider
+                            # Get the server URL from the provisioner
+                            provisioner = lc._provisioner(model)
+                            if hasattr(provisioner, '_managers') and model.id in provisioner._managers:
+                                manager = provisioner._managers[model.id]
+                                base_url = f"http://{manager.host}:{manager.port}"
+                            else:
+                                base_url = "http://127.0.0.1:8080"
+                            provider = LlamaCppProvider(base_url=base_url, model=model.id)
+                            router.add(provider)
+                            _log.info("registered llama_cpp provider for %s at %s", model.id, base_url)
+                        except Exception as e:
+                            _log.warning("failed to register llama_cpp provider: %s", e)
                 except Exception:
                     pass
             primary = lc.primary
