@@ -1262,5 +1262,58 @@ class MessageFeedNoDedupTests(unittest.TestCase):
         self.assertEqual(len(feed), 2)
 
 
+class GodConsoleTests(unittest.TestCase):
+    """GodConsole: views must actually switch, and the loop must tick."""
+
+    def _console(self):
+        from nomorals.console.godconsole import GodConsole
+
+        c = GodConsole(snapshot=lambda: _snap(), on_command=lambda cmd: cmd)
+        c._color = True
+        return c
+
+    def test_views_render_distinct_content(self):
+        # Reported bug: 1/2/3/4 set the view but the pane never changed.
+        c = self._console()
+        rendered = {}
+        for view in ("status", "games", "jobs", "brain", "debug"):
+            c._view = view
+            rendered[view] = "\n".join(c._render_main(80, 10))
+        self.assertEqual(len(set(rendered.values())), 5)
+
+    def test_handle_key_switches_view(self):
+        c = self._console()
+        self.assertTrue(c._handle_key("2"))
+        self.assertEqual(c._view, "games")
+        self.assertTrue(c._handle_key("3"))
+        self.assertEqual(c._view, "jobs")
+        self.assertTrue(c._handle_key("4"))
+        self.assertEqual(c._view, "brain")
+        self.assertTrue(c._handle_key("d"))
+        self.assertEqual(c._view, "debug")
+        self.assertTrue(c._handle_key("1"))
+        self.assertEqual(c._view, "status")
+
+    def test_wait_key_timeout_returns_none(self):
+        # Reported bug: the frame only re-rendered on keypress. A tick must
+        # return None so the loop re-renders without input.
+        import unittest.mock as mock
+
+        c = self._console()
+        with mock.patch("select.select", return_value=([], [], [])), \
+             mock.patch.object(c, "_width", 80):
+            self.assertIsNone(c._wait_key(0.01))
+
+    def test_wait_key_reads_pending_key(self):
+        import io as _io
+        import unittest.mock as mock
+
+        c = self._console()
+        fake_stdin = _io.StringIO("4")
+        with mock.patch("sys.stdin", fake_stdin), \
+             mock.patch("select.select", return_value=([fake_stdin], [], [])):
+            self.assertEqual(c._wait_key(1.0), "4")
+
+
 if __name__ == "__main__":
     unittest.main()

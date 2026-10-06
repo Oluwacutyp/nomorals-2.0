@@ -27,8 +27,10 @@ Layout:
 
 from __future__ import annotations
 
+import io
 import os
 import queue
+import select
 import sys
 import termios
 import threading
@@ -168,12 +170,12 @@ class GodConsole:
         return lines
 
     def _render_main(self, w: int, h: int) -> list[str]:
-        from .dashboard import render_dashboard
+        from .dashboard import render_view
         snap = self._snapshot()
         try:
-            content = render_dashboard(snap, bare=True, color=self._color)
+            content = render_view(snap, self._view, bare=True, color=self._color)
         except Exception:
-            content = "dashboard unavailable"
+            content = "view unavailable"
         lines = content.split("\n")
         # Truncate each line to width, pad to height
         result = []
@@ -242,19 +244,36 @@ class GodConsole:
         out += f"\x1b[{input_row + 1};{cursor_col + 1}H"
         return out
 
-    def _read_key(self) -> str:
-        """Read a single keypress. Returns the char or escape sequence."""
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+    def _wait_key(self, timeout: float) -> str | None:
+        """Return a keypress if one arrives within ``timeout`` seconds, else None.
+
+        ``None`` is a timer tick: the caller should re-render the frame and
+        wait again, so background events (pushed via :meth:`push_event`) and
+        snapshot changes appear live without any keypress.
+        """
+        stdin = sys.stdin
         try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
-            if ch == "\x1b":
-                # Escape sequence
-                ch += sys.stdin.read(2)
-            return ch
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            fd = stdin.fileno()
+        except (OSError, io.UnsupportedOperation):
+            fd = None
+        target = [fd] if fd is not None else [stdin]
+        r, _, _ = select.select(target, [], [], timeout)
+        if not r:
+            return None
+        ch = stdin.read(1)
+        if ch == "\x1b":
+            # Escape sequence (arrows, etc.): read the rest without blocking.
+            extra = ""
+            while len(extra) < 2:
+                r2, _, _ = select.select(target, [], [], 0.05)
+                if not r2:
+                    break
+                c = stdin.read(1)
+                extra += c
+                if c.isalpha() or c == "~":
+                    break
+            ch += extra
+        return ch
 
     def _handle_key(self, key: str) -> bool:
         """Handle a keypress. Returns False to quit."""
@@ -295,11 +314,19 @@ class GodConsole:
         return True
 
     def run(self) -> str:
-        """Main loop. Takes over the terminal until quit."""
+        """Main loop. Takes over the terminal until quit.
+
+        The frame re-renders on every tick (~1s) even with no input, so the
+        display stays live: uptime, event feed and view content all refresh
+        without a keypress. Raw mode is set once for the session (not per
+        keystroke).
+        """
         if not self._color:
             return "god console needs a real terminal"
 
+        TICK = 1.0
         guard = _ScreenGuard(isolate=True)
+        fd = sys.stdin.fileno()
         try:
             with guard:
                 tty_out = guard.tty
@@ -307,33 +334,46 @@ class GodConsole:
                 tty_out.write(_ALT_SCREEN_ON + _HIDE_CURSOR)
                 tty_out.flush()
 
-                self._running = True
-                self._width, self._height = self._get_size()
+                # Raw mode once for the whole session.
+                try:
+                    old_attrs = termios.tcgetattr(fd)
+                    tty.setraw(fd)
+                    raw = True
+                except Exception:
+                    old_attrs = None
+                    raw = False
 
-                # Initial render
-                tty_out.write(self._render_frame())
-                tty_out.flush()
+                try:
+                    self._running = True
+                    self._width, self._height = self._get_size()
 
-                while self._running:
-                    # Check for resize
-                    w, h = self._get_size()
-                    if (w, h) != (self._width, self._height):
-                        self._width, self._height = w, h
-                        # Full clear on resize
-                        tty_out.write("\x1b[2J")
+                    while self._running:
+                        # Check for resize
+                        w, h = self._get_size()
+                        if (w, h) != (self._width, self._height):
+                            self._width, self._height = w, h
+                            # Full clear on resize
+                            tty_out.write("\x1b[2J")
 
-                    # Render frame
-                    tty_out.write(self._render_frame())
-                    tty_out.flush()
+                        # Render frame on every iteration (tick or keypress)
+                        tty_out.write(self._render_frame())
+                        tty_out.flush()
 
-                    # Read key (blocking)
-                    try:
-                        key = self._read_key()
-                    except Exception:
-                        break
+                        # Wait for a key, but wake up on the tick so the
+                        # display never goes stale waiting for input.
+                        try:
+                            key = self._wait_key(TICK)
+                        except Exception:
+                            break
 
-                    if not self._handle_key(key):
-                        break
+                        if key is None:
+                            continue  # timer tick: re-render
+
+                        if not self._handle_key(key):
+                            break
+                finally:
+                    if raw and old_attrs is not None:
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
                 # Restore
                 tty_out.write(_ALT_SCREEN_OFF + _SHOW_CURSOR)
