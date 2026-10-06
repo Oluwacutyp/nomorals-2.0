@@ -1217,8 +1217,15 @@ class DashboardCommandWiringTests(unittest.TestCase):
             self.assertEqual(snap["games"], {"players": 7})
 
 
-class MessageFeedDedupTests(unittest.TestCase):
-    def test_duplicate_push_ignored(self):
+class MessageFeedNoDedupTests(unittest.TestCase):
+    """The feed records every push verbatim — no fuzzy deduplication.
+
+    At-most-once delivery is guaranteed by the adapters
+    (TelegramAdapter/TelegramBotAdapter skip replayed Telegram message
+    ids at the source). The feed must not hide duplicates with
+    text-similarity heuristics."""
+
+    def test_identical_events_both_recorded(self):
         from nomorals.console.widgets import MessageEvent, MessageFeed
 
         feed = MessageFeed()
@@ -1228,9 +1235,9 @@ class MessageFeedDedupTests(unittest.TestCase):
                            text="hello", timestamp=1001.0)  # same, 1s later
         feed.push(ev1)
         feed.push(ev2)
-        self.assertEqual(len(feed), 1)
+        self.assertEqual(len(feed), 2)
 
-    def test_different_messages_not_deduped(self):
+    def test_different_messages_recorded(self):
         from nomorals.console.widgets import MessageEvent, MessageFeed
 
         feed = MessageFeed()
@@ -1242,7 +1249,7 @@ class MessageFeedDedupTests(unittest.TestCase):
         feed.push(ev2)
         self.assertEqual(len(feed), 2)
 
-    def test_same_text_after_delay_not_deduped(self):
+    def test_same_text_after_delay_recorded(self):
         from nomorals.console.widgets import MessageEvent, MessageFeed
 
         feed = MessageFeed()

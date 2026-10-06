@@ -405,6 +405,11 @@ class TelegramAdapter(ChatAdapter):
         self._me_first_name: str = ""
         # ids of messages this adapter sent — the self-chat loop guard
         self._sent_ids: set[int] = set()
+        # (chat_id, message_id) of inbound messages already delivered.
+        # Telethon can replay the same Telegram update (channel difference
+        # on reconnect, update re-delivery); the adapter guarantees
+        # at-most-once processing per Telegram message here, at the source.
+        self._seen_inbound: set[tuple[str, int]] = set()
         # the connection's event loop (set in run()); all outbound coroutines
         # must run on it — Telethon binds the client to that loop
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -484,6 +489,22 @@ class TelegramAdapter(ChatAdapter):
         name = self._me_first_name.lower()
         if len(name) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", lowered):
             return True
+        return False
+
+    def _note_inbound_seen(self, chat_id: str, message_id: int) -> bool:
+        """Record an inbound Telegram message id; True if already seen.
+
+        At-most-once delivery guard: Telethon can replay the same update
+        (channel difference on reconnect, update re-delivery). The bounded
+        set keeps the last ~5000 (chat_id, message_id) pairs.
+        """
+        key = (str(chat_id), int(message_id))
+        if key in self._seen_inbound:
+            return True
+        self._seen_inbound.add(key)
+        if len(self._seen_inbound) > 5000:
+            for _ in range(2500):
+                self._seen_inbound.pop()
         return False
 
     def _outgoing_is_self_chat(self, event: Any) -> bool:
@@ -826,6 +847,22 @@ class TelegramAdapter(ChatAdapter):
            keeps the message alive even when Telethon can't resolve the user)"""
         message = getattr(event, "message", None) or event
         chat_id = str(getattr(event, "chat_id", "") or "")
+        # ── at-most-once inbound ─────────────────────────────────────
+        # Telethon can deliver the same Telegram message twice (channel
+        # difference fetch on reconnect, update replay). Drop the replay
+        # here so nothing downstream ever sees the message twice — the
+        # dashboard, the brain, and the game engine all get exactly one
+        # copy. This is delivery guarantee, not UI deduplication.
+        try:
+            _mid = int(getattr(message, "id", 0) or 0)
+        except (TypeError, ValueError):
+            _mid = 0
+        if _mid and self._note_inbound_seen(chat_id, _mid):
+            _log.debug(
+                "telegram: skipping replayed message id=%s in chat_id=%s",
+                _mid, chat_id,
+            )
+            return
         # ── bot self-reply loop guard ──────────────────────────────────
         # When the companion BotFather bot runs alongside this userbot, the
         # bot's outgoing messages arrive here as incoming (different account).
@@ -1449,6 +1486,26 @@ class TelegramBotAdapter(ChatAdapter):
         self._offset = 0
         self._bot_id: int | None = None
         self._bot_username = ""
+        # (chat_id, message_id) already delivered — getUpdates offset
+        # tracking normally prevents replays, but a restarted poll loop
+        # can re-fetch recent updates; guarantee at-most-once here too.
+        self._seen_inbound: set[tuple[str, str]] = set()
+
+    def _note_inbound_seen(self, chat_id: str, message_id: str) -> bool:
+        """Record an inbound Bot API message id; True if already seen.
+
+        getUpdates offset tracking normally prevents replays, but a
+        restarted poll loop can re-fetch recent updates. Same at-most-once
+        guarantee as the userbot adapter.
+        """
+        key = (str(chat_id), str(message_id))
+        if key in self._seen_inbound:
+            return True
+        self._seen_inbound.add(key)
+        if len(self._seen_inbound) > 5000:
+            for _ in range(2500):
+                self._seen_inbound.pop()
+        return False
 
     # ── HTTP ────────────────────────────────────────────────────────────────
     def _sess(self) -> Any:
@@ -1522,6 +1579,18 @@ class TelegramBotAdapter(ChatAdapter):
                     continue
                 message = self._convert(update)
                 if message is not None:
+                    # At-most-once: a restarted poll loop can re-fetch
+                    # updates the offset already passed. Skip replays by
+                    # (chat_id, message_id) so the brain/feed see each
+                    # message exactly once.
+                    if message.message_id and self._note_inbound_seen(
+                        message.chat.chat_id, message.message_id
+                    ):
+                        _log.debug(
+                            "telegram-bot: skipping replayed message %s in %s",
+                            message.message_id, message.chat.chat_id,
+                        )
+                        continue
                     self._deliver(handler, message)
 
     # ── inbound ───────────────────────────────────────────────────────────

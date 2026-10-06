@@ -820,3 +820,58 @@ class ResolveUsernameTests(unittest.TestCase):
         self.assertIn("hit_rate", s)
         self.assertIn("avg_lookup_s", s)
         self.assertEqual(s["entries"], 0)
+
+
+class AtMostOnceInboundTests(unittest.TestCase):
+    """At-most-once inbound delivery: replayed Telegram updates are
+    dropped at the adapter, so the gateway/brain/feed see each message
+    exactly once. This is the root-cause fix for duplicate feed lines —
+    not UI-level fuzzy deduplication."""
+
+    def _userbot(self):
+        import tempfile
+        from nomorals.social.chat.telegram import TelegramAdapter
+        d = tempfile.mkdtemp()
+        return TelegramAdapter(api_id=123, api_hash="x",
+                               session_path=":memory:", media_dir=d)
+
+    def _bot(self):
+        import tempfile
+        from nomorals.social.chat.telegram import TelegramBotAdapter
+        d = tempfile.mkdtemp()
+        return TelegramBotAdapter(token="123:abc", media_dir=d)
+
+    def test_userbot_replay_dropped(self):
+        a = self._userbot()
+        self.assertFalse(a._note_inbound_seen("-1001234", 777))
+        # Same (chat_id, message_id) again → duplicate.
+        self.assertTrue(a._note_inbound_seen("-1001234", 777))
+        # Different message id → new.
+        self.assertFalse(a._note_inbound_seen("-1001234", 778))
+        # Different chat, same message id → new (ids are per-chat).
+        self.assertFalse(a._note_inbound_seen("-1009999", 777))
+
+    def test_userbot_seen_set_bounded(self):
+        a = self._userbot()
+        for i in range(6000):
+            a._note_inbound_seen("-1001", i)
+        self.assertLessEqual(len(a._seen_inbound), 5000)
+
+    def test_bot_replay_dropped(self):
+        b = self._bot()
+        self.assertFalse(b._note_inbound_seen("-1001234", "42"))
+        self.assertTrue(b._note_inbound_seen("-1001234", "42"))
+        self.assertFalse(b._note_inbound_seen("-1001234", "43"))
+
+    def test_feed_push_records_everything(self):
+        # The feed must NOT fuzzy-deduplicate: identical-looking events
+        # are recorded as pushed. At-most-once lives in the adapters.
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+        feed = MessageFeed(capacity=10)
+        e1 = MessageEvent(platform="telegram", sender="u",
+                         text="hello", timestamp=1000.0)
+        e2 = MessageEvent(platform="telegram", sender="u",
+                         text="hello", timestamp=1001.0)
+        feed.push(e1)
+        feed.push(e2)
+        self.assertEqual(len(feed), 2)

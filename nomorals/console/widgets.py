@@ -292,16 +292,10 @@ class MessageFeed:
     def push(self, event: MessageEvent) -> None:
         try:
             with self._lock:
-                # Deduplicate: Telegram/Telethon can deliver the same update
-                # twice; skip if identical to the most recent event.
-                if self._events:
-                    last = self._events[-1]
-                    if (last.platform == event.platform
-                            and last.sender == event.sender
-                            and last.text == event.text
-                            and abs((last.timestamp or 0)
-                                    - (event.timestamp or 0)) < 5.0):
-                        return
+                # No fuzzy deduplication here: at-most-once delivery is
+                # guaranteed by the adapters (they skip replayed Telegram
+                # message ids at the source). The feed records what it is
+                # given, exactly once per push.
                 self._events.append(event)
                 if len(self._events) > self._capacity:
                     del self._events[: len(self._events) - self._capacity]
