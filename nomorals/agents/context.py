@@ -491,15 +491,15 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                 try:
                     broker.register(_card_for(model))
                     # Only load the local model if it's the primary — otherwise skip
-                    # to avoid hanging boot on OOM-prone GGUF loads
-                    if model.provider == "llama_cpp" and model.id == primary_id and "llama_cpp" not in router.providers():
+                    # to avoid hanging boot on OOM-prone GGUF loads.
+                    # Also skip if it's already failed this boot (don't retry loop).
+                    if (model.provider == "llama_cpp" and model.id == primary_id
+                            and "llama_cpp" not in router.providers()
+                            and model.status != "failed"):
                         try:
-                            # Reset if stuck in failed state from previous OOM
-                            if model.status == "failed":
-                                lc.retry(model.id)
-                                # Refresh model object after retry
-                                model = lc.get(model.id)
                             # Ensure the model is loaded (server running)
+                            # Note: if status is failed, we skip entirely — don't retry
+                            # OOM-killed models, let the operator manually retry.
                             lc.load(model.id)
                             from ..llm.providers.llama_cpp import LlamaCppProvider
                             # Get the server URL from the provisioner
