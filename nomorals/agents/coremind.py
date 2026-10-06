@@ -522,6 +522,52 @@ def _owner_intent_model_check(text: str, context: Any = None) -> bool:
         return False
 
 
+def _llm_intent_interpret(text: str, context: Any = None) -> Intent | None:
+    """LLM-first intent interpretation. The model reads meaning, not patterns.
+
+    Returns an Intent when the model confidently classifies the text,
+    None when the model is unavailable or uncertain (falls back to regex).
+    """
+    router = getattr(context, "router", None)
+    if router is None:
+        return None
+    try:
+        from ..llm.power import model_usable
+        if not model_usable(context):
+            return None
+        from ..llm.base import Message, SamplingParams
+        response = router.chat(
+            [Message.system(
+                "Classify the user's intent. Reply with ONLY one word from this list:\n"
+                "schedule (reminders, alerts, 'in X minutes')\n"
+                "mission (tasks, background work)\n"
+                "research (look up, find information)\n"
+                "build (create code, build something)\n"
+                "chat (general conversation, no specific action)\n"
+                "status (system status check)\n"
+                "If unsure, reply 'chat'."
+            ),
+             Message.user(text[:300])],
+            SamplingParams(temperature=0.0, max_tokens=16),
+        )
+        if not getattr(response, "ok", False):
+            return None
+        kind = (getattr(response, "text", "") or "").strip().lower()
+        kind_map = {
+            "schedule": ("schedule", 0.9, "scheduler", "LLM interpreted as scheduling intent"),
+            "mission": ("mission", 0.85, "directives", "LLM interpreted as mission intent"),
+            "research": ("research", 0.85, "research_swarm", "LLM interpreted as research intent"),
+            "build": ("build", 0.85, "coding", "LLM interpreted as build intent"),
+            "status": ("status", 0.85, "mind", "LLM interpreted as status intent"),
+        }
+        if kind in kind_map:
+            k, conf, route, why = kind_map[kind]
+            return Intent(k, conf, target=text.strip()[:200], route=route, why=why)
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _clean_topic(text: str, verb: re.Pattern) -> str:
     """The payload after the intent verb, stripped of filler."""
     m = verb.search(text)
@@ -1290,6 +1336,15 @@ class CoreMind:
     def _decide(self, text: str, *, live_game: str | None = None,
                 allow_model: bool = True) -> Intent:
         """The decision, pure and inspectable.  ``chat`` = just talk."""
+        # LLM-first: let the model interpret meaning before regex patterns.
+        # Falls back to regex when the model is unavailable or uncertain.
+        if allow_model:
+            try:
+                llm_intent = _llm_intent_interpret(text, self.context)
+                if llm_intent is not None and llm_intent.kind != "chat":
+                    return llm_intent
+            except Exception:  # noqa: BLE001 - LLM intent never breaks routing
+                pass
         cands = understand(text, live_game=live_game)
         # owner identity is semantic, not just regex: if the deterministic
         # pass missed it but the text smells like an identity claim, ask the

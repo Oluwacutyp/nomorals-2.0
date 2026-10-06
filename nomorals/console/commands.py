@@ -21,6 +21,7 @@ SnapshotProvider = Callable[[], dict[str, Any]]
 _CLEAR_SEQ = "\033[2J\033[H"
 
 _HELP_TEXT = """console commands (local terminal only):
+  console                    god-tier fullscreen interactive console
   dashboard [--watch [secs]]   full status · live split-pane with --watch
                                (in watch: 1=status 2=games 3=jobs 4=brain, q=quit)
   status          one-line compact status
@@ -57,6 +58,8 @@ class ConsoleCommands:
                         secs = 2.0  # unparseable interval → default, not a crash
                 return self._watch(secs)
             return render_dashboard(self._safe_snapshot())
+        if cmd in {"console", "/console"}:
+            return self._god_console()
         if cmd in {"status", "/status"}:
             return render_status_line(self._safe_snapshot())
         if cmd in {"jobs", "schedule", "/jobs"}:
@@ -96,6 +99,26 @@ class ConsoleCommands:
                 + "\n"
                 + render_dashboard(self._safe_snapshot())
             )
+
+    def _god_console(self) -> str:
+        """Launch the god-tier fullscreen interactive console."""
+        try:
+            from .godconsole import GodConsole
+
+            console = GodConsole(
+                snapshot=self._safe_snapshot,
+                on_command=self._handle_console_command,
+            )
+            return console.run()
+        except Exception as exc:  # noqa: BLE001
+            return paint(f"console failed ({exc})", WARN)
+
+    def _handle_console_command(self, cmd: str) -> str:
+        """Handle a command typed in the god console."""
+        result = self.handle(cmd)
+        if result is not None:
+            return result
+        return f"(sent to Devon: {cmd})"
 
     def _handle_theme(self, args: list[str]) -> str:
         if not args:
