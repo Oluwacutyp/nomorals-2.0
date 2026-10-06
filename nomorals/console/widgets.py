@@ -292,6 +292,16 @@ class MessageFeed:
     def push(self, event: MessageEvent) -> None:
         try:
             with self._lock:
+                # Deduplicate: Telegram/Telethon can deliver the same update
+                # twice; skip if identical to the most recent event.
+                if self._events:
+                    last = self._events[-1]
+                    if (last.platform == event.platform
+                            and last.sender == event.sender
+                            and last.text == event.text
+                            and abs((last.timestamp or 0)
+                                    - (event.timestamp or 0)) < 5.0):
+                        return
                 self._events.append(event)
                 if len(self._events) > self._capacity:
                     del self._events[: len(self._events) - self._capacity]
@@ -915,13 +925,18 @@ class GodScreen:
 
     def _feed_line(self, event: "MessageEvent") -> str:
         """One compact feed row: ``\u2502 17:04  TG  Ade  preview\u2026``."""
+        from .palette import visible_width
+
         c = self.color
         ts = time.strftime("%H:%M", time.localtime(event.timestamp or time.time()))
         plat = self._PLAT_SHORT.get((event.platform or "").lower(), "??")
         sender = (event.sender or "?")[:12]
         text = " ".join((event.text or "").split())
-        if len(text) > 56:
-            text = text[:53] + "\u2026"
+        # Truncate by VISIBLE width (emoji = 2 cells), not char count.
+        # Prefix is ~22 cells; leave room so the full line fits narrow terms.
+        if visible_width(text) > 48:
+            from .palette import truncate_visible as _tv
+            text = _tv(text, 48)
         where = f" @{event.chat_title}" if event.chat_title else ""
         return (
             paint("\u2502 ", STEALTH_CYAN, color=c)

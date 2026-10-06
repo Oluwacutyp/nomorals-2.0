@@ -1217,5 +1217,43 @@ class DashboardCommandWiringTests(unittest.TestCase):
             self.assertEqual(snap["games"], {"players": 7})
 
 
+class MessageFeedDedupTests(unittest.TestCase):
+    def test_duplicate_push_ignored(self):
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+
+        feed = MessageFeed()
+        ev1 = MessageEvent(platform="telegram", sender="user1",
+                           text="hello", timestamp=1000.0)
+        ev2 = MessageEvent(platform="telegram", sender="user1",
+                           text="hello", timestamp=1001.0)  # same, 1s later
+        feed.push(ev1)
+        feed.push(ev2)
+        self.assertEqual(len(feed), 1)
+
+    def test_different_messages_not_deduped(self):
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+
+        feed = MessageFeed()
+        ev1 = MessageEvent(platform="telegram", sender="user1",
+                           text="hello", timestamp=1000.0)
+        ev2 = MessageEvent(platform="telegram", sender="user1",
+                           text="world", timestamp=1001.0)  # different text
+        feed.push(ev1)
+        feed.push(ev2)
+        self.assertEqual(len(feed), 2)
+
+    def test_same_text_after_delay_not_deduped(self):
+        from nomorals.console.widgets import MessageEvent, MessageFeed
+
+        feed = MessageFeed()
+        ev1 = MessageEvent(platform="telegram", sender="user1",
+                           text="hello", timestamp=1000.0)
+        ev2 = MessageEvent(platform="telegram", sender="user1",
+                           text="hello", timestamp=1010.0)  # 10s later
+        feed.push(ev1)
+        feed.push(ev2)
+        self.assertEqual(len(feed), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
