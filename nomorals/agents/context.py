@@ -492,6 +492,11 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                     # Also add the provider to the router so the broker can activate it
                     if model.provider == "llama_cpp" and "llama_cpp" not in router.providers():
                         try:
+                            # Reset if stuck in failed state from previous OOM
+                            if model.status == "failed":
+                                lc.retry(model.id)
+                                # Refresh model object after retry
+                                model = lc.get(model.id)
                             # Ensure the model is loaded (server running)
                             lc.load(model.id)
                             from ..llm.providers.llama_cpp import LlamaCppProvider
