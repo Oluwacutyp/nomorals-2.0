@@ -1211,16 +1211,49 @@ class BattleArenaGame(MultiGame):
                        and piece.get("grade") == "myth"
                        for piece in loadout.values())
         s["myth_foe"] = myth_foe
-        enemy = roll_enemy(
-            rng, rank_idx, player_power,
-            foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
-                      "def": h["def"]},
-            myth_foe=myth_foe, difficulty=difficulty)
+        enemy = None
+        # boss fight every 10th arena bout — the house sends its champion
+        bouts = int(s.get("_arena_bouts", 0)) + 1
+        s["_arena_bouts"] = bouts
+        is_boss_fight = (bouts % 10 == 0)
+        if is_boss_fight:
+            from ..enemies import roll_boss
+            enemy = roll_boss(
+                rng, rank_idx, player_power,
+                foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
+                          "def": h["def"]},
+                difficulty=difficulty)
+        else:
+            # archetype variety: not every foe is a hunter
+            archetype = rng.choices(
+                ("hunter", "beast", "machine", "shade"),
+                weights=(60, 15, 15, 10))[0]
+            enemy = roll_enemy(
+                rng, rank_idx, player_power,
+                foe_base={"max_hp": h["max_hp"], "atk": h["atk"],
+                          "def": h["def"]},
+                myth_foe=myth_foe, difficulty=difficulty,
+                archetype=archetype)
         # house_skills must land before _apply_house_gear: the 20%
         # power cap counts skill power when it measures.
         s["house_skills"] = enemy["skills"]
+        # archetype/elite/boss shaping lands on the house fighter BEFORE
+        # gear + power cap, so the 20% competitive cap still holds.
+        shaped = enemy.get("shaped_base") or {}
+        if shaped:
+            h["max_hp"] = int(shaped.get("max_hp", h["max_hp"]))
+            h["hp"] = h["max_hp"]
+            h["atk"] = int(shaped.get("atk", h["atk"]))
+            h["def"] = int(shaped.get("def", h["def"]))
         self._apply_house_gear(room, enemy)
         s["house_name"] = enemy["name"]
+        s["house_archetype"] = enemy.get("archetype", "hunter")
+        s["house_elite"] = enemy.get("elite")
+        s["house_is_boss"] = bool(enemy.get("is_boss", False))
+        s["house_enrage_at"] = float(enemy.get("enrage_at", 0.0))
+        s["house_enraged"] = False
+        s["house_enrage_mult"] = float(enemy.get("enrage_mult", 1.0))
+        s["house_lifesteal"] = bool(enemy.get("lifesteal", False))
         s["house_skill_cd"] = {}
         s["house_skill_used"] = []
         h["potions"] = enemy["potions"]
@@ -2222,6 +2255,16 @@ class BattleArenaGame(MultiGame):
         # venom can finish the house before it acts
         if self._check(room):
             return
+        # boss enrage: below the threshold, once per fight, the boss surges
+        if (s.get("house_is_boss") and not s.get("house_enraged")
+                and s.get("house_enrage_at", 0) > 0
+                and house["hp"] <= house["max_hp"] * s["house_enrage_at"]):
+            s["house_enraged"] = True
+            mult = s.get("house_enrage_mult", 1.35)
+            house["atk"] = int(house["atk"] * mult)
+            out.append(
+                f"💢 {s.get('house_name', 'the boss')} ENRAGES — "
+                "its attacks surge!")
         if house["fury_cd"] > 0:
             house["fury_cd"] -= 1
         # a skilled hunter opens with technique, not fists

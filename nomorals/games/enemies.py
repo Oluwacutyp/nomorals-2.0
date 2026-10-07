@@ -153,17 +153,91 @@ ENEMY_EXCLUSIVE_COUNTS: dict[int, int] = {
 _ENEMY_FIRST = (
     "Gore", "Mara", "Vex", "Rusk", "Dain", "Sable", "Korr", "Juno",
     "Pike", "Tarn", "Vessa", "Odo", "Rin", "Kess", "Bran", "Zev",
+    "Hale", "Yrsa", "Drok", "Fenn", "Garr", "Hush", "Ivo", "Jex",
+    "Karn", "Lira", "Moss", "Nyx", "Orr", "Pell", "Quill", "Rho",
+    "Sarn", "Tove", "Ulric", "Vann", "Wren", "Xan", "Ysol", "Zara",
 )
 
 _ENEMY_TITLES: dict[int, tuple[str, ...]] = {
-    0: ("the Cutthroat", "the Brawler", "the Desperate"),
-    1: ("the Duelist", "the Blade", "the Scarred"),
-    2: ("the Reaver", "the Iron Fang", "the Stormcrow"),
-    3: ("the Warlord", "the Crimson Edge", "the Nightmare"),
-    4: ("the Executioner", "the Hollow Blade", "the Dreadnought"),
-    5: ("the Render", "the World-Eater", "the Unbroken"),
-    6: ("the Calamity", "the Stormborn", "the Twice-Crowned"),
-    7: ("the Annihilator", "the End of Legends", "the Absolute"),
+    0: ("the Cutthroat", "the Brawler", "the Desperate",
+        "the Rat", "the Hungry", "the Cornered"),
+    1: ("the Duelist", "the Blade", "the Scarred",
+        "the Quick", "the Patient", "the Oathbound"),
+    2: ("the Reaver", "the Iron Fang", "the Stormcrow",
+        "the Relentless", "the Ashen", "the Gatekeeper"),
+    3: ("the Warlord", "the Crimson Edge", "the Nightmare",
+        "the Butcher", "the Ironclad", "the Howling Dark"),
+    4: ("the Executioner", "the Hollow Blade", "the Dreadnought",
+        "the Reaper", "the Kingslayer", "the Maw"),
+    5: ("the Render", "the World-Eater", "the Unbroken",
+        "the Godslayer", "the Everburning", "the Thronebreaker"),
+    6: ("the Calamity", "the Stormborn", "the Twice-Crowned",
+        "the Harbinger", "the Doom of Armies", "the Unmade"),
+    7: ("the Annihilator", "the End of Legends", "the Absolute",
+        "the Final Argument", "the Death of Hope", "the Omega"),
+}
+
+# ---------------------------------------------------------------------------
+# Enemy archetypes — not every foe is a hunter.  Each archetype reshapes
+# the stat profile and draws from its own name pool, so fights feel
+# different beyond the numbers.
+# ---------------------------------------------------------------------------
+
+#: archetype → stat multipliers (hp, atk, def) + flavor.
+ARCHETYPES: dict[str, dict[str, Any]] = {
+    "hunter": {"hp": 1.0, "atk": 1.0, "def": 1.0,
+               "blurb": "a hunter",
+               "names": _ENEMY_FIRST},
+    "beast": {"hp": 1.45, "atk": 1.18, "def": 0.78,
+              "blurb": "a beast",
+              "names": (
+                  "Ravage", "Gnash", "Howler", "Mauler", "Fang",
+                  "Claw", "Rip", "Snarl", "Bloodmaw", "Thornback",
+                  "Gorehorn", "Nightpelt", "Razorback", "Deathroll",
+              )},
+    "machine": {"hp": 1.12, "atk": 0.95, "def": 1.45,
+                "blurb": "a war machine",
+                "names": (
+                  "Ironclad", "Siegebreaker", "Rustjaw", "Geargrinder",
+                  "Piston", "Anvil", "Bulwark", "Cogsworth", "Furnace",
+                  "Hammerfall", "Steelrain", "Ironmonger",
+                )},
+    "shade": {"hp": 0.78, "atk": 1.22, "def": 0.85,
+              "blurb": "a shade",
+              "names": (
+                  "Whisper", "Gloom", "Umbra", "Wraith", "Hollow",
+                  "Dusk", "Murk", "Eclipse", "Nightfall", "Specter",
+                  "Vapor", "Shroud",
+              )},
+}
+
+#: elite affixes — ~15% of enemies roll one.  The affix prefixes the
+#: name and bends the stats; elites also drop better rewards.
+ELITE_AFFIXES: dict[str, dict[str, Any]] = {
+    "swift": {"hp": 0.9, "atk": 1.0, "def": 1.0, "dodge": True,
+              "blurb": "moves like smoke"},
+    "armored": {"hp": 1.1, "atk": 0.95, "def": 1.35,
+                "blurb": "plated head to toe"},
+    "vampiric": {"hp": 1.0, "atk": 1.1, "def": 0.9, "lifesteal": True,
+                 "blurb": "drinks your strength"},
+    "frenzied": {"hp": 0.85, "atk": 1.35, "def": 0.8,
+                 "blurb": "frothing, wild-eyed"},
+    "titanic": {"hp": 1.6, "atk": 1.1, "def": 1.1,
+                "blurb": "simply enormous"},
+}
+ELITE_CHANCE = 0.15
+
+#: boss names — one per rank tier, unique fights.  Bosses get phased
+#: combat: below 30% HP they enrage (attack surge, new message).
+BOSS_NAMES: dict[int, tuple[str, ...]] = {
+    0: ("Rat-King Skree", "Mudfang the Desperate"),
+    1: ("Duelist Corvus", "The Scarred Captain"),
+    2: ("Ironjaw Grull", "Stormcaller Vex"),
+    3: ("Warlord Kargath", "The Crimson Matriarch"),
+    4: ("Executioner Morvain", "The Hollow King"),
+    5: ("World-Eater Ythra", "The Unbroken Throne"),
+    6: ("Calamity Zero", "The Twice-Crowned Tyrant"),
+    7: ("The Absolute", "Omega Prime"),
 }
 
 #: titles reserved for myth-foe hunters — S-rank killers who rose to
@@ -175,17 +249,30 @@ _MYTH_FOE_TITLES: tuple[str, ...] = (
 
 
 def roll_enemy_name(rng: random.Random, rank_idx: int,
-                    myth_foe: bool = False) -> str:
+                    myth_foe: bool = False,
+                    archetype: str = "hunter") -> str:
     """A flavorful name, e.g. ``Vex the Render``.
 
     Myth-foe hunters (spawned against myth-equipped players) take a
-    darker title — the player knows this one is different.
+    darker title — the player knows this one is different.  Non-hunter
+    archetypes draw from their own name pools.
     """
     rank_idx = max(0, min(7, int(rank_idx)))
+    arch = ARCHETYPES.get(archetype, ARCHETYPES["hunter"])
+    if archetype != "hunter":
+        # beasts/machines/shades get a raw name, no hunter title
+        return str(rng.choice(arch["names"]))
     titles = (_MYTH_FOE_TITLES if myth_foe and rank_idx >= 5
               else _ENEMY_TITLES[rank_idx])
     return (f"{rng.choice(_ENEMY_FIRST)} "
             f"{rng.choice(titles)}")
+
+
+def roll_elite(rng: random.Random) -> Optional[str]:
+    """Maybe roll an elite affix (~15%).  Returns the affix slug or None."""
+    if rng.random() < ELITE_CHANCE:
+        return str(rng.choice(tuple(ELITE_AFFIXES)))
+    return None
 
 
 def _gear_pool(rank_idx: int, difficulty: str = "normal") -> tuple[str, ...]:
@@ -329,7 +416,9 @@ def roll_enemy(rng: random.Random, rank_idx: int,
                player_power: int = 0,
                foe_base: dict[str, Any] | None = None,
                myth_foe: bool = False,
-               difficulty: str = "normal") -> dict[str, Any]:
+               difficulty: str = "normal",
+               archetype: str = "hunter",
+               force_elite: bool = False) -> dict[str, Any]:
     """Roll a complete enemy: name, gear, skills, potions.
 
     ``player_power`` feeds the anti-triviality backstop, measured with
@@ -348,14 +437,42 @@ def roll_enemy(rng: random.Random, rank_idx: int,
     ``difficulty`` (easy/normal/hard/expert) scales the hunter's base
     stats, shifts their gear grade pool, and adjusts their technique
     counts — the flag is a real dial, not a label.
+
+    ``archetype`` (hunter/beast/machine/shade) reshapes the stat
+    profile and name pool.  Beasts hit hard with big HP; machines
+    shrug off damage; shades are fragile but lethal.
+
+    ``force_elite`` (or the 15% roll) applies an elite affix — a
+    named modifier with real stat bends and better rewards.
     """
     rank_idx = max(0, min(7, int(rank_idx)))
     mods = DIFFICULTY_MODS.get(difficulty, DIFFICULTY_MODS["normal"])
     mult = float(mods["stat_mult"])
+    arch = ARCHETYPES.get(archetype, ARCHETYPES["hunter"])
+    elite = roll_elite(rng) if not force_elite else None
+    if force_elite and elite is None:
+        elite = rng.choice(tuple(ELITE_AFFIXES))
+    affix = ELITE_AFFIXES.get(elite, {}) if elite else {}
+
+    base_name = roll_enemy_name(rng, rank_idx, myth_foe=myth_foe,
+                               archetype=archetype)
+    if elite:
+        base_name = f"{elite.title()} {base_name}"
+
+    # archetype + elite stat shaping, applied to the foe base
+    hp_m = float(arch.get("hp", 1.0)) * float(affix.get("hp", 1.0))
+    atk_m = float(arch.get("atk", 1.0)) * float(affix.get("atk", 1.0))
+    dfn_m = float(arch.get("def", 1.0)) * float(affix.get("def", 1.0))
+
     enemy: dict[str, Any] = {
-        "name": roll_enemy_name(rng, rank_idx, myth_foe=myth_foe),
+        "name": base_name,
         "rank_idx": rank_idx,
         "difficulty": difficulty,
+        "archetype": archetype,
+        "elite": elite,
+        "elite_blurb": affix.get("blurb", ""),
+        "lifesteal": bool(affix.get("lifesteal", False)),
+        "dodge_bonus": bool(affix.get("dodge", False)),
         "gear": roll_enemy_gear(rng, rank_idx, myth_foe=myth_foe,
                                 difficulty=difficulty),
         "skills": roll_enemy_skills(rng, rank_idx, myth_foe=myth_foe,
@@ -363,6 +480,7 @@ def roll_enemy(rng: random.Random, rank_idx: int,
         "potions": POTIONS[rank_idx] + (1 if difficulty == "expert"
                                         and rank_idx >= 3 else 0),
         "myth_foe": myth_foe and rank_idx >= 5,
+        "stat_mults": {"hp": hp_m, "atk": atk_m, "def": dfn_m},
     }
     if player_power > 0:
         from .power import fighter_power
@@ -371,6 +489,12 @@ def roll_enemy(rng: random.Random, rank_idx: int,
         base = {k: (int(round(v * mult)) if k in ("max_hp", "atk", "def")
                    else v)
                 for k, v in raw.items()}
+        # archetype + elite shaping lands on the base stats
+        sm = enemy["stat_mults"]
+        base["max_hp"] = int(base.get("max_hp", 50) * sm["hp"])
+        base["atk"] = int(base.get("atk", 10) * sm["atk"])
+        base["def"] = int(base.get("def", 5) * sm["def"])
+        enemy["shaped_base"] = dict(base)
 
         def _with_gear(gear: dict[str, Any]) -> int:
             gatk, gdef = _gear_power(gear, rank_idx)
@@ -389,4 +513,40 @@ def roll_enemy(rng: random.Random, rank_idx: int,
             enemy["gear"] = roll_enemy_gear(
                 rng, max(0, rank_idx - 1), myth_foe=myth_foe,
                 difficulty=difficulty)
+    else:
+        # no backstop: still expose the shaped base for the caller
+        raw = dict(foe_base) if foe_base else {"max_hp": 50,
+                                              "atk": 10, "def": 5}
+        sm = enemy["stat_mults"]
+        enemy["shaped_base"] = {
+            "max_hp": int(raw.get("max_hp", 50) * mult * sm["hp"]),
+            "atk": int(raw.get("atk", 10) * mult * sm["atk"]),
+            "def": int(raw.get("def", 5) * mult * sm["def"]),
+        }
+    return enemy
+
+
+def roll_boss(rng: random.Random, rank_idx: int,
+              player_power: int = 0,
+              foe_base: dict[str, Any] | None = None,
+              difficulty: str = "normal") -> dict[str, Any]:
+    """Roll a boss: a named, phased, elite-tier threat.
+
+    Bosses are always elite, always at least A-rank presence, and carry
+    an enrage phase: below 30% HP they surge (+35% atk, new message).
+    The caller checks ``enemy["enrage_at"]`` against current HP and
+    flips ``enemy["enraged"]`` once.
+    """
+    rank_idx = max(4, min(7, int(rank_idx)))
+    names = BOSS_NAMES.get(rank_idx, BOSS_NAMES[7])
+    enemy = roll_enemy(rng, rank_idx, player_power,
+                       foe_base=foe_base, difficulty=difficulty,
+                       archetype="hunter", force_elite=True)
+    enemy["name"] = str(rng.choice(names))
+    enemy["is_boss"] = True
+    enemy["enrage_at"] = 0.30
+    enemy["enraged"] = False
+    enemy["enrage_mult"] = 1.35
+    # bosses bring an extra potion and hit harder by nature
+    enemy["potions"] = enemy.get("potions", 2) + 1
     return enemy
