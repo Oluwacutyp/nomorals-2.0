@@ -105,7 +105,7 @@ class FinderTests(unittest.TestCase):
         self.assertTrue(all(o.url.startswith("http") for o in opps))
 
     def test_all_finders_registered(self):
-        self.assertEqual(7, len(O.FINDERS))
+        self.assertEqual(11, len(O.FINDERS))
         self.assertEqual(set(O.KINDS),
                          {f.kind for f in (c() for c in O.FINDERS)})
 
@@ -120,7 +120,10 @@ class HunterTests(unittest.TestCase):
     def test_scan_curated_only_offline(self):
         opps = self.hunter.scan(use_curated=True)
         self.assertTrue(opps)
-        self.assertTrue(all(o.kind == "referral" for o in opps))
+        # curated entries now span multiple kinds (referral + board finders)
+        kinds = {o.kind for o in opps}
+        self.assertTrue(kinds <= set(O.KINDS))
+        self.assertIn("referral", kinds)
         scores = [o.score for o in opps]
         self.assertEqual(scores, sorted(scores, reverse=True))
 

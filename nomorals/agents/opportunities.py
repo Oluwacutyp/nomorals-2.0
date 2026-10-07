@@ -47,10 +47,16 @@ __all__ = [
     "OpportunityHunter",
     "OpportunityProfile",
     "score_opportunity",
+    "match_score",
     "extract_payout_usd",
     "normalize_url",
     "handle_money_command",
     "register",
+    # Board-specific finders
+    "OutlierFinder",
+    "MindriftFinder",
+    "UpworkFinder",
+    "JobbermanFinder",
 ]
 
 #: Opportunity kinds the hunter knows.
@@ -283,6 +289,31 @@ def score_opportunity(opp: Opportunity) -> float:
     return round(score, 2)
 
 
+def match_score(opp: Opportunity, profile: "OpportunityProfile") -> float:
+    """Skill-profile match 0.0–1.0: how well an opportunity fits the user.
+
+    Combines skill overlap, region fit, and payout threshold.  Deterministic.
+    """
+    if not profile.skills and not profile.regions:
+        return 1.0
+    parts: list[float] = []
+    if profile.skills:
+        text = f"{opp.title} {' '.join(opp.skills)}".lower()
+        hits = sum(1 for s in profile.skills if s.lower() in text)
+        parts.append(min(1.0, hits / max(1, len(profile.skills))))
+    if profile.regions and "global" not in profile.regions:
+        overlap = set(opp.regions) & set(profile.regions)
+        parts.append(1.0 if overlap else 0.0)
+    if profile.min_payout_usd > 0:
+        if opp.payout_usd and opp.payout_usd >= profile.min_payout_usd:
+            parts.append(1.0)
+        else:
+            parts.append(0.3 if opp.payout_usd is None else 0.0)
+    if not parts:
+        return 1.0
+    return round(sum(parts) / len(parts), 3)
+
+
 # ---------------------------------------------------------------------------
 # Finders — query → search → parse → normalize
 # ---------------------------------------------------------------------------
@@ -457,12 +488,99 @@ class ContentFinder(Finder):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Board-specific finders — named platforms, not generic queries.
+# These target the exact boards where AI-training and freelance work lives.
+# ---------------------------------------------------------------------------
+
+class OutlierFinder(Finder):
+    """Outlier AI — AI training data work (Scale AI's platform)."""
+    name = "outlier"
+    kind = "paid_task"
+    queries = [
+        "Outlier AI apply 2026",
+        "Outlier AI data annotation jobs",
+        "Outlier AI remote work requirements",
+    ]
+    curated = [
+        {"title": "Outlier AI — AI training contributor (apply)",
+         "source": "outlier.ai", "url": "https://outlier.ai/",
+         "payout_text": "flexible AI training work, pay varies by project",
+         "effort": "medium", "regions": ["global"],
+         "skills": ["ai training", "data annotation", "writing", "coding"]},
+        {"title": "Outlier AI — coding expertise projects",
+         "source": "outlier.ai", "url": "https://outlier.ai/coding-expertise",
+         "payout_text": "coding tasks for AI training",
+         "effort": "medium", "regions": ["global"],
+         "skills": ["coding", "python", "ai training"]},
+    ]
+
+
+class MindriftFinder(Finder):
+    """Mindrift — AI training gigs (Appen's expert platform)."""
+    name = "mindrift"
+    kind = "paid_task"
+    queries = [
+        "Mindrift AI apply 2026",
+        "Mindrift expert AI training jobs",
+        "Mindrift remote annotation work",
+    ]
+    curated = [
+        {"title": "Mindrift — AI expert contributor (apply)",
+         "source": "mindrift.ai", "url": "https://mindrift.ai/",
+         "payout_text": "expert AI training projects, pay per task",
+         "effort": "medium", "regions": ["global"],
+         "skills": ["ai training", "data annotation", "writing", "domain expertise"]},
+    ]
+
+
+class UpworkFinder(Finder):
+    """Upwork — freelance marketplace, filtered for entry-friendly gigs."""
+    name = "upwork"
+    kind = "gig"
+    queries = [
+        "Upwork entry level remote jobs 2026",
+        "Upwork AI services freelancer 2026",
+        "Upwork data annotation gigs",
+        "Upwork virtual assistant beginner",
+    ]
+    curated = [
+        {"title": "Upwork — find freelance work (profile + proposals)",
+         "source": "upwork.com", "url": "https://www.upwork.com/nx/search/jobs/",
+         "payout_text": "freelance gigs, pay varies",
+         "effort": "medium", "regions": ["global"],
+         "skills": ["freelance", "writing", "coding", "design"]},
+    ]
+
+
+class JobbermanFinder(Finder):
+    """Jobberman — Nigeria's job board (local relevance)."""
+    name = "jobberman"
+    kind = "gig"
+    queries = [
+        "Jobberman remote jobs Nigeria 2026",
+        "Jobberman entry level Lagos 2026",
+        "Jobberman freelance Nigeria",
+    ]
+    curated = [
+        {"title": "Jobberman — jobs in Nigeria (apply)",
+         "source": "jobberman.com", "url": "https://www.jobberman.com/jobs",
+         "payout_text": "Nigerian jobs, salaries in ₦",
+         "effort": "medium", "regions": ["nigeria"],
+         "skills": []},
+    ]
+
+
 FINDERS: tuple[type[Finder], ...] = (
     PaidTaskFinder,
+    OutlierFinder,
+    MindriftFinder,
     ReferralFinder,
     FreeCourseFinder,
     BountyFinder,
     GigFinder,
+    UpworkFinder,
+    JobbermanFinder,
     ArbitrageFinder,
     ContentFinder,
 )
@@ -660,7 +778,8 @@ def handle_money_command(tail: str, context: Any = None) -> str:
     """Entry point for ``/money``.  Returns the reply text.
 
     Verbs: ``/money`` | ``/money scan [kind]`` | ``/money list`` |
-    ``/money new`` | ``/money profile``
+    ``/money new`` | ``/money profile`` | ``/money apply <gig_id> [submit]`` |
+    ``/money applications [status]``
     """
     from ..core.config import get_settings
     settings = getattr(context, "settings", None) or get_settings()
@@ -680,6 +799,11 @@ def handle_money_command(tail: str, context: Any = None) -> str:
     hunter = OpportunityHunter(settings=settings, search_fn=search_fn)
     verb = (tail or "").strip().split()
     action = verb[0].lower() if verb else "list"
+
+    if action == "apply":
+        return _handle_apply(verb[1:], hunter, context)
+    if action == "applications":
+        return _handle_applications(verb[1:], settings)
 
     if action == "scan":
         kinds = [verb[1].lower()] if len(verb) > 1 else None
@@ -705,7 +829,72 @@ def handle_money_command(tail: str, context: Any = None) -> str:
                 f"  min payout: ${p.min_payout_usd:.0f}\n"
                 f"  kinds: {', '.join(p.kinds)}")
     return ("usage: /money scan [kind] · /money list · /money new · "
-            "/money profile")
+            "/money profile · /money apply <gig_id> [submit] · "
+            "/money applications [status]")
+
+
+def _handle_apply(args: list[str], hunter: OpportunityHunter,
+                  context: Any = None) -> str:
+    """``/money apply <gig_id> [submit]`` — draft or submit an application."""
+    from .gig_applier import GigApplier, is_explicit_submit
+    if not args:
+        return ("usage: /money apply <gig_id> [submit]\n"
+                "  draft an application, then review it, then submit.\n"
+                "  saying 'submit' applies immediately (explicit = execute).")
+    gig_id = args[0]
+    rest = " ".join(args[1:])
+    applier = GigApplier(settings=hunter.settings)
+
+    # Explicit submit: user said the word → execute immediately.
+    if is_explicit_submit(rest):
+        app = applier.store.get(gig_id)
+        if app is None:
+            # No draft yet — draft first, then submit in one go.
+            seen = hunter.load_seen()
+            opp = seen.get(gig_id)
+            if opp is None:
+                return (f"no gig {gig_id!r} found — run /money scan first, "
+                        "then /money apply <gig_id>.")
+            profile = hunter.load_profile()
+            try:
+                app = applier.draft(opp, profile, context)
+            except RuntimeError as exc:
+                return f"couldn't draft: {exc}"
+        applier.submit(app.gig_id, explicit=True)
+        return (f"✅ submitted: {app.title}\n"
+                f"   {app.url}\n"
+                "track it with /money applications")
+
+    # Default: draft (or show existing draft).
+    existing = applier.store.get(gig_id)
+    if existing is not None:
+        return (f"📝 existing {existing.status} application:\n\n"
+                f"{existing.draft_text}\n\n"
+                f"say '/money apply {gig_id} submit' to submit it.")
+    seen = hunter.load_seen()
+    opp = seen.get(gig_id)
+    if opp is None:
+        return (f"no gig {gig_id!r} found — run /money scan first, "
+                "then /money apply <gig_id>.")
+    profile = hunter.load_profile()
+    try:
+        app = applier.draft(opp, profile, context)
+    except RuntimeError as exc:
+        return f"couldn't draft: {exc}"
+    return (f"📝 draft ready for: {app.title}\n\n"
+            f"{app.draft_text}\n\n"
+            f"review it, then '/money apply {gig_id} submit' to send.")
+
+
+def _handle_applications(args: list[str], settings: Any) -> str:
+    """``/money applications [status]`` — list tracked applications."""
+    from .gig_applier import GigApplier
+    applier = GigApplier(settings=settings)
+    status = args[0].lower() if args else None
+    apps = applier.store.list_by_status(status=status)
+    if not apps:
+        return "no applications tracked yet — /money apply <gig_id> to start."
+    return applier.render(apps)
 
 
 def register(registry: Any) -> None:
@@ -731,3 +920,39 @@ def register(registry: Any) -> None:
         opps = hunter.scan(kinds=ks, use_curated=True)
         return {"count": len(opps),
                 "opportunities": [o.to_dict() for o in opps[:max_results]]}
+
+    @registry.register(
+        "money_apply",
+        description=("Draft or submit a gig application. Pass gig_id to draft "
+                     "(or show an existing draft); pass submit=true with an "
+                     "explicit user instruction to submit immediately."),
+        capability=Capability.NET_OUT,
+        parameters={
+            "gig_id": "str — opportunity id from money_scan",
+            "submit": "bool — submit immediately (explicit user instruction)",
+        },
+    )
+    def money_apply(gig_id: str, submit: bool = False) -> dict[str, Any]:
+        from ..core.config import get_settings
+        from .gig_applier import GigApplier
+        settings = get_settings()
+        applier = GigApplier(settings=settings)
+        hunter = OpportunityHunter(settings=settings)
+        if submit:
+            app = applier.store.get(gig_id)
+            if app is None:
+                opp = hunter.load_seen().get(gig_id)
+                if opp is None:
+                    return {"ok": False, "error": f"no gig {gig_id!r}"}
+                app = applier.draft(opp, hunter.load_profile())
+            applier.submit(app.gig_id, explicit=True)
+            return {"ok": True, "status": "submitted",
+                    "gig_id": gig_id, "title": app.title}
+        app = applier.store.get(gig_id)
+        if app is None:
+            opp = hunter.load_seen().get(gig_id)
+            if opp is None:
+                return {"ok": False, "error": f"no gig {gig_id!r}"}
+            app = applier.draft(opp, hunter.load_profile())
+        return {"ok": True, "status": app.status, "gig_id": gig_id,
+                "title": app.title, "draft": app.draft_text}

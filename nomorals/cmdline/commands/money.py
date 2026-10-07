@@ -12,6 +12,10 @@ def _cmd_money(args, context):
         tail = f"scan {args.kind}".strip()
     elif action == "list":
         tail = "new" if args.new else "list"
+    elif action == "apply":
+        tail = f"apply {' '.join(args.apply_args)}".strip()
+    elif action == "applications":
+        tail = f"applications {args.app_status}".strip()
     else:
         tail = "profile"
     print(handle_money_command(tail, context))

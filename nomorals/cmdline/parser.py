@@ -2251,6 +2251,12 @@ def _parser() -> argparse.ArgumentParser:
     _m.add_argument("--new", action="store_true", help="only recent finds")
     _m.add_argument("--max", type=int, default=30, help="max results shown")
     _m = msub.add_parser("profile", help="show the earner profile")
+    _m = msub.add_parser("apply", help="draft/submit a gig application")
+    _m.add_argument("apply_args", nargs="*", default=[],
+                    help="<gig_id> [submit]")
+    _m = msub.add_parser("applications", help="list tracked applications")
+    _m.add_argument("app_status", nargs="?", default="",
+                    help="optional status filter")
     structure_p.add_argument("--polish", action="store_true",
                              help="let the model rewrite the brief")
     structure_p.add_argument("--json", action="store_true", help="Output as JSON")
