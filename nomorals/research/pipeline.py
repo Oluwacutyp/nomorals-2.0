@@ -66,9 +66,16 @@ class ResearchJob:
     queries: list[str]
     cadence_hours: float = 24.0
     goals: list[str] = field(default_factory=list)
-    max_results: int = 6
-    fetch_top: int = 2
+    max_results: int | None = None  # None → profile default
+    fetch_top: int | None = None  # None → profile default
     enabled: bool = True
+
+    def __post_init__(self) -> None:
+        from ..core.profiles import profile_value
+        if self.max_results is None:
+            self.max_results = int(profile_value("max_results", 6))
+        if self.fetch_top is None:
+            self.fetch_top = int(profile_value("fetch_top", 2))
 
 
 @dataclass
@@ -98,7 +105,12 @@ class ResearchContext:
     gateway: Any | None = None  # ChatGateway, optional
     goal_keywords: dict[str, list[str]] | None = None
     worth_threshold: float = 0.65
-    daily_delivery_cap: int = 3
+    daily_delivery_cap: int | None = None  # None → profile default
+
+    def __post_init__(self) -> None:
+        from ..core.profiles import profile_value
+        if self.daily_delivery_cap is None:
+            self.daily_delivery_cap = int(profile_value("daily_delivery_cap", 3))
 
 
 #: Goal tags -> keywords the owner actually cares about. Jobs tag themselves
@@ -181,12 +193,14 @@ def run_job(job: ResearchJob, rctx: ResearchContext) -> list[ResearchFinding]:
     if not any_ok:
         raise RuntimeError(f"research job {job.id!r}: all web_search calls failed")
     # Depth pass: fetch full text for the top N so assessment sees more than a snippet.
+    from ..core.profiles import profile_value
+    _detail_chars = int(profile_value("detail_chars", 2000))
     for finding in findings[: max(0, job.fetch_top)]:
         payload = _tool_text(
             rctx.registry, "web_fetch", url=finding.url, max_chars=6000
         )
         if payload and payload.get("text"):
-            finding.detail = str(payload["text"])[:2000]
+            finding.detail = str(payload["text"])[:_detail_chars]
     _log.info("research job %s: %d findings", job.id, len(findings))
     return findings
 
@@ -338,7 +352,8 @@ def format_finding(finding: ResearchFinding, assessment: Assessment) -> str:
     )
     lines = [f"🔍 {finding.title}", "", why, "", finding.url]
     text = "\n".join(lines)
-    return text[:900]
+    from ..core.profiles import profile_value
+    return text[:int(profile_value("summary_chars", 900))]
 
 
 def deliver(

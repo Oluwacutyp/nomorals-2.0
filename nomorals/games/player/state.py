@@ -81,8 +81,12 @@ class GameState:
             if any(k in el.label.lower() for k in lowered)
         ]
 
-    def summary(self, max_chars: int = 2000) -> str:
+    def summary(self, max_chars: int | None = None) -> str:
         """Compact human/LLM-readable snapshot for prompts and logs."""
+        from ...core.profiles import profile_value
+        if max_chars is None:
+            max_chars = int(profile_value("summary_chars", 2000))
+        _el_cap = max(20, int(profile_value("max_tools_in_prompt", 40)))
         lines = [f"url: {self.url}", f"title: {self.title}"]
         if self.numbers:
             lines.append(
@@ -90,13 +94,13 @@ class GameState:
                 + ", ".join(f"{k}={v:g}" for k, v in self.numbers.items())
             )
         lines.append("actions:")
-        for el in self.elements[:40]:
+        for el in self.elements[:_el_cap]:
             lines.append(f"  [{el.id}] ({el.kind}) {el.label}")
-        if len(self.elements) > 40:
-            lines.append(f"  … +{len(self.elements) - 40} more")
+        if len(self.elements) > _el_cap:
+            lines.append(f"  … +{len(self.elements) - _el_cap} more")
         if self.visual:
             lines.append("visual:")
-            lines.append(f"  {self.visual[:800]}")
+            lines.append(f"  {self.visual[:max_chars // 2]}")
         text = "\n".join(lines)
         return text[:max_chars]
 

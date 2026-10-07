@@ -73,11 +73,18 @@ class LoopMemory:
     history: list[tuple[str, str]] = field(default_factory=list)
     steps: list[StepRecord] = field(default_factory=list)
     plan: str = ""
-    max_history_turns: int = 6
-    max_observation_chars: int = 2000
+    max_history_turns: int | None = None  # None → profile default
+    max_observation_chars: int | None = None  # None → profile default
     # Lessons from MasterOrchestrator reflection (via the planner bridge).
     # Surfaced in the think prompt so future steps benefit from past runs.
     lessons: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        from ...core.profiles import profile_value
+        if self.max_history_turns is None:
+            self.max_history_turns = int(profile_value("history_turns", 6))
+        if self.max_observation_chars is None:
+            self.max_observation_chars = int(profile_value("obs_chars", 2000))
 
     # ── recording ────────────────────────────────────────────────────
 
@@ -85,17 +92,21 @@ class LoopMemory:
         self.steps.append(record)
 
     def set_plan(self, plan: str) -> None:
-        self.plan = (plan or "").strip()[:500]
+        from ...core.profiles import profile_value
+        self.plan = (plan or "").strip()[:int(profile_value("plan_chars", 500))]
 
     def add_history(self, role: str, text: str) -> None:
         self.history.append((role, text))
 
     def add_lesson(self, lesson: str) -> None:
-        """Add a reflection lesson. Bounded — keeps the most recent 8."""
+        """Add a reflection lesson. Bounded — keeps the most recent N."""
+        from ...core.profiles import profile_value
+        _max = int(profile_value("max_lessons", 8))
+        _chars = int(profile_value("lesson_chars", 300))
         lesson = (lesson or "").strip()
         if lesson and lesson not in self.lessons:
-            self.lessons.append(lesson[:300])
-            self.lessons = self.lessons[-8:]
+            self.lessons.append(lesson[:_chars])
+            self.lessons = self.lessons[-_max:]
 
     # ── rendering for the model ──────────────────────────────────────
 

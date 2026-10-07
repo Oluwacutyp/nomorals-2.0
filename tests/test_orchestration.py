@@ -284,7 +284,9 @@ def test_describe_for_ranks_relevant_tools_first():
     reg.register("weather_lookup", lambda: "sunny",
                  "get the current weather forecast for a city",
                  {"city": {}})
-    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    # Pin to 40 to test pagination (profile default varies by machine).
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all(),
+                          max_tools_in_prompt=40)
     listing = adapter.describe_for("what is the weather like today in Lagos?")
     lines = listing.splitlines()
     assert lines[0].startswith("- weather_lookup("), \

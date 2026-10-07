@@ -34,7 +34,13 @@ __all__ = ["TrialFlow", "active_delivery_platforms", "new_id"]
 _DELIVERY_ORDER = ("whatsapp", "telegram")
 
 #: max concurrent background assist runs — browser signups are heavy.
+#: Profile-gated: use profile_value("assist_max_inflight") at runtime.
+#: Kept as a fallback default for import-time references.
 _ASSIST_MAX_INFLIGHT = 2
+
+def _assist_max_inflight() -> int:
+    from ...core.profiles import profile_value
+    return int(profile_value("assist_max_inflight", _ASSIST_MAX_INFLIGHT))
 
 #: terminal assist-run states.  Any row in ``trial_assist_runs`` whose
 #: state is *not* in this set was in flight when the process died and
@@ -145,7 +151,7 @@ class TrialFlow:
         #: context when not passed explicitly.
         self.gateway = gateway
         # bounded background assist runs (browser signups are heavy)
-        self._assist_sem = threading.Semaphore(_ASSIST_MAX_INFLIGHT)
+        self._assist_sem = threading.Semaphore(_assist_max_inflight())
         self._assist_lock = threading.Lock()
         #: run_id -> {platform, chat_key, started, state, note}
         self._assist_runs: dict[str, dict[str, Any]] = {}
@@ -246,7 +252,7 @@ class TrialFlow:
             )
         if not self._assist_sem.acquire(blocking=False):
             return (
-                f"already driving {_ASSIST_MAX_INFLIGHT} assisted signups — "
+                f"already driving {_assist_max_inflight()} assisted signups — "
                 "wait for one to finish, then try again. "
                 "check status: /trial status"
             )

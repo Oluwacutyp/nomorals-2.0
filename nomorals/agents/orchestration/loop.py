@@ -81,15 +81,19 @@ class AgenticLoop:
         llm: Any,
         tools: ToolAdapter,
         *,
-        step_budget: int = DEFAULT_STEP_BUDGET,
+        step_budget: int | None = None,
         sampling: SamplingParams | None = None,
     ) -> None:
+        from ...core.profiles import profile_value
+        if step_budget is None:
+            step_budget = int(profile_value("step_budget", DEFAULT_STEP_BUDGET))
         if step_budget < 1:
             raise ValueError("step_budget must be >= 1")
         self.llm = llm
         self.tools = tools
         self.step_budget = step_budget
-        self.sampling = sampling or SamplingParams(temperature=0.2, max_tokens=1024)
+        _max_tok = int(profile_value("max_tokens", 1024))
+        self.sampling = sampling or SamplingParams(temperature=0.2, max_tokens=_max_tok)
 
     # ── public entry ─────────────────────────────────────────────────
 
@@ -483,7 +487,7 @@ def run_agentic(
     llm: Any,
     registry: Any,
     history: list[tuple[str, str]] | None = None,
-    step_budget: int = DEFAULT_STEP_BUDGET,
+    step_budget: int | None = None,
     actor: str = "owner-loop",
     capabilities: Any = None,
     resume_from: dict[str, Any] | None = None,

@@ -63,10 +63,14 @@ class Seer:
     def __init__(
         self,
         *,
-        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        idle_timeout: float | None = None,
         router: Any | None = None,
     ) -> None:
-        self.idle_timeout = idle_timeout
+        from ..core.profiles import profile_value
+        self.idle_timeout = (
+            idle_timeout if idle_timeout is not None
+            else float(profile_value("idle_timeout", DEFAULT_IDLE_TIMEOUT))
+        )
         self._router = router
         self._lock = threading.Lock()
         # Local-model state (lazy)

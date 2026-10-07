@@ -66,7 +66,8 @@ class _BridgeMemory:
         # The reflector calls memory.remember(text, kind="lesson", ...).
         # We capture the text so the bridge can hand lessons to the loop.
         if text:
-            self.lessons.append(str(text)[:500])
+            from ...core.profiles import profile_value
+            self.lessons.append(str(text)[:int(profile_value("lesson_chars", 500))])
 
 
 class PlannerBridge:
@@ -295,9 +296,10 @@ class PlannerBridge:
                 return {"error": f"no tool available for step {task.name!r}: {goal[:100]}"}
 
         ok, observation = self.tools.call(tool_name, args)
+        from ...core.profiles import profile_value
         if not ok:
-            return {"error": observation[:1000]}
-        return {"result": observation[:4000], "tool": tool_name}
+            return {"error": observation[:int(profile_value("detail_chars", 1000))]}
+        return {"result": observation[:int(profile_value("obs_chars", 4000))], "tool": tool_name}
 
 
     def _best_tool_for(self, goal: str) -> str:
@@ -399,7 +401,8 @@ def observation_from_result(result: OrchestrationResult) -> str:
     ]
     answer = (result.answer or "").strip()
     if answer:
-        lines.append(f"result: {answer[:2000]}")
+        from ...core.profiles import profile_value
+        lines.append(f"result: {answer[:int(profile_value('detail_chars', 2000))]}")
     if result.report.failures:
         failures = "; ".join(
             f"{k}: {v[:200]}" for k, v in list(result.report.failures.items())[:3]

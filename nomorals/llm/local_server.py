@@ -333,7 +333,7 @@ class GGUFServerManager:
         host: str = "127.0.0.1",
         port: int = 8080,
         cache_dir: str = "models",
-        ctx_size: int = 2048,
+        ctx_size: int | None = None,
         threads: int = 0,
         boot_timeout: float = 1800.0,
         extra_args: str = "",
@@ -341,11 +341,15 @@ class GGUFServerManager:
         lora_files: str = "",
         process_env: dict[str, str] | None = None,
     ) -> None:
+        from ..core.profiles import profile_value
         self.host = host
         self.port = int(port)
         self.cache_dir = os.path.expanduser(cache_dir)
-        self.ctx_size = int(ctx_size)
-        self.threads = min(int(threads) or _physical_cores(), 4)
+        # Profile-gated defaults: explicit args win, else the profile decides.
+        # ctx_size=None → profile; threads=0 → profile (profile 0 = all cores).
+        self.ctx_size = int(ctx_size) if ctx_size else int(profile_value("ctx_size", 2048))
+        _t = int(threads) or int(profile_value("threads", 4))
+        self.threads = _t if _t else _physical_cores()
         self.boot_timeout = max(30.0, float(boot_timeout))
         self.extra_args = [a for a in (extra_args or "").split() if a]
         self.token = token

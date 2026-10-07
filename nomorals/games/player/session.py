@@ -228,13 +228,15 @@ def handle_autopilot_command(tail: str) -> str:
             "example: /autopilot lagos_life https://example.com/game moves=10"
         )
     game, url = parts[0], parts[1]
+    from ...core.profiles import profile_value
+    _profile_max = int(profile_value("max_moves", 50))
     max_moves = 20
     dry_run = True
     auto_yes = False
     for part in parts[2:]:
         if part.startswith("moves="):
             try:
-                max_moves = max(1, min(100, int(part.split("=", 1)[1])))
+                max_moves = max(0, min(_profile_max, int(part.split("=", 1)[1])))
             except ValueError:
                 return f"autopilot: bad moves value: {part!r}"
         elif part == "--dry-run":

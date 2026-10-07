@@ -166,10 +166,11 @@ class LocalGGUFProvisioner:
     """
 
     def __init__(self, *, host: str = "127.0.0.1", base_port: int = 8080,
-                 ctx_size: int = 2048) -> None:
+                 ctx_size: int | None = None) -> None:
+        from ..core.profiles import profile_value
         self.host = host
         self.base_port = base_port
-        self.ctx_size = ctx_size
+        self.ctx_size = int(ctx_size) if ctx_size else int(profile_value("ctx_size", 2048))
         self._managers: dict[str, Any] = {}
         self._lock = threading.RLock()
 

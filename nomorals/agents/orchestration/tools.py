@@ -71,12 +71,16 @@ class ToolAdapter:
         *,
         actor: str = "owner-loop",
         capabilities: CapabilitySet | None = None,
-        max_tools_in_prompt: int = 40,
+        max_tools_in_prompt: int | None = None,
     ) -> None:
+        from ...core.profiles import profile_value
         self.registry = registry
         self.actor = actor
         self.capabilities = capabilities or CapabilitySet.all()
-        self.max_tools_in_prompt = max_tools_in_prompt
+        self.max_tools_in_prompt = (
+            max_tools_in_prompt if max_tools_in_prompt is not None
+            else int(profile_value("max_tools_in_prompt", 40))
+        )
 
     # ── for the think prompt ─────────────────────────────────────────
 
@@ -182,10 +186,12 @@ class ToolAdapter:
         outcomes: list[Outcome] | None = None
         call_many_fn = getattr(self.registry, "call_many", None)
         if callable(call_many_fn):
+            from ...core.profiles import profile_value
+            _max_par = int(profile_value("max_parallel", _MAX_PARALLEL_CALLS))
             try:
                 outcomes = call_many_fn(
                     normed,
-                    max_workers=min(_MAX_PARALLEL_CALLS, len(normed)),
+                    max_workers=min(_max_par, len(normed)),
                     actor=self.actor,
                     capabilities=self.capabilities,
                 )

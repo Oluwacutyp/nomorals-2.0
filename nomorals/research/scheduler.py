@@ -63,9 +63,12 @@ class ResearchScheduler:
         db: Any,
         rctx: ResearchContext,
         *,
-        tick_seconds: float = 300.0,
+        tick_seconds: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        from ..core.profiles import profile_value
+        if tick_seconds is None:
+            tick_seconds = float(profile_value("tick_seconds", 300.0))
         if tick_seconds <= 0:
             raise ValueError("tick_seconds must be positive")
         ensure_schema(db)
