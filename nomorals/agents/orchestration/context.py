@@ -75,6 +75,9 @@ class LoopMemory:
     plan: str = ""
     max_history_turns: int = 6
     max_observation_chars: int = 2000
+    # Lessons from MasterOrchestrator reflection (via the planner bridge).
+    # Surfaced in the think prompt so future steps benefit from past runs.
+    lessons: list[str] = field(default_factory=list)
 
     # ── recording ────────────────────────────────────────────────────
 
@@ -86,6 +89,13 @@ class LoopMemory:
 
     def add_history(self, role: str, text: str) -> None:
         self.history.append((role, text))
+
+    def add_lesson(self, lesson: str) -> None:
+        """Add a reflection lesson. Bounded — keeps the most recent 8."""
+        lesson = (lesson or "").strip()
+        if lesson and lesson not in self.lessons:
+            self.lessons.append(lesson[:300])
+            self.lessons = self.lessons[-8:]
 
     # ── rendering for the model ──────────────────────────────────────
 
@@ -116,6 +126,12 @@ class LoopMemory:
 
         if self.plan:
             lines.append(f"CURRENT PLAN: {self.plan}")
+            lines.append("")
+
+        if self.lessons:
+            lines.append("LESSONS FROM PAST RUNS:")
+            for lesson in self.lessons[-4:]:
+                lines.append(f"  • {lesson}")
             lines.append("")
 
         if self.steps:
@@ -171,6 +187,7 @@ class LoopMemory:
             "history": [[role, text] for role, text in self.history],
             "steps": [s.to_dict() for s in self.steps],
             "plan": self.plan,
+            "lessons": list(self.lessons),
         }
 
     @classmethod
@@ -185,6 +202,9 @@ class LoopMemory:
         plan = d.get("plan", "")
         if isinstance(plan, str) and plan.strip():
             mem.set_plan(plan)
+        for lesson in d.get("lessons", []) or []:
+            if isinstance(lesson, str) and lesson.strip():
+                mem.add_lesson(lesson)
         for s in d.get("steps", []) or []:
             if isinstance(s, dict):
                 mem.record_step(StepRecord.from_dict(s))

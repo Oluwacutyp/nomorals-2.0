@@ -24,17 +24,22 @@ Usage as an alternative mode in owner chat::
     #                           resume_from=result.memory_snapshot)
 """
 
-from .bridge import agentic_mode_enabled, maybe_run_agentic
+from .bridge import agentic_mode_enabled, is_model_available, maybe_run_agentic
 from .context import LoopMemory
 from .loop import AgenticLoop, LoopResult, run_agentic
+from .planner_bridge import PlannerBridge, model_steps_to_plan, observation_from_result
 from .tools import ToolAdapter
 
 __all__ = [
     "AgenticLoop",
     "LoopMemory",
     "LoopResult",
+    "PlannerBridge",
     "ToolAdapter",
     "agentic_mode_enabled",
+    "is_model_available",
     "maybe_run_agentic",
+    "model_steps_to_plan",
+    "observation_from_result",
     "run_agentic",
 ]

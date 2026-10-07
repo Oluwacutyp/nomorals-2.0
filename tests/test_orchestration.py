@@ -17,8 +17,9 @@ from nomorals.llm.base import Message
 
 
 class FakeResponse:
-    def __init__(self, text: str):
+    def __init__(self, text: str, ok: bool = True):
         self.text = text
+        self.ok = ok
 
 
 class FakeLLM:
@@ -514,3 +515,185 @@ def test_plan_field_updates_memory():
     assert result.success
     mem = LoopMemory.from_dict(result.memory_snapshot)
     assert mem.plan == "first check X, then do Y"
+
+
+# ── planner bridge: unified orchestration ──────────────────────────────
+
+from nomorals.agents.orchestration.bridge import (
+    is_model_available,
+    maybe_run_agentic,
+)
+from nomorals.agents.orchestration.planner_bridge import (
+    PlannerBridge,
+    model_steps_to_plan,
+    observation_from_result,
+)
+
+
+def _bridge_registry():
+    reg = FakeRegistry()
+    reg.register("get_time", lambda: "12:00", "current time")
+    reg.register("web_search", lambda query="": f"results for {query}",
+                 "search the web", parameters={"query": ""})
+    return reg
+
+
+def test_model_steps_to_plan_valid():
+    reg = _bridge_registry()
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    steps = [
+        {"name": "t1", "goal": "get the time", "tool": "get_time",
+         "args": {}, "role": "data_collection", "depends_on": []},
+        {"name": "t2", "goal": "search for noon", "tool": "web_search",
+         "args": {"query": "noon"}, "role": "research", "depends_on": ["t1"]},
+    ]
+    plan = model_steps_to_plan("check time and search", steps, adapter)
+    assert plan is not None
+    assert len(plan.steps) == 2
+    assert plan.steps[0].name == "t1"
+    assert plan.steps[0].payload["tool"] == "get_time"
+    assert plan.steps[1].depends_on == ["t1"]
+    assert plan.steps[1].role == "research"
+
+
+def test_model_steps_to_plan_rejects_unknown_tool():
+    reg = _bridge_registry()
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    steps = [
+        {"name": "t1", "goal": "do magic", "tool": "nonexistent_tool",
+         "args": {}},
+    ]
+    assert model_steps_to_plan("do magic", steps, adapter) is None
+
+
+def test_model_steps_to_plan_rejects_bad_deps():
+    reg = _bridge_registry()
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    steps = [
+        {"name": "t1", "goal": "step one", "tool": "get_time",
+         "args": {}, "depends_on": ["ghost"]},
+    ]
+    assert model_steps_to_plan("bad deps", steps, adapter) is None
+
+
+def test_model_steps_to_plan_rejects_duplicates():
+    reg = _bridge_registry()
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    steps = [
+        {"name": "t1", "goal": "one", "tool": "get_time", "args": {}},
+        {"name": "t1", "goal": "two", "tool": "get_time", "args": {}},
+    ]
+    assert model_steps_to_plan("dupes", steps, adapter) is None
+
+
+def test_loop_emits_plan_action():
+    """The loop routes a plan action through the bridge and records it."""
+    reg = _bridge_registry()
+    llm = FakeLLM([
+        {"thought": "complex task, needs planning", "action": "plan",
+         "goal": "check time then search",
+         "steps": [
+             {"name": "t1", "goal": "get the time", "tool": "get_time",
+              "args": {}, "role": "data_collection", "depends_on": []},
+         ],
+         "plan": "get time via planned execution"},
+        {"thought": "got the planned result", "action": "respond",
+         "response": "planned done"},
+    ])
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    loop = AgenticLoop(llm, adapter, step_budget=10)
+    result = loop.run("complex request")
+    assert result.success
+    assert "plan" in result.tools_called
+    # The plan step was recorded
+    mem = LoopMemory.from_dict(result.memory_snapshot)
+    plan_steps = [s for s in mem.steps if s.action == "plan"]
+    assert len(plan_steps) == 1
+    assert "planned execution" in plan_steps[0].observation.lower()
+
+
+def test_planned_result_feeds_back_as_observation():
+    """A plan action's observation contains the orchestrated outcome."""
+    reg = _bridge_registry()
+    llm = FakeLLM([
+        {"thought": "needs orchestration", "action": "plan",
+         "goal": "get time",
+         "steps": [
+             {"name": "t1", "goal": "get the time", "tool": "get_time",
+              "args": {}, "depends_on": []},
+         ]},
+        {"thought": "done", "action": "respond", "response": "ok"},
+    ])
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    loop = AgenticLoop(llm, adapter, step_budget=10)
+    result = loop.run("do it planned")
+    mem = LoopMemory.from_dict(result.memory_snapshot)
+    plan_step = next(s for s in mem.steps if s.action == "plan")
+    assert not plan_step.failed
+    assert "12:00" in plan_step.observation or "succeeded" in plan_step.observation
+
+
+def test_plan_lessons_land_in_memory():
+    """Reflection lessons from planned execution are visible to the loop."""
+    mem = LoopMemory(user_message="test")
+    mem.add_lesson("always check the time first")
+    mem.add_lesson("always check the time first")  # dedup
+    assert len(mem.lessons) == 1
+    rendered = mem.render()
+    assert "LESSONS FROM PAST RUNS" in rendered
+    assert "always check the time first" in rendered
+    # Serialization roundtrip
+    restored = LoopMemory.from_dict(mem.to_dict())
+    assert restored.lessons == mem.lessons
+
+
+def test_is_model_available():
+    assert not is_model_available(None)
+
+    class Dead:
+        available = False
+    assert not is_model_available(Dead())
+
+    class NoCreds:
+        api_key = ""
+    assert not is_model_available(NoCreds())
+
+    class Live:
+        available = True
+    assert is_model_available(Live())
+    # Plain object with no flags → assumed usable
+    assert is_model_available(object())
+
+
+def test_maybe_run_agentic_returns_none_without_model(monkeypatch):
+    """No model → None → rigid pipeline handles it. Exact commands bypass."""
+    import os
+    monkeypatch.setenv("NM_AGENTIC_MODE", "1")
+    reg = _bridge_registry()
+    # llm=None must fall through, not crash
+    assert maybe_run_agentic("hello", llm=None, registry=reg) is None
+    # Disabled mode also falls through (exact /commands parse first anyway)
+    monkeypatch.setenv("NM_AGENTIC_MODE", "0")
+    llm = FakeLLM([{"thought": "t", "action": "respond", "response": "hi"}])
+    assert maybe_run_agentic("/model groq", llm=llm, registry=reg) is None
+
+
+def test_observation_from_result():
+    from nomorals.agents.orchestrator import OrchestrationResult, Plan
+    from nomorals.agents.runtime import ExecutionReport
+    report = ExecutionReport()
+    report.done = 2
+    report.failed = 0
+    result = OrchestrationResult(
+        goal="test goal",
+        plan=Plan(goal="test goal"),
+        report=report,
+        answer="the answer",
+        lessons=["lesson one"],
+        score=0.9,
+        seconds=1.5,
+    )
+    obs = observation_from_result(result)
+    assert "succeeded" in obs
+    assert "the answer" in obs
+    assert "lesson one" in obs

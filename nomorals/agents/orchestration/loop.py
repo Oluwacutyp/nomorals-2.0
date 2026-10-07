@@ -51,17 +51,18 @@ THINK_SYSTEM = """You are Devon's agentic orchestrator. You solve the owner's re
 
 RULES:
 1. Output ONLY a JSON object, no other text. Format:
-   {"thought": "<brief reasoning>", "action": "<tool|tools|respond|ask>", "tool": "<name>", "args": {…}, "calls": [{"tool": "<name>", "args": {…}}], "plan": "<your current plan>", "response": "<final answer or question>"}
+   {"thought": "<brief reasoning>", "action": "<tool|tools|plan|respond|ask>", "tool": "<name>", "args": {…}, "calls": [{"tool": "<name>", "args": {…}}], "goal": "<overall objective>", "steps": [{"name": "<id>", "goal": "<step goal>", "tool": "<tool>", "args": {…}, "role": "<role>", "depends_on": ["<id>"]}], "plan": "<your current plan>", "response": "<final answer or question>"}
 2. action "tool": call ONE tool. Set "tool" to the exact tool name and "args" to its parameters object.
 3. action "tools": call MULTIPLE INDEPENDENT tools at once. Set "calls" to a list of {"tool", "args"} objects. Use ONLY when the calls do not depend on each other's results — they run in parallel.
-4. action "respond": you are done. Put your final answer to the owner in "response". Use this when you have what you need.
-5. action "ask": you genuinely cannot proceed without the owner clarifying something. Put the question in "response". Use sparingly.
-6. "plan": keep your running plan updated here (one or two sentences). It persists across steps and messages.
-7. If a tool failed, try a DIFFERENT tool or approach. Never retry the identical call.
-8. Chain tools: use one tool's output as the next tool's input.
-9. Keep "thought" to one or two sentences.
-10. Do not invent tools. Only use tools from the AVAILABLE TOOLS list.
-11. Prefer fewer steps. If you can answer now, use "respond".
+4. action "plan": the task is COMPLEX — needs 4+ steps, parallel workstreams, distinct roles (research + coding + execution), or dependencies between steps. Set "goal" to the overall objective and "steps" to the decomposed steps, each with a "name", "goal", "tool", "args", "role" (research|coding|vision|data_collection|execution|social), and "depends_on" (list of step names that must finish first). Prefer direct "tool"/"tools" calls for simple tasks (1-3 steps) — use "plan" only when the work genuinely needs structured orchestration.
+5. action "respond": you are done. Put your final answer to the owner in "response". Use this when you have what you need.
+6. action "ask": you genuinely cannot proceed without the owner clarifying something. Put the question in "response". Use sparingly.
+7. "plan": keep your running plan updated here (one or two sentences). It persists across steps and messages.
+8. If a tool failed, try a DIFFERENT tool or approach. Never retry the identical call.
+9. Chain tools: use one tool's output as the next tool's input.
+10. Keep "thought" to one or two sentences.
+11. Do not invent tools. Only use tools from the AVAILABLE TOOLS list.
+12. Prefer fewer steps. If you can answer now, use "respond".
 """
 
 THINK_USER_TEMPLATE = """AVAILABLE TOOLS (ranked by relevance to this task):
@@ -190,6 +191,12 @@ class AgenticLoop:
                 )
                 continue
 
+            if action == "plan":
+                self._run_planned_action(
+                    memory, step_num, thought, decision, tools_called
+                )
+                continue
+
             if action == "tool":
                 tool_name = str(decision.get("tool", "")).strip()
                 args = decision.get("args") or {}
@@ -238,7 +245,7 @@ class AgenticLoop:
                     failed=True,
                     observation=(
                         f"unknown action {action!r}. "
-                        "Valid actions: tool, tools, respond, ask."
+                        "Valid actions: tool, tools, plan, respond, ask."
                     ),
                 )
             )
@@ -396,7 +403,50 @@ class AgenticLoop:
                 )
             )
 
-    # ── helpers ──────────────────────────────────────────────────────
+    # ── planned execution (escalation to MasterOrchestrator) ──────────
+
+    def _run_planned_action(
+        self,
+        memory: LoopMemory,
+        step_num: int,
+        thought: str,
+        decision: dict[str, Any],
+        tools_called: list[str],
+    ) -> None:
+        """Execute a "plan" action via the PlannerBridge.
+
+        The model decided the task needs structured orchestration. The
+        bridge translates the goal (+ optional model-provided steps) into
+        a MasterOrchestrator plan, runs it, and the result comes back as
+        an observation the loop can build on. Reflection lessons are
+        added to memory so future think steps benefit.
+        """
+        from .planner_bridge import PlannerBridge
+
+        goal = str(decision.get("goal", "")).strip() or memory.user_message
+        raw_steps = decision.get("steps")
+        model_steps = raw_steps if isinstance(raw_steps, list) else None
+
+        bridge = PlannerBridge(self.llm, self.tools)
+        ok, observation, lessons = bridge.run_planned(
+            goal,
+            model_steps=model_steps,
+            context_hint=memory.plan,
+        )
+        tools_called.append("plan")
+        for lesson in lessons:
+            memory.add_lesson(lesson)
+        memory.record_step(
+            StepRecord(
+                step=step_num,
+                thought=thought,
+                action="plan",
+                tool_name="plan",
+                tool_args={"goal": goal[:200]},
+                observation=observation,
+                failed=not ok,
+            )
+        )
 
     @staticmethod
     def _same_args_as_failed(
@@ -406,6 +456,8 @@ class AgenticLoop:
             if s.failed and s.tool_name == tool_name and s.tool_args == args:
                 return True
         return False
+
+    # ── helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _budget_summary(memory: LoopMemory) -> str:
