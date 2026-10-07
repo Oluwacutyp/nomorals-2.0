@@ -225,3 +225,48 @@ class ToolAdapter:
         except Exception:  # noqa: BLE001
             text = str(value)
         return text
+
+
+class CodeAdapter:
+    """Expose the tool registry as Python functions for code-first calls.
+
+    Each tool becomes ``name(**kwargs) -> str`` — the observation text.
+    Capability gating and confirmations still apply because every call
+    routes through ``ToolAdapter.call()``.
+    """
+
+    def __init__(self, adapter: ToolAdapter) -> None:
+        self.adapter = adapter
+
+    def namespace(self) -> dict[str, Any]:
+        """{tool_name: callable} for the safe code runner."""
+        ns: dict[str, Any] = {}
+        for schema in self.adapter._schemas():
+            name = schema.get("name")
+            if not name or not name.isidentifier():
+                continue
+            ns[name] = self._make_fn(name)
+        return ns
+
+    def _make_fn(self, name: str) -> Any:
+        def tool_fn(**kwargs: Any) -> str:
+            ok, obs = self.adapter.call(name, kwargs)
+            return obs
+        tool_fn.__name__ = name
+        return tool_fn
+
+    def describe_code(self, limit: int = 30) -> str:
+        """Tool signatures formatted for the code-mode think prompt."""
+        lines = []
+        for schema in self.adapter._schemas()[:limit]:
+            name = schema.get("name", "")
+            if not name.isidentifier():
+                continue
+            params = schema.get("parameters") or {}
+            if isinstance(params, dict):
+                sig = ", ".join(f"{k}=..." for k in params.keys())
+            else:
+                sig = "..."
+            desc = (schema.get("description") or "")[:80]
+            lines.append(f"def {name}({sig}) -> str:  # {desc}")
+        return "\n".join(lines) if lines else "(no tools available)"

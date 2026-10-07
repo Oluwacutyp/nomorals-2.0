@@ -73,6 +73,26 @@ THINK_USER_TEMPLATE = """AVAILABLE TOOLS (ranked by relevance to this task):
 Decide your next action. Output ONLY the JSON object."""
 
 
+CODE_SYSTEM = """You are Devon's agentic orchestrator. You solve the owner's request by writing Python code that calls tools as functions.
+
+RULES:
+1. Output ONLY a Python code block: ```python ... ```
+2. Tools are functions: name(**kwargs) -> str (the observation text).
+3. Use loops and conditionals freely — do in ONE block what would take many steps.
+4. Assign your final answer to the variable `result`.
+5. No imports, no file I/O, no network — only the tool functions and safe builtins.
+6. If you need to ask the owner something, set result to "ASK: <your question>".
+7. Keep it focused. Prefer fewer tool calls.
+"""
+
+CODE_USER_TEMPLATE = """AVAILABLE TOOL FUNCTIONS:
+{tools}
+
+{context}
+
+Write the Python block to advance the task. Assign the outcome to `result`."""
+
+
 class AgenticLoop:
     """ReAct loop over Devon's tool registry."""
 
@@ -83,8 +103,9 @@ class AgenticLoop:
         *,
         step_budget: int | None = None,
         sampling: SamplingParams | None = None,
+        code_mode: bool | None = None,
     ) -> None:
-        from ...core.profiles import profile_value
+        from ...core.profiles import profile_value, get_profile_kind
         if step_budget is None:
             step_budget = int(profile_value("step_budget", DEFAULT_STEP_BUDGET))
         if step_budget < 1:
@@ -94,6 +115,15 @@ class AgenticLoop:
         self.step_budget = step_budget
         _max_tok = int(profile_value("max_tokens", 1024))
         self.sampling = sampling or SamplingParams(temperature=0.2, max_tokens=_max_tok)
+        # code-first tool calls: default ON for termux (fewer round-trips =
+        # less battery/latency), available everywhere.  Explicit arg wins.
+        if code_mode is None:
+            try:
+                code_mode = get_profile_kind() == "termux"
+            except Exception:  # noqa: BLE001
+                code_mode = False
+        self.code_mode = bool(code_mode)
+        self._code_adapter: Any = None
 
     # ── public entry ─────────────────────────────────────────────────
 
@@ -119,6 +149,11 @@ class AgenticLoop:
         tools_called: list[str] = []
 
         for step_num in range(1, self.step_budget + 1):
+            if self.code_mode:
+                done, final = self._step_code(memory, step_num, tools_called)
+                if done:
+                    return final
+                continue
             decision = self._think(memory, step_num)
             if decision is None:
                 # Model output was unparseable — count as a failed step and
@@ -283,6 +318,75 @@ class AgenticLoop:
             if s.tool_name:
                 parts.append(s.tool_name.replace("_", " "))
         return " ".join(p for p in parts if p)
+
+    # ── code-first mode ──────────────────────────────────────────────
+
+    def _code_adapter_lazy(self):
+        if self._code_adapter is None:
+            from .tools import CodeAdapter
+            self._code_adapter = CodeAdapter(self.tools)
+        return self._code_adapter
+
+    @staticmethod
+    def _extract_code(text):
+        """Pull the python block out of model output."""
+        m = re.search(r"```python\s*(.*?)```", text, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r"```\s*(.*?)```", text, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        stripped = text.strip()
+        if stripped and not stripped.startswith("{"):
+            return stripped
+        return None
+
+    def _step_code(self, memory, step_num, tools_called):
+        """One code-mode step. Returns (done, final_result_or_None)."""
+        from .code_exec import SafeCodeRunner
+        adapter = self._code_adapter_lazy()
+        prompt = CODE_USER_TEMPLATE.format(
+            tools=adapter.describe_code(),
+            context=memory.render(),
+        )
+        try:
+            resp = self.llm.chat(
+                [Message.system(CODE_SYSTEM), Message.user(prompt)],
+                self.sampling,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("code-mode think step %d failed: %s", step_num, exc)
+            return False, None
+        text = (resp.text or "").strip()
+        code = self._extract_code(text) if text else None
+        if not code:
+            memory.record_step(
+                StepRecord(step=step_num, thought="no code block produced",
+                           action="tool", failed=True,
+                           observation="output ONLY a python code block."))
+            return False, None
+        runner = SafeCodeRunner(adapter.namespace())
+        ok, obs = runner.run(code)
+        ns = adapter.namespace()
+        called = [n for n in ns if n in code]
+        tools_called.extend(n for n in called if n not in tools_called)
+        memory.record_step(
+            StepRecord(step=step_num, thought="code-first block",
+                       action="tool", tool_name="code_block",
+                       tool_args={"code": code[:500]},
+                       observation=obs[:2000], failed=not ok))
+        if obs.startswith("ASK:"):
+            question = obs[4:].strip()
+            return True, LoopResult(
+                response=question, steps_taken=step_num,
+                tools_called=tools_called, asked_user=True,
+                question=question, memory_snapshot=memory.to_dict())
+        if ok and not obs.startswith("(code ran, no result set"):
+            return True, LoopResult(
+                response=obs, steps_taken=step_num,
+                tools_called=tools_called,
+                memory_snapshot=memory.to_dict())
+        return False, None
 
     def _think(self, memory: LoopMemory, step_num: int) -> dict[str, Any] | None:
         """One model call. Returns the parsed decision dict, or None."""

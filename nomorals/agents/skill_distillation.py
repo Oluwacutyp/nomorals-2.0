@@ -109,8 +109,8 @@ def should_distill(result: Any, context: Any = None) -> bool:
         return False
     # profile gate: workstation/laptop auto, termux opt-in
     try:
-        from ..core.profiles import profile_name
-        profile = profile_name()
+        from ..core.profiles import get_profile_kind
+        profile = get_profile_kind()
     except Exception:  # noqa: BLE001
         profile = "workstation"
     if profile == "termux" and os.environ.get("NM_DISTILL") != "1":
