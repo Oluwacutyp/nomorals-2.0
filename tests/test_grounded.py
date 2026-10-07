@@ -69,16 +69,22 @@ class SessionTests(unittest.TestCase):
         self.assertIn("Sources:", rendered)
         self.assertIn("[1]", rendered)
 
-    def test_ask_refuses_when_model_cannot(self):
+    def test_ask_offers_when_model_cannot(self):
         s = self._session()
-        ans = s.ask("What is the GDP of Mars?", llm_fn=_llm_cannot)
-        self.assertTrue(ans.refused)
-        self.assertIn("can't answer", ans.text)
+        def llm(prompt):
+            if "do not cover" in prompt:
+                return "Mars has no GDP; no economy."
+            return "CANNOT_ANSWER"
+        ans = s.ask("What is the GDP of Mars?", llm_fn=llm)
+        self.assertFalse(ans.refused)
+        self.assertIn("Not in your documents", ans.text)
 
-    def test_ask_refuses_on_no_hits(self):
+    def test_ask_offers_on_no_hits(self):
         s = self._session()
-        ans = s.ask("zxqwkj asdfzxcv qwerty", llm_fn=_llm_citing)
-        self.assertTrue(ans.refused)
+        ans = s.ask("zxqwkj asdfzxcv qwerty",
+                    llm_fn=lambda p: "no idea what that means.")
+        self.assertFalse(ans.refused)
+        self.assertIn("Not in your documents", ans.text)
 
     def test_invented_citations_stripped(self):
         s = self._session()
@@ -86,10 +92,18 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("[S99]", ans.text)
         self.assertNotIn("[MadeUp]", ans.text)
 
-    def test_uncited_claims_refused(self):
+    def test_uncited_claims_get_labeled_fallback(self):
+        # no valid citations -> the session offers general knowledge,
+        # labeled, instead of serving uncited claims or refusing
         s = self._session()
-        ans = s.ask("tell me everything", llm_fn=_llm_no_citations)
-        self.assertTrue(ans.refused)
+        def llm(prompt):
+            if "do not cover" in prompt:
+                return "here is the general picture."
+            return ("Lagos is the capital and it has millions of people "
+                    "living there with a vibrant economy and culture.")
+        ans = s.ask("tell me everything", llm_fn=llm)
+        self.assertFalse(ans.refused)
+        self.assertIn("Not in your documents", ans.text)
 
     def test_empty_question_raises(self):
         s = self._session()
@@ -106,9 +120,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class NonStrictTests(unittest.TestCase):
+class SmartFallbackTests(unittest.TestCase):
+    """The session offers general knowledge itself — no separate mode."""
+
     def _session(self):
-        s = GroundedSession(strict=False)
+        s = GroundedSession()
         s.add_text("Lagos is a city in Nigeria.", title="nigeria doc")
         return s
 
@@ -132,8 +148,10 @@ class NonStrictTests(unittest.TestCase):
         ans = s.ask("capital of France?", llm_fn=llm)
         self.assertTrue(ans.text.startswith("⚠️ Not in your documents"))
 
-    def test_strict_still_refuses(self):
-        s = GroundedSession(strict=True)
-        s.add_text("Lagos is a city in Nigeria.", title="nigeria doc")
-        ans = s.ask("capital of France?", llm_fn=lambda p: "CANNOT_ANSWER")
-        self.assertTrue(ans.refused)
+    def test_no_hits_offers_fallback(self):
+        s = self._session()
+        def llm(prompt):
+            return "here is what I know anyway."
+        ans = s.ask("zxqwkj asdfzxcv qwerty", llm_fn=llm)
+        self.assertFalse(ans.refused)
+        self.assertIn("Not in your documents", ans.text)

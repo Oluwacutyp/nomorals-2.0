@@ -1,8 +1,8 @@
 """Source-grounded research mode (NotebookLM pattern).
 
-Answer ONLY from user-provided sources, with inline citations to exact
-passages.  Refuse when the sources don't support an answer — never
-confabulate.
+Answer from user-provided sources first, with inline citations to exact
+passages.  When the sources don't cover the question, say so and offer
+what general knowledge holds — clearly labeled, never mixed.
 
 The citation rule that matters: the model emits ``[Label]`` markers and
 CODE maps them to deterministic numbers + a Sources section.  The model
@@ -117,13 +117,9 @@ def _chunk(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
 class GroundedSession:
     """A question-answering session bound to a fixed set of documents."""
 
-    def __init__(self, *, chunk_size: int = 1200, strict: bool = True) -> None:
+    def __init__(self, *, chunk_size: int = 1200) -> None:
         self.index = DocumentIndex()
         self.chunk_size = chunk_size
-        #: strict=True: refuse when sources don't cover it.
-        #: strict=False: answer from the model's own knowledge, but clearly
-        #: labeled as NOT from the documents.
-        self.strict = strict
         self.doc_ids: list[str] = []
         self.created_at = time.time()
 
@@ -185,9 +181,7 @@ class GroundedSession:
             raise GroundedError("no documents ingested yet")
         hits = self.index.search(question, limit=top_k)
         if not hits:
-            if not self.strict:
-                return self._answer_ungrounded(question, llm_fn, context)
-            return GroundedAnswer(text=_REFUSAL, refused=True, query=question)
+            return self._answer_ungrounded(question, llm_fn, context)
 
         sources = [
             Source(doc_id=h["doc_id"], title=h.get("title", h["doc_id"]),
@@ -210,9 +204,7 @@ class GroundedSession:
 
         raw = (raw or "").strip()
         if "CANNOT_ANSWER" in raw.upper():
-            if not self.strict:
-                return self._answer_ungrounded(question, llm_fn, context)
-            return GroundedAnswer(text=_REFUSAL, refused=True, query=question)
+            return self._answer_ungrounded(question, llm_fn, context)
         return self._number_citations(raw, sources, question)
 
     def _answer_ungrounded(self, question: str,
