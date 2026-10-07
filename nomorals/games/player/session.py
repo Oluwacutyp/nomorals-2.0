@@ -90,6 +90,11 @@ class PlaySession:
         self.driver = driver
         self.decider = decider
         self.executor = executor
+        self._stop_requested = False
+
+    def stop(self) -> None:
+        """Request the running session to stop after the current move."""
+        self._stop_requested = True
 
     def run(
         self,
@@ -101,9 +106,11 @@ class PlaySession:
         confirm: Callable[[Move, GameState], bool] | None = None,
     ) -> SessionReport:
         """Run the loop. Never raises for game-level outcomes; raises only on
-        programmer errors (bad args). Driver failures end the session."""
-        if max_moves < 1:
-            raise ToolError("max_moves must be >= 1")
+        programmer errors (bad args). Driver failures end the session.
+        max_moves=0 means play until stopped externally (via stop() or
+        the decider running out of moves)."""
+        if max_moves < 0:
+            raise ToolError("max_moves must be >= 0 (0 = play until stopped)")
         if not url.startswith(("http://", "https://")):
             raise ToolError(f"refusing non-http(s) game url: {url!r}")
 
@@ -121,7 +128,12 @@ class PlaySession:
         )
 
         current_url = url
-        for n in range(max_moves):
+        n = 0
+        while max_moves == 0 or n < max_moves:
+            n += 1
+            if self._stop_requested:
+                report.stop_reason = "stopped by user"
+                break
             try:
                 page: Page = self.driver.fetch(current_url)
             except ToolError as exc:
