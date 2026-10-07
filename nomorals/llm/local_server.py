@@ -333,7 +333,7 @@ class GGUFServerManager:
         host: str = "127.0.0.1",
         port: int = 8080,
         cache_dir: str = "models",
-        ctx_size: int = 4096,
+        ctx_size: int = 2048,
         threads: int = 0,
         boot_timeout: float = 1800.0,
         extra_args: str = "",
@@ -345,7 +345,7 @@ class GGUFServerManager:
         self.port = int(port)
         self.cache_dir = os.path.expanduser(cache_dir)
         self.ctx_size = int(ctx_size)
-        self.threads = int(threads) or _physical_cores()
+        self.threads = min(int(threads) or _physical_cores(), 4)
         self.boot_timeout = max(30.0, float(boot_timeout))
         self.extra_args = [a for a in (extra_args or "").split() if a]
         self.token = token

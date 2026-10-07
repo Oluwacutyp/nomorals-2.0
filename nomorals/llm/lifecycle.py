@@ -166,7 +166,7 @@ class LocalGGUFProvisioner:
     """
 
     def __init__(self, *, host: str = "127.0.0.1", base_port: int = 8080,
-                 ctx_size: int = 4096) -> None:
+                 ctx_size: int = 2048) -> None:
         self.host = host
         self.base_port = base_port
         self.ctx_size = ctx_size
