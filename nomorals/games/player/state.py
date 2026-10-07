@@ -17,7 +17,13 @@ from .driver import BrowserDriver, InteractiveElement, Page, extract_elements
 
 _log = get_logger(__name__)
 
-__all__ = ["GameState", "capture_state", "extract_numbers", "state_from_page"]
+__all__ = [
+    "GameState",
+    "capture_state",
+    "extract_numbers",
+    "state_from_page",
+    "state_from_screenshot",
+]
 
 #: ₦1,234 · $5.00 · 1,234 coins · Balance: 500 · Level 12 · 116 XP
 _NUMBER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -62,6 +68,9 @@ class GameState:
     numbers: dict[str, float] = field(default_factory=dict)
     elements: list[InteractiveElement] = field(default_factory=list)
     captured_at: float = field(default_factory=time.time)
+    #: Visual description from the vision model (when the DOM/text was
+    #: insufficient and a screenshot was interpreted instead).
+    visual: str = ""
 
     def find_elements(self, *keywords: str) -> list[InteractiveElement]:
         """Elements whose label contains any of the keywords (case-insensitive)."""
@@ -85,6 +94,9 @@ class GameState:
             lines.append(f"  [{el.id}] ({el.kind}) {el.label}")
         if len(self.elements) > 40:
             lines.append(f"  … +{len(self.elements) - 40} more")
+        if self.visual:
+            lines.append("visual:")
+            lines.append(f"  {self.visual[:800]}")
         text = "\n".join(lines)
         return text[:max_chars]
 
@@ -120,3 +132,46 @@ def capture_state(driver: BrowserDriver, url: str) -> GameState:
     """Fetch ``url`` and build a :class:`GameState`. Fail-fast on HTTP errors."""
     page: Page = driver.fetch(url)
     return state_from_page(page)
+
+
+def state_from_screenshot(
+    image_path: str,
+    *,
+    url: str = "",
+    title: str = "",
+    question: str = "",
+) -> GameState:
+    """Build a :class:`GameState` from a screenshot via the vision model.
+
+    Used when DOM/text parsing is insufficient (JS-heavy games, canvas
+    rendering, visual state like health bars). The vision model describes
+    what it sees; numbers and a text summary are extracted from that
+    description so the decider works off what Devon "sees".
+
+    Fail-fast: raises if the vision system is unavailable.
+    """
+    from ...vision import see
+
+    prompt = question or (
+        "Describe this game screen in detail for a game-playing agent: "
+        "current values (health, currency, level, score — with numbers), "
+        "visible buttons/controls and their labels, the player's apparent "
+        "state, and anything actionable on screen."
+    )
+    visual = see(image_path, prompt)
+    numbers = extract_numbers(visual)
+    state = GameState(
+        url=url,
+        title=title,
+        text=visual,
+        numbers=numbers,
+        elements=[],
+        visual=visual,
+    )
+    _log.debug(
+        "captured visual state: url=%r numbers=%s visual_chars=%d",
+        url,
+        numbers,
+        len(visual),
+    )
+    return state

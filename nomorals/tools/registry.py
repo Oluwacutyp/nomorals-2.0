@@ -128,7 +128,7 @@ class ToolRegistry:
             "macros", "media", "media_edit", "media_pipeline", "metadata",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
-            "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
+            "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "workspace",
             "trading",
             # the agent bridge registers last: agent modules own the real
