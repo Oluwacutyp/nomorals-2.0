@@ -148,12 +148,20 @@ class AgenticLoop:
                 memory.record_step(
                     StepRecord(step=step_num, thought=thought, action="respond")
                 )
-                return LoopResult(
+                result = LoopResult(
                     response=response or "(no response produced)",
                     steps_taken=step_num,
                     tools_called=tools_called,
                     memory_snapshot=memory.to_dict(),
                 )
+                # Hermes loop: distill successful multi-tool runs into
+                # reusable skill drafts (inactive until promoted).
+                try:
+                    from ..skill_distillation import maybe_distill
+                    maybe_distill(result, memory)
+                except Exception:  # noqa: BLE001 - distillation never breaks a run
+                    pass
+                return result
 
             if action == "ask":
                 question = str(decision.get("response", "")).strip()
