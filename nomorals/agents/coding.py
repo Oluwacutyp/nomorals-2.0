@@ -239,6 +239,12 @@ class CodingResult:
     # Phase C: diff-review gate verdict — {"passed": bool, "rounds": int,
     # "objections": [str]}.  Empty when the gate never ran.
     review: dict[str, Any] = field(default_factory=dict)
+    # Plan mode (item #4): when True the task paused BEFORE any file was
+    # touched — the owner must approve plan_text (plan_id) before
+    # execute_plan() runs it.
+    needs_approval: bool = False
+    plan_id: str = ""
+    plan_text: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -249,6 +255,9 @@ class CodingResult:
             "error": self.error[-2000:],
             "seconds": round(self.seconds, 2),
             "review": self.review,
+            "needs_approval": self.needs_approval,
+            "plan_id": self.plan_id,
+            "plan_text": self.plan_text,
         }
 
 
@@ -269,6 +278,9 @@ class CodingAgent:
         # Git mission snapshot (snapshot()/rollback()); None when the
         # workdir is not a git repo or no mission is in flight.
         self._mission_snapshot: dict[str, Any] | None = None
+        # Plan-mode approved scope: when execute_plan() sets this, patch
+        # targets outside the set are rejected (no silent scope creep).
+        self._plan_scope: set[str] | None = None
         self._mission_touched: list[str] = []
 
     def _error_recall(self) -> Any:
@@ -542,6 +554,8 @@ class CodingAgent:
         seed_code: str = "",
         background_tests: bool = False,
         test_cap_seconds: float = 900.0,
+        plan_mode: Any = "auto",
+        _plan: list[dict[str, Any]] | None = None,
     ) -> CodingResult:
         """Run the surgical multi-file edit loop (audit Phase B).
 
@@ -554,6 +568,15 @@ class CodingAgent:
         ``background_tests`` (Phase D) runs the suite in the background
         while the lint gate runs concurrently, instead of blocking on it;
         ``test_cap_seconds`` caps the background run (default 15 min).
+
+        ``plan_mode`` gates non-trivial work on owner approval:
+        ``"auto"`` (default) pauses when the file plan is complex
+        (>4 files, >2 new files, or >2 modules); ``True``/``"always"``
+        always pauses; ``False``/``"never"`` never pauses.  A paused run
+        returns ``CodingResult(needs_approval=True, plan_id=...,
+        plan_text=...)`` with NO files touched — approve with
+        :meth:`approve_and_execute` or :meth:`execute_plan` after
+        :meth:`PlanStore.approve`.
         """
         from ..tools import lint as _lint_mod
         from ..tools import pytest_runner as _pytest_mod
@@ -593,7 +616,26 @@ class CodingAgent:
         editor = EditLoop(agent=None, project_root=str(workdir))
 
         # ── plan step: which files change and why ──
-        plan = self._plan_files(draft_task, filename, workdir)
+        plan = _plan if _plan is not None else self._plan_files(
+            draft_task, filename, workdir)
+        # ── plan-mode gate (item #4): non-trivial plans pause for owner
+        # approval BEFORE any file is touched.  _plan is set only by
+        # execute_plan() on an already-approved plan, so it skips the gate.
+        if _plan is None and plan_mode not in (False, "never", "off", None):
+            from .plan_mode import PlanStore, is_complex, render_plan
+            mode = str(plan_mode).lower() if not isinstance(
+                plan_mode, bool) else ("always" if plan_mode else "never")
+            if mode == "always" or (mode == "auto" and is_complex(plan)):
+                code_plan = PlanStore.new(draft_task, plan,
+                                          approach="", risks=[])
+                return CodingResult(
+                    ok=False,
+                    iterations=0,
+                    needs_approval=True,
+                    plan_id=code_plan.id,
+                    plan_text=render_plan(code_plan),
+                    seconds=round(time.perf_counter() - started, 2),
+                )
         per_file = max(1, max_iterations // max(1, len(plan)))
         budgets = {spec["path"]: per_file for spec in plan}
         # Phase D: explore phase reads all planned files in one parallel
@@ -885,6 +927,46 @@ class CodingAgent:
                     "objections": review_objections + exhausted_objections},
         )
 
+    # ── plan mode: approve → execute (item #4) ────────────────────────
+
+    def execute_plan(self, plan_id: str) -> CodingResult:
+        """Execute an approved plan from :class:`plan_mode.PlanStore`.
+
+        Returns a failed CodingResult (never raises) when the plan is
+        unknown or not yet approved.  Execution stays within the approved
+        scope: a model patch touching an unplanned file is rejected with
+        a re-plan request instead of being silently applied.
+        """
+        from .plan_mode import PlanStore
+        plan = PlanStore.get(plan_id)
+        if plan is None:
+            return CodingResult(
+                ok=False, iterations=0,
+                error=f"unknown plan {plan_id!r} — ask for a fresh plan")
+        if not plan.approved:
+            return CodingResult(
+                ok=False, iterations=0,
+                error=f"plan {plan_id} not approved — reply 'approve' first")
+        specs = [{"path": str(f.get("path", "")),
+                  "why": str(f.get("why", "")),
+                  "new_file": bool(f.get("new_file"))}
+                 for f in plan.files if f.get("path")]
+        self._plan_scope = {s["path"] for s in specs}
+        try:
+            return self.run(plan.task, _plan=specs, plan_mode="never")
+        finally:
+            self._plan_scope = None
+
+    def approve_and_execute(self, plan_id: str) -> CodingResult:
+        """Approve ``plan_id`` and immediately execute it."""
+        from .plan_mode import PlanStore
+        plan = PlanStore.approve(plan_id)
+        if plan is None:
+            return CodingResult(
+                ok=False, iterations=0,
+                error=f"unknown plan {plan_id!r} — ask for a fresh plan")
+        return self.execute_plan(plan_id)
+
     def _plan_files(self, task: str, default: str,
                     workdir: Path) -> list[dict[str, Any]]:
         """Ask the model which files the task touches (Phase B plan step).
@@ -1024,8 +1106,17 @@ class CodingAgent:
                 p = self._resolve(fp.target_rel)
             except ValueError as exc:
                 return False, f"patch target rejected: {exc}"
+            # Plan-mode scope enforcement: an approved plan lists the
+            # files the mission may touch. A patch reaching outside that
+            # set is not silently applied — the caller re-plans instead.
+            if (self._plan_scope is not None
+                    and fp.target_rel not in self._plan_scope):
+                return False, (
+                    f"patch target {fp.target_rel!r} is outside the "
+                    "approved plan scope — re-plan instead of silent "
+                    "scope creep")
             before[fp.target_rel] = (p.read_text(encoding="utf-8")
-                                    if p.is_file() else "")
+                                     if p.is_file() else "")
         try:
             result = apply_unified_diff(patch_text, workdir)
         except ValueError as exc:

@@ -69,8 +69,11 @@ class CodingAgentPlanModeTests(unittest.TestCase):
     def _agent(self):
         from unittest.mock import MagicMock
         from nomorals.agents.coding import CodingAgent
+        import tempfile
         ctx = MagicMock()
-        agent = CodingAgent(ctx)
+        # explicit root: _resolve() then stays inside a temp dir, so the
+        # real run() preamble (snapshot etc.) never touches the repo
+        agent = CodingAgent(ctx, root=tempfile.mkdtemp())
         # stub the model-driven plan step
         agent._plan_files = lambda task, default, workdir: [
             _spec("a.py"), _spec("b.py"), _spec("c.py"),

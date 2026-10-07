@@ -104,6 +104,7 @@ class AgenticLoop:
         step_budget: int | None = None,
         sampling: SamplingParams | None = None,
         code_mode: bool | None = None,
+        db: Any = None,
     ) -> None:
         from ...core.profiles import profile_value, get_profile_kind
         if step_budget is None:
@@ -112,6 +113,9 @@ class AgenticLoop:
             raise ValueError("step_budget must be >= 1")
         self.llm = llm
         self.tools = tools
+        # Optional skill database for the Hermes distillation hook. When
+        # None the hook falls back to the app's default storage path.
+        self.db = db
         self.step_budget = step_budget
         _max_tok = int(profile_value("max_tokens", 1024))
         self.sampling = sampling or SamplingParams(temperature=0.2, max_tokens=_max_tok)
@@ -190,10 +194,20 @@ class AgenticLoop:
                     memory_snapshot=memory.to_dict(),
                 )
                 # Hermes loop: distill successful multi-tool runs into
-                # reusable skill drafts (inactive until promoted).
+                # reusable skill drafts (inactive until promoted). The
+                # loop's own LLM does the distillation — previously the
+                # hook was called without one, so distill() always
+                # returned None and nothing was ever installed.
                 try:
                     from ..skill_distillation import maybe_distill
-                    maybe_distill(result, memory)
+
+                    def _distill_llm(prompt: str) -> str:
+                        resp = self.llm.chat(
+                            [Message.user(prompt)], self.sampling)
+                        return (getattr(resp, "text", None) or "")
+
+                    maybe_distill(result, memory,
+                                  llm_fn=_distill_llm, db=self.db)
                 except Exception:  # noqa: BLE001 - distillation never breaks a run
                     pass
                 return result
@@ -603,6 +617,7 @@ def run_agentic(
     actor: str = "owner-loop",
     capabilities: Any = None,
     resume_from: dict[str, Any] | None = None,
+    db: Any = None,
 ) -> LoopResult:
     """One-call convenience wrapper.
 
@@ -612,6 +627,9 @@ def run_agentic(
     ``resume_from``: a ``LoopResult.memory_snapshot`` from a previous run
     that paused with ``ask``. The new ``message`` is treated as the user's
     answer and the prior plan continues instead of starting fresh.
+
+    ``db``: skill database for the Hermes distillation hook. When None
+    the hook falls back to the app's default storage path.
     """
     tools = ToolAdapter(registry, actor=actor, capabilities=capabilities)
     memory = LoopMemory.from_dict(resume_from) if resume_from else None
@@ -619,5 +637,5 @@ def run_agentic(
         memory = LoopMemory(user_message=message)
     for role, text in history or []:
         memory.add_history(role, text)
-    loop = AgenticLoop(llm, tools, step_budget=step_budget)
+    loop = AgenticLoop(llm, tools, step_budget=step_budget, db=db)
     return loop.run(message, memory)

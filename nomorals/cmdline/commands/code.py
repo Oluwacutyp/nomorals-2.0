@@ -18,6 +18,14 @@ def _cmd_code(args: argparse.Namespace, context: Any) -> int:
         return _cmd_code_review(args, context, ref)
     if words and words[0] == "test":
         return _cmd_code_test(args, context)
+    if words and words[0] == "approve":
+        # nm code approve <plan-id> — approve a paused plan-mode plan
+        # (created by an earlier `nm code` run) and execute it now.
+        plan_id = words[1] if len(words) > 1 else ""
+        if not plan_id:
+            print("usage: nm code approve <plan-id>", file=sys.stderr)
+            return 2
+        return _cmd_code_approve(args, context, plan_id)
     task = " ".join(words).strip()
     if not task:
         print('usage: nm code "<task>" [--file F] [--accept CMD] [--max-iters N] [--root DIR]',
@@ -26,6 +34,26 @@ def _cmd_code(args: argparse.Namespace, context: Any) -> int:
         print('       nm code test [--changed] [--root DIR]', file=sys.stderr)
         return 2
     return _cmd_code_run(args, context, task)
+
+
+def _cmd_code_approve(args: argparse.Namespace, context: Any,
+                      plan_id: str) -> int:
+    """Approve a paused plan-mode plan and execute it within its scope."""
+    from ...agents.coding import CodingAgent
+
+    root = str(Path(args.root).expanduser().resolve())
+    agent = CodingAgent(context, root=root)
+    result = agent.approve_and_execute(plan_id)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, default=str))
+        return 0 if result.ok else 1
+    if result.ok:
+        print(f"plan {plan_id} approved and executed — OK")
+        print(f"files: {', '.join(result.files) or '(none)'}  "
+              f"iterations: {result.iterations}  seconds: {result.seconds:.1f}")
+    else:
+        print(f"FAILED: {result.error}")
+    return 0 if result.ok else 1
 
 
 def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
@@ -39,7 +67,18 @@ def _cmd_code_run(args: argparse.Namespace, context: Any, task: str) -> int:
         filename=args.file,
         accept=args.accept,
         max_iterations=args.max_iters,
+        plan_mode=args.plan_mode,
     )
+    if result.needs_approval:
+        # Plan mode paused the task BEFORE any file was touched. Show
+        # the plan; nothing executes until the owner approves.
+        print(result.plan_text)
+        print(f"\nplan id: {result.plan_id}")
+        print("approve with:  nm code approve <plan-id>")
+        print("             (or re-run with --plan-mode never to skip the gate)")
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, default=str))
+        return 0
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, default=str))
         return 0 if result.ok else 1

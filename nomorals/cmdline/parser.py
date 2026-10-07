@@ -621,6 +621,10 @@ def _parser() -> argparse.ArgumentParser:
     code.add_argument("--changed", action="store_true",
                       help="with test: only run tests for changed files")
     code.add_argument("--json", action="store_true", help="Output as JSON")
+    code.add_argument("--plan-mode", default="auto",
+                      choices=["auto", "always", "never"],
+                      help="plan approval gate: auto (complex plans pause), "
+                           "always, never (default: auto)")
 
     media = sub.add_parser("media", aliases=CLI_ALIASES["media"],
         help="Edit images and video from plain language",

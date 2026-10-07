@@ -191,11 +191,17 @@ def _parse_draft(text: str) -> Optional[SkillDraft]:
 
 
 def maybe_distill(result: Any, memory: Any, context: Any = None,
-                  llm_fn: Any = None) -> Optional[SkillDraft]:
+                  llm_fn: Any = None, db: Any = None) -> Optional[SkillDraft]:
     """Post-task hook: distill and install a skill draft when warranted.
 
     Called from the agentic loop after a run.  Installs the draft with
     ``active=0`` — never auto-promotes.  Returns the draft or None.
+
+    ``llm_fn`` is a ``prompt -> text`` callable; when omitted the router
+    on ``context`` is used.  ``db`` is the skill database; when omitted
+    it is taken from ``context.db`` or opened from the app's default
+    storage path.  Without a database the draft is still returned but
+    installation is skipped (logged, never raises).
     """
     if not should_distill(result, context):
         return None
@@ -211,11 +217,19 @@ def maybe_distill(result: Any, memory: Any, context: Any = None,
     if draft is None:
         return None
     try:
+        database = db if db is not None else getattr(context, "db", None)
+        if database is None:
+            from ..core.config import StorageSettings
+            from ..storage.db import open_database
+            database, _, _ = open_database(StorageSettings().path)
         from ..skills.registry import SkillRegistry
-        registry = SkillRegistry()
+        registry = SkillRegistry(database)
         registry.install(draft.to_manifest())
+        # Drafts never auto-activate: the first installed version becomes
+        # the active pin by registry design, so clear it immediately. The
+        # draft waits for canary validation + an explicit pin.
+        registry.deactivate(draft.name)
         _log.info("distilled skill installed (inactive): %s", draft.name)
     except Exception as exc:  # noqa: BLE001
         _log.warning("distilled skill install failed: %s", exc)
-        return None
     return draft

@@ -76,6 +76,7 @@ def maybe_run_agentic(
     actor: str = "owner-loop",
     capabilities: Any = None,
     resume_from: dict[str, Any] | None = None,
+    db: Any = None,
 ) -> LoopResult | None:
     """Run the agentic loop if agentic mode is enabled, else return None.
 
@@ -85,6 +86,9 @@ def maybe_run_agentic(
 
     Callers must parse exact ``/commands`` deterministically BEFORE
     calling this — the agentic loop never sees slash commands.
+
+    ``db``: skill database for the Hermes distillation hook. When None
+    the hook falls back to the app's default storage path.
 
     ``resume_from``: a ``LoopResult.memory_snapshot`` from a previous run
     that paused with ``ask`` — continues the plan on the user's answer.
@@ -107,6 +111,7 @@ def maybe_run_agentic(
             actor=actor,
             capabilities=capabilities,
             resume_from=resume_from,
+            db=db,
         )
     except Exception as exc:  # noqa: BLE001 — agentic mode must never sink chat
         _log.warning("agentic loop failed: %s", exc)

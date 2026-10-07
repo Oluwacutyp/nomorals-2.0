@@ -126,6 +126,20 @@ class SkillRegistry:
         _log.info("skill %s pinned to version %s", name, version)
         return self.get(name, version)  # type: ignore[return-value]
 
+    def deactivate(self, name: str) -> bool:
+        """Clear the active pin for ``name``.
+
+        All installed versions stay in the registry but none is active —
+        the skill will not resolve until explicitly pinned.  Used for
+        distilled drafts, which must wait for canary validation plus an
+        explicit pin before they can take effect (never auto-activated).
+        Returns True when at least one version row was touched.
+        """
+        cur = self.db.execute(
+            "UPDATE skill_packages SET active=0, updated_at=? WHERE name=?",
+            (time.time(), name))
+        return cur.rowcount > 0
+
     def enable(self, name: str) -> bool:
         """Enable all installed versions of ``name``.  Returns False when
         the name is not installed."""

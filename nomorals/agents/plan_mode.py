@@ -17,9 +17,12 @@ Flow::
 
 from __future__ import annotations
 
+import json
+import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -94,27 +97,92 @@ def render_plan(plan: CodePlan) -> str:
 
 
 class PlanStore:
-    """In-process store for pending/approved plans."""
+    """Pending/approved plans, shared across processes.
+
+    Plans live in memory for the session AND are persisted to a JSON
+    file (``NM_PLAN_STORE``, default ``data/code-plans.json``) so a plan
+    created by one ``nm code`` invocation can be approved and executed
+    by a later one (``nm code approve <plan-id>``).  Only the most
+    recent plans are kept — the file is pruned on every save.
+    """
 
     _plans: dict[str, CodePlan] = {}
+    _loaded: bool = False
+    _KEEP = 50
+
+    @classmethod
+    def _path(cls) -> Path:
+        return Path(os.environ.get("NM_PLAN_STORE", "data/code-plans.json"))
+
+    @classmethod
+    def _ensure_loaded(cls) -> None:
+        if cls._loaded:
+            return
+        cls._loaded = True
+        try:
+            raw = cls._path().read_text(encoding="utf-8")
+        except OSError:
+            return
+        try:
+            rows = json.loads(raw)
+        except ValueError:
+            _log.warning("plan store file is not valid JSON — starting fresh")
+            return
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict) or "id" not in row:
+                continue
+            try:
+                plan = CodePlan(
+                    id=str(row["id"]),
+                    task=str(row.get("task", "")),
+                    files=list(row.get("files") or []),
+                    approach=str(row.get("approach", "")),
+                    risks=list(row.get("risks") or []),
+                    created_at=float(row.get("created_at", time.time())),
+                    approved=bool(row.get("approved", False)),
+                    approved_at=float(row.get("approved_at", 0.0)),
+                )
+            except (TypeError, ValueError):
+                continue
+            cls._plans[plan.id] = plan
+
+    @classmethod
+    def _persist(cls) -> None:
+        try:
+            path = cls._path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            rows = [asdict(p) for p in
+                    sorted(cls._plans.values(),
+                           key=lambda p: p.created_at)[-cls._KEEP:]]
+            path.write_text(json.dumps(rows, ensure_ascii=False),
+                            encoding="utf-8")
+        except OSError as exc:  # noqa: BLE001 — persistence is best-effort
+            _log.warning("could not persist plan store: %s", exc)
 
     @classmethod
     def save(cls, plan: CodePlan) -> str:
+        cls._ensure_loaded()
         cls._plans[plan.id] = plan
+        cls._persist()
         return plan.id
 
     @classmethod
     def get(cls, plan_id: str) -> CodePlan | None:
+        cls._ensure_loaded()
         return cls._plans.get(plan_id)
 
     @classmethod
     def approve(cls, plan_id: str) -> CodePlan | None:
+        cls._ensure_loaded()
         plan = cls._plans.get(plan_id)
         if plan is None:
             return None
         plan.approved = True
         plan.approved_at = time.time()
         _log.info("plan %s approved", plan_id)
+        cls._persist()
         return plan
 
     @classmethod

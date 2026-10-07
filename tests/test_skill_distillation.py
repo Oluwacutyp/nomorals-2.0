@@ -97,9 +97,16 @@ class MaybeDistillTests(unittest.TestCase):
         installed = {}
 
         class FakeRegistry:
+            def __init__(self, db=None):
+                self.db = db
+
             def install(self, manifest):
                 installed.update(manifest)
                 return SimpleNamespace(name=manifest["name"])
+
+            def deactivate(self, name):
+                installed["active"] = 0
+                return True
 
         steps = [_step() for _ in range(6)]
         memory = SimpleNamespace(user_message="find gigs", steps=steps)
@@ -120,6 +127,8 @@ class MaybeDistillTests(unittest.TestCase):
                 mod.should_distill = orig
         self.assertIsNotNone(d)
         self.assertIn("distilled_", installed.get("name", ""))
+        # the draft must never auto-activate: deactivate() clears the pin
+        self.assertEqual(0, installed.get("active"))
 
     def test_skipped_when_not_warranted(self):
         import nomorals.agents.skill_distillation as mod
@@ -129,6 +138,35 @@ class MaybeDistillTests(unittest.TestCase):
             self.assertIsNone(mod.maybe_distill(_result(True, 6), None))
         finally:
             mod.should_distill = orig
+
+    def test_end_to_end_installs_inactive_in_real_db(self):
+        """Full path with a real SkillRegistry: draft installs, pin cleared."""
+        from nomorals.storage.db import Database
+
+        db = Database(":memory:")
+        steps = [_step() for _ in range(6)]
+        memory = SimpleNamespace(user_message="find gigs", steps=steps)
+        result = _result(True, 6)
+
+        def llm(prompt):
+            return ("NAME: test_skill\nDESCRIPTION: test\nTOOLS: web_search\n"
+                    "WORKFLOW:\n1. Do it\n")
+
+        import nomorals.agents.skill_distillation as mod
+        orig = mod.should_distill
+        mod.should_distill = lambda r, c=None: True
+        try:
+            d = mod.maybe_distill(result, memory, llm_fn=llm, db=db)
+        finally:
+            mod.should_distill = orig
+        self.assertIsNotNone(d)
+        row = db.query_one(
+            "SELECT name, active, enabled FROM skill_packages WHERE name=?",
+            (d.name,))
+        self.assertIsNotNone(row)
+        # never auto-activated: active pin cleared, still enabled/resolvable
+        self.assertEqual(0, row["active"])
+        self.assertEqual(1, row["enabled"])
 
 
 if __name__ == "__main__":
