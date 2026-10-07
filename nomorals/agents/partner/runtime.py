@@ -471,6 +471,23 @@ class PartnerRuntime(
                 message = dataclasses.replace(message, text=spoken)
                 _log.info("voice note in %s transcribed to command %r",
                           message.chat.key, spoken[:40])
+        # Voice-note ping-pong (inbound): a voice note that isn't a slash
+        # command still becomes spoken text, so the brain hears it.  Gated
+        # on the "voice" feature; transcription is best-effort.
+        if message.incoming and not message.text.strip():
+            from ..features import feature_enabled as _fe
+            if _fe(self.context, "voice"):
+                from ...voice.pingpong import (
+                    has_voice_media, transcribe_voice_media)
+                if has_voice_media(message):
+                    heard = transcribe_voice_media(self.context, message)
+                    if heard:
+                        import dataclasses
+
+                        message = dataclasses.replace(message, text=heard)
+                        message.meta["voice_in"] = True
+                        _log.info("voice note in %s heard: %r",
+                                  message.chat.key, heard[:60])
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -734,7 +751,43 @@ class PartnerRuntime(
 
         threading.Thread(target=_job, name=f"delayed-reply-{message.chat.key}", daemon=True).start()
 
+    def _send_voice_reply(self, message: ChatMessage,
+                            parts: list[str]) -> bool:
+        """Reply with voice note(s).  True when at least one went out."""
+        from ...voice.pingpong import synthesize_voice_reply
+        from ...social.chat.base import MediaRef
+        sent_any = False
+        for part in parts:
+            text = (part or "").strip()
+            if not text:
+                continue
+            try:
+                ogg_path = synthesize_voice_reply(self.context, text)
+                media = MediaRef(path=ogg_path, kind="audio",
+                                 name="reply.ogg", mime="audio/ogg")
+                adapter = self.gateway._adapter_for(message.chat.platform)
+                if adapter is None or self.gateway.dry_run:
+                    return sent_any
+                result = adapter.send_media(message.chat, media)
+                if result.ok:
+                    sent_any = True
+                    _log.info("voice reply sent in %s", message.chat.key)
+                else:
+                    _log.warning("voice reply send failed: %s", result.error)
+            except Exception as exc:  # noqa: BLE001 - fall back to text
+                _log.warning("voice reply failed, falling back to text: %s",
+                             exc)
+                return sent_any
+        return sent_any
+
     def _send_reply(self, message: ChatMessage, parts: list[str]) -> None:
+        # Voice-note ping-pong (outbound): the user spoke, so Devon answers
+        # in voice.  Best-effort — any TTS/ffmpeg failure falls back to the
+        # normal text path below.
+        if message.meta.get("voice_in"):
+            from ..features import feature_enabled as _fe
+            if _fe(self.context, "voice") and self._send_voice_reply(message, parts):
+                return
         partner_cfg = self.settings.partner
         values = self.brain.mood.current().values
         # Typing indicator on every kind of chat, per part: each chunk of a
