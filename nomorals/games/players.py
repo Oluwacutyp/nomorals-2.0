@@ -1406,4 +1406,12 @@ def render_full_profile(prof: "Profile", display_name: str = "") -> str:
             played = w + l + d
             if played:
                 lines.append(f"   {gname}: {w}W {l}L {d}D")
+    # next-action CTA + copyable commands (Septorch-style output)
+    lines.append("")
+    if to_go > 0:
+        lines.append(f"🎯 {to_go:,} XP to level {level + 1} — "
+                     f"`/game arena` to grind")
+    else:
+        lines.append("🎯 max level energy — keep the streak alive")
+    lines.append("`/game arena` · `/game shop` · `/game leaderboard`")
     return "\n".join(lines)
