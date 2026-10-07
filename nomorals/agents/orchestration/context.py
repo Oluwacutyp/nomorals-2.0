@@ -4,6 +4,10 @@ Keeps conversation history, tool results, and the current plan in a form
 small enough for weaker models. Summarizes aggressively: only the latest
 N exchanges are kept verbatim, older ones are compressed to one-line
 summaries.
+
+Memory is serializable (to_dict / from_dict) so a loop that pauses with
+``ask`` can be resumed on the user's next message instead of starting
+fresh — the plan, steps, and history all carry over.
 """
 
 from __future__ import annotations
@@ -18,11 +22,39 @@ class StepRecord:
 
     step: int
     thought: str
-    action: str  # "tool" | "respond" | "ask"
+    action: str  # "tool" | "tools" | "respond" | "ask"
     tool_name: str = ""
     tool_args: dict[str, Any] = field(default_factory=dict)
     observation: str = ""
     failed: bool = False
+    question: str = ""  # for ask actions: the question posed to the user
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "thought": self.thought,
+            "action": self.action,
+            "tool_name": self.tool_name,
+            "tool_args": self.tool_args,
+            "observation": self.observation,
+            "failed": self.failed,
+            "question": self.question,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StepRecord":
+        d = d or {}
+        args = d.get("tool_args")
+        return cls(
+            step=int(d.get("step", 0) or 0),
+            thought=str(d.get("thought", "")),
+            action=str(d.get("action", "")),
+            tool_name=str(d.get("tool_name", "")),
+            tool_args=args if isinstance(args, dict) else {},
+            observation=str(d.get("observation", "")),
+            failed=bool(d.get("failed", False)),
+            question=str(d.get("question", "")),
+        )
 
 
 @dataclass
@@ -118,3 +150,42 @@ class LoopMemory:
     def failed_tools(self) -> list[str]:
         """Names of tools that failed this run (to avoid blind retries)."""
         return [s.tool_name for s in self.steps if s.failed and s.tool_name]
+
+    def last_question(self) -> str:
+        """The most recent clarifying question posed to the user, if any."""
+        for s in reversed(self.steps):
+            if s.action == "ask" and s.question:
+                return s.question
+        return ""
+
+    def pending_ask(self) -> bool:
+        """True when the last recorded step was an ask (awaiting the user)."""
+        return bool(self.steps) and self.steps[-1].action == "ask"
+
+    # ── serialization (cross-message plan persistence) ───────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the full loop state for resuming on a later message."""
+        return {
+            "user_message": self.user_message,
+            "history": [[role, text] for role, text in self.history],
+            "steps": [s.to_dict() for s in self.steps],
+            "plan": self.plan,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "LoopMemory":
+        """Rebuild loop state from a to_dict snapshot. Defensive: bad input
+        yields an empty memory rather than raising."""
+        d = d if isinstance(d, dict) else {}
+        mem = cls(user_message=str(d.get("user_message", "")))
+        for h in d.get("history", []) or []:
+            if isinstance(h, (list, tuple)) and len(h) == 2:
+                mem.add_history(str(h[0]), str(h[1]))
+        plan = d.get("plan", "")
+        if isinstance(plan, str) and plan.strip():
+            mem.set_plan(plan)
+        for s in d.get("steps", []) or []:
+            if isinstance(s, dict):
+                mem.record_step(StepRecord.from_dict(s))
+        return mem

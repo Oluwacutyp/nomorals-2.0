@@ -39,11 +39,17 @@ def maybe_run_agentic(
     step_budget: int = 10,
     actor: str = "owner-loop",
     capabilities: Any = None,
+    resume_from: dict[str, Any] | None = None,
 ) -> LoopResult | None:
     """Run the agentic loop if agentic mode is enabled, else return None.
 
     Returns None when disabled so the caller falls through to the normal
     rigid pipeline. When enabled, returns the LoopResult.
+
+    ``resume_from``: a ``LoopResult.memory_snapshot`` from a previous run
+    that paused with ``ask`` — continues the plan on the user's answer.
+    Persist ``result.memory_snapshot`` whenever ``result.asked_user`` is
+    True and hand it back here on the next message.
     """
     if not agentic_mode_enabled():
         return None
@@ -59,6 +65,7 @@ def maybe_run_agentic(
             step_budget=step_budget,
             actor=actor,
             capabilities=capabilities,
+            resume_from=resume_from,
         )
     except Exception as exc:  # noqa: BLE001 — agentic mode must never sink chat
         _log.warning("agentic loop failed: %s", exc)

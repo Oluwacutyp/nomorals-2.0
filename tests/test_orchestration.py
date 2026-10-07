@@ -269,3 +269,248 @@ def test_memory_renders_compactly():
     assert "USER REQUEST: test" in rendered
     assert "truncated" in rendered  # long observation was compacted
     assert len(rendered) < 5000
+
+
+# ── relevance-ranked tool selection ───────────────────────────────────
+
+
+def test_describe_for_ranks_relevant_tools_first():
+    """With 50+ tools, the task-relevant tool surfaces to the top."""
+    reg = FakeRegistry()
+    for i in range(50):
+        reg.register(f"zzz_tool_{i:02d}", lambda: "x",
+                     f"unrelated utility number {i}")
+    reg.register("weather_lookup", lambda: "sunny",
+                 "get the current weather forecast for a city",
+                 {"city": {}})
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    listing = adapter.describe_for("what is the weather like today in Lagos?")
+    lines = listing.splitlines()
+    assert lines[0].startswith("- weather_lookup("), \
+        f"relevant tool not ranked first: {lines[0]}"
+    # all 51 tools still reachable across the listing pages
+    assert "… and 11 more tools" in listing
+
+
+def test_describe_for_empty_query_keeps_original_order():
+    """No query → same behavior as the old describe()."""
+    reg = FakeRegistry()
+    reg.register("bravo", lambda: "b", "second tool")
+    reg.register("alpha", lambda: "a", "first tool")
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    assert adapter.describe() == adapter.describe_for("")
+
+
+def test_think_sees_relevant_tools():
+    """The think prompt carries the relevance-ranked listing."""
+    reg = FakeRegistry()
+    for i in range(45):
+        reg.register(f"aaa_filler_{i:02d}", lambda: "f", "filler tool")
+    reg.register("btc_price", lambda: "90000", "get BTC price in USD")
+    seen_prompts = []
+
+    class SpyLLM(FakeLLM):
+        def chat(self, messages, params=None, **kw):
+            seen_prompts.append(messages[1].content)
+            self.calls += 1
+            return FakeResponse(json.dumps(
+                {"thought": "done", "action": "respond",
+                 "response": "ok"}))
+
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    loop = AgenticLoop(SpyLLM([]), adapter, step_budget=2)
+    loop.run("check BTC price and alert me")
+    prompt = seen_prompts[0]
+    btc_pos = prompt.find("btc_price")
+    filler_pos = prompt.find("aaa_filler_00")
+    assert btc_pos != -1 and filler_pos != -1
+    assert btc_pos < filler_pos, "relevant tool must appear before filler"
+
+
+# ── parallel tool calls ───────────────────────────────────────────────
+
+
+def test_parallel_tools_action():
+    """One 'tools' action dispatches independent calls together."""
+    loop, reg, llm = make_loop(
+        [
+            {"thought": "need both", "action": "tools",
+             "calls": [
+                 {"tool": "get_time", "args": {}},
+                 {"tool": "get_weather", "args": {"city": "Lagos"}},
+             ]},
+            {"thought": "have both", "action": "respond",
+             "response": "Time and weather fetched."},
+        ],
+        lambda r: (
+            r.register("get_time", lambda: "12:00", "current time"),
+            r.register("get_weather", lambda city: f"sunny in {city}",
+                       "weather", {"city": {}}),
+        ),
+    )
+    result = loop.run("time and weather")
+    assert result.success
+    assert result.tools_called == ["get_time", "get_weather"]
+    # both calls happened, but only ONE budget step was consumed for the batch
+    assert result.steps_taken == 2
+    assert ("get_time", {}) in reg.calls
+    assert ("get_weather", {"city": "Lagos"}) in reg.calls
+
+
+def test_parallel_batch_uses_registry_call_many():
+    """When the registry supports call_many, the batch goes through it."""
+
+    class ParallelRegistry(FakeRegistry):
+        def __init__(self):
+            super().__init__()
+            self.call_many_used = False
+
+        def call_many(self, calls, max_workers=1, **common):
+            from nomorals.core.result import Ok
+            self.call_many_used = True
+            return [Ok(f"parallel-{name}") for name, _ in calls]
+
+    reg = ParallelRegistry()
+    reg.register("alpha", lambda: "a", "alpha tool")
+    reg.register("beta", lambda: "b", "beta tool")
+    llm = FakeLLM([
+        {"thought": "batch it", "action": "tools",
+         "calls": [{"tool": "alpha", "args": {}},
+                    {"tool": "beta", "args": {}}]},
+        {"thought": "done", "action": "respond", "response": "batched"},
+    ])
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    loop = AgenticLoop(llm, adapter, step_budget=5)
+    result = loop.run("batch test")
+    assert result.success
+    assert reg.call_many_used, "registry.call_many was not used"
+    assert result.tools_called == ["alpha", "beta"]
+
+
+def test_parallel_batch_skips_blind_retry():
+    """A repeated failed call inside a batch is skipped, others proceed."""
+
+    def boom():
+        raise RuntimeError("down")
+
+    loop, reg, llm = make_loop(
+        [
+            {"thought": "try solo", "action": "tool",
+             "tool": "flaky", "args": {"x": 1}},
+            {"thought": "batch with a repeat", "action": "tools",
+             "calls": [
+                 {"tool": "flaky", "args": {"x": 1}},  # blind retry → skip
+                 {"tool": "solid", "args": {}},
+             ]},
+            {"thought": "done", "action": "respond", "response": "ok"},
+        ],
+        lambda r: (
+            r.register("flaky", boom, "flaky", {"x": {}}),
+            r.register("solid", lambda: "fine", "solid tool"),
+        ),
+    )
+    result = loop.run("batch retry test")
+    assert result.success
+    # flaky called once (the batch repeat was blocked), solid ran
+    assert reg.calls.count(("flaky", {"x": 1})) == 1
+    assert ("solid", {}) in reg.calls
+
+
+def test_malformed_tools_action_is_guided_failure():
+    loop, reg, llm = make_loop(
+        [
+            {"thought": "bad batch", "action": "tools"},  # no calls list
+            {"thought": "recover", "action": "respond", "response": "recovered"},
+        ]
+    )
+    result = loop.run("bad batch test")
+    assert result.success
+    assert result.response == "recovered"
+
+
+# ── cross-message plan persistence ────────────────────────────────────
+
+
+def test_ask_snapshot_resumes_on_next_message():
+    """ask → snapshot → resume_from: the plan continues, not restarts."""
+    reg = FakeRegistry()
+    reg.register("signup", lambda platform: f"started {platform}",
+                 "start signup", {"platform": {}})
+
+    llm1 = FakeLLM([
+        {"thought": "need the platform", "action": "ask",
+         "plan": "sign up for trial once the platform is known",
+         "response": "Which platform?"},
+    ])
+    adapter = ToolAdapter(reg, capabilities=CapabilitySet.all())
+    loop1 = AgenticLoop(llm1, adapter, step_budget=5)
+    r1 = loop1.run("help me sign up for a trial")
+    assert r1.asked_user
+    assert r1.question == "Which platform?"
+    assert r1.memory_snapshot, "ask must return a memory snapshot"
+
+    # user answers on the next message; a fresh loop resumes the plan
+    llm2 = FakeLLM([
+        {"thought": "platform known, proceed", "action": "tool",
+         "tool": "signup", "args": {"platform": "netflix"}},
+        {"thought": "done", "action": "respond",
+         "response": "Signup started for netflix."},
+    ])
+    loop2 = AgenticLoop(llm2, adapter, step_budget=5)
+    r2 = run_agentic("netflix", llm=llm2, registry=reg,
+                     resume_from=r1.memory_snapshot)
+    assert r2.success
+    assert r2.tools_called == ["signup"]
+    assert ("signup", {"platform": "netflix"}) in reg.calls
+
+    # the resumed memory carries the plan, the Q&A, and both runs' steps
+    mem = LoopMemory.from_dict(r2.memory_snapshot)
+    assert "trial" in mem.plan
+    assert ("assistant", "Which platform?") in mem.history
+    assert ("user", "netflix") in mem.history
+    assert len(mem.steps) == 3  # ask + tool + respond
+
+
+def test_memory_roundtrip_is_lossless():
+    mem = LoopMemory(user_message="original request")
+    mem.add_history("user", "hello")
+    mem.set_plan("do the thing in two steps")
+    mem.record_step(StepRecord(step=1, thought="t1", action="tool",
+                               tool_name="x", tool_args={"a": 1},
+                               observation="out", failed=False))
+    mem.record_step(StepRecord(step=2, thought="t2", action="ask",
+                               question="sure?"))
+    restored = LoopMemory.from_dict(mem.to_dict())
+    assert restored.user_message == "original request"
+    assert restored.history == [("user", "hello")]
+    assert restored.plan == "do the thing in two steps"
+    assert len(restored.steps) == 2
+    assert restored.steps[0].tool_args == {"a": 1}
+    assert restored.last_question() == "sure?"
+    assert restored.pending_ask()
+
+
+def test_memory_from_dict_is_defensive():
+    assert LoopMemory.from_dict(None).user_message == ""
+    assert LoopMemory.from_dict({}).user_message == ""
+    assert LoopMemory.from_dict({"steps": "garbage"}).steps == []
+    # fresh message without a snapshot still works
+    r = run_agentic("hi", llm=FakeLLM([
+        {"thought": "t", "action": "respond", "response": "hey"}]),
+        registry=FakeRegistry(), resume_from=None)
+    assert r.success
+
+
+def test_plan_field_updates_memory():
+    loop, reg, llm = make_loop(
+        [
+            {"thought": "step one", "action": "tool", "tool": "noop",
+             "args": {}, "plan": "first check X, then do Y"},
+            {"thought": "done", "action": "respond", "response": "finished"},
+        ],
+        lambda r: r.register("noop", lambda: "ok", "does nothing"),
+    )
+    result = loop.run("do the thing")
+    assert result.success
+    mem = LoopMemory.from_dict(result.memory_snapshot)
+    assert mem.plan == "first check X, then do Y"
