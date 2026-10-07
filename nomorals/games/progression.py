@@ -8,11 +8,11 @@ XP curve
 --------
 ``xp_for_level(n)`` is the *cumulative* XP needed to reach level ``n``::
 
-    xp_for_level(n) = 40 * n * (n - 1)
+    xp_for_level(n) = 30 * n * (n - 1)
 
-So level 2 needs 80 XP, level 3 needs 240, level 5 needs 800, level 10
-needs 3,600.  An arena win pays 60 XP — level 2 lands after about two
-battles; later levels take a session each, never a week.
+So level 2 needs 60 XP, level 3 needs 180, level 5 needs 600, level 10
+needs 2,700.  An arena win pays 100 XP — level 2 lands after one good
+battle; later levels take a few bouts each, never a grind.
 
 Stat growth (arena)
 -------------------
@@ -34,20 +34,24 @@ from typing import Any
 
 #: XP for one arena win / loss. Wins pay more than double — winning
 #: should always feel like the fastest way up.
-ARENA_WIN_XP = 60
-ARENA_LOSS_XP = 25
+ARENA_WIN_XP = 100
+ARENA_LOSS_XP = 40
 
 #: generic games (everything that isn't the arena): small but nonzero,
 #: so every table moves the bar.
-GAME_WIN_XP = 20
-GAME_DRAW_XP = 12
-GAME_LOSS_XP = 8
+GAME_WIN_XP = 30
+GAME_DRAW_XP = 18
+GAME_LOSS_XP = 12
+
+#: bonus XP multipliers for special kills
+ELITE_KILL_MULT = 1.5
+BOSS_KILL_MULT = 2.5
 
 
 def xp_for_level(level: int) -> int:
     """Cumulative XP required to *reach* ``level`` (level 1 = 0)."""
     level = max(1, int(level))
-    return 40 * level * (level - 1)
+    return 30 * level * (level - 1)
 
 
 def level_for_xp(xp: int) -> int:

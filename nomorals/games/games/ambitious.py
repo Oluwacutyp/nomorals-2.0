@@ -1400,6 +1400,12 @@ class BattleArenaGame(MultiGame):
         foe_pow = int(s.get("house_power", 0))
         if you_pow > 0 and foe_pow >= you_pow * 1.1:
             total = int(round(total * 1.25))  # the upset bonus
+        # elites and bosses pay extra — harder fights, bigger rewards
+        from ..progression import ELITE_KILL_MULT, BOSS_KILL_MULT
+        if s.get("house_is_boss"):
+            total = int(round(total * BOSS_KILL_MULT))
+        elif s.get("house_elite"):
+            total = int(round(total * ELITE_KILL_MULT))
         return total
 
     # ── gear ───────────────────────────────────────────────────────────────
