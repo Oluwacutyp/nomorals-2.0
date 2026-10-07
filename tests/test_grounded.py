@@ -104,3 +104,36 @@ class SessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonStrictTests(unittest.TestCase):
+    def _session(self):
+        s = GroundedSession(strict=False)
+        s.add_text("Lagos is a city in Nigeria.", title="nigeria doc")
+        return s
+
+    def test_ungrounded_fallback_labeled(self):
+        s = self._session()
+        def llm(prompt):
+            if "do not cover" in prompt:
+                return "Paris is the capital of France."
+            return "CANNOT_ANSWER"
+        ans = s.ask("capital of France?", llm_fn=llm)
+        self.assertFalse(ans.refused)
+        self.assertIn("Not in your documents", ans.text)
+        self.assertIn("Paris", ans.text)
+
+    def test_marker_added_when_model_forgets(self):
+        s = self._session()
+        def llm(prompt):
+            if "do not cover" in prompt:
+                return "just the answer, no marker"
+            return "CANNOT_ANSWER"
+        ans = s.ask("capital of France?", llm_fn=llm)
+        self.assertTrue(ans.text.startswith("⚠️ Not in your documents"))
+
+    def test_strict_still_refuses(self):
+        s = GroundedSession(strict=True)
+        s.add_text("Lagos is a city in Nigeria.", title="nigeria doc")
+        ans = s.ask("capital of France?", llm_fn=lambda p: "CANNOT_ANSWER")
+        self.assertTrue(ans.refused)

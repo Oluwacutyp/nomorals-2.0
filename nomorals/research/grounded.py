@@ -82,6 +82,15 @@ SOURCES:
 {sources}
 """
 
+#: used when strict=False and the documents don't cover the question
+_UNGROUNDED_PROMPT = """The user's documents do not cover this question. Answer from your own
+knowledge, but START your reply with this exact line:
+"⚠️ Not in your documents — this is from my own knowledge:"
+Then give the answer. Keep it concise.
+
+QUESTION: {question}
+"""
+
 
 def _chunk(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
     """Split text into overlapping chunks for retrieval."""
@@ -108,9 +117,13 @@ def _chunk(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
 class GroundedSession:
     """A question-answering session bound to a fixed set of documents."""
 
-    def __init__(self, *, chunk_size: int = 1200) -> None:
+    def __init__(self, *, chunk_size: int = 1200, strict: bool = True) -> None:
         self.index = DocumentIndex()
         self.chunk_size = chunk_size
+        #: strict=True: refuse when sources don't cover it.
+        #: strict=False: answer from the model's own knowledge, but clearly
+        #: labeled as NOT from the documents.
+        self.strict = strict
         self.doc_ids: list[str] = []
         self.created_at = time.time()
 
@@ -172,6 +185,8 @@ class GroundedSession:
             raise GroundedError("no documents ingested yet")
         hits = self.index.search(question, limit=top_k)
         if not hits:
+            if not self.strict:
+                return self._answer_ungrounded(question, llm_fn, context)
             return GroundedAnswer(text=_REFUSAL, refused=True, query=question)
 
         sources = [
@@ -195,8 +210,24 @@ class GroundedSession:
 
         raw = (raw or "").strip()
         if "CANNOT_ANSWER" in raw.upper():
+            if not self.strict:
+                return self._answer_ungrounded(question, llm_fn, context)
             return GroundedAnswer(text=_REFUSAL, refused=True, query=question)
         return self._number_citations(raw, sources, question)
+
+    def _answer_ungrounded(self, question: str,
+                           llm_fn: Callable[[str], str] | None,
+                           context: Any) -> GroundedAnswer:
+        """Answer from the model's own knowledge, clearly labeled."""
+        prompt = _UNGROUNDED_PROMPT.format(question=question)
+        try:
+            text = (self._complete(prompt, llm_fn, context) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            raise GroundedError(f"answer generation failed: {exc}") from exc
+        marker = "⚠️ Not in your documents — this is from my own knowledge:"
+        if not text.startswith(marker):
+            text = marker + "\n" + text
+        return GroundedAnswer(text=text, sources=[], query=question)
 
     def _complete(self, prompt: str,
                   llm_fn: Callable[[str], str] | None,
