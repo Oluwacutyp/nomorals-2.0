@@ -1685,8 +1685,12 @@ class RuntimeGamesMixin:
             return flow.start(" ".join(parts[1:]))
         if verb == "assist":
             if len(parts) < 2:
-                return "usage: /trial assist <platform>"
-            return flow.assist(" ".join(parts[1:]), chat_key=chat_key)
+                return "usage: /trial assist <platform> [--yes]"
+            auto_yes = "--yes" in [p.lower() for p in parts]
+            platform_parts = [p for p in parts[1:] if p.lower() != "--yes"]
+            if not platform_parts:
+                return "usage: /trial assist <platform> [--yes]"
+            return flow.assist(" ".join(platform_parts), chat_key=chat_key, auto_yes=auto_yes)
         if verb == "status":
             return flow.assist_status()
         if verb == "resume":

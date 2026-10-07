@@ -202,7 +202,7 @@ class TrialFlow:
         lines.append(f"  /trial assist {platform}")
         return "\n".join(lines)
 
-    def assist(self, platform: str, *, chat_key: str = "") -> str:
+    def assist(self, platform: str, *, chat_key: str = "", auto_yes: bool = False) -> str:
         """Browser-assisted signup via AccountCreator — actually launched.
 
         One account per service, owner's identity from the identity bank,
@@ -211,23 +211,34 @@ class TrialFlow:
         ``_ASSIST_MAX_INFLIGHT`` at once) and the outcome — finished,
         paused-for-human, or failed — is reported back to the owner's chat.
         Returns immediately with a truthful status.
+
+        If no identity is set, generates a disposable one (temp email +
+        generated name) and shows it with a warning — proceeds on explicit
+        confirmation, or immediately with auto_yes=True (--yes flag).
         """
         platform = (platform or "").strip()
         if not platform:
-            raise ToolError("usage: /trial assist <platform>")
+            raise ToolError("usage: /trial assist <platform> [--yes]")
         try:
             from ...accounts.creator import AccountCreator  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             return f"account automation unavailable: {exc}"
-        # Identity bank check — the owner must have set their details first.
+        # Identity bank check — generate a disposable identity if none set.
         identity = self._owner_identity()
         if not identity.get("name") or not identity.get("email"):
-            return (
-                "set your identity first so I can fill forms:\n"
-                "  /identity set name <your name>\n"
-                "  /identity set email <your email>\n"
-                f"then: /trial assist {platform}"
-            )
+            identity = self._generate_disposable_identity(platform)
+            if not auto_yes:
+                return (
+                    "⚠️ no identity set — I generated a disposable one:\n"
+                    f"  name:  {identity.get('name')}\n"
+                    f"  email: {identity.get('email')} (temp, disposable)\n"
+                    "this is NOT your real identity. reply 'yes' to proceed\n"
+                    f"with this, or use /trial assist {platform} --yes to skip\n"
+                    "this warning. to use your own details instead:\n"
+                    "  /identity set name <your name>\n"
+                    "  /identity set email <your email>"
+                )
+            # auto_yes: proceed with the generated identity, note it in the run
         if not os.environ.get("NM_VAULT_PASSPHRASE", ""):
             return (
                 "vault is locked: set the NM_VAULT_PASSPHRASE environment "
@@ -1209,6 +1220,40 @@ class TrialFlow:
             return json.loads(row["value"])
         except Exception:  # noqa: BLE001
             return {}
+
+    def _generate_disposable_identity(self, platform: str) -> dict[str, str]:
+        """Generate a disposable identity for trial signups.
+
+        Uses temp/disposable email services — NEVER the owner's real details.
+        Returns dict with name, email, and a flag marking it as generated.
+        """
+        import random
+        import string
+
+        # Generate a plausible-but-clearly-disposable name
+        first_names = ["Alex", "Sam", "Jordan", "Casey", "Riley", "Morgan"]
+        last_names = ["Trial", "Test", "Demo", "Temp", "Guest"]
+        name = f"{random.choice(first_names)} {random.choice(last_names)}"
+
+        # Generate a temp email via the creator's tempmail
+        # (uses disposable domains, not the owner's real email)
+        try:
+            from ...accounts.creator import AccountCreator
+            creator = AccountCreator(db=self.db)
+            username = "".join(random.choices(string.ascii_lowercase, k=10))
+            account = creator._create_tempmail(username)
+            email = account.get("email", f"{username}@tempmail.plus")
+        except Exception:  # noqa: BLE001
+            # Fallback: clearly-marked disposable address
+            username = "".join(random.choices(string.ascii_lowercase, k=10))
+            email = f"{username}@tempmail.plus"
+
+        return {
+            "name": name,
+            "email": email,
+            "disposable": "true",
+            "platform": platform,
+        }
 
     # ── save + deliver ───────────────────────────────────────────────────────
     def save(self, platform: str, login: str, secret: str, note: str = "") -> dict:

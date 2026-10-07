@@ -73,7 +73,8 @@ def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
             print("trial assist needs a platform — nm trial assist <platform>",
                   file=sys.stderr)
             return 2
-        print(flow.assist(platform))
+        auto_yes = bool(getattr(args, "yes", False))
+        print(flow.assist(platform, auto_yes=auto_yes))
         return 0
 
     if cmd == "status":

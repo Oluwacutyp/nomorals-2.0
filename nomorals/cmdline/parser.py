@@ -2270,6 +2270,8 @@ def _parser() -> argparse.ArgumentParser:
     trial_assist = trial_sub.add_parser(
         "assist", help="Browser-assisted signup (runs in background, reports back)")
     trial_assist.add_argument("platform", help="platform name")
+    trial_assist.add_argument("--yes", action="store_true",
+                              help="skip the disposable-identity warning and proceed")
     trial_sub.add_parser("status", help="Status of background assisted signups")
     trial_resume = trial_sub.add_parser(
         "resume", help="Continue a paused account flow after the human step")
