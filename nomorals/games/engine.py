@@ -1740,6 +1740,7 @@ class GameEngine:
                 lines.append(f"  /game {g.name:<18} {g.description}"
                              f"{diff}{extra}")
         lines.append("  /game leaderboard [game]   the rankings")
+        lines.append("  /game profile [name]       your full character sheet")
         lines.append("  /game stats [name]         a player's record")
         lines.append("  /game shop                 spend your coins")
         lines.append("  /game quit                 leave the table")

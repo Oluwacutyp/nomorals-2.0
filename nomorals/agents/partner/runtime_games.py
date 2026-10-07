@@ -115,6 +115,20 @@ class RuntimeGamesMixin:
                 if live:
                     overrides[player.key] = live
             return engine.board.render(10, game=game, name_overrides=overrides)
+        if verb == "profile":
+            from ...games.players import render_full_profile
+            want = " ".join(parts[1:]).strip().lower()
+            if want:
+                for prof in engine.store.all():
+                    if want in prof.key.lower() or want in prof.name.lower():
+                        return render_full_profile(prof)
+                return f"no player found matching {want!r}."
+            if player is not None:
+                return render_full_profile(
+                    engine.store.get_for(player),
+                    display_name=getattr(player, "name", ""),
+                )
+            return "usage: /game profile [name]"
         if verb == "stats":
             want = " ".join(parts[1:]).strip().lower()
             if want:

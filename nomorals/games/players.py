@@ -1348,3 +1348,62 @@ class Leaderboard:
                     f"{row['win_rate']:.0%}{streak}"
                 )
         return "\n".join(lines)
+
+
+def render_full_profile(prof: "Profile", display_name: str = "") -> str:
+    """The combined game profile: level, character sheet, record, per-game.
+
+    One view showing everything — the character's stats (with level
+    bonuses visible), overall record, wallet, and per-game breakdown.
+    """
+    from .progression import level_for_xp, level_stat_bonus, xp_bar, xp_for_level
+    name = (display_name or "").strip() or prof.name or prof.key
+    level = level_for_xp(prof.xp)
+    bonus = level_stat_bonus(level)
+    # character sheet: base arena stats + level growth
+    hp = 50 + bonus["max_hp"]
+    atk = 10 + bonus["atk"]
+    dfn = 5 + bonus["def"]
+    # xp progress to next
+    cur = xp_for_level(level)
+    nxt = xp_for_level(level + 1)
+    to_go = nxt - prof.xp
+
+    lines = [f"🥷 {name} — Level {level}"]
+    lines.append(f"⭐ {prof.xp:,} XP {xp_bar(prof.xp)} · {to_go:,} to L{level + 1}")
+    lines.append("")
+    lines.append("⚔️ CHARACTER")
+    lines.append(f"   {hp} HP · {atk} atk · {dfn} def")
+    if level > 1:
+        lines.append(f"   (+{bonus['max_hp']} HP, +{bonus['atk']} atk, "
+                     f"+{bonus['def']} def from levels)")
+    lines.append("")
+    games = prof.games_played or 0
+    pct = round(100 * prof.wins / games) if games else 0
+    if prof.streak > 0:
+        streak = f"🔥 {prof.streak} win streak"
+    elif prof.streak < 0:
+        streak = f"🧊 {-prof.streak} losing"
+    else:
+        streak = "no streak"
+    lines.append("📊 RECORD")
+    lines.append(f"   {prof.wins}W {prof.losses}L {prof.draws}D · "
+                 f"{pct}% · {streak}")
+    lines.append(f"   best streak: {prof.best_streak} · {games} games played")
+    lines.append("")
+    items = ", ".join(f"{k}×{v}" for k, v in (prof.items or {}).items()) or "none"
+    lines.append("💰 WALLET")
+    lines.append(f"   🪙 {prof.coins:,} coins · {prof.points:,} points")
+    lines.append(f"   🎒 {items}")
+    per = prof.per_game or {}
+    if per:
+        lines.append("")
+        lines.append("🎮 PER GAME")
+        for gname in sorted(per):
+            g = per[gname] or {}
+            w = int(g.get("wins", 0)); l = int(g.get("losses", 0))
+            d = int(g.get("draws", 0))
+            played = w + l + d
+            if played:
+                lines.append(f"   {gname}: {w}W {l}L {d}D")
+    return "\n".join(lines)
