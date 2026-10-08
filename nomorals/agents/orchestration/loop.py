@@ -45,6 +45,12 @@ class LoopResult:
     # Serialized LoopMemory — persist this when asked_user is True (or
     # always) and pass it back as resume_from on the user's next message
     # to continue the plan instead of starting fresh.
+    confidence: dict[str, Any] = field(
+        default_factory=lambda: {"score": 0.5, "level": "medium",
+                                 "reasons": []})
+    # Self-rated confidence for this answer (build-map #34). Populated by
+    # AgenticLoop._finalize when confidence_ux is on; {"score","level",
+    # "reasons"} from agents.confidence.Confidence.to_dict().
 
 
 THINK_SYSTEM = """You are Devon's agentic orchestrator. You solve the owner's request step by step by choosing tools.
@@ -107,6 +113,7 @@ class AgenticLoop:
         sampling: SamplingParams | None = None,
         code_mode: bool | None = None,
         db: Any = None,
+        confidence_ux: bool = True,
     ) -> None:
         from ...core.profiles import profile_value, get_profile_kind
         if step_budget is None:
@@ -130,6 +137,34 @@ class AgenticLoop:
                 code_mode = False
         self.code_mode = bool(code_mode)
         self._code_adapter: Any = None
+        # Calibrated confidence UX (build-map #34): self-rate every final
+        # answer; below threshold flag uncertainty instead of guessing.
+        # Opt-out with confidence_ux=False (behavior is then exactly the
+        # old one). Assessment is heuristic-only — no extra LLM call.
+        # (An LLM-judge upgrade is a natural follow-up.)
+        self.confidence_ux = bool(confidence_ux)
+
+    # ── confidence UX ────────────────────────────────────────────────
+
+    def _finalize(self, result: LoopResult) -> LoopResult:
+        """Stamp self-rated confidence on a final answer (build-map #34).
+
+        Runs the cheap heuristic assessment, records it on
+        ``result.confidence``, and rewrites ``result.response`` with the
+        confidence UX when warranted. Never raises; when confidence_ux is
+        off the result passes through untouched.
+        """
+        if not self.confidence_ux:
+            return result
+        try:
+            from ..confidence import assess_confidence, format_with_confidence
+            conf = assess_confidence(
+                result.response, tools_called=result.tools_called)
+            result.confidence = conf.to_dict()
+            result.response = format_with_confidence(result.response, conf)
+        except Exception:  # noqa: BLE001 — confidence never breaks a run
+            _log.debug("confidence finalize failed", exc_info=True)
+        return result
 
     # ── public entry ─────────────────────────────────────────────────
 
@@ -212,7 +247,7 @@ class AgenticLoop:
                                   llm_fn=_distill_llm, db=self.db)
                 except Exception:  # noqa: BLE001 - distillation never breaks a run
                     pass
-                return result
+                return self._finalize(result)
 
             if action == "ask":
                 question = str(decision.get("response", "")).strip()
@@ -315,14 +350,14 @@ class AgenticLoop:
 
         # Budget exhausted — summarize what happened honestly
         summary = self._budget_summary(memory)
-        return LoopResult(
+        return self._finalize(LoopResult(
             response=summary,
             steps_taken=self.step_budget,
             tools_called=tools_called,
             budget_exhausted=True,
             success=False,
             memory_snapshot=memory.to_dict(),
-        )
+        ))
 
     # ── think ────────────────────────────────────────────────────────
 
@@ -398,10 +433,10 @@ class AgenticLoop:
                 tools_called=tools_called, asked_user=True,
                 question=question, memory_snapshot=memory.to_dict())
         if ok and not obs.startswith("(code ran, no result set"):
-            return True, LoopResult(
+            return True, self._finalize(LoopResult(
                 response=obs, steps_taken=step_num,
                 tools_called=tools_called,
-                memory_snapshot=memory.to_dict())
+                memory_snapshot=memory.to_dict()))
         return False, None
 
     def _think(self, memory: LoopMemory, step_num: int) -> dict[str, Any] | None:
@@ -620,6 +655,7 @@ def run_agentic(
     capabilities: Any = None,
     resume_from: dict[str, Any] | None = None,
     db: Any = None,
+    confidence_ux: bool = True,
 ) -> LoopResult:
     """One-call convenience wrapper.
 
@@ -632,6 +668,9 @@ def run_agentic(
 
     ``db``: skill database for the Hermes distillation hook. When None
     the hook falls back to the app's default storage path.
+
+    ``confidence_ux``: self-rate the final answer and flag uncertainty
+    (build-map #34). Pass False for the exact old behavior.
     """
     tools = ToolAdapter(registry, actor=actor, capabilities=capabilities)
     memory = LoopMemory.from_dict(resume_from) if resume_from else None
@@ -639,5 +678,6 @@ def run_agentic(
         memory = LoopMemory(user_message=message)
     for role, text in history or []:
         memory.add_history(role, text)
-    loop = AgenticLoop(llm, tools, step_budget=step_budget, db=db)
+    loop = AgenticLoop(llm, tools, step_budget=step_budget, db=db,
+                       confidence_ux=confidence_ux)
     return loop.run(message, memory)
