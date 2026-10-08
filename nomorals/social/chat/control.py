@@ -250,6 +250,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "commands": (0, 1),      # alias of /list
     # redteam: defensive self-attack suite
     "redteam": (0, 1),       # /redteam [scenario_id] — attack our own loop, report holes
+    "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 1),          # alias of /list
     # wave 72 systems: media, execution, archives, builders
     "music": (0, None),      # /music <topic> [style] | styles | song [slug]
@@ -342,6 +343,7 @@ _HELP_TEXT = "\n".join(
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
         "   /king /story /case /world /escape /political /auction\n"
         "   /shop /wyrr /two_truths /numberguess   start any of the 41 (every chat)",
+        "  /predict <stake> <over|under> <1-99>    prediction pit — call the d100 roll, win 2x (unlock by beating challenges)",
         "  /game leaderboard|stats|shop|balance    the shared table: rankings, record, coins",
         "  /inventory | /equip <gear> | /unequip [slot] | /repair <gear>",
         "   arena gear — persistent swords & armor with durability, grades, sets",
@@ -575,6 +577,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "redteam": {"what": "defensive self-attack: runs attack scenarios against a sandboxed copy of my own agent loop and reports the holes it finds. Never touches external systems.",
                 "usage": "/redteam [scenario_id]", "example": "/redteam",
                 "related": "/benchmark"},
+    "predict": {"what": "the prediction pit: call a d100 roll over/under a line, stake coins, correct calls pay 2x. Unlock: earn 'High Roller' (craps) or 'Boss Hunter' (raid boss) — progression-gated, the owner always has access.",
+                "usage": "/predict <stake> <over|under> <1-99>", "example": "/predict 50 over 60",
+                "related": "/game /bet /achievements"},
     "miniapp": {"what": "group mini-apps: polls, shared-expense tracking with settle-up, and event RSVPs. Group chats only — state is group-scoped and isolated from my private memory.",
                 "usage": "/miniapp new <poll|expenses|rsvp> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe",
                 "example": "/miniapp new poll \"Best day?\" Mon Tue Wed",
@@ -1146,7 +1151,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots", "miniapp",
+      "blackjack", "roulette", "slots", "miniapp", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
@@ -1357,7 +1362,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots", "miniapp",
+      "blackjack", "roulette", "slots", "miniapp", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision",
@@ -1407,6 +1412,7 @@ _LIST_GROUP_ALIASES = {
     "audio": "media system — music · playback · video",
     "wisdom": "wisdom keeper — corpus · history · practice",
     "games": "games — 41, DM + group, start them directly",
+    "predict": "games — 41, DM + group, start them directly",
     "discovery": "discovery",
 }
 
@@ -1466,6 +1472,7 @@ LIST_ONELINERS: dict[str, str] = {
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
+    "predict": "prediction pit — call a d100 roll, win 2x (unlock: beat challenges)",
     "miniapp": "group mini-apps: polls, shared expenses, RSVPs",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",

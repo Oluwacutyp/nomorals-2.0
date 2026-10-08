@@ -28,7 +28,7 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .logging_setup import get_logger
 
@@ -341,10 +341,20 @@ class Policy:
         enforce: bool = True,
         confirmation_ttl: float = 300.0,
         clock: Any = None,
+        progression: Callable[[], set[str]] | None = None,
     ) -> None:
+        """Args:
+            progression: optional zero-arg callable returning extra granted
+                capability strings for the actor (e.g. game-achievement
+                unlocks). Consulted alongside the actor's CapabilitySet at
+                the grant step. Never raises — failures degrade to no extra
+                grants. Kept as a callable so policy.py stays decoupled from
+                the games DB.
+        """
         self.default_grant = default_grant if default_grant is not None else CapabilitySet.none()
         self.enforce = enforce
         self.confirmation_ttl = confirmation_ttl
+        self.progression = progression
         self._rules: list[_Rule] = []
         # token -> (expiry_ts, capability it was minted for)
         self._confirmations: dict[str, tuple[float, str]] = {}
@@ -441,6 +451,25 @@ class Policy:
         except Exception:  # noqa: BLE001 - fail closed on evaluation errors
             return True
 
+    def _progression_grants(self, capability: str) -> bool:
+        """True when the progression callable grants this capability.
+
+        Additive-only grant source (game achievement unlocks). Never raises:
+        a failing callable degrades to no extra grants.
+        """
+        prog = self.progression
+        if prog is None:
+            return False
+        try:
+            granted = prog()
+        except Exception:  # noqa: BLE001 - fail closed on callable errors
+            _log.debug("progression callable failed", exc_info=True)
+            return False
+        try:
+            return capability in granted
+        except Exception:  # noqa: BLE001
+            return False
+
     # -- evaluation ----------------------------------------------------------
     def check(
         self,
@@ -483,6 +512,10 @@ class Policy:
                     break
 
         granted = effective.grants(capability)
+        if not granted:
+            # Step 4b: progression unlocks (achievement grants) — additive
+            # only, consulted alongside the actor's CapabilitySet.
+            granted = self._progression_grants(capability)
         confirmable = needs_confirm or capability in Capability.CONFIRMABLE
         biometric_required = needs_biometric or capability in Capability.BIOMETRIC
 

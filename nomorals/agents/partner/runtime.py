@@ -1265,6 +1265,41 @@ class PartnerRuntime(
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
 
+    def _progression_gate(self, kind: str, message: Any) -> str | None:
+        """Locked-command reply when a player lacks a progression unlock.
+
+        Returns the reply text to send instead of dispatching, or None when
+        the command is open / unlocked / the sender is the owner. Never
+        raises — on any failure the command dispatches normally (fail-open
+        for the gate itself; the unlock check inside is fail-closed).
+        """
+        try:
+            from ...games.unlocks import command_unlock_required, locked_reply
+
+            required = command_unlock_required(kind)
+            if required is None:
+                return None
+            if message is not None and self._is_operator(message):
+                return None  # owner bypass: progression never gates the owner
+            player = None
+            try:
+                player = self._game_player(message)
+            except Exception:  # noqa: BLE001
+                player = None
+            if player is None:
+                # No resolvable player (e.g. console call without a sender):
+                # treat as locked only when a sender exists, else let the
+                # command's own handler complain about the missing player.
+                if message is None or not getattr(message, "sender", None):
+                    return None
+                player_key = "unknown"
+            else:
+                player_key = player.key
+            db = getattr(self.context, "db", None)
+            return locked_reply(kind, db, player_key)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _build_adapter(self, name: str) -> Any:
         """Factory for hot starts. Returns the adapter, None for an unknown
         or disabled platform, and raises with a readable message when a
@@ -1292,6 +1327,13 @@ class PartnerRuntime(
         kind, arg = command.kind, command.arg
         if kind == "error":
             return arg
+
+        # Progression-gated commands: beating challenges unlocks commands.
+        # Checked before dispatch; the owner bypasses (their capabilities
+        # come from role config — progression is additive for players only).
+        locked = self._progression_gate(kind, message)
+        if locked is not None:
+            return locked
 
         if kind in {"list", "commands", "menu"}:
             # wave 68: /list — every executable chat command, categorized
@@ -1479,6 +1521,11 @@ class PartnerRuntime(
             from ..proactive import control_memory
 
             return control_memory(command.tail or arg, context=self.context)
+        if kind == "predict":
+            # Prediction pit: unlocked by beating challenges (see
+            # nomorals/games/unlocks.py). Gated above in _progression_gate.
+            return self._control_predict(
+                command.tail or arg, chat_key, message=message)
         if kind == "miniapp":
             # Group mini-apps: architecturally isolated from owner memory,
             # accounts and vaults (see nomorals/community/__init__.py).

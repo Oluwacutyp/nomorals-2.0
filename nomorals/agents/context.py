@@ -60,8 +60,29 @@ class AgentContext:
         if self.policy is None:
             with self._lock:
                 if self.policy is None:
-                    self.policy = Policy(default_grant=self.capabilities)
+                    self.policy = Policy(
+                        default_grant=self.capabilities,
+                        progression=self._progression_grants,
+                    )
         return self.policy
+
+    def _progression_grants(self) -> set[str]:
+        """Extra capabilities from game-achievement progression unlocks.
+
+        Additive only: unlocks grant capabilities to player actors, never
+        subtract from anyone. The owner's grant comes from role config, so
+        the owner is unaffected by this system. Never raises.
+        """
+        try:
+            from ..games.achievements import progression_capabilities
+
+            db = getattr(self, "db", None)
+            actor = (getattr(self, "actor", "") or "").strip()
+            if db is None or not actor:
+                return set()
+            return progression_capabilities(db, actor)
+        except Exception:  # noqa: BLE001
+            return set()
 
     def check(self, capability: str, *, actor: str = "", confirmation: str | None = None) -> Any:
         """Ask the policy whether ``capability`` may be exercised."""

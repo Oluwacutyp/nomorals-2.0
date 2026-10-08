@@ -12,7 +12,9 @@ from typing import Any
 
 from ..storage.db import Database
 
-__all__ = ["Achievement", "ACHIEVEMENTS", "unlock_achievement", "get_achievements"]
+__all__ = ["Achievement", "ACHIEVEMENTS", "ACHIEVEMENT_UNLOCKS",
+           "UNLOCK_SOURCE", "unlock_achievement", "get_achievements",
+           "get_unlocks", "has_unlock", "progression_capabilities"]
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,118 @@ def _achievement_map() -> dict[str, Achievement]:
     return {a.id: a for a in ACHIEVEMENTS}
 
 
+# ── progression unlocks: beating challenges unlocks commands/capabilities ──
+#
+# Grant strings use the ``unlock:<kind>:<name>`` format:
+#   unlock:command:predict      — unlocks the /predict chat command
+#   unlock:capability:<cap>     — grants a policy capability string
+#
+# Every achievement_id here MUST exist in the ACHIEVEMENTS catalog above
+# (verified by tests/test_progression_unlocks.py).
+
+ACHIEVEMENT_UNLOCKS: dict[str, list[str]] = {
+    # Casino high-rollers earn the prediction pit.
+    "craps_high_roller": ["unlock:command:predict"],
+    # Boss hunters earn the prediction pit too — bosses unlock commands.
+    "arena_raid_win": ["unlock:command:predict"],
+    # Master detectives earn deeper research tools.
+    "case_expert": ["unlock:capability:research.advanced"],
+    # Puzzle masters earn deeper research tools.
+    "sudoku_hard": ["unlock:capability:research.advanced"],
+}
+
+#: Reverse map: unlock grant string -> achievement id that grants it.
+#: Used for locked-command messages ("earn 'High Roller' to unlock /predict").
+UNLOCK_SOURCE: dict[str, str] = {}
+for _aid, _grants in ACHIEVEMENT_UNLOCKS.items():
+    for _g in _grants:
+        UNLOCK_SOURCE.setdefault(_g, _aid)
+del _aid, _g, _grants
+
+
+def _ensure_unlocks_table(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS progression_unlocks ("
+            "player_key TEXT NOT NULL, "
+            "unlock_id TEXT NOT NULL, "
+            "unlocked_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (player_key, unlock_id))"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_progression_unlocks_player "
+            "ON progression_unlocks(player_key)"
+        )
+    except Exception:  # noqa: BLE001 - defensive: no unlocks, no crash
+        pass
+
+
+def _persist_unlocks(db: Any, player_key: str, achievement_id: str) -> None:
+    """Persist the progression grants for a newly unlocked achievement."""
+    grants = ACHIEVEMENT_UNLOCKS.get(achievement_id)
+    if not grants:
+        return
+    _ensure_unlocks_table(db)
+    now = time.time()
+    try:
+        for grant in grants:
+            db.execute(
+                "INSERT OR IGNORE INTO progression_unlocks "
+                "(player_key, unlock_id, unlocked_at) VALUES (?, ?, ?)",
+                (player_key, grant, now),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def get_unlocks(db: Any, player_key: str) -> list[str]:
+    """All progression unlock grant strings for a player. Never raises."""
+    _ensure_unlocks_table(db)
+    try:
+        cursor = db.execute(
+            "SELECT unlock_id FROM progression_unlocks WHERE player_key = ? "
+            "ORDER BY unlocked_at ASC",
+            (player_key,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+    except Exception:  # noqa: BLE001 - missing table etc: no unlocks
+        return []
+
+
+def has_unlock(db: Any, player_key: str, unlock_id: str) -> bool:
+    """True when the player holds this unlock grant. Never raises."""
+    _ensure_unlocks_table(db)
+    try:
+        cursor = db.execute(
+            "SELECT 1 FROM progression_unlocks WHERE player_key = ? "
+            "AND unlock_id = ? LIMIT 1",
+            (player_key, unlock_id),
+        )
+        return cursor.fetchone() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def progression_capabilities(db: Any, player_key: str) -> set[str]:
+    """Capability strings granted by a player's progression unlocks.
+
+    Filters the player's unlock grants to ``unlock:capability:*`` and
+    returns the bare capability strings. This is what callers pass as
+    the ``progression`` callable to :class:`nomorals.core.policy.Policy`.
+    Never raises.
+    """
+    caps: set[str] = set()
+    try:
+        for grant in get_unlocks(db, player_key):
+            if grant.startswith("unlock:capability:"):
+                cap = grant.split("unlock:capability:", 1)[1].strip()
+                if cap:
+                    caps.add(cap)
+    except Exception:  # noqa: BLE001
+        pass
+    return caps
+
+
 # ── unlock / query ───────────────────────────────────────────────────────────
 
 def unlock_achievement(db: Database, player_key: str, achievement_id: str) -> bool:
@@ -178,6 +292,11 @@ def unlock_achievement(db: Database, player_key: str, achievement_id: str) -> bo
         try:
             from .titles import TitleStore
             TitleStore(db).check_unlocks(player_key)
+        except Exception:  # noqa: BLE001
+            pass
+        # achievements unlock progression grants (commands / capabilities)
+        try:
+            _persist_unlocks(db, player_key, achievement_id)
         except Exception:  # noqa: BLE001
             pass
     return new

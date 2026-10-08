@@ -1995,3 +1995,56 @@ class RuntimeGamesMixin:
             return render_analysis(a)
 
         return f"unknown /bet verb {verb!r}\n{_usage()}"
+
+    def _control_predict(self, tail: str, chat_key: str, *,
+                         message: Any = None) -> str:
+        """The prediction pit — unlocked by beating challenges.
+
+        /predict <stake> <over|under> <1-99>
+        Call the d100 roll: stake coins, win 2x on a correct call.
+        Unlocked via the 'High Roller' (craps) or 'Boss Hunter' (raid)
+        achievements — see nomorals/games/unlocks.py.
+        """
+        import random
+
+        def _usage() -> str:
+            return ("/predict <stake> <over|under> <1-99>\n"
+                    "call the d100 roll — a correct call pays 2x your stake.\n"
+                    "example: /predict 50 over 60")
+
+        parts = (tail or "").strip().split()
+        if len(parts) != 3:
+            return _usage()
+        try:
+            stake = int(parts[0])
+        except ValueError:
+            return _usage()
+        side = parts[1].lower()
+        try:
+            line = int(parts[2])
+        except ValueError:
+            return _usage()
+        if stake <= 0 or side not in ("over", "under") or not 1 <= line <= 99:
+            return _usage()
+
+        player = self._game_player(message) if message is not None else None
+        if player is None:
+            return "predict needs a chat sender — run it where you play."
+        engine = self._game_engine()
+        store = engine.store
+        new_balance = store.spend_coins(player, stake, "predict:stake")
+        if new_balance is None:
+            prof = store.get_for(player)
+            return (f"stake is {stake}c but you only have {prof.coins}c — "
+                    "win games to earn more.")
+
+        roll = random.randint(1, 100)
+        won = roll > line if side == "over" else roll < line
+        if won:
+            payout = stake * 2
+            balance = store.add_coins(player, payout, "predict:win")
+            return (f"\U0001f3b2 rolled {roll} — {side} {line}: "
+                    f"you called it! +{payout}c (balance {balance}c)")
+        balance = store.get_for(player).coins
+        return (f"\U0001f3b2 rolled {roll} — {side} {line}: missed it. "
+                f"-{stake}c (balance {balance}c)")
