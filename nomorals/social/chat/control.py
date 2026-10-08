@@ -220,6 +220,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "watch": (0, None),       # /watch 2bed Yaba under 1.5m [for 7|14|28d] | list | stop <id> — persistent match alerts
     "aeo": (0, None),         # /aeo track <brand> [prompts] | report [brand] | briefs [brand] — share-of-answer visibility (owner only)
     "send": (0, None),        # /send campaign <template> to <a,b> [via <provider>] | queue | process | status — self-hosted send layer (owner only)
+    "leads": (0, None),       # /leads trigger <post> <keyword> | list | dm <contact> | everyone <post> — comment→DM→lead loop (owner only)
     "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
     "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
@@ -1060,6 +1061,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/send template add <name> | <body> | /send provider add <name> <kind> [rate/min] | /send campaign <template> to <a@b.com, c@d.com> [via <provider>] | /send process | /send queue | /send status | /send bounce <address>",
             "example": "/send campaign launch to a@x.com, b@y.com via ses-main",
             "related": "/aeo /watch"},
+    "leads": {"what": "Comment → DM → lead social-sales loop (ManyChat pattern). Keyword triggers on post comments fire auto-DM flows → lead capture → CRM → follow-up. WhatsApp legs priced through #68 cost-awareness; explicit 'DM everyone' commands always execute. Owner only.",
+            "usage": "/leads trigger <post_id> <KEYWORD> [platform] | /leads triggers | /leads list [status] | /leads dm <contact> | /leads everyone <post_id>",
+            "example": "/leads trigger post123 PRICE instagram",
+            "related": "/send /content /aeo"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1412,7 +1417,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1622,7 +1627,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1741,6 +1746,7 @@ LIST_ONELINERS: dict[str, str] = {
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
     "send": "self-hosted send layer — campaigns, queue, bounce handling (owner only)",
+    "leads": "comment → DM → lead loop — keyword triggers, lead CRM (owner only)",
     "brief": "SERP-derived content brief — keywords, questions, angles (owner only)",
     "content": "brief-first pipeline — score, predict, schedule (owner only)",
     "think": "explicit multi-step reasoning with the full trace",

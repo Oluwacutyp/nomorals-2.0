@@ -2190,6 +2190,16 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "leads":
+            # Comment → DM → lead loop (#100) — ManyChat pattern, owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...social.leads import control_leads
+            return control_leads(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "brief":
             # Brief-first content pipeline (#99) — SERP-derived briefs,
             # owner-only.
