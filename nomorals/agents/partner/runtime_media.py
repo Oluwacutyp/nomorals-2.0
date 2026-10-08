@@ -548,6 +548,39 @@ class RuntimeMediaMixin:
                 pass
         return text
 
+    def _control_produce(self, tail: str, chat_key: str = "") -> str:
+        """ /produce <spotify-url|vibe words…> — the Producer composes an
+        ORIGINAL piece in the reference's lane (motivic writing, never a
+        copy).  Sends the WAV + production notes to chat.
+        """
+        from ...media.producer import Producer
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /produce <spotify track url> — analyze its lane "
+                    "and compose an original piece\n"
+                    "       /produce <vibe words> — e.g. /produce dark "
+                    "driving edm like black out days")
+        try:
+            res = Producer(self.context).produce(tail)
+        except Exception as exc:  # noqa: BLE001
+            return f"produce error: {exc}"
+        if not res.get("ok"):
+            return f"couldn't produce: {res.get('reason', '?')}"
+        lines = [f"🎛 produced: {res['title']} — {res['bpm']:g} BPM, "
+                 f"{res['key']} {res['mode']}"]
+        lines.append(res["notes"])
+        text = "\n".join(lines)
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None and res.get("path"):
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    res["path"], caption=f"🎛 {res['title']} (original)")
+            except Exception:  # noqa: BLE001
+                pass
+        return text
+
     def _control_video(self, tail: str) -> str:
         """/video <query> [platform] | /video download <url> [audio] | platforms."""
         from ...media.video import _PLATFORM_SITES, VideoFinder

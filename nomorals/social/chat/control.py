@@ -325,6 +325,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "hub": (0, None),        # /hub [song <topic…> [style]|video <q…>|podcast <q…>|status]
     "podcast": (1, None),    # /podcast <query…> — find→download→transcribe→chapters
     "dj": (0, 1),           # /dj [trending|<genre>] — radio show w/ voice breaks
+    "produce": (1, None),   # /produce <spotify-url|vibe words…> — compose original music
     "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
 }
 
@@ -1521,6 +1522,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/dj [trending|<genre>]",
             "example": "/dj uk-drill",
             "related": "/music · /play · /podcast"},
+    "produce": {"what": "Producer: analyzes a Spotify track's musical DNA "
+                        "(tempo, key, energy, mood) and composes an ORIGINAL "
+                        "piece in its lane — motivic writing, classical "
+                        "development techniques, composed transitions. "
+                        "Never copies the reference's melody.",
+                "usage": "/produce <spotify-url> | /produce <vibe words…>",
+                "example": "/produce dark driving edm like black out days",
+                "related": "/music · /dj · /play"},
     "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
                     "model rewrites it and it runs again, until exit 0 (or the "
                     "expected text appears in stdout). Reports every round — exit "
@@ -1561,7 +1570,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj"]),
+    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
