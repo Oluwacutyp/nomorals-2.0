@@ -28,6 +28,7 @@ FEATURES: dict[str, tuple[bool, str]] = {
     "games": (True, "the social game engine: /game — 41 games across DM, group "
                     "and channel, with a shared economy, items and leaderboards"),
     "notifier": (True, "deliver alerts (arena builds, research, news, tasks) to your chats"),
+    "voice": (True, "voice-note ping-pong: transcribe inbound voice notes, reply with voice"),
 }
 
 
