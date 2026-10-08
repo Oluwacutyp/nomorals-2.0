@@ -221,6 +221,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "budget": (1, None),     # /budget set <category> <amount> | /budget list
     "spending": (0, 1),      # /spending [week|month] — summary vs budgets
     "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
+    "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -613,6 +614,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/miniapp new <poll|expenses|rsvp> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe",
                 "example": "/miniapp new poll \"Best day?\" Mon Tue Wed",
                 "related": "/game"},
+    "gtrip": {"what": "group-travel stack: polls with deadlines, shared expenses with minimized settle-up, per-person budgets, per-traveler flight legs, proposals vs agreed items, merged itinerary. Group chats only — state is group-scoped and isolated from my private memory.",
+                "usage": "/gtrip new <name> | /gtrip poll <q> | <opt1> | <opt2> [deadline 2h] | /gtrip vote <id> <opt> | /gtrip expense <amount> <what> [for <m1,m2>] | /gtrip settle | /gtrip leg <flight> | /gtrip propose <idea> | /gtrip agree <id> | /gtrip itinerary",
+                "example": "/gtrip poll where should we eat? | suya spot | pizza place",
+                "related": "/miniapp /trip"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1263,7 +1268,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots", "miniapp", "predict",
+      "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
@@ -1475,7 +1480,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots", "miniapp", "predict",
+      "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision",
