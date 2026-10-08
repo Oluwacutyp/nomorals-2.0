@@ -398,28 +398,44 @@ class Producer:
         else:
             profile = describe_to_profile(ref)
             from_url = False
+        return self.produce_from_profile(profile, seed=seed, workdir=workdir,
+                                         from_url=from_url, ref=ref)
 
-        if seed is None:
-            seed = int(hashlib.sha256(
-                f"{ref}|{time.time():.0f}".encode()).hexdigest()[:8], 16)
-        rng = random.Random(seed)
+    def produce_from_profile(self, profile: "ReferenceProfile", *,
+                             seed: int | None = None,
+                             workdir: str = "produced",
+                             from_url: bool = False, ref: str = "",
+                             source_note: str = "") -> dict[str, Any]:
+        """Compose straight from a ReferenceProfile (taste memory,
+        iterative tweaks).  Never raises."""
+        try:
+            if seed is None:
+                seed = int(hashlib.sha256(
+                    f"{profile.bpm}|{profile.key}|{time.time():.0f}"
+                    .encode()).hexdigest()[:8], 16)
+            rng = random.Random(seed)
 
-        motif = write_motif(profile.key, profile.mode, bars=2, rng=rng)
-        plan = plan_arrangement(profile, rng)
-        progression = _progression_for(profile)
-        scale = _scale_degrees(profile.key, profile.mode)
+            motif = write_motif(profile.key, profile.mode, bars=2, rng=rng)
+            plan = plan_arrangement(profile, rng)
+            progression = _progression_for(profile)
+            scale = _scale_degrees(profile.key, profile.mode)
 
-        parts = self._compose_parts(profile, motif, plan, progression,
-                                    scale, rng, seed)
+            parts = self._compose_parts(profile, motif, plan, progression,
+                                        scale, rng, seed)
 
-        out_path = self._render(profile, parts, seed, workdir)
-        notes = self._production_notes(profile, motif, plan, progression,
-                                       from_url, ref)
-        title = self._title(profile, rng)
-        return {"ok": True, "path": out_path, "title": title,
-                "notes": notes, "bpm": profile.bpm, "key": profile.key,
-                "mode": profile.mode, "seed": seed,
-                "sections": [n for n, _ in plan]}
+            out_path = self._render(profile, parts, seed, workdir)
+            notes = self._production_notes(profile, motif, plan, progression,
+                                           from_url, ref,
+                                           source_note=source_note)
+            title = self._title(profile, rng)
+            return {"ok": True, "path": out_path, "title": title,
+                    "notes": notes, "bpm": profile.bpm, "key": profile.key,
+                    "mode": profile.mode, "seed": seed,
+                    "sections": [n for n, _ in plan],
+                    "profile": profile}
+        except Exception as exc:  # noqa: BLE001 - produce never raises
+            _log.exception("produce_from_profile failed: %s", exc)
+            return {"ok": False, "reason": str(exc)[:200]}
 
     # ── composition ───────────────────────────────────────────────────────
     def _compose_parts(self, profile: ReferenceProfile,
@@ -640,7 +656,8 @@ class Producer:
                           motif: list[MotifNote],
                           plan: list[tuple[str, int]],
                           progression: tuple[str, ...],
-                          from_url: bool, ref: str) -> str:
+                          from_url: bool, ref: str,
+                          source_note: str = "") -> str:
         scale_names = ["1", "2", "3", "4", "5", "6", "7", "8"]
         motif_str = " – ".join(
             f"{scale_names[min(7, max(0, n.degree))]} ({n.dur:g}b)"
@@ -653,6 +670,8 @@ class Producer:
         if from_url:
             lines.append(f"reference lane: {profile.title or ref[:60]} "
                          f"(characteristics only — melody is original)")
+        elif source_note:
+            lines.append(source_note)
         else:
             lines.append(f"vibe brief: {(ref or '')[:80]}")
         if profile.energy_words:

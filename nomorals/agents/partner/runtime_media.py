@@ -365,13 +365,23 @@ class RuntimeMediaMixin:
                     except Exception as exc:  # noqa: BLE001
                         return f"can't play {rest[:80]!r} from YouTube: {exc}"
                     return self._fmt_started(res, engine)
-                query = self._play_query(self.context, rest)
-                try:
-                    res = engine.add(query)
-                except Exception as exc:  # noqa: BLE001 - the player's
-                    # own error contract, surfaced not swallowed
-                    return f"can't play {rest[:80]!r}: {exc}"
-                added = res.get("added", [])
+                # Dynamic resolution: the strategy chain in
+                # nomorals/media/resolver.py tries local file → yt-dlp
+                # (universal) → SoundCloud API (with yt-dlp fallback) →
+                # text search, recording every attempt.  Never raises.
+                from ...media.resolver import SourceResolver
+                resolution = SourceResolver(self.context).resolve(rest)
+                if not resolution.ok:
+                    tried = "; ".join(resolution.attempts) or "no strategies"
+                    hint = (f" {resolution.hint}"
+                            if resolution.hint else "")
+                    return (f"couldn't find {rest[:80]!r} — "
+                            f"tried: {tried}.{hint}")
+                added = []
+                for r in (resolution, *resolution.extra_tracks):
+                    added.append(engine._enqueue(
+                        r.path_or_url, r.kind, r.title or r.path_or_url,
+                        artist=r.artist, duration=r.duration))
                 queue_len = len(engine.queue())
                 if not added:
                     return (f"couldn't find {rest[:80]!r} — not a file, "
@@ -549,37 +559,172 @@ class RuntimeMediaMixin:
         return text
 
     def _control_produce(self, tail: str, chat_key: str = "") -> str:
-        """ /produce <spotify-url|vibe words…> — the Producer composes an
-        ORIGINAL piece in the reference's lane (motivic writing, never a
-        copy).  Sends the WAV + production notes to chat.
+        """ /produce — the Producer composes an ORIGINAL piece.
+
+        * ``/produce`` (no args) → from your taste profile ("make me something")
+        * ``/produce <spotify-url>`` → analyze the track's lane + record taste
+        * ``/produce <vibe words>`` → compose from the description + record taste
+        * ``/produce harder|faster|slower|…`` → iterate on the last production
         """
-        from ...media.producer import Producer
+        from ...media.producer import Producer, describe_to_profile
+        from ...media.taste import (load_taste, modify_profile,
+                                    last_production_profile)
 
         tail = (tail or "").strip()
-        if not tail:
-            return ("usage: /produce <spotify track url> — analyze its lane "
-                    "and compose an original piece\n"
-                    "       /produce <vibe words> — e.g. /produce dark "
-                    "driving edm like black out days")
+        store = load_taste(getattr(self, "context", None))
+        producer = Producer(self.context)
+
+        def _deliver(res: dict, intro: str) -> str:
+            if not res.get("ok"):
+                return f"couldn't produce: {res.get('reason', '?')}"
+            lines = [f"{intro} {res['title']} — {res['bpm']:g} BPM, "
+                     f"{res['key']} {res['mode']}"]
+            lines.append(res["notes"])
+            text = "\n".join(lines)
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None and res.get("path"):
+                try:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        res["path"], caption=f"🎛 {res['title']} (original)")
+                except Exception:  # noqa: BLE001
+                    pass
+            return text
+
         try:
-            res = Producer(self.context).produce(tail)
+            # ── no args: from taste ──────────────────────────────────
+            if not tail:
+                prof = store.suggest_profile()
+                if prof is None:
+                    # cold start: something dark and driving, and say so
+                    prof = describe_to_profile("dark driving edm")
+                    note = ("no taste profile yet — made you something dark "
+                            "and driving. tell me what you think and I'll "
+                            "learn your taste.")
+                else:
+                    note = ("based on your taste profile — "
+                            f"{store.profile.production_count} productions "
+                            "and counting.")
+                res = producer.produce_from_profile(prof, source_note=note)
+                if res.get("ok"):
+                    store.record_production(res["profile"], source="taste",
+                                            ref="taste profile")
+                return _deliver(res, "🎛 produced from your taste:")
+
+            # ── iteration on the last production ─────────────────────
+            low = tail.lower()
+            iter_words = ("harder", "faster", "slower", "more melodic",
+                          "softer", "darker", "lighter", "heavier",
+                          "speed it up", "slow it down", "chill out")
+            if len(tail.split()) <= 3 and any(w in low for w in iter_words):
+                base = last_production_profile(store)
+                if base is not None:
+                    tweaked = modify_profile(base, tail)
+                    if tweaked is not base:
+                        note = (f"iterating on the last one — {tail}. "
+                                f"{base.bpm:g}→{tweaked.bpm:g} BPM.")
+                        res = producer.produce_from_profile(
+                            tweaked, source_note=note)
+                        if res.get("ok"):
+                            store.record_production(res["profile"],
+                                                    source="iterate", ref=tail)
+                        return _deliver(res, "🎛 reworked:")
+
+            # ── link or description ──────────────────────────────────
+            res = producer.produce(tail)
+            if res.get("ok"):
+                src = "link" if "open.spotify.com" in tail else "description"
+                ref_profile = res.get("profile")
+                if ref_profile is not None:
+                    store.record_production(ref_profile, source=src, ref=tail)
+                else:  # pragma: no cover - safety net
+                    store.record_production(describe_to_profile(tail),
+                                            source=src, ref=tail)
+            return _deliver(res, "🎛 produced:")
         except Exception as exc:  # noqa: BLE001
             return f"produce error: {exc}"
-        if not res.get("ok"):
-            return f"couldn't produce: {res.get('reason', '?')}"
-        lines = [f"🎛 produced: {res['title']} — {res['bpm']:g} BPM, "
-                 f"{res['key']} {res['mode']}"]
-        lines.append(res["notes"])
-        text = "\n".join(lines)
-        chat = self._ref_from_key(chat_key) if chat_key else None
-        if chat is not None and res.get("path"):
-            try:
-                self.gateway.send_file(
-                    chat.platform, f"{chat.platform}:{chat.chat_id}",
-                    res["path"], caption=f"🎛 {res['title']} (original)")
-            except Exception:  # noqa: BLE001
-                pass
-        return text
+
+    def _control_like(self, tail: str) -> str:
+        """/like [notes…] — the last production was good; learn from it."""
+        from ...media.taste import load_taste
+        store = load_taste(getattr(self, "context", None))
+        return store.record_feedback(True, tail or "")
+
+    def _control_dislike(self, tail: str) -> str:
+        """/dislike [notes…] — the last production missed; learn from it."""
+        from ...media.taste import load_taste
+        store = load_taste(getattr(self, "context", None))
+        return store.record_feedback(False, tail or "not feeling it")
+
+    def _produce_hook(self, message: Any) -> str | None:
+        """NL music production for the owner DM (non-slash only).
+
+        "make me something for the gym" → produce with a mood-derived
+        profile.  "I like this" / "too slow" right after a production →
+        taste feedback.  Returns a reply or None; never raises.
+        """
+        from ...media.taste import (detect_feedback, detect_produce_intent,
+                                    load_taste, mood_hint)
+        from ...media.producer import Producer, describe_to_profile
+
+        text = (getattr(message, "text", None) or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        store = load_taste(getattr(self, "context", None))
+
+        # feedback first — but only when there's a production to judge
+        if store.profile.last_production:
+            fb = detect_feedback(text)
+            if fb is not None:
+                liked, notes = fb
+                return store.record_feedback(liked, notes)
+
+        intent = detect_produce_intent(text)
+        if intent is None:
+            return None
+        try:
+            producer = Producer(self.context)
+            hint = mood_hint(text)
+            if "open.spotify.com" in intent:
+                res = producer.produce(intent)
+                src, ref = "link", intent
+            elif hint:
+                prof = describe_to_profile(" ".join(hint) + " electronic")
+                # nudge bpm by context: gym → fast, chill → slow
+                low = text.lower()
+                if any(w in low for w in ("gym", "workout", "party", "hype",
+                                          "pumped")):
+                    prof.bpm = max(prof.bpm, 140.0)
+                if any(w in low for w in ("chill", "relax", "focus", "study",
+                                          "sleep")):
+                    prof.bpm = min(prof.bpm, 110.0)
+                note = f"mood read: {', '.join(hint)} — composed from that."
+                res = producer.produce_from_profile(prof, source_note=note)
+                src, ref = "mood", text
+            else:
+                res = producer.produce(intent)
+                src, ref = "description", intent
+            if not res.get("ok"):
+                return f"couldn't produce: {res.get('reason', '?')}"
+            ref_profile = res.get("profile")
+            if ref_profile is not None:
+                store.record_production(ref_profile, source=src, ref=ref)
+            lines = [f"🎛 produced: {res['title']} — {res['bpm']:g} BPM, "
+                     f"{res['key']} {res['mode']}"]
+            lines.append(res["notes"])
+            chat_key = getattr(getattr(message, "chat", None), "key", "")
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None and res.get("path"):
+                try:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        res["path"], caption=f"🎛 {res['title']} (original)")
+                except Exception:  # noqa: BLE001
+                    pass
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("produce hook failed")
+            return f"produce error: {exc}"
 
     def _control_video(self, tail: str) -> str:
         """/video <query> [platform] | /video download <url> [audio] | platforms."""

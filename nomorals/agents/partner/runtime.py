@@ -895,6 +895,23 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("trip reply send failed: %s", exc)
                 return
+            # Producer NL: "make me something for the gym" -> compose;
+            # "I like this" / "too slow" right after a production -> feedback.
+            # Owner only, non-slash, never eats chat.
+            try:
+                produce_reply = self._produce_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("produce hook failed")
+                produce_reply = None
+            if produce_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, produce_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      produce_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("produce reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -2382,6 +2399,10 @@ class PartnerRuntime(
         if kind == "produce":
             return self._control_produce(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "like":
+            return self._control_like(command.tail or arg)
+        if kind == "dislike":
+            return self._control_dislike(command.tail or arg)
         if kind == "fix":
             return self._control_fix(command.tail or arg)
 
