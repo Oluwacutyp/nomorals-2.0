@@ -141,5 +141,76 @@ class CodingAgentPlanModeTests(unittest.TestCase):
         self.assertFalse(result.ok)
 
 
+class SpecFirstTests(unittest.TestCase):
+    """#4 extension: the plan IS a durable, versioned design document."""
+
+    def _agent(self):
+        import os, tempfile
+        from unittest.mock import MagicMock
+        from nomorals.agents.coding import CodingAgent
+        ctx = MagicMock()
+        agent = CodingAgent(ctx, root=tempfile.mkdtemp())
+        tmp = tempfile.mkdtemp()
+        self._old = os.environ.get("NM_SPEC_STORE")
+        os.environ["NM_SPEC_STORE"] = os.path.join(tmp, "specs.json")
+        from nomorals.agents.plan_spec import SpecStore
+        SpecStore._specs = {}
+        SpecStore._loaded = False
+        self.addCleanup(self._restore)
+        return agent
+
+    def _restore(self):
+        import os
+        from nomorals.agents.plan_spec import SpecStore
+        SpecStore._specs = {}
+        SpecStore._loaded = False
+        if self._old is None:
+            os.environ.pop("NM_SPEC_STORE", None)
+        else:
+            os.environ["NM_SPEC_STORE"] = self._old
+
+    def test_execute_plan_creates_spec_artifact(self):
+        agent = self._agent()
+        plan = PlanStore.new("build widget",
+                             [_spec("w.py", new=True)])
+        PlanStore.approve(plan.id)
+        # stub the heavy run: we only care that the spec got created
+        agent.run = lambda task, **kw: __import__(
+            "nomorals.agents.coding", fromlist=["CodingResult"]
+        ).CodingResult(ok=True, iterations=1)
+        result = agent.execute_plan(plan.id)
+        self.assertTrue(result.ok)
+        self.assertTrue(agent._last_spec_id)
+        from nomorals.agents.plan_spec import SpecStore
+        spec = SpecStore.get(agent._last_spec_id)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.goals, "build widget")
+        self.assertEqual(len(spec.tasks), 1)
+
+    def test_spec_version_bump_and_regen(self):
+        agent = self._agent()
+        (agent._root / "w.py").write_text("print('v1')\n", encoding="utf-8")
+        plan = PlanStore.new("build widget",
+                             [{"path": "w.py", "why": "main", "new_file": True}])
+        spec = agent.plan_to_spec(plan.id)
+        from nomorals.agents.plan_spec import SpecStore
+        v2 = SpecStore.bump_version(spec.spec_id,
+                                    {"goals": "build widget, now with storage"})
+        self.assertEqual(v2.version, 2)
+
+        class Resp:
+            ok = True
+            text = "```python\nprint('v2')\n```"
+
+        agent._phase_chat = lambda phase, messages, params: Resp()
+        out = agent.regenerate_from_spec(v2.key)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["version"], 2)
+        entry = out["files"]["w.py"]
+        self.assertTrue(entry["changed"])
+        self.assertIn("print('v2')", entry["after"])
+        self.assertIn("-print('v1')", entry["diff"])
+
+
 if __name__ == "__main__":
     unittest.main()

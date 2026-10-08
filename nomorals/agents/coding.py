@@ -286,8 +286,12 @@ class CodingAgent:
         # working on, serialized into checkpoints and restored by rewind().
         self._last_task: str = ""
         self._last_plan_id: str = ""
+        self._last_spec_id: str = ""
         self._last_scope: list[str] = []
         self._last_iterations: int = 0
+        # Spec-first (#4 extension): generation prompts carry the
+        # backend-included block by default; set False to opt out.
+        self._backend_included: bool = True
 
     def _error_recall(self) -> Any:
         """The Phase C embedding recall index (lazy, cached, best-effort)."""
@@ -1121,6 +1125,15 @@ class CodingAgent:
             return CodingResult(
                 ok=False, iterations=0,
                 error=f"plan {plan_id} not approved — reply 'approve' first")
+        # Spec-first (#4 extension): an approved plan becomes a durable
+        # design document.  Best-effort — a spec failure never kills the run.
+        try:
+            from .plan_spec import plan_to_spec as _promote
+            spec = _promote(plan)
+            if spec is not None:
+                self._last_spec_id = spec.key
+        except Exception:  # noqa: BLE001
+            pass
         specs = [{"path": str(f.get("path", "")),
                   "why": str(f.get("why", "")),
                   "new_file": bool(f.get("new_file"))}
@@ -1151,6 +1164,81 @@ class CodingAgent:
                 ok=False, iterations=0,
                 error=f"unknown plan {plan_id!r} — ask for a fresh plan")
         return self.execute_plan(plan_id)
+
+    # ── spec-first (#4 extension): the plan IS a durable design doc ──────
+
+    def plan_to_spec(self, plan_id: str, goals: str = ""):
+        """Promote an approved plan to a versioned :class:`plan_spec.PlanSpec`.
+
+        The spec becomes the durable design artifact — code can later be
+        regenerated from it with :meth:`regenerate_from_spec`.  Returns
+        the PlanSpec, or None for an unknown plan.  Never raises.
+        """
+        try:
+            from .plan_mode import PlanStore
+            from .plan_spec import plan_to_spec as _promote
+            plan = PlanStore.get(plan_id)
+            if plan is None:
+                return None
+            return _promote(plan, goals=goals)
+        except Exception:  # noqa: BLE001 — never raises
+            return None
+
+    def regenerate_from_spec(self, spec_key: str) -> dict:
+        """Regenerate code FROM the spec document — never from memory.
+
+        For each spec task with a ``path``, re-drafts the file with the
+        spec as context and returns a per-file ``{"before", "after",
+        "diff", "changed"}`` map (nothing is written; review the diff
+        first).  ``{"ok": False, "reason": ...}`` for unknown specs or
+        generation failures.  Never raises.
+        """
+        try:
+            from .plan_spec import SpecStore
+            spec = SpecStore.get(spec_key)
+            if spec is None:
+                return {"ok": False,
+                        "reason": f"unknown spec {spec_key!r}"}
+            files: dict[str, dict] = {}
+            context = (
+                f"SPEC {spec.key}\n"
+                f"Goals: {spec.goals}\n"
+                f"Architecture: {spec.architecture}\n"
+                f"Data model: {spec.data_model}\n"
+                f"API: {spec.api}\n"
+                "Regenerate the file below so it implements this spec. "
+                "Keep the public surface compatible unless the spec says otherwise."
+            )
+            for t in spec.tasks or []:
+                if not isinstance(t, dict) or not t.get("path"):
+                    continue
+                rel = str(t["path"])
+                try:
+                    path = self._resolve(rel)
+                    before = path.read_text(encoding="utf-8") \
+                        if path.is_file() else ""
+                except Exception:  # noqa: BLE001 — one bad path, not the run
+                    before = ""
+                task = (f"{context}\n\nTask for this file: "
+                        f"{t.get('what') or t.get('why') or rel}")
+                try:
+                    after = self._draft(task, rel, before, "", 1)
+                except Exception:  # noqa: BLE001 — never raises
+                    after = ""
+                if not after:
+                    files[rel] = {"ok": False, "reason": "generation failed"}
+                    continue
+                files[rel] = {
+                    "ok": True,
+                    "before": before,
+                    "after": after,
+                    "diff": _unified_diff(before, after, rel),
+                    "changed": after != before,
+                }
+            return {"ok": True, "spec": spec.key, "version": spec.version,
+                    "files": files}
+        except Exception as exc:  # noqa: BLE001 — never raises
+            return {"ok": False, "reason": f"regenerate failed: {exc}"}
 
     def _plan_files(self, task: str, default: str,
                     workdir: Path) -> list[dict[str, Any]]:
@@ -1432,13 +1520,21 @@ class CodingAgent:
     # ── internals ───────────────────────────────────────────────────────────
     def _draft(
         self, task: str, filename: str, current: str, last_error: str, attempt: int,
-        seeded: bool = False,
+        seeded: bool = False, backend_included: bool | None = None,
     ) -> str:
         system = (
             f"You are a coding agent. Write complete, runnable Python for the file "
             f"'{filename}'. Respond with EXACTLY ONE fenced ```python code block "
             "containing the whole file and nothing else — no prose outside the block."
         )
+        # Spec-first (#4 extension): backend-included by default — apps/tools
+        # ship with their data layer (SQLite schema, storage, scheduled jobs).
+        include = (self._backend_included
+                   if backend_included is None else backend_included)
+        if include:
+            from .plan_spec import inject_backend_included, should_backend_include
+            if should_backend_include(filename):
+                system = inject_backend_included(system)
         user = f"Task: {task}\n\nAttempt {attempt}."
         if current:
             if seeded:
