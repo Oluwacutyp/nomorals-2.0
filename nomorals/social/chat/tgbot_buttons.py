@@ -42,6 +42,50 @@ Button = tuple[str, str]
 Keyboard = list[list[Button]]
 
 
+class ActionableMessage:
+    """A text reply bundled with tappable action buttons.
+
+    Handlers build one via :func:`actionable` and pass
+    ``buttons=msg.buttons`` to ``gateway.send(...)``. Platforms without
+    a button concept (WhatsApp, SMS, …) ignore the keyboard — the raw
+    command text stays in the message body, tappable as plain text.
+    """
+
+    __slots__ = ("text", "buttons")
+
+    def __init__(self, text: str, buttons: Keyboard) -> None:
+        self.text = text
+        self.buttons = buttons
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"ActionableMessage(text={self.text[:40]!r}, buttons={self.buttons!r})"
+
+
+def actionable(text: str, buttons: list[tuple[str, str]]) -> ActionableMessage:
+    """Build a message with tappable inline buttons.
+
+    ``buttons`` is ``[(label, command), …]`` — ``command`` is the chat
+    command run on tap, with or without the leading slash
+    (``"/proxy refresh"`` or ``"proxy refresh"``; the adapter normalizes
+    it). All buttons land on a single row; pass nested lists via the
+    raw ``Keyboard`` type for multi-row layouts.
+
+    Raises :class:`ValueError` if any callback payload exceeds Telegram's
+    47-byte budget (after the adapter's HMAC signature is added).
+    """
+    keyboard: Keyboard = []
+    row: list[Button] = []
+    for label, command in buttons:
+        data = (command or "").strip()
+        if data.startswith("/"):
+            data = data[1:]
+        check_callback_data(data)
+        row.append((label, data))
+    if row:
+        keyboard.append(row)
+    return ActionableMessage(text, keyboard)
+
+
 def buttons_for_text(text: str) -> Keyboard | None:
     """Return contextual inline-keyboard buttons for an outgoing reply.
 
@@ -76,6 +120,28 @@ def buttons_for_text(text: str) -> Keyboard | None:
     # ── generic help ──
     if "try /game list to see what's on" in t:
         return [[("🎮 Games", "game list"), ("❓ Help", "help")]]
+
+    # ── proxy pool empty — one tap to rescrape ──
+    if "pool empty — /proxy refresh to scrape+test" in t:
+        return [[("🔄 Refresh pool", "proxy refresh")]]
+
+    # ── research proposals — approve / deny the latest ──
+    if "approve: /research approve" in t and "deny: /research deny" in t:
+        return [[("✅ Approve latest", "research approve latest"),
+                 ("❌ Deny latest", "research deny latest")]]
+
+    # ── build failure — jump to checkpoints to rewind/retry ──
+    if "coding bot gave up after" in t or "the builder gave up after" in t:
+        return [[("📋 Checkpoints", "checkpoints")]]
+
+    # ── music track info — transport controls ──
+    # (matches the "🎵 "Title"" track header, not error lines)
+    if t.startswith("🎵 \u201c") and "couldn't make" not in t:
+        return [[("⏸️ Pause", "play pause"), ("⏭️ Next", "play next")]]
+
+    # ── tour results — one tap to re-run ──
+    if "🧪 tour —" in t and "commands probed" in t:
+        return [[("🔁 Re-run tour", "tour")]]
 
     return None
 
