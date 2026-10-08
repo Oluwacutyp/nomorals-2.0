@@ -218,6 +218,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "value": (0, None),       # /value <desc> — DIY valuation: range + confidence band + comparables
     "valuepick": (0, None),   # /valuepick <estimate id> <1,2,4> — refine from picked comparables
     "watch": (0, None),       # /watch 2bed Yaba under 1.5m [for 7|14|28d] | list | stop <id> — persistent match alerts
+    "aeo": (0, None),         # /aeo track <brand> [prompts] | report [brand] | briefs [brand] — share-of-answer visibility (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1040,6 +1041,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/watch 2bed Yaba under 1.5m [for 7|14|28 days] | /watch gig <query> | /watch flight <route> | /watch list | /watch stop <id> | /watch check",
             "example": "/watch 2bed Yaba under 1.5m",
             "related": "/track /scamcheck"},
+    "aeo": {"what": "AEO/GEO visibility tracking — share of answer, not rank. Fans prompts to ChatGPT/Claude/Gemini/Perplexity, parses citations, two-model cross-checks mentions, reports confirmed share. Owner only.",
+            "usage": "/aeo track <brand> [prompt1; prompt2; …] | /aeo report [brand] | /aeo briefs [brand]",
+            "example": "/aeo track Acme",
+            "related": "/research"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1719,6 +1724,7 @@ LIST_ONELINERS: dict[str, str] = {
     "value": "DIY property valuation — value range with confidence band + comparables",
     "valuepick": "refine a value estimate from picked comparables",
     "watch": "persistent match alerts — saved listing searches",
+    "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
