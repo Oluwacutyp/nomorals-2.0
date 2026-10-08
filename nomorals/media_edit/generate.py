@@ -978,6 +978,10 @@ def _register() -> None:
     from .faceswap import op_faceswap
     _images._OP_FUNCS["faceswap"] = op_faceswap
     _images.OP_ALLOWLIST.add("faceswap")
+    # text replacement in photos (#24)
+    from .edittext import op_edittext
+    _images._OP_FUNCS["edittext"] = op_edittext
+    _images.OP_ALLOWLIST.add("edittext")
 
 
 _register()

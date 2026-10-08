@@ -790,6 +790,17 @@ _RE_UPSCALE_SR = re.compile(
 _RE_FACESWAP = re.compile(
     r"^swap\s+faces?(?:\s+with\s+(?:this|the|my)\s+"
     r"(?:other\s+)?(?:image|photo|face))?\s*$", re.I)
+# text replacement in photos (#24): replace "OLD" with "NEW" [in this
+# image] / change the text "OLD" to "NEW". Quoted or bare phrases.
+_RE_EDITTEXT = re.compile(
+    r"^replace\s+[\"'](.+?)[\"']\s+with\s+[\"'](.+?)[\"']"
+    r"(?:\s+in\s+(?:this|the)\s+(?:image|photo|pic(?:ture)?))?\s*$", re.I)
+_RE_EDITTEXT_BARE = re.compile(
+    r"^replace\s+(\S(?:.*?\S)?)\s+with\s+(\S(?:.*?\S)?)"
+    r"\s+in\s+(?:this|the)\s+(?:image|photo|pic(?:ture)?)\s*$", re.I)
+_RE_EDITTEXT_CHANGE = re.compile(
+    r"^change\s+(?:the\s+)?text\s+[\"'](.+?)[\"']\s+to\s+[\"'](.+?)[\"']"
+    r"(?:\s+in\s+(?:this|the)\s+(?:image|photo|pic(?:ture)?))?\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -850,6 +861,30 @@ def _image_intent(text: str) -> Intent | None:
         return Intent("vision_faceswap", 0.88, target=stripped[:200],
                       action="faceswap", route="media",
                       why="face swap request")
+    # text replacement in photos (#24)
+    m = _RE_EDITTEXT.match(stripped) or _RE_EDITTEXT_CHANGE.match(stripped)
+    if m:
+        old, new = m.group(1).strip(), m.group(2).strip()
+        if old and new and len(old) <= 200 and len(new) <= 200:
+            return Intent("vision_edittext", 0.9,
+                          target=f"{old!r} -> {new!r}",
+                          action="edittext", route="media",
+                          meta={"old_text": old, "new_text": new},
+                          why=f"text replacement: {old[:30]!r} -> "
+                              f"{new[:30]!r}")
+    else:
+        m = _RE_EDITTEXT_BARE.match(stripped)
+        if m:
+            old, new = m.group(1).strip(), m.group(2).strip()
+            # the bare form requires the "in this image" anchor, so a
+            # stray "replace X with Y" in normal chat won't misfire.
+            if old and new and len(old) <= 200 and len(new) <= 200:
+                return Intent("vision_edittext", 0.85,
+                              target=f"{old!r} -> {new!r}",
+                              action="edittext", route="media",
+                              meta={"old_text": old, "new_text": new},
+                              why=f"text replacement: {old[:30]!r} -> "
+                                  f"{new[:30]!r}")
     return None
 
 
@@ -1663,6 +1698,7 @@ class CoreMind:
             "vision_bgremove": self._dispatch_vision,
             "vision_upscale": self._dispatch_vision,
             "vision_faceswap": self._dispatch_vision,
+            "vision_edittext": self._dispatch_vision,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2243,7 +2279,8 @@ class CoreMind:
 
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
-        """NL vision utilities (#23): bg removal, SR upscale, face swap.
+        """NL vision utilities (#23/#24): bg removal, SR upscale, face swap,
+        text replacement.
 
         Runs on a background thread (heavy models), delivers via
         send_media. Needs an attached image; faceswap wants two (the
@@ -2252,7 +2289,7 @@ class CoreMind:
         """
         from ..social.chat.base import MediaRef
 
-        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap"
+        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap" | "edittext"
         media = list(getattr(message, "media", None) or [])
         images = [m for m in media
                   if getattr(m, "kind", "") == "image"
@@ -2266,12 +2303,15 @@ class CoreMind:
                                 "`upscale this image`"),
                 "faceswap": ("🖼️ attach TWO images (target first, face "
                              "donor second), then say:\n`swap faces`"),
+                "edittext": ("🖼️ attach the image, then say:\n"
+                             "`replace \"OLD\" with \"NEW\" in this image`"),
             }
             return hints[action]
         src_paths = [m.path for m in images[:need]]
         labels = {"bgremove": "✂️ removing background",
                   "upscale_sr": "🔍 upscaling",
-                  "faceswap": "🔄 swapping faces"}
+                  "faceswap": "🔄 swapping faces",
+                  "edittext": "✏️ replacing text"}
 
         def job() -> str:
             from ..media_edit.images import load_image
@@ -2287,6 +2327,15 @@ class CoreMind:
                 from ..media_edit.upscale import upscale
                 out = upscale(load_image(src_paths[0]), scale=4.0)
                 name = "upscaled"
+            elif action == "edittext":
+                from ..media_edit.edittext import replace_text
+                old = str((intent.meta or {}).get("old_text", "")).strip()
+                new = str((intent.meta or {}).get("new_text", "")).strip()
+                out, meta = replace_text(load_image(src_paths[0]),
+                                         old, new)
+                name = "edittext"
+                caption_extra = (f" (replaced {meta['found']!r} via "
+                                 f"{meta['inpaint_backend']})")
             else:
                 from ..media_edit.faceswap import swap_face
                 donor = load_image(src_paths[1])
@@ -2304,7 +2353,9 @@ class CoreMind:
             result = adapter.send_media(
                 ref, MediaRef(path=str(out_path), kind="image",
                               mime="image/png", name=out_path.name),
-                caption=f"🖼️ {labels[action]} — done")
+                caption=(f"🖼️ {labels[action]} — done"
+                         + (caption_extra if action == "edittext"
+                            else "")))
             if not result.ok:
                 return (f"❌ {labels[action]} done but couldn't send: "
                         f"{result.error}")
