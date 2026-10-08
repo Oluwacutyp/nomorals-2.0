@@ -13,6 +13,7 @@ from nomorals.finance.ledger import Ledger, format_naira
 from nomorals.finance.send import (
     RecipientStore,
     confirm_send,
+    confirm_send_otp,
     parse_send_request,
     resolve_recipient,
     send_money,
@@ -175,16 +176,16 @@ def test_confirm_send_executes_via_paystack(ledger, recipients):
     assert staged.get("needs") == "biometric"
 
     class FakePaystack:
-        def _api(self, method, path, payload=None):
-            if path == "/transferrecipient":
-                return {"status": True,
-                        "data": {"recipient_code": "RCP_test"}}
-            if path == "/transfer":
-                assert payload["amount"] == 500_000
-                assert payload["recipient"] == "RCP_test"
-                return {"status": True,
-                        "data": {"reference": "TRF_test123"}}
-            raise AssertionError(path)
+        def create_transfer_recipient(self, account_number, bank_code, **kw):
+            assert account_number == "0123456789"
+            return {"recipient_code": "RCP_test"}
+
+        def initiate_transfer(self, amount_kobo, recipient_code, **kw):
+            assert amount_kobo == 500_000
+            assert recipient_code == "RCP_test"
+            assert kw.get("confirmed") is True
+            assert kw.get("biometric_token") == "tok_test"
+            return {"status": "success", "reference": "TRF_test123"}
 
     result = confirm_send(staged["staged_id"], "tok_test", ledger=ledger,
                           paystack=FakePaystack(), recipients=recipients)
@@ -193,6 +194,35 @@ def test_confirm_send_executes_via_paystack(ledger, recipients):
     # Ledger has the transfer
     txns = ledger.transactions(category="transfer")
     assert any(t.note == "transfer to Mama" for t in txns)
+
+
+def test_confirm_send_otp_flow(ledger, recipients):
+    _seed_history(ledger)
+    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    assert staged.get("needs") == "biometric"
+
+    class FakePaystack:
+        def create_transfer_recipient(self, *a, **kw):
+            return {"recipient_code": "RCP_test"}
+
+        def initiate_transfer(self, *a, **kw):
+            return {"status": "otp", "transfer_code": "TRF_otp1",
+                    "reference": "ref_otp1"}
+
+        def finalize_transfer(self, transfer_code, otp):
+            assert transfer_code == "TRF_otp1"
+            assert otp == "123456"
+            return {"status": "success", "reference": "ref_otp1"}
+
+    result = confirm_send(staged["staged_id"], "tok_test", ledger=ledger,
+                          paystack=FakePaystack(), recipients=recipients)
+    assert result["ok"] is False
+    assert result["needs"] == "otp"
+    done = confirm_send_otp(staged["staged_id"], result["transfer_code"],
+                            "123456", ledger=ledger,
+                            paystack=FakePaystack())
+    assert done["ok"] is True
+    assert done["reference"] == "ref_otp1"
 
 
 def test_audit_trail_logged(ledger, recipients):

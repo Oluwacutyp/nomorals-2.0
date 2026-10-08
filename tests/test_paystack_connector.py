@@ -385,6 +385,200 @@ class WebhookTests(unittest.TestCase):
         self.assertFalse(conn.verify_webhook_signature(body, "deadbeef"))
         self.assertFalse(conn.verify_webhook_signature(b"tampered", sig))
 
+    def test_transfer_events_documented(self) -> None:
+        from nomorals.connectors.paystack import TRANSFER_EVENTS
+        self.assertIn("transfer.success", TRANSFER_EVENTS)
+        self.assertIn("transfer.failed", TRANSFER_EVENTS)
+        self.assertIn("transfer.reversed", TRANSFER_EVENTS)
+
+    def test_verify_webhook_signature_transfer_event(self) -> None:
+        conn, _http = _connected(key="sk_test_webhook")
+        body = (b'{"event":"transfer.success","data":'
+                b'{"reference":"TRF_x","status":"success"}}')
+        sig = hmac.new(b"sk_test_webhook", body, hashlib.sha512).hexdigest()
+        self.assertTrue(conn.verify_webhook_signature(body, sig))
+
+
+class TransferRecipientTests(unittest.TestCase):
+    def test_create_transfer_recipient(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/transferrecipient", FakeResponse(200, {
+            "status": True, "message": "Recipient created",
+            "data": {"recipient_code": "RCP_abc", "type": "nuban",
+                     "account_number": "0123456789"},
+        }))
+        result = conn.create_transfer_recipient("0123456789", "058",
+                                                name="Mama")
+        self.assertEqual(result["recipient_code"], "RCP_abc")
+        _m, url, payload, _h = http.calls[-1]
+        self.assertIn("/transferrecipient", url)
+        self.assertEqual(payload["type"], "nuban")
+        self.assertEqual(payload["account_number"], "0123456789")
+        self.assertEqual(payload["bank_code"], "058")
+        self.assertEqual(payload["name"], "Mama")
+
+    def test_create_recipient_bad_account_number_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.create_transfer_recipient("12345", "058")
+        with self.assertRaises(ConnectorError):
+            conn.create_transfer_recipient("abcdefghij", "058")
+
+    def test_create_recipient_empty_bank_code_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.create_transfer_recipient("0123456789", "")
+
+
+class TransferTests(unittest.TestCase):
+    def test_transfer_requires_confirmation(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError) as ctx:
+            conn.initiate_transfer(250_000, "RCP_abc")
+        self.assertIn("confirmed=True", str(ctx.exception))
+
+    def test_transfer_refuses_bad_amount(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.initiate_transfer(0, "RCP_abc", confirmed=True)
+
+    def test_transfer_refuses_empty_recipient(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.initiate_transfer(250_000, "", confirmed=True)
+
+    def test_transfer_confirmed(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/transfer", FakeResponse(200, {
+            "status": True, "message": "Transfer has been queued",
+            "data": {"reference": "TRF_1", "status": "pending",
+                     "transfer_code": "TRF_1"},
+        }))
+        result = conn.initiate_transfer(250_000, "RCP_abc", reason="test",
+                                        confirmed=True)
+        self.assertEqual(result["reference"], "TRF_1")
+        _m, url, payload, _h = http.calls[-1]
+        self.assertIn("/transfer", url)
+        self.assertNotIn("finalize", url)
+        self.assertEqual(payload["source"], "balance")
+        self.assertEqual(payload["amount"], 250_000)
+        self.assertEqual(payload["recipient"], "RCP_abc")
+        self.assertEqual(payload["reason"], "test")
+
+    def test_transfer_large_amount_needs_biometric(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError) as ctx:
+            conn.initiate_transfer(10_000_000, "RCP_abc", confirmed=True)
+        self.assertIn("biometric", str(ctx.exception).lower())
+
+    def test_transfer_large_amount_with_biometric_token(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/transfer", FakeResponse(200, {
+            "status": True, "message": "ok",
+            "data": {"reference": "TRF_big", "status": "pending"},
+        }))
+        result = conn.initiate_transfer(
+            10_000_000, "RCP_abc", confirmed=True,
+            biometric_token="tok_biometric",
+        )
+        self.assertEqual(result["reference"], "TRF_big")
+
+    def test_finalize_transfer(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/transfer/finalize_transfer", FakeResponse(200, {
+            "status": True, "message": "Transfer finalized",
+            "data": {"reference": "TRF_1", "status": "success"},
+        }))
+        result = conn.finalize_transfer("TRF_1", "123456")
+        self.assertEqual(result["status"], "success")
+        _m, url, payload, _h = http.calls[-1]
+        self.assertIn("/transfer/finalize_transfer", url)
+        self.assertEqual(payload["transfer_code"], "TRF_1")
+        self.assertEqual(payload["otp"], "123456")
+
+    def test_finalize_transfer_empty_otp_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.finalize_transfer("TRF_1", "")
+
+    def test_transfer_via_human_checkpoint(self) -> None:
+        from nomorals.connectors.checkpoints import HumanCheckpointPending
+
+        conn, http = _connected()
+        db = _db()
+        with self.assertRaises(HumanCheckpointPending) as ctx:
+            conn.initiate_transfer(250_000, "RCP_abc", reason="rent", db=db)
+        cp_id = ctx.exception.checkpoint.id
+        store = CheckpointStore(db)
+        self.assertIn("250", store.get(cp_id).instructions.replace(",", ""))
+        self.assertIn("RCP_abc", store.get(cp_id).instructions)
+        http.route("POST", "/transfer", FakeResponse(200, {
+            "status": True, "message": "ok",
+            "data": {"reference": "TRF_2", "status": "pending"},
+        }))
+        store.resolve(cp_id, note="approved")
+        result = conn.resume_checkpoint(store.get(cp_id), db=db)
+        self.assertEqual(result["reference"], "TRF_2")
+
+
+class PaymentLinkTests(unittest.TestCase):
+    def test_create_payment_link(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/page", FakeResponse(200, {
+            "status": True, "message": "Page created",
+            "data": {"name": "T-shirt", "slug": "tshirt-xyz",
+                     "amount": 500_000},
+        }))
+        result = conn.create_payment_link(500_000, name="T-shirt",
+                                          description="Cotton tee")
+        self.assertEqual(
+            result["payment_url"], "https://paystack.com/pay/tshirt-xyz"
+        )
+        _m, url, payload, _h = http.calls[-1]
+        self.assertIn("/page", url)
+        self.assertEqual(payload["amount"], 500_000)
+        self.assertEqual(payload["name"], "T-shirt")
+
+    def test_payment_link_bad_amount_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.create_payment_link(0, name="x")
+
+    def test_payment_link_empty_name_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.create_payment_link(500_000, name="")
+
+
+class VirtualAccountTests(unittest.TestCase):
+    def test_create_virtual_account(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/dedicated_account", FakeResponse(200, {
+            "status": True, "message": "Account created",
+            "data": {"account_number": "0123456789",
+                     "account_name": "Ada Lovelace",
+                     "bank": {"name": "Wema Bank"}},
+        }))
+        result = conn.create_virtual_account("CUS_abc")
+        self.assertEqual(result["account_number"], "0123456789")
+        _m, url, payload, _h = http.calls[-1]
+        self.assertIn("/dedicated_account", url)
+        self.assertEqual(payload["customer"], "CUS_abc")
+
+    def test_virtual_account_preferred_bank(self) -> None:
+        conn, http = _connected()
+        http.route("POST", "/dedicated_account", FakeResponse(200, {
+            "status": True, "message": "ok", "data": {},
+        }))
+        conn.create_virtual_account("CUS_abc", preferred_bank="wema-bank")
+        _m, _u, payload, _h = http.calls[-1]
+        self.assertEqual(payload["preferred_bank"], "wema-bank")
+
+    def test_virtual_account_empty_customer_raises(self) -> None:
+        conn, _http = _connected()
+        with self.assertRaises(ConnectorError):
+            conn.create_virtual_account("")
+
 
 if __name__ == "__main__":
     unittest.main()

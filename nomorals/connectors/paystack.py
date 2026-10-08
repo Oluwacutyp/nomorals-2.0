@@ -7,17 +7,23 @@ Settings -> API Keys & Webhooks; ``sk_test_*`` for test mode,
 ``sk_live_*`` for production) in the ``Authorization: Bearer`` header,
 ``AuthMethod.API_KEY``. Amounts are in minor units (kobo for NGN).
 
-Money movement is confirmation-gated: ``initialize_transaction`` only
-creates a checkout URL (no money moves until the payer acts), while
-``charge_authorization`` pulls money off a saved card and refuses to run
-without explicit owner confirmation (``confirmed=True`` after the owner
-approved the exact charge, or a human checkpoint when ``db`` is given).
+Money movement is confirmation-gated, in BOTH directions:
+``initialize_transaction`` only creates a checkout URL (no money moves
+until the payer acts), while ``charge_authorization`` and
+``initiate_transfer`` pull/send real money and refuse to run without
+explicit owner confirmation (``confirmed=True`` after the owner approved
+the exact payload, or a human checkpoint when ``db`` is given).
+Transfers at or above ``BIOMETRIC_THRESHOLD_KOBO`` additionally need a
+biometric token (minted via ``policy.approve_with_biometric``) — the
+explicit-override rule ("send it") executes, the gradient governs
+autonomous action.
 
 Webhook handling: Paystack notifies ``charge.success`` etc. on the URL
 configured in the dashboard. ``verify_webhook_signature`` checks the
 ``x-paystack-signature`` HMAC-SHA512 so a local webhook receiver can trust
 the payload — receiving the webhook itself is the deployer's web server,
-not this connector.
+not this connector. ``TRANSFER_EVENTS`` lists the transfer events to
+listen for.
 """
 
 from __future__ import annotations
@@ -48,6 +54,15 @@ API_BASE = "https://api.paystack.co"
 SECRET_ENV = "PAYSTACK_SECRET_KEY"
 DOCS_URL = "https://paystack.com/docs/api"
 
+#: Transfers at or above this need a biometric token (minted via
+#: ``policy.approve_with_biometric``) on top of explicit confirmation.
+BIOMETRIC_THRESHOLD_KOBO = 5_000_000  # ₦50,000
+
+#: Webhook events Paystack sends for transfers — listen for these on the
+#: dashboard-configured webhook URL and verify with
+#: :meth:`verify_webhook_signature`.
+TRANSFER_EVENTS = ("transfer.success", "transfer.failed", "transfer.reversed")
+
 
 class PaystackError(ConnectorError):
     """A Paystack API call failed."""
@@ -70,9 +85,11 @@ class PaystackConnector(Connector):
     name = "Paystack"
     description = (
         "Nigerian payments: initialize transactions (checkout URLs), "
-        "verify them, list transaction history, manage customers, and "
-        "charge saved authorizations (confirmation-gated). Authenticates "
-        "with a Paystack secret key (Bearer header)."
+        "verify them, list transaction history, manage customers, charge "
+        "saved authorizations (confirmation-gated), send transfers to "
+        "bank accounts (confirmation-gated, biometric for large amounts), "
+        "create payment links, and issue dedicated virtual accounts. "
+        "Authenticates with a Paystack secret key (Bearer header)."
     )
     auth_methods = (AuthMethod.API_KEY,)
 
@@ -103,19 +120,20 @@ class PaystackConnector(Connector):
             "paystack",
             secret,
             credential_type="api_key",
-            scopes=["transactions", "customers"],
+            scopes=["transactions", "customers", "transfers"],
             metadata={"mode": mode},
         )
         _log.info("paystack connected (%s mode)", mode)
         return ConnectResult(
             ok=True,
             account=f"paystack ({mode})",
-            scopes=["transactions", "customers"],
+            scopes=["transactions", "customers", "transfers"],
             message=(
                 f"connected to Paystack in {mode} mode. The secret key is "
                 "in the encrypted vault. initialize_transaction() creates "
-                "checkout URLs; charge_authorization() needs explicit "
-                "owner confirmation every time."
+                "checkout URLs; charge_authorization() and initiate_transfer() "
+                "need explicit owner confirmation every time (transfers "
+                "≥ ₦50,000 also need biometric approval)."
             ),
         )
 
@@ -169,26 +187,35 @@ class PaystackConnector(Connector):
         db: Any,
         context: Any = None,
     ) -> dict[str, Any]:
-        """Complete a confirmed charge after the owner resolved it."""
+        """Complete a confirmed charge/transfer after the owner resolved it."""
         if checkpoint.state != CheckpointState.RESOLVED:
             raise ConnectorError(
                 f"checkpoint {checkpoint.id} is {checkpoint.state.value}, "
-                "not resolved — the owner must approve the charge first"
+                "not resolved — the owner must approve it first"
             )
-        if (checkpoint.resume_state or {}).get("stage") != "charge":
-            raise ConnectorError(
-                "paystack cannot resume checkpoint stage "
-                f"{(checkpoint.resume_state or {}).get('stage')!r}"
-            )
+        stage = (checkpoint.resume_state or {}).get("stage")
         payload = dict((checkpoint.resume_state or {}).get("payload", {}))
-        if not payload.get("authorization_code") or not payload.get(
-            "amount_kobo"
-        ):
-            raise ConnectorError(
-                "the resolved checkpoint has no charge payload — "
-                "it cannot charge"
-            )
-        return self._charge_now(payload)
+        if stage == "charge":
+            if not payload.get("authorization_code") or not payload.get(
+                "amount_kobo"
+            ):
+                raise ConnectorError(
+                    "the resolved checkpoint has no charge payload — "
+                    "it cannot charge"
+                )
+            return self._charge_now(payload)
+        if stage == "transfer":
+            if not payload.get("recipient_code") or not payload.get(
+                "amount_kobo"
+            ):
+                raise ConnectorError(
+                    "the resolved checkpoint has no transfer payload — "
+                    "it cannot transfer"
+                )
+            return self._transfer_now(payload)
+        raise ConnectorError(
+            f"paystack cannot resume checkpoint stage {stage!r}"
+        )
 
     # ── transactions ─────────────────────────────────────────────
 
@@ -422,6 +449,224 @@ class PaystackConnector(Connector):
         _log.info(
             "paystack charged %s: %s",
             payload["email"], data.get("reference", "?"),
+        )
+        return data
+
+    # ── transfers (confirmation-gated money-OUT) ─────────────────
+
+    def create_transfer_recipient(
+        self,
+        account_number: str,
+        bank_code: str,
+        *,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Create a transfer recipient (``POST /transferrecipient``).
+
+        ``account_number`` is a 10-digit NUBAN number; ``bank_code`` is
+        Paystack's bank code (e.g. ``"058"`` for GTBank). Returns the
+        recipient object — its ``recipient_code`` feeds
+        :meth:`initiate_transfer`.
+        """
+        number = (account_number or "").strip()
+        code = (bank_code or "").strip()
+        if not number.isdigit() or len(number) != 10:
+            raise ConnectorError(
+                f"invalid account number {account_number!r}: must be a "
+                "10-digit NUBAN number"
+            )
+        if not code:
+            raise ConnectorError(
+                "empty bank_code: pass Paystack's bank code "
+                "(e.g. '058' for GTBank)"
+            )
+        payload: dict[str, Any] = {
+            "type": "nuban",
+            "name": (name or "").strip() or "Devon transfer recipient",
+            "account_number": number,
+            "bank_code": code,
+            "currency": "NGN",
+        }
+        data = self._api("POST", "/transferrecipient", payload=payload)
+        _log.info(
+            "paystack transfer recipient created: %s",
+            data.get("recipient_code", "?"),
+        )
+        return data
+
+    def initiate_transfer(
+        self,
+        amount_kobo: int,
+        recipient_code: str,
+        *,
+        reason: str = "",
+        reference: str = "",
+        confirmed: bool = False,
+        db: Any = None,
+        context: Any = None,
+        biometric_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Send money to a recipient (``POST /transfer``).
+
+        This moves real money out of the Paystack balance. Same
+        confirmation architecture as :meth:`charge_authorization`:
+        pass ``confirmed=True`` only after the owner approved the exact
+        amount/recipient (an explicit "send it"), or pass ``db`` to park
+        the exact transfer on a human checkpoint instead.
+
+        Transfers at or above ``BIOMETRIC_THRESHOLD_KOBO`` (₦50,000)
+        additionally need ``biometric_token`` — mint it with
+        ``policy.approve_with_biometric()``. The connector does not mint
+        or consume tokens; the caller (e.g. ``finance.send.confirm_send``)
+        owns the biometric flow.
+
+        The returned ``data["status"]`` may be ``"otp"`` — Paystack is
+        asking for an OTP before releasing the money. Complete it with
+        :meth:`finalize_transfer`.
+        """
+        if amount_kobo <= 0:
+            raise ConnectorError(
+                f"invalid amount {amount_kobo}: must be a positive integer "
+                "in kobo"
+            )
+        recipient_code = (recipient_code or "").strip()
+        if not recipient_code:
+            raise ConnectorError("empty recipient_code")
+        if amount_kobo >= BIOMETRIC_THRESHOLD_KOBO and not biometric_token:
+            raise ConnectorError(
+                f"transfer of {self._format_amount(amount_kobo, 'NGN')} "
+                "needs biometric approval — mint a token with "
+                "policy.approve_with_biometric() and pass it as "
+                "biometric_token"
+            )
+        payload: dict[str, Any] = {
+            "amount_kobo": amount_kobo,
+            "recipient_code": recipient_code,
+            "reason": (reason or "").strip(),
+            "reference": (reference or "").strip(),
+        }
+        confirm_or_checkpoint(
+            self,
+            confirmed=confirmed,
+            db=db,
+            context=context,
+            stage="transfer",
+            title=f"Transfer {self._format_amount(amount_kobo, 'NGN')}",
+            instructions="\n".join([
+                "Devon wants to send money via Paystack.",
+                "This moves real money — review it carefully.",
+                f"Amount: {self._format_amount(amount_kobo, 'NGN')}",
+                f"Recipient code: {recipient_code}",
+                f"Reason: {payload['reason'] or '(none)'}",
+                f"Reference: {payload['reference'] or '(auto-generated)'}",
+            ]),
+            resume_state={"payload": payload},
+        )
+        return self._transfer_now(payload)
+
+    def _transfer_now(self, payload: dict[str, Any]) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "source": "balance",
+            "amount": payload["amount_kobo"],
+            "recipient": payload["recipient_code"],
+            "reason": payload.get("reason") or "Devon transfer",
+        }
+        if payload.get("reference"):
+            body["reference"] = payload["reference"]
+        data = self._api("POST", "/transfer", payload=body)
+        _log.info(
+            "paystack transfer initiated: %s (%s)",
+            data.get("reference", "?"), data.get("status", "?"),
+        )
+        return data
+
+    def finalize_transfer(self, transfer_code: str, otp: str) -> dict[str, Any]:
+        """Complete an OTP-gated transfer (``POST /transfer/finalize``).
+
+        Call this when :meth:`initiate_transfer` returned
+        ``data["status"] == "otp"``. ``transfer_code`` comes from that
+        response; ``otp`` is what Paystack sent the account owner.
+        """
+        transfer_code = (transfer_code or "").strip()
+        otp = (otp or "").strip()
+        if not transfer_code:
+            raise ConnectorError("empty transfer_code")
+        if not otp:
+            raise ConnectorError("empty otp")
+        data = self._api(
+            "POST", "/transfer/finalize_transfer",
+            payload={"transfer_code": transfer_code, "otp": otp},
+        )
+        _log.info(
+            "paystack transfer finalized: %s", data.get("reference", "?")
+        )
+        return data
+
+    # ── payment links (conversational checkout) ──────────────────
+
+    def create_payment_link(
+        self,
+        amount_kobo: int,
+        *,
+        name: str,
+        description: str = "",
+        currency: str = "NGN",
+    ) -> dict[str, Any]:
+        """Create a payment page (``POST /page``) — "here's your pay link".
+
+        Returns the page object with an added ``payment_url``
+        (``https://paystack.com/pay/<slug>``) — hand that URL to the
+        payer. No money moves here; confirm with
+        :meth:`verify_transaction` after they pay.
+        """
+        if amount_kobo <= 0:
+            raise ConnectorError(
+                f"invalid amount {amount_kobo}: must be a positive integer "
+                "in kobo"
+            )
+        name = (name or "").strip()
+        if not name:
+            raise ConnectorError("payment link needs a name")
+        payload: dict[str, Any] = {
+            "name": name,
+            "amount": amount_kobo,
+            "currency": currency.upper(),
+        }
+        if description.strip():
+            payload["description"] = description.strip()
+        data = self._api("POST", "/page", payload=payload)
+        slug = str(data.get("slug") or "")
+        if slug:
+            data["payment_url"] = f"https://paystack.com/pay/{slug}"
+        _log.info("paystack payment page created: %s", slug or "?")
+        return data
+
+    # ── dedicated virtual accounts ─────────────────────────────
+
+    def create_virtual_account(
+        self,
+        customer: str,
+        *,
+        preferred_bank: str = "",
+    ) -> dict[str, Any]:
+        """Issue a dedicated virtual account (``POST /dedicated_account``).
+
+        ``customer`` is a Paystack customer ID or code (see
+        :meth:`create_customer`). Returns the account object with
+        ``account_number``, ``account_name`` and ``bank`` — payments into
+        it auto-reconcile against the customer.
+        """
+        customer = (customer or "").strip()
+        if not customer:
+            raise ConnectorError("empty customer: a dedicated account "
+                                 "needs a Paystack customer ID or code")
+        payload: dict[str, Any] = {"customer": customer}
+        if preferred_bank.strip():
+            payload["preferred_bank"] = preferred_bank.strip()
+        data = self._api("POST", "/dedicated_account", payload=payload)
+        _log.info(
+            "paystack dedicated account created: %s (%s)",
+            data.get("account_number", "?"), data.get("bank", {}).get("name", "?"),
         )
         return data
 

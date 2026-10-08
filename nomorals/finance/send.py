@@ -30,6 +30,7 @@ __all__ = [
     "resolve_recipient",
     "send_money",
     "confirm_send",
+    "confirm_send_otp",
 ]
 
 #: Capability required for money movement (biometric-gated per policy).
@@ -246,9 +247,55 @@ def confirm_send(
     return result
 
 
+def confirm_send_otp(
+    staged_id: str,
+    transfer_code: str,
+    otp: str,
+    *,
+    context: Any = None,
+    ledger: Ledger | None = None,
+    paystack: Any = None,
+) -> dict[str, Any]:
+    """Complete an OTP-gated transfer after ``confirm_send`` reported ``needs: otp``.
+
+    The money was already approved (biometric); this just releases it.
+    Returns {"ok": True, ...} or {"ok": False, "error": ...}.
+    """
+    settings = getattr(context, "settings", None)
+    ledger = ledger or Ledger(finance_paths(settings)[0])
+    if paystack is None:
+        return {"ok": False,
+                "error": "no transfer connector configured — money did not move"}
+    staging = _staging(settings)
+    rec = next((r for r in staging.pending() if r.id == staged_id), None)
+    if rec is None:
+        return {"ok": False, "error": f"unknown staged transfer {staged_id!r}"}
+    try:
+        data = paystack.finalize_transfer(transfer_code, otp)
+    except Exception as exc:  # noqa: BLE001 - connector errors are results
+        _audit(ledger, rec.amount_kobo, rec.recipient, "otp_failed",
+               note=str(exc)[:120])
+        return {"ok": False, "error": f"OTP finalization failed: {exc}"}
+    staging.mark(staged_id, "executed")
+    ledger.log(rec.amount_kobo, category="transfer",
+               note=f"transfer to {rec.recipient}",
+               kind="spend", source="paystack")
+    _audit(ledger, rec.amount_kobo, rec.recipient, "executed",
+           note=f"ref={data.get('reference', '')} (otp)")
+    return {"ok": True, "reference": str(data.get("reference", "")),
+            "amount": format_naira(rec.amount_kobo), "to": rec.recipient}
+
+
 def _execute_via_paystack(rec: Any, paystack: Any,
                           recipients: RecipientStore | None = None) -> dict[str, Any]:
-    """Real Paystack Transfer API: recipient → transfer. Fail-closed."""
+    """Real Paystack transfer through the connector. Fail-closed.
+
+    Uses ``PaystackConnector.create_transfer_recipient`` /
+    ``initiate_transfer`` — the connector owns the API surface; this
+    module owns the conversational flow (parse → guard → biometric).
+    The biometric token on the staged record IS the explicit approval,
+    so ``confirmed=True``.
+    """
     if paystack is None:
         return {"ok": False, "error":
                 "no transfer connector configured — money did not move. "
@@ -259,27 +306,29 @@ def _execute_via_paystack(rec: Any, paystack: Any,
         return {"ok": False, "error":
                 f"no bank details for {rec.recipient!r} — money did not move"}
     try:
-        create = paystack._api("POST", "/transferrecipient", payload={
-            "type": "nuban",
-            "name": details["name"],
-            "account_number": details["account_number"],
-            "bank_code": details["bank_code"],
-            "currency": "NGN",
-        })
-        code = (create.get("data") or {}).get("recipient_code")
+        created = paystack.create_transfer_recipient(
+            details["account_number"],
+            details["bank_code"],
+            name=details.get("name") or rec.recipient,
+        )
+        code = (created or {}).get("recipient_code")
         if not code:
             return {"ok": False, "error":
-                    f"Paystack recipient creation failed: {str(create)[:200]}"}
-        sent = paystack._api("POST", "/transfer", payload={
-            "source": "balance",
-            "amount": rec.amount_kobo,
-            "recipient": code,
-            "reason": rec.note or f"Devon transfer to {details['name']}",
-        })
-        data = sent.get("data") or {}
-        if not sent.get("status"):
-            return {"ok": False, "error":
-                    f"Paystack transfer failed: {str(sent)[:200]}"}
+                    f"Paystack recipient creation failed: {str(created)[:200]}"}
+        sent = paystack.initiate_transfer(
+            rec.amount_kobo,
+            code,
+            reason=rec.note or f"Devon transfer to {details['name']}",
+            confirmed=True,
+            biometric_token=getattr(rec, "biometric_token", None),
+        )
+        data = sent or {}
+        status = str(data.get("status") or "")
+        if status == "otp":
+            return {"ok": False, "needs": "otp",
+                    "transfer_code": str(data.get("transfer_code", "")),
+                    "error": "Paystack needs an OTP to release this transfer — "
+                             "ask the owner for it, then call confirm_send_otp"}
         return {"ok": True, "reference": str(data.get("reference", "")),
                 "amount": format_naira(rec.amount_kobo),
                 "to": details["name"]}
