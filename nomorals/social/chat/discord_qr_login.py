@@ -75,10 +75,12 @@ def main() -> int:
             threading.Thread(target=_beat, daemon=True).start()
             ws.send(json.dumps({"op": "init", "encoded_public_key": pub_b64}))
 
-        elif op == "nonce_proof_request":
+        elif op == "nonce_proof":
+            # gateway sends the encrypted nonce; we reply with the
+            # base64url-encoded DECRYPTED nonce (per userdoccers).
             nonce = _decrypt(msg["encrypted_nonce"])
-            proof = _b64url_nopad(hashlib.sha256(nonce).digest())
-            ws.send(json.dumps({"op": "nonce_proof", "proof": proof}))
+            ws.send(json.dumps({"op": "nonce_proof",
+                                "nonce": _b64url_nopad(nonce)}))
 
         elif op == "pending_remote_init":
             fp = msg["fingerprint"]
@@ -99,8 +101,10 @@ def main() -> int:
             print()
             print("Waiting for scan + approval…")
 
-        elif op == "pending_ticket":
-            ticket = _decrypt(msg["encrypted_user_payload"]).decode()
+        elif op == "pending_login":
+            ticket = msg.get("ticket", "")
+            if not ticket and msg.get("encrypted_user_payload"):
+                ticket = _decrypt(msg["encrypted_user_payload"]).decode()
             # exchange the ticket for the token
             body = json.dumps({"ticket": ticket}).encode()
             req = urllib.request.Request(
