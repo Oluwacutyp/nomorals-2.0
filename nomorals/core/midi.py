@@ -479,6 +479,62 @@ DRUM_PATTERNS: dict[str, tuple[tuple[float, int, float], ...]] = {
         (2.0, OPEN_HAT, 0.6), (0.5, TAMBOURINE, 0.6),
         (2.5, TAMBOURINE, 0.6), (0.0, CRASH, 0.7),
     ),
+    "uk_drill": (
+        # UK drill: sparse menacing kicks, snare on the 3, swung hats,
+        # 32nd-note hat roll into the next bar
+        (0.0, KICK, 1.0), (0.75, KICK, 0.85), (2.5, KICK, 0.95),
+        (3.25, KICK, 0.7),
+        (2.0, SNARE, 1.0),
+        *[(i * (1 / 3), CLOSED_HAT, 0.7 if i % 3 == 0 else 0.5)
+          for i in range(11)],
+        (3.625, CLOSED_HAT, 0.85), (3.6875, CLOSED_HAT, 0.85),
+        (3.75, CLOSED_HAT, 0.9), (3.8125, CLOSED_HAT, 0.9),
+        (3.875, CLOSED_HAT, 0.95), (3.9375, CLOSED_HAT, 0.95),
+        (0.0, CRASH, 0.55),
+    ),
+    "grime": (
+        # eski grime: cold square-wave bounce, syncopated kicks,
+        # snare on 2 and 4 with eski rim clicks
+        (0.0, KICK, 1.0), (0.75, KICK, 0.8), (1.5, KICK, 0.9),
+        (2.75, KICK, 0.85), (3.5, KICK, 0.75),
+        (1.0, SNARE, 1.0), (3.0, SNARE, 1.0),
+        (0.5, RIM, 0.7), (2.5, RIM, 0.7),
+        *[(i * 0.25, CLOSED_HAT, 0.6) for i in range(16)],
+        (3.875, OPEN_HAT, 0.65), (0.0, CRASH, 0.6),
+    ),
+    "phonk": (
+        # dark memphis phonk: cowbell lead, heavy swung kicks,
+        # half-time snare, rolling hats
+        (0.0, KICK, 1.0), (0.75, KICK, 0.85), (1.75, KICK, 0.9),
+        (2.5, KICK, 0.95),
+        (2.0, SNARE, 1.0),
+        (0.0, COWBELL, 0.85), (0.75, COWBELL, 0.85),
+        (1.5, COWBELL, 0.85), (2.25, COWBELL, 0.7),
+        (3.0, COWBELL, 0.85),
+        *[(i * 0.25, CLOSED_HAT, 0.5) for i in range(16)],
+        (3.75, OPEN_HAT, 0.65), (0.0, CRASH, 0.6),
+    ),
+    "jersey": (
+        # jersey club: triplet kick pattern, clap/snare stabs,
+        # chopped feel
+        (0.0, KICK, 1.0), (0.33, KICK, 0.85), (0.67, KICK, 0.9),
+        (1.5, KICK, 0.9), (2.0, KICK, 1.0),
+        (2.33, KICK, 0.85), (2.67, KICK, 0.9), (3.5, KICK, 0.8),
+        (1.0, CLAP, 1.0), (3.0, CLAP, 1.0),
+        (1.75, SNARE, 0.6), (3.75, SNARE, 0.7),
+        *[(i * 0.25, CLOSED_HAT, 0.6) for i in range(16)],
+        (0.0, CRASH, 0.65),
+    ),
+    "dnb": (
+        # amen-style drum & bass 2-step: rolling break, ghost snares,
+        # driving hats at ~174 bpm
+        (0.0, KICK, 1.0), (1.75, KICK, 0.85), (2.5, KICK, 0.9),
+        (1.0, SNARE, 1.0), (3.0, SNARE, 1.0),
+        (0.875, SNARE, 0.45), (2.875, SNARE, 0.45),
+        (3.5, SNARE, 0.55), (3.75, SNARE, 0.6),
+        *[(i * 0.25, CLOSED_HAT, 0.62) for i in range(16)],
+        (0.0, CRASH, 0.7), (2.0, RIDE, 0.6),
+    ),
 }
 
 
@@ -514,7 +570,7 @@ def generate_drums(pattern: str, *, bars: int = 4, beats: int = 4,
 #: bass-line styles: how the bass moves under each chord
 BASS_STYLES = ("roots", "driving_eighths", "walking", "syncopated",
                "logdrum", "halftime", "riff", "reggae_bubble", "breakdown_pad",
-               "gallop")
+               "gallop", "808_slide", "sub_pulse", "reese")
 
 
 def generate_bass_line(root: str, mode: str, romans: Sequence[str], *,
@@ -528,7 +584,10 @@ def generate_bass_line(root: str, mode: str, romans: Sequence[str], *,
     ``syncopated`` (afrobeats offbeat groove), ``logdrum`` (amapiano-style
     syncopated mid-register stabs), ``halftime`` (dotted-half roots),
     ``riff`` (root/fifth/octave rock riff), ``reggae_bubble`` (offbeat
-    stabs), ``breakdown_pad`` (one long root per chord).
+    stabs), ``breakdown_pad`` (one long root per chord),
+    ``808_slide`` (long 808 notes with portamento glides via
+    ``NoteEvent.slide_to``), ``sub_pulse`` (trap/phonk eighth-note sub
+    pulses), ``reese`` (dnb sustained root + octave stack).
     """
     rng = random.Random(seed)
     chords = chord_progression(root, mode, list(romans))
@@ -606,6 +665,37 @@ def generate_bass_line(root: str, mode: str, romans: Sequence[str], *,
                 ev(root_n, start + beat + 0.75, 0.2, soft)
                 if beat % 2 == 1:
                     ev(oct_n, start + beat + 0.5, 0.2, accent)
+        elif style == "808_slide":
+            # drill/trap 808s: long sustained sub notes with portamento
+            # slides into the fifth/octave — the signature glide. Each
+            # long note carries slide_to so the synth sweeps the pitch.
+            nxt_root = chords[(i + 1) % len(chords)][0] - 12
+            long1 = bar_len * 0.55
+            long2 = bar_len * 0.30
+            out.append(NoteEvent(max(1, min(127, root_n)), start,
+                                 max(0.1, long1), velocity=accent,
+                                 channel=channel, slide_to=fifth_n))
+            out.append(NoteEvent(max(1, min(127, fifth_n)),
+                                 start + long1, max(0.1, long2),
+                                 velocity=soft, channel=channel,
+                                 slide_to=nxt_root))
+            out.append(NoteEvent(max(1, min(127, nxt_root)),
+                                 start + long1 + long2,
+                                 max(0.1, bar_len - long1 - long2),
+                                 velocity=accent, channel=channel))
+        elif style == "sub_pulse":
+            # trap/phonk sub: deep eighth-note pulses hammering the root
+            n = int(bar_len / 0.5)
+            for j in range(n):
+                nn = root_n if j % 8 < 6 else (fifth_n if j % 2 else oct_n)
+                ev(nn, start + j * 0.5, 0.46,
+                   accent if j % 2 == 0 else soft)
+        elif style == "reese":
+            # dnb reese: sustained root doubled an octave up — thick,
+            # menacing, constantly moving under the break
+            ev(root_n, start, bar_len * 0.9, accent)
+            ev(oct_n, start, bar_len * 0.9, soft)
+            ev(fifth_n, start + bar_len * 0.5, bar_len * 0.4, soft)
         else:  # breakdown_pad
             ev(root_n, start, bar_len * 0.95, soft)
     return out
@@ -747,6 +837,11 @@ class NoteEvent:
     duration: float       # beats
     velocity: int = 96
     channel: int = 0
+    slide_to: int | None = None  # portamento target (MIDI note): when set,
+                                 # audio renderers glide the pitch from
+                                 # ``note`` to ``slide_to`` over the
+                                 # duration (808 slides). MIDI writers
+                                 # ignore it (plain note-on).
 
     @property
     def end(self) -> float:

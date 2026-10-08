@@ -443,10 +443,11 @@ class StyleSpecTests(unittest.TestCase):
                     self.assertTrue(0 <= p <= 127)
 
     def test_aliases(self) -> None:
-        cases = {"lo-fi": "lofi", "boom bap": "hiphop", "r&b": "rnb",
+        cases = {"lo-fi": "lofi", "boom bap": "rap", "r&b": "rnb",
                  "dembow": "reggaeton", "nashville": "country",
                  "thrash": "metal", "boogie": "disco", "hymn": "choir",
-                 "p-funk": "funk", "uk drill": "drill", "drone": "ambient",
+                 "p-funk": "funk", "uk drill": "uk-drill",
+                 "chicago drill": "drill", "drone": "ambient",
                  "alté": "afrobeats"}
         for alias, want in cases.items():
             self.assertEqual(resolve_style(alias).name, want)

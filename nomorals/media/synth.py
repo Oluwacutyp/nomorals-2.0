@@ -115,6 +115,35 @@ def _render_tone(freq: float, n: int, velocity: float, harmonics: Sequence[float
     return out
 
 
+def _render_slide_tone(freq_start: float, freq_end: float, n: int,
+                       velocity: float, harmonics: Sequence[float],
+                       attack: float, decay: float, sustain: float,
+                       release: float) -> array:
+    """An 808-style gliding note: pitch sweeps exponentially from
+    ``freq_start`` to ``freq_end`` over the note (portamento).
+
+    The exponential curve sounds like a real 808 slide — fast at first,
+    settling into the target — instead of a linear robot sweep.
+    """
+    out = array("d", [0.0]) * n
+    env = _adsr(n, attack, decay, sustain, release, n)
+    ratio = max(1e-6, freq_end / max(1e-6, freq_start))
+    for h, amp in enumerate(harmonics, start=1):
+        if amp <= 0:
+            continue
+        f0 = freq_start * h
+        ph = 0.0
+        for i in range(n):
+            frac = i / max(1, n - 1)
+            freq = f0 * (ratio ** frac)
+            ph += 2.0 * math.pi * freq / SAMPLE_RATE
+            out[i] += amp * _sine(ph)
+    vel = max(0.05, min(1.0, velocity / 100.0))
+    for i in range(n):
+        out[i] *= env[i] * vel * 0.5
+    return out
+
+
 def _render_kick(n: int, velocity: float) -> array:
     """Kick: sine dropping 120 Hz → 45 Hz with a fast decay."""
     out = array("d", [0.0]) * n
@@ -181,7 +210,8 @@ _TIMBRES = {
 #: below each bass note, mixed under. Inaudible on phone speakers (they
 #: can't reproduce it) but felt on real systems; the mix normalizer keeps
 #: it from ever pushing the master into clipping. 0.0 disables.
-_SUB_BASS_GAIN = 0.35
+#: Raised for heavier 808s — drill/trap/phonk lean on the sub.
+_SUB_BASS_GAIN = 0.5
 
 _KICK_NOTES = {35, 36}
 _SNARE_NOTES = {38, 40}
@@ -244,6 +274,26 @@ def _render_tone_np(np, freq: float, n: int, velocity: float,
         if amp <= 0:
             continue
         out += amp * np.sin(2.0 * np.pi * freq * h * t)
+    vel = max(0.05, min(1.0, velocity / 100.0))
+    out *= env * vel * 0.5
+    return out
+
+
+def _render_slide_tone_np(np, freq_start: float, freq_end: float, n: int,
+                           velocity: float, harmonics: Sequence[float],
+                           attack: float, decay: float, sustain: float,
+                           release: float):
+    """Vectorized 808-style pitch glide: exponential sweep."""
+    ratio = max(1e-6, freq_end / max(1e-6, freq_start))
+    frac = np.arange(n, dtype=np.float64) / max(1, n - 1)
+    env = _adsr_np(np, n, attack, decay, sustain, release)
+    out = np.zeros(n, dtype=np.float64)
+    for h, amp in enumerate(harmonics, start=1):
+        if amp <= 0:
+            continue
+        freq = (freq_start * h) * (ratio ** frac)
+        phase = np.cumsum(2.0 * np.pi * freq / SAMPLE_RATE)
+        out += amp * np.sin(phase)
     vel = max(0.05, min(1.0, velocity / 100.0))
     out *= env * vel * 0.5
     return out
@@ -328,15 +378,28 @@ def _mix_tracks_np(np, parts: dict[str, list], tempo: float,
             dur_sec = e.duration * beat_sec
             n = min(_MAX_NOTE_SAMPLES, max(16, int(dur_sec * SAMPLE_RATE)))
             freq = midi_to_freq(max(0, min(127, int(e.note))))
-            sig = _render_tone_np(np, freq, n, e.velocity, harmonics,
-                                  attack, decay, sustain, release)
+            slide = getattr(e, "slide_to", None)
+            if slide is not None:
+                freq_end = midi_to_freq(max(0, min(127, int(slide))))
+                sig = _render_slide_tone_np(np, freq, freq_end, n,
+                                            e.velocity, harmonics,
+                                            attack, decay, sustain, release)
+            else:
+                sig = _render_tone_np(np, freq, n, e.velocity, harmonics,
+                                      attack, decay, sustain, release)
             end = min(total_samples, start + len(sig))
             mix[start:end] += sig[:end - start] * gain
             if track == "bass" and _SUB_BASS_GAIN > 0:
-                # sub-octave doubler: pure sine one octave down
-                sub = _render_tone_np(np, freq / 2.0, n, e.velocity,
-                                      (1.0,), attack, decay, sustain,
-                                      release)
+                # sub-octave doubler: pure sine one octave down, following
+                # any 808 glide so the sub sweeps with the bass
+                if slide is not None:
+                    sub = _render_slide_tone_np(
+                        np, freq / 2.0, freq_end / 2.0, n, e.velocity,
+                        (1.0,), attack, decay, sustain, release)
+                else:
+                    sub = _render_tone_np(np, freq / 2.0, n, e.velocity,
+                                          (1.0,), attack, decay, sustain,
+                                          release)
                 mix[start:end] += sub[:end - start] * _SUB_BASS_GAIN
     # soft clip + normalize (same curve as the stdlib path)
     if total_samples:
@@ -376,16 +439,29 @@ def _mix_tracks_stdlib(parts: dict[str, list], tempo: float,
             dur_sec = e.duration * beat_sec
             n = min(_MAX_NOTE_SAMPLES, max(16, int(dur_sec * SAMPLE_RATE)))
             freq = midi_to_freq(max(0, min(127, int(e.note))))
-            sig = _render_tone(freq, n, e.velocity, harmonics,
-                               attack, decay, sustain, release)
+            slide = getattr(e, "slide_to", None)
+            if slide is not None:
+                freq_end = midi_to_freq(max(0, min(127, int(slide))))
+                sig = _render_slide_tone(freq, freq_end, n, e.velocity,
+                                         harmonics, attack, decay, sustain,
+                                         release)
+            else:
+                sig = _render_tone(freq, n, e.velocity, harmonics,
+                                   attack, decay, sustain, release)
             for i, s in enumerate(sig):
                 idx = start + i
                 if idx < total_samples:
                     mix[idx] += s * gain
             if track == "bass" and _SUB_BASS_GAIN > 0:
-                # sub-octave doubler: pure sine one octave down
-                sub = _render_tone(freq / 2.0, n, e.velocity, (1.0,),
-                                   attack, decay, sustain, release)
+                # sub-octave doubler: pure sine one octave down, following
+                # any 808 glide so the sub sweeps with the bass
+                if slide is not None:
+                    sub = _render_slide_tone(freq / 2.0, freq_end / 2.0, n,
+                                             e.velocity, (1.0,),
+                                             attack, decay, sustain, release)
+                else:
+                    sub = _render_tone(freq / 2.0, n, e.velocity, (1.0,),
+                                       attack, decay, sustain, release)
                 for i, s in enumerate(sub):
                     idx = start + i
                     if idx < total_samples:

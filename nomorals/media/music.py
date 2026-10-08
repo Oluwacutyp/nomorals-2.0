@@ -46,6 +46,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.midi import (
+    CRASH,
     MidiBuilder,
     NoteEvent,
     add_chord_extensions,
@@ -85,16 +86,18 @@ class StyleSpec:
     extensions: str = ""            # "" | sevenths | ninths — 7th/9th color
     modulate: bool = False          # lift the final chorus a semitone
     programs: tuple[int, int, int] = (0, 4, 32)  # GM: melody, chords, bass
+    bass_boost: float = 1.0         # velocity multiplier on the bass track
+                                    # (1.3-1.4 for 808-heavy styles)
 
 
 def _style(name, label, tempo, mode, progressions, sections, energy,
            palette, instrumentation, drum_pattern="", bass_pattern="roots",
            voicing="closed", modulate=False, extensions="",
-           programs=(0, 4, 32)) -> StyleSpec:
+           programs=(0, 4, 32), bass_boost=1.0) -> StyleSpec:
     return StyleSpec(name, label, tempo, mode, tuple(progressions),
                      tuple(sections), energy, tuple(palette),
                      tuple(instrumentation), drum_pattern, bass_pattern,
-                     voicing, extensions, modulate, programs)
+                     voicing, extensions, modulate, programs, bass_boost)
 
 
 STYLES: dict[str, StyleSpec] = {
@@ -380,6 +383,98 @@ STYLES: dict[str, StyleSpec] = {
                      "choir stabs", "deep sub"),
                     drum_pattern="drill", bass_pattern="riff",
                     voicing="stabs", programs=(0, 4, 39)),
+    "uk-drill": _style("uk-drill", "UK Drill", (138, 143), "minor",
+                       (("i", "bVI", "i", "bVII"), ("i", "iv", "bVI", "bVII"),
+                        ("i", "i", "bVI", "bVII")),
+                       (("intro", 2), ("verse", 16), ("chorus", 8),
+                        ("verse", 16), ("chorus", 8), ("outro", 2)),
+                       "cold, sliding, opps-free menace",
+                       ("estate", "night bus", "rain on concrete", "sirens",
+                        "block lights", "shadows"),
+                       ("gliding 808s", "sparse sliding kicks",
+                        "dark piano stabs", "eerie choir", "deep sub",
+                        "32nd hat rolls"),
+                       drum_pattern="uk_drill", bass_pattern="808_slide",
+                       voicing="stabs", bass_boost=1.4,
+                       programs=(0, 4, 39)),
+    "rap": _style("rap", "Boom-bap Rap", (88, 95), "minor",
+                  (("i", "iv", "v", "i"), ("i", "bVI", "bVII", "i"),
+                   ("i", "vii", "iv", "v")),
+                  (("intro", 2), ("verse", 16), ("chorus", 8),
+                   ("verse", 16), ("chorus", 8), ("outro", 2)),
+                  "dusty, head-nodding, golden-era",
+                  ("stoop", "vinyl", "cipher", "boombox", "concrete",
+                   "midnight"),
+                  ("dusty drums", "chopped soul sample", "hard snare",
+                   "deep bass", "vinyl crackle"),
+                  drum_pattern="boombap", bass_pattern="roots",
+                  voicing="closed", extensions="sevenths",
+                  programs=(0, 4, 33)),
+    "trap": _style("trap", "Trap", (130, 150), "minor",
+                   (("i", "bVI", "bVII", "i"), ("i", "iv", "v", "i"),
+                    ("i", "bVII", "bVI", "bVII")),
+                   (("intro", 2), ("verse", 16), ("chorus", 8),
+                    ("verse", 8), ("chorus", 8), ("outro", 2)),
+                   "heavy, rolling, half-time menace",
+                   ("low end", "smoke", "night drive", "vault",
+                    "pressure", "static"),
+                   ("rolling hi-hats", "deep 808s", "hard snare",
+                    "dark bells", "sub drops"),
+                   drum_pattern="trap", bass_pattern="sub_pulse",
+                   voicing="stabs", bass_boost=1.35,
+                   programs=(0, 4, 39)),
+    "grime": _style("grime", "Grime", (138, 142), "minor",
+                    (("i", "bVI", "bVII", "i"), ("i", "iv", "v", "i"),
+                     ("i", "i", "bVII", "bVI")),
+                    (("intro", 2), ("verse", 16), ("chorus", 8),
+                     ("verse", 16), ("chorus", 8), ("outro", 2)),
+                    "cold, eski, reload bars",
+                    ("estate", "pirate radio", "snow", "neon",
+                     "concrete", "static"),
+                    ("square-wave bass", "eski rim clicks",
+                     "syncopated kicks", "cold strings", "sub bass"),
+                    drum_pattern="grime", bass_pattern="sub_pulse",
+                    voicing="stabs", bass_boost=1.3,
+                    programs=(81, 4, 39)),
+    "phonk": _style("phonk", "Phonk", (120, 130), "minor",
+                    (("i", "bVII", "iv", "i"), ("i", "iv", "bVI", "v"),
+                     ("i", "bVI", "bVII", "i")),
+                    (("intro", 2), ("verse", 8), ("chorus", 8),
+                     ("break", 2), ("chorus", 8), ("outro", 2)),
+                    "dark, drifting, memphis-night",
+                    ("purple haze", "lowrider", "night fog", "tape hiss",
+                     "gravel", "after hours"),
+                    ("cowbell lead", "heavy 808s", "chopped memphis vox",
+                     "dark keys", "deep sub"),
+                    drum_pattern="phonk", bass_pattern="sub_pulse",
+                    voicing="stabs", bass_boost=1.4,
+                    programs=(0, 4, 39)),
+    "jersey": _style("jersey", "Jersey Club", (135, 140), "minor",
+                     (("i", "bVI", "bVII", "i"), ("i", "iv", "v", "i"),
+                      ("i", "bVII", "iv", "v")),
+                     (("intro", 2), ("verse", 8), ("chorus", 8),
+                      ("break", 2), ("chorus", 8), ("outro", 2)),
+                     "bouncy, chopped, dancefloor chaos",
+                     ("club lights", "bounce", "sweat", "bass bins",
+                      "midnight", "energy"),
+                     ("triplet kicks", "chopped vocal stabs", "claps",
+                      "bouncy bass", "sirens"),
+                     drum_pattern="jersey", bass_pattern="riff",
+                     voicing="stabs", programs=(0, 4, 38)),
+    "dnb": _style("dnb", "Drum & Bass", (172, 176), "minor",
+                  (("i", "bVI", "bVII", "i"), ("i", "iv", "v", "i"),
+                   ("i", "bVII", "bVI", "bVII")),
+                  (("intro", 4), ("verse", 8), ("buildup", 4),
+                   ("drop", 8), ("break", 4), ("drop", 8),
+                   ("outro", 2)),
+                  "relentless, rolling, warehouse pressure",
+                  ("warehouse", "strobe", "pressure", "bassweight",
+                   "4am", "concrete"),
+                  ("amen breaks", "reese bass", "rolling hats",
+                   "dark pads", "sub drops"),
+                  drum_pattern="dnb", bass_pattern="reese",
+                  voicing="stabs", bass_boost=1.3,
+                  programs=(0, 4, 39)),
     "choir": _style("choir", "Choir / hymnal", (70, 90), "major",
                     (("I", "IV", "V", "I"), ("I", "vi", "ii", "V"),
                      ("IV", "I", "V", "I")),
@@ -399,8 +494,9 @@ STYLES: dict[str, StyleSpec] = {
 STYLE_ALIASES = {
     "lofi": "lofi", "lo-fi": "lofi", "chill": "lofi", "chillhop": "lofi",
     "chillbeat": "lofi",
-    "hiphop": "hiphop", "hip-hop": "hiphop", "rap": "hiphop", "trap": "hiphop",
-    "boom bap": "hiphop", "boom-bap": "hiphop",
+    "hiphop": "hiphop", "hip-hop": "hiphop",
+    "rap": "rap", "boom bap": "rap", "boom-bap": "rap", "boombap": "rap",
+    "trap": "trap",
     "afro": "afrobeats", "afrobeats": "afrobeats", "afrobeat": "afrobeats",
     "amapiano": "amapiano", "mapiano": "amapiano",
     "pop": "pop",
@@ -427,7 +523,13 @@ STYLE_ALIASES = {
     "metal": "metal", "heavy metal": "metal", "thrash": "metal",
     "ambient": "ambient", "drone": "ambient", "chillout": "ambient",
     "sleep": "ambient",
-    "drill": "drill", "uk drill": "drill",
+    "drill": "drill", "chicago drill": "drill",
+    "uk drill": "uk-drill", "uk-drill": "uk-drill", "ukdrill": "uk-drill",
+    "grime": "grime", "eski": "grime", "eski beat": "grime",
+    "phonk": "phonk", "drift phonk": "phonk",
+    "jersey": "jersey", "jersey club": "jersey",
+    "dnb": "dnb", "drum and bass": "dnb", "drum & bass": "dnb",
+    "jungle": "dnb",
     "choir": "choir", "hymn": "choir", "choral": "choir",
     "acappella": "choir", "a cappella": "choir",
 }
@@ -669,6 +771,9 @@ _METER: dict[str, tuple[int, int]] = {
     "funk": (6, 10), "disco": (5, 9), "reggaeton": (7, 11),
     "country": (7, 11), "metal": (7, 11), "ambient": (5, 9),
     "drill": (9, 14), "choir": (6, 10),
+    "uk-drill": (9, 14), "rap": (9, 14), "trap": (9, 14),
+    "grime": (9, 14), "phonk": (7, 11), "jersey": (6, 10),
+    "dnb": (6, 10),
 }
 
 _NAIJA_STYLES = {"afrobeats", "highlife", "amapiano", "dancehall"}
@@ -1245,6 +1350,11 @@ class MusicCreator:
                 root, song.mode, prog, style=spec.bass_pattern,
                 bars_per_chord=1, beats=4, seed=seed + idx * 13 + 2,
                 velocity=92, channel=3))
+            if spec.bass_boost != 1.0:
+                # 808-heavy styles: the bass sits louder in the mix
+                for e in sec["bass"]:
+                    e.velocity = max(
+                        1, min(127, int(e.velocity * spec.bass_boost)))
 
             # drums: pattern per section role
             pattern = spec.drum_pattern
@@ -1254,6 +1364,22 @@ class MusicCreator:
                 pattern = "buildup"
             drums = generate_drums(pattern, bars=s.bars,
                                    seed=seed + idx * 17 + 3, velocity=100)
+            if pattern and s.name in ("pre-chorus", "buildup") \
+                    and s.bars >= 2 and pattern != "buildup":
+                # snare roll into the chorus/drop: the last bar swaps to
+                # the rising buildup kit so the drop lands harder
+                keep = [d for d in drums if d.start < (s.bars - 1) * 4]
+                roll = generate_drums("buildup", bars=1,
+                                      seed=seed + idx * 17 + 99,
+                                      velocity=105)
+                rbase = (s.bars - 1) * 4
+                for d in roll:
+                    d.start += rbase
+                drums = keep + roll
+            if s.name == "drop" and pattern:
+                # drop impact: crash slams on the downbeat
+                drums.append(NoteEvent(CRASH, 0.0, 0.5, velocity=115,
+                                       channel=9))
             if s.name == "intro" and s.bars > 1:
                 # the kit kicks in on the last intro bar
                 drums = [d for d in drums if d.start >= (s.bars - 1) * 4]
