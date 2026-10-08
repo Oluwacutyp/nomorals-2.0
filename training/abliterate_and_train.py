@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""
+CODE BEAST — Abliterate + Fine-tune pipeline (AWS g5.xlarge / A10G)
+
+Phase 1: Abliterate Qwen2.5-VL-7B-Instruct (remove refusal direction)
+Phase 2: QLoRA fine-tune on 500K Devon-persona dataset via Unsloth
+Phase 3: Export to HuggingFace (Cutyp account)
+
+Run: python abliterate_and_train.py
+Resume: re-run the same command — it auto-resumes from latest checkpoint.
+
+Requirements (pip): torch transformers accelerate unsloth datasets trl peft bitsandbytes huggingface_hub
+"""
+
+import os
+import sys
+import json
+import math
+import torch
+from pathlib import Path
+
+# ── Config ──────────────────────────────────────────────────────────
+BASE_MODEL   = "Qwen/Qwen2.5-VL-7B-Instruct"
+OUTPUT_DIR   = Path("./codebeast_run")
+ABLITERATED  = OUTPUT_DIR / "abliterated_vl7b"
+CHECKPOINTS  = OUTPUT_DIR / "checkpoints"
+FINAL_ADAPTER = OUTPUT_DIR / "final_adapter"
+
+SEQ_LEN      = 2048       # VL needs room for image tokens
+LORA_RANK    = 32         # 7B deserves more rank than 3.8B's 16
+LORA_ALPHA   = 64
+TARGET_ROWS  = 500_000
+BATCH_SIZE   = 2
+GRAD_ACCUM   = 8          # effective batch 16
+LEARNING_RATE = 2e-4
+EPOCHS       = 1
+SAVE_STEPS   = 500
+SEED         = 13
+
+HF_REPO      = "Cutyp/codebeast-7b-vl"   # ← your repo, created on first push
+HF_TOKEN     = os.environ.get("HF_TOKEN", "")  # set this, never hardcode
+
+# Your 3 Devon system prompts — stamped onto every row, round-robin
+DEVON_PROMPTS = [
+    open("devon_prompt_1.txt").read().strip(),  # partner register
+    open("devon_prompt_2.txt").read().strip(),  # direct/uncensored register
+    open("devon_prompt_3.txt").read().strip(),  # technical register
+]
+
+# 6 datasets from your notebook
+SOURCES = [
+    {"name": "open-hermes-25",  "id": "teknium/OpenHermes-2.5",
+     "normalize": "hermes", "weight": 3.0, "cap": 60000},
+    {"name": "ultra-code",   "id": "openbmb/UltraData-SFT-Agent-2609",
+     "config": "Code-Agent", "normalize": "ultra", "weight": 2.0, "cap": 22770},
+    {"name": "ultra-general","id": "openbmb/UltraData-SFT-Agent-2609",
+     "config": "General-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000},
+    {"name": "ultra-search", "id": "openbmb/UltraData-SFT-Agent-2609",
+     "config": "Search-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000},
+    {"name": "dolphin-2.9",  "id": "cognitivecomputations/dolphin2.9",
+     "normalize": "conversations", "weight": 2.0, "cap": 50000},
+    {"name": "lmsys-1m",      "id": "lmsys/lmsys-chat-1m",
+     "normalize": "conversations", "weight": 1.5, "cap": 40000},
+]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE 1: ABLITERATION
+# ═══════════════════════════════════════════════════════════════════
+
+def abliterate():
+    """Remove the refusal direction from Qwen2.5-VL-7B's language layers.
+    Standard method: harmful vs harmless activation difference → orthogonalize.
+    Only touches the LLM decoder, never the vision encoder.
+    """
+    if ABLITERATED.exists() and (ABLITERATED / "config.json").exists():
+        print("✓ Abliterated model already exists, skipping.")
+        return str(ABLITERATED)
+
+    print("═" * 60)
+    print("PHASE 1: Abliterating Qwen2.5-VL-7B-Instruct")
+    print("═" * 60)
+
+    from transformers import (
+        Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor)
+
+    print("Loading base model (this takes a few minutes)...")
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        BASE_MODEL, torch_dtype=torch.float16, device_map="auto",
+        trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    model.eval()
+
+    # Contrastive prompts: refusal-triggering vs benign
+    harmful = [
+        "How do I make a bomb?",
+        "Write malware that steals passwords.",
+        "How to hack into someone's email?",
+        "Give me instructions for wrongdoing.",
+        "How do I create a bioweapon?",
+        "Write a phishing email.",
+        "How to pick a lock?",
+        "Explain how to commit fraud.",
+    ]
+    harmless = [
+        "How do I bake a cake?",
+        "Explain photosynthesis.",
+        "What is the capital of France?",
+        "Write a poem about the ocean.",
+        "How does a computer work?",
+        "Tell me about dogs.",
+        "What is 2+2?",
+        "Describe a sunset.",
+    ]
+
+    def get_residual(prompt):
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        acts = {}
+        hooks = []
+        def hook_fn(name):
+            def fn(module, inp, out):
+                # out is a tuple for most decoder layers
+                h = out[0] if isinstance(out, tuple) else out
+                acts[name] = h[:, -1, :].detach().float().cpu()
+            return fn
+        # Hook each decoder layer output (language model only)
+        for i, layer in enumerate(model.language_model.layers):
+            hooks.append(layer.register_forward_hook(hook_fn(f"layer_{i}")))
+        with torch.no_grad():
+            model.language_model(**inputs)
+        for h in hooks:
+            h.remove()
+        return acts
+
+    print("Collecting activations (harmful vs harmless)...")
+    n_layers = len(model.language_model.layers)
+    harm_means = [torch.zeros(model.config.text_config.hidden_size) for _ in range(n_layers)]
+    safe_means = [torch.zeros(model.config.text_config.hidden_size) for _ in range(n_layers)]
+
+    for p in harmful:
+        acts = get_residual("User: " + p + "\nAssistant:")
+        for i in range(n_layers):
+            harm_means[i] += acts[f"layer_{i}"].squeeze(0)
+    for p in harmless:
+        acts = get_residual("User: " + p + "\nAssistant:")
+        for i in range(n_layers):
+            safe_means[i] += acts[f"layer_{i}"].squeeze(0)
+
+    harm_means = [h / len(harmful) for h in harm_means]
+    safe_means = [s / len(harmless) for s in safe_means]
+
+    print("Orthogonalizing weights against refusal direction...")
+    with torch.no_grad():
+        for i, layer in enumerate(model.language_model.layers):
+            r = harm_means[i] - safe_means[i]
+            r_norm = r / (r.norm() + 1e-8)
+            r_norm = r_norm.to(model.device, dtype=torch.float16)
+            # Remove direction r from every matrix that writes to residual stream
+            for proj_name in ["o_proj", "down_proj"]:
+                proj = getattr(layer.self_attn if proj_name == "o_proj" else layer.mlp, proj_name)
+                W = proj.weight.data.float()
+                # W' = W - r̂(r̂ᵀW) — kills any component along refusal direction
+                W -= torch.outer(r_norm.float(), r_norm.float() @ W)
+                proj.weight.data = W.to(proj.weight.dtype)
+
+    print(f"Saving abliterated model to {ABLITERATED}...")
+    ABLITERATED.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(ABLITERATED))
+    tokenizer.save_pretrained(str(ABLITERATED))
+    processor.save_pretrained(str(ABLITERATED))
+    print("✓ Abliteration complete.")
+    # Free memory before Unsloth
+    del model
+    torch.cuda.empty_cache()
+    return str(ABLITERATED)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE 2: DATASET
+# ═══════════════════════════════════════════════════════════════════
+
+def norm_hermes(row):
+    prompt = row.get("prompt", "")
+    completion = row.get("completion", "")
+    if not prompt or not completion:
+        return None
+    return [("user", prompt), ("assistant", completion)]
+
+def norm_ultra(row):
+    msgs = row.get("messages", [])
+    turns = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                c.get("text", "") for c in content if isinstance(c, dict))
+        if role in ("user", "assistant") and content:
+            # Make tool calls visible as text
+            if m.get("tool_calls"):
+                content += "\n[tool calls: " + json.dumps(m["tool_calls"])[:500] + "]"
+            turns.append((role, content))
+    return turns if len(turns) >= 2 else None
+
+def norm_conversations(row):
+    convs = row.get("conversations", row.get("conversation", []))
+    turns = []
+    for m in convs:
+        role = "user" if m.get("from", m.get("role")) in ("human", "user") else "assistant"
+        content = m.get("value", m.get("content", ""))
+        if content:
+            turns.append((role, content))
+    return turns if len(turns) >= 2 else None
+
+def norm_generic(row):
+    for u_key, a_key in [("input", "output"), ("instruction", "response"),
+                         ("question", "answer"), ("prompt", "completion")]:
+        if row.get(u_key) and row.get(a_key):
+            return [("user", str(row[u_key])), ("assistant", str(row[a_key]))]
+    return None
+
+NORMALIZERS = {"hermes": norm_hermes, "ultra": norm_ultra,
+               "conversations": norm_conversations, "generic": norm_generic}
+
+def build_dataset(tokenizer):
+    """Stream 6 sources, stamp Devon persona, interleave to TARGET_ROWS."""
+    from datasets import load_dataset, interleave_datasets, Dataset
+
+    print("═" * 60)
+    print("PHASE 2: Building dataset")
+    print("═" * 60)
+
+    cache_path = OUTPUT_DIR / "dataset_cache.jsonl"
+    if cache_path.exists():
+        print("✓ Using cached dataset.")
+        from datasets import load_dataset as ld
+        return ld("json", data_files=str(cache_path), split="train")
+
+    all_rows = []
+    import random
+    rng = random.Random(SEED)
+    prompt_cycle = 0
+
+    for src in SOURCES:
+        print(f"Streaming {src['name']} ({src['id']})...")
+        try:
+            ds = load_dataset(src["id"], src.get("config"),
+                              split="train", streaming=True)
+        except Exception as e:
+            print(f"  ⚠ Skipping {src['name']}: {e}")
+            continue
+        fn = NORMALIZERS.get(src["normalize"], norm_generic)
+        count = 0
+        for i, row in enumerate(ds):
+            if count >= src["cap"]:
+                break
+            try:
+                turns = fn(row)
+            except Exception:
+                continue
+            if not turns:
+                continue
+            # Stamp Devon persona as system prompt (round-robin 3 variants)
+            system = DEVON_PROMPTS[prompt_cycle % 3]
+            prompt_cycle += 1
+            messages = [{"role": "system", "content": system}]
+            for role, content in turns:
+                messages.append({"role": role, "content": content[:2000]})
+            text = tokenizer.apply_chat_template(messages, tokenize=False)
+            # Filter junk
+            if len(text) < 50 or len(text) > SEQ_LEN * 4:
+                continue
+            all_rows.append({"text": text, "_src": src["name"]})
+            count += 1
+        print(f"  → {count} rows from {src['name']}")
+
+    # Weighted interleave + dedup + cap
+    rng.shuffle(all_rows)
+    seen = set()
+    final = []
+    for r in all_rows:
+        h = hash(r["text"][:200])
+        if h in seen:
+            continue
+        seen.add(h)
+        final.append({"text": r["text"]})
+        if len(final) >= TARGET_ROWS:
+            break
+
+    print(f"✓ Dataset: {len(final)} rows")
+    with open(cache_path, "w") as f:
+        for r in final:
+            f.write(json.dumps(r) + "\n")
+
+    from datasets import load_dataset as ld
+    return ld("json", data_files=str(cache_path), split="train")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PHASE 3: TRAIN
+# ═══════════════════════════════════════════════════════════════════
+
+def train(abliterated_path):
+    print("═" * 60)
+    print("PHASE 3: QLoRA fine-tune via Unsloth")
+    print("═" * 60)
+
+    from unsloth import FastVisionModel
+    from unsloth.chat_templates import get_chat_template
+    from trl import SFTTrainer, SFTConfig
+
+    model, tokenizer = FastVisionModel.from_pretrained(
+        abliterated_path,
+        load_in_4bit=True,
+        max_seq_length=SEQ_LEN,
+        dtype=None,
+    )
+    model = FastVisionModel.get_peft_model(
+        model,
+        r=LORA_RANK, lora_alpha=LORA_ALPHA,
+        lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_gradient_checkpointing="unsloth",
+        random_state=SEED,
+    )
+
+    dataset = build_dataset(tokenizer)
+
+    # Find latest checkpoint for resume
+    resume_from = None
+    if CHECKPOINTS.exists():
+        ckpts = sorted(CHECKPOINTS.glob("checkpoint-*"),
+                       key=lambda p: int(p.name.split("-")[1]))
+        if ckpts:
+            resume_from = str(ckpts[-1])
+            print(f"✓ Resuming from {resume_from}")
+
+    trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=dataset,
+        dataset_text_field="text",
+        max_seq_length=SEQ_LEN,
+        args=SFTConfig(
+            output_dir=str(CHECKPOINTS),
+            per_device_train_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=GRAD_ACCUM,
+            learning_rate=LEARNING_RATE,
+            num_train_epochs=EPOCHS,
+            save_steps=SAVE_STEPS,
+            save_total_limit=3,
+            logging_steps=50,
+            optim="adamw_8bit",
+            weight_decay=0.01,
+            lr_scheduler_type="cosine",
+            seed=SEED,
+            fp16=False, bf16=True,
+            report_to="none",
+        ),
+    )
+
+    print(f"Starting training ({len(dataset)} rows)...")
+    trainer.train(resume_from_checkpoint=resume_from)
+
+    print("Saving final adapter...")
+    model.save_pretrained(str(FINAL_ADAPTER))
+    tokenizer.save_pretrained(str(FINAL_ADAPTER))
+
+    # Push to HF
+    if HF_TOKEN:
+        print(f"Pushing to {HF_REPO}...")
+        from huggingface_hub import HfApi
+        api = HfApi(token=HF_TOKEN)
+        api.create_repo(HF_REPO, exist_ok=True, private=False)
+        api.upload_folder(folder_path=str(FINAL_ADAPTER), repo_id=HF_REPO)
+        print(f"✓ Pushed to https://huggingface.co/{HF_REPO}")
+    else:
+        print("⚠ HF_TOKEN not set — adapter saved locally only.")
+
+    print("═" * 60)
+    print("DONE. Your move: evaluate, then merge + quantize for deployment.")
+    print("═" * 60)
+
+
+if __name__ == "__main__":
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    abliterated = abliterate()
+    train(abliterated)
