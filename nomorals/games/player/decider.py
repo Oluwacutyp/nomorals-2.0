@@ -10,8 +10,9 @@ of guessing.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from ...core.logging_setup import get_logger
 from .driver import Action
@@ -25,6 +26,7 @@ __all__ = [
     "Strategy",
     "decide",
     "heuristic_strategy",
+    "interpret_freeform",
     "lagos_life_strategy",
     "register_strategy",
     "strategies",
@@ -176,3 +178,126 @@ class Decider:
 def decide(game: str, state: GameState) -> Move | None:
     """One-shot convenience: decide the next move for ``game``."""
     return Decider(game).decide(state)
+
+
+#: Words too common to mean anything when matching freeform intent.
+_FREEFORM_STOPWORDS = frozenset(
+    "a an the to do it i me my you your we they them this that these those "
+    "is are was were be been and or but if then so at on in of for with as "
+    "please just now here there what how".split()
+)
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _freeform_tokens(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.lower())
+            if w not in _FREEFORM_STOPWORDS and len(w) > 1}
+
+
+def _element_action_kind(el: Any) -> str:
+    return "submit" if getattr(el, "kind", "") == "form" else "click"
+
+
+def interpret_freeform(
+    text: str,
+    game: str,
+    state: GameState,
+    *,
+    suggest: Callable[[str], str] | None = None,
+) -> Move | None:
+    """Map "do anything" input ("bribe the guard", "sneak around back")
+    onto a real :class:`Move`.
+
+    1. Keyword/intent matching: the text is tokenized and scored against
+       every interactive element's label; a strong match becomes a
+       click/submit on that element.
+    2. With ``suggest`` (an LLM ``(prompt) -> text`` bridge): the model
+       picks the closest option from the game's numbered move list, and
+       the pick is validated back against the real elements.
+    3. Otherwise a generic ``freeform`` Move carrying the raw text, so the
+       game itself can interpret it ("sneak around back" has no button).
+
+    Never returns an illegal move: click/submit targets must be real
+    element ids from ``state``. Freeform intent is explicit player
+    instruction, so avoid-labeled matches are allowed — but flagged
+    ``irreversible`` so downstream gates can confirm them.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    elements = [el for el in (state.elements or [])
+                if getattr(el, "kind", "") in ("link", "button", "form")]
+    tokens = _freeform_tokens(text)
+
+    def _move_for(el: Any, reason: str, confidence: float) -> Move:
+        risky = _is_avoid(getattr(el, "label", ""))
+        return Move(
+            action=Action(
+                kind=_element_action_kind(el),
+                target=getattr(el, "id", ""),
+                label=getattr(el, "label", ""),
+            ),
+            reason=reason,
+            irreversible=risky,
+            confidence=max(0.0, min(1.0, confidence)),
+        )
+
+    # 1. keyword/intent matching against the live move list
+    if tokens and elements:
+        scored: list[tuple[float, Any]] = []
+        for el in elements:
+            label_tokens = _freeform_tokens(getattr(el, "label", ""))
+            if not label_tokens:
+                continue
+            overlap = len(tokens & label_tokens)
+            # score by coverage of the *label*: "bribe the guard" fully
+            # covering a "Bribe guard" button is a strong match even with
+            # extra words in the intent.
+            score = overlap / len(label_tokens)
+            scored.append((score, el))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        if scored and scored[0][0] >= 0.5:
+            best_score, best_el = scored[0]
+            return _move_for(
+                best_el,
+                f"freeform {text!r} → {best_el.label!r}",
+                0.5 + 0.4 * best_score,
+            )
+
+    # 2. LLM pick from the numbered move list, validated back to elements
+    if suggest is not None and elements:
+        menu = "\n".join(
+            f"{i + 1}. {el.label}" for i, el in enumerate(elements[:20])
+        )
+        try:
+            reply = (suggest(
+                f"The player typed a freeform command in the game "
+                f"'{game}': {text!r}\n"
+                f"Which numbered option below matches their intent best?\n"
+                f"{menu}\n"
+                f"Reply with ONLY the number (1-{min(20, len(elements))}), "
+                f"or 0 if none matches."
+            ) or "").strip()
+        except Exception:  # noqa: BLE001 - model failure → freeform fallback
+            _log.debug("interpret_freeform model call failed", exc_info=True)
+            reply = ""
+        match = re.fullmatch(r"\s*(\d+)\s*\.?", reply or "")
+        if match:
+            idx = int(match.group(1)) - 1
+            if 0 <= idx < min(20, len(elements)):
+                el = elements[idx]
+                return _move_for(
+                    el,
+                    f"freeform {text!r} → {el.label!r} (model)",
+                    0.6,
+                )
+
+    # 3. generic fallback: the game handles the raw intent itself
+    return Move(
+        action=Action(kind="freeform", target="", label=text,
+                      payload={"text": text}),
+        reason=f"freeform intent: {text!r}",
+        irreversible=False,
+        confidence=0.4,
+    )

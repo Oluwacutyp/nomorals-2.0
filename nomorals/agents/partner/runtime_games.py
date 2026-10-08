@@ -1121,6 +1121,107 @@ class RuntimeGamesMixin:
             _log.exception("game move failed")
             return None
 
+    # ── NPCs & the game master ─────────────────────────────────────────────
+    def _npc_gamemaster(self) -> Any:
+        """A GameMaster wired to the games NPC store and the game LLM
+        bridge (None when no model is connected — the template forge
+        keeps everything playable offline)."""
+        from ...games.gamemaster import GameMaster
+        from ...games.npc import NPCStore
+        return GameMaster(NPCStore(), suggest=self._game_suggest())
+
+    def _npc_game_id(self, chat_key: str) -> tuple[str | None, str]:
+        """(game_id, error). The NPC cast belongs to the live game in
+        this chat — no live game, no cast to talk to."""
+        engine = self._game_engine()
+        live = engine.live(chat_key)
+        if live is None:
+            return None, ("no live game in this chat — start one with "
+                          "/game <name>, then meet its cast.")
+        return live.game, ""
+
+    def _control_npc(self, tail: str, chat_key: str) -> str:
+        """NPC cast commands: /npc list | talk <name> <msg> | mood <name>."""
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        game_id, err = self._npc_game_id(chat_key)
+        if game_id is None:
+            return err
+        gm = self._npc_gamemaster()
+        cast = gm.ensure_cast(game_id)
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if verb in ("list", ""):
+            lines = [f"🎭 cast of {game_id}:"]
+            for npc in cast:
+                lines.append(
+                    f"  • {npc.name} — {npc.mood_word()} "
+                    f"({npc.voice_style or 'natural voice'})")
+            lines.append("  /npc talk <name> <message> — speak to one of them")
+            return "\n".join(lines)
+
+        if verb == "mood":
+            name = rest.strip()
+            if not name:
+                return "usage: /npc mood <name>"
+            npc = gm.store.find_by_name(game_id, name)
+            if npc is None:
+                return f"no NPC named {name!r} in {game_id}."
+            m = npc.mood
+            traits = ", ".join(f"{k}={v:.2f}"
+                               for k, v in sorted(npc.personality.items()))
+            return (f"🎭 {npc.name} — feeling {npc.mood_word()}\n"
+                    f"   mood: valence {m['valence']:+.2f} · "
+                    f"arousal {m['arousal']:.2f} · trust {m['trust']:.2f}\n"
+                    f"   traits: {traits or '—'}\n"
+                    f"   wants: {'; '.join(npc.goals) or '—'}\n"
+                    f"   memories kept: {len(npc.memory)}")
+
+        if verb == "talk":
+            bits = rest.split(None, 1)
+            if len(bits) < 2:
+                return "usage: /npc talk <name> <message>"
+            name, message = bits
+            npc = gm.store.find_by_name(game_id, name)
+            if npc is None:
+                return f"no NPC named {name!r} in {game_id}."
+            reply = gm.npc_speak(npc, message)
+            # the exchange becomes a memory (low salience — chatter)
+            npc.remember(f"Talked with the player: {message[:120]}",
+                         salience=0.3)
+            npc.react(message, {"arousal": 0.05})
+            gm.store.save(npc)
+            return f"🎭 {npc.name}: {reply}"
+
+        return ("usage: /npc list · /npc talk <name> <message> · "
+                "/npc mood <name>")
+
+    def _control_dm(self, tail: str, chat_key: str) -> str:
+        """DM persona: /dm mood [mood] — inspect or set the narrator mood."""
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "games"):
+            return "games are off. /features games on"
+        game_id, err = self._npc_game_id(chat_key)
+        if game_id is None:
+            return err
+        from ...games.gamemaster import DM_MOODS
+        gm = self._npc_gamemaster()
+        mood = (tail or "").strip().lower()
+        if not mood:
+            cur = gm.get_dm_mood(game_id)
+            return (f"🎲 DM mood for {game_id}: {cur}\n"
+                    f"   /dm mood <{'|'.join(DM_MOODS)}> — set it")
+        try:
+            gm.set_dm_mood(game_id, mood)
+        except ValueError as exc:
+            return str(exc)
+        # show off the new voice immediately
+        sample = gm.narrate(game_id, "the mood in the room shifts")
+        return f"🎲 DM mood for {game_id}: {mood}\n{sample}"
+
     # ── games ────────────────────────────────────────────────────────────────
     def _game_engine(self) -> Any:
         """The multi-player GameEngine — ONE instance serves every platform

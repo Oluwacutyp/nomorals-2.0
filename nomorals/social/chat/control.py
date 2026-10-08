@@ -144,6 +144,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "identity": (0, 3),      # /identity [show|set <field> <value>|clear] — the profile bank for signups
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
+    "npc": (0, None),        # /npc list | talk <name> <msg> | mood <name> — the living cast
+    "dm": (0, 2),            # /dm mood [mood] — the narrator's persona
     # wave 87: direct game-start commands — games are social, so they work in
     # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
     # natural language never launches a game there. ("arena" stays the
@@ -344,6 +346,10 @@ _HELP_TEXT = "\n".join(
         "  /inventory | /equip <gear> | /unequip [slot] | /repair <gear>",
         "   arena gear — persistent swords & armor with durability, grades, sets",
         "  /level                                   XP, level, arena stat growth",
+        "  /npc list | /npc talk <name> <msg> | /npc mood <name>",
+        "   the living cast — NPCs with memory, mood, and boundaries",
+        "  /dm mood [grim|whimsical|epic|deadpan|neutral]",
+        "   the narrator's persona for this game",
         "  /news [run|status]                      fetch + summarize the feeds",
         "  /research [run [domain]|status]         lifestyle | tech | cyber",
         "  /code <what to build>                   the coding bot (draft→run→fix)",
@@ -659,6 +665,19 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "example": "/game trivia  ·  /game mafia (group)  ·  "
                         "/game leaderboard",
              "related": ""},
+    "npc": {"what": "the living cast — NPCs with personality, memory, mood "
+                    "and knowledge boundaries, per game. They remember your "
+                    "conversations and react to what happens.",
+            "usage": "/npc list · /npc talk <name> <message> · "
+                     "/npc mood <name>",
+            "example": "/npc list  ·  /npc talk Marlowe \"any advice?\"",
+            "related": "/dm · /game"},
+    "dm": {"what": "the game master's persona — the narrator's mood for "
+                   "the current game. Grim, whimsical, epic, deadpan or "
+                   "neutral; it shapes how scenes are described.",
+           "usage": "/dm mood [grim|whimsical|epic|deadpan|neutral]",
+           "example": "/dm mood grim",
+           "related": "/npc · /game"},
     "inventory": {"what": "your persistent equipment & consumables — arena "
                           "gear bought from /game shop. Swords and armor "
                           "never vanish: they wear with use, break at 0 "
@@ -1129,7 +1148,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram"]),
+      "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
@@ -1340,7 +1359,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "2048", "snake", "connect4", "battleship",
       "blackjack", "roulette", "slots", "miniapp",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
-      "sudoku", "anagram", "cryptogram"]),
+      "sudoku", "anagram", "cryptogram", "npc", "dm"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("tools & automation",

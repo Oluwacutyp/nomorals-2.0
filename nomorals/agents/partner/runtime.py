@@ -1561,6 +1561,12 @@ class PartnerRuntime(
             return self._control_game(
                 command.tail or arg, chat_key=chat_key,
                 player=self._game_player_for_key(chat_key), kind="dm")
+        if kind == "npc":
+            # the living cast — game-scoped via the live room in this chat
+            return self._control_npc(command.tail or arg, chat_key=chat_key)
+        if kind == "dm":
+            # the narrator's persona for the current game
+            return self._control_dm(command.tail or arg, chat_key=chat_key)
         # ── arena gear: persistent equipment ─────────────────────────────────
         if kind in ("inventory", "equip", "unequip", "repair"):
             return self._control_gear(

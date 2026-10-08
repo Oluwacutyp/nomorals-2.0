@@ -127,6 +127,18 @@ class Executor:
             _log.warning("SAFETY BLOCKED move %r: %s", move.action.label, blocked)
             raise SafetyBlocked(blocked)
 
+        if move.action.kind == "freeform":
+            # interpret_freeform's escape hatch: the raw player intent is in
+            # the payload for the GAME to handle. The browser driver has no
+            # element to act on, so this stops here — loudly, not silently.
+            reason = ("freeform intent needs game-level handling "
+                      f"({move.action.payload.get('text', '')!r}); "
+                      "no page element to act on")
+            result = ExecutionResult(ok=False, move=move,
+                                     blocked_reason=reason)
+            self.log.append(result)
+            raise SafetyBlocked(reason)
+
         if move.irreversible and not self._confirmed(move, state):
             result = ExecutionResult(
                 ok=False,
