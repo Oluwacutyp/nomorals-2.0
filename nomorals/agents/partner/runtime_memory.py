@@ -728,3 +728,82 @@ class RuntimeMemoryMixin:
             return f"no store '{parts[0]}'. Use /store list."
         result = mgr.manage(store, parts[1])
         return result.get("message", str(result))
+
+    def _control_mandate(self, tail: str, *, chat_key: str = "") -> str:
+        """Payment mandates — the agent's standing authority to move money.
+
+        Owner-only.
+
+        /mandate issue <scope> <per-txn-₦> [per-day-₦] [days-valid]
+        /mandate list
+        /mandate revoke <id>
+        /mandate stop all
+        """
+        from ...finance.ledger import format_naira, parse_amount
+        from ...finance.mandate import MandateError, MandateStore
+        store = getattr(self, "_mandate_store", None)
+        if store is None:
+            store = MandateStore()
+            self._mandate_store = store
+        rest = (tail or "").strip()
+        if not rest:
+            return ("usage: /mandate issue <scope> <per-txn-₦> [per-day-₦] "
+                    "[days-valid] — e.g. /mandate issue transfer 50000 200000 30\n"
+                    "       /mandate list | /mandate revoke <id> | "
+                    "/mandate stop all")
+        low = rest.lower()
+        if low == "list":
+            mandates = store.list("owner")
+            if not mandates:
+                return ("no mandates — money cannot move until you issue one:\n"
+                        "/mandate issue transfer <per-txn-₦> [per-day-₦] [days]")
+            lines = ["💳 payment mandates:"]
+            for m in mandates:
+                state = "revoked" if m.revoked else (
+                    "expired" if m.expired else "active")
+                lines.append(
+                    f"• {m.id} [{m.scope}] {state} — "
+                    f"{format_naira(m.cap_per_txn)}/txn, "
+                    f"{format_naira(m.cap_per_day)}/day")
+            return "\n".join(lines)
+        if low == "stop all":
+            n = store.revoke_all("owner")
+            return (f"🛑 revoked {n} mandate(s) — all agent spending is "
+                    f"stopped until you issue a new mandate.")
+        if low.startswith("revoke "):
+            mid = rest[len("revoke "):].strip()
+            try:
+                if store.revoke(mid):
+                    return f"mandate {mid} revoked — effective immediately."
+                return f"no mandate '{mid}'. Use /mandate list."
+            except MandateError as exc:
+                return f"cannot revoke: {exc}"
+        if low.startswith("issue "):
+            parts = rest[len("issue "):].split()
+            if len(parts) < 2:
+                return ("usage: /mandate issue <scope> <per-txn-₦> "
+                        "[per-day-₦] [days-valid]")
+            scope = parts[0].lower()
+            per_txn = parse_amount(parts[1])
+            per_day = parse_amount(parts[2]) if len(parts) > 2 else None
+            try:
+                days = float(parts[3]) if len(parts) > 3 else 30.0
+            except ValueError:
+                return f"bad days value: {parts[3]!r}"
+            if per_txn is None or per_txn <= 0:
+                return f"bad per-transaction cap: {parts[1]!r}"
+            if per_day is None:
+                per_day = per_txn * 4  # sensible default: 4× per-txn
+            try:
+                m = store.issue(principal="owner", scope=scope,
+                                cap_per_txn=per_txn, cap_per_day=per_day,
+                                ttl_days=days)
+            except MandateError as exc:
+                return f"cannot issue: {exc}"
+            return (f"✅ mandate {m.id} issued: {m.scope} scope, "
+                    f"{format_naira(m.cap_per_txn)}/txn, "
+                    f"{format_naira(m.cap_per_day)}/day, "
+                    f"valid {days:g} days.")
+        return ("usage: /mandate issue <scope> <per-txn-₦> [per-day-₦] "
+                "[days-valid] | /mandate list | /mandate revoke <id> | "
+                "/mandate stop all")

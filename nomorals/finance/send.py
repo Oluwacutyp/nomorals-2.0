@@ -21,6 +21,12 @@ from ..voice.money import TransferStaging, parse_amount as _voice_parse_amount
 from .budgets import finance_paths
 from .guard import Warning, check_outgoing
 from .ledger import Ledger, format_naira, parse_amount
+from .mandate import (
+    SCOPE_TRANSFER,
+    MandateError,
+    MandateStore,
+    require_mandate,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -148,6 +154,8 @@ def send_money(
     ledger: Ledger | None = None,
     recipients: RecipientStore | None = None,
     override_warning: bool = False,
+    mandate_store: MandateStore | None = None,
+    principal: str = "owner",
 ) -> dict[str, Any]:
     """Stage an outgoing transfer. Returns a result dict (never raises).
 
@@ -169,11 +177,20 @@ def send_money(
     if kobo is None or kobo <= 0:
         return {"ok": False, "error": f"couldn't parse amount {amount!r}"}
 
-    # 2. recipient — asked about, never guessed
+    # 2. recipient — asked about, never guessed (no mandate needed to ask)
     resolved = resolve_recipient(to, recipients)
     if not resolved["ok"]:
         return resolved
     recipient = resolved["recipient"]
+
+    # 2b. mandate — fail fast before staging (#69: structural, not advisory)
+    try:
+        require_mandate(mandate_store, principal, SCOPE_TRANSFER, kobo,
+                        ledger=ledger)
+    except MandateError as exc:
+        _audit(ledger, kobo, recipient["name"], "mandate_blocked",
+               note=str(exc)[:120])
+        return {"ok": False, "error": f"mandate blocked: {exc}"}
 
     # 3. guard — advisory, not blocking
     warning: Warning | None = None
@@ -209,11 +226,15 @@ def confirm_send(
     ledger: Ledger | None = None,
     paystack: Any = None,
     recipients: RecipientStore | None = None,
+    mandate_store: MandateStore | None = None,
+    principal: str = "owner",
 ) -> dict[str, Any]:
     """Execute a staged transfer after biometric approval.
 
     Requires the capability-bound token from policy.approve_with_biometric().
     No token → no movement, no exceptions-as-control-flow: a clear error.
+    The active payment mandate (#69) is re-checked here — authority is
+    validated at movement time, not just at staging.
     """
     settings = getattr(context, "settings", None)
     ledger = ledger or Ledger(finance_paths(settings)[0])
@@ -230,6 +251,17 @@ def confirm_send(
     staging.mark(staged_id, "biometric_confirmed", biometric_token=biometric_token)
     rec.status = "biometric_confirmed"
     rec.biometric_token = biometric_token
+
+    # Mandate gate — structural (#69). Fresh check at movement time: the
+    # mandate may have been revoked or the daily cap hit since staging.
+    try:
+        require_mandate(mandate_store, principal, SCOPE_TRANSFER,
+                        rec.amount_kobo, ledger=ledger)
+    except MandateError as exc:
+        _audit(ledger, rec.amount_kobo, rec.recipient, "mandate_blocked",
+               note=str(exc)[:120])
+        return {"ok": False,
+                "error": f"mandate blocked: {exc} — money did not move"}
 
     # Execute through the connector. Paystack Transfer API is the real path;
     # anything else fails closed — never fake success.

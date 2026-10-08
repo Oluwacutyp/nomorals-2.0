@@ -135,7 +135,8 @@ def register(registry: Any) -> None:
         description=(
             "Send money as a chat primitive ('send 5k to Mama'). Args: to "
             "(recipient name), amount (e.g. '5k'), note (optional). Flow: "
-            "resolves recipient (asks when unknown, never guesses) → guard "
+            "resolves recipient (asks when unknown, never guesses) → "
+            "mandate check (active payment mandate required, #69) → guard "
             "check (warns on anomalies, advisory only) → stages → returns "
             "a biometric prompt. Money moves ONLY via finance_confirm_send "
             "with a biometric token. override_warning=True executes after "
@@ -162,7 +163,9 @@ def register(registry: Any) -> None:
         description=(
             "Execute a staged transfer after biometric approval. Args: "
             "staged_id (from finance_send), biometric_token (capability-bound "
-            "token from policy.approve_with_biometric — no token, no movement)."
+            "token from policy.approve_with_biometric — no token, no movement). "
+            "The active payment mandate (#69) is re-checked here: no mandate, "
+            "expired/revoked, or over cap → money does not move."
         ),
         capability="finance",
         parameters={

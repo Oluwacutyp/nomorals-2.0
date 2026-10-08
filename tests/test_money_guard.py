@@ -33,6 +33,17 @@ def recipients(tmp_path):
     return store
 
 
+@pytest.fixture()
+def mandates(tmp_path):
+    """Generous test mandate — #69 requires one for any money movement."""
+    from nomorals.finance.mandate import MandateStore
+    store = MandateStore(tmp_path / "mandates.json")
+    store.issue(principal="owner", scope="transfer",
+                cap_per_txn=100_000_000_000, cap_per_day=1_000_000_000_000,
+                ttl_days=30)
+    return store
+
+
 def _seed_history(ledger, n=5, amount_kobo=500_000, to="Mama"):
     """5 × ₦5,000 transfers to Mama — a normal baseline."""
     base = time.time() - 86400 * 10
@@ -131,48 +142,55 @@ def test_unknown_recipient_asks(ledger, recipients, tmp_path):
     assert "account number" in result["ask"].lower()
 
 
-def test_known_recipient_stages_for_biometric(ledger, recipients, tmp_path):
+def test_known_recipient_stages_for_biometric(ledger, recipients, tmp_path, mandates):
     _seed_history(ledger)
-    result = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    result = send_money("Mama", "5k", ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert result["needs"] == "biometric"
     assert "fingerprint" in result["prompt"].lower()
     assert result["staged_id"]
 
 
-def test_warning_blocks_until_override(ledger, recipients):
+def test_warning_blocks_until_override(ledger, recipients, mandates):
     _seed_history(ledger)
-    result = send_money("Mama", 5_000_000, ledger=ledger, recipients=recipients)
+    result = send_money("Mama", 5_000_000, ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert result["ok"] is False
     assert "warning" in result
     assert result["warning"]["message"].startswith("⚠️")
     # Explicit override → proceeds to biometric staging
     result2 = send_money("Mama", 5_000_000, ledger=ledger,
-                         recipients=recipients, override_warning=True)
+                         recipients=recipients, override_warning=True,
+                         mandate_store=mandates)
     assert result2["needs"] == "biometric"
 
 
-def test_confirm_send_requires_biometric_token(ledger, recipients):
+def test_confirm_send_requires_biometric_token(ledger, recipients, mandates):
     _seed_history(ledger)
-    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert staged.get("needs") == "biometric"
     result = confirm_send(staged["staged_id"], None, ledger=ledger)
     assert result["ok"] is False
     assert "biometric" in result["error"].lower()
 
 
-def test_confirm_send_fails_closed_without_connector(ledger, recipients):
+def test_confirm_send_fails_closed_without_connector(ledger, recipients, mandates):
     _seed_history(ledger)
-    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert staged.get("needs") == "biometric"
     result = confirm_send(staged["staged_id"], "tok_test", ledger=ledger,
+                          mandate_store=mandates,
                           paystack=None)
     assert result["ok"] is False
     assert "did not move" in result["error"]
 
 
-def test_confirm_send_executes_via_paystack(ledger, recipients):
+def test_confirm_send_executes_via_paystack(ledger, recipients, mandates):
     _seed_history(ledger)
-    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert staged.get("needs") == "biometric"
 
     class FakePaystack:
@@ -188,6 +206,7 @@ def test_confirm_send_executes_via_paystack(ledger, recipients):
             return {"status": "success", "reference": "TRF_test123"}
 
     result = confirm_send(staged["staged_id"], "tok_test", ledger=ledger,
+                          mandate_store=mandates,
                           paystack=FakePaystack(), recipients=recipients)
     assert result["ok"] is True
     assert result["reference"] == "TRF_test123"
@@ -196,9 +215,10 @@ def test_confirm_send_executes_via_paystack(ledger, recipients):
     assert any(t.note == "transfer to Mama" for t in txns)
 
 
-def test_confirm_send_otp_flow(ledger, recipients):
+def test_confirm_send_otp_flow(ledger, recipients, mandates):
     _seed_history(ledger)
-    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients)
+    staged = send_money("Mama", "5k", ledger=ledger, recipients=recipients,
+                        mandate_store=mandates)
     assert staged.get("needs") == "biometric"
 
     class FakePaystack:
@@ -215,6 +235,7 @@ def test_confirm_send_otp_flow(ledger, recipients):
             return {"status": "success", "reference": "ref_otp1"}
 
     result = confirm_send(staged["staged_id"], "tok_test", ledger=ledger,
+                          mandate_store=mandates,
                           paystack=FakePaystack(), recipients=recipients)
     assert result["ok"] is False
     assert result["needs"] == "otp"
@@ -225,9 +246,10 @@ def test_confirm_send_otp_flow(ledger, recipients):
     assert done["reference"] == "ref_otp1"
 
 
-def test_audit_trail_logged(ledger, recipients):
+def test_audit_trail_logged(ledger, recipients, mandates):
     _seed_history(ledger)
-    send_money("Mama", 5_000_000, ledger=ledger, recipients=recipients)
+    send_money("Mama", 5_000_000, ledger=ledger, recipients=recipients,
+             mandate_store=mandates)
     audits = ledger.transactions(category="transfer_audit")
     assert any("warning_shown" in t.note for t in audits)
 

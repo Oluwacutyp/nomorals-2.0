@@ -208,6 +208,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
+    "mandate": (0, None),     # /mandate issue <scope> <per-txn> [per-day] [days] | list | revoke <id> | stop all
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -912,6 +913,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/store provision <business> | /store woo <business> <url> | /store list | /store catalog <id> <desc> | /store <id> <instruction>",
               "example": "/store provision SuyaSpot",
               "related": "/routine"},
+    "mandate": {"what": "payment mandates — the agent's standing authority to move money (scope, per-transaction and daily caps, expiry). Every money-moving dispatch checks the active mandate.",
+              "usage": "/mandate issue <scope> <per-txn-₦> [per-day-₦] [days-valid] | /mandate list | /mandate revoke <id> | /mandate stop all",
+              "example": "/mandate issue transfer 50000 200000 30",
+              "related": "/spend"},
     "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
@@ -1229,7 +1234,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health"]),
-    ("money & spending", ["spend", "budget", "spending"]),
+    ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1563,6 +1568,7 @@ LIST_ONELINERS: dict[str, str] = {
     "spend": "money & spending",
     "budget": "money & spending",
     "spending": "money & spending",
+    "mandate": "money & spending",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

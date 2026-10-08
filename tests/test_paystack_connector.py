@@ -96,6 +96,17 @@ def _connected(
     return conn, http
 
 
+def _mandates() -> "MandateStore":
+    """Generous test mandate — #69 requires one for any transfer."""
+    from nomorals.finance.mandate import MandateStore
+    import tempfile, os
+    tmp = tempfile.mkdtemp()
+    store = MandateStore(os.path.join(tmp, "mandates.json"))
+    store.issue(principal="owner", scope="transfer",
+                cap_per_txn=10**14, cap_per_day=10**15, ttl_days=30)
+    return store
+
+
 class RegistryTests(unittest.TestCase):
     def test_registered(self) -> None:
         self.assertIs(get_connector("paystack"), PaystackConnector)
@@ -359,7 +370,8 @@ class ChargeTests(unittest.TestCase):
                        "data": {"reference": "ch_2"},
                    }))
         store.resolve(cp_id, note="approved")
-        result = conn.resume_checkpoint(store.get(cp_id), db=db)
+        result = conn.resume_checkpoint(store.get(cp_id), db=db,
+                                        mandate_store=_mandates())
         self.assertEqual(result["reference"], "ch_2")
 
     def test_resume_unresolved_checkpoint_raises(self) -> None:
@@ -455,7 +467,8 @@ class TransferTests(unittest.TestCase):
                      "transfer_code": "TRF_1"},
         }))
         result = conn.initiate_transfer(250_000, "RCP_abc", reason="test",
-                                        confirmed=True)
+                                        confirmed=True,
+                                        mandate_store=_mandates())
         self.assertEqual(result["reference"], "TRF_1")
         _m, url, payload, _h = http.calls[-1]
         self.assertIn("/transfer", url)
@@ -480,6 +493,7 @@ class TransferTests(unittest.TestCase):
         result = conn.initiate_transfer(
             10_000_000, "RCP_abc", confirmed=True,
             biometric_token="tok_biometric",
+            mandate_store=_mandates(),
         )
         self.assertEqual(result["reference"], "TRF_big")
 
@@ -517,7 +531,8 @@ class TransferTests(unittest.TestCase):
             "data": {"reference": "TRF_2", "status": "pending"},
         }))
         store.resolve(cp_id, note="approved")
-        result = conn.resume_checkpoint(store.get(cp_id), db=db)
+        result = conn.resume_checkpoint(store.get(cp_id), db=db,
+                                        mandate_store=_mandates())
         self.assertEqual(result["reference"], "TRF_2")
 
 

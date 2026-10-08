@@ -34,6 +34,12 @@ import time
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..finance.mandate import (
+    SCOPE_TRANSFER,
+    MandateError,
+    MandateStore,
+    require_mandate,
+)
 from ._confirm import confirm_or_checkpoint
 from .auth import prompt_secret
 from .base import (
@@ -186,6 +192,8 @@ class PaystackConnector(Connector):
         *,
         db: Any,
         context: Any = None,
+        mandate_store: Any = None,
+        principal: str = "owner",
     ) -> dict[str, Any]:
         """Complete a confirmed charge/transfer after the owner resolved it."""
         if checkpoint.state != CheckpointState.RESOLVED:
@@ -212,6 +220,13 @@ class PaystackConnector(Connector):
                     "the resolved checkpoint has no transfer payload — "
                     "it cannot transfer"
                 )
+            # Mandate re-check (#69): authority is validated at movement
+            # time, not just when the checkpoint was created.
+            try:
+                require_mandate(mandate_store, principal, SCOPE_TRANSFER,
+                                int(payload["amount_kobo"]))
+            except MandateError as exc:
+                raise ConnectorError(f"mandate blocked: {exc}") from exc
             return self._transfer_now(payload)
         raise ConnectorError(
             f"paystack cannot resume checkpoint stage {stage!r}"
@@ -505,6 +520,8 @@ class PaystackConnector(Connector):
         db: Any = None,
         context: Any = None,
         biometric_token: str | None = None,
+        mandate_store: Any = None,
+        principal: str = "owner",
     ) -> dict[str, Any]:
         """Send money to a recipient (``POST /transfer``).
 
@@ -519,6 +536,11 @@ class PaystackConnector(Connector):
         ``policy.approve_with_biometric()``. The connector does not mint
         or consume tokens; the caller (e.g. ``finance.send.confirm_send``)
         owns the biometric flow.
+
+        Payment mandate (#69): the agent's standing authority is checked
+        in this dispatch path — no active mandate (or expired/revoked/over
+        cap) → ``MandateError``, money does not move. This is structural,
+        not advisory.
 
         The returned ``data["status"]`` may be ``"otp"`` — Paystack is
         asking for an OTP before releasing the money. Complete it with
@@ -539,6 +561,10 @@ class PaystackConnector(Connector):
                 "policy.approve_with_biometric() and pass it as "
                 "biometric_token"
             )
+        # Mandate gate (#69) — agent authority, checked in the dispatch path.
+        # Structural: no mandate → no movement. Ordered after the
+        # per-transaction confirmation so "owner didn't approve this" still
+        # surfaces first; the resume path re-checks below.
         payload: dict[str, Any] = {
             "amount_kobo": amount_kobo,
             "recipient_code": recipient_code,
@@ -562,6 +588,11 @@ class PaystackConnector(Connector):
             ]),
             resume_state={"payload": payload},
         )
+        try:
+            require_mandate(mandate_store, principal, SCOPE_TRANSFER,
+                            amount_kobo)
+        except MandateError as exc:
+            raise ConnectorError(f"mandate blocked: {exc}") from exc
         return self._transfer_now(payload)
 
     def _transfer_now(self, payload: dict[str, Any]) -> dict[str, Any]:
