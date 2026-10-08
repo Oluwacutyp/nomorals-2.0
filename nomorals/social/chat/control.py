@@ -243,6 +243,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 68: command discovery
     "list": (0, 1),          # /list [group] — every executable command, categorized
     "commands": (0, 1),      # alias of /list
+    # redteam: defensive self-attack suite
+    "redteam": (0, 1),       # /redteam [scenario_id] — attack our own loop, report holes
     "menu": (0, 1),          # alias of /list
     # wave 72 systems: media, execution, archives, builders
     "music": (0, None),      # /music <topic> [style] | styles | song [slug]
@@ -398,6 +400,7 @@ _HELP_TEXT = "\n".join(
         "  /think <question>                       step-by-step answer with the full trace",
         "  /think <question> <strategy>            strategy: cot|decompose|hypothesize|critique|tree|auto",
         "  /benchmark [dimension]                  how sharp the system is right now (0-1)",
+        "  /redteam [scenario]                   attack my own loop (sandboxed) and report holes",
         "  — media system (music · playback · video) —",
         "  /music <topic> [style]                  compose a real song (lyrics + MIDI)",
         "  /music styles | /music song [slug]      browse styles / re-fetch a saved song",
@@ -558,6 +561,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "searchhist": {"what": "your recent research runs.",
                    "usage": "/searchhist [n]", "example": "/searchhist 5",
                    "related": "/search"},
+    "redteam": {"what": "defensive self-attack: runs attack scenarios against a sandboxed copy of my own agent loop and reports the holes it finds. Never touches external systems.",
+                "usage": "/redteam [scenario_id]", "example": "/redteam",
+                "related": "/benchmark"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1093,7 +1099,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "think",
-                           "benchmark"]),
+                           "benchmark", "redteam"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1304,7 +1310,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
-     ["remember", "recall", "forget", "think", "benchmark"]),
+     ["remember", "recall", "forget", "think", "benchmark", "redteam"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1419,6 +1425,7 @@ LIST_ONELINERS: dict[str, str] = {
     "forget": "delete a memory",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
+    "redteam": "attack my own loop in a sandbox and report the holes",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",

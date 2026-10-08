@@ -1450,6 +1450,11 @@ class PartnerRuntime(
             return self._control_search_leads()
         if kind == "searchhist":
             return self._control_search_hist(arg)
+        if kind == "redteam":
+            # Defensive self-attack suite: sandboxed, never touches externals.
+            from ..redteam import control_redteam
+
+            return control_redteam(command.tail or arg, context=self.context)
         if kind == "book":
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
         if kind in {"wisdom", "wis"}:
