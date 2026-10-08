@@ -783,12 +783,15 @@ class PartnerRuntime(
                                                 message=message)
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("control command failed: %s", exc)
-                    import traceback as _tb
-                    _frames = _tb.extract_tb(exc.__traceback__)
-                    _loc = (f"{_frames[-1].filename.split('/')[-1]}:"
-                            f"{_frames[-1].lineno}" if _frames else "?")
-                    reply = (f"/{command.kind} blew up on my end: {exc} "
-                             f"[{_loc}] — "
+                    try:
+                        from ...core.error_doctor import diagnose as _diagnose
+                        _diag = _diagnose(exc, context={"command": f"/{command.kind}"})
+                        _log.info("error diagnosis for /%s: %s",
+                                  command.kind, _diag["summary"])
+                        _why = _diag["summary"]
+                    except Exception:  # noqa: BLE001 - diagnosis never breaks the reply
+                        _why = f"{type(exc).__name__}: {exc}"
+                    reply = (f"/{command.kind} blew up on my end: {_why} — "
                              f"/help {command.kind} shows the right usage")
                 if reply:
                     try:
@@ -1818,6 +1821,10 @@ class PartnerRuntime(
             # /help <command> for one command's full page, /help budget
             # etc. for topic pages.
             return detailed_help(arg or command.tail)
+
+        if kind == "tour":
+            # smoke-test every command with safe read-only probes.
+            return self._control_tour(command.tail or arg, chat_key=chat_key)
 
         if kind == "profile":
             # wave 86: the profile-aware runtime, in chat (owner-only —

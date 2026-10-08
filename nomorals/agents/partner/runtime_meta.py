@@ -529,3 +529,168 @@ class RuntimeMetaMixin:
                 return f"clear failed: {exc}"
 
         return "usage: /identity [show|set <field> <value>|clear]"
+
+    #: Commands the tour never probes — destructive, state-changing, slow,
+    #: or money-moving. The tour is read-only; these stay untouched.
+    _TOUR_DENYLIST = frozenset({
+        # code execution
+        "exec",
+        # outbound messaging
+        "send", "dm", "email",
+        # destructive / state-changing
+        "quit", "upgrade", "train", "repair", "trial",
+        # starts background work
+        "mission", "schedule", "routine", "monitor", "watch", "track",
+        # state toggles / autonomous loops
+        "proactive", "model", "features", "arena",
+        # money
+        "money", "shop", "bet", "spend",
+        # slow (attack suites, benchmarks, media generation)
+        "redteam", "benchmark", "vnote", "audio", "video", "music",
+        # no recursion
+        "tour",
+    })
+
+    _TOUR_PROBE_TIMEOUT = 6.0  # seconds per command; slower → skipped
+
+    def _control_tour(self, tail: str, chat_key: str = "") -> str:
+        """Smoke-test every registered command with safe read-only probes.
+
+        /tour — probe all commands, report OK / broken / skipped.
+        /tour <command> — deep-probe one command.
+        """
+        target = (tail or "").strip().lstrip("/").lower().split(None, 1)[0] \
+            if (tail or "").strip() else ""
+        if target:
+            return self._tour_single(target, chat_key)
+        return self._tour_all(chat_key)
+
+    def _tour_probe(self, kind: str, chat_key: str) -> dict:
+        """One safe probe of a command. Never raises. Returns a result dict."""
+        from ...social.chat.control import CONTROL_COMMANDS, detailed_help
+
+        spec = CONTROL_COMMANDS.get(kind)
+        if spec is None:
+            return {"kind": kind, "verdict": "skip", "reason": "not registered"}
+        min_args = spec[0]
+        if min_args > 0:
+            return {"kind": kind, "verdict": "skip",
+                    "reason": f"needs {min_args} arg(s)"}
+        if kind in self._TOUR_DENYLIST:
+            return {"kind": kind, "verdict": "skip", "reason": "denylisted"}
+
+        # Help coverage check — pure read-only.
+        help_ok = True
+        try:
+            h = detailed_help(kind)
+            if not h or "unknown" in h[:60].lower():
+                help_ok = False
+        except Exception:  # noqa: BLE001
+            help_ok = False
+
+        # Dispatch probe — no-arg call in a worker thread with a timeout.
+        # Never raises out of here; timeouts and exceptions are captured.
+        import concurrent.futures as _cf
+        import traceback as _tb
+
+        def _run():
+            return self.handle_control(f"/{kind}", chat_key, message=None)
+
+        reply, error, location = "", "", ""
+        timed_out = False
+        with _cf.ThreadPoolExecutor(max_workers=1,
+                                     thread_name_prefix="tour") as _ex:
+            fut = _ex.submit(_run)
+            try:
+                reply = fut.result(timeout=self._TOUR_PROBE_TIMEOUT)
+            except _cf.TimeoutError:
+                timed_out = True
+                fut.cancel()
+            except Exception as exc:  # noqa: BLE001
+                error = f"{type(exc).__name__}: {exc}"
+                frames = _tb.extract_tb(exc.__traceback__)
+                if frames:
+                    location = (f"{frames[-1].filename.split('/')[-1]}:"
+                                f"{frames[-1].lineno}")
+
+        if timed_out:
+            return {"kind": kind, "verdict": "skip", "reason": "slow (>6s)",
+                    "help_ok": help_ok}
+        if error:
+            return {"kind": kind, "verdict": "broken", "error": error,
+                    "location": location, "help_ok": help_ok}
+        return {"kind": kind, "verdict": "ok",
+                "reply": (reply or "")[:120], "help_ok": help_ok}
+
+    def _tour_all(self, chat_key: str) -> str:
+        """Probe every registered command, return a compact report."""
+        from ...social.chat.control import CONTROL_COMMANDS
+
+        kinds = sorted(k for k in CONTROL_COMMANDS if k != "error")
+        ok, broken, skipped = [], [], []
+        skip_reasons: dict[str, int] = {}
+        for kind in kinds:
+            try:
+                res = self._tour_probe(kind, chat_key)
+            except Exception as exc:  # noqa: BLE001 — the tour never dies
+                res = {"kind": kind, "verdict": "broken",
+                       "error": f"{type(exc).__name__}: {exc}", "location": ""}
+            if res["verdict"] == "ok":
+                ok.append(kind)
+            elif res["verdict"] == "broken":
+                broken.append(res)
+            else:
+                skipped.append(res)
+                r = res.get("reason", "?")
+                skip_reasons[r] = skip_reasons.get(r, 0) + 1
+
+        lines = [f"🧪 tour — {len(kinds)} commands probed",
+                 f"✅ {len(ok)} OK · ❌ {len(broken)} broken · "
+                 f"⏭️ {len(skipped)} skipped"]
+        if broken:
+            lines.append("")
+            lines.append("❌ broken:")
+            for res in broken[:15]:
+                loc = f" [{res['location']}]" if res.get("location") else ""
+                lines.append(f"  /{res['kind']} — {res['error'][:100]}{loc}")
+            if len(broken) > 15:
+                lines.append(f"  …and {len(broken) - 15} more")
+        if skipped:
+            lines.append("")
+            detail = ", ".join(f"{n} {r}" for r, n in
+                               sorted(skip_reasons.items(),
+                                      key=lambda kv: -kv[1]))
+            lines.append(f"⏭️ skipped: {detail}")
+        lines.append("")
+        lines.append("deep-probe one: /tour <command>")
+        return "\n".join(lines)
+
+    def _tour_single(self, kind: str, chat_key: str) -> str:
+        """Deep-probe one command with safe probes."""
+        from ...social.chat.control import CONTROL_COMMANDS
+
+        if kind not in CONTROL_COMMANDS:
+            return (f"no such command: /{kind}\n"
+                    f"/tour (no args) lists everything probed.")
+        try:
+            res = self._tour_probe(kind, chat_key)
+        except Exception as exc:  # noqa: BLE001 — the tour never dies
+            res = {"kind": kind, "verdict": "broken",
+                   "error": f"{type(exc).__name__}: {exc}", "location": ""}
+
+        lines = [f"🧪 /{kind}"]
+        lines.append(f"  📖 help: {'yes' if res.get('help_ok') else 'missing/broken'}")
+        verdict = res["verdict"]
+        if verdict == "ok":
+            reply = res.get("reply", "")
+            lines.append(f"  ⚙️ probe: OK")
+            if reply:
+                lines.append(f"  💬 reply: {reply[:200]}")
+        elif verdict == "broken":
+            loc = f" [{res['location']}]" if res.get("location") else ""
+            lines.append(f"  ⚙️ probe: BROKEN — {res.get('error', '?')[:200]}{loc}")
+        else:
+            lines.append(f"  ⚙️ probe: SKIPPED — {res.get('reason', '?')}")
+        if kind in self._TOUR_DENYLIST:
+            lines.append(f"  🛡️ denylisted: never auto-probed (destructive/slow)")
+        return "\n".join(lines)
