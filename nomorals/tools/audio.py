@@ -452,10 +452,14 @@ def register(registry: Any) -> None:
         base, key = api_base(), api_key()
         if provider == "openai_compat" or (provider == "auto" and base and key):
             _check_net()
+        # Groq doesn't serve OpenAI's whisper-1 — pick the model for
+        # the endpoint (empty = let stt() choose the provider default).
+        stt_model = getattr(audio_settings, "stt_model", "") or ""
+        if not stt_model and "groq.com" in base:
+            stt_model = "whisper-large-v3-turbo"
         return stt(
             target, provider=provider, language=language,
-            base_url=base, api_key=key,
-            model=getattr(audio_settings, "stt_model", "") or "whisper-1",
+            base_url=base, api_key=key, model=stt_model,
         )
 
     @registry.register(
