@@ -75,10 +75,88 @@ class RuntimeMediaMixin:
             text += f"\naudio: {res.audio_path or '(render failed)'}"
         return text
 
+    def _control_music_full(self, tail: str, chat_key: str = "") -> str:
+        """ /music full <topic> [style] [voice_id] — the whole song.
+
+        #57 ACE-Step bed + DiffSinger vocal + RVC voice → mixed master.
+        Honest labeling: "AI-generated instrumental + AI vocals."
+        Fails honestly when a stage can't run — never fake audio.
+        """
+        from ...media.vocals import (
+            RVCVoiceRegistry, VocalModelUnavailable,
+            make_full_song, parse_full_request)
+        from ...media.music import STYLES
+
+        req = parse_full_request(f"/music full {tail}", STYLES)
+        if req is None:
+            return ("usage: /music full <topic> [style] [voice_id]\n"
+                    "e.g. /music full lagos nights afrobeats owner-xtts\n"
+                    "/music voices lists registered voices")
+        # voice_id is the last word if it's a known voice, else default
+        registry = RVCVoiceRegistry()
+        words = req["topic"].split()
+        voice_id = ""
+        if words and words[-1] in registry.all():
+            voice_id = words[-1]
+            req["topic"] = " ".join(words[:-1]).strip() or "untitled"
+        if not voice_id:
+            default = registry.default()
+            if default is None:
+                known = ", ".join(sorted(registry.all())) or "(none)"
+                return ("no voice registered yet — register one first:\n"
+                        "/music voices add <id> <model.pth> <source>\n"
+                        f"known voices: {known}")
+            voice_id = default.voice_id
+        try:
+            res = make_full_song(req["topic"], style=req["style"],
+                                 voice_id=voice_id, audience="private",
+                                 context=self.context)
+        except Exception as exc:  # noqa: BLE001 - both model errors
+            return f"🎵 couldn't make the full song:\n{exc}"
+        text = (f"🎵 “{res.title}” — full song [{voice_id}]\n{res.note}")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None and res.master_path:
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    res.master_path,
+                    caption=f"🎵 {res.title} — AI instrumental + AI vocals")
+                text += "\nsent the master to this chat."
+            except Exception:  # noqa: BLE001
+                text += f"\nmaster: {res.master_path}"
+        else:
+            text += f"\nmaster: {res.master_path or '(render failed)'}"
+        return text
+
+    def _control_music_voices(self, tail: str, chat_key: str = "") -> str:
+        """ /music voices [add <id> <model.pth> <source>] — RVC voices. """
+        from ...media.vocals import RVCVoiceRegistry, VocalModelUnavailable
+        registry = RVCVoiceRegistry()
+        words = (tail or "").split()
+        if words and words[0].lower() == "add":
+            if len(words) < 4:
+                return ("usage: /music voices add <id> <model.pth> "
+                        "<source>\nsource: xtts (private-only) | "
+                        "chatterbox | rvc")
+            try:
+                v = registry.add(words[1], words[2], words[3])
+            except VocalModelUnavailable as exc:
+                return f"couldn't register the voice:\n{exc}"
+            return (f"voice “{v.voice_id}” registered "
+                    f"({v.source}, {v.license})")
+        voices = registry.all()
+        if not voices:
+            return ("no RVC voices registered.\n"
+                    "/music voices add <id> <model.pth> <source>")
+        return ("RVC voices:\n" + "\n".join(
+            f"  {v.voice_id:16s} {v.source:12s} {v.license}"
+            for v in voices.values()))
+
     def _control_music(self, tail: str, chat_key: str = "") -> str:
         """ /music <topic> [style] — composes a real song and sends the
         audio + the score PDF (lead sheet) straight to this chat.
-        /music styles | /music song [slug]."""
+        /music styles | /music song [slug] | /music bed <topic> [style]
+        | /music full <topic> [style] [voice_id] | /music voices."""
         from ...media.music import STYLES, MusicCreator
 
         tail = (tail or "").strip()
@@ -92,6 +170,10 @@ class RuntimeMediaMixin:
                 for k, v in STYLES.items()))
         if words[0].lower() == "bed":
             return self._control_music_bed(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "full":
+            return self._control_music_full(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "voices":
+            return self._control_music_voices(" ".join(words[1:]), chat_key)
         if words[0].lower() == "song":
             from ...media.music import _saved_songs
 

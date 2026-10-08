@@ -265,7 +265,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 1),          # alias of /list
     # wave 72 systems: media, execution, archives, builders
-    "music": (0, None),      # /music <topic> [style] | styles | song [slug]
+    "music": (0, None),      # /music <topic> [style] | styles | song [slug] | bed | full | voices
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
     "video": (0, None),      # /video <query> | download <url> | platforms
     "exec": (0, None),       # /exec <code> | languages — multi-language sandbox
@@ -433,6 +433,8 @@ _HELP_TEXT = "\n".join(
         "  /music <topic> [style]                  compose a real song (lyrics + MIDI)",
         "  /music styles | /music song [slug]      browse styles / re-fetch a saved song",
         "  /music bed <topic> [style]              AI instrumental bed (ACE-Step, needs GPU)",
+        "  /music full <topic> [style] [voice]     full song: bed + AI vocals (DiffSinger→RVC)",
+        "  /music voices [add <id> <pth> <src>]     list / register RVC voices",
         "  /play <paths…>                          queue + play audio (mpv when installed)",
         "  /play status | queue | pause | resume | stop | next | prev",
         "  /play seek <s> | volume <n> | remove <n> | clear",
@@ -1115,7 +1117,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "style-aware lyrics, section structure, chord "
                       "progression, melody description, and a playable .mid "
                       "file (real MIDI, opens in any player).",
-              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]",
+              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]  |  /music full <topic> [style] [voice]  |  /music voices",
               "example": "/music the first rain in lagos lofi",
               "related": "/play (queue the midi or audio) · nm music on the console"},
     "play": {"what": "media player: durable queue + transport for audio. "

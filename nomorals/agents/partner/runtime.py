@@ -826,6 +826,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("money-send reply send failed: %s", exc)
                 return
+        # Build-map #58: "make me a song about X" → full vocal pipeline
+        # (bed + DiffSinger + RVC + master). Owner only, non-slash.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                song_reply = self._music_full_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("music-full hook failed")
+                song_reply = None
+            if song_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, song_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      song_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("music-full reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -1473,6 +1491,47 @@ class PartnerRuntime(
         if result.get("error"):
             return f"couldn't send: {result['error']}"
         return None
+
+    def _music_full_hook(self, message: ChatMessage) -> str | None:
+        """Build-map #58: "make me a song about X" → full vocal pipeline.
+
+        Returns a reply string when a full-song intent fired, else None.
+        Never raises — failures return honest error strings.
+        """
+        from ...media.vocals import (
+            RVCVoiceRegistry, parse_full_request, make_full_song)
+        from ...media.music import STYLES
+        req = parse_full_request(message.text, STYLES)
+        if req is None:
+            return None
+        _log.info("music-full intent: %s [%s]", req["topic"], req["style"])
+        registry = RVCVoiceRegistry()
+        default = registry.default()
+        if default is None:
+            known = ", ".join(sorted(registry.all())) or "(none)"
+            return ("I can make the song, but no voice is registered yet — "
+                    "register one first:\n"
+                    "/music voices add <id> <model.pth> <source>\n"
+                    f"known voices: {known}")
+        try:
+            res = make_full_song(req["topic"], style=req["style"],
+                                 voice_id=default.voice_id,
+                                 audience="private", context=self.context)
+        except Exception as exc:  # noqa: BLE001 - both model errors
+            return f"🎵 couldn't make the full song:\n{exc}"
+        text = (f"🎵 “{res.title}” — full song [{default.voice_id}]\n"
+                f"{res.note}")
+        if res.master_path:
+            try:
+                self.gateway.send_file(
+                    message.chat.platform,
+                    f"{message.chat.platform}:{message.chat.chat_id}",
+                    res.master_path,
+                    caption=f"🎵 {res.title} — AI instrumental + AI vocals")
+                text += "\nsent the master to this chat."
+            except Exception:  # noqa: BLE001
+                text += f"\nmaster: {res.master_path}"
+        return text
 
     def _explicit_post_override(self, message: ChatMessage) -> str | None:
         """Build-map #43: the owner's explicit post instruction = execute.

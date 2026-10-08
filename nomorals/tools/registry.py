@@ -227,8 +227,11 @@ class ToolRegistry:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video
             from ..media import library as _library
+            from ..media import ace_step as _ace_step
+            from ..media import vocals as _vocals
 
-            for _mod in (_music, _playback, _library, _video):
+            for _mod in (_music, _playback, _library, _video,
+                         _ace_step, _vocals):
                 try:
                     _mod.register(self)
                 except Exception as exc:  # noqa: BLE001 — module-level opt-out
