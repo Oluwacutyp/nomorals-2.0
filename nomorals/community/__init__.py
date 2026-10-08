@@ -20,4 +20,4 @@ incapable of leaking the owner's private world, by construction rather
 than by care.
 """
 
-__all__ = ["miniapps", "policy", "registry"]
+__all__ = ["events", "groups", "meetups", "miniapps", "policy", "registry"]

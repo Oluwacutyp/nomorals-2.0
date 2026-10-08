@@ -230,6 +230,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "uprofile": (0, None),     # /uprofile … — prompt-scaffolded profiles + element-level likes (gig/community/business)
     "vnote": (0, None),        # /vnote … — voice notes in chat (audio + searchable transcripts)
     "match": (0, None),        # /match … — curated daily batches + stable two-sided matching
+    "cgroup": (0, None),       # /cgroup … — themed groups, events, meetups (#84)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -657,6 +658,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/match daily [gig|community|learning] | add <id> | <title> | tags | attrs | questionnaire [surface] | answer <qid> <1-5> | dealbreaker <name> <attr> <pred> <value> | rank <proposer|reviewer> <who> <ids> | run",
                 "example": "/match daily gig",
                 "related": "/uprofile /miniapp"},
+    "cgroup": {"what": "themed community groups + events + IRL meetups — group rooms with topics and post feeds, event lifecycle (create → RSVP → reminders → summary), venue polls, day-of reminders, check-in, weekly rituals, and warm-start discovery. Not owner-gated (shared surfaces).",
+                "usage": "/cgroup new <name> | <topic> · join <group_id> · list · post <group_id> <text> · show <group_id> · discover [member] · nudge | /cgroup event new <group_id> | <title> | <YYYY-MM-DD HH:MM> | [where] | [weekly] · rsvp <event_id> <yes|no|maybe> · list · summary · ritual · nudge | /cgroup meetup poll <event_id> | <venue>… · vote · results · attendees · checkin · turnout",
+                "example": "/cgroup event new grp_x | Lagos Devs dinner | 2026-10-10 19:00 | Ikeja | weekly",
+                "related": "/miniapp /gtrip /match"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1317,7 +1322,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1527,7 +1532,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
