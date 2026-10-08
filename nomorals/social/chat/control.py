@@ -224,6 +224,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
     "contract": (0, None),     # /contract review [type] <text> | types — letter-grade contract risk review (Nigerian playbooks)
     "legal": (0, None),        # /legal [language] <question> — plain-language legal information (EN/PCM/YO/HA/IG)
+    "research": (0, None),    # /research <legal question> — grounded RAG with confidence + traceable citations
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -627,6 +628,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "legal": {"what": "consumer legal aid — ask a legal question in plain language and get the answer in English, Pidgin, Yoruba, Hausa, or Igbo, with sources cited. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
                 "usage": "/legal [en|pcm|yo|ha|ig] <your question>",
                 "example": "/legal pcm my landlord don lock me out"},
+    "research": {"what": "grounded legal research — RAG over the verified corpus only, with a confidence score and traceable document+section citations. Says 'I don't know' when the corpus doesn't cover it. Your question is never stored or used for training. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
+                "usage": "/research <legal question>",
+                "example": "/research can my landlord increase rent without notice?",
+                "related": "/legal /contract"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1287,7 +1292,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1497,7 +1502,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

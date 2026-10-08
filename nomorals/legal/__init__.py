@@ -24,6 +24,17 @@ from .aid import (
     format_answer,
 )
 
+from .research import (
+    CONFIDENTIALITY,
+    Citation,
+    Evidence,
+    LegalResearch,
+    ResearchResult,
+    control_research,
+    format_research,
+    research_citations,
+)
+
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
@@ -43,4 +54,12 @@ __all__ = [
     "control_legal",
     "corpus_search",
     "format_answer",
+    "CONFIDENTIALITY",
+    "Citation",
+    "Evidence",
+    "LegalResearch",
+    "ResearchResult",
+    "control_research",
+    "format_research",
+    "research_citations",
 ]

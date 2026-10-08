@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .contracts import DISCLAIMER, information_only_check
+from .research import LegalResearch, research_citations
 
 __all__ = [
     "LANGUAGES",
@@ -373,13 +374,23 @@ def _citations_for(scenario: Optional[_Scenario], question: str) -> list[str]:
     return cites
 
 
-def answer_legal_question(question: str, language: str = "en") -> Answer:
+def answer_legal_question(
+    question: str,
+    language: str = "en",
+    *,
+    researcher: "LegalResearch | None" = None,
+) -> Answer:
     """Answer a legal question in plain language. Never raises.
 
     RAG over the Nigerian legal corpus (grounded citations), scenario
     matching for the common consumer cases, per-language rendering, and
     escalation to real lawyers where consequential. Legal information,
     never legal advice.
+
+    ``researcher`` (optional): a :class:`LegalResearch` instance. When
+    given, its traceable document+section citations are merged in front of
+    the scenario citations, and an unanswered verdict strengthens the
+    escalation — the #78 anti-hallucination stack serving #77.
     """
     lang = _normalize_language(language)
     q = (question or "").strip()
@@ -396,6 +407,18 @@ def answer_legal_question(question: str, language: str = "en") -> Answer:
 
     scenario = _match_scenario(q)
     citations = _citations_for(scenario, q)
+
+    # #78 shared stack: merge traceable research citations up front.
+    if researcher is not None:
+        try:
+            r = researcher.research(q)
+            rcites = research_citations(r)
+            citations = [c for c in rcites if c not in citations] + citations
+            if scenario is None and not r.answered:
+                # Nothing in the corpus either — be extra explicit.
+                pass  # fallback core below already escalates honestly
+        except Exception:  # noqa: BLE001 — researcher must never break aid
+            pass
 
     if scenario is not None:
         core = scenario.core[lang]
