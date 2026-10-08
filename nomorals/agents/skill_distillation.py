@@ -55,9 +55,16 @@ class SkillDraft:
     task_kind: str = ""
 
     def to_manifest(self) -> dict[str, Any]:
+        # Cache the version on the instance: the same draft must map to
+        # one version across calls (install -> prove -> pin), otherwise a
+        # second ticking over between calls breaks the version match.
+        version = getattr(self, "_manifest_version", "")
+        if not version:
+            version = f"0.1.{int(time.time()) % 100000}"
+            self._manifest_version = version
         return {
             "name": self.name,
-            "version": f"0.1.{int(time.time()) % 100000}",
+            "version": version,
             "tools": self.tools,
             "description": self.description,
             "wiring": [{"step": "distilled",
@@ -191,7 +198,8 @@ def _parse_draft(text: str) -> Optional[SkillDraft]:
 
 
 def maybe_distill(result: Any, memory: Any, context: Any = None,
-                  llm_fn: Any = None, db: Any = None) -> Optional[SkillDraft]:
+                  llm_fn: Any = None, db: Any = None,
+                  prove: bool = False) -> Optional[SkillDraft]:
     """Post-task hook: distill and install a skill draft when warranted.
 
     Called from the agentic loop after a run.  Installs the draft with
@@ -202,6 +210,12 @@ def maybe_distill(result: Any, memory: Any, context: Any = None,
     it is taken from ``context.db`` or opened from the app's default
     storage path.  Without a database the draft is still returned but
     installation is skipped (logged, never raises).
+
+    ``prove`` enables the H.O.T-Jarvis test-proof path (see
+    ``skill_proving``): the draft gets an auto-generated proof test and
+    only activates on a passing test; a failing test flags and disables
+    the skill instead.  Default False preserves the manual
+    canary-validation + explicit-pin flow.
     """
     if not should_distill(result, context):
         return None
@@ -230,6 +244,12 @@ def maybe_distill(result: Any, memory: Any, context: Any = None,
         # draft waits for canary validation + an explicit pin.
         registry.deactivate(draft.name)
         _log.info("distilled skill installed (inactive): %s", draft.name)
+        if prove:
+            from .skill_proving import promote_on_proof, prove_skill
+            proof = prove_skill(draft, database, llm_fn=llm_fn)
+            outcome = promote_on_proof(draft, proof, registry, database)
+            _log.info("distilled skill %s proof outcome: %s",
+                      draft.name, outcome)
     except Exception as exc:  # noqa: BLE001
         _log.warning("distilled skill install failed: %s", exc)
     return draft

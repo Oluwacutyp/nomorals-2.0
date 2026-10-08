@@ -278,9 +278,18 @@ class CanaryRollout:
         return False, (f"waiting: {canary_n}/{self.min_sample} canary tasks, "
                        f"{age_h:.1f}/{self.min_hours}h")
 
-    def evaluate(self, skill_name: str) -> dict[str, Any]:
+    def evaluate(self, skill_name: str, *,
+                 proof_check: Any = None) -> dict[str, Any]:
         """Decide a running canary: promote, revert, or keep waiting. The
-        decision and the numbers are recorded on the run."""
+        decision and the numbers are recorded on the run.
+
+        ``proof_check`` is an optional ``(skill_name, version_hash) -> bool``
+        callable (see ``skill_proving.canary_proof_check``).  When given, a
+        "promote" decision is downgraded to "revert" unless the canary
+        version has a passing proof test — the numbers can only promote
+        what the tests have already proven.  Untested versions are
+        refused, never promoted.
+        """
         run = self.active(skill_name)
         if run is None:
             return {"ok": False, "error": "no running canary"}
@@ -300,6 +309,16 @@ class CanaryRollout:
                          "rate": round(b_ok / b_n, 3) if b_n else 0.0},
             "ready_reason": why,
         }
+        if decision == "promote" and proof_check is not None:
+            try:
+                proven = bool(proof_check(skill_name, run.canary_hash))
+            except Exception:  # noqa: BLE001
+                proven = False
+            if not proven:
+                decision = "revert"
+                detail["proof_gate"] = (
+                    "promotion refused: no passing proof test for the "
+                    "canary version")
         if decision == "inconclusive":
             # aged out with no canary data: keep collecting, don't judge
             status = "running"
