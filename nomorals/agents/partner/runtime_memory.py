@@ -642,6 +642,17 @@ class RuntimeMemoryMixin:
             self._route_planner = p
         return control_route(tail or "", planner=p)
 
+    def _control_eta(self, tail: str, *, chat_key: str = "") -> str:
+        """Honest time estimates — bands, not points. Owner-only.
+
+        /eta <task-type> [seg=min] ... — banded estimate
+        /eta record <task> <predicted> <actual> — feed a real outcome
+        /eta risk <task> <elapsed> — miss probability right now
+        /eta stats [task] — history per task type
+        """
+        from ...planning.estimates import control_eta
+        return control_eta(tail or "")
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 

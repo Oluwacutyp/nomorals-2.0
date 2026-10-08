@@ -922,6 +922,29 @@ class Scheduler:
     def deferral_counts(self) -> dict[str, int]:
         """Per-task deferral counts for this session (heavy skips under pressure)."""
         return dict(self._deferrals)
+
+    def eta_for(self, task_type: str,
+                segments: dict[str, float] | None = None) -> str:
+        """Honest banded ETA for a task type (#91).
+
+        Every time promise ships a band, not a point:
+        "ETA 4:30pm (range 4:15–4:50)". Bands widen after misses.
+        Never raises.
+        """
+        try:
+            from ..planning.estimates import eta_text
+            return eta_text(task_type, segments)
+        except Exception:  # noqa: BLE001
+            return "⏱️ estimate unavailable"
+
+    def record_outcome(self, task_type: str, predicted_minutes: float,
+                       actual_minutes: float) -> bool:
+        """Feed a real task outcome into the estimate model (#91)."""
+        try:
+            from ..planning.estimates import record_actual
+            return record_actual(task_type, predicted_minutes, actual_minutes)
+        except Exception:  # noqa: BLE001
+            return False
     
     async def _execute_cron(self, row: dict[str, Any]) -> None:
         """Execute a cron job."""

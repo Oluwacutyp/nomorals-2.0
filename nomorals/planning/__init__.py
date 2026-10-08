@@ -19,6 +19,15 @@ from .route import (
     cell_for,
     h3_available,
 )
+from .estimates import (
+    Estimate,
+    Segment,
+    EstimateStore,
+    estimate,
+    record_actual,
+    control_eta,
+    eta_text,
+)
 
 __all__ = [
     "WorldGraph",
@@ -36,4 +45,11 @@ __all__ = [
     "control_route",
     "cell_for",
     "h3_available",
+    "Estimate",
+    "Segment",
+    "EstimateStore",
+    "estimate",
+    "record_actual",
+    "control_eta",
+    "eta_text",
 ]

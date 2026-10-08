@@ -210,6 +210,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "film": (0, None),        # /film analyze <video> <game> [exercise] | games | fingerprint [game] | list [game] | export <id>
     "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
     "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
+    "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1000,6 +1001,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/route plan <stop1>; <stop2>; ... | /route add <label> [lat,lng] | /route stops | /route record <from> > <to> <min> [kobo] | /route stats",
               "example": "/route plan home; market; bank",
               "related": "/graph"},
+    "eta": {"what": "Honest time estimates — every promise ships a band, not a point. Bands widen after misses; quoted deadlines are the conservative end.",
+            "usage": "/eta <task-type> [seg=min] ... | /eta record <task> <predicted-min> <actual-min> | /eta risk <task> <elapsed-min> | /eta stats [task]",
+            "example": "/eta research prep=10 read=20 write=15",
+            "related": "/route"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1332,7 +1337,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1545,7 +1550,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route"]),
+      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
