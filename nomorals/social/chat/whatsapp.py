@@ -335,6 +335,13 @@ class WhatsAppAdapter(ChatAdapter):
         if not self.connected.is_set():
             return SendResult(ok=False, platform=self.name, error="bridge not connected",
                               seconds=time.perf_counter() - started)
+        # Convert Telegram HTML / canonical markdown to WhatsApp markdown
+        # (game output and styled menus are authored Telegram-first).
+        try:
+            from .platforms import format_for_platform
+            text = format_for_platform(text, "whatsapp")
+        except Exception:  # noqa: BLE001
+            pass
         # WhatsApp caps a text message well above this; split long sends so
         # one giant alert doesn't get silently truncated by the bridge.
         chunks = _split_text(text, limit=4000)

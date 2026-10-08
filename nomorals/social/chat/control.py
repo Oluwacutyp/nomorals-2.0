@@ -47,10 +47,11 @@ testable; dispatch happens in :mod:`nomorals.agents.partner_runtime`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
-           "parse_control", "PLATFORMS", "help_text", "detailed_help",
+           "parse_control", "PLATFORMS", "help_text", "help_menu", "detailed_help",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
@@ -477,7 +478,7 @@ _HELP_TEXT = "\n".join(
         "  /benchmark [dimension]                  how sharp the system is right now (0-1)",
         "  /redteam [scenario]                   attack my own loop (sandboxed) and report holes",
         "  — media system (music · playback · video) —",
-        "  /music <topic> [style]                  compose a real song (lyrics + MIDI)",
+        "  /music <topic> [style] [vocals|novocals] compose a real song (lyrics + MIDI + TTS hook vocal)",
         "  /music styles | /music song [slug]      browse styles / re-fetch a saved song",
         "  /music bed <topic> [style]              AI instrumental bed (ACE-Step, needs GPU)",
         "  /music full <topic> [style] [voice]     full song: bed + AI vocals (DiffSinger→RVC)",
@@ -568,6 +569,91 @@ def help_text() -> str:
     if missing:
         text += "\n  /" + " /".join(missing) + "   (newer games — /list has the full detail)"
     return text
+
+
+#: Section keyword → emoji for the styled help menu.
+_HELP_SECTION_EMOJI: list[tuple[str, str]] = [
+    ("control commands", "🎛️"),
+    ("search", "🔍"),
+    ("bookforge", "📚"),
+    ("wisdom", "🧠"),
+    ("decode", "🔐"),
+    ("crypto", "🔐"),
+    ("speaks first", "📣"),
+    ("proactive", "📣"),
+    ("features", "🏟️"),
+    ("arena", "🏟️"),
+    ("trial", "🧪"),
+    ("expansion", "🎮"),
+    ("game", "🎮"),
+    ("voice", "🎙️"),
+    ("screen", "🎙️"),
+    ("tools", "🧰"),
+    ("network", "🌐"),
+    ("proxy", "🌐"),
+    ("osint", "🌐"),
+    ("automation", "🌐"),
+]
+
+
+def _help_section_emoji(title: str) -> str:
+    low = (title or "").lower()
+    for keyword, emoji in _HELP_SECTION_EMOJI:
+        if keyword in low:
+            return emoji
+    return "📌"
+
+
+def help_menu(platform: str = "telegram") -> str:
+    """The help catalog rendered as a styled, scannable menu.
+
+    Parses :data:`_HELP_TEXT` (the same source ``help_text()`` uses, so
+    command coverage can never drift) into emoji-headed sections and
+    renders them for the target platform — HTML on Telegram,
+    ``*bold*``/`` `code` `` on WhatsApp. Never raises.
+    """
+    try:
+        from .style import render_menu
+        sections: list[tuple[str, str, list[tuple[str, str]]]] = []
+        cur_emoji, cur_title = "🎛️", "control commands"
+        cur_items: list[tuple[str, str]] = []
+        notes: list[str] = []
+
+        def flush() -> None:
+            if cur_items or notes:
+                items = list(cur_items)
+                for n in notes:
+                    items.append(("", n))
+                sections.append((cur_emoji, cur_title, items))
+
+        for raw in help_text().split("\n"):
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("—") and line.endswith("—"):
+                flush()
+                cur_title = line.strip("— ").strip()
+                cur_emoji = _help_section_emoji(cur_title)
+                cur_items, notes = [], []
+            elif line.startswith("/"):
+                parts = re.split(r"\s{2,}", line, maxsplit=1)
+                cmd = parts[0].strip()
+                desc = parts[1].strip() if len(parts) > 1 else ""
+                cur_items.append((cmd, desc))
+            elif line.startswith("“") or "→" in line:
+                notes.append(line)
+            else:
+                notes.append(line)
+        flush()
+        # drop empty-command note rows from the styled render's item list
+        clean = [(e, t, [(c, d) for c, d in items if c]) for e, t, items in sections]
+        return render_menu(
+            clean, platform,
+            header="Devon — command menu",
+            footer="say it in plain words, or tap a command — /help <command> for detail",
+        )
+    except Exception:  # noqa: BLE001
+        return help_text()
 
 
 # ── detailed help (wave 67) ─────────────────────────────────────────────────
@@ -1349,7 +1435,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "style-aware lyrics, section structure, chord "
                       "progression, melody description, and a playable .mid "
                       "file (real MIDI, opens in any player).",
-              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]  |  /music full <topic> [style] [voice]  |  /music voices",
+              "usage": "/music <topic> [style] [vocals|novocals]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]  |  /music full <topic> [style] [voice]  |  /music voices",
               "example": "/music the first rain in lagos lofi",
               "related": "/play (queue the midi or audio) · nm music on the console"},
     "distribute": {"what": "music distribution pipeline: generate → master → "
