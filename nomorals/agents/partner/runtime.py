@@ -912,6 +912,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("produce reply send failed: %s", exc)
                 return
+            # /play pick-list: a bare number reply ("3") right after a
+            # vague /play resolves the pending pick-list choice and
+            # downloads that track — old-school WhatsApp-bot style.
+            # Owner only, non-slash, never eats chat.
+            try:
+                pick_reply = self._play_pick_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("play-pick hook failed")
+                pick_reply = None
+            if pick_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, pick_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      pick_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("play-pick reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat

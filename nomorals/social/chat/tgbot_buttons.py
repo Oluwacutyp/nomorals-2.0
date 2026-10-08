@@ -134,6 +134,23 @@ def buttons_for_text(text: str) -> Keyboard | None:
     if "coding bot gave up after" in t or "the builder gave up after" in t:
         return [[("📋 Checkpoints", "checkpoints")]]
 
+    # ── /play pick-list — tappable track numbers ──
+    # Checked BEFORE the music-track pattern: pick-lists also start with
+    # "🎵 "...".  The message ends with a "pick:<token>" marker; each
+    # button fires "/play pick <token> <n>" which downloads+sends that
+    # track.  Buttons are numbered to match the message lines.
+    if "— pick one" in t and "pick:" in t:
+        import re as _re
+        m = _re.search(r"pick:([0-9a-f]{8})", t)
+        if m:
+            token = m.group(1)
+            nums = _re.findall(r"^(\d{1,2})\.\s", t, _re.M)
+            nums = nums[:8]
+            if nums:
+                row = [(n, f"play pick {token} {n}") for n in nums]
+                # two rows of four keeps the keyboard compact
+                return [row[:4], row[4:]] if len(row) > 4 else [row]
+
     # ── music track info — transport controls ──
     # (matches the "🎵 "Title"" track header, not error lines)
     if t.startswith("🎵 \u201c") and "couldn't make" not in t:

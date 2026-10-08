@@ -143,6 +143,74 @@ class SourceResolver:
                          q[:80], exc)
             return result
 
+    def search_candidates(self, query: str,
+                          limit: int = 8) -> list[ResolvedAudio]:
+        """All text-search candidates for a pick-list — no auto-picking.
+
+        Runs the downloadable text strategies (SoundCloud search,
+        YouTube search) and returns every usable candidate, deduped by
+        (title, artist), best first.  Never raises; empty list on total
+        failure.
+        """
+        out: list[ResolvedAudio] = []
+        q = (query or "").strip()
+        if not q:
+            return out
+        limit = max(1, min(int(limit or 8), 25))
+        try:
+            out.extend(self._soundcloud_search_many(q, limit))
+        except Exception as exc:  # noqa: BLE001 — one source dying
+            # must not kill the other
+            _log.info("resolver candidates: soundcloud failed: %s", exc)
+        try:
+            out.extend(self._youtube_search_many(q, limit))
+        except Exception as exc:  # noqa: BLE001
+            _log.info("resolver candidates: youtube failed: %s", exc)
+        seen: set[tuple[str, str]] = set()
+        deduped: list[ResolvedAudio] = []
+        for r in out:
+            title = (r.title or "").strip()
+            if not title:
+                continue
+            key = (title.lower(), (r.artist or "").strip().lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
+        return deduped[:limit]
+
+    def _soundcloud_search_many(self, query: str,
+                                limit: int) -> list[ResolvedAudio]:
+        adapter = self._soundcloud
+        if adapter is None:
+            return []
+        tracks = adapter.search_tracks(query, limit=limit)
+        out: list[ResolvedAudio] = []
+        for tr in tracks or []:
+            try:
+                out.append(self._track_result(tr, "SoundCloud search"))
+            except ResolutionError:
+                continue
+        return out
+
+    def _youtube_search_many(self, query: str,
+                             limit: int) -> list[ResolvedAudio]:
+        from .playback import PlaybackEngine  # lazy: same layer
+
+        out: list[ResolvedAudio] = []
+        for row in PlaybackEngine._youtube_search_many(query, limit):
+            title = row.get("title") or query
+            out.append(ResolvedAudio(
+                ok=True,
+                path_or_url=PlaybackEngine._youtube_watch_url(
+                    row["video_id"]),
+                title=title,
+                artist=row.get("uploader") or "",
+                duration=row.get("duration") or 0.0,
+                kind="youtube",
+                source_name="YouTube search (yt-dlp)"))
+        return out
+
     # ── chain machinery ───────────────────────────────────────────────
 
     def _run_chain(self, result: ResolvedAudio,

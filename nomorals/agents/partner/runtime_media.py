@@ -330,7 +330,8 @@ class RuntimeMediaMixin:
 
         tail = (tail or "").strip()
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
-                   "next", "prev", "queue", "remove", "clear", "status"}
+                   "next", "prev", "queue", "remove", "clear", "status",
+                   "pick"}
         parts = tail.split(None, 1)
         first = parts[0].lower() if parts else ""
         if first in actions:
@@ -347,6 +348,8 @@ class RuntimeMediaMixin:
             forced, rest = "youtube", rest.split(":", 1)[1].strip()
         try:
             engine = PlaybackEngine(self.context)
+            if action == "pick":
+                return self._play_pick(rest, chat_key)
             if action in ("play", "add"):
                 if not rest:
                     st = engine.status()
@@ -374,7 +377,38 @@ class RuntimeMediaMixin:
                 # (universal) → SoundCloud API (with yt-dlp fallback) →
                 # text search, recording every attempt.  Never raises.
                 from ...media.resolver import SourceResolver
-                resolution = SourceResolver(self.context).resolve(rest)
+                from ...media.picklist import (
+                    is_specific, parse_title_artist, search_query_for,
+                    PickCache, format_picklist, PICK_LIMIT,
+                )
+                low_r = rest.lower()
+                _is_urlish = low_r.startswith(("http://", "https://",
+                                               "spotify:"))
+                _is_pathish = ("/" in rest or "\\" in rest) and bool(
+                    re.search(r"\.(mp3|wav|flac|ogg|m4a|mid|midi)$", rest, re.I))
+                chat = self._ref_from_key(chat_key) if chat_key else None
+                if (chat is not None and not _is_urlish and not _is_pathish
+                        and not is_specific(rest)):
+                    # Vague query in chat → old-school pick-list instead of
+                    # auto-downloading the top guess.  Never raises.
+                    try:
+                        candidates = SourceResolver(
+                            self.context).search_candidates(
+                                rest, limit=PICK_LIMIT)
+                    except Exception:  # noqa: BLE001
+                        candidates = []
+                    if candidates:
+                        token = PickCache.store(
+                            candidates, chat_key or "")
+                        if token:
+                            return format_picklist(
+                                candidates, rest, token)
+                    # No candidates (or cache hiccup) → fall through to
+                    # the normal auto-resolve so the user still gets an
+                    # honest tried-list instead of silence.
+                title_q, artist_q = parse_title_artist(rest)
+                search_q = search_query_for(title_q, artist_q) or rest
+                resolution = SourceResolver(self.context).resolve(search_q)
                 if not resolution.ok:
                     tried = "; ".join(resolution.attempts) or "no strategies"
                     hint = (f" {resolution.hint}"
@@ -392,7 +426,6 @@ class RuntimeMediaMixin:
                                    for a in added))
                 # Chat context: SEND the audio file instead of local mpv.
                 # Nobody hears the server's speakers — the user gets the track.
-                chat = self._ref_from_key(chat_key) if chat_key else None
                 if action == "play" and chat is not None:
                     return self._play_send_in_chat(engine, added[0], out, chat)
                 if action == "play":
@@ -426,6 +459,80 @@ class RuntimeMediaMixin:
                     f"volume: {st['volume']}")
         except Exception as exc:  # noqa: BLE001
             return f"play error: {exc}"
+
+    def _play_pick(self, rest: str, chat_key: str = "") -> str:
+        """`/play pick <token> <n>` — download+send pick-list choice n.
+
+        The token comes from a Telegram inline button or the WhatsApp
+        number-reply hook.  Single-use: the pick-list is consumed on a
+        successful pick.  Never raises.
+        """
+        from ...media.playback import PlaybackEngine
+        from ...media.picklist import PickCache
+
+        parts = (rest or "").split()
+        if len(parts) < 2:
+            return ("usage: /play pick <token> <number> — or just reply "
+                    "with the number after /play shows the list.")
+        token, num_s = parts[0].strip().lower(), parts[1].strip()
+        try:
+            n = int(num_s)
+        except (TypeError, ValueError):
+            return f"“{num_s}” isn't a track number — reply with a number from the list."
+        entry = PickCache.consume(token)
+        if entry is None:
+            return ("that pick-list expired (5 min) — run /play again and "
+                    "pick fast 😄")
+        cands = entry.candidates or []
+        if n < 1 or n > len(cands):
+            return (f"pick a number 1–{len(cands)} — “{num_s}” is out of range.")
+        cand = cands[n - 1]
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        try:
+            engine = PlaybackEngine(self.context)
+            item = engine._enqueue(
+                cand.path_or_url, cand.kind,
+                cand.title or cand.path_or_url,
+                artist=cand.artist or "", duration=cand.duration or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't queue “{cand.title}”: {exc}"
+        out = f"picked {n}/{len(cands)}:\n  - {cand.title}"
+        if chat is not None:
+            return self._play_send_in_chat(engine, item, out, chat)
+        try:
+            st = engine.play()
+            if st.get("status") == "playing":
+                out += f"\n▶ playing “{st.get('current', '')}”"
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    def _play_pick_hook(self, message: ChatMessage) -> str | None:
+        """Bare number reply after a /play pick-list → download that track.
+
+        Old-school WhatsApp-bot style: the pick-list says "reply with the
+        number", the user replies "3", this resolves it through the same
+        ``/play pick`` path as the Telegram buttons.  Returns a reply
+        string when a pending pick-list and a bare number both match,
+        else None.  Never raises.
+        """
+        from ...media.picklist import PickCache, PICK_LIMIT
+
+        text = (message.text or "").strip()
+        if not text.isdigit():
+            return None
+        n = int(text)
+        if n < 1 or n > PICK_LIMIT:
+            return None
+        found = PickCache.get_for_chat(message.chat.key)
+        if found is None:
+            return None
+        token, _entry = found
+        try:
+            return self._control_play(f"pick {token} {n}", message.chat.key)
+        except Exception as exc:  # noqa: BLE001 — _control_play
+            # shouldn't raise, belt and braces
+            return f"couldn't pick track {n}: {exc}"
 
     @staticmethod
     def _play_query(context: Any, raw: str) -> str:

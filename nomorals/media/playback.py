@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import socket
@@ -85,6 +86,9 @@ _log = get_logger(__name__)
 __all__ = ["PlaybackEngine", "Backend", "register"]
 
 _STATE_KEY = "media.player_state"
+
+#: YouTube video ids are exactly 11 base64url chars.
+_YT_ID_RE = re.compile(r"[A-Za-z0-9_\-]{11}\Z")
 
 
 def _which(names: tuple[str, ...]) -> str:
@@ -597,6 +601,86 @@ class PlaybackEngine:
         d = safe_path(self.context, "media")
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
+
+    @classmethod
+    def _youtube_search_many(cls, query: str,
+                             limit: int = 8) -> list[dict[str, Any]]:
+        """Top N YouTube results for a query (yt-dlp ``ytsearchN:``).
+
+        Returns [{video_id, title, duration, uploader}].  Empty list when
+        yt-dlp is missing or the search fails — never raises.
+        """
+        from ..core.logging_setup import get_logger as _get_logger
+        _log = _get_logger(__name__)
+        query = (query or "").strip()
+        limit = max(1, min(int(limit or 8), 25))
+        if not query:
+            return []
+        try:
+            import yt_dlp  # noqa: F401
+            has_module = True
+        except ImportError:
+            has_module = False
+        entries: list[dict[str, Any]] = []
+        if has_module:
+            import yt_dlp
+            import contextlib
+            import io
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with yt_dlp.YoutubeDL(
+                            {"quiet": True, "no_warnings": True,
+                             "skip_download": True}) as ydl:
+                        info = ydl.extract_info(f"ytsearch{limit}:{query}",
+                                                download=False)
+                entries = (info or {}).get("entries") or []
+            except Exception as exc:  # noqa: BLE001
+                _log.info("youtube multi-search failed: %s", exc)
+                return []
+        else:
+            import shutil
+            import subprocess
+            cli = shutil.which("yt-dlp")
+            if not cli:
+                return []
+            try:
+                proc = subprocess.run(
+                    [cli, "--print", "%(id)s\t%(title)s\t%(duration)s\t"
+                     "%(uploader)s", "--skip-download",
+                     f"ytsearch{limit}:{query}"],
+                    capture_output=True, text=True, timeout=60)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                _log.info("youtube multi-search failed: %s", exc)
+                return []
+            if proc.returncode != 0:
+                return []
+            for line in (proc.stdout or "").splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[0].strip():
+                    entries.append({
+                        "id": parts[0].strip(),
+                        "title": parts[1].strip() if len(parts) > 1 else "",
+                        "duration": parts[2].strip() if len(parts) > 2 else "",
+                        "uploader": parts[3].strip() if len(parts) > 3 else "",
+                    })
+        out: list[dict[str, Any]] = []
+        for e in entries:
+            vid = str((e or {}).get("id") or "").strip()
+            if not _YT_ID_RE.match(vid):
+                continue
+            try:
+                dur = float((e or {}).get("duration") or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            out.append({
+                "video_id": vid,
+                "title": str((e or {}).get("title") or "").strip(),
+                "duration": dur,
+                "uploader": str((e or {}).get("uploader") or "").strip(),
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     def _youtube_audio(self, item: dict[str, Any]) -> str:
         """Local audio file for a youtube queue item (download + cache).

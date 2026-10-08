@@ -1465,9 +1465,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "play": {"what": "media player: durable queue + transport for audio. "
                      "Uses mpv when installed (full transport, auto-advance, "
                      "survives restarts); otherwise the queue is kept and it "
-                     "tells you what to install.",
-              "usage": "/play <paths…> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
-              "example": "/play workspace/song.mid workspace/track2.mp3",
+                     "tells you what to install. In chat, tracks download "
+                     "and send as files. Vague queries get a pick-list — "
+                     "tap a number (Telegram) or reply with it (WhatsApp).",
+              "usage": "/play <song title> | /play <title> by <artist> | /play <url> | /play pick <token> <n> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
+              "example": "/play lifestyle (YA MAN) by ayo maff",
               "related": "/music (make the thing to play) · nm play on the console"},
     "video": {"what": "VideoFinder: finds videos across the open web — "
                       "multi-engine search, ranked by video-URL confidence + "
