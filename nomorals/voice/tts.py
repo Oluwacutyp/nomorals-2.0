@@ -1573,22 +1573,52 @@ class UniversalTTS:
     #         "sample_rate": 24000, "backend": "bark"}
     """
 
+    #: License map: which backends are safe for which audience.
+    #: XTTS v2 is non-commercial — private (owner's own) use only.
+    #: Everything else in the preference order is MIT/Apache-2.0 or system.
+    _NONCOMMERCIAL_BACKENDS = frozenset({"xtts"})
+
     def __init__(self, backend: str = "auto", voices_dir: str = "voices",
-                 default_sample_rate: int = 24000) -> None:
+                 default_sample_rate: int = 24000,
+                 audience: str = "private") -> None:
+        """``audience``: "private" (owner's own Devon — XTTS allowed for its
+        best-in-class cloning) or "public" (community/shared surfaces —
+        XTTS is structurally excluded, MIT-safe backends only)."""
+        if audience not in ("private", "public"):
+            raise ValueError(
+                f"audience must be 'private' or 'public', got {audience!r}")
         self.tag_processor = TagProcessor()
         self.voices = VoiceLibrary(voices_dir)
         self.default_sample_rate = default_sample_rate
         self._backend_name = (backend or "auto").lower()
+        self.audience = audience
         self._loaded = False
         self._impl: Any = None
 
+    def _audience_backends(self, audience: str) -> list[str]:
+        """Available backends filtered/routed for the audience.
+
+        Private: XTTS first when installed (best cloning quality), then
+        the normal preference order. Public: the normal order with
+        non-commercial backends REMOVED — structural, not advisory.
+        """
+        order = available_backends()
+        if audience == "public":
+            return [b for b in order
+                    if b not in self._NONCOMMERCIAL_BACKENDS]
+        # private: XTTS to the front when it's installed
+        if "xtts" in order:
+            order = ["xtts"] + [b for b in order if b != "xtts"]
+        return order
+
     # -- backend lifecycle ---------------------------------------------------
-    def _load_backend(self) -> Any:
+    def _load_backend(self, audience: str | None = None) -> Any:
         if self._loaded:
             return self._impl
+        aud = audience or self.audience
         wanted = self._backend_name
         if wanted == "auto":
-            available = available_backends()
+            available = self._audience_backends(aud)
             if not available:
                 raise RuntimeError(
                     "no TTS backend usable — pip install one of: "
@@ -1603,6 +1633,10 @@ class UniversalTTS:
                     "or install an OS speech service (espeak-ng) for the "
                     "zero-dependency 'system' backend")
             wanted = available[0]
+        if (aud == "public" and wanted in self._NONCOMMERCIAL_BACKENDS):
+            raise RuntimeError(
+                f"TTS backend {wanted!r} is non-commercial and cannot serve "
+                f"the public audience — use a MIT/Apache-2.0 backend")
         if wanted not in _BACKENDS:
             raise RuntimeError(
                 f"unknown TTS backend {wanted!r}; use one of "
@@ -1701,12 +1735,17 @@ class UniversalTTS:
         return self.tag_processor.to_bark_format(segments), ""
 
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
-              out_path: str = "", mood: str = "", mood_level: int = 5) -> dict:
-        """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV."""
+              out_path: str = "", mood: str = "", mood_level: int = 5,
+              audience: str | None = None) -> dict:
+        """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV.
+
+        ``audience`` overrides the engine's audience for this call:
+        "private" (XTTS allowed) or "public" (MIT-safe backends only).
+        """
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
         voice = self.voices.get(voice_name) if voice_name else None
-        backend = self._load_backend()
+        backend = self._load_backend(audience=audience)
         segments = self.tag_processor.parse(text)
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 
