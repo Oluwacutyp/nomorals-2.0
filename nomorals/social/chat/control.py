@@ -204,6 +204,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
+    "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
     "course": (0, None),      # /course <topic> | waec <subject> | set <field> <value> | build | list | teach <id> | status
     "health": (0, None),      # /health log <text> | timeline | summary [days]
@@ -1081,7 +1082,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "tour": {"what": "smoke-test every command with safe read-only probes — finds broken commands without running anything destructive. /tour <command> deep-probes one.",
              "usage": "/tour | /tour <command>",
              "example": "/tour research",
-             "related": "/help /status /redteam"},
+             "related": "/help /status /redteam /heal"},
+    "heal": {"what": "self-healing loop — finds broken commands (tour), diagnoses them (error doctor), auto-fixes safe patterns (unbound-variable init, dead-method rescue), verifies, and reports. Each fix is git-committed for reversibility.",
+             "usage": "/heal | /heal --dry | /heal <command>",
+             "example": "/heal --dry",
+             "related": "/tour /help"},
     "course": {"what": "WAEC/JAMB course builder — scoping questions, syllabus-mapped lessons, embedded tutor.",
                  "usage": "/course <topic> | /course waec <subject> | /course set <field> <value> | /course build | /course list | /course teach <id>",
                  "example": "/course quadratic equations",
@@ -1562,7 +1567,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
     ("platform control", ["start", "stop", "profile"]),
-    ("discovery", ["list", "commands", "menu", "help", "tour"]),
+    ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
 _TOPIC_PAGES: dict[str, str] = {

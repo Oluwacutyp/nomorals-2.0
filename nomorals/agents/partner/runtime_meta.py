@@ -548,7 +548,7 @@ class RuntimeMetaMixin:
         # slow (attack suites, benchmarks, media generation)
         "redteam", "benchmark", "vnote", "audio", "video", "music",
         # no recursion
-        "tour",
+        "tour", "heal",
     })
 
     _TOUR_PROBE_TIMEOUT = 6.0  # seconds per command; slower → skipped
@@ -693,4 +693,107 @@ class RuntimeMetaMixin:
             lines.append(f"  ⚙️ probe: SKIPPED — {res.get('reason', '?')}")
         if kind in self._TOUR_DENYLIST:
             lines.append(f"  🛡️ denylisted: never auto-probed (destructive/slow)")
+        return "\n".join(lines)
+
+    # ── /heal: the self-healing loop ──────────────────────────────────────
+    # tour (find broken) → error doctor (diagnose) → conservative auto-fix
+    # → re-probe (verify) → report. Only two fix patterns are ever
+    # auto-applied: unbound-variable init and dead-method rescue. Both are
+    # semantics-preserving by construction; everything else is reported.
+
+    def _control_heal(self, tail: str, chat_key: str = "") -> str:
+        """Self-healing loop over broken commands.
+
+        /heal — find broken commands, auto-fix the safe ones, verify, report.
+        /heal --dry — show what WOULD be fixed without changing anything.
+        /heal <command> — heal just one command.
+        """
+        from ...core.self_heal import heal_all, heal_one
+
+        args = (tail or "").strip().split()
+        dry = "--dry" in args or "-n" in args
+        target = next((a.lstrip("/").lower() for a in args
+                       if not a.startswith("-")), "")
+
+        # /heal never probes itself or the tour (recursion), and respects
+        # the same denylist as the tour for everything else.
+        skip = frozenset(self._TOUR_DENYLIST) | {"heal"}
+
+        if target:
+            if target == "heal":
+                return "🩹 /heal doesn't heal itself."
+            try:
+                res = heal_one(self.handle_control, target, chat_key,
+                               dry_run=dry)
+            except Exception as exc:  # noqa: BLE001 — heal never raises
+                return f"🩹 heal of /{target} failed safely: {exc}"
+            return self._heal_report_single(res)
+
+        from ...social.chat.control import CONTROL_COMMANDS
+        kinds = sorted(k for k in CONTROL_COMMANDS
+                       if k != "error" and k not in skip)
+        try:
+            summary = heal_all(self.handle_control, kinds, chat_key,
+                               dry_run=dry, skip=skip)
+        except Exception as exc:  # noqa: BLE001 — heal never raises
+            return f"🩹 heal loop failed safely: {exc}"
+        return self._heal_report(summary)
+
+    def _heal_report_single(self, res) -> str:
+        """One-command heal report."""
+        if not res.broken:
+            return f"🩹 /{res.kind} — not broken, nothing to heal."
+        lines = [f"🩹 /{res.kind} — {res.error[:120]}"]
+        if res.dry_run and res.fixable:
+            lines.append(f"  would fix: {res.fix_detail}")
+            if res.diff_preview:
+                lines.append(f"  {res.diff_preview}")
+        elif res.fixed:
+            lines.append(f"  ✅ healed: {res.fix_detail}")
+            if res.committed:
+                lines.append("  📝 fix committed (reversible via git)")
+        else:
+            lines.append(f"  ❌ still broken: {res.skip_reason or res.error[:100]}")
+            if res.suggestion:
+                lines.append(f"  💡 suggestion: {res.suggestion[:160]}")
+        return "\n".join(lines)
+
+    def _heal_report(self, summary: dict) -> str:
+        """Full-loop heal report."""
+        dry = summary.get("dry_run", False)
+        healed = summary.get("healed", [])
+        still = summary.get("still_broken", [])
+        would = summary.get("would_fix", [])
+        total = summary.get("total", 0)
+
+        if dry:
+            lines = [f"🩹 heal --dry — {total} commands probed"]
+            if would:
+                lines.append(f"  would fix {len(would)}:")
+                for r in would:
+                    lines.append(f"    /{r['kind']} — {r['fix_detail'][:100]}")
+            else:
+                lines.append("  nothing auto-fixable found.")
+            if still:
+                lines.append(f"  still broken (no safe fix): "
+                             f"{', '.join('/' + r['kind'] for r in still[:10])}")
+            lines.append("")
+            lines.append("run /heal to apply.")
+            return "\n".join(lines)
+
+        lines = [f"🩹 heal — {total} commands probed"]
+        if healed:
+            lines.append(f"  ✅ healed {len(healed)}:")
+            for r in healed:
+                c = " 📝" if r.get("committed") else ""
+                lines.append(f"    /{r['kind']} — {r['fix_detail'][:100]}{c}")
+        if still:
+            lines.append(f"  ❌ still broken {len(still)}:")
+            for r in still[:12]:
+                why = r.get("skip_reason") or r.get("error", "")[:80]
+                lines.append(f"    /{r['kind']} — {why[:100]}")
+            if len(still) > 12:
+                lines.append(f"    …and {len(still) - 12} more")
+        if not healed and not still:
+            lines.append("  ✨ nothing broken — nothing to heal.")
         return "\n".join(lines)

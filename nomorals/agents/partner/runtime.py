@@ -1826,6 +1826,10 @@ class PartnerRuntime(
             # smoke-test every command with safe read-only probes.
             return self._control_tour(command.tail or arg, chat_key=chat_key)
 
+        if kind == "heal":
+            # self-healing loop: diagnose + auto-fix broken commands.
+            return self._control_heal(command.tail or arg, chat_key=chat_key)
+
         if kind == "profile":
             # wave 86: the profile-aware runtime, in chat (owner-only —
             # control commands never reach non-operators)
