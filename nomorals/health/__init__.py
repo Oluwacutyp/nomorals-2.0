@@ -1,5 +1,24 @@
 """Patient-side health timeline. Tracking only — Devon is not a doctor."""
 
+from .coach import (
+    guard_coaching,
+)
+from .drift import (
+    ACTIVITY_DROP_RATIO,
+    CRISIS_MOOD,
+    HRV_DECLINE_RATIO,
+    LOW_MOOD,
+    MAX_PINGS_PER_DAY,
+    MIN_DAYS,
+    SLEEP_DEBT_H,
+    SLEEP_DECLINE_H,
+    SLEEP_SEVERE_H,
+    DriftMonitor,
+    DriftReport,
+    DriftSignal,
+    RecoveryAction,
+    recovery_plan,
+)
 from .previsit import (
     CRISIS_RESOURCES,
     NAVIGATION_DISCLAIMER,
@@ -44,4 +63,19 @@ __all__ = [
     "prepare_visit",
     "summarize_visit",
     "triage_route",
+    "guard_coaching",
+    "MIN_DAYS",
+    "SLEEP_DEBT_H",
+    "SLEEP_SEVERE_H",
+    "SLEEP_DECLINE_H",
+    "LOW_MOOD",
+    "CRISIS_MOOD",
+    "HRV_DECLINE_RATIO",
+    "ACTIVITY_DROP_RATIO",
+    "MAX_PINGS_PER_DAY",
+    "DriftSignal",
+    "DriftReport",
+    "RecoveryAction",
+    "DriftMonitor",
+    "recovery_plan",
 ]
