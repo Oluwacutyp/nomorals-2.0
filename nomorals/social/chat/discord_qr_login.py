@@ -59,6 +59,8 @@ def main() -> int:
     def on_message(ws, raw):
         msg = json.loads(raw)
         op = msg.get("op")
+        if os.environ.get("QR_DEBUG"):
+            print(f"[qr] op={op}", file=sys.stderr)
 
         if op == "hello":
             interval = msg.get("heartbeat_interval", 30000) / 1000
