@@ -228,6 +228,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "contracts": (0, None),    # /contracts … — contract portfolio: obligations, renewals, SLA tracking
     "regwatch": (0, None),     # /regwatch … — regulatory change monitoring (CBN/SEC/NDPA/FIRS)
     "uprofile": (0, None),     # /uprofile … — prompt-scaffolded profiles + element-level likes (gig/community/business)
+    "vnote": (0, None),        # /vnote … — voice notes in chat (audio + searchable transcripts)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -644,9 +645,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "example": "/regwatch add CBN fintech AML",
                 "related": "/contracts /research"},
     "uprofile": {"what": "prompt-scaffolded profiles + element-level likes — Hinge-style profiles for gig freelancers, community members, and business listings. Curated prompts fix blank bios; likes attach to specific projects/photos with optional comment openers.",
-                "usage": "/uprofile create [gig|community|business] [name] | show <id> | prompt <id> <prompt_id> <answer> | add <id> <type> <title> | like <profile> <element> [comment] | matches",
+                "usage": "/uprofile create [gig|community|business] [name] | show <id> | prompt <id> <prompt_id> <answer> | add <id> <type> <title> | like <profile> <element> [comment] | matches | voice <id> [audio_path] [language]",
                 "example": "/uprofile create gig Ada — freelance designer",
-                "related": "/miniapp"},
+                "related": "/miniapp /vnote"},
+    "vnote": {"what": "voice notes in chat — audio kept for tone, transcripts indexed for search. Full voice language scope: English, Pidgin, Ekiti Yoruba, Hausa, Igbo.",
+                "usage": "/vnote send <chat_id> <audio_path> [language] | search <query> [chat_id] | play <note_id> | preview <public|private> <language> <text>",
+                "example": "/vnote search price",
+                "related": "/uprofile"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1307,7 +1312,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1517,7 +1522,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

@@ -2095,6 +2095,17 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "vnote":
+            # Voice notes — not owner-gated (anyone in the chat sends them),
+            # community (#12) and gig (#1) chats alike.
+            from ...social.voice_notes import control_vnote
+            return control_vnote(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "gtrip":
             # Group-travel stack: NOT owner-gated (every member drives it),
             # group chats only — control_gtrip refuses DMs itself.

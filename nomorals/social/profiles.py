@@ -40,6 +40,7 @@ __all__ = [
     "Profile",
     "ProfileElement",
     "ElementLike",
+    "VoiceIntro",
     "ProfileStore",
     "suggested_prompts",
     "format_profile",
@@ -47,6 +48,14 @@ __all__ = [
 
 #: Profile surfaces Devon knows how to scaffold.
 SURFACES = ("gig", "community", "business")
+
+#: Audio formats Devon accepts for voice intros / voice notes.
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".oga", ".m4a",
+                    ".opus", ".aac", ".flac", ".wma")
+
+#: The 30-second guidance for a spoken intro (advisory, not a hard cap —
+#: a great 45s intro beats a rushed 30s one, and the UI says so).
+VOICE_INTRO_SECONDS = 30
 
 #: Element types a profile can hold.
 ELEMENT_TYPES = ("project", "photo", "answer", "link")
@@ -110,6 +119,18 @@ class ElementLike:
 
 
 @dataclass
+class VoiceIntro:
+    """A profile's 30-second spoken 'about me' — audio + transcript."""
+
+    profile_id: str = ""
+    audio_path: str = ""        # vault copy, playable
+    transcript: str = ""        # STT text (empty when no STT was available)
+    language: str = "en"        # en | pcm | yo | yo-ekiti | ha | ig
+    stt_backend: str = ""       # which STT produced the transcript
+    created_at: float = 0.0
+
+
+@dataclass
 class Profile:
     """One profile on one surface, scaffolded by prompts."""
 
@@ -119,6 +140,7 @@ class Profile:
     display_name: str = ""
     prompts: dict[str, str] = field(default_factory=dict)
     elements: list[ProfileElement] = field(default_factory=list)
+    voice_intro: VoiceIntro | None = None
     created_at: float = 0.0
 
 
@@ -147,9 +169,24 @@ class ProfileStore:
                        comment TEXT, created_at REAL,
                        PRIMARY KEY (profile_id, element_id, liker))""")
             self._db.commit()
+            self._ensure_voice_columns()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty store
             _log.warning("profiles: db unavailable, running empty", exc_info=True)
             self._db = None
+
+    def _ensure_voice_columns(self) -> None:
+        """Voice-intro columns, added to DBs created before #82."""
+        cols = {r["name"] for r in
+                self._db.execute("PRAGMA table_info(profiles)")}
+        for col in ("voice_intro_path TEXT",
+                    "voice_intro_transcript TEXT",
+                    "voice_intro_language TEXT",
+                    "voice_intro_stt TEXT",
+                    "voice_intro_at REAL"):
+            name = col.split()[0]
+            if name not in cols:
+                self._db.execute(f"ALTER TABLE profiles ADD COLUMN {col}")
+        self._db.commit()
 
     # — profiles —
 
@@ -170,7 +207,11 @@ class ProfileStore:
         )
         try:
             self._db.execute(
-                "INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?)",
+                """INSERT INTO profiles
+                   (profile_id, owner, surface, display_name, prompts_json,
+                    created_at, voice_intro_path, voice_intro_transcript,
+                    voice_intro_language, voice_intro_stt, voice_intro_at)
+                   VALUES (?, ?, ?, ?, ?, ?, '', '', '', '', 0)""",
                 (p.profile_id, p.owner, p.surface, p.display_name,
                  json.dumps({}), p.created_at))
             self._db.commit()
@@ -195,6 +236,7 @@ class ProfileStore:
                 surface=row["surface"], display_name=row["display_name"],
                 prompts=json.loads(row["prompts_json"] or "{}"),
                 created_at=row["created_at"])
+            p.voice_intro = self._row_voice_intro(row)
             for erow in self._db.execute(
                     "SELECT * FROM elements WHERE profile_id = ?",
                     (profile_id,)):
@@ -209,6 +251,22 @@ class ProfileStore:
         except Exception:  # noqa: BLE001
             _log.debug("profiles: get failed", exc_info=True)
             return None
+
+    @staticmethod
+    def _row_voice_intro(row: sqlite3.Row) -> VoiceIntro | None:
+        """VoiceIntro from a profiles row, or None when unset."""
+        try:
+            path = row["voice_intro_path"] or ""
+        except (IndexError, KeyError):
+            return None
+        if not path:
+            return None
+        return VoiceIntro(
+            profile_id=row["profile_id"], audio_path=path,
+            transcript=row["voice_intro_transcript"] or "",
+            language=row["voice_intro_language"] or "en",
+            stt_backend=row["voice_intro_stt"] or "",
+            created_at=row["voice_intro_at"] or 0.0)
 
     def list(self, surface: str = "") -> list[Profile]:
         """All profiles, optionally filtered by surface."""
@@ -262,6 +320,124 @@ class ProfileStore:
         if p is None:
             return []
         return suggested_prompts(p.surface, set(p.prompts))
+
+    # — voice intro (#82) —
+
+    @staticmethod
+    def voice_vault_dir() -> str:
+        """Where Devon keeps its copy of voice-intro audio."""
+        path = os.path.expanduser("~/.nomorals/social/voice_intros")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _valid_audio(path: str) -> bool:
+        """An audio file Devon will accept: exists + known extension."""
+        if not path or not os.path.isfile(path):
+            return False
+        return os.path.splitext(path)[1].lower() in AUDIO_EXTENSIONS
+
+    @staticmethod
+    def _wav_duration_hint(path: str) -> float | None:
+        """Best-effort duration for WAV files (stdlib only)."""
+        if os.path.splitext(path)[1].lower() != ".wav":
+            return None
+        try:
+            import wave
+            with wave.open(path, "rb") as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+                return frames / rate if rate else None
+        except Exception:  # noqa: BLE001 — hint only, never blocks
+            return None
+
+    def set_voice_intro(self, profile_id: str, audio_path: str, *,
+                        language: str = "en",
+                        stt: object = None) -> VoiceIntro | None:
+        """Attach a spoken 30s 'about me' to a profile.
+
+        ``stt`` is the production seam: any callable
+        ``(audio_path, language) -> dict`` with a ``"text"`` key.
+        None → no transcription is attempted and the transcript stays
+        empty (honest: Devon says the intro isn't transcribed yet,
+        never fabricates one). None returned when invalid/down.
+        """
+        if self._db is None:
+            return None
+        if self.get(profile_id) is None:
+            return None
+        if not self._valid_audio(audio_path):
+            return None
+        try:
+            from .voice_notes import normalize_voice_language
+            lang = normalize_voice_language(language)
+        except Exception:  # noqa: BLE001 — voice_notes import problems
+            lang = "en"
+        try:
+            import shutil
+            ext = os.path.splitext(audio_path)[1].lower()
+            dest = os.path.join(
+                self.voice_vault_dir(),
+                f"{profile_id}{ext}")
+            shutil.copy2(audio_path, dest)
+        except Exception:  # noqa: BLE001
+            _log.debug("profiles: voice intro copy failed", exc_info=True)
+            return None
+        transcript, backend = "", ""
+        if stt is not None:
+            try:
+                out = stt(dest, lang) or {}
+                transcript = str(out.get("text", "") or "").strip()
+                backend = str(out.get("backend", "") or "").strip()
+            except Exception:  # noqa: BLE001 — STT failure is not fatal
+                _log.debug("profiles: voice intro STT failed", exc_info=True)
+        try:
+            now = time.time()
+            self._db.execute(
+                """UPDATE profiles
+                   SET voice_intro_path = ?, voice_intro_transcript = ?,
+                       voice_intro_language = ?, voice_intro_stt = ?,
+                       voice_intro_at = ?
+                   WHERE profile_id = ?""",
+                (dest, transcript, lang, backend, now, profile_id))
+            self._db.commit()
+            return VoiceIntro(profile_id=profile_id, audio_path=dest,
+                              transcript=transcript, language=lang,
+                              stt_backend=backend, created_at=now)
+        except Exception:  # noqa: BLE001
+            _log.debug("profiles: voice intro save failed", exc_info=True)
+            return None
+
+    def get_voice_intro(self, profile_id: str) -> VoiceIntro | None:
+        """A profile's voice intro, or None when unset."""
+        if self._db is None:
+            return None
+        try:
+            row = self._db.execute(
+                "SELECT * FROM profiles WHERE profile_id = ?",
+                (profile_id,)).fetchone()
+            return self._row_voice_intro(row) if row else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def delete_voice_intro(self, profile_id: str) -> bool:
+        """Remove a voice intro (and its vault copy). False on failure."""
+        vi = self.get_voice_intro(profile_id)
+        if vi is None:
+            return False
+        try:
+            self._db.execute(
+                """UPDATE profiles
+                   SET voice_intro_path = '', voice_intro_transcript = '',
+                       voice_intro_language = '', voice_intro_stt = '',
+                       voice_intro_at = 0
+                   WHERE profile_id = ?""", (profile_id,))
+            self._db.commit()
+            if vi.audio_path and os.path.isfile(vi.audio_path):
+                os.remove(vi.audio_path)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     # — elements —
 
@@ -372,6 +548,7 @@ def _usage() -> str:
         "  /uprofile add <id> <type> <title> | [content] — add an element\n"
         "  /uprofile like <profile_id> <element_id> [comment] — like it\n"
         "  /uprofile matches — likes on your elements (the warm openers)\n"
+        "  /uprofile voice <id> <audio_path> [language] — 30s spoken intro 🎙️\n"
         "  /uprofile list [surface]"
     )
 
@@ -458,6 +635,33 @@ def control_uprofile(tail: str, context=None, chat=None,
                 lines.append(f"  {lk.liker} liked [{lk.element_id}]{c}")
             return "\n".join(lines)
 
+        if cmd == "voice":
+            # /uprofile voice <id> <audio_path> [language] — set intro;
+            # /uprofile voice <id> — show the intro's transcript.
+            if len(parts) < 2:
+                return "usage: /uprofile voice <profile_id> [audio_path] [language]"
+            if len(parts) < 3:
+                vi = s.get_voice_intro(parts[1])
+                if vi is None:
+                    return ("no voice intro yet — record ~30s 'about me' "
+                            "and /uprofile voice <id> <audio_path>.")
+                line = f"🎙️ voice intro [{vi.language}] — {vi.audio_path}"
+                if vi.transcript:
+                    line += f"\n  “{vi.transcript[:160]}”"
+                else:
+                    line += "\n  (not transcribed yet)"
+                return line
+            lang = parts[3].lower() if len(parts) > 3 else "en"
+            stt = getattr(context, "stt", None) if context is not None else None
+            vi = s.set_voice_intro(parts[1], parts[2], language=lang,
+                                   stt=stt)
+            if vi is None:
+                return ("couldn't set the intro — check the profile id and "
+                        "that the file is real audio (wav/mp3/ogg/m4a/opus).")
+            note = (f"\n  📝 “{vi.transcript[:160]}”" if vi.transcript
+                    else "\n  (audio saved; transcription not available yet)")
+            return f"🎙️ voice intro set [{vi.language}].{note}"
+
         if cmd == "list":
             surface = parts[1].lower() if len(parts) > 1 else ""
             profs = s.list(surface)
@@ -476,6 +680,12 @@ def control_uprofile(tail: str, context=None, chat=None,
 def format_profile(p: Profile) -> str:
     """Render a profile as chat text — prompts first, elements likeable."""
     lines = [f"👤 {p.display_name}"]
+    if p.voice_intro is not None:
+        vi = p.voice_intro
+        tag = f" 🎙️ voice intro [{vi.language}]"
+        if vi.transcript:
+            tag += f" — “{vi.transcript[:80]}”"
+        lines.append(tag)
     prompt_list = PROMPTS.get(p.surface, [])
     for pid, ptext in prompt_list:
         ans = p.prompts.get(pid)
