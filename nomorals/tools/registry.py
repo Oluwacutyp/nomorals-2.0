@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -23,9 +24,59 @@ from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
 from ..core.result import Err, Ok, Outcome
 
-__all__ = ["ToolRegistry", "ToolSpec"]
+__all__ = ["ToolRegistry", "ToolSpec", "sanitize_tool_description"]
 
 _log = get_logger(__name__)
+
+
+#: sentence-level patterns for instruction-like text smuggled into tool
+#: descriptions. Tool metadata is shown to the model, so it is an
+#: untrusted surface: descriptions must describe, never instruct.
+_DESC_INSTRUCTION_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bhidden\s+instruction\b", re.IGNORECASE),
+    re.compile(r"\bignore\s+(all\s+)?previous\s+instructions\b", re.IGNORECASE),
+    re.compile(r"^\s*(system|developer|admin)\s*:", re.IGNORECASE),
+    re.compile(r"\byou\s+(must|should|shall)\b", re.IGNORECASE),
+    re.compile(
+        r"\bdo\s+not\s+(mention|reveal|tell|disclose).{0,60}\binstruction\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def sanitize_tool_description(name: str, description: str) -> str:
+    """Strip instruction-like sentences from a tool description.
+
+    Keeps legitimate descriptive sentences; drops sentences that read as
+    directives to the agent.  Never raises and never returns an empty
+    description — worst case the original is kept with a warning, so
+    registration can never break on sanitization.
+    """
+    try:
+        text = (description or "").strip()
+        if not text:
+            return description
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        kept = [
+            s for s in sentences
+            if not any(p.search(s) for p in _DESC_INSTRUCTION_RES)
+        ]
+        if len(kept) == len(sentences):
+            return description  # clean — return untouched
+        if not any(k.strip() for k in kept):
+            _log.warning(
+                "tool %s description was entirely instruction-like; "
+                "kept as-is (flagged)", name)
+            return description
+        _log.warning(
+            "tool %s description contained instruction-like text; "
+            "stripped %d of %d sentence(s)",
+            name, len(sentences) - len(kept), len(sentences))
+        return " ".join(kept).strip()
+    except Exception:  # noqa: BLE001 - sanitization must never break registration
+        _log.debug("tool %s description sanitization failed", name,
+                   exc_info=True)
+        return description
 
 
 @dataclass
@@ -87,7 +138,11 @@ class ToolRegistry:
             spec = ToolSpec(
                 name=name,
                 fn=func,
-                description=description or first_line or name,
+                # tool metadata reaches the model: sanitize instruction-like
+                # sentences (prompt-injection surface), never breaking
+                # registration
+                description=sanitize_tool_description(
+                    name, description or first_line or name),
                 capability=capability,
                 parameters=parameters or _infer_parameters(func),
                 confirm=confirm,

@@ -27,7 +27,7 @@ import time
 from typing import Any, Callable
 
 from ...core.ids import new_short_id
-from ...core.logging_setup import get_logger
+from ...core.logging_setup import get_logger, scrub_secrets
 from ...storage.db import Database
 from .base import (
     ChatAdapter,
@@ -428,6 +428,16 @@ class ChatGateway:
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         text = text if text is not None else ""
+        # Outbound secret guard: agent text leaving the system must never
+        # carry secret-shaped values (defense against exfiltration via a
+        # compromised model response). Tool inputs and stored memory are
+        # NOT scrubbed — they legitimately carry credentials for API use.
+        scrubbed = scrub_secrets(text)
+        if scrubbed != text:
+            _log.warning(
+                "gateway.send: scrubbed secret-shaped content for %s",
+                chat.key)
+            text = scrubbed
         adapter = self._adapter_for(chat.platform)
         if adapter is None:
             return SendResult(ok=False, platform=platform, error=f"no adapter for {platform!r}")

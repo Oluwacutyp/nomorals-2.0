@@ -70,6 +70,16 @@ def redact(text: str) -> str:
     return out
 
 
+def scrub_secrets(text: str) -> str:
+    """Outbound guard: remove secret-shaped values from text leaving the system.
+
+    Uses the same patterns as the log redactor (:data:`_SECRET_PATTERNS`).
+    Wire into outbound chat paths (gateway.send) — never into tool inputs
+    or stored memory, which may legitimately carry credentials for API use.
+    """
+    return redact(text)
+
+
 class RedactionFilter(logging.Filter):
     """Logging filter that redacts the message and known-sensitive args."""
 
