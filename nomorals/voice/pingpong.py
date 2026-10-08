@@ -73,7 +73,16 @@ def synthesize_voice_reply(context: Any, text: str) -> str:
         raise ValueError("nothing to synthesize")
     # keep voice notes short — cap at ~30s of speech
     text = text[:600]
-    out = context.tools.call("speak", text=text)
+    # voice from settings (NM_AUDIO_TTS_VOICE); Nigerian English default
+    # suits Devon better than edge-tts's flat default.
+    voice = ""
+    try:
+        settings = getattr(context, "settings", None)
+        voice = (getattr(getattr(settings, "audio", None), "tts_voice", "")
+                 or "en-NG-EzinneNeural")
+    except Exception:  # noqa: BLE001
+        voice = "en-NG-EzinneNeural"
+    out = context.tools.call("speak", text=text, voice=voice)
     if not out.ok:
         raise RuntimeError(f"TTS failed: {getattr(out, 'error', out)}")
     value = out.value or {}
