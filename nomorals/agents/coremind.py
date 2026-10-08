@@ -822,6 +822,19 @@ _RE_AVATAR_TALK = re.compile(
     r"^make\s+this\s+photo\s+talk\s*:\s*(.+?)\s*$", re.I)
 _RE_AVATAR_SAY = re.compile(
     r"^make\s+this\s+photo\s+say\s+(.+?)\s*$", re.I)
+# transcript-first video editing (#28): "cut the umms" / "remove silences" /
+# "cut the silences and umms" / "keep only the part about X". Narrow
+# whole-message shapes; all need an attached VIDEO (dispatch asks for it),
+# so ordinary chat can't misfire into an ffmpeg job.
+_RE_CUT_FILLERS = re.compile(
+    r"^(?:cut|remove)\s+(?:the\s+)?(?:um+s?|uh+s?|filler\s+words?|fillers?)\s*$",
+    re.I)
+_RE_CUT_SILENCE = re.compile(
+    r"^(?:cut|remove)(?:\s+the)?\s+silences?\s*$", re.I)
+_RE_CUT_BOTH = re.compile(
+    r"^cut\s+the\s+silences?\s+and\s+(?:um+s?|uh+s?|fillers?)\s*$", re.I)
+_RE_KEEP_TOPIC = re.compile(
+    r"^keep\s+only\s+the\s+part\s+about\s+(.+?)\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -958,6 +971,40 @@ def _avatar_intent(text: str) -> Intent | None:
                   action="talking_head", route="media",
                   meta={"text": said},
                   why=f"talking head request: {said[:40]}")
+
+
+def _transcript_edit_intent(text: str) -> Intent | None:
+    """Detect transcript-first video edit requests (#28).
+
+    Narrow by design: the whole message must match one of the shapes, and
+    dispatch requires an attached video, so ordinary chat never misfires
+    into an ffmpeg job.
+    """
+    stripped = (text or "").strip()
+    if _RE_CUT_BOTH.match(stripped):
+        return Intent("vision_transcript_edit", 0.9,
+                      target=stripped[:200], action="transcript_edit",
+                      route="media", meta={"edit": "both"},
+                      why="cut silences + fillers request")
+    if _RE_CUT_FILLERS.match(stripped):
+        return Intent("vision_transcript_edit", 0.9,
+                      target=stripped[:200], action="transcript_edit",
+                      route="media", meta={"edit": "fillers"},
+                      why="cut filler words request")
+    if _RE_CUT_SILENCE.match(stripped):
+        return Intent("vision_transcript_edit", 0.9,
+                      target=stripped[:200], action="transcript_edit",
+                      route="media", meta={"edit": "silences"},
+                      why="cut silences request")
+    m = _RE_KEEP_TOPIC.match(stripped)
+    if m:
+        topic = m.group(1).strip()
+        if topic and len(topic) <= 200:
+            return Intent("vision_transcript_edit", 0.9,
+                          target=topic[:200], action="transcript_edit",
+                          route="media", meta={"edit": "topic", "topic": topic},
+                          why=f"keep topic request: {topic[:40]}")
+    return None
 
 
 def _finance_intent(text: str) -> Intent | None:
@@ -1256,7 +1303,8 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
-               _finance_intent, _image_intent, _video_intent, _avatar_intent):
+               _finance_intent, _image_intent, _video_intent, _avatar_intent,
+               _transcript_edit_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1772,6 +1820,7 @@ class CoreMind:
             "vision_faceswap": self._dispatch_vision,
             "vision_edittext": self._dispatch_vision,
             "vision_captions": self._dispatch_vision,
+            "vision_transcript_edit": self._dispatch_vision,
             "video_gen": self._dispatch_video,
             "avatar": self._dispatch_avatar,
             "finance_log": self._dispatch_finance_log,
@@ -2457,20 +2506,22 @@ class CoreMind:
 
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
-        """NL vision utilities (#23/#24) + caption pipeline (#25): bg removal,
-        SR upscale, face swap, text replacement, video captions.
+        """NL vision utilities (#23/#24) + caption pipeline (#25) +
+        transcript-first video editing (#28): bg removal, SR upscale,
+        face swap, text replacement, video captions, cut-by-transcript.
 
         Runs on a background thread (heavy models), delivers via
-        send_media. Needs an attached image (captions: a video); faceswap
-        wants two images. Nothing is faked: a missing library raises with
-        the pip hint, and the reply says exactly that.
+        send_media. Needs an attached image (captions / transcript_edit:
+        a video); faceswap wants two images. Nothing is faked: a missing
+        library raises with the pip hint, and the reply says exactly that.
         """
         from ..social.chat.base import MediaRef
 
         action = intent.action  # "bgremove" | "upscale_sr" | "faceswap" |
-        # "edittext" | "captions"
+        # "edittext" | "captions" | "transcript_edit"
         media = list(getattr(message, "media", None) or [])
-        want_kind = "video" if action == "captions" else "image"
+        want_kind = ("video" if action in ("captions", "transcript_edit")
+                     else "image")
         files = [m for m in media
                  if getattr(m, "kind", "") == want_kind
                  and getattr(m, "path", "")]
@@ -2487,6 +2538,9 @@ class CoreMind:
                              "`replace \"OLD\" with \"NEW\" in this image`"),
                 "captions": ("🎬 attach the video, then say:\n"
                              "`add captions`"),
+                "transcript_edit": ("🎬 attach the video, then say:\n"
+                                    "`cut the umms` / `remove silences` /\n"
+                                    "`keep only the part about X`"),
             }
             return hints[action]
         src_paths = [m.path for m in files[:need]]
@@ -2494,7 +2548,8 @@ class CoreMind:
                   "upscale_sr": "🔍 upscaling",
                   "faceswap": "🔄 swapping faces",
                   "edittext": "✏️ replacing text",
-                  "captions": "💬 adding captions"}
+                  "captions": "💬 adding captions",
+                  "transcript_edit": "✂️ cutting by transcript"}
 
         def job() -> str:
             from ..media_edit.images import load_image
@@ -2529,6 +2584,51 @@ class CoreMind:
                                       mime="text/plain", name=srt.name),
                         caption="📄 .srt sidecar for your editor")
                 return "🎬 done — adding captions"
+            if action == "transcript_edit":
+                # #28: transcript-first edit — transcribe once (cached next
+                # to the video), then cut by timestamps. Video path, not
+                # the image pipeline below.
+                from ..media_edit.captions import (
+                    load_transcript, save_transcript, transcribe_words)
+                from ..media_edit.transcript_edit import (
+                    keep_topic, remove_fillers, remove_silences)
+                words = load_transcript(src_paths[0])
+                if not words:
+                    words = transcribe_words(src_paths[0])
+                    save_transcript(src_paths[0], words)
+                if not words:
+                    return ("❌ couldn't transcribe the video — "
+                            "nothing to cut by")
+                edit = str((intent.meta or {}).get("edit", "both"))
+                if edit == "fillers":
+                    run = remove_fillers(src_paths[0], words,
+                                         out_dir=str(out_dir))
+                elif edit == "silences":
+                    run = remove_silences(src_paths[0], out_dir=str(out_dir))
+                elif edit == "topic":
+                    topic = str((intent.meta or {}).get("topic", "")).strip()
+                    run = keep_topic(src_paths[0], words, topic,
+                                     out_dir=str(out_dir))
+                else:  # "both": fillers first, then silences on the result
+                    run = remove_fillers(src_paths[0], words,
+                                         out_dir=str(out_dir))
+                    run = remove_silences(run["output"], out_dir=str(out_dir))
+                if self.runtime is None:
+                    return f"🎬 edited: {run['output']} ({run.get('note', '')})"
+                ref = self.runtime._ref_from_key(chat_key)
+                adapter = self.runtime.gateway._adapter_for(ref.platform)
+                if adapter is None:
+                    return f"❌ done but no adapter for {ref.platform}"
+                out_mp4 = Path(run["output"])
+                result = adapter.send_media(
+                    ref, MediaRef(path=str(out_mp4), kind="video",
+                                  mime="video/mp4", name=out_mp4.name),
+                    caption=f"🎬 {labels[action]} — done "
+                            f"({run.get('note', 'edited')})")
+                if not result.ok:
+                    return (f"❌ edit done but couldn't send: "
+                            f"{result.error}")
+                return f"🎬 done — {labels[action].split(' ', 1)[1]}"
             if action == "bgremove":
                 from ..media_edit.segment import remove_background
                 out = remove_background(load_image(src_paths[0]))
@@ -2574,7 +2674,8 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             f"{labels[action]} — I'll send it when it's ready.",
-            kind="video" if action == "captions" else "image")
+            kind="video" if action in ("captions", "transcript_edit")
+            else "image")
 
     def _dispatch_finance_log(self, intent: Intent, job_id: str, chat_key: str,
                               message: Any) -> str:
