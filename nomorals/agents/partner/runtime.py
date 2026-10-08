@@ -1828,6 +1828,12 @@ class PartnerRuntime(
             if not sms_allows(kind):
                 return SMS_BLOCKED_REPLY
 
+        # Default chat ref for every dispatch branch.  Several branches
+        # (miniapp/gtrip/upgrade/...) rebind `chat` from the message for a
+        # richer ref; branches that don't (watch/aeo/passport/...) previously
+        # crashed with UnboundLocalError.  This default keeps them working.
+        chat = self._ref_from_key(chat_key)
+
         if kind in {"list", "commands", "menu"}:
             # wave 68: /list — every executable chat command, categorized
             # with a one-line "what it does"; /list <group> filters.
@@ -2048,7 +2054,8 @@ class PartnerRuntime(
             # Group chats only — control_miniapp refuses DMs itself.
             from ...community.miniapps import control_miniapp
 
-            chat = message.chat if message is not None else None
+            if message is not None:
+                chat = message.chat
             return control_miniapp(
                 command.tail or arg,
                 context=self.context,
@@ -2343,7 +2350,8 @@ class PartnerRuntime(
             # group chats only — control_gtrip refuses DMs itself.
             from ...travel.groups import control_gtrip
 
-            chat = message.chat if message is not None else None
+            if message is not None:
+                chat = message.chat
             return control_gtrip(
                 command.tail or arg,
                 context=self.context,
@@ -2665,7 +2673,8 @@ class PartnerRuntime(
             # the originating chat rides along so _control_upgrade can
             # re-check the owner gate itself (defense in depth — a direct
             # call with a non-owner chat is denied, fail-closed).
-            chat = getattr(message, "chat", None) if message is not None else None
+            if message is not None:
+                chat = getattr(message, "chat", None) or chat
             return self._control_upgrade(command.tail or arg, _chat=chat)
         if kind == "speak":
             return self._control_speak(command.tail or arg, chat_key=chat_key)
