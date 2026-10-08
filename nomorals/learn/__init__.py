@@ -5,6 +5,21 @@ modes, mastery model, answer-guard); ``flashcards.py`` turns wrong
 answers into spaced-repetition cards.
 """
 
+from .dialect import (
+    DialectError,
+    DialectTurn,
+    DialectUnsupported,
+    EkitiTutor,
+    PhonemeFeedback,
+    PronunciationReport,
+    WordFeedback,
+    arm_check,
+    consume_check,
+    detect_dialect_detail,
+    get_tutor,
+    pending_check,
+    suggest_ekiti_fix,
+)
 from .flashcards import MistakeNotebook, card_from_mistake
 from .tutor import (
     MasteryModel,
@@ -27,7 +42,20 @@ __all__ = [
     "TutorError",
     "TutorSession",
     "TutorTurn",
+    "DialectError",
+    "DialectTurn",
+    "DialectUnsupported",
+    "EkitiTutor",
+    "PhonemeFeedback",
+    "PronunciationReport",
+    "WordFeedback",
+    "arm_check",
     "card_from_mistake",
+    "consume_check",
+    "detect_dialect_detail",
+    "get_tutor",
+    "pending_check",
+    "suggest_ekiti_fix",
     "end_session",
     "get_notebook",
     "get_session",

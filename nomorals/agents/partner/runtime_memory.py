@@ -173,6 +173,79 @@ class RuntimeMemoryMixin:
                   "Ask with /tutor answer <text> to check yourself.")
         return f"{opener}\n\n{turn.prompt}"
 
+    def _control_ekiti(self, tail: str, *, chat_key: str = "") -> str:
+        """/ekiti — Ekiti/Ilawe Ekiti dialect tutoring. Owner-only.
+
+        /ekiti converse <text>   practice conversation in Ekiti dialect
+        /ekiti debate <topic>     argue with me in Ekiti (opposing side)
+        /ekiti say <text>         native-speaker reference audio (XTTS, private)
+        /ekiti check "<expected>" arm a pronunciation check, then send a voice note
+        /ekiti tones              the three Yoruba tones + minimal pairs
+        """
+        from ...learn.dialect import (
+            TONE_GUIDE,
+            YORUBA_MINIMAL_PAIRS,
+            arm_check,
+            get_tutor,
+        )
+        raw = (tail or "").strip()
+        if not raw:
+            return ("usage: /ekiti converse <text> | /ekiti debate <topic> | "
+                    '/ekiti say <text> | /ekiti check "<expected>" | /ekiti tones')
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+        try:
+            if verb == "tones":
+                pairs = "\n".join(
+                    f"• {form} = {gloss} ({tone})"
+                    for form, gloss, tone in YORUBA_MINIMAL_PAIRS)
+                return f"{TONE_GUIDE}\n\nMinimal pairs:\n{pairs}"
+            if verb == "converse":
+                if not rest:
+                    return "usage: /ekiti converse <text in Yoruba/Ekiti>"
+                tutor = get_tutor(chat_key)
+                turn = tutor.converse(rest)
+                out = turn.response
+                if turn.correction:
+                    out += f"\n\n💡 {turn.correction}"
+                return out
+            if verb == "debate":
+                if not rest:
+                    return "usage: /ekiti debate <topic>"
+                tutor = get_tutor(chat_key)
+                turn = tutor.debate(rest)
+                return (f"🥊 round {turn.debate_round} — mi lòdì sí ọ̀!\n\n"
+                        f"{turn.response}")
+            if verb == "say":
+                if not rest:
+                    return "usage: /ekiti say <text>"
+                tutor = get_tutor(chat_key)
+                try:
+                    result = tutor.reference_audio(rest[:500])
+                except Exception as exc:  # noqa: BLE001
+                    return f"reference audio failed: {exc}"
+                path = result.get("path", "")
+                chat = self._ref_from_key(chat_key)
+                try:
+                    sent = self.gateway.send_file(
+                        chat.platform, chat, path,
+                        caption="🎙️ Ekiti reference — shadow this")
+                    if getattr(sent, "ok", False):
+                        return f"🎙️ reference audio sent ({result.get('backend', '?')})"
+                except Exception:  # noqa: BLE001
+                    pass
+                return f"🎙️ reference audio saved at {path}"
+            if verb == "check":
+                try:
+                    return arm_check(chat_key, rest)
+                except Exception as exc:  # noqa: BLE001
+                    return str(exc)
+            return ("usage: /ekiti converse <text> | /ekiti debate <topic> | "
+                    '/ekiti say <text> | /ekiti check "<expected>" | /ekiti tones')
+        except Exception as exc:  # noqa: BLE001
+            return f"ekiti tutor failed: {exc}"
+
     def _control_forget(self, tail: str) -> str:
         """Forget by id, or by the best matching description."""
         target = (tail or "").strip()

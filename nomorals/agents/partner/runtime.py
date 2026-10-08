@@ -529,6 +529,26 @@ class PartnerRuntime(
                                     _log.exception(
                                         "voice money reply send failed")
                                 return
+                            # Ekiti pronunciation check (owner only): an armed
+                            # /ekiti check consumes the next voice note here.
+                            from ...learn.dialect import (
+                                consume_check, pending_check)
+                            if pending_check(message.chat.key):
+                                try:
+                                    scored = consume_check(
+                                        message.chat.key, heard)
+                                except Exception:  # noqa: BLE001
+                                    _log.exception("ekiti check failed")
+                                    scored = None
+                                if scored:
+                                    try:
+                                        self.gateway.send(
+                                            message.chat.platform,
+                                            message.chat, scored)
+                                    except Exception:  # noqa: BLE001
+                                        _log.exception(
+                                            "ekiti check reply failed")
+                                    return
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -1890,6 +1910,11 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_tutor(command.tail or arg,
+                                       chat_key=chat_key)
+        if kind == "ekiti":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_ekiti(command.tail or arg,
                                        chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)

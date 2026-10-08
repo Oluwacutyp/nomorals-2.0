@@ -202,6 +202,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
+    "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -884,6 +885,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/tutor [guide me] <topic> | /tutor answer <text> | /tutor hint | /tutor status | /tutor stop",
                  "example": "/tutor guide me fractions",
                  "related": "/review"},
+    "ekiti": {"what": "Ekiti/Ilawe Ekiti dialect tutoring — conversation, debate, pronunciation, reference audio.",
+                 "usage": '/ekiti converse <text> | /ekiti debate <topic> | /ekiti say <text> | /ekiti check "<expected>" | /ekiti tones',
+                 "example": "/ekiti debate school",
+                 "related": "/tutor"},
     "recall": {"what": "what she remembers, ranked; a query narrows it.",
                "usage": "/recall [query]", "example": "/recall python",
                "related": "/remember /forget"},
@@ -1182,7 +1187,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti"]),
     ("money & spending", ["spend", "budget", "spending"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1395,7 +1400,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor"]),
+      "review", "tutor", "ekiti"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
