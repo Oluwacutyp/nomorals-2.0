@@ -653,6 +653,16 @@ class RuntimeMemoryMixin:
         from ...planning.estimates import control_eta
         return control_eta(tail or "")
 
+    def _control_congestion(self, tail: str, *, chat_key: str = "") -> str:
+        """Multi-agent congestion prediction — owner-only.
+
+        /congestion status | register <name> [kind] [capacity] |
+        advise <resource> [agents=N] | predict <resource> |
+        alternate <resource> <alternate>
+        """
+        from ...planning.congestion import control_congestion
+        return control_congestion(tail or "")
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 

@@ -28,6 +28,14 @@ from .estimates import (
     control_eta,
     eta_text,
 )
+from .congestion import (
+    Resource,
+    Hold,
+    ContentionMonitor,
+    pre_fanout_check,
+    format_status,
+    control_congestion,
+)
 
 __all__ = [
     "WorldGraph",
@@ -52,4 +60,10 @@ __all__ = [
     "record_actual",
     "control_eta",
     "eta_text",
+    "Resource",
+    "Hold",
+    "ContentionMonitor",
+    "pre_fanout_check",
+    "format_status",
+    "control_congestion",
 ]

@@ -211,6 +211,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
     "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
     "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
+    "congestion": (0, None),  # /congestion status | register <name> [kind] [capacity] | advise <resource> [agents=N] | predict <resource> | alternate <r> <alt>
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1005,6 +1006,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/eta <task-type> [seg=min] ... | /eta record <task> <predicted-min> <actual-min> | /eta risk <task> <elapsed-min> | /eta stats [task]",
             "example": "/eta research prep=10 read=20 write=15",
             "related": "/route"},
+    "congestion": {"what": "Multi-agent congestion prediction — per-resource queue depth with jam forecasting before fan-out. Back off, switch provider, or stagger.",
+            "usage": "/congestion status | /congestion register <name> [kind] [capacity] | /congestion advise <resource> [agents=N] | /congestion predict <resource> | /congestion alternate <resource> <alternate>",
+            "example": "/congestion advise groq-key agents=6",
+            "related": "/route"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1337,7 +1342,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1550,7 +1555,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta"]),
+      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
