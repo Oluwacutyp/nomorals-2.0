@@ -262,6 +262,13 @@ class ChatSettings:
     webhook_port: int = 0
     webhook_token: str = ""
     webhook_reply_url: str = ""
+    # SMS fallback surface (build-map #19): text a number, get Devon.
+    # COST: Twilio numbers cost real money (~$1/mo + per-segment each way).
+    # Off by default — needs sms_enabled=true AND sms_from_number set.
+    sms_enabled: bool = False
+    sms_from_number: str = ""
+    sms_host: str = "127.0.0.1"
+    sms_port: int = 0
     max_per_hour: int = 60
 
 
@@ -770,6 +777,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_WEBHOOK_PORT": "chat.webhook_port",
     "NM_CHAT_WEBHOOK_TOKEN": "chat.webhook_token",
     "NM_CHAT_WEBHOOK_REPLY_URL": "chat.webhook_reply_url",
+    "NM_CHAT_SMS_ENABLED": "chat.sms_enabled",
+    "NM_CHAT_SMS_FROM_NUMBER": "chat.sms_from_number",
+    "NM_CHAT_SMS_HOST": "chat.sms_host",
+    "NM_CHAT_SMS_PORT": "chat.sms_port",
     "NM_ARENA_ENABLED": "arena.enabled",
     "NM_ARENA_BUILD": "arena.build",
     "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",

@@ -131,7 +131,9 @@ class PartnerRuntime(
         if self.gateway is None:
             from ...social.chat import build_adapters
 
-            adapters, skipped = build_adapters(self.settings, on_new_member=self._on_new_discord_member)
+            adapters, skipped = build_adapters(
+                self.settings, on_new_member=self._on_new_discord_member,
+                db=getattr(self.context, "db", None))
             if skipped:
                 _log.warning("skipped chat adapters: %s", skipped)
             if not adapters:
@@ -436,6 +438,19 @@ class PartnerRuntime(
 
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
+        # SMS fallback surface (build-map #19): SMS can't carry media into
+        # the brain. Answer honestly instead of letting her hallucinate
+        # about a picture she never received.
+        if (message.incoming and message.chat.platform == "sms"
+                and message.meta.get("sms_has_media")):
+            from ...social.chat.sms import SMS_MEDIA_REPLY
+
+            try:
+                self.gateway.send(message.chat.platform, message.chat,
+                                  SMS_MEDIA_REPLY)
+            except Exception:  # noqa: BLE001 - reply is best-effort
+                _log.exception("sms media reply send failed")
+            return
         # Vision flag: with it off, inbound media is dropped before the brain
         # (no download-to-understanding pipeline, no token cost).
         if message.media:
@@ -1355,6 +1370,16 @@ class PartnerRuntime(
         locked = self._progression_gate(kind, message)
         if locked is not None:
             return locked
+
+        # SMS fallback surface (build-map #19): restricted command set over
+        # SMS — games, media, exec and everything heavy get an honest
+        # "needs the app" reply instead of running.
+        platform = (chat_key or "").partition(":")[0].strip().lower()
+        if platform == "sms":
+            from ...social.chat.sms import SMS_BLOCKED_REPLY, sms_allows
+
+            if not sms_allows(kind):
+                return SMS_BLOCKED_REPLY
 
         if kind in {"list", "commands", "menu"}:
             # wave 68: /list — every executable chat command, categorized

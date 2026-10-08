@@ -9,6 +9,8 @@ The companion's three (or four) faces:
   servers, threads; opens first DMs, reports new server members
 * ``whatsapp``  — Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``)
 * ``local``     — console, for development and tests
+* ``sms``         — Twilio SMS fallback (opt-in, costs money): text a number,
+  get Devon; restricted command set, DM-only
 
 ``build_adapters`` turns settings into whichever adapters are configured and
 importable, skipping (not failing on) platforms whose optional dependency is
@@ -43,7 +45,8 @@ __all__ = [
 _log = get_logger(__name__)
 
 
-def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> ChatAdapter | None:
+def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
+                  db: Any = None) -> ChatAdapter | None:
     """Build one adapter by name; None when unavailable (missing dependency,
     disabled, or bad credentials). Used both at boot and for hot starts."""
     name = name.strip().lower()
@@ -131,11 +134,41 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None) -> Cha
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"webhook unavailable: {exc}") from exc
+    if name == "sms":
+        from .sms import sms_enabled
+
+        if not sms_enabled(settings):
+            return None
+        try:
+            import os
+
+            from .sms import SMSAdapter
+
+            twilio = None
+            if db is not None:
+                try:
+                    from ...accounts.vault import CredentialVault
+                    from ...connectors import create_connector
+
+                    vault = CredentialVault(
+                        db, master_passphrase=os.environ.get("NM_VAULT_PASSPHRASE", ""))
+                    twilio = create_connector("twilio", vault)
+                except Exception as exc:  # noqa: BLE001 - sends fail closed
+                    _log.warning("sms: twilio connector unavailable: %s", exc)
+            return SMSAdapter(
+                twilio,
+                from_number=chat.sms_from_number,
+                host=chat.sms_host,
+                port=chat.sms_port,
+                media_dir=str(settings.resolve("data/media/sms")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"sms unavailable: {exc}") from exc
     return None
 
 
 def build_adapters(
-    settings: Any, *, on_new_member: Any = None
+    settings: Any, *, on_new_member: Any = None, db: Any = None
 ) -> tuple[dict[str, ChatAdapter], list[str]]:
     """Instantiate the chat adapters that are enabled in settings.
 
@@ -151,11 +184,11 @@ def build_adapters(
     adapters: dict[str, ChatAdapter] = {}
     skipped: list[str] = []
     for name in ("local", "telegram", "telegram-bot", "discord", "whatsapp",
-                 "webhook"):
+                 "webhook", "sms"):
         if name not in wanted and not (name == "local" and settings.chat.local_enabled):
             continue
         try:
-            adapter = build_adapter(settings, name, on_new_member=on_new_member)
+            adapter = build_adapter(settings, name, on_new_member=on_new_member, db=db)
         except ValueError as exc:
             skipped.append(str(exc))
             continue
