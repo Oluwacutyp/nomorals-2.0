@@ -798,6 +798,46 @@ class ResearchProvider(_Provider):
             name=self.name, title=self.title, priority=self.priority,
             source="upgrade_queue", items=items, lines=lines)
 
+
+class FromYourPastProvider(_Provider):
+    """Spaced-repetition resurfacing (build-map #40): memories due on the
+    forgetting curve, Readwise-style. 2-3 cards max, lowest priority so
+    urgent sections always win the word-cap fight. Never raises."""
+    name = "from_past"
+    title = "🕰️ From your past"
+    priority = 90  # yields to everything; first dropped by the word cap
+    source = "repetition"
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — past is optional
+            _log.debug("from-your-past provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        from ..memory.repetition import RepetitionScheduler
+        sched = RepetitionScheduler()
+        cards = sched.due(limit=3)
+        if not cards:
+            return None
+        items, lines = [], []
+        for c in cards:
+            text = (c.text or "").strip()
+            if not text:
+                continue
+            first_seen = time.strftime("%Y-%m-%d",
+                                       time.localtime(c.created_at))
+            lines.append(f"• 🕰️ {text[:160]}")
+            lines.append(f"  — first noted {first_seen}")
+            items.append({"id": f"past-{c.memory_id}", "title": text[:120],
+                          "body": text[:300], "memory_id": c.memory_id})
+        if not lines:
+            return None
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source=self.source, items=items, lines=lines)
+
     @staticmethod
     def _open_queue(UpgradeQueue: Any, ctx: Any) -> Any | None:
         """Construct the queue without knowing its signature: prefer a
@@ -872,6 +912,12 @@ class BriefingComposer:
         # briefing (collect() itself also swallows everything).
         try:
             self.providers.append(ResearchProvider())
+        except Exception:  # noqa: BLE001
+            pass
+        # From-your-past (spaced repetition, build-map #40): local class,
+        # constructed defensively — no due cards → provider returns None.
+        try:
+            self.providers.append(FromYourPastProvider())
         except Exception:  # noqa: BLE001
             pass
 
@@ -1163,6 +1209,18 @@ def run_briefing(context: Any, late: bool = False) -> dict[str, Any]:
         record_briefing_views(context, briefing)
     except Exception as exc:  # noqa: BLE001 — storage must not kill delivery
         _log.warning("briefing store failed: %s", exc)
+    # Bookkeeping for the knowledge state (build-map #40): the last-N
+    # briefings must not resurface the same memories. Recording what we
+    # surfaced is delivery bookkeeping, not acting on owner data.
+    try:
+        from ..memory.delivery import KnowledgeState
+        ks = KnowledgeState()
+        surfaced = [i.get("memory_id") for s in briefing.sections
+                    for i in s.items if i.get("memory_id")]
+        if surfaced:
+            ks.mark_briefing(briefing.id, surfaced)
+    except Exception:  # noqa: BLE001 — bookkeeping never blocks delivery
+        _log.debug("briefing knowledge-state record failed", exc_info=True)
     text = briefing.render_text()
     if not briefing.sections:
         text += ("\n\n(quiet night — nothing to report. "
