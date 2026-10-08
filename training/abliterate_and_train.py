@@ -47,20 +47,30 @@ DEVON_PROMPTS = [
     open("devon_prompt_3.txt").read().strip(),  # technical register
 ]
 
-# 6 datasets from your notebook
+# 6 datasets from your notebook (+ Tool-Use). Schemas verified 2026-10-08
+# against the live HF dataset pages. "required": False only for gated lmsys.
 SOURCES = [
     {"name": "open-hermes-25",  "id": "teknium/OpenHermes-2.5",
-     "normalize": "hermes", "weight": 3.0, "cap": 60000},
+     "normalize": "sharegpt", "weight": 3.0, "cap": 60000, "required": True},
     {"name": "ultra-code",   "id": "openbmb/UltraData-SFT-Agent-2609",
-     "config": "Code-Agent", "normalize": "ultra", "weight": 2.0, "cap": 22770},
+     "config": "Code-Agent", "normalize": "ultra", "weight": 2.0, "cap": 22770,
+     "required": True},
     {"name": "ultra-general","id": "openbmb/UltraData-SFT-Agent-2609",
-     "config": "General-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000},
+     "config": "General-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000,
+     "required": True},
     {"name": "ultra-search", "id": "openbmb/UltraData-SFT-Agent-2609",
-     "config": "Search-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000},
-    {"name": "dolphin-2.9",  "id": "cognitivecomputations/dolphin2.9",
-     "normalize": "conversations", "weight": 2.0, "cap": 50000},
+     "config": "Search-Agent", "normalize": "ultra", "weight": 2.0, "cap": 30000,
+     "required": True},
+    {"name": "ultra-tooluse","id": "openbmb/UltraData-SFT-Agent-2609",
+     "config": "Tool-Use", "normalize": "ultra", "weight": 2.0, "cap": 40000,
+     "required": True},
+    # ID is case-sensitive: cognitivecomputations/Dolphin-2.9 (capital D).
+    {"name": "dolphin-2.9",  "id": "cognitivecomputations/Dolphin-2.9",
+     "normalize": "sharegpt", "weight": 2.0, "cap": 50000, "required": True},
+    # GATED: accept the license at https://huggingface.co/datasets/lmsys/lmsys-chat-1m
+    # with the same HF account/token before running, else this yields 0 rows.
     {"name": "lmsys-1m",      "id": "lmsys/lmsys-chat-1m",
-     "normalize": "conversations", "weight": 1.5, "cap": 40000},
+     "normalize": "sharegpt", "weight": 1.5, "cap": 40000, "required": False},
 ]
 
 
@@ -180,12 +190,28 @@ def abliterate():
 # PHASE 2: DATASET
 # ═══════════════════════════════════════════════════════════════════
 
-def norm_hermes(row):
-    prompt = row.get("prompt", "")
-    completion = row.get("completion", "")
-    if not prompt or not completion:
-        return None
-    return [("user", prompt), ("assistant", completion)]
+def norm_sharegpt(row):
+    """Handles OpenHermes-2.5, Dolphin-2.9, lmsys-chat-1m.
+    All three use a conversations list; roles are human/gpt (+system on hermes)
+    or user/assistant (lmsys). Source system turns are DROPPED — our Devon
+    system prompt replaces them, so roleplay personas can't leak in.
+    """
+    convs = row.get("conversations", row.get("conversation", []))
+    turns = []
+    for m in convs:
+        if not isinstance(m, dict):
+            continue
+        f = m.get("from", m.get("role", ""))
+        content = m.get("value", m.get("content", ""))
+        if not content:
+            continue
+        content = str(content)
+        if f in ("human", "user"):
+            turns.append(("user", content))
+        elif f in ("gpt", "assistant"):
+            turns.append(("assistant", content))
+        # "system" intentionally dropped (see docstring)
+    return turns if len(turns) >= 2 else None
 
 def norm_ultra(row):
     msgs = row.get("messages", [])
@@ -196,21 +222,18 @@ def norm_ultra(row):
         if isinstance(content, list):
             content = " ".join(
                 c.get("text", "") for c in content if isinstance(c, dict))
-        if role in ("user", "assistant") and content:
+        if not content:
+            continue
+        content = str(content)
+        if role in ("user", "assistant"):
             # Make tool calls visible as text
             if m.get("tool_calls"):
                 content += "\n[tool calls: " + json.dumps(m["tool_calls"])[:500] + "]"
             turns.append((role, content))
-    return turns if len(turns) >= 2 else None
-
-def norm_conversations(row):
-    convs = row.get("conversations", row.get("conversation", []))
-    turns = []
-    for m in convs:
-        role = "user" if m.get("from", m.get("role")) in ("human", "user") else "assistant"
-        content = m.get("value", m.get("content", ""))
-        if content:
-            turns.append((role, content))
+        elif role == "tool":
+            # Tool outputs are the other half of an agent trajectory — keep
+            # them as pseudo-user turns so the cause→effect chain stays intact.
+            turns.append(("user", "[tool result]\n" + content[:2000]))
     return turns if len(turns) >= 2 else None
 
 def norm_generic(row):
@@ -220,8 +243,8 @@ def norm_generic(row):
             return [("user", str(row[u_key])), ("assistant", str(row[a_key]))]
     return None
 
-NORMALIZERS = {"hermes": norm_hermes, "ultra": norm_ultra,
-               "conversations": norm_conversations, "generic": norm_generic}
+NORMALIZERS = {"sharegpt": norm_sharegpt, "ultra": norm_ultra,
+               "conversations": norm_sharegpt, "generic": norm_generic}
 
 def build_dataset(tokenizer):
     """Stream 6 sources, stamp Devon persona, interleave to TARGET_ROWS."""
@@ -274,6 +297,15 @@ def build_dataset(tokenizer):
             all_rows.append({"text": text, "_src": src["name"]})
             count += 1
         print(f"  → {count} rows from {src['name']}")
+        if count == 0 and src.get("required", True):
+            print()
+            print("=" * 60)
+            print(f"❌ FATAL: {src['name']} ({src['id']}) yielded 0 rows.")
+            print("   Refusing to train on a silently broken mix. Fix the source, re-run.")
+            print("=" * 60)
+            raise SystemExit(1)
+        elif count == 0:
+            print(f"  ⚠ {src['name']} yielded 0 rows (optional — continuing).")
 
     # Weighted interleave + dedup + cap
     rng.shuffle(all_rows)
