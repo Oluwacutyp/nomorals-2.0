@@ -18,9 +18,13 @@ from __future__ import annotations
 from .ai import GameMind
 from .economy import DEFAULT_SHOP, GameEconomy, ShopItem
 from .engine import GameEngine, SendFn
+from .film import (FilmBreakdown, FilmStore, FingerprintStore, GAMES,
+                   analyze_vod, control_film, export_breakdown)
 from .players import AI_PLAYER, Leaderboard, Player, PlayerStore
 
 __all__ = [
-    "AI_PLAYER", "DEFAULT_SHOP", "GameEconomy", "GameEngine", "GameMind",
+    "AI_PLAYER", "DEFAULT_SHOP", "FilmBreakdown", "FilmStore",
+    "FingerprintStore", "GAMES", "GameEconomy", "GameEngine", "GameMind",
     "Leaderboard", "Player", "PlayerStore", "SendFn", "ShopItem",
+    "analyze_vod", "control_film", "export_breakdown",
 ]

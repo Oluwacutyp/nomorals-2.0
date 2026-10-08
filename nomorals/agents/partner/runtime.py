@@ -2328,6 +2328,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_form(command.tail or arg,
                                       chat_key=chat_key)
+        if kind == "film":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_film(command.tail or arg,
+                                      chat_key=chat_key)
         if kind == "routine":
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."

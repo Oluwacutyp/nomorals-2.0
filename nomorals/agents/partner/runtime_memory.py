@@ -586,6 +586,27 @@ class RuntimeMemoryMixin:
             self._form_store = store
         return control_form(tail or "", coach=coach, store=store)
 
+    def _control_film(self, tail: str, *, chat_key: str = "") -> str:
+        """VOD film study — mistakes + highlights + fingerprints. Owner-only.
+
+        /film analyze <video> <game> [exercise] — VOD breakdown
+        /film games — supported games
+        /film fingerprint [game] — recurring playstyle patterns
+        /film list [game] — past breakdowns
+        /film export <id> — shareable summary
+        """
+        from ...games.film import (FingerprintStore, FilmStore,
+                                   control_film)
+        store = getattr(self, "_film_store", None)
+        if store is None:
+            store = FilmStore()
+            self._film_store = store
+        fps = getattr(self, "_fingerprint_store", None)
+        if fps is None:
+            fps = FingerprintStore()
+            self._fingerprint_store = fps
+        return control_film(tail or "", store=store, fingerprints=fps)
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 
