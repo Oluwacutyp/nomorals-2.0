@@ -223,6 +223,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
     "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
     "contract": (0, None),     # /contract review [type] <text> | types — letter-grade contract risk review (Nigerian playbooks)
+    "legal": (0, None),        # /legal [language] <question> — plain-language legal information (EN/PCM/YO/HA/IG)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -622,7 +623,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "contract": {"what": "contract risk review — paste a tenancy, employment, or freelance agreement and get a letter grade (A–F) plus flagged clauses explained in plain language. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
                 "usage": "/contract review [tenancy|employment|freelance] <paste contract text> | /contract types",
                 "example": "/contract review tenancy This tenancy agreement between landlord and tenant...",
-                "related": "/trip"},
+                "related": "/legal"},
+    "legal": {"what": "consumer legal aid — ask a legal question in plain language and get the answer in English, Pidgin, Yoruba, Hausa, or Igbo, with sources cited. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
+                "usage": "/legal [en|pcm|yo|ha|ig] <your question>",
+                "example": "/legal pcm my landlord don lock me out"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1283,7 +1287,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1493,7 +1497,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

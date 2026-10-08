@@ -13,6 +13,17 @@ from .contracts import (
     review_contract,
 )
 
+from .aid import (
+    LANGUAGES,
+    LANGUAGE_NAMES,
+    Answer,
+    answer_legal_question,
+    bill_answer,
+    control_legal,
+    corpus_search,
+    format_answer,
+)
+
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
@@ -24,4 +35,12 @@ __all__ = [
     "format_review",
     "information_only_check",
     "review_contract",
+    "LANGUAGES",
+    "LANGUAGE_NAMES",
+    "Answer",
+    "answer_legal_question",
+    "bill_answer",
+    "control_legal",
+    "corpus_search",
+    "format_answer",
 ]
