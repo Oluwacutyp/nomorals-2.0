@@ -159,7 +159,17 @@ def setup_logging(
     redact_secrets: bool = True,
     color: bool = True,
     force: bool = False,
-    quiet_libs: Iterable[str] = ("urllib3", "asyncio", "filelock"),
+    quiet_libs: Iterable[str] = (
+        "urllib3",
+        "asyncio",
+        "filelock",
+        # Third-party protocol libraries: their DEBUG output (full Discord
+        # gateway event dicts, Telethon MTProto packet traces) drowns the
+        # application log. Devon's own adapters log under ``nomorals.*`` and
+        # are unaffected.
+        "discord",
+        "telethon",
+    ),
 ) -> logging.Logger:
     """Configure root logging for the process. Idempotent unless ``force``."""
     global _CONFIGURED
