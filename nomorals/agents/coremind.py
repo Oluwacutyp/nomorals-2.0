@@ -769,6 +769,63 @@ def _email_intent(text: str) -> Intent | None:
                   why=f"vendor mail query: {vendor[:30]} / {topic[:30]}")
 
 
+# Image-generation NL intents — narrow by design, whole-message matches only.
+# "generate an image of a cat" / "create an image of X" → generate.
+# "draw a cat" → generate (but "draw a conclusion" must NOT match — the
+# abstract-verb denylist keeps it honest).
+# "edit this image: make it sunset" → edit (needs an attached image).
+_RE_IMAGE_GEN = re.compile(
+    r"^(?:generate|create)\s+(?:an?\s+)?image\s+of\s+(.+?)\s*$", re.I)
+_RE_IMAGE_DRAW = re.compile(r"^draw\s+(.+?)\s*$", re.I)
+_RE_IMAGE_EDIT = re.compile(
+    r"^edit\s+(?:this\s+)?image\s*:\s*(.+?)\s*$", re.I)
+_IMAGE_DRAW_DENYLIST = (
+    "conclusion", "comparison", "distinction", "line", "the line",
+    "curtains", "blinds", "salary", "pay", "attention",
+)
+
+
+def _image_intent(text: str) -> Intent | None:
+    """Detect image generation/edit requests — routes to the model router.
+
+    Narrow by design: the whole message must match one of the three
+    shapes, so ordinary chat never misfires into a GPU job.
+    """
+    stripped = (text or "").strip()
+    m = _RE_IMAGE_GEN.match(stripped)
+    if m:
+        prompt = m.group(1).strip()
+        if not prompt or len(prompt) > 500:
+            return None
+        return Intent("image_gen", 0.9, target=prompt[:500],
+                      action="generate", route="media",
+                      meta={"prompt": prompt},
+                      why=f"image request: {prompt[:40]}")
+    m = _RE_IMAGE_EDIT.match(stripped)
+    if m:
+        instruction = m.group(1).strip()
+        if not instruction or len(instruction) > 500:
+            return None
+        return Intent("image_edit", 0.88, target=instruction[:500],
+                      action="edit", route="media",
+                      meta={"instruction": instruction},
+                      why=f"image edit: {instruction[:40]}")
+    m = _RE_IMAGE_DRAW.match(stripped)
+    if m:
+        prompt = m.group(1).strip()
+        if not prompt or len(prompt) > 500:
+            return None
+        # "draw a conclusion / the line / curtains" is not an image request.
+        low = prompt.lower()
+        if any(bad in low for bad in _IMAGE_DRAW_DENYLIST):
+            return None
+        return Intent("image_gen", 0.8, target=prompt[:500],
+                      action="generate", route="media",
+                      meta={"prompt": prompt},
+                      why=f"draw request: {prompt[:40]}")
+    return None
+
+
 def _finance_intent(text: str) -> Intent | None:
     """Detect finance NL: "I spent 5k on transport" / "how's my spending?".
 
@@ -1065,7 +1122,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
-               _finance_intent):
+               _finance_intent, _image_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1574,6 +1631,8 @@ class CoreMind:
             "play": self._dispatch_play,
             "owner": self._dispatch_owner,
             "email_query": self._dispatch_email,
+            "image_gen": self._dispatch_image,
+            "image_edit": self._dispatch_image,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2064,6 +2123,93 @@ class CoreMind:
                     "`nm connectors connect --name gmail` first.")
         reply = answer_vendor_query(gmail, intent.target)
         return reply or "couldn't parse that mail query."
+
+    def _dispatch_image(self, intent: Intent, job_id: str, chat_key: str,
+                        message: Any) -> str:
+        """NL image generation/edit: route via the license-aware model
+        router, generate on a background thread, deliver the image to chat.
+
+        Audience is structural: the owner's DM/console gets "private"
+        (FLUX dev allowed); everything else gets "public" (open licenses
+        only — the router excludes non-commercial models before scoring).
+        Nothing is faked: a missing backend raises with the real reason.
+        """
+        from ..media_edit.models import ImageModelRouter
+        from ..social.chat.base import MediaRef
+
+        action = intent.action  # "generate" | "edit"
+        src_media = None
+        if action == "edit":
+            try:
+                src_media = message.first_media()
+            except Exception:  # noqa: BLE001 - best-effort
+                src_media = None
+            if src_media is None or src_media.kind != "image":
+                return ("🖼️ attach the image you want edited, then say:\n"
+                        "`edit this image: <what to change>`")
+        src_path = src_media.path if src_media is not None else ""
+
+        audience = ("private"
+                    if self._is_owner_dm(message, chat_key) else "public")
+
+        def job() -> str:
+            router = ImageModelRouter()
+            route = router.route(action, audience=audience)
+            out_dir = Path(self.context.settings.resolve(
+                "data/generations"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            out_path = out_dir / f"gen-{stamp}.png"
+
+            if route.backend == "local":
+                from ..media_edit.generate import op_upscale
+                from ..media_edit.images import load_image
+                img = op_upscale(load_image(src_path), scale=2.0)
+            elif route.backend == "hf":
+                from ..media_edit.generate import HFInferenceBackend
+                be = HFInferenceBackend(model=route.hf_id)
+                img = (be.generate(intent.target, steps=route.steps)[0]
+                       if action == "generate"
+                       else be.edit(src_path, intent.target,
+                                    steps=route.steps))
+            elif route.backend == "diffusers":
+                from ..media_edit.generate import DiffusersBackend
+                be = DiffusersBackend(model=route.hf_id)
+                img = (be.generate(intent.target, steps=route.steps)[0]
+                       if action == "generate"
+                       else be.edit(src_path, intent.target,
+                                    steps=route.steps))
+            else:  # comfy
+                from ..media_edit.comfy import ComfyUIBackend
+                be = ComfyUIBackend(checkpoint=route.checkpoint)
+                if action == "generate":
+                    img = be.generate(intent.target, steps=route.steps)[0]
+                elif route.workflow == "upscale":
+                    img = be.upscale(src_path, scale=2.0)
+                else:
+                    img = be.edit(src_path, intent.target,
+                                  steps=route.steps)
+
+            img.save(out_path)
+            if self.runtime is None:
+                return f"🖼️ saved to {out_path}\n({route.reason})"
+            ref = self.runtime._ref_from_key(chat_key)
+            adapter = self.runtime.gateway._adapter_for(ref.platform)
+            if adapter is None:
+                return f"❌ generated but no adapter for {ref.platform}"
+            result = adapter.send_media(
+                ref, MediaRef(path=str(out_path), kind="image",
+                              mime="image/png", name=out_path.name),
+                caption=f"🎨 {route.model}")
+            if not result.ok:
+                return (f"❌ generated ({route.model}) but couldn't send: "
+                        f"{result.error}")
+            return f"🖼️ done — {route.reason}"
+
+        return self._send_async(
+            chat_key, job, job_id,
+            "🎨 generating — I'll send it when it's ready.",
+            kind="image")
 
     def _dispatch_finance_log(self, intent: Intent, job_id: str, chat_key: str,
                               message: Any) -> str:
