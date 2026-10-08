@@ -223,6 +223,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "leads": (0, None),       # /leads trigger <post> <keyword> | list | dm <contact> | everyone <post> — comment→DM→lead loop (owner only)
     "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
     "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
+    "guardrails": (0, None),   # /guardrails add <rule> | list | run | override … — rule-based ad-spend safety (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1057,6 +1058,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/content score <draft> | /content schedule <draft_id> <when> | /content run <topic>",
             "example": "/content score Lagos rents are wild right now",
             "related": "/brief"},
+    "guardrails": {"what": "Rule-based ad guardrails — autonomous-spend safety. 'pause if CPA > X for 3 days', 'scale 20% if ROAS > 3'. Spend actions need an adspend mandate; explicit overrides bypass rules but never the mandate. Audit-logged. Owner only.",
+            "usage": "/guardrails add <rule> | list | run | override <action> <adset> [pct] | stop <id> | audit",
+            "example": "/guardrails add pause if cpa > ₦50000 for 3 days on adset123",
+            "related": "/mandate /send"},
     "send": {"what": "Self-hosted send layer — Devon owns the mailgun. SQLite queue, per-provider sliding-window rate limits, exponential-backoff retry, DSN bounce processing with auto-blocklist, conditional templates, provider registry (SMTP/SES/Twilio/custom). Every bulk send routes through #68 cost-awareness. Owner only.",
             "usage": "/send template add <name> | <body> | /send provider add <name> <kind> [rate/min] | /send campaign <template> to <a@b.com, c@d.com> [via <provider>] | /send process | /send queue | /send status | /send bounce <address>",
             "example": "/send campaign launch to a@x.com, b@y.com via ses-main",
@@ -1417,7 +1422,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1749,6 +1754,7 @@ LIST_ONELINERS: dict[str, str] = {
     "leads": "comment → DM → lead loop — keyword triggers, lead CRM (owner only)",
     "brief": "SERP-derived content brief — keywords, questions, angles (owner only)",
     "content": "brief-first pipeline — score, predict, schedule (owner only)",
+    "guardrails": "rule-based ad-spend guardrails — pause/scale rules, mandate-gated (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

@@ -2222,6 +2222,17 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "guardrails":
+            # Rule-based ad guardrails (#101) — autonomous-spend safety,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...marketing.guardrails import control_guardrails
+            return control_guardrails(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.
