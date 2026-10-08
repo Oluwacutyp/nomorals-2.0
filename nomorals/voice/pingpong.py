@@ -66,6 +66,32 @@ def transcribe_voice_media(context: Any, message: Any) -> str:
     return ""
 
 
+def _private_voice_reply(context: Any, text: str) -> str:
+    """Devon's own cloned voice (XTTS v2) on capable profiles.
+
+    Returns the wav path, or "" when unavailable (wrong profile, no
+    voice profile registered, backend missing) — the caller falls back
+    to the cloud voice.  Never raises.
+    """
+    try:
+        settings = getattr(context, "settings", None)
+        profile = (getattr(settings, "profile", "") or "").lower()
+        if profile in ("termux", "phone", "mobile"):
+            return ""
+        from .tts import UniversalTTS
+        tts = UniversalTTS(backend="xtts")
+        # "devon" is the registered private voice profile; skip silently
+        # when the owner hasn't cloned one yet.
+        names = {p.get("name") for p in tts.voices.list()}
+        if "devon" not in names:
+            return ""
+        result = tts.speak(text, voice_name="devon")
+        path = result.get("path", "")
+        return path if path and Path(path).is_file() else ""
+    except Exception:  # noqa: BLE001 - private voice is a bonus, never a failure
+        return ""
+
+
 def synthesize_voice_reply(context: Any, text: str) -> str:
     """TTS the reply text → path to an .ogg voice note.  Raises on failure."""
     text = (text or "").strip()
@@ -73,6 +99,13 @@ def synthesize_voice_reply(context: Any, text: str) -> str:
         raise ValueError("nothing to synthesize")
     # keep voice notes short — cap at ~30s of speech
     text = text[:600]
+    # Private voice first: on workstation-class profiles, use Devon's own
+    # cloned voice (XTTS v2) when a voice profile is registered.  Phone /
+    # termux falls back to the cloud voice below — profile-gated, never
+    # designed down.
+    private_path = _private_voice_reply(context, text)
+    if private_path:
+        return to_ogg(private_path)
     # voice from settings (NM_AUDIO_TTS_VOICE); Nigerian English default
     # suits Devon better than edge-tts's flat default.
     voice = ""
