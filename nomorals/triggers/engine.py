@@ -38,6 +38,7 @@ from .models import (
     OUTCOME_FIRED,
     OUTCOME_NO_MATCH,
     OUTCOME_SKIPPED,
+    SOURCE_ENTITY_STATE,
     SOURCE_FILE,
     SOURCE_MESSAGE,
     SOURCE_PRICE,
@@ -52,6 +53,7 @@ from .sources import (
     SCHEDULER_ACTION,
     evaluate_file,
     evaluate_price,
+    match_entity_state,
     match_message,
     schedule_plan,
 )
@@ -377,6 +379,45 @@ class TriggerEngine:
                 self.store.record(
                     trigger.id, OUTCOME_NO_MATCH,
                     {"source": "message", "chat": chat_key, **evidence})
+        return fired
+
+    # ── evaluation: entity_state source ────────────────────────────────
+
+    def on_entity_state(self, entity_id: str, old_state: Any,
+                        new_state: Any,
+                        attributes: dict[str, Any] | None = None
+                        ) -> list[str]:
+        """Feed one HA ``state_changed`` event to every enabled
+        entity_state trigger.  Mirrors :meth:`on_message`: per-trigger
+        isolation, history for every outcome, never raises."""
+        fired: list[str] = []
+        entity_id = str(entity_id or "").lower()
+        attributes = dict(attributes or {})
+        for trigger in self.store.list(enabled_only=True,
+                                       source=SOURCE_ENTITY_STATE):
+            try:
+                hit, evidence = match_entity_state(
+                    trigger, entity_id, old_state, new_state, attributes)
+            except Exception as exc:  # noqa: BLE001 - per-trigger isolation
+                _log.exception("trigger %s entity_state match failed",
+                               trigger.id)
+                self.store.record(
+                    trigger.id, OUTCOME_ERROR, {"source": "entity_state"},
+                    error=f"{type(exc).__name__}: {exc}")
+                continue
+            if hit:
+                result = self._fire(
+                    trigger, {"source": "entity_state",
+                              "entity_id": entity_id,
+                              "attributes": attributes,
+                              **evidence})
+                if result["fired"]:
+                    fired.append(trigger.id)
+            else:
+                self.store.record(
+                    trigger.id, OUTCOME_NO_MATCH,
+                    {"source": "entity_state", "entity_id": entity_id,
+                     **evidence})
         return fired
 
     # ── evaluation: webhook source ─────────────────────────────────────────

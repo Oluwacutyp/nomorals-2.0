@@ -4,7 +4,8 @@ A trigger is ``when <source> says so, do <action>``:
 
 * **sources** — ``schedule`` (cron/interval, via the existing scheduler),
   ``file`` (path change), ``price`` (keyless market-data threshold),
-  ``message`` (regex on inbound chat), ``webhook`` (HTTP POST).
+  ``message`` (regex on inbound chat), ``webhook`` (HTTP POST),
+  ``entity_state`` (Home Assistant state_changed, event-driven).
 * **actions** — ``notify`` (owner-only channel), ``message`` (send to a
   chat), ``command`` (run an ``nm`` command), ``mission`` (start a mission).
 
@@ -26,6 +27,7 @@ from .models import (
     ACTION_MISSION,
     ACTION_NOTIFY,
     ACTIONS,
+    SOURCE_ENTITY_STATE,
     SOURCE_FILE,
     SOURCE_MESSAGE,
     SOURCE_PRICE,
@@ -53,6 +55,7 @@ __all__ = [
     "SOURCE_PRICE",
     "SOURCE_MESSAGE",
     "SOURCE_WEBHOOK",
+    "SOURCE_ENTITY_STATE",
     "ACTION_NOTIFY",
     "ACTION_MESSAGE",
     "ACTION_COMMAND",

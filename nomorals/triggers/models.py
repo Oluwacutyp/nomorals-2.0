@@ -27,8 +27,10 @@ SOURCE_FILE = "file"
 SOURCE_PRICE = "price"
 SOURCE_MESSAGE = "message"
 SOURCE_WEBHOOK = "webhook"
+SOURCE_ENTITY_STATE = "entity_state"
 SOURCES = frozenset(
-    {SOURCE_SCHEDULE, SOURCE_FILE, SOURCE_PRICE, SOURCE_MESSAGE, SOURCE_WEBHOOK}
+    {SOURCE_SCHEDULE, SOURCE_FILE, SOURCE_PRICE, SOURCE_MESSAGE,
+     SOURCE_WEBHOOK, SOURCE_ENTITY_STATE}
 )
 
 #: actions a trigger can take
@@ -344,6 +346,29 @@ def _validate_action_params(action: str,
     return params
 
 
+def _validate_entity_state(condition: dict[str, Any]) -> dict[str, Any]:
+    """Validate an entity_state (Home Assistant state_changed) condition.
+
+    Optional filters (all ANDed): ``domain`` (e.g. "light"), ``entity_id``
+    (e.g. "light.kitchen"), ``to`` (new state, e.g. "on"), ``from``
+    (previous state).  An empty condition matches every state change.
+    """
+    out: dict[str, Any] = {}
+    domain = str(condition.get("domain") or "").strip().lower()
+    if domain:
+        out["domain"] = domain
+    entity_id = str(condition.get("entity_id") or "").strip().lower()
+    if entity_id:
+        out["entity_id"] = entity_id
+    to_state = condition.get("to")
+    if to_state is not None and str(to_state) != "":
+        out["to"] = str(to_state)
+    from_state = condition.get("from")
+    if from_state is not None and str(from_state) != "":
+        out["from"] = str(from_state)
+    return out
+
+
 def validate_definition(
     source: str,
     condition: dict[str, Any] | None,
@@ -374,6 +399,8 @@ def validate_definition(
         condition = _validate_message(condition)
     elif source == SOURCE_WEBHOOK:
         condition = _validate_webhook(condition)
+    elif source == SOURCE_ENTITY_STATE:
+        condition = _validate_entity_state(condition)
     params = _validate_action_params(action, action_params)
     try:
         cooldown = float(cooldown_s or 0.0)

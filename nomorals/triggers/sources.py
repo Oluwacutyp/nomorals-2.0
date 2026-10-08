@@ -156,3 +156,34 @@ def match_message(trigger: Any, text: str, chat_key: str,
         return False, {"reason": "no_match"}
     return True, {"pattern": cond["pattern"], "chat": chat_key,
                   "matched": m.group(0)[:200]}
+
+
+def match_entity_state(trigger: Any, entity_id: str,
+                       old_state: Any, new_state: Any,
+                       attributes: dict[str, Any] | None = None
+                       ) -> tuple[bool, dict[str, Any]]:
+    """Check one HA ``state_changed`` event against an entity_state trigger.
+
+    Filters (all ANDed): ``domain`` (entity_id prefix), ``entity_id``
+    (exact), ``to`` (new state), ``from`` (old state).  An empty condition
+    matches every state change.
+    """
+    cond = trigger.condition
+    entity_id = str(entity_id or "").lower()
+    want_domain = cond.get("domain")
+    if want_domain:
+        domain = entity_id.split(".", 1)[0]
+        if domain != want_domain:
+            return False, {"reason": "domain_mismatch",
+                           "entity_id": entity_id}
+    want_entity = cond.get("entity_id")
+    if want_entity and want_entity != entity_id:
+        return False, {"reason": "entity_mismatch", "entity_id": entity_id}
+    want_to = cond.get("to")
+    if want_to is not None and str(new_state) != want_to:
+        return False, {"reason": "to_mismatch", "new_state": new_state}
+    want_from = cond.get("from")
+    if want_from is not None and str(old_state) != want_from:
+        return False, {"reason": "from_mismatch", "old_state": old_state}
+    return True, {"entity_id": entity_id, "old_state": old_state,
+                  "new_state": new_state}
