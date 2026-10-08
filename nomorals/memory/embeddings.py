@@ -12,9 +12,12 @@ enough for "recall what we discussed about X" and degrades only on paraphrase.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 import re
 import time
+import urllib.request
 from typing import Any, Callable, Sequence
 
 from ..core.errors import classify
@@ -77,6 +80,58 @@ def _undouble(word: str) -> str:
     return word
 
 
+class Qwen3Embedder:
+    """Qwen3-Embedding-0.6B via a local llama-server ``/v1/embeddings`` endpoint.
+
+    Apache 2.0, ~0.6B params — beats commercial embedding APIs on MTEB
+    multilingual while running fully offline on the owner's own hardware.
+    Serve it with a GGUFServerManager on a second port (embeddings want
+    their own server: different model, different context needs)::
+
+        mgr = GGUFServerManager(port=8081, ctx_size=512)
+        mgr.start("qwen3-embedding-0.6b-q8_0.gguf")
+
+    Config: ``EMBEDDING_URL`` (default ``http://127.0.0.1:8081``),
+    ``EMBEDDING_MODEL`` (default ``qwen3-embedding-0.6b``). Lazy — no
+    network traffic until the first embed call. Raises on failure; the
+    :class:`Embedder` ``"qwen3"`` mode catches that and falls back to
+    hashing (failures are counted in stats, never fatal).
+    """
+
+    def __init__(self, url: str = "", model: str = "",
+                 timeout: float = 10.0) -> None:
+        self.url = (url or os.environ.get("EMBEDDING_URL", "")
+                    or "http://127.0.0.1:8081").rstrip("/")
+        self.model = (model or os.environ.get("EMBEDDING_MODEL", "")
+                      or "qwen3-embedding-0.6b")
+        self.timeout = timeout
+        self.dimensions = 1024  # Qwen3-Embedding-0.6B native dim
+
+    def available(self) -> bool:
+        """Quick probe — True when the endpoint answers. Never raises."""
+        try:
+            vectors = self.embed_many(["probe"])
+            return bool(vectors and len(vectors[0]) > 0)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def embed_many(self, texts: Sequence[str]) -> list[list[float]]:
+        body = json.dumps({"model": self.model, "input": list(texts)}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.url}/v1/embeddings", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"qwen3 embedding endpoint failed: {exc}") from exc
+        try:
+            items = sorted(payload["data"], key=lambda d: d["index"])
+            return [list(map(float, d["embedding"])) for d in items]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"unexpected embeddings response shape: {exc}") from exc
+
+
 class Embedder:
     """Produces fixed-dimension vectors for text.
 
@@ -85,6 +140,9 @@ class Embedder:
     - ``"auto"``: probe the router for a working embedding backend on first
       use; use it if available, otherwise fall back to hashing. The probe
       result is cached so we don't pay for a failed probe on every call.
+    - ``"qwen3"``: Qwen3-Embedding-0.6B via a local llama-server embeddings
+      endpoint (:class:`Qwen3Embedder`); falls back to hashing when the
+      server is down.
     - Any other string: use the router's embedding backend directly, falling
       back to hashing on failure (existing behavior).
     """
@@ -110,12 +168,18 @@ class Embedder:
         # Auto-mode probe state: None = not probed yet, True/False = result.
         self._auto_probed: bool | None = None
         self._auto_works: bool = False
+        # qwen3-mode state: lazily-built embedder, None = not probed yet.
+        self._qwen3: Qwen3Embedder | None = None
+        self._qwen3_works: bool | None = None
 
     # ── public API ───────────────────────────────────────────────────────────
     @property
     def is_semantic(self) -> bool:
         if self.provider == "hashing":
             return False
+        if self.provider == "qwen3":
+            # Optimistic until a probe fails — same contract as auto mode.
+            return self._qwen3_works is not False
         if self.provider == "auto":
             # In auto mode, we're semantic if the probe succeeded.
             # If not probed yet, check router availability optimistically.
@@ -197,6 +261,23 @@ class Embedder:
 
     # ── backends ─────────────────────────────────────────────────────────────
     def _produce(self, texts: Sequence[str]) -> list[list[float]]:
+        # qwen3 mode: local Qwen3-Embedding-0.6B server, hashing on failure.
+        if self.provider == "qwen3":
+            if self._qwen3_works is not False:
+                try:
+                    if self._qwen3 is None:
+                        self._qwen3 = Qwen3Embedder(model=self.model or "")
+                    vectors = self._qwen3.embed_many(list(texts))
+                    if vectors and all(len(v) == len(vectors[0]) for v in vectors):
+                        self._qwen3_works = True
+                        self.dimensions = len(vectors[0])
+                        return [_l2(v) for v in vectors]
+                    _log.warning("qwen3 embedding server returned ragged vectors; using hashing")
+                except Exception as exc:  # noqa: BLE001 - never fail recall over embeddings
+                    _log.debug("qwen3 embedding server failed (%s); using hashing", exc)
+                self._qwen3_works = False
+                self.stats["fallbacks"] += 1
+            return [self._hash(text) for text in texts]
         # Auto mode: probe once, then use the cached result.
         if self.provider == "auto":
             if self._probe_auto():

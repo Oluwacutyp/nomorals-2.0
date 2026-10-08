@@ -31,6 +31,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import platform
 import shutil
 import signal
 import socket
@@ -340,14 +341,38 @@ class GGUFServerManager:
         token: str = "",
         lora_files: str = "",
         process_env: dict[str, str] | None = None,
+        kv_cache_quant: str | None = None,
+        flash_attn: bool | None = None,
     ) -> None:
-        from ..core.profiles import profile_value
+        from ..core.profiles import get_profile_kind, profile_value
         self.host = host
         self.port = int(port)
         self.cache_dir = os.path.expanduser(cache_dir)
         # Profile-gated defaults: explicit args win, else the profile decides.
         # ctx_size=None → profile; threads=0 → profile (profile 0 = all cores).
+        kind = get_profile_kind()
         self.ctx_size = int(ctx_size) if ctx_size else int(profile_value("ctx_size", 2048))
+        # KV-CACHE QUANTIZATION — the phone OOM fix.
+        # Why the cache and not the weights: at ctx 4096 a 3-4B model holds
+        # ~1.5GB of KV cache in fp16 (2 × layers × kv_heads × head_dim ×
+        # ctx × 2 bytes), ON TOP of the ~2.3GB Q4 weights. That cache is
+        # what OOMs a phone when context + threads both run hot. q8_0
+        # halves the cache with negligible quality loss — unlike shrinking
+        # the model, which costs capability everywhere.
+        # termux: ALWAYS on (structural — the OOM fix is not optional on a
+        # phone). Pass kv_cache_quant="" to explicitly disable.
+        # laptop/workstation: opt-in via LLAMA_KV_QUANT env (e.g. "q8_0").
+        if kv_cache_quant is None:
+            if kind == "termux":
+                kv_cache_quant = "q8_0"
+            else:
+                kv_cache_quant = (os.environ.get("LLAMA_KV_QUANT", "") or "").strip() or None
+        self.kv_cache_quant = kv_cache_quant or None
+        # Flash attention: x86-only win (AVX-heavy kernels); keep it off on
+        # ARM by default. termux → always off (ARM phone, no debate).
+        if flash_attn is None:
+            flash_attn = False if (kind == "termux" or _is_arm()) else True
+        self.flash_attn = flash_attn
         _t = int(threads) or int(profile_value("threads", 4))
         self.threads = _t if _t else _physical_cores()
         self.boot_timeout = max(30.0, float(boot_timeout))
@@ -379,7 +404,15 @@ class GGUFServerManager:
         ]
         for lora in self.lora_files:
             args += ["--lora", lora]
-        # ARM/Termux: flash-attn is x86-avx heavy; keep it off by default.
+        # KV-cache quantization: --ctk/--ctv shrink the runtime cache, not
+        # the weights (see __init__ for why this is the phone OOM fix).
+        if self.kv_cache_quant:
+            args += ["--ctk", self.kv_cache_quant, "--ctv", self.kv_cache_quant]
+        # Flash attention is a net win on x86, a net loss on ARM.
+        if self.flash_attn is True:
+            args += ["--flash-attn", "on"]
+        elif self.flash_attn is False:
+            args += ["--flash-attn", "off"]
         args += self.extra_args
         if Path(binary).name == "llama-cli":
             args = [binary, "--server"] + args[1:]
@@ -801,6 +834,15 @@ def _physical_cores() -> int:
         return max(1, os.process_cpu_count() or os.cpu_count() or 4)
     except Exception:  # noqa: BLE001
         return 4
+
+
+def _is_arm() -> bool:
+    """True on ARM/AArch64 (phones, Apple Silicon, ARM servers)."""
+    try:
+        machine = (platform.machine() or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return machine.startswith(("arm", "aarch64"))
 
 
 def _drain_tail(process: subprocess.Popen[bytes], limit: int = 4000) -> str:
