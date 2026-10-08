@@ -1479,6 +1479,20 @@ class PartnerRuntime(
             from ..proactive import control_memory
 
             return control_memory(command.tail or arg, context=self.context)
+        if kind == "miniapp":
+            # Group mini-apps: architecturally isolated from owner memory,
+            # accounts and vaults (see nomorals/community/__init__.py).
+            # Group chats only — control_miniapp refuses DMs itself.
+            from ...community.miniapps import control_miniapp
+
+            chat = message.chat if message is not None else None
+            return control_miniapp(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "email":
             # AI email triage. Drafts are never auto-sent; sending needs
             # an approved draft or the owner's explicit "send it".

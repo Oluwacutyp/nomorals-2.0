@@ -198,6 +198,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
+    "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -568,6 +569,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "redteam": {"what": "defensive self-attack: runs attack scenarios against a sandboxed copy of my own agent loop and reports the holes it finds. Never touches external systems.",
                 "usage": "/redteam [scenario_id]", "example": "/redteam",
                 "related": "/benchmark"},
+    "miniapp": {"what": "group mini-apps: polls, shared-expense tracking with settle-up, and event RSVPs. Group chats only — state is group-scoped and isolated from my private memory.",
+                "usage": "/miniapp new <poll|expenses|rsvp> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe",
+                "example": "/miniapp new poll \"Best day?\" Mon Tue Wed",
+                "related": "/game"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1122,7 +1127,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots",
+      "blackjack", "roulette", "slots", "miniapp",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
@@ -1333,7 +1338,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "duel", "case", "world", "escape", "political",
       "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
       "2048", "snake", "connect4", "battleship",
-      "blackjack", "roulette", "slots",
+      "blackjack", "roulette", "slots", "miniapp",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram"]),
     ("voice & vision",
@@ -1442,6 +1447,7 @@ LIST_ONELINERS: dict[str, str] = {
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
+    "miniapp": "group mini-apps: polls, shared expenses, RSVPs",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",
