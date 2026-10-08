@@ -1886,6 +1886,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_review(command.tail or arg,
                                         chat_key=chat_key)
+        if kind == "tutor":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_tutor(command.tail or arg,
+                                       chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "stt":

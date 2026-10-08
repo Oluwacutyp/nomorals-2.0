@@ -80,6 +80,99 @@ class RuntimeMemoryMixin:
         except Exception as exc:  # noqa: BLE001 — review never breaks chat
             return f"couldn't pull the review: {exc}"
 
+    def _control_tutor(self, tail: str, *, chat_key: str = "") -> str:
+        """/tutor — Socratic tutoring. Owner-only.
+
+        /tutor <topic>             start in direct ("just tell me") mode
+        /tutor guide me <topic>    start in socratic ("guide me") mode
+        /tutor answer <text>       answer the current question
+        /tutor hint                progressive hint (never the answer, socratic)
+        /tutor status              mastery snapshot + mistake count
+        /tutor stop                end the session
+        """
+        from ...learn.tutor import (
+            TutorSession, end_session, get_notebook, get_session, set_session,
+        )
+        raw = (tail or "").strip()
+        if not raw:
+            return ("usage: /tutor [guide me] <topic> — e.g. /tutor guide me "
+                    "fractions\n       /tutor answer <text> | /tutor hint | "
+                    "/tutor status | /tutor stop")
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+
+        if verb == "stop":
+            return ("session ended." if end_session(chat_key)
+                    else "no tutoring session running.")
+        if verb == "status":
+            sess = get_session(chat_key)
+            if sess is None:
+                return "no tutoring session running."
+            snap = sess.mastery.snapshot()
+            nb = get_notebook(chat_key)
+            lines = [f"📚 tutoring '{sess.topic}' ({sess.mode} mode, "
+                     f"{sess.turns} turns)"]
+            for skill, val in sorted(snap.items(), key=lambda kv: kv[1]):
+                bar = "█" * int(val * 10) + "░" * (10 - int(val * 10))
+                lines.append(f"  {skill}: {bar} {val:.0%}")
+            lines.append(f"  mistakes notebooked: {nb.count()}")
+            return "\n".join(lines)
+        if verb == "hint":
+            sess = get_session(chat_key)
+            if sess is None:
+                return "no tutoring session running — /tutor <topic> to start."
+            try:
+                turn = sess.hint()
+            except Exception as exc:  # noqa: BLE001
+                return f"hint failed: {exc}"
+            return f"{turn.feedback}\n{turn.prompt}"
+        if verb == "answer":
+            sess = get_session(chat_key)
+            if sess is None:
+                return "no tutoring session running — /tutor <topic> to start."
+            if not rest.strip():
+                return "usage: /tutor answer <your answer>"
+            try:
+                turn = sess.respond(rest.strip())
+            except Exception as exc:  # noqa: BLE001
+                return f"couldn't process that: {exc}"
+            out = f"{turn.feedback}\n\n{turn.prompt}" if turn.feedback else turn.prompt
+            # Wrong answers become flashcards automatically.
+            if turn.diagnosis == "wrong" and sess.mode == "socratic":
+                try:
+                    nb = get_notebook(chat_key)
+                    nb.record(sess._current_question or sess.topic,
+                              rest.strip(), sess.expected_answer,
+                              topic=sess.topic)
+                    out += "\n\n📝 noted in your mistake notebook for review."
+                except Exception:  # noqa: BLE001
+                    pass
+            if turn.done:
+                out += "\n\n🎓 you've got this one — nice work."
+            return out
+
+        # Start a new session: "guide me <topic>" -> socratic, else direct.
+        if verb == "guide" and rest.lower().startswith("me "):
+            mode, topic = "socratic", rest[3:].strip()
+        elif verb == "guide":
+            return "did you mean: /tutor guide me <topic>?"
+        else:
+            mode, topic = "direct", raw
+        if not topic:
+            return "usage: /tutor [guide me] <topic>"
+        try:
+            sess = TutorSession(topic=topic, mode=mode)
+            set_session(chat_key, sess)
+            turn = sess.start()
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't start tutoring: {exc}"
+        opener = ("🔍 socratic mode — I'll guide you, not tell you. "
+                  "Answer with /tutor answer <text>."
+                  if mode == "socratic" else
+                  "📖 direct mode — straight teaching. "
+                  "Ask with /tutor answer <text> to check yourself.")
+        return f"{opener}\n\n{turn.prompt}"
+
     def _control_forget(self, tail: str) -> str:
         """Forget by id, or by the best matching description."""
         target = (tail or "").strip()
