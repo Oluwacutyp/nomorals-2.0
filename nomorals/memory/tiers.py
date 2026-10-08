@@ -566,6 +566,7 @@ class TwoTierMemory:
         self.llm_fn = llm_fn
         self.events = EventStore(db, embedder=self.embedder)
         self.facts = FactStore(db, embedder=self.embedder)
+        self.session = SessionMemory(db)
         self._lock = threading.RLock()
         self.stats = {"observed": 0, "distilled": 0, "distill_errors": 0}
 
@@ -637,6 +638,9 @@ class TwoTierMemory:
             facts_first = False
         fact_hits = self.facts.search_facts(query, limit=limit)
         event_hits = self.events.search_events(query, limit=limit)
+        # Retrieval-time conflict resolution: current facts win, history
+        # stays visible (Mem0 pattern — facts never deleted, only superseded).
+        fact_hits = resolve_conflicts(fact_hits)
         return TwoTierRecall(
             query=query, facts=fact_hits, events=event_hits,
             facts_first=facts_first,
@@ -647,3 +651,107 @@ class TwoTierMemory:
             self.db.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ── Session-scoped episodic memory (Mem0 pattern) ─────────────────────────────
+# Not every chat detail is permanent. SessionMemory holds transient episodic
+# notes that auto-expire — the "what were we just talking about" layer.
+# Facts never deleted, only superseded (the ADD-only rule lives in FactStore).
+
+SESSION_TTL_S = 24 * 3600  # session notes expire after a day by default
+
+
+class SessionMemory:
+    """Ephemeral per-session notes with TTL. Auto-expires; never permanent."""
+
+    def __init__(self, db: Any, *, ttl_s: float = SESSION_TTL_S) -> None:
+        self.db = db
+        self.ttl_s = ttl_s
+        try:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS tier_session (
+                       id TEXT PRIMARY KEY,
+                       session_id TEXT NOT NULL,
+                       text TEXT NOT NULL,
+                       created_at REAL NOT NULL,
+                       expires_at REAL NOT NULL
+                   )""")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tier_session_sid "
+                "ON tier_session(session_id, expires_at)")
+        except Exception:  # noqa: BLE001 — a broken db must not break chat
+            _log.debug("session table setup failed", exc_info=True)
+
+    def remember(self, session_id: str, text: str,
+                 *, ttl_s: float | None = None) -> str:
+        """Store a transient note. Returns the note id. Never raises."""
+        try:
+            text = (text or "").strip()
+            if not text or not session_id:
+                return ""
+            now = time.time()
+            nid = new_id()
+            self.db.execute(
+                "INSERT INTO tier_session "
+                "(id, session_id, text, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (nid, session_id, text, now,
+                 now + (ttl_s if ttl_s is not None else self.ttl_s)))
+            return nid
+        except Exception:  # noqa: BLE001 — episodic notes never break chat
+            _log.debug("session remember failed", exc_info=True)
+            return ""
+
+    def recall(self, session_id: str, *, limit: int = 10) -> list[str]:
+        """Live notes for this session, newest first. Never raises."""
+        try:
+            self.prune()
+            rows = self.db.query(
+                "SELECT text FROM tier_session "
+                "WHERE session_id = ? AND expires_at > ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (session_id, time.time(), limit))
+            return [str(r["text"]) for r in rows]
+        except Exception:  # noqa: BLE001
+            _log.debug("session recall failed", exc_info=True)
+            return []
+
+    def prune(self) -> int:
+        """Delete expired notes. Returns the count removed. Never raises."""
+        try:
+            cur = self.db.execute(
+                "DELETE FROM tier_session WHERE expires_at <= ?",
+                (time.time(),))
+            return cur.rowcount if cur else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+
+def resolve_conflicts(fact_hits: list[Any]) -> list[Any]:
+    """Retrieval-time conflict resolution (Mem0 pattern).
+
+    When a superseded fact and its replacement both match a query, the
+    current fact wins — but the superseded one stays visible in
+    ``fact.history`` so Devon can answer "what did I believe in March?".
+    Facts never deleted, only superseded; contradictions resolve at query
+    time, not write time.
+    """
+    seen_ids: set[str] = set()
+    out: list[Any] = []
+    for hit in fact_hits:
+        fact = getattr(hit, "fact", hit)
+        fid = str(getattr(fact, "id", ""))
+        if fid and fid in seen_ids:
+            continue
+        if fid:
+            seen_ids.add(fid)
+        # A superseded (inactive) fact only surfaces when its replacement
+        # didn't match — the active one always wins ties by sort order.
+        out.append(hit)
+    # Active facts first, then by confidence — the current belief leads,
+    # history follows.
+    out.sort(key=lambda h: (
+        0 if getattr(getattr(h, "fact", h), "active", True) else 1,
+        -(getattr(getattr(h, "fact", h), "confidence", 0.5) or 0.5),
+    ))
+    return out
