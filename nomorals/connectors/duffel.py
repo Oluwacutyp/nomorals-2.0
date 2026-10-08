@@ -324,9 +324,15 @@ class DuffelConnector(Connector):
 
     # ── booking (money moves — confirmation-gated) ─────────────
 
-    def format_itinerary(self, offer: Offer) -> str:
+    def format_itinerary(self, offer: Offer, *,
+                         budget_kobo: int | None = None,
+                         programs: list | None = None) -> str:
         """The permission-checkpoint text: itinerary + price, shown to the
-        owner BEFORE any confirmation is requested."""
+        owner BEFORE any confirmation is requested.
+
+        #75: budget line + points-vs-cash appended when provided.
+        """
+        from ..travel.display import _naira, points_vs_cash
         lines = [
             "✈️ Flight booking — review before confirming:",
             f"  {offer.origin} → {offer.destination}"
@@ -338,6 +344,22 @@ class DuffelConnector(Connector):
         ]
         if offer.expires_at:
             lines.append(f"  Offer expires: {offer.expires_at}")
+        if budget_kobo:
+            try:
+                total_kobo = int(round(float(offer.total_amount) * 100))
+            except (TypeError, ValueError):
+                total_kobo = 0
+            if total_kobo > 0:
+                if total_kobo <= budget_kobo:
+                    lines.append(f"  within your budget ✅")
+                else:
+                    lines.append(
+                        f"  over budget by "
+                        f"{_naira(total_kobo - budget_kobo)} ⚠️")
+                if programs:
+                    pvc = points_vs_cash(total_kobo, programs)
+                    if pvc:
+                        lines.append(f"  🎖️ {pvc}")
         lines.append(
             "Payment comes from the Duffel organisation balance "
             "(fund it in the Duffel dashboard first)."

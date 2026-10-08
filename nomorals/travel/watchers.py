@@ -120,7 +120,10 @@ class PricePoint:
     cheapest: bool = False
 
 
-def format_alert(alert: PriceAlert) -> str:
+def format_alert(alert: PriceAlert, *,
+                 budget_kobo: int | None = None,
+                 programs: list | None = None) -> str:
+    # #75: budget line + points-vs-cash when provided.
     prev = _short(alert.previous_kobo)
     curr = _short(alert.current_kobo)
     lines = [
@@ -129,6 +132,18 @@ def format_alert(alert: PriceAlert) -> str:
     ]
     if alert.scarcity:
         lines.append(alert.scarcity)
+    if budget_kobo:
+        if alert.current_kobo <= budget_kobo:
+            lines.append(f"within your {_short(budget_kobo)} budget ✅")
+        else:
+            lines.append(
+                f"over budget by "
+                f"₦{(alert.current_kobo - budget_kobo) / 100:,.0f} ⚠️")
+    if programs:
+        from .display import points_vs_cash
+        pvc = points_vs_cash(alert.current_kobo, programs)
+        if pvc:
+            lines.append(f"🎖️ {pvc}")
     lines.append("Want it? Book before the fare moves again.")
     return "\n".join(lines)
 

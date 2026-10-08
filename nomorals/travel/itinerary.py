@@ -559,11 +559,29 @@ class ItineraryBuilder:
 
     # ── summary ──
 
-    def summary(self, trip_id: str) -> str:
+    def summary(self, trip_id: str, *,
+                total_kobo: int = 0,
+                budget_kobo: int | None = None,
+                programs: list | None = None) -> str:
+        # #75: cost summary first when a total is known.
         trip = self.get_trip(trip_id)
         if trip is None:
             return "no such trip."
         lines = [f"🧳 {trip.name or trip.id}"]
+        if total_kobo:
+            from .display import _naira, points_vs_cash
+            lines.append(f"💰 Total: {_naira(total_kobo)}")
+            if budget_kobo:
+                if total_kobo <= budget_kobo:
+                    lines.append("   within budget ✅")
+                else:
+                    lines.append(
+                        f"   over budget by "
+                        f"{_naira(total_kobo - budget_kobo)} ⚠️")
+            if programs:
+                pvc = points_vs_cash(total_kobo, programs)
+                if pvc:
+                    lines.append(f"🎖️ {pvc}")
         for f in trip.flights:
             lines.append(f"  ✈️ {f.one_line()}")
         for h in trip.hotels:

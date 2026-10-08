@@ -1,5 +1,11 @@
 """Travel: price watchers (build-map #71) + auto itineraries (#72)
-+ white-label clients (#73) + group travel stack (#74)."""
++ white-label clients (#73) + group travel stack (#74)
++ display rules (#75)."""
+from .display import (
+    format_with_budget, points_vs_cash, multi_origin_search,
+    format_multi_origin, LoyaltyProgram,
+    enrich_offers_text, enrich_alert_text, enrich_itinerary_text,
+)
 from .watchers import (
     PriceWatcher, PriceWatch, PriceAlert, PricePoint,
     PRICE_WATCH_ACTION, ensure_schedule, check_all,
@@ -32,4 +38,7 @@ __all__ = [
     "GroupTrip", "GroupPoll", "GroupExpense", "TripLeg", "TripProposal",
     "GroupTripStore", "settle_balances", "parse_naira_kobo",
     "merged_itinerary", "control_gtrip",
+    "format_with_budget", "points_vs_cash", "multi_origin_search",
+    "format_multi_origin", "LoyaltyProgram",
+    "enrich_offers_text", "enrich_alert_text", "enrich_itinerary_text",
 ]
