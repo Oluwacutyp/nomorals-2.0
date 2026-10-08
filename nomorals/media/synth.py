@@ -19,6 +19,7 @@ everything else → generic percussive tick.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import struct
@@ -26,6 +27,10 @@ import wave
 from array import array
 from io import BytesIO
 from typing import Sequence
+
+from . import caps
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["render_wav", "write_wav", "mix_tracks"]
 
@@ -432,9 +437,18 @@ def render_wav(parts: dict[str, list], tempo: float, seed: int = 0) -> bytes:
 
 
 def write_wav(path: str, parts: dict[str, list], tempo: float,
-              seed: int = 0) -> str:
-    """Render and write a WAV file.  Returns the path."""
+              seed: int = 0) -> str | None:
+    """Render and write a WAV file.
+
+    Returns the path on success, or ``None`` when the render would exceed
+    :data:`.caps.MAX_AUDIO_WRITE_BYTES` — the cap refusal is logged and
+    never raises, and nothing is written (no truncation).
+    """
     data = render_wav(parts, tempo, seed=seed)
+    ok, reason = caps.check_write_size(len(data), caps.MAX_AUDIO_WRITE_BYTES)
+    if not ok:
+        caps.refuse_write(f"write_wav({path})", reason)
+        return None
     with open(path, "wb") as f:
         f.write(data)
     return path

@@ -1396,6 +1396,19 @@ CREATE INDEX IF NOT EXISTS idx_schedule_depends ON schedule_jobs(depends_on);
 """
 
 
+_V82_MEMORY_TRUST_COLUMNS = """
+-- Trust provenance for memory records (hardens mem-false-fact,
+-- mem-pref-override, mem-cross-session): `trust` is "trusted" (direct
+-- user/owner input) or "untrusted" (tool output / external content), and
+-- `session_id` records the chat/session the record was captured in so
+-- recall across sessions can downrank untrusted records further.
+-- Legacy rows keep trust='' and resolve through infer_trust() at read time.
+ALTER TABLE memories ADD COLUMN trust TEXT NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN session_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_memories_trust ON memories(trust);
+"""
+
+
 def _apply_game_identity_untangle(db: object) -> None:
     """Untangle the chfjdhx/peacethefirst identity mix-up (one-time repair).
 
@@ -2967,6 +2980,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_game_phantom_cleanup),
     Migration(81, "scheduler_upgrades",
               sql=_V81_SCHEDULER_UPGRADES),
+    Migration(82, "memory_trust_columns",
+              sql=_V82_MEMORY_TRUST_COLUMNS),
 )
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .base import MemoryRecord, score_memory
+from .base import TRUSTED, UNTRUSTED, MemoryRecord, score_memory
 from .embeddings import Embedder
 from .manager import MemoryManager
 from .vector_backends import (
@@ -22,6 +22,8 @@ __all__ = [
     "MemoryManager",
     "MemoryRecord",
     "SqliteVecBackend",
+    "TRUSTED",
+    "UNTRUSTED",
     "USearchBackend",
     "VectorBackend",
     "available_backends",

@@ -541,9 +541,10 @@ class CatalogDetectorTests(unittest.TestCase):
         self._run_detect("catalog-inj-direct-override", {})
 
     def test_static_detector_absent_defense(self):
-        # vision/ has no untrusted marking -> attack succeeds (finding)
+        # inj-image-ocr is FIXED: vision/ marks OCR output untrusted, so
+        # the static detector now reports the attack as blocked.
         ok = self._run_detect("catalog-inj-image-ocr", {})
-        self.assertTrue(ok)
+        self.assertFalse(ok)
 
     def test_policy_detector_no_confirmation(self):
         ok = self._run_detect("catalog-esc-no-confirm",

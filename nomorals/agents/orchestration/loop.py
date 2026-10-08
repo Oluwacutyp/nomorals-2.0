@@ -20,7 +20,7 @@ from typing import Any
 from ...core.jsonutil import extract_json
 from ...llm.base import Message, SamplingParams
 from .context import LoopMemory, StepRecord
-from .tools import ToolAdapter
+from .tools import ToolAdapter, _scrub_audit_args, _scrub_audit_name
 
 _log = logging.getLogger(__name__)
 
@@ -301,16 +301,15 @@ class AgenticLoop:
                 if not isinstance(args, dict):
                     args = {}
                 # Guard: don't blind-retry a tool that already failed
-                if tool_name in memory.failed_tools() and self._same_args_as_failed(
-                    memory, tool_name, args
-                ):
+                if _scrub_audit_name(tool_name) in memory.failed_tools() \
+                        and self._same_args_as_failed(memory, tool_name, args):
                     memory.record_step(
                         StepRecord(
                             step=step_num,
                             thought=thought,
                             action="tool",
-                            tool_name=tool_name,
-                            tool_args=args,
+                            tool_name=_scrub_audit_name(tool_name),
+                            tool_args=_scrub_audit_args(args),
                             failed=True,
                             observation=(
                                 f"blocked: {tool_name} already failed with these "
@@ -321,13 +320,17 @@ class AgenticLoop:
                     continue
                 ok, observation = self.tools.call(tool_name, args)
                 tools_called.append(tool_name)
+                # Audit write: scrub the name + args BEFORE persisting —
+                # the memory snapshot (with these step records) is stored
+                # for cross-message resume, so raw secrets must never land
+                # here. The live tool call above already got the real args.
                 memory.record_step(
                     StepRecord(
                         step=step_num,
                         thought=thought,
                         action="tool",
-                        tool_name=tool_name,
-                        tool_args=args,
+                        tool_name=_scrub_audit_name(tool_name),
+                        tool_args=_scrub_audit_args(args),
                         observation=observation,
                         failed=not ok,
                     )
@@ -423,8 +426,9 @@ class AgenticLoop:
         tools_called.extend(n for n in called if n not in tools_called)
         memory.record_step(
             StepRecord(step=step_num, thought="code-first block",
-                       action="tool", tool_name="code_block",
-                       tool_args={"code": code[:500]},
+                       action="tool",
+                       tool_name=_scrub_audit_name("code_block"),
+                       tool_args=_scrub_audit_args({"code": code[:500]}),
                        observation=obs[:2000], failed=not ok))
         if obs.startswith("ASK:"):
             question = obs[4:].strip()
@@ -526,8 +530,8 @@ class AgenticLoop:
                         step=step_num,
                         thought=thought,
                         action="tools",
-                        tool_name=tool_name,
-                        tool_args=args,
+                        tool_name=_scrub_audit_name(tool_name),
+                        tool_args=_scrub_audit_args(args),
                         failed=True,
                         observation=(
                             f"blocked: {tool_name} already failed with these "
@@ -563,8 +567,8 @@ class AgenticLoop:
                     step=step_num,
                     thought=thought,
                     action="tools",
-                    tool_name=tool_name,
-                    tool_args=args,
+                    tool_name=_scrub_audit_name(tool_name),
+                    tool_args=_scrub_audit_args(args),
                     observation=observation,
                     failed=not ok,
                 )
@@ -608,8 +612,8 @@ class AgenticLoop:
                 step=step_num,
                 thought=thought,
                 action="plan",
-                tool_name="plan",
-                tool_args={"goal": goal[:200]},
+                tool_name=_scrub_audit_name("plan"),
+                tool_args=_scrub_audit_args({"goal": goal[:200]}),
                 observation=observation,
                 failed=not ok,
             )
@@ -619,8 +623,14 @@ class AgenticLoop:
     def _same_args_as_failed(
         memory: LoopMemory, tool_name: str, args: dict[str, Any]
     ) -> bool:
+        # Stored step records carry scrubbed names/args (see the audit
+        # scrub above), so scrub the incoming call the same way before
+        # comparing — otherwise the guard would never match.
+        want_name = _scrub_audit_name(tool_name)
+        want_args = _scrub_audit_args(args)
         for s in memory.steps:
-            if s.failed and s.tool_name == tool_name and s.tool_args == args:
+            if s.failed and s.tool_name == want_name \
+                    and s.tool_args == want_args:
                 return True
         return False
 

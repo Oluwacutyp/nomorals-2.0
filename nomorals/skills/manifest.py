@@ -51,6 +51,7 @@ __all__ = [
     "WiringError",
     "validate_schema",
     "resolve_expression",
+    "sanitize_description",
     "SEMVER_RE",
     "NAME_RE",
     "TYPE_NAMES",
@@ -61,6 +62,110 @@ SEMVER_RE = re.compile(r"^\d+\.\d+(\.\d+)?(-[0-9A-Za-z.-]+)?$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 TYPE_NAMES = {"str", "int", "float", "bool", "list", "dict", "any"}
 _REF_RE = re.compile(r"^\$(input|last|\d+)(?P<path>(\.[A-Za-z0-9_]+|\[\d+\])*)$")
+
+# ── description sanitization (sup-skill-poison) ─────────────────────────
+# A skill description steers the agent ("when to use this skill"), so a
+# poisoned description is a prompt-injection vector.  Two-tier cleaning:
+#   * strip: hidden/zero-width unicode, ANSI escapes, control characters.
+#     Hidden unicode is replaced with a space first, so it cannot split a
+#     marker phrase apart to dodge detection.
+#   * reject: instruction-override markers fail the install outright.
+# The marker list is deliberately tight: none of these phrases has a
+# legitimate use in a one-line "when to use this skill" description.
+
+
+def _hidden_unicode_chars() -> str:
+    points = [0x00AD, 0xFEFF]
+    points += list(range(0x200B, 0x2010))  # zero-width space/joiners, LRM/RLM
+    points += list(range(0x202A, 0x202F))  # bidi embeddings and overrides
+    points += list(range(0x2060, 0x2065))  # word joiner, invisible operators
+    points += list(range(0x2066, 0x2070))  # isolates
+    return "".join(chr(c) for c in points)
+
+
+_HIDDEN_UNICODE_RE = re.compile("[" + re.escape(_hidden_unicode_chars()) + "]")
+_ANSI_ESCAPE_RE = re.compile(re.escape(chr(0x1B)) + "\\[[0-9;?]*[A-Za-z]")
+_CONTROL_CHARS_RE = re.compile(
+    "[" + "".join(chr(c) for c in
+                   list(range(0x00, 0x09)) + [0x0B, 0x0C] +
+                   list(range(0x0E, 0x20)) + list(range(0x7F, 0xA0))) + "]")
+
+#: (pattern, human-readable reason) — a match REJECTS the description.
+#: All patterns are case-insensitive.
+_INJECTION_MARKERS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(
+        r"\b(ignore|disregard|forget|overlook)\s+"
+        r"((all|any|your|the|previous|prior|earlier|above)\s+)*"
+        r"instructions?\b", re.IGNORECASE),
+     "instruction-override phrase ('ignore ... instructions')"),
+    (re.compile(r"\byou\s+are\s+now\b", re.IGNORECASE),
+     "identity-override phrase ('you are now')"),
+    (re.compile(r"\b(hidden|secret|embedded|concealed)\s+instructions?\b",
+                re.IGNORECASE),
+     "hidden-instruction marker"),
+    (re.compile(r"(^|[.\n])\s*(new\s+|updated\s+|additional\s+|revised\s+)?"
+                r"instructions?\s*:", re.IGNORECASE),
+     "embedded instruction block"),
+    (re.compile(r"(^|[.\n])\s*(system|developer|assistant)\s*:",
+                re.IGNORECASE),
+     "role-header marker"),
+    (re.compile(r"\[/?INST\]|<<SYS>>|<\|\s*(system|im_start|assistant|user)\s*\|>",
+                re.IGNORECASE),
+     "chat-template marker"),
+    (re.compile(r"\bexfiltrat\w*\b", re.IGNORECASE),
+     "'exfiltrate' directive"),
+    (re.compile(r"\bjailbreak\b", re.IGNORECASE),
+     "'jailbreak' directive"),
+    (re.compile(
+        r"\boverride\s+(\w+\s+){0,2}"
+        r"(instructions?|rules?|polic(ies|y)|guardrails|safeguards)\b",
+        re.IGNORECASE),
+     "override directive"),
+    (re.compile(
+        r"\b(do\s+not|don't|never)\s+(mention|reveal|tell|disclose|expose|show)\b",
+        re.IGNORECASE),
+     "secrecy directive"),
+]
+
+
+def _rejection_reason(text: str) -> str | None:
+    """First matching injection marker's reason, or None when clean."""
+    for pattern, reason in _INJECTION_MARKERS:
+        if pattern.search(text):
+            return reason
+    return None
+
+
+def sanitize_description(text: Any, max_len: int = 200
+                         ) -> tuple[str | None, str | None]:
+    """Clean a skill description for install.  Never raises.
+
+    Returns ``(cleaned, None)`` when the description is safe, or
+    ``(None, reason)`` when it carries instruction-override markers and
+    the install must be refused honestly.
+
+    Cleaning (always applied): hidden/zero-width unicode becomes a space
+    (so it cannot split a marker phrase to dodge detection), ANSI escape
+    sequences and control characters are stripped, whitespace collapses
+    to single spaces, then the text is stripped and truncated to
+    ``max_len``.  Marker detection runs on the cleaned text.
+    """
+    try:
+        if not isinstance(text, str):
+            return None, "description must be a string, got %s" % (
+                type(text).__name__,)
+        cleaned = _HIDDEN_UNICODE_RE.sub(" ", text)
+        cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+        cleaned = _CONTROL_CHARS_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if max_len and len(cleaned) > max_len:
+            cleaned = cleaned[:max_len].rstrip()
+        reason = _rejection_reason(cleaned)
+        if reason is not None:
+            return None, "rejected: " + reason
+        return cleaned, None
+    except Exception as exc:  # noqa: BLE001 — never raises by contract
+        return None, "sanitize failed: %s" % exc
 
 
 class ManifestError(ValidationError):
@@ -261,6 +366,12 @@ class SkillManifest:
         if not isinstance(self.description, str):
             errors.append(f"description must be a string, got "
                           f"{type(self.description).__name__}")
+        else:
+            # sup-skill-poison: a description that steers the agent with
+            # instruction-override markers fails validation outright.
+            reason = _rejection_reason(self.description)
+            if reason is not None:
+                errors.append(f"description rejected: {reason}")
         return errors
 
     def _validate_wiring(self) -> list[str]:
@@ -354,6 +465,11 @@ class SkillManifest:
         if not isinstance(data, dict):
             raise ManifestError(
                 f"manifest must be a dict, got {type(data).__name__}")
+        # sup-skill-poison: sanitize at the install boundary.  Poisoned
+        # descriptions fail the install honestly instead of being stored.
+        cleaned, reason = sanitize_description(data.get("description", "") or "")
+        if reason is not None:
+            raise ManifestError(f"description {reason}")
         manifest = cls(
             name=data.get("name", ""),
             version=str(data.get("version", "1.0.0")),
@@ -362,6 +478,6 @@ class SkillManifest:
             output_schema=dict(data.get("output_schema", {}) or {}),
             wiring=[dict(w) for w in (data.get("wiring", []) or [])],
             owner=data.get("owner", "") or "",
-            description=data.get("description", "") or "",
+            description=cleaned,
         )
         return manifest.validate_or_raise()

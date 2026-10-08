@@ -19,7 +19,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["DEFAULT_WEIGHTS", "MemoryKind", "MemoryRecord", "decay_factor", "score_memory"]
+__all__ = [
+    "DEFAULT_WEIGHTS",
+    "MemoryKind",
+    "MemoryRecord",
+    "TRUSTED",
+    "UNTRUSTED",
+    "decay_factor",
+    "infer_trust",
+    "score_memory",
+]
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     "recency": 0.25,
@@ -51,6 +60,57 @@ ALL_KINDS = frozenset({
 })
 
 
+# ── trust provenance ──────────────────────────────────────────────────────
+# Root-cause fix for mem-false-fact / mem-pref-override / mem-cross-session:
+# every record carries *where it came from*, so recall can downrank content
+# that arrived via tool output or other external paths instead of surfacing
+# it as trusted truth.
+
+#: direct user/owner input — full weight in recall
+TRUSTED = "trusted"
+#: tool output, external content, or anything not written by the owner —
+#: recalled only with a downrank, and preferences are flagged for confirmation
+UNTRUSTED = "untrusted"
+
+_TRUSTED_SOURCE_PREFIXES = ("user:", "owner:", "cli", "tui")
+
+#: substrings in a record's source/origin that mark external provenance:
+#: tool calls, web/browser output, document ingestion, extraction passes,
+#: connector results, and other agent-written (non-owner) content.
+_UNTRUSTED_SOURCE_MARKERS = (
+    "tool", "browser", "web", "page", "search", "scrape", "crawl",
+    "external", "extract", "document", "ingest", "connector",
+    "agent", "curate", "feed", "rss",
+)
+
+
+def infer_trust(source: str = "", origin: str = "",
+                explicit: str = "") -> str:
+    """Resolve a record's trust level. Never raises.
+
+    Precedence: an explicit ``"trusted"``/``"untrusted"`` wins; a source
+    that starts with a user/owner prefix is trusted; a source/origin that
+    carries a tool/external marker is untrusted; anything else (including
+    legacy records with an empty source) defaults to trusted so existing
+    recall behaviour is unchanged.
+    """
+    try:
+        e = (explicit or "").strip().lower()
+        if e in (TRUSTED, UNTRUSTED):
+            return e
+        s = (source or "").strip().lower()
+        if any(s.startswith(p) for p in _TRUSTED_SOURCE_PREFIXES):
+            return TRUSTED
+        if any(m in s for m in _UNTRUSTED_SOURCE_MARKERS):
+            return UNTRUSTED
+        o = (origin or "").strip().lower()
+        if any(m in o for m in _UNTRUSTED_SOURCE_MARKERS):
+            return UNTRUSTED
+        return TRUSTED
+    except Exception:  # noqa: BLE001
+        return TRUSTED
+
+
 #: Kinds that decay slowly because they stay relevant.
 SLOW_DECAY = frozenset({MemoryKind.FACT, MemoryKind.PREFERENCE, MemoryKind.SKILL})
 
@@ -78,6 +138,13 @@ class MemoryRecord:
     last_access: float = 0.0
     source: str = ""
     agent: str = ""
+    #: trust provenance: "trusted" (direct user/owner input) or
+    #: "untrusted" (tool output / external content). Resolved at write time
+    #: by ``infer_trust()``; never empty after ``from_row``.
+    trust: str = ""
+    #: session (chat) this record was captured in; used to downrank
+    #: untrusted records recalled across sessions.
+    session_id: str = ""
     #: comma-joined normalized tags (see manager.join_tags) and the pointer
     #: to the chat this memory was distilled from ("chat:tg:123")
     tags: str = ""
@@ -99,6 +166,25 @@ class MemoryRecord:
     @property
     def expired(self) -> bool:
         return self.expires_at is not None and time.time() > self.expires_at
+
+    @property
+    def is_trusted(self) -> bool:
+        """True when this record came from direct user/owner input."""
+        return self.trust == TRUSTED
+
+    @property
+    def is_untrusted(self) -> bool:
+        """True when this record arrived via tool output or external content."""
+        return self.trust == UNTRUSTED
+
+    @property
+    def requires_confirmation(self) -> bool:
+        """Untrusted preferences are never applied silently: mem-pref-override.
+
+        A ``kind="preference"`` record from an untrusted source must be
+        confirmed by the user before it changes behaviour.
+        """
+        return self.kind == MemoryKind.PREFERENCE and self.trust == UNTRUSTED
 
     def recency(self, half_life_seconds: float, now: float | None = None) -> float:
         """Decay rate depends on kind: facts persist, episodes fade."""
@@ -122,6 +208,8 @@ class MemoryRecord:
             "access_count": self.access_count,
             "source": self.source,
             "agent": self.agent,
+            "trust": self.trust,
+            "session_id": self.session_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "expires_at": self.expires_at,
@@ -141,6 +229,8 @@ class MemoryRecord:
                 metadata = json.loads(metadata or "{}")
             except (ValueError, TypeError):
                 metadata = {}
+        source = row.get("source") or ""
+        origin = row.get("origin") or ""
         return cls(
             id=row["id"],
             kind=row.get("kind") or MemoryKind.EPISODE,
@@ -154,8 +244,13 @@ class MemoryRecord:
             decay=float(row.get("decay") or 1.0),
             access_count=int(row.get("access_count") or 0),
             last_access=float(row.get("last_access") or 0.0),
-            source=row.get("source") or "",
+            source=source,
             agent=row.get("agent") or "",
+            # Trust is always normalized: legacy rows (no trust column yet)
+            # resolve through infer_trust() from their source/origin, so
+            # nothing is ever recalled with an ambiguous provenance.
+            trust=infer_trust(source, origin, explicit=row.get("trust") or ""),
+            session_id=row.get("session_id") or "",
             created_at=float(row.get("created_at") or time.time()),
             updated_at=float(row.get("updated_at") or time.time()),
             expires_at=row.get("expires_at"),

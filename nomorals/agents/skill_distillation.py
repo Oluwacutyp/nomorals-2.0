@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
+from ..skills.manifest import sanitize_description
 
 _log = get_logger(__name__)
 
@@ -189,9 +190,16 @@ def _parse_draft(text: str) -> Optional[SkillDraft]:
     name = "".join(c if c.isalnum() or c == "_" else "_" for c in name)[:48]
     if not name:
         return None
+    # sup-skill-poison: sanitize the description with the same rigor.
+    # A poisoned description fails the draft honestly (None, logged) —
+    # it never reaches the registry.
+    cleaned, reason = sanitize_description(description, max_len=200)
+    if reason is not None:
+        _log.warning("distilled skill draft %r rejected: %s", name, reason)
+        return None
     return SkillDraft(
         name=f"distilled_{name}",
-        description=description[:200] or "distilled skill",
+        description=cleaned or "distilled skill",
         tools=tools,
         workflow="\n".join(workflow_lines)[:MAX_DRAFT_CHARS],
     )

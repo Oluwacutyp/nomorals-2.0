@@ -43,6 +43,7 @@ from typing import Any, Callable
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.profile import detect_profile
+from . import caps
 
 _log = get_logger(__name__)
 
@@ -426,8 +427,13 @@ class _OfficialAdapter(_BaseAdapter):
 
 
 def _write_wav_float32_stereo(path: str, sample_rate: int,
-                              pcm_bytes: bytes) -> None:
-    """Write float32 stereo PCM → 16-bit WAV with the stdlib only."""
+                              pcm_bytes: bytes) -> bool:
+    """Write float32 stereo PCM → 16-bit WAV with the stdlib only.
+
+    Returns ``True`` on success, ``False`` (logged, never raises) when the
+    frames would exceed :data:`.caps.MAX_AUDIO_WRITE_BYTES` — nothing is
+    written on refusal.
+    """
     import numpy as np
     arr = np.frombuffer(pcm_bytes, dtype=np.float32)
     if arr.size % 2:
@@ -435,11 +441,18 @@ def _write_wav_float32_stereo(path: str, sample_rate: int,
     stereo = arr.reshape(-1, 2)
     clipped = max(-1.0, min(1.0, float(abs(stereo).max()))) or 1.0
     pcm16 = (stereo / clipped * 32767).astype("<i2")
+    frames = pcm16.tobytes()
+    ok, reason = caps.check_write_size(
+        caps.wav_expected_bytes(len(frames)), caps.MAX_AUDIO_WRITE_BYTES)
+    if not ok:
+        caps.refuse_write(f"_write_wav_float32_stereo({path})", reason)
+        return False
     with wave.open(path, "wb") as wf:
         wf.setnchannels(2)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
+        wf.writeframes(frames)
+    return True
 
 
 # ───────────────────────── backend ──────────────────────────────────────────

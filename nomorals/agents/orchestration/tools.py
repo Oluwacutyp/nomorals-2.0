@@ -15,6 +15,7 @@ import json
 import re
 from typing import Any
 
+from ...core.logging_setup import scrub_secrets
 from ...core.policy import CapabilitySet
 from ...core.result import Outcome
 
@@ -25,6 +26,79 @@ _STOP_TOKENS = frozenset(
     "that what when how".split()
 )
 _MAX_PARALLEL_CALLS = 8
+
+#: Dict keys whose values are treated as secrets for audit scrubbing.
+#: Matched as a whole key segment (snake_case / kebab-case / camelCase
+#: aware) so "monkey" or "keyboard" are NOT redacted.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(password|passwd|pwd|secret|token|api[_-]?key|"
+    r"apikey|client[_-]?secret|private[_-]?key|access[_-]?token|"
+    r"refresh[_-]?token|auth[_-]?token)(?:[^a-z0-9]|$)"
+)
+
+_SCRUBBED_VALUE = "[REDACTED]"
+
+
+def _scrub_audit_text(text: Any) -> str:
+    """Scrub secret-shaped content from audit-bound text. Never raises."""
+    try:
+        return scrub_secrets(str(text))
+    except Exception:  # noqa: BLE001 — auditing never breaks a tool call
+        try:
+            return str(text)
+        except Exception:  # noqa: BLE001
+            return ""
+
+
+def _scrub_audit_name(name: Any) -> str:
+    """Scrub a tool name for audit records. Never raises."""
+    try:
+        text = name if isinstance(name, str) else str(name)
+    except Exception:  # noqa: BLE001
+        return ""
+    return _scrub_audit_text(text)
+
+
+def _scrub_audit_value(value: Any) -> Any:
+    """Recursively scrub secret-shaped strings inside an audit value.
+
+    Dict keys that look like credential names (password, api_key, token,
+    …) have their whole value redacted; other strings go through
+    :func:`scrub_secrets` so embedded shapes (``Bearer …``, ``sk-…``,
+    ``password=hunter2``) are caught too. Containers are rebuilt — the
+    input is never mutated.
+    """
+    if isinstance(value, str):
+        return scrub_secrets(value)
+    if isinstance(value, dict):
+        return {
+            k: (_SCRUBBED_VALUE if _SECRET_KEY_RE.search(str(k))
+                else _scrub_audit_value(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_audit_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_audit_value(v) for v in value)
+    return value
+
+
+def _scrub_audit_args(args: dict[str, Any] | None) -> dict[str, Any]:
+    """Scrubbed COPY of tool-call args for audit records.
+
+    Secret-shaped values become ``[REDACTED]`` markers. The input dict is
+    never mutated: the live tool call still receives the real values —
+    tools may legitimately need credentials via args (e.g. the
+    ``http_api`` connector's ``token`` param) — while anything persisted
+    (step records, memory snapshots, audit trails) only ever sees the
+    scrubbed copy. Never raises.
+    """
+    try:
+        if not isinstance(args, dict):
+            return {}
+        return _scrub_audit_value(args)
+    except Exception:  # noqa: BLE001 — auditing never breaks a tool call
+        return {}
 
 
 def _tokens(text: str) -> list[str]:
@@ -147,7 +221,7 @@ class ToolAdapter:
         if not isinstance(args, dict):
             return False, f"tool args must be an object, got {type(args).__name__}"
         if not self.has(name):
-            return False, f"unknown tool {name!r}"
+            return False, f"unknown tool {_scrub_audit_name(name)!r}"
 
         try:
             outcome: Outcome = self.registry.call(
@@ -157,13 +231,20 @@ class ToolAdapter:
                 **args,
             )
         except Exception as exc:  # noqa: BLE001 — registry should not raise, but be safe
-            return False, f"tool {name} raised unexpectedly: {exc}"
+            return False, (
+                f"tool {_scrub_audit_name(name)} raised unexpectedly: "
+                f"{_scrub_audit_text(exc)}"
+            )
 
         if outcome.ok:
             return True, self._format_result(outcome.value)
         err = outcome.error
         msg = getattr(err, "message", None) or str(err)
-        return False, f"tool {name} failed: {msg}"
+        # Scrub before returning: error text can echo secret-shaped args,
+        # and this observation lands in the persisted audit trail.
+        return False, (
+            f"tool {_scrub_audit_name(name)} failed: {_scrub_audit_text(msg)}"
+        )
 
     def call_many(
         self, calls: list[tuple[str, dict[str, Any]]]
@@ -204,14 +285,17 @@ class ToolAdapter:
 
         results: list[tuple[bool, str]] = []
         for (name, _args), outcome in zip(normed, outcomes):
+            clean_name = _scrub_audit_name(name)
             if outcome is None:
-                results.append((False, f"tool {name} returned no outcome"))
+                results.append((False, f"tool {clean_name} returned no outcome"))
             elif outcome.ok:
                 results.append((True, self._format_result(outcome.value)))
             else:
                 err = outcome.error
                 msg = getattr(err, "message", None) or str(err)
-                results.append((False, f"tool {name} failed: {msg}"))
+                results.append(
+                    (False, f"tool {clean_name} failed: {_scrub_audit_text(msg)}")
+                )
         return results
 
     @staticmethod

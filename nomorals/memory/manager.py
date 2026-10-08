@@ -29,7 +29,16 @@ from ..storage.db import Database
 from ..storage.fts import FTSIndex
 from ..storage.repository import Repository
 from ..storage.vectors import VectorStore
-from .base import DEFAULT_WEIGHTS, MemoryKind, MemoryRecord, normalize_scores, score_memory
+from .base import (
+    DEFAULT_WEIGHTS,
+    TRUSTED,
+    UNTRUSTED,
+    MemoryKind,
+    MemoryRecord,
+    infer_trust,
+    normalize_scores,
+    score_memory,
+)
 from .embeddings import Embedder
 from .vector_backends import VectorBackend, select_vector_backend
 
@@ -133,6 +142,25 @@ class MemoryManager:
         )
         self.stats = {"remembered": 0, "recalls": 0, "consolidations": 0, "forgotten": 0}
         self._last_consolidation = 0.0
+        # Trust provenance columns (migration 82) — belt and braces for DBs
+        # that were created without running migrations. Never raises.
+        self._ensure_trust_columns()
+
+    def _ensure_trust_columns(self) -> None:
+        """Make sure ``memories`` has the trust/session_id columns.
+
+        Migration 82 covers migrated DBs; this covers hand-built ones
+        (tests, older snapshots). Never raises.
+        """
+        try:
+            columns = {c["name"] for c in self.db.table_info("memories")}
+            for name in ("trust", "session_id"):
+                if name not in columns:
+                    self.db.execute(
+                        f"ALTER TABLE memories ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                    )
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── write path ───────────────────────────────────────────────────────────
     def remember(
@@ -148,18 +176,28 @@ class MemoryManager:
         index: bool = True,
         tags: Any = "",
         origin: str = "",
+        trust: str = "",
+        session_id: str = "",
     ) -> str:
         """Store a memory and index it for both vector and lexical recall.
 
         The owner decides what is remembered — no content-based refusals.
         Use ``mark_private`` / the ``private`` metadata flag when a record
         should stay out of model context.
+
+        Trust provenance (mem-false-fact hardening): ``trust`` is
+        ``"trusted"`` or ``"untrusted"``; when empty it is derived from
+        ``source``/``origin`` — tool output and other external sources
+        default to untrusted, direct user input defaults to trusted.
+        Untrusted records are downranked at recall time and untrusted
+        preferences are flagged, never applied silently.
         """
         content = (content or "").strip()
         if not content:
             return ""
         now = time.time()
         record_id = new_id()
+        origin = (origin or "").strip()
         row = {
             "id": record_id,
             "kind": kind,
@@ -172,7 +210,9 @@ class MemoryManager:
             "source": source,
             "agent": agent,
             "tags": join_tags(tags),
-            "origin": (origin or "").strip(),
+            "origin": origin,
+            "trust": infer_trust(source, origin, explicit=trust),
+            "session_id": (session_id or origin).strip(),
             "created_at": now,
             "updated_at": now,
             "expires_at": now + ttl_seconds if ttl_seconds else None,
@@ -209,6 +249,8 @@ class MemoryManager:
                 "importance": kw.get("importance", 0.5), "salience": kw.get("importance", 0.5),
                 "decay": 1.0, "access_count": 0, "last_access": 0.0,
                 "source": source, "agent": kw.get("agent", ""),
+                "trust": infer_trust(source, kw.get("origin", ""), explicit=kw.get("trust", "")),
+                "session_id": (kw.get("session_id") or kw.get("origin") or "").strip(),
                 "created_at": now, "updated_at": now, "metadata": kw.get("metadata") or {},
             }
             for i, (content, kind) in enumerate(materialized)
@@ -251,6 +293,7 @@ class MemoryManager:
         tags: str = "",
         origin: str = "",
         include_superseded: bool = False,
+        trust_filter: str = "",
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
@@ -261,6 +304,12 @@ class MemoryManager:
         origin — session-relevant memories rank higher, but global
         knowledge is still accessible (boost, not filter).
 
+        ``trust_filter`` keeps only ``"trusted"`` or only ``"untrusted"``
+        records; anything else disables the filter. Untrusted records are
+        always *downranked* (mem-false-fact), and untrusted records from a
+        different session are downranked *further* (mem-cross-session) —
+        tool-planted content never outranks the owner's own memories.
+
         Private-marked records are excluded unless ``include_private`` is
         set — proactive recall and training pipelines never see them.
 
@@ -270,10 +319,13 @@ class MemoryManager:
         ``supersession_chain()``.
         """
         wanted_tags = {t.strip() for t in (tags or "").split(",") if t.strip()}
+        trust_wanted = (trust_filter or "").strip().lower()
+        if trust_wanted not in (TRUSTED, UNTRUSTED):
+            trust_wanted = ""
         started = time.perf_counter()
         limit = limit or self.limit
         if not query.strip():
-            recents = self._recent(limit, kind=kind)
+            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
             if not include_superseded:
@@ -311,7 +363,7 @@ class MemoryManager:
 
         ids = list(candidates)
         if not ids:
-            recents = self._recent(limit, kind=kind)
+            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
             if not include_superseded:
@@ -354,6 +406,20 @@ class MemoryManager:
             # This is a boost, not a filter — global knowledge stays accessible.
             if origin and record.origin == origin:
                 record.score = min(1.0, record.score + 0.15)
+            # Trust downrank (mem-false-fact): tool output / external content
+            # never outranks the owner's own memories, no matter how well it
+            # matches. Cross-session untrusted content is downranked further
+            # (mem-cross-session). Never raises.
+            if trust_wanted and record.trust != trust_wanted:
+                continue
+            if record.is_untrusted:
+                try:
+                    record.score *= 0.5
+                    rec_session = (record.session_id or record.origin or "").strip()
+                    if origin and rec_session and rec_session != origin.strip():
+                        record.score *= 0.5
+                except Exception:  # noqa: BLE001
+                    pass
             if record.score >= min_score:
                 scored.append(record)
 
@@ -364,12 +430,16 @@ class MemoryManager:
             self._touch([r.id for r in top])
         return RecallResult(records=top, query=query, elapsed_ms=(time.perf_counter() - started) * 1000)
 
-    def _recent(self, limit: int, *, kind: str = "") -> list[MemoryRecord]:
+    def _recent(self, limit: int, *, kind: str = "",
+                trust_filter: str = "") -> list[MemoryRecord]:
         query = self.repo.query().order_by("created_at DESC").limit(limit)
         if kind:
             query.where("kind = ?", kind)
         sql, params = query.build()
-        return [MemoryRecord.from_row(r) for r in self.db.query(sql, params)]
+        records = [MemoryRecord.from_row(r) for r in self.db.query(sql, params)]
+        if trust_filter in (TRUSTED, UNTRUSTED):
+            records = [r for r in records if r.trust == trust_filter]
+        return records
 
     def _touch(self, ids: Sequence[str]) -> None:
         if not ids:
@@ -561,6 +631,10 @@ class MemoryManager:
         the budget is spent — so a huge memory never crowds out the actual task.
 
         Private-marked records are excluded unless ``include_private`` is set.
+
+        Untrusted preference records are FLAGGED inline (mem-pref-override):
+        they are never applied silently — the flag tells the caller to get
+        explicit user confirmation first.
         """
         budget = budget_tokens or self.context_budget
         parts: list[str] = []
@@ -577,7 +651,12 @@ class MemoryManager:
                     pool.append(record)
 
         for record in pool:
-            line = f"- [{record.kind}] {record.content}"
+            flag = ""
+            if record.requires_confirmation:
+                flag = " [⚠ UNVERIFIED PREFERENCE — needs user confirmation]"
+            elif record.is_untrusted:
+                flag = " [untrusted]"
+            line = f"- [{record.kind}]{flag} {record.content}"
             cost = approx_token_count(line)
             if used + cost > budget:
                 continue

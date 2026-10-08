@@ -229,8 +229,15 @@ def _read_wav(path: str) -> tuple[Any, int, int]:
 
 
 def _write_wav_stereo(path: str, left: Any, right: Any,
-                      sample_rate: int) -> None:
-    """Two mono float arrays → 16-bit stereo WAV."""
+                      sample_rate: int) -> bool:
+    """Two mono float arrays → 16-bit stereo WAV.
+
+    Returns ``True`` on success, ``False`` (logged, never raises) when the
+    frames would exceed :data:`.caps.MAX_AUDIO_WRITE_BYTES` — nothing is
+    written on refusal.
+    """
+    from . import caps
+
     import numpy as np
     l = np.asarray(left, dtype=np.float64).reshape(-1)
     r = np.asarray(right, dtype=np.float64).reshape(-1)
@@ -240,12 +247,19 @@ def _write_wav_stereo(path: str, left: Any, right: Any,
     stereo = np.stack([l, r], axis=1)
     peak = float(abs(stereo).max()) or 1.0
     pcm16 = (stereo / peak * 32767).astype("<i2")
+    frames = pcm16.tobytes()
+    ok, reason = caps.check_write_size(
+        caps.wav_expected_bytes(len(frames)), caps.MAX_AUDIO_WRITE_BYTES)
+    if not ok:
+        caps.refuse_write(f"_write_wav_stereo({path})", reason)
+        return False
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with wave.open(path, "wb") as wf:
         wf.setnchannels(2)
         wf.setsampwidth(2)
         wf.setframerate(int(sample_rate))
-        wf.writeframes(pcm16.tobytes())
+        wf.writeframes(frames)
+    return True
 
 
 def _resample(mono: Any, src_sr: int, dst_sr: int) -> Any:

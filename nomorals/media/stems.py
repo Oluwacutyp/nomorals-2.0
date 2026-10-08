@@ -131,20 +131,34 @@ def probe_demucs(profile: str = "") -> ProbeResult:
     )
 
 
-def _write_wav_mono(path: str, samples: "object", sample_rate: int) -> None:
-    """Mono float samples → 16-bit WAV, stdlib + numpy only."""
+def _write_wav_mono(path: str, samples: "object", sample_rate: int) -> bool:
+    """Mono float samples → 16-bit WAV, stdlib + numpy only.
+
+    Returns ``True`` on success, ``False`` (logged, never raises) when the
+    frames would exceed :data:`.caps.MAX_AUDIO_WRITE_BYTES` — nothing is
+    written on refusal.
+    """
+    from . import caps
+
     import numpy as np
     arr = np.asarray(samples, dtype=np.float64).reshape(-1)
     if arr.size == 0:
         raise DemucsUnavailable("separator returned an empty stem")
     peak = float(abs(arr).max()) or 1.0
     pcm16 = (arr / peak * 32767).astype("<i2")
+    frames = pcm16.tobytes()
+    ok, reason = caps.check_write_size(
+        caps.wav_expected_bytes(len(frames)), caps.MAX_AUDIO_WRITE_BYTES)
+    if not ok:
+        caps.refuse_write(f"_write_wav_mono({path})", reason)
+        return False
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with wave.open(path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(int(sample_rate))
-        wf.writeframes(pcm16.tobytes())
+        wf.writeframes(frames)
+    return True
 
 
 class _RealSeparator:
