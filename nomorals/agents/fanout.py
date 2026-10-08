@@ -5,6 +5,12 @@ goal; :func:`fan_in` merges their Blackboard contributions with a chosen
 strategy (``concat_dedupe``, ``vote``, ``judge``); :func:`map_reduce`
 splits a work list across K workers and reduces the results.
 
+Extension #6 (Hark pattern): :func:`fan_out_compare` fans out one worker
+per *source* for comparison tasks ("compare X across N sources") with
+profile-gated parallelism (workstation 36 / laptop 12 / termux 4 —
+:func:`fanout_cap`), and :func:`synthesize_comparison` / :func:`compare`
+merge the per-source outputs into a comparison table + summary.
+
 Workers are injected callables, so the patterns are fully testable without
 a model.  In production the default worker drives one model call with the
 role's system prompt and angle brief.
@@ -28,9 +34,54 @@ from .role_specs import RoleRegistry, SwarmAgent, default_registry
 
 __all__ = [
     "fan_out", "fan_in", "map_reduce",
-    "FanOutResult", "FanInResult", "MapReduceResult",
-    "MERGE_STRATEGIES",
+    "fan_out_compare", "synthesize_comparison", "compare", "fanout_cap",
+    "FanOutResult", "FanInResult", "MapReduceResult", "CompareResult",
+    "MERGE_STRATEGIES", "FANOUT_WORKERS_BY_PROFILE",
 ]
+
+#: Profile-gated ceiling for parallel comparison workers (Hark pattern):
+#: workstation fans out 36 parallel browsers/agents, laptop 12, termux 4.
+FANOUT_WORKERS_BY_PROFILE = {"workstation": 36, "laptop": 12, "termux": 4}
+
+
+def fanout_cap(profile: str | None = None) -> int:
+    """Max parallel comparison workers for this machine. Never raises.
+
+    Resolution: explicit ``profile`` arg → ``NM_PROFILE`` env →
+    Termux ``PREFIX`` heuristic → :func:`nomorals.core.profile.detect_profile`.
+    """
+    try:
+        if profile is None:
+            from ..core.profiles import get_profile_kind
+            profile = get_profile_kind()
+        return FANOUT_WORKERS_BY_PROFILE.get(str(profile or "").lower(), 12)
+    except Exception:  # noqa: BLE001 - profile detection is best-effort
+        return 12
+
+
+@dataclass
+class CompareResult:
+    run_id: str
+    goal: str
+    sources: list[str]
+    results: list[Any] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    seconds: float = 0.0
+    workers_used: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors or bool([r for r in self.results
+                                        if not (isinstance(r, dict)
+                                                and r.get("error"))])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"run_id": self.run_id, "goal": self.goal,
+                "n_sources": len(self.sources),
+                "n_results": len(self.results),
+                "n_errors": len(self.errors), "errors": self.errors,
+                "workers_used": self.workers_used,
+                "seconds": round(self.seconds, 3)}
 
 _log = get_logger(__name__)
 
@@ -305,6 +356,213 @@ def map_reduce(
     return MapReduceResult(n_items=len(items), n_workers=len(chunks),
                            reduced=reduced, errors=errors,
                            seconds=time.perf_counter() - started)
+
+
+def fan_out_compare(
+    goal: str,
+    sources: list[str],
+    *,
+    worker_fn: Callable[[str, int], Any] | None = None,
+    max_workers: int | None = None,
+    profile: str | None = None,
+    context: Any = None,
+    blackboard: Blackboard | None = None,
+) -> CompareResult:
+    """Hark-style N-way fan-out for comparison tasks.
+
+    "Compare X across N sources" → one parallel worker per source, then
+    :func:`synthesize_comparison` merges their outputs into a comparison
+    table.  ``worker_fn(source, index)`` is injected (a browser-task
+    worker in production, a mock in tests).  Parallelism is profile-gated:
+    workstation 36 / laptop 12 / termux 4 unless ``max_workers`` overrides.
+
+    One bad source never kills the run; results stay in source order.
+    Never raises — failures are captured in ``errors`` / per-source
+    ``{"error": ...}`` dicts.
+    """
+    started = time.perf_counter()
+    run_id = f"compare-{new_id()[-8:]}"
+    board = blackboard if blackboard is not None else Blackboard()
+    errors: list[str] = []
+    errors_lock = threading.Lock()
+    try:
+        srcs = [str(s) for s in (sources or [])]
+    except Exception:  # noqa: BLE001
+        srcs = []
+    results: list[Any] = [None] * len(srcs)
+
+    cap = fanout_cap(profile)
+    try:
+        if max_workers is not None:
+            cap = max(1, int(max_workers))
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _default_worker(source: str, index: int) -> dict[str, Any]:
+        return {"source": source, "index": index,
+                "note": "no worker_fn supplied; nothing fetched"}
+
+    worker = worker_fn or _default_worker
+
+    def _one(index: int, source: str) -> None:
+        try:
+            out = worker(source, index)
+        except Exception as exc:  # noqa: BLE001 - one bad source ≠ failed run
+            with errors_lock:
+                errors.append(f"{source}: {exc}")
+            out = {"source": source, "error": str(exc)}
+        results[index] = out
+        try:
+            board.post(f"{run_id}.{_slug(source)}", out, author="fan_out_compare",
+                       topic=run_id,
+                       metadata={"source": source, "run_id": run_id,
+                                 "index": index})
+        except Exception:  # noqa: BLE001 - telemetry never breaks fan-out
+            pass
+
+    workers_used = min(cap, len(srcs)) or (1 if srcs else 0)
+    try:
+        if srcs:
+            with ThreadPoolExecutor(max_workers=workers_used,
+                                   thread_name_prefix="compare") as pool:
+                futures = {pool.submit(_one, i, s): i
+                           for i, s in enumerate(srcs)}
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as exc:  # noqa: BLE001 - harness guard
+                        with errors_lock:
+                            errors.append(f"harness: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"fan-out failed: {exc}")
+
+    elapsed = time.perf_counter() - started
+    if context is not None:
+        try:
+            context.emit("swarm.fan_out_compare", run_id=run_id,
+                         sources=len(srcs), errors=len(errors))
+        except Exception:  # noqa: BLE001 - telemetry never breaks fan-out
+            pass
+    _log.info("fan_out_compare %s: %d sources, %d ok, %d errors (%.1fs)",
+              run_id, len(srcs),
+              len([r for r in results
+                   if not (isinstance(r, dict) and r.get("error"))]),
+              len(errors), elapsed)
+    return CompareResult(run_id=run_id, goal=str(goal or ""),
+                         sources=srcs, results=results, errors=errors,
+                         seconds=elapsed, workers_used=workers_used)
+
+
+def synthesize_comparison(results: list[Any],
+                          sources: list[str] | None = None) -> dict[str, Any]:
+    """Merge per-source worker outputs into a comparison table + summary.
+
+    Each result is expected to be a dict of ``{aspect: value}`` pairs
+    (``"source"`` / ``"error"`` keys are treated as metadata).  The union
+    of aspects across all sources becomes the table rows, so sources that
+    report different fields still line up.  Never raises.
+    """
+    try:
+        items: list[dict[str, Any]] = []
+        for i, raw in enumerate(results or []):
+            src = (sources[i] if sources and i < len(sources)
+                   else f"source_{i}")
+            if isinstance(raw, dict):
+                err = raw.get("error")
+                fields = {k: v for k, v in raw.items()
+                          if k not in ("source", "error")}
+            else:
+                err = f"non-dict result ({type(raw).__name__})"
+                fields = {}
+            items.append({"source": str(src), "fields": fields,
+                          "error": err})
+        aspects: list[str] = []
+        for item in items:
+            for key in item["fields"]:
+                if key not in aspects:
+                    aspects.append(key)
+        table = [{"aspect": a,
+                  "values": {it["source"]: it["fields"].get(a)
+                             for it in items}}
+                 for a in aspects]
+        n_ok = len([it for it in items if not it["error"]])
+        coverage = {a: sum(1 for it in items if a in it["fields"])
+                    for a in aspects}
+        failed = [it["source"] for it in items if it["error"]]
+        summary = (f"{n_ok}/{len(items)} sources compared; "
+                   f"{len(aspects)} aspects; "
+                   + (f"failed: {', '.join(failed)}" if failed
+                      else "no failures"))
+        return {"table": table,
+                "markdown": render_comparison_table(table),
+                "summary": summary,
+                "n_sources": len(items), "n_ok": n_ok,
+                "n_aspects": len(aspects), "coverage": coverage,
+                "failed_sources": failed}
+    except Exception as exc:  # noqa: BLE001
+        return {"table": [], "markdown": "", "summary": f"synthesis failed: {exc}",
+                "n_sources": 0, "n_ok": 0, "n_aspects": 0,
+                "coverage": {}, "failed_sources": []}
+
+
+def render_comparison_table(table: list[dict[str, Any]]) -> str:
+    """Render a synthesized comparison table as a Markdown table.
+
+    Never raises; returns "" for an empty table.
+    """
+    try:
+        if not table:
+            return ""
+        headers = ["aspect"]
+        for row in table:
+            for src in (row.get("values") or {}):
+                if src not in headers:
+                    headers.append(src)
+
+        def cell(v: Any) -> str:
+            if v is None:
+                return "—"
+            text = str(v)
+            return text.replace("|", "\\|").replace("\n", " ").strip()[:120]
+
+        lines = ["| " + " | ".join(headers) + " |",
+                 "| " + " | ".join("---" for _ in headers) + " |"]
+        for row in table:
+            vals = row.get("values") or {}
+            lines.append("| " + " | ".join(
+                [cell(row.get("aspect"))] + [cell(vals.get(h))
+                                            for h in headers[1:]]) + " |")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def compare(goal: str,
+            sources: list[str],
+            *,
+            worker_fn: Callable[[str, int], Any] | None = None,
+            max_workers: int | None = None,
+            profile: str | None = None,
+            context: Any = None,
+            blackboard: Blackboard | None = None) -> dict[str, Any]:
+    """One-call "compare X across N sources": fan out, then synthesize.
+
+    Returns ``{"run": <CompareResult.to_dict()>, "table": [...],
+    "markdown": ..., "summary": ...}``.  Never raises.
+    """
+    try:
+        run = fan_out_compare(goal, sources, worker_fn=worker_fn,
+                              max_workers=max_workers, profile=profile,
+                              context=context, blackboard=blackboard)
+        synth = synthesize_comparison(run.results, run.sources)
+        out = {"run": run.to_dict()}
+        out.update(synth)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return {"run": {}, "table": [], "markdown": "",
+                "summary": f"compare failed: {exc}", "n_sources": 0,
+                "n_ok": 0, "n_aspects": 0, "coverage": {},
+                "failed_sources": []}
 
 
 def _chunks(items: list[Any], k: int) -> list[list[Any]]:

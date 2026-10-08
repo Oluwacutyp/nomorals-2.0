@@ -26,7 +26,11 @@ from nomorals.agents.blackboard import Blackboard
 from nomorals.agents.debate import (
     Debate, Critique, Issue, WorkArtifact, arbitrate,
 )
-from nomorals.agents.fanout import fan_in, fan_out, map_reduce
+from nomorals.agents.fanout import (
+    fan_in, fan_out, map_reduce,
+    fan_out_compare, synthesize_comparison, compare, fanout_cap,
+    render_comparison_table, FANOUT_WORKERS_BY_PROFILE,
+)
 from nomorals.agents.orchestrator import MasterOrchestrator, Plan, PlanStep
 from nomorals.agents.role_specs import (
     RoleEnforcingRegistry, RoleRegistry, SwarmAgent, default_registry,
@@ -300,6 +304,113 @@ class FanOutTests(unittest.TestCase):
             reduce_fn=lambda parts: sum(parts),
             k=3)
         self.assertEqual(res.reduced, 45)
+        self.assertFalse(res.errors)
+
+
+class CompareFanOutTests(unittest.TestCase):
+    """Extension #6: Hark-style N-way fan-out — one worker per source,
+    profile-gated parallelism (workstation 36 / laptop 12 / termux 4),
+    synthesized into a comparison table."""
+
+    def test_profile_caps(self):
+        self.assertEqual(fanout_cap("workstation"), 36)
+        self.assertEqual(fanout_cap("laptop"), 12)
+        self.assertEqual(fanout_cap("termux"), 4)
+        self.assertEqual(fanout_cap("bogus-profile"), 12)
+        self.assertEqual(FANOUT_WORKERS_BY_PROFILE["workstation"], 36)
+
+    def test_results_in_source_order(self):
+        def worker(source, i):
+            return {"source": source, "price": 10 * (i + 1)}
+
+        res = fan_out_compare("compare widgets", ["c.com", "a.com", "b.com"],
+                              worker_fn=worker, profile="termux")
+        self.assertEqual(len(res.results), 3)
+        self.assertEqual([r["source"] for r in res.results],
+                         ["c.com", "a.com", "b.com"])
+        self.assertEqual(res.results[2]["price"], 30)
+        self.assertFalse(res.errors)
+        self.assertLessEqual(res.workers_used, 4)
+
+    def test_one_bad_source_does_not_kill_run(self):
+        def worker(source, i):
+            if source == "bad.com":
+                raise RuntimeError("fetch exploded")
+            return {"price": 99}
+
+        res = fan_out_compare("compare", ["good.com", "bad.com"],
+                              worker_fn=worker)
+        self.assertEqual(len(res.results), 2)
+        self.assertEqual(res.results[0]["price"], 99)
+        self.assertIn("error", res.results[1])
+        self.assertEqual(len(res.errors), 1)
+        self.assertIn("bad.com", res.errors[0])
+
+    def test_max_workers_override_caps_pool(self):
+        seen_max = [0]
+        active = [0]
+        import threading
+        lock = threading.Lock()
+
+        def worker(source, i):
+            with lock:
+                active[0] += 1
+                seen_max[0] = max(seen_max[0], active[0])
+            import time as _t
+            _t.sleep(0.05)
+            with lock:
+                active[0] -= 1
+            return {"source": source}
+
+        res = fan_out_compare("compare", [f"s{i}.com" for i in range(8)],
+                              worker_fn=worker, max_workers=2)
+        self.assertEqual(res.workers_used, 2)
+        self.assertLessEqual(seen_max[0], 2)
+
+    def test_synthesize_unions_aspects(self):
+        results = [
+            {"price": 100, "rating": 4.5},
+            {"price": 120, "warranty": "2y"},
+        ]
+        synth = synthesize_comparison(results, ["a.com", "b.com"])
+        aspects = [r["aspect"] for r in synth["table"]]
+        self.assertEqual(sorted(aspects), ["price", "rating", "warranty"])
+        self.assertEqual(synth["coverage"]["price"], 2)
+        self.assertEqual(synth["coverage"]["warranty"], 1)
+        md = synth["markdown"]
+        self.assertIn("a.com", md)
+        self.assertIn("—", md)  # missing value placeholder
+
+    def test_render_table_empty(self):
+        self.assertEqual(render_comparison_table([]), "")
+
+    def test_compare_end_to_end(self):
+        def worker(source, i):
+            if i == 2:
+                raise ValueError("timeout")
+            return {"price": 50 + i, "stock": "yes"}
+
+        out = compare("compare phones", ["x.com", "y.com", "z.com"],
+                      worker_fn=worker)
+        self.assertEqual(out["n_sources"], 3)
+        self.assertEqual(out["n_ok"], 2)
+        self.assertIn("z.com", out["failed_sources"])
+        self.assertIn("failed: z.com", out["summary"])
+        self.assertIn("| aspect |", out["markdown"])
+
+    def test_never_raises_on_garbage(self):
+        res = fan_out_compare(None, None)
+        self.assertIsNotNone(res)
+        res = fan_out_compare("g", ["ok"], worker_fn=lambda s, i: 1 / 0)
+        self.assertEqual(len(res.errors), 1)
+        synth = synthesize_comparison(None)
+        self.assertEqual(synth["n_sources"], 0)
+        out = compare(None, None)
+        self.assertIn("summary", out)
+
+    def test_default_worker_when_none_supplied(self):
+        res = fan_out_compare("g", ["a.com"])
+        self.assertEqual(len(res.results), 1)
         self.assertFalse(res.errors)
 
 
