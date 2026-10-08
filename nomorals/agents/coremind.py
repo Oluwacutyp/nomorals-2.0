@@ -100,12 +100,12 @@ _DISPATCH_RETRY_BACKOFF_S = 1.0
 #: Intent kinds whose dispatch is read-only (safe to retry more).
 _DISPATCH_READONLY_KINDS = frozenset({
     "research", "status", "browse", "game", "owner", "fastchat",
-    "email_query",
+    "email_query", "finance_summary",
 })
 
 #: Intent kinds with side effects (retry conservatively).
 _DISPATCH_WRITE_KINDS = frozenset({
-    "build", "account", "mission", "download", "multi",
+    "build", "account", "mission", "download", "multi", "finance_log",
 })
 
 
@@ -735,6 +735,17 @@ def _account_intent(text: str) -> Intent | None:
 _RE_EMAIL_QUERY = re.compile(
     r"what did\s+(.+?)\s+say about\s+(.+?)\s*\??\s*$", re.I)
 
+# Finance NL intents — narrow by design, whole-message matches only.
+# "I spent 5k on transport" → log; "how's my spending?" → summary.
+# Bare "how am i doing" is general chat and must NOT match — the summary
+# shape requires either "spending" or an explicit "on <category>".
+_RE_FINANCE_LOG = re.compile(
+    r"^(?:i\s+)?(?:spent|paid)\s+(\S+)\s+(?:on|for)\s+(.+?)\s*$", re.I)
+_RE_FINANCE_SUMMARY = re.compile(
+    r"^(?:how(?:'s| is) my spending(?:\s+on\s+(.+?))?|"
+    r"how am i doing\s+on\s+(.+?))\s*\??\s*$",
+    re.I)
+
 
 def _email_intent(text: str) -> Intent | None:
     """Detect "what did <vendor> say about <topic>?" — routes to Gmail search.
@@ -756,6 +767,37 @@ def _email_intent(text: str) -> Intent | None:
                   action="search", route="email",
                   meta={"vendor": vendor, "topic": topic},
                   why=f"vendor mail query: {vendor[:30]} / {topic[:30]}")
+
+
+def _finance_intent(text: str) -> Intent | None:
+    """Detect finance NL: "I spent 5k on transport" / "how's my spending?".
+
+    Narrow by design: the whole message must match the spend/summary shape,
+    and the amount must parse as Nigerian shorthand — "I spent time on
+    transport" never misfires because "time" isn't an amount.
+    """
+    from ..finance.ledger import parse_amount
+
+    m = _RE_FINANCE_LOG.match((text or "").strip())
+    if m:
+        kobo = parse_amount(m.group(1))
+        if kobo is None or kobo <= 0:
+            return None
+        category = m.group(2).strip()
+        if not category or len(category) > 60:
+            return None
+        return Intent("finance_log", 0.92, target=text.strip()[:200],
+                      action="log", route="finance",
+                      meta={"amount_kobo": kobo, "category": category},
+                      why=f"spend log: {kobo} kobo on {category[:30]}")
+    m = _RE_FINANCE_SUMMARY.match((text or "").strip())
+    if m:
+        category = ((m.group(1) or m.group(2)) or "").strip()
+        return Intent("finance_summary", 0.9, target=text.strip()[:200],
+                      action="summary", route="finance",
+                      meta={"category": category},
+                      why="spending summary query")
+    return None
 
 
 def _owner_intent(text: str) -> Intent | None:
@@ -1022,7 +1064,8 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     cands: list[Intent] = []
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
-               _research_intent, _account_intent, _email_intent, _build_intent):
+               _research_intent, _account_intent, _email_intent, _build_intent,
+               _finance_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1531,6 +1574,8 @@ class CoreMind:
             "play": self._dispatch_play,
             "owner": self._dispatch_owner,
             "email_query": self._dispatch_email,
+            "finance_log": self._dispatch_finance_log,
+            "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
         if fn is None:
             self._job_done(job_id, True, "no route — treated as chat")
@@ -2019,6 +2064,54 @@ class CoreMind:
                     "`nm connectors connect --name gmail` first.")
         reply = answer_vendor_query(gmail, intent.target)
         return reply or "couldn't parse that mail query."
+
+    def _dispatch_finance_log(self, intent: Intent, job_id: str, chat_key: str,
+                              message: Any) -> str:
+        """NL spend log: "I spent 5k on transport". Write path."""
+        from ..finance.budgets import finance_paths
+        from ..finance.ledger import Ledger, categorize, format_naira
+
+        settings = getattr(self.context, "settings", None)
+        ledger_path, _ = finance_paths(settings)
+        ledger = Ledger(ledger_path)
+        kobo = int(intent.meta.get("amount_kobo", 0))
+        raw_category = str(intent.meta.get("category", "")).strip()
+        # The NL shape gives "on <category>"; treat it as a hint — the
+        # categorizer's keyword map decides the canonical category so
+        # "transport to ikeja" lands in transport, not in a free-text bucket.
+        category = categorize(raw_category)
+        txn = ledger.log(kobo, category=category, note=raw_category)
+        return (f"logged {format_naira(txn.amount_kobo)} → {txn.category}")
+
+    def _dispatch_finance_summary(self, intent: Intent, job_id: str,
+                                  chat_key: str, message: Any) -> str:
+        """NL spending summary: "how's my spending?" Read-only."""
+        from ..finance.budgets import (
+            BudgetStore, budget_status, finance_paths, month_key,
+        )
+        from ..finance.ledger import format_naira
+
+        settings = getattr(self.context, "settings", None)
+        ledger_path, budgets_path = finance_paths(settings)
+        from ..finance.ledger import Ledger
+
+        ledger, budgets = Ledger(ledger_path), BudgetStore(budgets_path)
+        cat = str(intent.meta.get("category", "") or "").strip().lower()
+        statuses = budget_status(ledger, budgets, month_key())
+        if cat:
+            statuses = [s for s in statuses if s.category == cat
+                        or cat in s.category]
+        if not statuses:
+            return ("no spending tracked yet" +
+                    (f" for {cat}" if cat else "") +
+                    " — try /spend 5k on transport")
+        lines = [f"spending — {month_key()}" +
+                 (f" ({cat})" if cat else "")]
+        for s in statuses:
+            lines.append(
+                f"  • {s.category}: {format_naira(s.spent_kobo)} / "
+                f"{format_naira(s.budgeted_kobo)} ({s.pct_used:.0%})")
+        return "\n".join(lines)
 
     def _dispatch_multi(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:

@@ -1521,6 +1521,21 @@ class PartnerRuntime(
             from ..proactive import control_memory
 
             return control_memory(command.tail or arg, context=self.context)
+        if kind == "spend":
+            # Naira-first expense log: /spend 5k on transport
+            from ...finance.commands import control_spend
+
+            return control_spend(command.tail or arg, context=self.context)
+        if kind == "budget":
+            # Monthly budgets: /budget set food 50k | /budget list
+            from ...finance.commands import control_budget
+
+            return control_budget(command.tail or arg, context=self.context)
+        if kind == "spending":
+            # Spending summary vs budgets: /spending [week|month]
+            from ...finance.commands import control_spending
+
+            return control_spending(command.tail or arg, context=self.context)
         if kind == "predict":
             # Prediction pit: unlocked by beating challenges (see
             # nomorals/games/unlocks.py). Gated above in _progression_gate.

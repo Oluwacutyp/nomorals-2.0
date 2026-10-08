@@ -97,3 +97,9 @@ def register(registry: Any) -> None:
         summary = expert.backtest(symbol, market=market, timeframe=timeframe,
                                   strategy=strategy)
         return summary.to_dict() if hasattr(summary, "to_dict") else {"result": str(summary)}
+
+    # Expense tracking + conversational budgeting (Naira-first). Lives in
+    # nomorals/finance/; registered here alongside the market tools.
+    from ..finance.tools import register as _register_finance_tools
+
+    _register_finance_tools(registry)

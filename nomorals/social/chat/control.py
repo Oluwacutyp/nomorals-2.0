@@ -200,6 +200,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
+    # expense tracking + conversational budgeting (Naira-first)
+    "spend": (1, None),      # /spend <amount> [on <category>] [note...]
+    "budget": (1, None),     # /budget set <category> <amount> | /budget list
+    "spending": (0, 1),      # /spending [week|month] — summary vs budgets
     "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
@@ -864,6 +868,17 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "memories": {"what": "trust view: how many people she tracks, how many long-term memories she holds, recent contact. A name narrows to that person.",
                "usage": "/memories [name]", "example": "/memories Adaeze",
                "related": "/recall /remember"},
+    "spend": {"what": "log a spend in Naira. Nigerian shorthand works: 5k, 2.5m.",
+              "usage": "/spend <amount> [on <category>] [note...]",
+              "example": "/spend 5k on transport",
+              "related": "/spending /budget"},
+    "budget": {"what": "monthly spending budgets per category. She warns at 80%, flags at 100%.",
+               "usage": "/budget set <category> <amount> | /budget list",
+               "example": "/budget set food 50k",
+               "related": "/spend /spending"},
+    "spending": {"what": "spending summary vs your budgets, with a weekly digest view.",
+                 "usage": "/spending [week|month]", "example": "/spending week",
+                 "related": "/spend /budget"},
     "tts": {"what": "speak text aloud and send the audio file back.",
             "usage": "/tts <text>", "example": "/tts morning",
             "related": "/speak /stt"},
@@ -1143,6 +1158,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam"]),
+    ("money & spending", ["spend", "budget", "spending"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1469,6 +1485,12 @@ LIST_ONELINERS: dict[str, str] = {
     "recall": "what she remembers (top 5)",
     "forget": "delete a memory",
     "memories": "trust view — people tracked, memory counts, recent contact",
+    "spend": "log a spend, e.g. /spend 5k on transport",
+    "budget": "set/list monthly budgets, e.g. /budget set food 50k",
+    "spending": "spending summary vs budgets (/spending week|month)",
+    "spend": "money & spending",
+    "budget": "money & spending",
+    "spending": "money & spending",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
