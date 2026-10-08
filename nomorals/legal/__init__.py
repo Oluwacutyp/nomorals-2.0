@@ -35,6 +35,19 @@ from .research import (
     research_citations,
 )
 
+from .portfolio import (
+    PORTFOLIO_CHECK_ACTION,
+    PORTFOLIO_CRON,
+    Contract,
+    Obligation,
+    SLAStatus,
+    TimelineEvent,
+    ContractPortfolio,
+    check_all as portfolio_check_all,
+    control_contracts,
+    ensure_schedule as ensure_portfolio_schedule,
+)
+
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
@@ -62,4 +75,14 @@ __all__ = [
     "control_research",
     "format_research",
     "research_citations",
+    "PORTFOLIO_CHECK_ACTION",
+    "PORTFOLIO_CRON",
+    "Contract",
+    "Obligation",
+    "SLAStatus",
+    "TimelineEvent",
+    "ContractPortfolio",
+    "portfolio_check_all",
+    "control_contracts",
+    "ensure_portfolio_schedule",
 ]
