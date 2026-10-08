@@ -2255,6 +2255,18 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "cost":
+            # Transparent cost display (extension #7) — toggleable
+            # per-answer spend footer, today's spend, research budgets.
+            # Owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...llm.cost_display import control_cost
+            return control_cost(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.

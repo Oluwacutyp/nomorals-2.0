@@ -15,12 +15,21 @@ from .lifecycle import (
     STAGES,
 )
 from .router import LLMRouter, ProviderHealth
+from .cost_display import (
+    CostDisplay,
+    control_cost,
+    format_cost,
+    get_display,
+    maybe_cost_footer,
+    parse_budget_nl,
+)
 
 __all__ = [
     "BenchmarkDB",
     "BenchmarkSample",
     "BrokerConstraints",
     "Capability",
+    "CostDisplay",
     "LifecycleError",
     "LLMProvider",
     "LLMResponse",
@@ -39,6 +48,11 @@ __all__ = [
     "Usage",
     "benchmark_model",
     "capability_from",
+    "control_cost",
+    "format_cost",
+    "get_display",
+    "maybe_cost_footer",
+    "parse_budget_nl",
     "provider_capabilities",
     "seed_synthetic",
 ]

@@ -228,6 +228,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
     "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
     "guardrails": (0, None),   # /guardrails add <rule> | list | run | override … — rule-based ad-spend safety (owner only)
+    "cost": (0, 2),          # /cost [on|off] | /cost budget $0.50 — transparent spend display (owner only)
     "competitor": (0, None),   # /competitor track <account> | report <account> | digest | vs <them> <you> — no-access competitor intel (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
@@ -1088,6 +1089,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/guardrails add <rule> | list | run | override <action> <adset> [pct] | stop <id> | audit",
             "example": "/guardrails add pause if cpa > ₦50000 for 3 days on adset123",
             "related": "/mandate /send"},
+    "cost": {"what": "Transparent spend display — 'this answer cost $0.003' after every reply (toggleable), today's metered spend, and research budget caps. Builds trust; the router already meters every call. Owner only.",
+            "usage": "/cost [on|off] | /cost budget $0.50",
+            "example": "/cost on",
+            "related": "/research"},
     "competitor": {"what": "No-access competitor intel — benchmark any public account without logins or credentials. Content pillars, posting cadence by format, engagement trends, window-vs-window digests, plus an AEO share-of-answer face-off against your brand. Owner only.",
             "usage": "/competitor track <account> [platform] | report <account> [platform] | digest [account] | list | untrack <account> | vs <competitor> <your-brand>",
             "example": "/competitor report rivalbrand",
@@ -1452,7 +1457,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1791,6 +1796,7 @@ LIST_ONELINERS: dict[str, str] = {
     "content": "brief-first pipeline — score, predict, schedule (owner only)",
     "guardrails": "rule-based ad-spend guardrails — pause/scale rules, mandate-gated (owner only)",
     "competitor": "no-access competitor intel — pillars, cadence, engagement, AEO face-off (owner only)",
+    "cost": "transparent spend — 'this answer cost $X' footer, today's spend, research budgets (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
