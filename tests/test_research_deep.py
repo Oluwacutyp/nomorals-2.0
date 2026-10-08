@@ -352,9 +352,20 @@ class ResearchDeepTests(unittest.TestCase):
                 return "qlora rank guide\nqlora vram needs"
             return "Use rank 16 [S1] with enough VRAM [S2]."
 
+        # Snippets honestly contain the facts the fake LLM cites —
+        # build-map #20 strips sentences whose citations don't verify
+        # against the source texts.
         reg = _ScriptedRegistry(search={
-            "qlora rank guide": _results("https://a.example/1"),
-            "qlora vram needs": _results("https://b.example/2"),
+            "qlora rank guide": [{
+                "title": "QLoRA rank guide",
+                "url": "https://a.example/1",
+                "snippet": "Use rank 16 for QLoRA fine-tuning.",
+            }],
+            "qlora vram needs": [{
+                "title": "QLoRA VRAM needs",
+                "url": "https://b.example/2",
+                "snippet": "You need enough VRAM for training runs.",
+            }],
         })
         report = research_deep(
             "What are the current best qlora settings for 2026?",

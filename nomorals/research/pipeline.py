@@ -780,6 +780,65 @@ _CITE_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9 _-]{0,40})\]")
 SYNTHESIS_EMPTY = "SYNTHESIS_EMPTY"
 
 
+def _resolve_label(label: str,
+                   findings: list[ResearchFinding]) -> int | None:
+    """Resolve a citation label (``S3`` or a title fragment) to a finding
+    index, or None when the label matches no source (invented label)."""
+    label = (label or "").strip().upper()
+    if label.startswith("S") and label[1:].isdigit():
+        n = int(label[1:])
+        if 1 <= n <= len(findings):
+            return n - 1
+    if label:
+        for i, f in enumerate(findings):
+            if label in f.title.upper():
+                return i
+    return None
+
+
+def _verify_cited_sentences(raw: str,
+                            findings: list[ResearchFinding]) -> str:
+    """Strip sentences whose citations don't verify against the sources.
+
+    Closes the loop on citations: a valid-looking ``[S<n>]`` marker is
+    not enough — the sentence's factual content must actually appear in
+    the cited source (see ``citations.sentence_supported``). Sentences
+    with no citation markers are left alone (uncited prose, not smuggled
+    claims). Sentences citing unknown labels are stripped too. Never
+    raises; on any internal error the text passes through unchanged.
+    """
+    try:
+        from .citations import sentence_supported
+    except Exception:  # noqa: BLE001 - verification is advisory
+        return raw
+    try:
+        texts = [(f.snippet or "") + "\n" + (f.detail or "") for f in findings]
+        kept: list[str] = []
+        for sent in re.split(r"(?<=[.!?])\s+", (raw or "").strip()):
+            if not sent.strip():
+                continue
+            labels = [m.group(1) for m in _CITE_RE.finditer(sent)]
+            if not labels:
+                kept.append(sent)
+                continue
+            idxs = {i for lab in labels
+                    if (i := _resolve_label(lab, findings)) is not None}
+            if not idxs:
+                _log.debug("synthesize: stripped sentence with unverifiable "
+                           "citation labels: %r", sent[:80])
+                continue
+            body = _CITE_RE.sub("", sent)
+            if any(sentence_supported(body, texts[i]) for i in idxs):
+                kept.append(sent)
+            else:
+                _log.info("synthesize: stripped sentence whose citation did "
+                          "not verify: %r", sent[:100])
+        return " ".join(kept)
+    except Exception as exc:  # noqa: BLE001 - never break synthesis
+        _log.debug("synthesize: citation verification failed (%s)", exc)
+        return raw
+
+
 def _map_citations(raw: str,
                    findings: list[ResearchFinding]
                    ) -> tuple[str, list[ResearchFinding]]:
@@ -793,17 +852,7 @@ def _map_citations(raw: str,
     used: list[ResearchFinding] = []
 
     def replace(m: "re.Match[str]") -> str:
-        label = m.group(1).strip().upper()
-        idx: int | None = None
-        if label.startswith("S") and label[1:].isdigit():
-            n = int(label[1:])
-            if 1 <= n <= len(findings):
-                idx = n - 1
-        if idx is None and label:
-            for i, f in enumerate(findings):
-                if label in f.title.upper():
-                    idx = i
-                    break
+        idx = _resolve_label(m.group(1), findings)
         if idx is None:
             return ""  # invented citation — strip it
         key = f"S{idx + 1}"
@@ -865,6 +914,9 @@ def synthesize(question: str, findings: list[ResearchFinding],
                                                numbered=numbered)) or "").strip()
             if SYNTHESIS_EMPTY in raw.upper():
                 return SYNTHESIS_EMPTY
+            # Claim-level check: strip sentences whose citations don't
+            # verify against the source texts before deterministic mapping.
+            raw = _verify_cited_sentences(raw, findings)
             text, used = _map_citations(raw, findings)
             if used:
                 return _render_synthesis(text, used)
@@ -967,6 +1019,29 @@ class DeepReport:
     needs_clarification: bool = False
     spent_usd: float = 0.0
     budget_exhausted: bool = False
+    citations: list[dict] = field(default_factory=list)  # audit trail
+
+
+def _citation_audit_trail(findings: list[ResearchFinding]) -> list[dict]:
+    """Build the claim-level evidence audit trail for a run's findings.
+
+    Registers each finding's source (content hash + access time) in a
+    ``CitationManager`` and returns the audit trail, so ``DeepReport``
+    carries its evidence. Never raises — an empty trail beats a failed
+    run.
+    """
+    try:
+        from .citations import CitationManager
+        mgr = CitationManager()
+        for f in findings or []:
+            mgr.register_source(
+                f.url, f.title,
+                (f.snippet or "") + "\n" + (f.detail or ""),
+                accessed_ts=f.fetched_at)
+        return mgr.audit_trail()
+    except Exception as exc:  # noqa: BLE001 - evidence is advisory
+        _log.debug("research_deep: citation audit trail failed (%s)", exc)
+        return []
 
 
 def _router_llm_fn(router: Any) -> Any:
@@ -1044,9 +1119,11 @@ def research_deep(question: str, rctx: ResearchContext, *,
     job = ResearchJob(id=job_id, topic=question, queries=sub_queries)
     findings = run_job(job, rctx, progress=progress, budget=budget)
     synthesis = synthesize(question, findings, llm_fn=bllm)
+    citations = _citation_audit_trail(findings)
     return _report(question=question, sub_queries=sub_queries,
                    findings=findings, synthesis=synthesis,
-                   clarifications=[], needs_clarification=False)
+                   clarifications=[], needs_clarification=False,
+                   citations=citations)
 
 
 # ── tool registration ──────────────────────────────────────────────────────
@@ -1102,6 +1179,7 @@ def register(registry: Any) -> None:
             "synthesis": report.synthesis,
             "spent_usd": report.spent_usd,
             "budget_exhausted": report.budget_exhausted,
+            "citations": report.citations,
             "findings": [
                 {"title": f.title, "url": f.url, "snippet": f.snippet,
                  "detail": f.detail}
