@@ -266,9 +266,12 @@ def _stt_openai_compat(
     if not base.endswith("/v1") and "/v1" not in base:
         base = base + "/v1"
     client = HttpClient(timeout=_STT_TIMEOUT)
+    # Groq doesn't serve OpenAI's "whisper-1" — use their turbo model.
+    default_model = ("whisper-large-v3-turbo" if "groq.com" in base
+                     else "whisper-1")
     response = client.post_multipart(
         f"{base}/audio/transcriptions",
-        fields={"model": model or "whisper-1", **({"language": language} if language and language != "auto" else {})},
+        fields={"model": model or default_model, **({"language": language} if language and language != "auto" else {})},
         files=[("file", str(path), "application/octet-stream")],
         headers={"Authorization": f"Bearer {api_key}"},
     )
