@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,100 @@ from typing import Any
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
+
+# ── budget ───────────────────────────────────────────────────────────────────
+#
+# "Spend $0.50 researching this" — budget as the stopping condition. Costs
+# are planning estimates, NOT metered billing: the real web_search/web_fetch
+# path here is DuckDuckGo (free), and LLM cost varies wildly by provider.
+# These numbers exist so a run can be *bounded*, not so it can be invoiced.
+
+#: approximate USD per operation. Planning estimates, not metered billing.
+COST_TABLE: dict[str, float] = {
+    "web_search": 0.001,   # one web_search call
+    "web_fetch": 0.002,    # one web_fetch call (full page read)
+    "llm_call": 0.0008,    # one decompose / synthesize / clarify LLM call
+}
+
+
+class ResearchBudget:
+    """A spend cap for one research run. Thread-safe.
+
+    ``charge(op)`` debits ``COST_TABLE[op]`` (or an explicit ``amount``)
+    and returns True. When a charge would exceed the budget it returns
+    False instead — the balance never goes negative and ``exhausted``
+    latches True. Exhaustion is a *signal to degrade gracefully* (stop
+    searching, synthesize with what you have), never a reason to raise.
+    """
+
+    def __init__(self, budget_usd: float) -> None:
+        if budget_usd < 0:
+            raise ValueError(f"budget must be >= 0, got {budget_usd}")
+        self._budget = round(float(budget_usd), 9)
+        self._spent = 0.0
+        self.exhausted = False
+        self._lock = threading.Lock()
+
+    def charge(self, op: str, amount: float | None = None) -> bool:
+        """Debit one operation. False when it would exceed the budget."""
+        cost = round(float(amount if amount is not None else COST_TABLE[op]), 9)
+        with self._lock:
+            if self.exhausted:
+                return False
+            if self._spent + cost > self._budget:
+                self.exhausted = True
+                return False
+            self._spent = round(self._spent + cost, 9)
+            return True
+
+    @property
+    def spent(self) -> float:
+        with self._lock:
+            return self._spent
+
+    @property
+    def remaining(self) -> float:
+        with self._lock:
+            return max(0.0, round(self._budget - self._spent, 9))
+
+    def spent_usd(self) -> float:
+        """Spend, rounded for reports."""
+        return round(self.spent, 6)
+
+
+class _BudgetExhausted(Exception):
+    """Internal: an LLM phase hit the budget cap. Caught by the phase's
+    existing fallback (templates / extractive brief / heuristic clarify),
+    so exhaustion degrades the run instead of killing it."""
+
+
+def _budgeted_llm(llm_fn: Any, budget: "ResearchBudget | None") -> Any:
+    """Wrap an llm_fn so each call charges ``llm_call`` first.
+
+    When the charge fails the wrapper raises ``_BudgetExhausted``, which
+    the pipeline's LLM phases already catch (they all degrade to free
+    fallbacks on LLM failure).
+    """
+    if llm_fn is None or budget is None:
+        return llm_fn
+
+    def wrapper(prompt: str) -> str:
+        if not budget.charge("llm_call"):
+            raise _BudgetExhausted("research budget exhausted")
+        return llm_fn(prompt)
+
+    return wrapper
+
+
+def _resolve_budget(job: Any,
+                    budget: "ResearchBudget | None") -> "ResearchBudget | None":
+    """Explicit budget wins; otherwise build one from the job's budget_usd."""
+    if budget is not None:
+        return budget
+    job_budget = getattr(job, "budget_usd", None)
+    if job_budget is not None:
+        return ResearchBudget(job_budget)
+    return None
 
 # ── schema ───────────────────────────────────────────────────────────────────
 
@@ -69,6 +164,7 @@ class ResearchJob:
     max_results: int | None = None  # None → profile default
     fetch_top: int | None = None  # None → profile default
     enabled: bool = True
+    budget_usd: float | None = None  # None → unlimited (today's behavior)
 
     def __post_init__(self) -> None:
         from ..core.profiles import profile_value
@@ -202,11 +298,19 @@ def _emit_progress(progress: Any, phase: str, item: str) -> None:
 
 
 def run_job(job: ResearchJob, rctx: ResearchContext,
-            *, progress: Any = None) -> list[ResearchFinding]:
+            *, progress: Any = None,
+            budget: "ResearchBudget | None" = None) -> list[ResearchFinding]:
     """Execute a job's queries and return deduplicated findings.
 
     Queries run concurrently (profile-gated workers); results are merged
     in query order with URL dedup, exactly like the old serial loop.
+
+    ``budget`` caps spend: each query charges ``web_search`` and each
+    depth fetch charges ``web_fetch`` *before* dispatching, in order, so
+    exhaustion simply stops issuing new calls — findings gathered so far
+    are kept. When the budget is exhausted before any search, returns []
+    instead of raising: a budget stop is not a tool failure. ``budget``
+    defaults to the job's ``budget_usd``; None means unlimited.
 
     Raises on total failure (no query produced results and no tool at all);
     partial failures are logged and skipped — a flaky endpoint must not kill
@@ -215,14 +319,29 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
     """
     if not job.queries:
         raise ValueError(f"research job {job.id!r} has no queries")
+    budget = _resolve_budget(job, budget)
+    # Budget gate: charge serially, in query order, before dispatching.
+    # Only affordable queries are sent; the rest are skipped, never failed.
+    queries = job.queries
+    if budget is not None:
+        queries = []
+        for q in job.queries:
+            if budget.charge("web_search"):
+                queries.append(q)
+            else:
+                _log.info("research job %s: budget exhausted, stopping "
+                          "after %d quer(ies)", job.id, len(queries))
+                break
+        if not queries:
+            return []
     seen_urls: set[str] = set()
     findings: list[ResearchFinding] = []
     any_ok = False
     search_calls = [
         ("web_search", {"query": q, "max_results": job.max_results})
-        for q in job.queries
+        for q in queries
     ]
-    for query, outcome in zip(job.queries,
+    for query, outcome in zip(queries,
                               _dispatch_calls(rctx.registry, search_calls)):
         _emit_progress(progress, "search", query)
         if not outcome.ok:
@@ -251,6 +370,16 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
     from ..core.profiles import profile_value
     _detail_chars = int(profile_value("detail_chars", 2000))
     targets = findings[: max(0, job.fetch_top)]
+    if budget is not None:
+        affordable: list[ResearchFinding] = []
+        for f in targets:
+            if budget.charge("web_fetch"):
+                affordable.append(f)
+            else:
+                _log.info("research job %s: budget exhausted, skipping "
+                          "remaining fetches", job.id)
+                break
+        targets = affordable
     fetch_calls = [("web_fetch", {"url": f.url, "max_chars": 6000})
                    for f in targets]
     for finding, outcome in zip(targets,
@@ -484,13 +613,16 @@ class JobReport:
 
 
 def execute_job(job: ResearchJob, rctx: ResearchContext,
-                *, progress: Any = None) -> JobReport:
+                *, progress: Any = None,
+                budget: "ResearchBudget | None" = None) -> JobReport:
     """Run one job end-to-end: research, assess each finding, deliver the
     worthy ones. Never raises for per-finding problems; raises only if the
     job itself could not run at all. ``progress`` is an optional
-    ``(phase, item)`` callback (phases: "search", "fetch", "assess")."""
+    ``(phase, item)`` callback (phases: "search", "fetch", "assess").
+    ``budget`` caps research spend (see ``run_job``); delivery itself is
+    not charged."""
     report = JobReport(job_id=job.id, findings=0, delivered=0, skipped=0)
-    findings = run_job(job, rctx, progress=progress)
+    findings = run_job(job, rctx, progress=progress, budget=budget)
     report.findings = len(findings)
     for finding in findings:
         _emit_progress(progress, "assess", finding.url)
@@ -783,6 +915,8 @@ class DeepReport:
     synthesis: str
     clarifications: list[str]
     needs_clarification: bool = False
+    spent_usd: float = 0.0
+    budget_exhausted: bool = False
 
 
 def _router_llm_fn(router: Any) -> Any:
@@ -799,32 +933,63 @@ def _router_llm_fn(router: Any) -> Any:
 
 def research_deep(question: str, rctx: ResearchContext, *,
                   llm_fn: Any = None, progress: Any = None,
-                  max_queries: int = 6) -> DeepReport:
+                  max_queries: int = 6,
+                  budget_usd: float | None = None) -> DeepReport:
     """One-shot deep research: clarify → decompose → concurrent search →
     synthesize.
 
     When the question is ambiguous, returns early with
     ``needs_clarification=True`` and the clarifying questions — the run is
-    never burned on a vague query. Raises ``ValueError`` on an empty
-    question; ``RuntimeError`` when every search fails (via ``run_job``).
+    never burned on a vague query.
+
+    ``budget_usd`` caps total spend: the question is clarified first, then
+    ``max_queries`` is cut so the planned searches fit the remaining
+    budget (each LLM phase charges ``llm_call``, each search charges
+    ``web_search``, each depth fetch charges ``web_fetch``). When the
+    budget runs out mid-run the run stops issuing calls and synthesizes
+    from whatever findings exist — exhaustion never raises.
+
+    Raises ``ValueError`` on an empty question; ``RuntimeError`` when
+    every search fails (via ``run_job``).
     """
     question = (question or "").strip()
     if not question:
         raise ValueError("research_deep needs a non-empty question")
-    clarifications = clarify(question, llm_fn=llm_fn)
+    budget = ResearchBudget(budget_usd) if budget_usd is not None else None
+
+    def _report(**kw: Any) -> DeepReport:
+        return DeepReport(
+            spent_usd=budget.spent_usd() if budget else 0.0,
+            budget_exhausted=budget.exhausted if budget else False,
+            **kw,
+        )
+
+    # LLM phases charge through the wrapper; exhaustion raises
+    # _BudgetExhausted, which each phase already degrades on (templates /
+    # heuristic clarify / extractive brief).
+    bllm = _budgeted_llm(llm_fn, budget)
+    clarifications = clarify(question, llm_fn=bllm)
     if clarifications:
         _log.info("research_deep: needs clarification for %r", question[:80])
-        return DeepReport(question=question, sub_queries=[], findings=[],
-                          synthesis="", clarifications=clarifications,
-                          needs_clarification=True)
-    sub_queries = decompose(question, llm_fn=llm_fn, max_queries=max_queries)
+        return _report(question=question, sub_queries=[], findings=[],
+                       synthesis="", clarifications=clarifications,
+                       needs_clarification=True)
+    if budget is not None:
+        # Cap the fan-out so the planned searches fit the remaining budget.
+        # Rough per-query cost: one search + one depth fetch.
+        per_query = COST_TABLE["web_search"] + COST_TABLE["web_fetch"]
+        affordable = int(budget.remaining / per_query) + 1
+        max_queries = max(1, min(int(max_queries), affordable))
+        _log.info("research_deep: budget $%.4f remaining, capping at %d "
+                  "sub-quer(ies)", budget.remaining, max_queries)
+    sub_queries = decompose(question, llm_fn=bllm, max_queries=max_queries)
     job_id = f"deep-{hashlib.sha256(question.encode()).hexdigest()[:12]}"
     job = ResearchJob(id=job_id, topic=question, queries=sub_queries)
-    findings = run_job(job, rctx, progress=progress)
-    synthesis = synthesize(question, findings, llm_fn=llm_fn)
-    return DeepReport(question=question, sub_queries=sub_queries,
-                      findings=findings, synthesis=synthesis,
-                      clarifications=[], needs_clarification=False)
+    findings = run_job(job, rctx, progress=progress, budget=budget)
+    synthesis = synthesize(question, findings, llm_fn=bllm)
+    return _report(question=question, sub_queries=sub_queries,
+                   findings=findings, synthesis=synthesis,
+                   clarifications=[], needs_clarification=False)
 
 
 # ── tool registration ──────────────────────────────────────────────────────
@@ -852,9 +1017,13 @@ def register(registry: Any) -> None:
         parameters={
             "question": "str — the research question",
             "max_queries": "int (optional) — max sub-queries to fan out, default 6",
+            "budget_usd": "float (optional) — spend cap in USD; the run stops "
+                          "issuing calls when exhausted and synthesizes from "
+                          "what it has",
         },
     )
     def research_deep_tool(question: str, max_queries: int = 6,
+                           budget_usd: float | None = None,
                            **_: Any) -> dict[str, Any]:
         rctx = ResearchContext(
             db=getattr(context, "db", None),
@@ -866,6 +1035,7 @@ def register(registry: Any) -> None:
             question, rctx,
             llm_fn=_router_llm_fn(getattr(context, "router", None)),
             max_queries=int(max_queries or 6),
+            budget_usd=budget_usd,
         )
         return {
             "question": report.question,
@@ -873,6 +1043,8 @@ def register(registry: Any) -> None:
             "clarifications": report.clarifications,
             "sub_queries": report.sub_queries,
             "synthesis": report.synthesis,
+            "spent_usd": report.spent_usd,
+            "budget_exhausted": report.budget_exhausted,
             "findings": [
                 {"title": f.title, "url": f.url, "snippet": f.snippet,
                  "detail": f.detail}

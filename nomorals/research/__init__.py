@@ -9,6 +9,7 @@ better to miss something than to spam the owner.
 from .pipeline import (
     Assessment,
     DeepReport,
+    ResearchBudget,
     ResearchContext,
     ResearchFinding,
     ResearchJob,
@@ -27,6 +28,7 @@ from .scheduler import ResearchScheduler, default_jobs
 __all__ = [
     "Assessment",
     "DeepReport",
+    "ResearchBudget",
     "ResearchContext",
     "ResearchFinding",
     "ResearchJob",
