@@ -239,7 +239,7 @@ class DiscordAdapter(ChatAdapter):
                 _log.debug("discord on_member_join failed: %s", exc)
 
         try:
-            bot.run(self.token, log_handler=None, bot=False)
+            bot.run(self.token, log_handler=None)
         except Exception as exc:  # noqa: BLE001 - bad token, network down, ...
             if self.stopped:
                 return
