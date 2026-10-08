@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
+from datetime import datetime
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable
@@ -723,6 +725,27 @@ class PartnerRuntime(
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
+        # Build-map #43 — the explicit-override rule (user's standing
+        # directive 2026-10-07): the owner's explicit "post this" / "send
+        # it" / "post at 6" / "publish now" / "reply now" means EXECUTE
+        # immediately. No re-confirmation, no hesitation, no policy text.
+        # Owner-DM/operator only; never fires on other people's messages.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                override_reply = self._explicit_post_override(message)
+            except Exception:  # noqa: BLE001 - the override must never eat chat
+                _log.exception("explicit-post override failed")
+                override_reply = None
+            if override_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, override_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      override_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("explicit-post reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -1343,6 +1366,77 @@ class PartnerRuntime(
         if isinstance(meta, dict) and meta.get("is_owner") is True:
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
+
+    def _explicit_post_override(self, message: ChatMessage) -> str | None:
+        """Build-map #43: the owner's explicit post instruction = execute.
+
+        Returns a reply string when explicit-post intent fired (the post or
+        schedule already happened), else None so the message falls through
+        to the normal pipeline. Never raises — failures return an honest
+        error string, never silence.
+        """
+        from ...social.drafts import (
+            DraftQueue, detect_explicit_post, execute_post, schedule_post,
+        )
+        intent = detect_explicit_post(message.text)
+        if intent is None:
+            return None
+        _log.info("explicit-post override fired (%r) in %s",
+                  intent.get("matched"), message.chat.key)
+        try:
+            queue = DraftQueue()
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't open the draft queue: {exc}"
+        try:
+            from ...social import SocialManager
+            manager = SocialManager(self.context).register_builtins()
+        except Exception as exc:  # noqa: BLE001
+            return f"can't post — no publisher wired: {exc}"
+        # Prefer the owner's pending draft; otherwise the message text
+        # after the command is the content ("post this: <text>").
+        pending = [d for d in queue.pending()
+                   if d.status in ("pending_review", "approved", "draft")]
+        draft = pending[0] if pending else None
+        if draft is not None:
+            content, platforms, draft_id = (
+                draft.content, draft.platforms or None, draft.id)
+        else:
+            content = re.sub(r"(?i)^(post|publish|send|reply)\b[^:]*:?\s*",
+                             "", message.text.strip()).strip()
+            if not content or detect_explicit_post(content) is not None:
+                return ("what should I post? Send the text first, then say"
+                        " 'post this'.")
+            platforms, draft_id = None, None
+        try:
+            if intent["action"] == "schedule" and intent.get("at"):
+                if draft is None:
+                    new_draft = queue.create_draft(content, list(platforms or []))
+                    queue.propose(new_draft.id)
+                    draft_id = new_draft.id
+                scheduler = getattr(self, "_scheduler", None) or \
+                    self.context.extras.get("scheduler")
+                if scheduler is None:
+                    return "can't schedule — the scheduler isn't running."
+                schedule_post(scheduler, queue, draft_id, intent["at"],
+                              platforms=platforms)
+                when = datetime.fromtimestamp(intent["at"]).strftime(
+                    "%I:%M %p, %b %d")
+                return f"scheduled for {when} — it'll go out on its own."
+            outcome = execute_post(manager, content, platforms=platforms,
+                                   draft_id=draft_id, queue=queue)
+            posted = len(getattr(outcome, "posted", []) or [])
+            failed = len(getattr(outcome, "failed", []) or [])
+            if posted and not failed:
+                return f"posted to {posted} platform(s)."
+            if posted:
+                return (f"posted to {posted}, {failed} failed: "
+                        f"{getattr(outcome, 'error', '')[:120]}")
+            return (f"post failed: "
+                    f"{getattr(outcome, 'error', 'unknown error')[:160]}")
+        except Exception as exc:  # noqa: BLE001
+            return f"post failed: {exc}"
+        finally:
+            queue.close()
 
     def _progression_gate(self, kind: str, message: Any) -> str | None:
         """Locked-command reply when a player lacks a progression unlock.
