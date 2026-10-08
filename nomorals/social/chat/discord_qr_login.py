@@ -94,6 +94,15 @@ def main() -> int:
                 qr = qrcode.QRCode(border=1)
                 qr.add_data(url)
                 qr.make()
+                # save as PNG for the Discord app's gallery scanner
+                img_path = os.path.expanduser("~/discord-qr.png")
+                try:
+                    qr.make_image().save(img_path)
+                    print(f"  QR saved to {img_path}")
+                    print("  In the Discord app: Settings → Scan QR Code → "
+                          "tap the gallery icon → pick discord-qr.png")
+                except ImportError:
+                    print("  (pip install pillow for a scannable image)")
                 for row in qr.get_matrix():
                     print("".join("██" if c else "  " for c in row))
             except ImportError:
