@@ -2348,7 +2348,7 @@ class PartnerRuntime(
             return self._control_distribute(command.tail or arg,
                                            chat_key=chat_key)
         if kind == "play":
-            return self._control_play(command.tail or arg)
+            return self._control_play(command.tail or arg, chat_key=chat_key)
         if kind == "video":
             return self._control_video(command.tail or arg)
         if kind == "exec":

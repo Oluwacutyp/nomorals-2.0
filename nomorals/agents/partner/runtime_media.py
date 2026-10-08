@@ -298,9 +298,14 @@ class RuntimeMediaMixin:
             return _dist.format_packet(packet)
         return nxt
 
-    def _control_play(self, tail: str) -> str:
+    def _control_play(self, tail: str, chat_key: str = "") -> str:
         """Play transport.  <query> is ONE thing — a path, a URL, or a
         song title — never whitespace-split into word-paths.
+
+        In chat (chat_key set): the resolved audio file is SENT to the
+        conversation via the gateway instead of playing locally — nobody
+        hears mpv on the server.  On CLI (no chat_key): local playback
+        via mpv/ffmpeg as before.
 
         /play <workspace path to audio/midi>
         /play <song title>   → resolved via workspace scan, then Spotify
@@ -347,6 +352,14 @@ class RuntimeMediaMixin:
                 if forced == "spotify":
                     return self._play_forced_spotify(engine, rest)
                 if forced == "youtube":
+                    chat = self._ref_from_key(chat_key) if chat_key else None
+                    try:
+                        added = engine._add_youtube(rest)
+                    except Exception as exc:  # noqa: BLE001
+                        return f"can't play {rest[:80]!r} from YouTube: {exc}"
+                    if chat is not None and added:
+                        out = f"queued 1:\n  - {added[0].get('title')}"
+                        return self._play_send_in_chat(engine, added[0], out, chat)
                     try:
                         res = engine.play_youtube(rest)
                     except Exception as exc:  # noqa: BLE001
@@ -368,6 +381,11 @@ class RuntimeMediaMixin:
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
+                # Chat context: SEND the audio file instead of local mpv.
+                # Nobody hears the server's speakers — the user gets the track.
+                chat = self._ref_from_key(chat_key) if chat_key else None
+                if action == "play" and chat is not None:
+                    return self._play_send_in_chat(engine, added[0], out, chat)
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -442,6 +460,29 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - adapter's own message
             return f"Spotify couldn't play {query[:80]!r}: {exc}"
         return self._fmt_started(res, engine)
+
+    def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
+                           out: str, chat: Any) -> str:
+        """Chat path for /play: download the track, send it as a file.
+
+        Never plays locally — the user receives the audio in the
+        conversation.  Honest on every failure path.  Never raises.
+        """
+        try:
+            dl = engine.download(item)
+        except Exception as exc:  # noqa: BLE001 - download() shouldn't raise, belt and braces
+            return out + f"\ncouldn't get the audio file: {exc}"
+        if not dl.get("ok"):
+            return out + f"\ncouldn't send the audio: {dl.get('reason', 'unknown error')}"
+        path = dl["path"]
+        title = dl.get("title") or item.get("title", "audio")
+        try:
+            self.gateway.send_file(
+                chat.platform, f"{chat.platform}:{chat.chat_id}",
+                path, caption=f"🎵 {title}")
+            return out + f"\n▶ sent “{title}” to this chat."
+        except Exception as exc:  # noqa: BLE001
+            return out + f"\nhad the file ({path}) but couldn't send it: {exc}"
 
     @staticmethod
     def _fmt_started(res: dict[str, Any], engine: Any) -> str:

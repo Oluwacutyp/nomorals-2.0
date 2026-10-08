@@ -636,6 +636,68 @@ class PlaybackEngine:
                             "produced no file")
         return path
 
+    def download(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a queue item to a local audio file path.
+
+        Used by chat surfaces (Telegram/WhatsApp) to SEND the audio file
+        instead of playing it locally via mpv. Returns {"ok", "path", "title"}
+        or {"ok": False, "reason"} — never raises, never fake success.
+
+        - file: already local → path as-is
+        - youtube: download + cache via _youtube_audio
+        - soundcloud: resolve stream URL, download via media_download
+        - url: download via media_download (yt-dlp or direct HTTP)
+        - spotify: honest refusal (DRM, no downloadable stream)
+        """
+        try:
+            kind = str(item.get("kind", ""))
+            title = str(item.get("title", "") or item.get("path", ""))
+            if kind == "spotify":
+                return {"ok": False, "reason":
+                        "Spotify tracks can't be downloaded (DRM) — "
+                        "they play on your linked Spotify device, not in chat. "
+                        "Try /play youtube:<song> instead."}
+            if kind == "file":
+                path = str(item.get("path", ""))
+                if path and os.path.isfile(path):
+                    return {"ok": True, "path": path, "title": title}
+                return {"ok": False, "reason": f"file not found: {path}"}
+            if kind == "youtube":
+                try:
+                    path = self._youtube_audio(item)
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": False, "reason": f"YouTube download failed: {exc}"}
+                return {"ok": True, "path": path, "title": title}
+            # soundcloud + generic url: resolve then download
+            url = str(item.get("path", ""))
+            if kind == "soundcloud":
+                try:
+                    url = self._soundcloud_play_url(item)
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": False, "reason": f"SoundCloud resolve failed: {exc}"}
+            if not url:
+                return {"ok": False, "reason": "no URL to download"}
+            tools = getattr(self.context, "tools", None)
+            call = getattr(tools, "call", None) if tools else None
+            if call is None:
+                return {"ok": False, "reason":
+                        "download needs the tool registry (media_download)"}
+            try:
+                out = call("media_download", url=url, audio_only=True)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "reason": f"download failed: {exc}"}
+            if not getattr(out, "ok", False):
+                return {"ok": False, "reason":
+                        f"download failed: {getattr(out, 'error', 'unknown error')}"}
+            value = out.value if isinstance(out.value, dict) else {}
+            path = str(value.get("path", ""))
+            if not path or not os.path.isfile(path):
+                return {"ok": False, "reason":
+                        "download reported success but produced no file"}
+            return {"ok": True, "path": path, "title": title}
+        except Exception as exc:  # noqa: BLE001 - never raises
+            return {"ok": False, "reason": f"download error: {exc}"}
+
     def _add_youtube(self, target: str, title: str = "") -> list[dict[str, Any]]:
         """Enqueue a YouTube URL or search query (audio extracted at play)."""
         target = (target or "").strip()
