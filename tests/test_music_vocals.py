@@ -328,5 +328,158 @@ class ResampleTests(unittest.TestCase):
         self.assertEqual(len(out), 0)
 
 
+class _HumEvent:
+    """Minimal NoteEvent stand-in for hum tests."""
+    def __init__(self, note, start, duration, velocity=96):
+        self.note = note
+        self.start = start
+        self.duration = duration
+        self.velocity = velocity
+
+
+def _hum_song():
+    secs = [SimpleNamespace(name="intro", bars=2, lyrics=[]),
+            SimpleNamespace(name="chorus", bars=8,
+                            lyrics=["We chase the golden light"]),
+            SimpleNamespace(name="outro", bars=2, lyrics=[])]
+    return SimpleNamespace(sections=secs, tempo=112)
+
+
+def _hum_events():
+    # chorus starts at beat 8 (2 intro bars x 4)
+    return [_HumEvent(60 + (i % 4) * 2, 8 + i * 0.5, 0.45)
+            for i in range(32)]
+
+
+def _acf_pitch(seg, sr):
+    n = len(seg)
+    if n < 200:
+        return 0.0
+    m = sum(seg) / n
+    seg = [s - m for s in seg]
+    best_lag, best_corr = 0, -1.0
+    for lag in range(int(sr / 800), int(sr / 80)):
+        c = sum(seg[i] * seg[i + lag] for i in range(0, n - lag, 4))
+        if c > best_corr:
+            best_corr, best_lag = c, lag
+    return sr / best_lag if best_lag else 0.0
+
+
+class HumFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bed = os.path.join(self.tmp, "bed.wav")
+        _write_tone_wav(self.bed, seconds=25.0, sr=22050, freq=110.0)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_hum_triggers_when_no_tts_backend(self):
+        # the exact failure the user hit on Termux -> hum, not silence
+        res = VL.add_vocal_track(
+            _hum_song(), self.bed, self.tmp,
+            tts_fn=_mock_tts_fail, melody_events=_hum_events())
+        self.assertTrue(res["ok"], res.get("reason"))
+        self.assertEqual(res.get("backend"), "hum")
+        self.assertTrue(os.path.isfile(res["path"]))
+        self.assertIn("hummed vocal melody", res["note"])
+        self.assertIn("termux-api", res["note"])
+
+    def test_hum_follows_melodic_contour(self):
+        # octave apart -> hum pitches an octave apart
+        song = SimpleNamespace(
+            sections=[SimpleNamespace(name="chorus", bars=4,
+                                       lyrics=["la"])],
+            tempo=120)
+        evs = [_HumEvent(60, 0, 1.0), _HumEvent(72, 1.0, 1.0)]
+        res = VL.render_hummed_vocal(song, self.tmp, evs)
+        self.assertTrue(res["ok"])
+        with wave.open(res["path"], "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        n = len(raw) // 2
+        vals = array("d", (v / 32768.0
+                           for v in struct.unpack("<%dh" % n, raw)))
+        sr = 22050
+        f1 = _acf_pitch(list(vals[int(0.1 * sr):int(0.4 * sr)]), sr)
+        f2 = _acf_pitch(list(vals[int(0.6 * sr):int(0.9 * sr)]), sr)
+        self.assertGreater(f1, 100)
+        self.assertAlmostEqual(f2 / f1, 2.0, delta=0.15)
+
+    def test_hum_vibrato_present(self):
+        # a sustained note's pitch should wobble (not be laser-flat)
+        tone = VL._render_hum_tone(440.0, 22050, 96)
+        sr = 22050
+        wins = [list(tone[int((0.2 + i * 0.1) * sr):
+                           int((0.3 + i * 0.1) * sr)])
+                for i in range(5)]
+        freqs = [_acf_pitch(w, sr) for w in wins]
+        freqs = [f for f in freqs if f > 100]
+        self.assertGreater(len(freqs), 2)
+        # mean near 440, with measurable wobble
+        mean = sum(freqs) / len(freqs)
+        self.assertAlmostEqual(mean, 440.0, delta=15.0)
+        self.assertGreater(max(freqs) - min(freqs), 1.0)
+
+    def test_hum_audible_in_mix(self):
+        res = VL.add_vocal_track(
+            _hum_song(), self.bed, self.tmp,
+            tts_fn=_mock_tts_fail, melody_events=_hum_events())
+        self.assertTrue(res["ok"])
+        with wave.open(res["path"], "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        n = len(raw) // 2
+        vals = array("d", (v / 32768.0
+                           for v in struct.unpack("<%dh" % n, raw)))
+        sr = 22050
+
+        def rms(a, b):
+            seg = vals[int(a * sr):int(b * sr)]
+            return (sum(s * s for s in seg) / max(1, len(seg))) ** 0.5
+        # chorus (beats 8-40 @112bpm = 4.3s-21.4s) vs intro
+        self.assertGreater(rms(6, 10), rms(1, 3) * 1.1)
+
+    def test_hum_mix_no_clip(self):
+        res = VL.add_vocal_track(
+            _hum_song(), self.bed, self.tmp,
+            tts_fn=_mock_tts_fail, melody_events=_hum_events())
+        self.assertTrue(res["ok"])
+        with wave.open(res["path"], "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        n = len(raw) // 2
+        peak = max(abs(v) for v in struct.unpack("<%dh" % n, raw))
+        self.assertLessEqual(peak, 32767)
+
+    def test_no_melody_events_honest_skip(self):
+        # hum needs the melody — without it, honest skip (old behavior)
+        res = VL.add_vocal_track(
+            _hum_song(), self.bed, self.tmp, tts_fn=_mock_tts_fail)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["path"], self.bed)
+
+    def test_no_chorus_melody_honest(self):
+        res = VL.render_hummed_vocal(_hum_song(), self.tmp, [])
+        self.assertFalse(res["ok"])
+
+    def test_other_tts_failure_no_hum(self):
+        # hum is only for the missing-backend case, not every TTS error
+        def fail_other(text, out_path):
+            return {"ok": False, "reason": "TTS crashed mysteriously"}
+        res = VL.add_vocal_track(
+            _hum_song(), self.bed, self.tmp,
+            tts_fn=fail_other, melody_events=_hum_events())
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["path"], self.bed)
+
+    def test_garbage_never_raises(self):
+        self.assertFalse(VL.render_hummed_vocal(None, self.tmp, None)["ok"])
+        # junk events filter out -> no melody -> honest False
+        self.assertFalse(VL.render_hummed_vocal(
+            _hum_song(), self.tmp, [None, "junk"])["ok"])
+        self.assertEqual(VL.mix_hum_track("/nope.wav", "/nope.wav",
+                                          "/nope_out.wav"), "")
+        self.assertEqual(len(VL._render_hum_tone(0, 0, 0)), 0)
+        self.assertEqual(len(VL._render_hum_tone(-440, 100, 96)), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1350,10 +1350,12 @@ class MusicCreator:
         builtin synth on phones.  The choice lands on the song so chat
         can surface a soundfont offer when one would help.
 
-        When ``with_vocals`` is true the chorus hook is synthesized with
-        the lightweight TTS vocal track (:mod:`nomorals.media.vocal_lite`
-        — works on Termux, unlike DiffSinger/RVC) and mixed under the
-        bed.  Missing TTS backend -> honest instrumental, never fake.
+        When ``with_vocals`` is true the chorus gets a vocal: the hook is
+        synthesized with the lightweight TTS vocal track
+        (:mod:`nomorals.media.vocal_lite` — works on Termux, unlike
+        DiffSinger/RVC) and mixed under the bed.  No TTS backend ->
+        the chorus melody is hummed with a vocal-like timbre instead —
+        /music always has a vocal line.  Never fake, never silent.
         """
         from ..tools.filesystem import safe_path
         from .synth_backend import render_wav as backend_render_wav
@@ -1375,7 +1377,8 @@ class MusicCreator:
         if with_vocals:
             try:
                 from .vocal_lite import add_vocal_track
-                vr = add_vocal_track(song, str(target), str(base))
+                vr = add_vocal_track(song, str(target), str(base),
+                                     melody_events=parts.get("melody"))
                 if vr.get("ok"):
                     song.audio_path = str(vr["path"])
                     song.vocal_path = str(vr.get("path", ""))
