@@ -53,6 +53,7 @@ AGENT_TOOL_MODULES = (
     "projects",
     "reasoning",
     "reflection",
+    "research.pipeline",
     "research_digest",
     "research_lexicon",
     "research_loop",

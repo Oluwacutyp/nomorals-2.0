@@ -158,23 +158,78 @@ def _tool_text(registry: Any, name: str, **kwargs: Any) -> dict[str, Any] | None
     return value if isinstance(value, dict) else None
 
 
-def run_job(job: ResearchJob, rctx: ResearchContext) -> list[ResearchFinding]:
+def _research_workers(n_calls: int) -> int:
+    """Profile-gated concurrency for research fan-out.
+
+    ``research_workers`` profile key, default 3; termux never exceeds 2 —
+    a phone must not melt running parallel fetches.
+    """
+    from ..core.profiles import get_profile_kind, profile_value
+    workers = int(profile_value("research_workers", 3))
+    try:
+        if get_profile_kind() == "termux":
+            workers = min(workers, 2)
+    except Exception:  # noqa: BLE001 - profile detection never breaks research
+        pass
+    return max(1, min(max(0, n_calls), workers))
+
+
+def _dispatch_calls(registry: Any, calls: list[tuple[str, dict[str, Any]]],
+                    *, actor: str = "system") -> list[Any]:
+    """Run tool calls in order, concurrently when the registry supports it.
+
+    Prefers ``registry.call_many`` (order-preserving, bounded workers);
+    falls back to the serial loop for registries that predate it.
+    """
+    if not calls:
+        return []
+    call_many = getattr(registry, "call_many", None)
+    if callable(call_many):
+        return list(call_many(calls,
+                              max_workers=_research_workers(len(calls)),
+                              actor=actor))
+    return [registry.call(name, actor=actor, **kwargs)
+            for name, kwargs in calls]
+
+
+def _emit_progress(progress: Any, phase: str, item: str) -> None:
+    if progress is None:
+        return
+    try:
+        progress(phase, item)
+    except Exception:  # noqa: BLE001 - progress must never break a run
+        pass
+
+
+def run_job(job: ResearchJob, rctx: ResearchContext,
+            *, progress: Any = None) -> list[ResearchFinding]:
     """Execute a job's queries and return deduplicated findings.
+
+    Queries run concurrently (profile-gated workers); results are merged
+    in query order with URL dedup, exactly like the old serial loop.
 
     Raises on total failure (no query produced results and no tool at all);
     partial failures are logged and skipped — a flaky endpoint must not kill
-    the whole run.
+    the whole run. ``progress`` is an optional ``(phase, item)`` callback
+    (phases: "search", "fetch").
     """
     if not job.queries:
         raise ValueError(f"research job {job.id!r} has no queries")
     seen_urls: set[str] = set()
     findings: list[ResearchFinding] = []
     any_ok = False
-    for query in job.queries:
-        payload = _tool_text(
-            rctx.registry, "web_search", query=query, max_results=job.max_results
-        )
-        if payload is None:
+    search_calls = [
+        ("web_search", {"query": q, "max_results": job.max_results})
+        for q in job.queries
+    ]
+    for query, outcome in zip(job.queries,
+                              _dispatch_calls(rctx.registry, search_calls)):
+        _emit_progress(progress, "search", query)
+        if not outcome.ok:
+            _log.warning("research tool web_search failed: %s", outcome.error)
+            continue
+        payload = outcome.value
+        if not isinstance(payload, dict):
             continue
         any_ok = True
         for item in payload.get("results", []):
@@ -195,11 +250,17 @@ def run_job(job: ResearchJob, rctx: ResearchContext) -> list[ResearchFinding]:
     # Depth pass: fetch full text for the top N so assessment sees more than a snippet.
     from ..core.profiles import profile_value
     _detail_chars = int(profile_value("detail_chars", 2000))
-    for finding in findings[: max(0, job.fetch_top)]:
-        payload = _tool_text(
-            rctx.registry, "web_fetch", url=finding.url, max_chars=6000
-        )
-        if payload and payload.get("text"):
+    targets = findings[: max(0, job.fetch_top)]
+    fetch_calls = [("web_fetch", {"url": f.url, "max_chars": 6000})
+                   for f in targets]
+    for finding, outcome in zip(targets,
+                                _dispatch_calls(rctx.registry, fetch_calls)):
+        _emit_progress(progress, "fetch", finding.url)
+        if not outcome.ok:
+            _log.warning("research tool web_fetch failed: %s", outcome.error)
+            continue
+        payload = outcome.value
+        if isinstance(payload, dict) and payload.get("text"):
             finding.detail = str(payload["text"])[:_detail_chars]
     _log.info("research job %s: %d findings", job.id, len(findings))
     return findings
@@ -422,14 +483,17 @@ class JobReport:
     errors: list[str] = field(default_factory=list)
 
 
-def execute_job(job: ResearchJob, rctx: ResearchContext) -> JobReport:
+def execute_job(job: ResearchJob, rctx: ResearchContext,
+                *, progress: Any = None) -> JobReport:
     """Run one job end-to-end: research, assess each finding, deliver the
     worthy ones. Never raises for per-finding problems; raises only if the
-    job itself could not run at all."""
+    job itself could not run at all. ``progress`` is an optional
+    ``(phase, item)`` callback (phases: "search", "fetch", "assess")."""
     report = JobReport(job_id=job.id, findings=0, delivered=0, skipped=0)
-    findings = run_job(job, rctx)
+    findings = run_job(job, rctx, progress=progress)
     report.findings = len(findings)
     for finding in findings:
+        _emit_progress(progress, "assess", finding.url)
         try:
             assessment = assess_worth(finding, rctx)
         except Exception as exc:  # noqa: BLE001 - one bad finding != dead job
@@ -449,3 +513,369 @@ def execute_job(job: ResearchJob, rctx: ResearchContext) -> JobReport:
             report.errors.append(f"deliver {finding.url[:60]}: {exc}")
             report.skipped += 1
     return report
+
+
+# ── deep research: decompose → concurrent search → synthesize ────────────────
+#
+# The scheduled path above runs a job's fixed queries. The deep path takes a
+# single question, decomposes it into angled sub-queries, fans them out
+# concurrently, and synthesizes one cited brief. Used by the ``research_deep``
+# tool and by chat/NL flows that need more than one angle of evidence.
+
+_DECOMPOSE_PROMPT = """Break this research question into {max_queries} or fewer specific web-search queries covering different angles: core facts, practical how-to guidance, criticisms and limitations, and recent developments.
+
+Reply with one query per line. No numbering, no bullets, no commentary — just the queries.
+
+QUESTION: {question}
+"""
+
+#: template angles (mirrors ResearchSwarm.angles_for): always available,
+#: no LLM needed.
+def _template_queries(question: str, max_queries: int) -> list[str]:
+    q = question.strip().rstrip("?")
+    angles = [
+        q,
+        f"{q} best practices how to",
+        f"{q} criticism problems limitations",
+        f"{q} recent developments",
+    ]
+    return list(dict.fromkeys(a for a in angles if a.strip()))[:max_queries]
+
+
+def decompose(question: str, llm_fn: Any = None, *,
+              max_queries: int = 6) -> list[str]:
+    """Split a research question into 1-``max_queries`` search queries.
+
+    LLM-driven when ``llm_fn`` is given; template angles otherwise (or when
+    the LLM fails / returns nothing parseable). Never raises for a
+    well-formed question — always returns at least one query.
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("decompose needs a non-empty question")
+    max_queries = max(1, int(max_queries))
+    if llm_fn is not None:
+        try:
+            raw = llm_fn(_DECOMPOSE_PROMPT.format(
+                question=question, max_queries=max_queries))
+            queries: list[str] = []
+            for line in (raw or "").splitlines():
+                line = line.strip().lstrip("-•*").strip()
+                line = re.sub(r"^\d+[.)]\s*", "", line).strip()
+                if len(line) > 3:
+                    queries.append(line)
+            queries = list(dict.fromkeys(queries))
+            if queries:
+                return queries[:max_queries]
+            _log.debug("decompose: LLM returned nothing parseable, "
+                       "using templates")
+        except Exception as exc:  # noqa: BLE001 - templates always work
+            _log.debug("decompose LLM failed (%s), using templates", exc)
+    return _template_queries(question, max_queries)
+
+
+_SYNTH_PROMPT = """Answer the research question using ONLY the findings below.
+
+Rules:
+- Every factual claim must cite its source with [S<n>], using the exact
+  labels shown (e.g. [S1], [S2]). Cite every paragraph that states facts.
+- If the findings do not support an answer, reply with exactly:
+  SYNTHESIS_EMPTY
+- Do not use knowledge outside the findings. Be concise and structured.
+
+QUESTION: {question}
+
+FINDINGS:
+{numbered}
+"""
+
+#: the model cites with [S<n>] (or a title fragment); code assigns the
+#: deterministic numbers. Mirrors grounded.py::_number_citations discipline:
+#: the model never numbers citations itself.
+_CITE_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9 _-]{0,40})\]")
+
+#: returned when nothing supports an answer.
+SYNTHESIS_EMPTY = "SYNTHESIS_EMPTY"
+
+
+def _map_citations(raw: str,
+                   findings: list[ResearchFinding]
+                   ) -> tuple[str, list[ResearchFinding]]:
+    """Map the model's [S<n>] markers to deterministic [1..n] numbers.
+
+    Labels the model invented (not matching any source) are stripped — a
+    citation to nothing is worse than no citation. Returns the remapped
+    text and the sources actually cited, in first-appearance order.
+    """
+    label_to_num: dict[str, int] = {}
+    used: list[ResearchFinding] = []
+
+    def replace(m: "re.Match[str]") -> str:
+        label = m.group(1).strip().upper()
+        idx: int | None = None
+        if label.startswith("S") and label[1:].isdigit():
+            n = int(label[1:])
+            if 1 <= n <= len(findings):
+                idx = n - 1
+        if idx is None and label:
+            for i, f in enumerate(findings):
+                if label in f.title.upper():
+                    idx = i
+                    break
+        if idx is None:
+            return ""  # invented citation — strip it
+        key = f"S{idx + 1}"
+        if key not in label_to_num:
+            label_to_num[key] = len(used) + 1
+            used.append(findings[idx])
+        return f"[{label_to_num[key]}]"
+
+    return _CITE_RE.sub(replace, raw), used
+
+
+def _render_synthesis(text: str, used: list[ResearchFinding]) -> str:
+    lines = [text.strip(), "", "Sources:"]
+    for i, f in enumerate(used, 1):
+        lines.append(f"[{i}] {f.title} — {f.url}")
+    return "\n".join(lines)
+
+
+def _extractive_brief(question: str,
+                      findings: list[ResearchFinding]) -> str:
+    """No-LLM fallback: top findings' titles + snippets, honestly cited.
+
+    No invented prose — just what the sources actually say.
+    """
+    lines = [question.strip(), ""]
+    for i, f in enumerate(findings, 1):
+        snippet = re.sub(r"\s+", " ", f.snippet).strip()
+        if len(snippet) > 300:
+            snippet = snippet[:300].rstrip() + "…"
+        lines.append(f"[{i}] {f.title} — {snippet or '(no snippet)'}")
+    lines += ["", "Sources:"]
+    for i, f in enumerate(findings, 1):
+        lines.append(f"[{i}] {f.title} — {f.url}")
+    return "\n".join(lines)
+
+
+def synthesize(question: str, findings: list[ResearchFinding],
+               llm_fn: Any = None) -> str:
+    """Merge findings into one coherent, cited brief.
+
+    LLM path: answer from the findings with [S<n>] citations, remapped to
+    deterministic numbers + a Sources section; invented citations stripped.
+    Fallback (no LLM, LLM failure, or no valid citations): extractive brief.
+    Returns ``SYNTHESIS_EMPTY`` when there is nothing to synthesize.
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("synthesize needs a non-empty question")
+    findings = [f for f in (findings or []) if f is not None]
+    if not findings:
+        return SYNTHESIS_EMPTY
+    if llm_fn is not None:
+        try:
+            numbered = "\n\n".join(
+                f"[S{i}] {f.title}\n{re.sub(r'\s+', ' ', f.snippet).strip()[:600]}"
+                for i, f in enumerate(findings, 1)
+            )
+            raw = (llm_fn(_SYNTH_PROMPT.format(question=question,
+                                               numbered=numbered)) or "").strip()
+            if SYNTHESIS_EMPTY in raw.upper():
+                return SYNTHESIS_EMPTY
+            text, used = _map_citations(raw, findings)
+            if used:
+                return _render_synthesis(text, used)
+            _log.debug("synthesize: no valid citations survived, "
+                       "falling back to extractive brief")
+        except Exception as exc:  # noqa: BLE001 - extractive always works
+            _log.debug("synthesize LLM failed (%s), extractive fallback", exc)
+    return _extractive_brief(question, findings)
+
+
+_CLARIFY_PROMPT = """You are scoping a research question before any searching happens.
+
+If the question is specific and unambiguous — clear topic, clear angle —
+reply with exactly: CLEAR
+
+Otherwise reply with 1-3 sharp clarifying questions, one per line, that
+would narrow the scope (angle, time frame, geography, depth). No numbering,
+no commentary.
+
+QUESTION: {question}
+"""
+
+_STOPWORDS = frozenset(
+    "a an the and or but if then else when at by for with about into through "
+    "during before after above below to from up down in out on off over under "
+    "again further once here there all any both each few more most other some "
+    "such no nor not only own same so than too very can will just should now "
+    "me my i you your we us is are was were be been being have has had do "
+    "does did of as it its this that these those am s t tell".split()
+)
+
+_TIME_ANCHORS = frozenset(
+    "today yesterday week month year recent latest current now upcoming soon "
+    "deadline new just 2024 2025 2026 2027 2028".split()
+)
+
+_SCOPE_ANCHORS = frozenset(
+    "nigeria nigerian africa african lagos abuja usa us america american uk "
+    "europe european global worldwide international local beginner advanced "
+    "free paid remote online best top worst vs versus how-to guide tutorial "
+    "comparison".split()
+)
+
+_GENERIC_CLARIFICATION = (
+    "What angle matters most here: a quick overview, a practical how-to, "
+    "or the latest developments?"
+)
+
+
+def _content_words(question: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", question.lower())
+            if w not in _STOPWORDS and len(w) > 1]
+
+
+def _has_anchor(question: str) -> bool:
+    words = set(re.findall(r"[a-z0-9]+", question.lower()))
+    return bool(words & _TIME_ANCHORS or words & _SCOPE_ANCHORS)
+
+
+def clarify(question: str, llm_fn: Any = None) -> list[str]:
+    """Scope-clarifying questions for an ambiguous research question.
+
+    Returns [] when the question is sharp. Heuristic gate first (no LLM
+    needed for the obvious cases): with no ``llm_fn``, a question with
+    fewer than 4 content words or no time/scope anchor gets one generic
+    clarification. With ``llm_fn``, the model decides — it replies CLEAR
+    for unambiguous questions. Never raises for a well-formed question.
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("clarify needs a non-empty question")
+    if llm_fn is None:
+        if len(_content_words(question)) < 4 or not _has_anchor(question):
+            return [_GENERIC_CLARIFICATION]
+        return []
+    try:
+        raw = (llm_fn(_CLARIFY_PROMPT.format(question=question)) or "")
+        lines = [ln.strip().lstrip("-•*").strip() for ln in raw.splitlines()]
+        lines = [re.sub(r"^\d+[.)]\s*", "", ln).strip() for ln in lines]
+        lines = [ln for ln in lines if ln]
+        if lines and lines[0].upper().rstrip(".") == "CLEAR":
+            return []
+        questions = [ln for ln in lines
+                     if ln.upper() != "CLEAR" and len(ln) > 8]
+        return questions[:3]
+    except Exception as exc:  # noqa: BLE001 - unclear is not fatal
+        _log.debug("clarify LLM failed (%s)", exc)
+        return []
+
+
+@dataclass
+class DeepReport:
+    """Outcome of one deep-research run."""
+
+    question: str
+    sub_queries: list[str]
+    findings: list[ResearchFinding]
+    synthesis: str
+    clarifications: list[str]
+    needs_clarification: bool = False
+
+
+def _router_llm_fn(router: Any) -> Any:
+    """Adapt an LLM router to the ``prompt -> text`` shape, or None."""
+    if router is None:
+        return None
+
+    def llm_fn(prompt: str) -> str:
+        resp = router.complete(prompt)
+        return resp.text if hasattr(resp, "text") else str(resp)
+
+    return llm_fn
+
+
+def research_deep(question: str, rctx: ResearchContext, *,
+                  llm_fn: Any = None, progress: Any = None,
+                  max_queries: int = 6) -> DeepReport:
+    """One-shot deep research: clarify → decompose → concurrent search →
+    synthesize.
+
+    When the question is ambiguous, returns early with
+    ``needs_clarification=True`` and the clarifying questions — the run is
+    never burned on a vague query. Raises ``ValueError`` on an empty
+    question; ``RuntimeError`` when every search fails (via ``run_job``).
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("research_deep needs a non-empty question")
+    clarifications = clarify(question, llm_fn=llm_fn)
+    if clarifications:
+        _log.info("research_deep: needs clarification for %r", question[:80])
+        return DeepReport(question=question, sub_queries=[], findings=[],
+                          synthesis="", clarifications=clarifications,
+                          needs_clarification=True)
+    sub_queries = decompose(question, llm_fn=llm_fn, max_queries=max_queries)
+    job_id = f"deep-{hashlib.sha256(question.encode()).hexdigest()[:12]}"
+    job = ResearchJob(id=job_id, topic=question, queries=sub_queries)
+    findings = run_job(job, rctx, progress=progress)
+    synthesis = synthesize(question, findings, llm_fn=llm_fn)
+    return DeepReport(question=question, sub_queries=sub_queries,
+                      findings=findings, synthesis=synthesis,
+                      clarifications=[], needs_clarification=False)
+
+
+# ── tool registration ──────────────────────────────────────────────────────
+
+def register(registry: Any) -> None:
+    """Expose ``research_deep`` as a registry tool (NET_OUT).
+
+    Wired via ``nomorals/tools/agents.py`` ``AGENT_TOOL_MODULES`` (the
+    ``nomorals.*`` fallback), next to the ``research_swarm`` tool.
+    """
+    from ..core.policy import Capability
+
+    context = registry.context
+
+    @registry.register(
+        "research_deep",
+        description=(
+            "deep research: decompose a question into sub-queries, search "
+            "them concurrently, and return one cited synthesis. Asks for "
+            "clarification first when the question is ambiguous instead of "
+            "burning a run. Use when a question needs more than one angle "
+            "of evidence."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "question": "str — the research question",
+            "max_queries": "int (optional) — max sub-queries to fan out, default 6",
+        },
+    )
+    def research_deep_tool(question: str, max_queries: int = 6,
+                           **_: Any) -> dict[str, Any]:
+        rctx = ResearchContext(
+            db=getattr(context, "db", None),
+            registry=registry,
+            memory=getattr(context, "memory", None),
+            gateway=getattr(context, "gateway", None),
+        )
+        report = research_deep(
+            question, rctx,
+            llm_fn=_router_llm_fn(getattr(context, "router", None)),
+            max_queries=int(max_queries or 6),
+        )
+        return {
+            "question": report.question,
+            "needs_clarification": report.needs_clarification,
+            "clarifications": report.clarifications,
+            "sub_queries": report.sub_queries,
+            "synthesis": report.synthesis,
+            "findings": [
+                {"title": f.title, "url": f.url, "snippet": f.snippet,
+                 "detail": f.detail}
+                for f in report.findings
+            ],
+        }
