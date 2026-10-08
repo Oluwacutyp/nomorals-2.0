@@ -266,6 +266,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "menu": (0, 1),          # alias of /list
     # wave 72 systems: media, execution, archives, builders
     "music": (0, None),      # /music <topic> [style] | styles | song [slug] | bed | full | voices
+    "distribute": (0, 1),   # /distribute [song.wav] | legal
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
     "video": (0, None),      # /video <query> | download <url> | platforms
     "exec": (0, None),       # /exec <code> | languages — multi-language sandbox
@@ -435,6 +436,8 @@ _HELP_TEXT = "\n".join(
         "  /music bed <topic> [style]              AI instrumental bed (ACE-Step, needs GPU)",
         "  /music full <topic> [style] [voice]     full song: bed + AI vocals (DiffSinger→RVC)",
         "  /music voices [add <id> <pth> <src>]     list / register RVC voices",
+        "  /distribute [song.wav]                  release walk-through: splits (mandatory) + AI disclosure + checklist",
+        "  /distribute legal                       legal weather: AI disclosure rules, Content ID, distributor terms",
         "  /play <paths…>                          queue + play audio (mpv when installed)",
         "  /play status | queue | pause | resume | stop | next | prev",
         "  /play seek <s> | volume <n> | remove <n> | clear",
@@ -1120,6 +1123,16 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]  |  /music full <topic> [style] [voice]  |  /music voices",
               "example": "/music the first rain in lagos lofi",
               "related": "/play (queue the midi or audio) · nm music on the console"},
+    "distribute": {"what": "music distribution pipeline: generate → master → "
+                           "distribute as one flow. Phase 1 — Devon prepares "
+                           "everything (metadata, royalty splits, AI "
+                           "disclosure, cover spec, submission checklist); "
+                           "the human clicks submit on the distributor. "
+                           "Splits are MANDATORY (must sum to 100); AI "
+                           "disclosure is always included; never auto-uploads.",
+                   "usage": "/distribute [song.wav]  |  /distribute legal",
+                   "example": "/distribute ~/music/lagos-nights.wav",
+                   "related": "/music full (render the song) · /distribute legal (legal weather)"},
     "play": {"what": "media player: durable queue + transport for audio. "
                      "Uses mpv when installed (full transport, auto-advance, "
                      "survives restarts); otherwise the queue is kept and it "
@@ -1216,7 +1229,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "play", "video", "hub", "podcast"]),
+    ("media system", ["music", "distribute", "play", "video", "hub", "podcast"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",

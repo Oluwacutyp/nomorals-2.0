@@ -240,6 +240,52 @@ class RuntimeMediaMixin:
                      f"\n midi: {song.midi_path or '(not written)'}")
         return text
 
+    def _control_distribute(self, tail: str, chat_key: str = "") -> str:
+        """ /distribute [song path] — the release walk-through (owner-only).
+
+        Phase 1: Devon prepares everything (metadata, splits, AI
+        disclosure, checklist) — the USER clicks submit on the
+        distributor. Splits are mandatory and must sum to 100.
+        """
+        from ...media import distribute as _dist
+        from ...finance.ledger import Ledger
+
+        tail = (tail or "").strip()
+        if tail.lower() in ("legal", "terms"):
+            return ("**Legal weather:**\n" +
+                    "\n".join(f"  {n}" for n in _dist.legal_notes()))
+        song_path = tail
+        if song_path and not os.path.isfile(song_path):
+            return (f"audio not found: {song_path!r}\n"
+                    "usage: /distribute [song .wav path]\n"
+                    "or reply with the path. /distribute legal shows terms.")
+        draft = _dist.start_draft(chat_key, song_path=song_path)
+        return _dist.draft_prompt(draft)
+
+    def _distribute_answer(self, chat_key: str, text: str) -> str | None:
+        """Advance a pending /distribute draft. None when no draft pending."""
+        from ...media import distribute as _dist
+        from ...finance.ledger import Ledger
+
+        draft = _dist.pending_draft(chat_key)
+        if draft is None:
+            return None
+        nxt = _dist.advance_draft(draft, text)
+        if nxt == "cancel":
+            _dist.clear_draft(chat_key)
+            return "📦 release cancelled — no packet built, nothing submitted."
+        if nxt == "done":
+            _dist.clear_draft(chat_key)
+            try:
+                packet = _dist.prepare(
+                    draft.song_path, title=draft.title, artist=draft.artist,
+                    platforms=draft.platforms, splits=draft.splits,
+                    ledger=Ledger())
+            except _dist.DistributionError as exc:
+                return f"📦 couldn't build the packet:\n{exc}"
+            return _dist.format_packet(packet)
+        return nxt
+
     def _control_play(self, tail: str) -> str:
         """Play transport.  <query> is ONE thing — a path, a URL, or a
         song title — never whitespace-split into word-paths.

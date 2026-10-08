@@ -588,6 +588,16 @@ class PartnerRuntime(
                     except Exception:  # noqa: BLE001
                         _log.exception("meal summary reply failed")
                     return
+                # /distribute walk-through: plain replies advance the draft
+                dist_reply = self._distribute_answer(chat_key, text or "")
+                if (dist_reply is not None and text
+                        and not text.startswith("/") and not images):
+                    try:
+                        self.gateway.send(message.chat.platform,
+                                          message.chat, dist_reply)
+                    except Exception:  # noqa: BLE001
+                        _log.exception("distribute reply failed")
+                    return
             except Exception:  # noqa: BLE001
                 _log.exception("meal photo flow failed")
         # Trigger engine hook (nomorals/triggers): message-source triggers
@@ -1940,6 +1950,9 @@ class PartnerRuntime(
             return self._control_cipher(command.tail or arg)
         if kind == "music":
             return self._control_music(command.tail or arg, chat_key=chat_key)
+        if kind == "distribute":
+            return self._control_distribute(command.tail or arg,
+                                           chat_key=chat_key)
         if kind == "play":
             return self._control_play(command.tail or arg)
         if kind == "video":
