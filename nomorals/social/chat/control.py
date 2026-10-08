@@ -1326,6 +1326,20 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["list", "commands", "menu", "help"]),
 ]
 
+#: Septorch-style emoji headers for the menu groups
+_GROUP_EMOJI = {
+    "her day — state & control": "🎛️",
+    "search & research": "🔍",
+    "wisdom keeper — corpus · history · practice": "📿",
+    "building for real — code & missions": "🏗️",
+    "media system — music · playback · video · podcast": "🎬",
+    "memory & thinking": "🧠",
+    "games — 41, DM + group, start them directly": "🎮",
+    "voice & vision": "🎙️",
+    "tools & automation": "⚙️",
+    "discovery": "🧭",
+}
+
 #: quick aliases → the group they filter to
 _LIST_GROUP_ALIASES = {
     "status": "her day — state & control",
@@ -1483,15 +1497,17 @@ def list_catalog(topic: str = "") -> str:
         groups = [(g, ks) for g, ks in LIST_GROUPS
                   if t in g.lower().replace(" — ", " ") or g.lower() == want
                   or any(t == k for k in ks)]
-    lines = ["executable commands from chat (start a message with /):"]
+    lines = ["🥷 Devon — commands (tap any /command to run it):"]
     shown = 0
     for group, kinds in groups:
+        emoji = _GROUP_EMOJI.get(group, "•")
         lines.append("")
-        lines.append(f"  — {group} —")
+        lines.append(f"{emoji} {group.upper()}")
         for k in kinds:
             if k not in CONTROL_COMMANDS:
                 continue
-            lines.append(f"  /{k:<13} {LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))}")
+            one = LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))
+            lines.append(f"  /{k} — {one}")
             shown += 1
     if not shown:
         groups_now = [g for g, _ in groups]
@@ -1499,9 +1515,9 @@ def list_catalog(topic: str = "") -> str:
         return (f"no group '{t}' — available: {all_groups}")
     lines += [
         "",
-        f"  ({shown} commands)  ·  /help <command> for the full page on any of them",
-        "  ·  /help budget|goals|builds|skills|missions|modes for topic pages",
-        "  ·  console mirror:  nm commands",
+        f"📦 {shown} commands",
+        "  /help <command> — full page  ·  /help budget|goals|builds|skills|missions|modes — topics",
+        "🎯 try /game arena or /search to start",
     ]
     return "\n".join(lines)
 
@@ -1525,14 +1541,14 @@ def detailed_help(topic: str = "") -> str:
         return _detailed_overview()
     if t in COMMAND_DETAILS:
         d = COMMAND_DETAILS[t]
-        lines = [f"/{t} — {d['what']}",
-                 f"  usage:   {d['usage']}",
-                 f"  example: {d['example']}"]
+        lines = [f"📖 {d['usage']}",
+                 f"{d['what']}",
+                 "",
+                 f"💡 try: {d['example']}"]
         if d.get("related"):
-            lines.append(f"  related: {d['related']}")
+            lines.append(f"🔗 related: {d['related']}")
         lines.append("")
-        lines.append("catalog: /help   ·   topics: "
-                     "/help budget|goals|builds|skills|missions|modes")
+        lines.append("/help — catalog  ·  /help budget|goals|builds|skills|missions|modes — topics")
         return "\n".join(lines)
     if t in _TOPIC_PAGES:
         return _TOPIC_PAGES[t]
