@@ -322,8 +322,11 @@ class _DiffusersAdapter(_BaseAdapter):
 
     name = "diffusers"
 
-    def __init__(self, variant: str = "full") -> None:
+    def __init__(self, variant: str = "full", lora_path: str = "",
+                 lora_scale: float = 1.0) -> None:
         self.variant = variant
+        self.lora_path = lora_path
+        self.lora_scale = lora_scale
         self._pipe: Any = None
 
     def load(self) -> None:
@@ -334,6 +337,9 @@ class _DiffusersAdapter(_BaseAdapter):
             "ACE-Step/ACE-Step-v1.5", torch_dtype=torch.bfloat16)
         if torch.cuda.is_available():
             self._pipe.to("cuda")
+        # LoRA hook (#59): a style LoRA attached via AfrobeatsLoRA.apply_lora
+        if self.lora_path:
+            self._pipe.load_lora_weights(self.lora_path)
 
     def unload(self) -> None:
         self._pipe = None
@@ -350,11 +356,16 @@ class _DiffusersAdapter(_BaseAdapter):
         import torch
         import numpy as np
         assert self._pipe is not None, "adapter not loaded"
+        kwargs: dict[str, Any] = {}
+        if self.lora_path:
+            # scale the attached LoRA at inference time
+            kwargs["cross_attention_kwargs"] = {"scale": self.lora_scale}
         out = self._pipe(
             prompt=caption,
             lyrics=lyrics,
             audio_duration=float(duration_s),
             generator=torch.Generator().manual_seed(seed),
+            **kwargs,
         )
         audio = out.audios  # (batch, channels, samples) or list
         arr = np.asarray(audio[0] if hasattr(audio, "__getitem__") else audio,
@@ -448,6 +459,9 @@ class ACEStepBackend:
         self.profile = (profile or "").strip().lower()
         self._adapter = adapter
         self._checkpoint_dir = checkpoint_dir
+        # style LoRA attached via nomorals.media.afrobeats.apply_lora (#59)
+        self.lora_path: str = ""
+        self.lora_scale: float = 1.0
 
     def probe(self) -> ProbeResult:
         base = probe_acestep(self.profile)
@@ -464,11 +478,15 @@ class ACEStepBackend:
 
     def _resolve_adapter(self, variant: str) -> _BaseAdapter:
         if self._adapter is not None:
+            # an injected adapter may itself carry a LoRA (#59)
             return self._adapter
         ckpt = self._checkpoint_dir or _checkpoint_dir()
         if _importable("acestep"):
             return _OfficialAdapter(ckpt, variant)
-        return _DiffusersAdapter(variant)
+        return _DiffusersAdapter(
+            variant,
+            lora_path=getattr(self, "lora_path", "") or "",
+            lora_scale=getattr(self, "lora_scale", 1.0))
 
     def generate(self, lyrics: str, style: Any, *,
                  duration_s: int = 120, seed: int = 0,
