@@ -2023,6 +2023,18 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "contract":
+            # Contract risk review — owner's private documents, owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...legal.contracts import control_contract
+            return control_contract(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "gtrip":
             # Group-travel stack: NOT owner-gated (every member drives it),
             # group chats only — control_gtrip refuses DMs itself.

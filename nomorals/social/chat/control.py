@@ -222,6 +222,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "spending": (0, 1),      # /spending [week|month] — summary vs budgets
     "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
     "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
+    "contract": (0, None),     # /contract review [type] <text> | types — letter-grade contract risk review (Nigerian playbooks)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -618,6 +619,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/gtrip new <name> | /gtrip poll <q> | <opt1> | <opt2> [deadline 2h] | /gtrip vote <id> <opt> | /gtrip expense <amount> <what> [for <m1,m2>] | /gtrip settle | /gtrip leg <flight> | /gtrip propose <idea> | /gtrip agree <id> | /gtrip itinerary",
                 "example": "/gtrip poll where should we eat? | suya spot | pizza place",
                 "related": "/miniapp /trip"},
+    "contract": {"what": "contract risk review — paste a tenancy, employment, or freelance agreement and get a letter grade (A–F) plus flagged clauses explained in plain language. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
+                "usage": "/contract review [tenancy|employment|freelance] <paste contract text> | /contract types",
+                "example": "/contract review tenancy This tenancy agreement between landlord and tenant...",
+                "related": "/trip"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1278,7 +1283,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1488,7 +1493,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
