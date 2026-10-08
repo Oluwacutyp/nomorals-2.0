@@ -587,6 +587,7 @@ class TwoTierRecall:
     events: list[EventHit] = field(default_factory=list)
     facts_first: bool = True
     elapsed_ms: float = 0.0
+    hybrid_hits: list[Any] = field(default_factory=list)  # RRF-fused, opt-in
 
     @property
     def texts(self) -> list[str]:
@@ -682,10 +683,15 @@ class TwoTierMemory:
         return done
 
     # ── read path ────────────────────────────────────────────────────────
-    def recall(self, query: str, *, limit: int = 8) -> TwoTierRecall:
+    def recall(self, query: str, *, limit: int = 8,
+               hybrid: bool = False) -> TwoTierRecall:
         """Query both tiers. Facts rank first for direct questions
         ("what's my girlfriend's name?"); events lead for temporal context
-        ("what did we discuss last Tuesday?")."""
+        ("what did we discuss last Tuesday?").
+
+        ``hybrid=True`` additionally fuses a BM25 keyword lane via RRF —
+        opt-in, additive; the default vector path is unchanged.
+        """
         started = time.perf_counter()
         query = (query or "").strip()
         facts_first = True
@@ -696,16 +702,103 @@ class TwoTierMemory:
         # Retrieval-time conflict resolution: current facts win, history
         # stays visible (Mem0 pattern — facts never deleted, only superseded).
         fact_hits = resolve_conflicts(fact_hits)
+        hybrid_hits: list[Any] = []
+        if hybrid and query:
+            hybrid_hits = self.hybrid_recall(query, limit=limit)
         return TwoTierRecall(
             query=query, facts=fact_hits, events=event_hits,
             facts_first=facts_first,
-            elapsed_ms=(time.perf_counter() - started) * 1000.0)
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            hybrid_hits=hybrid_hits)
 
     def close(self) -> None:
         try:
             self.db.close()
         except Exception:  # noqa: BLE001
             pass
+
+    # ── hybrid retrieval (opt-in) ────────────────────────────────────────
+    def _hybrid_index(self) -> Any:
+        """Lazy BM25 mirror of facts+events. Built on first hybrid recall."""
+        if self.__dict__.get("_hybrid_idx") is None:
+            from .hybrid import HybridMemoryIndex
+            idx = HybridMemoryIndex()
+            self._sync_hybrid_index(idx)
+            self.__dict__["_hybrid_idx"] = idx
+        else:
+            self._sync_hybrid_index(self.__dict__["_hybrid_idx"])
+        return self.__dict__["_hybrid_idx"]
+
+    def _sync_hybrid_index(self, idx: Any) -> None:
+        """Index any facts/events the BM25 mirror hasn't seen yet."""
+        try:
+            rows = self.db.query(
+                "SELECT id, text FROM tier_facts")
+            for r in rows:
+                uid = f"fact:{r['id']}"
+                if uid not in idx._indexed:
+                    idx.index_unit(uid, "fact", str(r["text"]))
+            rows = self.db.query(
+                "SELECT id, chunk AS text FROM tier_events")
+            for r in rows:
+                uid = f"event:{r['id']}"
+                if uid not in idx._indexed:
+                    idx.index_unit(uid, "event", str(r["text"]))
+        except Exception:  # noqa: BLE001
+            _log.debug("hybrid index sync failed", exc_info=True)
+
+    def hybrid_recall(self, query: str, limit: int = 8) -> list[Any]:
+        """Vector + BM25 fused with RRF. Never raises."""
+        try:
+            from .hybrid import hybrid_search
+            idx = self._hybrid_index()
+
+            def vector_fn(q: str, n: int) -> list[tuple[str, str]]:
+                out: list[tuple[str, str]] = []
+                for h in self.facts.search_facts(q, limit=n):
+                    out.append((f"fact:{h.fact.id}", h.fact.text))
+                for h in self.events.search_events(q, limit=n):
+                    out.append((f"event:{h.chunk_id}", h.text))
+                return out
+
+            return hybrid_search(
+                query, vector_fn=vector_fn,
+                bm25_fn=lambda q, n: idx.bm25_search(q, limit=n),
+                limit=limit)
+        except Exception:  # noqa: BLE001
+            _log.debug("hybrid recall failed", exc_info=True)
+            return []
+
+    # ── block-level addressability (Roam pattern) ────────────────────────
+    def resolve_id(self, unit_id: str) -> dict[str, Any] | None:
+        """Deep-link any memory unit by id: facts, event chunks, session
+        notes, typed entities. Returns {kind, id, text} or None."""
+        uid = (unit_id or "").strip()
+        if not uid:
+            return None
+        try:
+            fact = self.facts.get_fact(uid)
+            if fact is not None:
+                return {"kind": "fact", "id": fact.id, "text": fact.text,
+                        "active": fact.active,
+                        "valid_from": fact.valid_from,
+                        "valid_to": fact.valid_to}
+            row = self.db.query_one(
+                "SELECT id, chunk AS text, ts FROM tier_events WHERE id = ?",
+                (uid,))
+            if row is not None:
+                return {"kind": "event", "id": str(row["id"]),
+                        "text": str(row["text"]), "ts": float(row["ts"])}
+            row = self.db.query_one(
+                "SELECT id, session_id, text FROM tier_session WHERE id = ?",
+                (uid,))
+            if row is not None:
+                return {"kind": "session", "id": str(row["id"]),
+                        "text": str(row["text"]),
+                        "session_id": str(row["session_id"])}
+        except Exception:  # noqa: BLE001
+            _log.debug("resolve_id failed for %s", uid, exc_info=True)
+        return None
 
 
 # ── Session-scoped episodic memory (Mem0 pattern) ─────────────────────────────
