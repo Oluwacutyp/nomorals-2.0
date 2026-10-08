@@ -2170,6 +2170,23 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "value":
+            # DIY AVM (#95) — not owner-gated (owner + community).
+            # Estimates inform; humans commit.
+            from ...property.value import control_value
+            return control_value(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
+        if kind == "valuepick":
+            # Comp-picker (#95) — not owner-gated (owner + community).
+            from ...property.value import control_valuepick
+            return control_valuepick(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "gtrip":
             # Group-travel stack: NOT owner-gated (every member drives it),
             # group chats only — control_gtrip refuses DMs itself.
