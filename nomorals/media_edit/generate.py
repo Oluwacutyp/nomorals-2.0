@@ -22,6 +22,10 @@ Backends:
 - ``diffusers`` (:class:`DiffusersBackend`): local pipeline, active only
   when ``diffusers`` + ``torch`` import. Model from
   ``MEDIA_GEN_DIFFUSERS_MODEL`` (default ``timbrooks/instruct-pix2pix``).
+- ``comfy`` (:class:`nomorals.media_edit.comfy.ComfyUIBackend`): drives a
+  running ComfyUI server over HTTP (stdlib only). Host/port from
+  ``COMFYUI_HOST`` / ``COMFYUI_PORT``; workflows in
+  ``nomorals/media_edit/workflows/``; one GPU job at a time.
 - ``off`` / unconfigured: :class:`GenerativeEditError` naming the env var —
   never a fake edit.
 
@@ -630,7 +634,8 @@ _NO_BACKEND_MSG = (
     "no generative backend is configured. Options: "
     "pip install huggingface_hub and set HF_TOKEN (serverless, "
     "MEDIA_GEN_BACKEND=hf), or pip install diffusers torch for local "
-    "inference (MEDIA_GEN_BACKEND=diffusers). "
+    "inference (MEDIA_GEN_BACKEND=diffusers), or point at a running "
+    "ComfyUI server (MEDIA_GEN_BACKEND=comfy, COMFYUI_HOST/PORT). "
     "Set MEDIA_GEN_BACKEND=off to silence this check."
 )
 
@@ -639,7 +644,7 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
     """Resolve a generative backend.
 
     ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "hf", "diffusers",
-    "off". auto prefers local diffusers when importable, else HF when
+    "comfy", "off". auto prefers local diffusers when importable, else HF when
     huggingface_hub imports, else raises a clear error (never a fake edit).
     """
     want = (name or os.environ.get("MEDIA_GEN_BACKEND", "auto")).lower()
@@ -647,6 +652,9 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
         raise GenerativeEditError(_NO_BACKEND_MSG)
     if want == "hf":
         return HFInferenceBackend()
+    if want == "comfy":
+        from .comfy import ComfyUIBackend
+        return ComfyUIBackend()
     if want == "diffusers":
         if not DiffusersBackend.available():
             raise GenerativeEditError(
@@ -663,7 +671,7 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
             pass
         raise GenerativeEditError(_NO_BACKEND_MSG)
     raise GenerativeEditError(
-        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|hf|diffusers|off")
+        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|hf|diffusers|comfy|off")
 
 
 def backend_status() -> dict[str, Any]:
@@ -673,6 +681,8 @@ def backend_status() -> dict[str, Any]:
         hf = True
     except ImportError:
         hf = False
+    from .comfy import comfy_available
+    comfy_ok, comfy_reason = comfy_available()
     return {
         "hf_installed": hf,
         "hf_token_set": bool(os.environ.get("HF_TOKEN")),
@@ -681,6 +691,10 @@ def backend_status() -> dict[str, Any]:
         "diffusers_available": DiffusersBackend.available(),
         "diffusers_model": os.environ.get("MEDIA_GEN_DIFFUSERS_MODEL",
                                           DEFAULT_DIFFUSERS_MODEL),
+        "comfy_available": comfy_ok,
+        "comfy_reason": comfy_reason,
+        "comfy_host": os.environ.get("COMFYUI_HOST", "127.0.0.1"),
+        "comfy_port": int(os.environ.get("COMFYUI_PORT", "8188") or 8188),
         "selected": os.environ.get("MEDIA_GEN_BACKEND", "auto"),
     }
 

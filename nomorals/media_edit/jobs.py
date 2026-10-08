@@ -29,6 +29,7 @@ class MediaJob:
     progress: float | None = None  # 0.0..1.0 while running
     input_ref: str = ""
     output_ref: str = ""
+    backend: str = ""  # "" = current behavior; "comfy"|"auto" = gen routing hint
     result: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     created_at: float = field(default_factory=time.time)
@@ -44,6 +45,7 @@ class MediaJob:
             "progress": self.progress,
             "input_ref": self.input_ref,
             "output_ref": self.output_ref,
+            "backend": self.backend,
             "result": self.result,
             "error": self.error,
             "created_at": self.created_at,
@@ -72,11 +74,13 @@ class JobManager:
     # -- public API ---------------------------------------------------------
     def submit(self, kind: str, label: str,
                fn: Callable[[Callable[[float], None]], dict[str, Any]],
-               *, input_ref: str = "") -> str:
+               *, input_ref: str = "", backend: str = "") -> str:
         """Enqueue ``fn``. ``fn`` receives a progress callback and returns the
-        op result dict (must include an ``output`` path on success)."""
+        op result dict (must include an ``output`` path on success).
+        ``backend`` is a routing hint recorded on the job ("" = current
+        behavior)."""
         job = MediaJob(id=new_id("mjob"), kind=kind, label=label,
-                       input_ref=input_ref)
+                       input_ref=input_ref, backend=backend)
         job._fn = fn  # worker picks this up; not part of the dataclass state
         with self._lock:
             self._jobs[job.id] = job
@@ -84,6 +88,62 @@ class JobManager:
             self._cond.notify()
         _log.info("media job %s queued: %s", job.id, label)
         return job.id
+
+    def submit_gen(self, label: str, op: str, params: dict[str, Any],
+                   *, input_ref: str = "",
+                   backend: str = "auto") -> str:
+        """Enqueue a generative image job.
+
+        ``op``: "txt2img" | "img2img" | "inpaint" | "generative_edit".
+        ``params`` are the op's kwargs (prompt, image, ...). The backend is
+        resolved at *run* time: "auto" picks ComfyUI when
+        :func:`nomorals.media_edit.comfy.comfy_available` says so, else
+        falls back to :func:`get_backend` (existing behavior — the ffmpeg /
+        Pillow worker path is untouched). The chosen backend is recorded in
+        the result dict; artifacts land in ``edited/`` next to the input
+        (or ``./edited/`` when there is no input file).
+        """
+        from .generate import (op_generative_edit, op_img2img, op_inpaint,
+                               op_txt2img)
+        op_fns = {
+            "txt2img": op_txt2img,
+            "img2img": op_img2img,
+            "inpaint": op_inpaint,
+            "generative_edit": op_generative_edit,
+        }
+        op_fn = op_fns.get(op)
+        if op_fn is None:
+            raise MediaEditError(
+                f"unknown gen op {op!r}; use one of {sorted(op_fns)}")
+        cell: dict[str, str] = {}
+
+        def _run(progress_cb: Callable[[float], None]) -> dict[str, Any]:
+            from .comfy import comfy_available
+            chosen = backend
+            if chosen == "auto":
+                ok, _reason = comfy_available()
+                chosen = "comfy" if ok else ""
+            p = dict(params)
+            p["backend"] = chosen or None
+            result = op_fn(**p)
+            images = result if isinstance(result, list) else [result]
+            from pathlib import Path as _Path
+            from .images import save_image
+            base = _Path(input_ref).parent if input_ref else _Path(".")
+            out_dir = base / "edited"
+            paths: list[str] = []
+            for i, img in enumerate(images):
+                out = out_dir / f"gen_{cell['id']}_{i}.png"
+                save_image(img, out)
+                paths.append(str(out))
+            return {"output": paths[0] if len(paths) == 1 else paths,
+                    "backend": chosen or "default",
+                    "op": op}
+
+        job_id = self.submit("image", label, _run, input_ref=input_ref,
+                             backend=backend)
+        cell["id"] = job_id
+        return job_id
 
     def status(self, job_id: str) -> dict[str, Any]:
         with self._lock:
