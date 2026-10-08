@@ -453,6 +453,7 @@ _S8_ALLOWLIST = {
     # or under tests/ to pass the check.
     "core/policy.py",               # approve_with_biometric: the operator path
     "agents/redteam_scenarios.py",  # S5 mints a token to test replay binding
+    "agents/redteam_catalog.py",    # catalog policy template: same replay tests
 }
 
 

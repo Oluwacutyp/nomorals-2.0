@@ -43,6 +43,8 @@ __all__ = [
     "RedTeam",
     "SCENARIOS",
     "build_scenarios",
+    "build_all_scenarios",
+    "catalog_stats",
     "report_to_github",
     "control_redteam",
     "ensure_redteam_weekly_job",
@@ -246,15 +248,35 @@ class RedTeam:
         step_budget: int = 6,
         per_scenario_timeout_s: float = 60.0,
         failure_kb: Any | None = None,
+        sandbox_first: bool = True,
     ) -> None:
         self.step_budget = step_budget
         self.per_scenario_timeout_s = per_scenario_timeout_s
         self.failure_kb = failure_kb
+        # Open SWE pattern: isolate first, then trust.  When True, every
+        # scenario harness is verified isolated BEFORE the loop runs; a
+        # harness that fails verification is never executed.
+        self.sandbox_first = sandbox_first
 
     def run_scenario(self, scenario: AttackScenario) -> AttackFinding:
         started = time.time()
         try:
             harness = scenario.make_harness() if scenario.make_harness else {}
+            if self.sandbox_first:
+                from .redteam_sandbox import RedTeamSandbox
+
+                iso = RedTeamSandbox().verify_isolation(harness)
+                if not iso.ok:
+                    return AttackFinding(
+                        scenario_id=scenario.id,
+                        name=scenario.name,
+                        severity=scenario.severity,
+                        succeeded=False,
+                        evidence=("sandbox violation — scenario NOT run: "
+                                  + "; ".join(iso.violations))[:2000],
+                        inconclusive=True,
+                        duration_s=time.time() - started,
+                    )
             if "policy" not in harness:
                 from ..core.policy import Policy
 
@@ -347,6 +369,20 @@ def build_scenarios() -> list[AttackScenario]:
     return _build()
 
 
+def build_all_scenarios() -> list[AttackScenario]:
+    """Curated scenarios + the 9-class / 47-sub-pattern attack catalog."""
+    from .redteam_catalog import build_all_scenarios as _build_all
+
+    return _build_all()
+
+
+def catalog_stats() -> dict[str, Any]:
+    """Attack-catalog counts per class."""
+    from .redteam_catalog import catalog_stats as _stats
+
+    return _stats()
+
+
 def SCENARIOS() -> list[AttackScenario]:  # noqa: N802 - stable public name
     return build_scenarios()
 
@@ -435,17 +471,34 @@ def report_to_github(
 # ── chat command ─────────────────────────────────────────────────────────────
 
 def control_redteam(arg: str, *, context: Any = None) -> str:
-    """Implement ``/redteam``: full suite, or one scenario by id.
+    """Implement ``/redteam``: full suite, catalog, or one scenario by id.
+
+    ``/redteam`` — curated suite · ``/redteam catalog`` — list the
+    9-class / 47-sub-pattern catalog · ``/redteam all`` — curated +
+    catalog · ``/redteam <scenario-id>`` — one scenario.
 
     Long-running by nature — the suite caps each scenario with a timeout
     and reports partial results honestly.
     """
     arg = (arg or "").strip()
-    scenarios = build_scenarios()
-    if arg:
+    if arg == "catalog":
+        from .redteam_catalog import ATTACK_CLASSES, catalog_stats
+
+        stats = catalog_stats()
+        lines = [f"attack catalog: {stats['classes']} classes, "
+                 f"{stats['sub_patterns']} sub-patterns", ""]
+        for cls in ATTACK_CLASSES:
+            n = stats["per_class"].get(cls["id"], 0)
+            lines.append(f"  {cls['id']}: {n} — {cls['name']}")
+        return "\n".join(lines)
+    if arg == "all":
+        scenarios = build_all_scenarios()
+    else:
+        scenarios = build_scenarios()
+    if arg and arg != "all":
         scenarios = [s for s in scenarios if s.id == arg]
         if not scenarios:
-            known = ", ".join(s.id for s in build_scenarios())
+            known = ", ".join(s.id for s in build_all_scenarios())
             return f"unknown redteam scenario {arg!r}. known: {known}"
 
     kb = None
