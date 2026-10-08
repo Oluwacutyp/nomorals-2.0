@@ -145,6 +145,17 @@ class ScreenshotResult:
 # ── tab ──────────────────────────────────────────────────────────────────────
 
 
+def _notify_action(tab: Any, description: str) -> None:
+    """Fire a tab's ``on_action`` hook (live agent window). Never raises —
+    a broken hook must never kill the browser task."""
+    try:
+        hook = getattr(tab, "on_action", None)
+        if hook is not None:
+            hook(description)
+    except Exception:  # noqa: BLE001 - hook failures are never fatal
+        _log.debug("tab on_action hook failed", exc_info=True)
+
+
 class Tab:
     """One browser tab: exactly one ``tools.browser.BrowserSession`` plus the
     tab's own navigation history."""
@@ -159,6 +170,11 @@ class Tab:
         #: last load failure that did not kill the tab (set by restore);
         #: empty when the tab loaded cleanly.
         self.error: str = ""
+        #: Optional live-view hook: called with a short description after
+        #: each major action (navigate/click/fill/select/check/back).
+        #: ``None`` (default) = no live view; set by
+        #: ``nomorals.browser.liveview.LiveView.attach``.
+        self.on_action: Any = None
 
     # -- navigation ----------------------------------------------------------
     def _load_page(self, url: str) -> dict[str, Any]:
@@ -211,6 +227,7 @@ class Tab:
             "url": self.url,
             "title": self.title,
         })
+        _notify_action(self, f"opened {self.url or url}")
         return result
 
     def back(self) -> dict[str, Any]:
@@ -223,6 +240,7 @@ class Tab:
         result = self._load_page(prev["url"])
         prev["ts"] = time.time()
         prev["title"] = self.title
+        _notify_action(self, f"went back to {self.url}")
         return result
 
     # -- page work (delegated to the wrapped BrowserSession) -----------------
@@ -251,18 +269,25 @@ class Tab:
         self.title = self.session.title
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
+        _notify_action(self, f"clicked {target!r}")
         return result
 
     def fill(self, name: str, value: str) -> dict[str, Any]:
-        return self._delegate("fill", name, value)
+        result = self._delegate("fill", name, value)
+        _notify_action(self, f"filled {name!r}")
+        return result
 
     def select(self, name: str, value: str) -> dict[str, Any]:
         """Pick a ``<select>`` dropdown option (submitted on next submit)."""
-        return self._delegate("select", name, value)
+        result = self._delegate("select", name, value)
+        _notify_action(self, f"selected {value!r} in {name!r}")
+        return result
 
     def check(self, name: str, checked: bool = True) -> dict[str, Any]:
         """Check/uncheck a checkbox, or pick a radio button."""
-        return self._delegate("check", name, checked)
+        result = self._delegate("check", name, checked)
+        _notify_action(self, f"{'checked' if checked else 'unchecked'} {name!r}")
+        return result
 
     def check_captcha(self, *, fetch_bytes: bool = False) -> dict[str, Any]:
         """One-call captcha scan of this tab's current page HTML."""
@@ -495,6 +520,8 @@ class RenderedTab:
         self.history: list[dict[str, Any]] = []
         #: last load failure (set by navigate); empty when the tab is clean.
         self.error: str = ""
+        #: Optional live-view hook — see ``Tab.on_action``.
+        self.on_action: Any = None
         self._storage_state_path = Path(storage_state_path)
         #: started driver object (owns .chromium); owned by the service.
         self._playwright = playwright
@@ -672,6 +699,7 @@ class RenderedTab:
         self.error = ""
         entry = {"url": self.url, "title": self.title, "ts": time.time()}
         self.history.append(entry)
+        _notify_action(self, f"opened {self.url}")
         return dict(entry)
 
     def _require_loaded(self) -> Any:
@@ -868,6 +896,7 @@ class RenderedTab:
                 "fill", exc, detail=f"field {name!r}") from exc
         finally:
             forms.clear_marker(page)
+        _notify_action(self, f"filled {name!r}")
         return {"ok": True, "field": name, "tab_id": self.tab_id,
                 "matched_via": (info or {}).get("by", "") or "name/id"}
 
@@ -1130,6 +1159,7 @@ class RenderedTab:
                 pass
             self.history.append(
                 {"url": self.url, "title": self.title, "ts": time.time()})
+        _notify_action(self, f"clicked {target!r}")
         return {"ok": True, "target": target, "url": self.url,
                 "title": self.title, "navigated": after != before}
 
@@ -1155,6 +1185,7 @@ class RenderedTab:
             pass
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
+        _notify_action(self, f"submitted form{f' via {target!r}' if target else ''}")
         return {"ok": True, "url": self.url, "title": self.title}
 
     def wait_for(self, selector: str = "", *, state: str = "visible",

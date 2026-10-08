@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 import time
@@ -1320,6 +1321,36 @@ class TelegramAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,
+                   *, caption: str = "") -> SendResult:
+        """In-place media swap via Telethon ``edit_message`` (the live-view
+        path: one message updated instead of a photo per action)."""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name, error="not connected")
+        started = time.perf_counter()
+
+        async def _do() -> Any:
+            entity = self._input_entity_cache.get(chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            # Editing keeps the message in place; no thread routing needed.
+            result = await client.edit_message(
+                entity, int(message_id), file=media.path,
+                text=caption or None)
+            self._remember_sent(getattr(result, "id", None))
+            return result
+
+        try:
+            result = self._run_on_loop(_do())
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(getattr(result, "id", message_id)),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Chat action indicator: "typing" or "recording" (voice)."""
@@ -1883,6 +1914,39 @@ class TelegramBotAdapter(ChatAdapter):
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
                               message_id=str(result["result"].get("message_id", "")),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,
+                   *, caption: str = "") -> SendResult:
+        """In-place media swap via Bot API ``editMessageMedia``."""
+        started = time.perf_counter()
+        path = Path(media.path)
+        if not path.is_file():
+            return SendResult(ok=False, platform=self.name,
+                              error=f"media file not found: {media.path}")
+        try:
+            url = _BOT_API.format(token=self.token, method="editMessageMedia")
+            media_obj = {"type": "photo",
+                         "media": f"attach://{path.name}"}
+            if caption:
+                media_obj["caption"] = caption[:1024]
+            data = {"chat_id": chat.chat_id,
+                    "message_id": message_id,
+                    "media": json.dumps(media_obj)}
+            with open(path, "rb") as fh:
+                files = {path.name: (path.name, fh, _mime_for(str(path)))}
+                resp = self._sess().post(url, data=data, files=files,
+                                         timeout=120)
+            result = resp.json()
+            if not result.get("ok"):
+                raise ValidationError(result.get("description", "edit failed"))
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(result["result"].get("message_id", message_id)),
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
             self.stats["send_errors"] += 1

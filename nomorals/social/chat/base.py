@@ -434,6 +434,17 @@ class ChatAdapter(ABC):
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
         return SendResult(ok=False, platform=self.name, error="media not supported")
 
+    def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,
+                   *, caption: str = "") -> SendResult:
+        """Replace the media (and caption) of a previously sent message.
+
+        Used by the live agent window to update one message in place instead
+        of spamming new ones. Adapters without in-place media editing return
+        ``ok=False`` and callers fall back to throttled new messages.
+        """
+        return SendResult(ok=False, platform=self.name,
+                          error="edit_media not supported")
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Show a typing indicator. Best-effort; adapters without one return False."""
