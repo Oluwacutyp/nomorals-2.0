@@ -655,3 +655,76 @@ class RuntimeMemoryMixin:
             return "\n".join(lines)
         return ("usage: /home status | /home what changed [hours] | "
                 "/home unusual?")
+
+    def _control_store(self, tail: str, *, chat_key: str = "") -> str:
+        """Self-hosted storefronts (Medusa / WooCommerce). Owner-only.
+
+        /store provision <business>   provision a Medusa store
+        /store woo <business> <url>    provision a WooCommerce store
+        /store list                   all stores + status
+        /store catalog <id> <desc>    AI-generate a product catalog
+        /store <id> <instruction>     conversational management
+        """
+        from ...commerce.medusa import StoreManager
+        mgr = getattr(self, "_store_manager", None)
+        if mgr is None:
+            mgr = StoreManager()
+            self._store_manager = mgr
+        rest = (tail or "").strip()
+        if not rest:
+            return ("usage: /store provision <business> | /store woo "
+                    "<business> <url> | /store list | /store catalog <id> "
+                    "<description> | /store <id> <instruction>")
+        low = rest.lower()
+        if low == "list":
+            stores = mgr.list()
+            if not stores:
+                return "no stores yet — /store provision <business>."
+            lines = ["🏪 stores:"]
+            for s in stores:
+                lines.append(f"• {s.id}: {s.name} [{s.engine}] — {s.status}")
+            return "\n".join(lines)
+        if low.startswith("provision "):
+            business = rest[len("provision "):].strip()
+            try:
+                store = mgr.provision_store(business)
+            except Exception as exc:  # noqa: BLE001 — show the problem
+                return f"provisioning failed: {exc}"
+            return (f"🏪 store '{store.name}' → {store.status}\n"
+                    f"API: {store.api_url}\nAdmin: {store.admin_url}")
+        if low.startswith("woo "):
+            parts = rest[4:].strip().split(None, 1)
+            if len(parts) < 2:
+                return "usage: /store woo <business> <site-url>"
+            try:
+                store = mgr.provision_woocommerce(parts[0], site_url=parts[1])
+            except Exception as exc:  # noqa: BLE001
+                return f"provisioning failed: {exc}"
+            return (f"🏪 WooCommerce store '{store.name}' → {store.status}\n"
+                    f"API: {store.api_url}")
+        if low.startswith("catalog "):
+            parts = rest[8:].strip().split(None, 1)
+            if len(parts) < 2:
+                return "usage: /store catalog <id> <business description>"
+            store = mgr.get(parts[0])
+            if store is None:
+                return f"no store '{parts[0]}'. Use /store list."
+            llm_fn = getattr(self, "_llm_fn", None)
+            try:
+                created = mgr.generate_catalog(store, parts[1], llm_fn=llm_fn)
+            except Exception as exc:  # noqa: BLE001
+                return f"catalog failed: {exc}"
+            lines = [f"✅ {len(created)} products created:"]
+            for p in created[:10]:
+                lines.append(f"• {p['name']} — ₦{p['price_naira']:,}")
+            return "\n".join(lines)
+        # /store <id> <instruction>
+        parts = rest.split(None, 1)
+        if len(parts) < 2:
+            return ("usage: /store <id> <instruction> — e.g. "
+                    "'/store store_abc123 add 10% discount this weekend'")
+        store = mgr.get(parts[0])
+        if store is None:
+            return f"no store '{parts[0]}'. Use /store list."
+        result = mgr.manage(store, parts[1])
+        return result.get("message", str(result))

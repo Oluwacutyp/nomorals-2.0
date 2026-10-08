@@ -207,6 +207,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "health": (0, None),      # /health log <text> | timeline | summary [days]
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
+    "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -907,6 +908,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/home status | /home what changed [hours] | /home unusual?",
              "example": "/home unusual?",
              "related": "/routine"},
+    "store": {"what": "self-hosted storefronts — Medusa (zero platform tax) or WooCommerce (budget). Provision, AI catalog, conversational management.",
+              "usage": "/store provision <business> | /store woo <business> <url> | /store list | /store catalog <id> <desc> | /store <id> <instruction>",
+              "example": "/store provision SuyaSpot",
+              "related": "/routine"},
     "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
@@ -1243,7 +1248,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1453,7 +1458,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
