@@ -211,6 +211,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mandate": (0, None),     # /mandate issue <scope> <per-txn> [per-day] [days] | list | revoke <id> | stop all
     "track": (0, None),       # /track LOS LHR 2026-12-01 [under 400k] | list
     "untrack": (1, None),     # /untrack <watch_id>
+    "trip": (0, None),        # /trip | /trip <id> | /trip add <text> | /trip calendar <id> | /trip docs <id>
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -927,6 +928,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/untrack <watch_id>",
               "example": "/untrack watch_abc123",
               "related": "/track"},
+    "trip": {"what": "auto itineraries — forward a booking confirmation (email, PDF, screenshot) and get a structured trip with times, PNRs, calendar sync, and a document vault.",
+              "usage": "/trip | /trip <id> | /trip add <text> | /trip calendar <id> | /trip docs <id>",
+              "example": "/trip add Booking confirmation: BA075 LOS→LHR departs 22:45 PNR ABC123",
+              "related": "/track"},
     "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
@@ -1263,7 +1268,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1473,7 +1478,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

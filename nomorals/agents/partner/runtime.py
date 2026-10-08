@@ -872,6 +872,21 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("track reply send failed: %s", exc)
                 return
+            # Build-map #72: forwarded booking confirmation → itinerary.
+            try:
+                trip_reply = self._trip_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("trip hook failed")
+                trip_reply = None
+            if trip_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, trip_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      trip_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("trip reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -1556,6 +1571,36 @@ class PartnerRuntime(
             msg += "\n" + alert.text
         return msg
 
+    def _trip_hook(self, message: ChatMessage) -> str | None:
+        """Build-map #72: forwarded booking confirmation → auto itinerary.
+
+        Returns a reply string when confirmation-like text was ingested,
+        else None. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        try:
+            from ...travel.itinerary import (
+                ItineraryBuilder, confirmation_hook, added_message,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not confirmation_hook(text):
+            return None
+        try:
+            builder = getattr(self, "_trip_builder", None)
+            if builder is None:
+                builder = ItineraryBuilder()
+                self._trip_builder = builder
+            trip = builder.ingest_email(text)
+        except Exception:  # noqa: BLE001
+            _log.exception("trip hook ingest failed")
+            return None
+        if trip.is_empty():
+            return None
+        return added_message(trip) + f"\n(trip id: {trip.id})"
+
     def _music_full_hook(self, message: ChatMessage) -> str | None:
         """Build-map #58: "make me a song about X" → full vocal pipeline.
 
@@ -2169,6 +2214,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_untrack(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "trip":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_trip(command.tail or arg,
+                                      chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "stt":

@@ -804,6 +804,78 @@ class RuntimeMemoryMixin:
             return f"stopped watching {wid}."
         return f"no watcher '{wid}'. Use /track list."
 
+    def _control_trip(self, tail: str, *, chat_key: str = "") -> str:
+        """Auto itineraries from forwarded booking confirmations. Owner-only.
+
+        /trip                  list trips
+        /trip <id>             itinerary summary
+        /trip add <text>       parse a pasted confirmation
+        /trip calendar <id>    sync to Google Calendar (confirmation-gated)
+        /trip docs <id>        vault docs for a trip
+        """
+        from ...travel.itinerary import ItineraryBuilder, added_message
+        builder = getattr(self, "_trip_builder", None)
+        if builder is None:
+            builder = ItineraryBuilder()
+            self._trip_builder = builder
+        rest = (tail or "").strip()
+        if not rest:
+            trips = builder.list_trips()
+            if not trips:
+                return ("no trips yet — forward a booking confirmation "
+                        "(email, PDF, screenshot) and I'll build the "
+                        "itinerary.\nusage: /trip <id> | /trip add <text> | "
+                        "/trip calendar <id> | /trip docs <id>")
+            lines = ["🧳 trips:"]
+            for t in trips[:10]:
+                n = (len(t.flights) + len(t.hotels) + len(t.cars))
+                lines.append(f"  • {t.id} — {t.name or 'untitled'} "
+                             f"({n} segment(s))")
+            return "\n".join(lines)
+        low = rest.lower()
+        if low.startswith("add "):
+            trip = builder.ingest_email(rest[4:].strip())
+            if trip.is_empty():
+                return ("couldn't parse a booking from that — I need a "
+                        "flight number, PNR, or hotel name. Try forwarding "
+                        "the full confirmation.")
+            return added_message(trip) + f"\n(trip id: {trip.id})"
+        if low.startswith("calendar "):
+            tid = rest[9:].strip()
+            gcal = self._resolve_gcal()
+            if gcal is None:
+                return ("Google Calendar isn't connected — connect it first, "
+                        "then /trip calendar <id>.")
+            created = builder.to_calendar(tid, gcal, confirmed=False)
+            if not created:
+                return (f"nothing to sync for {tid} — no dated segments, or "
+                        "the trip doesn't exist.")
+            return (f"📅 {len(created)} event(s) prepared for {tid} — "
+                    "approve the calendar checkpoint to create them.")
+        if low.startswith("docs "):
+            tid = rest[5:].strip()
+            docs = builder.vault_docs(tid)
+            if not docs:
+                return f"no docs for {tid}."
+            return f"📎 {tid} vault:\n" + "\n".join(f"  • {d}" for d in docs)
+        trip = builder.get_trip(rest.split()[0])
+        if trip is None:
+            return ("usage: /trip <id> | /trip add <text> | "
+                    "/trip calendar <id> | /trip docs <id>")
+        return builder.summary(trip.id)
+
+    def _resolve_gcal(self) -> Any:
+        """Connected GCalendarConnector or None.
+
+        The instance is injected by the runtime setup (``self._gcal_instance``).
+        Never raises; returns None when calendar isn't wired up so the
+        handler reports honestly instead of faking events.
+        """
+        try:
+            return getattr(self, "_gcal_instance", None)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _control_mandate(self, tail: str, *, chat_key: str = "") -> str:
         """Payment mandates — the agent's standing authority to move money.
 
