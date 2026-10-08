@@ -2106,6 +2106,17 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "match":
+            # Curated batches + stable matching — not owner-gated (shared
+            # surfaces: gigs, communities, mentoring). Anyone drives it.
+            from ...matching.chat import control_match
+            return control_match(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "gtrip":
             # Group-travel stack: NOT owner-gated (every member drives it),
             # group chats only — control_gtrip refuses DMs itself.

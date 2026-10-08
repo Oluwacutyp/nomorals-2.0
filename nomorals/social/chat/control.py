@@ -229,6 +229,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "regwatch": (0, None),     # /regwatch … — regulatory change monitoring (CBN/SEC/NDPA/FIRS)
     "uprofile": (0, None),     # /uprofile … — prompt-scaffolded profiles + element-level likes (gig/community/business)
     "vnote": (0, None),        # /vnote … — voice notes in chat (audio + searchable transcripts)
+    "match": (0, None),        # /match … — curated daily batches + stable two-sided matching
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -652,6 +653,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/vnote send <chat_id> <audio_path> [language] | search <query> [chat_id] | play <note_id> | preview <public|private> <language> <text>",
                 "example": "/vnote search price",
                 "related": "/uprofile"},
+    "match": {"what": "curated daily batches + two-sided stable matching — scarcity-as-ritual picks (daily gig/community/learning highlights) and Gale-Shapley mutual-preference matching with importance-weighted questionnaires and front-loaded deal-breakers.",
+                "usage": "/match daily [gig|community|learning] | add <id> | <title> | tags | attrs | questionnaire [surface] | answer <qid> <1-5> | dealbreaker <name> <attr> <pred> <value> | rank <proposer|reviewer> <who> <ids> | run",
+                "example": "/match daily gig",
+                "related": "/uprofile /miniapp"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1312,7 +1317,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1522,7 +1527,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
