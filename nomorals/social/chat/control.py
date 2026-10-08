@@ -205,6 +205,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
     "course": (0, None),      # /course <topic> | waec <subject> | set <field> <value> | build | list | teach <id> | status
     "health": (0, None),      # /health log <text> | timeline | summary [days]
+    "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -897,6 +898,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/course <topic> | /course waec <subject> | /course set <field> <value> | /course build | /course list | /course teach <id>",
                  "example": "/course quadratic equations",
                  "related": "/tutor"},
+    "routine": {"what": "natural-language smart-home routines — \"every morning at 7, kitchen lights + coffee\" → validated automation. You confirm before it activates.",
+               "usage": "/routine <natural language> | /routine confirm <id> | /routine list",
+               "example": "/routine every morning at 7 turn on the kitchen lights",
+               "related": "/schedule"},
     "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
@@ -1233,7 +1238,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email"]),
+                            "bet", "finance", "weather", "tz", "email", "routine"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1443,7 +1448,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

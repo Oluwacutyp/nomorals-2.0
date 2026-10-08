@@ -549,3 +549,73 @@ class RuntimeMemoryMixin:
                     "/health visited <notes>")
         finally:
             tl.close()
+
+    def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
+        """Natural-language smart-home routines. Owner-only.
+
+        /routine <natural language>  parse → describe → pending confirm
+        /routine confirm <id>        validate → activate via Home Assistant
+        /routine list                pending drafts
+        """
+        from ...integrations.routines import (
+            activate, build_routine, confirm, describe, load_aliases,
+            pending_draft, validate,
+        )
+        rest = (tail or "").strip()
+        if not rest:
+            return ("usage: /routine <natural language> — e.g. "
+                    "\"/routine every morning at 7, turn on the kitchen "
+                    "lights\"\n"
+                    "       /routine confirm <id> — activate a parsed routine\n"
+                    "       /routine list — show pending drafts")
+        if rest == "list":
+            from ...integrations import routines as _r
+            drafts = list(_r._DRAFTS.values())
+            if not drafts:
+                return "no pending routine drafts."
+            lines = ["pending routines:"]
+            for d in drafts:
+                lines.append(f"• {d.id}: {d.raw[:60]}")
+            return "\n".join(lines)
+        if rest.startswith("confirm "):
+            draft_id = rest[len("confirm "):].strip()
+            draft = pending_draft(draft_id)
+            if draft is None:
+                return f"no pending draft '{draft_id}'. Use /routine list."
+            try:
+                routine = confirm(draft)
+            except Exception as exc:  # noqa: BLE001 — show the problem
+                return f"can't activate yet:\n{exc}"
+            # activate via Home Assistant (best-effort wiring)
+            try:
+                import asyncio
+                from ...integrations.smarthome_integration import (
+                    SmartHomeIntegration)
+                integration = getattr(self, "_smarthome", None)
+                if integration is None:
+                    return (f"✅ routine validated: {describe(draft)}\n"
+                            "⚠️ smart-home backend not connected here — "
+                            "connect Home Assistant to activate it.")
+                result = asyncio.run(activate(routine, integration))
+                return (f"✅ routine active: {result.name}\n"
+                        f"(Home Assistant automation {result.ha_automation_id})")
+            except Exception as exc:  # noqa: BLE001 — never break chat
+                return (f"✅ routine validated: {describe(draft)}\n"
+                        f"⚠️ activation failed: {exc}")
+        # parse a new routine
+        memory = getattr(self, "_memory", None)
+        devices: list[dict] = []
+        try:
+            aliases = load_aliases(memory)
+        except Exception:  # noqa: BLE001
+            aliases = {}
+        draft = build_routine(rest, devices=devices, aliases=aliases,
+                              memory=memory)
+        errors = validate(draft)
+        out = describe(draft)
+        if errors:
+            out += "\n\n⚠️ needs fixing:\n" + "\n".join(
+                f"• {e.message}" for e in errors)
+        else:
+            out += (f"\n\nReply `/routine confirm {draft.id}` to activate it.")
+        return out
