@@ -251,6 +251,8 @@ class Fact:
     supersedes: str | None = None
     active: bool = True
     created_at: float = field(default_factory=time.time)
+    valid_from: float = 0.0  # when this became the believed truth
+    valid_to: float | None = None  # when superseded; None = current
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "text": self.text,
@@ -293,8 +295,21 @@ class FactStore:
                    source_ts REAL NOT NULL,
                    supersedes TEXT,
                    active INTEGER NOT NULL DEFAULT 1,
-                   created_at REAL NOT NULL
+                   created_at REAL NOT NULL,
+                   valid_from REAL NOT NULL DEFAULT 0,
+                   valid_to REAL
                )""")
+        # Migrate older DBs: add temporal columns, backfill valid_from.
+        for col, ddl in (("valid_from", "REAL NOT NULL DEFAULT 0"),
+                         ("valid_to", "REAL")):
+            try:
+                self.db.execute(
+                    f"ALTER TABLE tier_facts ADD COLUMN {col} {ddl}")
+            except Exception:  # noqa: BLE001 — column already exists
+                pass
+        self.db.execute(
+            "UPDATE tier_facts SET valid_from = created_at "
+            "WHERE valid_from = 0")
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tier_facts_active ON tier_facts(active)")
 
@@ -307,14 +322,15 @@ class FactStore:
         fact = Fact(id=new_id(), text=text,
                     confidence=max(0.0, min(1.0, confidence)),
                     source_ts=source_ts if source_ts is not None else now,
-                    created_at=now)
+                    created_at=now, valid_from=now)
         with self.db.transaction():
             self.db.execute(
                 """INSERT INTO tier_facts
-                   (id, text, confidence, source_ts, supersedes, active, created_at)
-                   VALUES (?,?,?,?,?,1,?)""",
+                   (id, text, confidence, source_ts, supersedes, active,
+                    created_at, valid_from, valid_to)
+                   VALUES (?,?,?,?,?,1,?,?,NULL)""",
                 (fact.id, fact.text, fact.confidence, fact.source_ts,
-                 None, fact.created_at))
+                 None, fact.created_at, now))
             self.vectors.put(self.embedder.embed(text), fact.id)
         return fact
 
@@ -330,7 +346,10 @@ class FactStore:
             confidence=float(row["confidence"]),
             source_ts=float(row["source_ts"]),
             supersedes=str(row["supersedes"]) if row["supersedes"] else None,
-            active=bool(row["active"]), created_at=float(row["created_at"]))
+            active=bool(row["active"]), created_at=float(row["created_at"]),
+            valid_from=float(row.get("valid_from") or row["created_at"]),
+            valid_to=(float(row["valid_to"])
+                      if row.get("valid_to") is not None else None))
 
     def supersede_fact(self, old_id: str, new_text: str, *,
                        confidence: float = 0.7) -> Fact:
@@ -346,12 +365,14 @@ class FactStore:
         new = self.add_fact(new_text, confidence=confidence)
         with self.db.transaction():
             self.db.execute(
-                "UPDATE tier_facts SET active = 0 WHERE id = ?", (old_id,))
+                "UPDATE tier_facts SET active = 0, valid_to = ? WHERE id = ?",
+                (new.created_at, old_id))
             self.db.execute(
                 "UPDATE tier_facts SET supersedes = ? WHERE id = ?",
                 (old_id, new.id))
         new.supersedes = old_id
         old.active = False
+        old.valid_to = new.created_at
         return new
 
     def history(self, fact_id: str) -> list[Fact]:
@@ -366,6 +387,40 @@ class FactStore:
                        if current.supersedes else None)
         chain.reverse()
         return chain
+
+    def as_of(self, query: str, when: float, *, limit: int = 5) -> list[Fact]:
+        """What was believed about ``query`` at time ``when`` (unix ts).
+
+        Returns the facts whose [valid_from, valid_to) interval contains
+        ``when``, ranked by vector similarity. The Zep pattern: time as a
+        queryable dimension.
+        """
+        hits = self.search_facts(query, limit=limit * 4, active_only=False)
+        out = []
+        for h in hits:
+            f = h.fact
+            if f.valid_from <= when and (f.valid_to is None or when < f.valid_to):
+                out.append(f)
+            if len(out) >= limit:
+                break
+        return out
+
+    def timeline(self, query: str, *, limit: int = 10) -> list[Fact]:
+        """How the belief about ``query`` evolved, oldest first.
+
+        Walks the supersede chains of the top matches — "what changed and
+        when" as a first-class query.
+        """
+        hits = self.search_facts(query, limit=limit, active_only=False)
+        seen: set[str] = set()
+        facts: list[Fact] = []
+        for h in hits:
+            for f in self.history(h.fact.id):
+                if f.id not in seen:
+                    seen.add(f.id)
+                    facts.append(f)
+        facts.sort(key=lambda f: f.valid_from)
+        return facts[:limit]
 
     def search_facts(self, query: str, *, limit: int = 5,
                      active_only: bool = True) -> list[FactHit]:

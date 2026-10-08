@@ -91,3 +91,37 @@ def test_two_tier_recall_uses_conflict_resolution(tt):
     tt.facts.add_fact("my girlfriend is Ada", confidence=0.9)
     r = tt.recall("what's my girlfriend's name?")
     assert r.texts and "Ada" in r.texts[0]
+
+
+def test_temporal_validity_intervals(tt):
+    import time as _t
+    f1 = tt.facts.add_fact("my favorite color is blue", confidence=0.8)
+    t1 = f1.valid_from
+    _t.sleep(0.05)
+    f2 = tt.facts.supersede_fact(f1.id, "my favorite color is green")
+    # old fact's validity ended when the new one began
+    old = tt.facts.get_fact(f1.id)
+    assert old.valid_to is not None
+    assert abs(old.valid_to - f2.valid_from) < 0.01
+    assert f2.valid_to is None  # current
+
+
+def test_as_of_temporal_query(tt):
+    import time as _t
+    f1 = tt.facts.add_fact("my favorite color is blue", confidence=0.8)
+    t_before = f1.valid_from + 0.001
+    _t.sleep(0.05)
+    tt.facts.supersede_fact(f1.id, "my favorite color is green")
+    then = tt.facts.as_of("favorite color", t_before)
+    assert then and then[0].text == "my favorite color is blue"
+    now = tt.facts.as_of("favorite color", _t.time())
+    assert now and now[0].text == "my favorite color is green"
+
+
+def test_timeline_shows_evolution(tt):
+    f1 = tt.facts.add_fact("I work at Acme", confidence=0.8)
+    tt.facts.supersede_fact(f1.id, "I work at Globex")
+    tl = tt.facts.timeline("where do I work")
+    texts = [f.text for f in tl]
+    assert texts == ["I work at Acme", "I work at Globex"]
+    assert tl[-1].valid_to is None  # current last
