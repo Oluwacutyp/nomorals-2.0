@@ -488,6 +488,27 @@ class PartnerRuntime(
                         message.meta["voice_in"] = True
                         _log.info("voice note in %s heard: %r",
                                   message.chat.key, heard[:60])
+                        # Voice money commands (owner only): a confident
+                        # money intent short-circuits here so a transfer
+                        # hits the fingerprint gate before the brain ever
+                        # sees it. Anything else falls through untouched.
+                        if self._is_operator(message):
+                            from ...voice.money import voice_money_precheck
+                            try:
+                                money_reply = voice_money_precheck(
+                                    heard, self.context)
+                            except Exception:  # noqa: BLE001
+                                _log.exception("voice money pre-check failed")
+                                money_reply = None
+                            if money_reply:
+                                try:
+                                    self.gateway.send(
+                                        message.chat.platform,
+                                        message.chat, money_reply)
+                                except Exception:  # noqa: BLE001
+                                    _log.exception(
+                                        "voice money reply send failed")
+                                return
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
