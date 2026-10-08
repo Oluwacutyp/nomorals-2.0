@@ -783,7 +783,12 @@ class PartnerRuntime(
                                                 message=message)
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("control command failed: %s", exc)
-                    reply = (f"/{command.kind} blew up on my end: {exc} — "
+                    import traceback as _tb
+                    _frames = _tb.extract_tb(exc.__traceback__)
+                    _loc = (f"{_frames[-1].filename.split('/')[-1]}:"
+                            f"{_frames[-1].lineno}" if _frames else "?")
+                    reply = (f"/{command.kind} blew up on my end: {exc} "
+                             f"[{_loc}] — "
                              f"/help {command.kind} shows the right usage")
                 if reply:
                     try:
