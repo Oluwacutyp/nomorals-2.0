@@ -762,6 +762,9 @@ class Song:
     score_pdf_path: str = ""
     synth_backend: str = ""
     synth_note: str = ""
+    #: lightweight TTS hook vocal mixed under the bed (vocal_lite)
+    vocal_path: str = ""
+    vocal_note: str = ""
     seed: int = 0
     #: melody notes for staff notation: (midi_pitch, start_beat, dur_beats)
     melody_notes: list[tuple[int, float, float]] = field(default_factory=list)
@@ -784,6 +787,8 @@ class Song:
             "score_pdf_path": self.score_pdf_path,
             "synth_backend": self.synth_backend,
             "synth_note": self.synth_note,
+            "vocal_path": self.vocal_path,
+            "vocal_note": self.vocal_note,
         }
 
     def to_score_markdown(self) -> str:
@@ -876,7 +881,8 @@ class MusicCreator:
     def compose(self, topic: str, *, style: str = "pop", title: str = "",
                 key: str = "", seed: int | None = None,
                 with_midi: bool = True, with_audio: bool = True,
-                with_score: bool = True, workdir: str = "music") -> Song:
+                with_score: bool = True, with_vocals: bool = True,
+                workdir: str = "music") -> Song:
         spec = resolve_style(style)
         if seed is None:
             seed = int(hashlib.sha256(
@@ -918,7 +924,8 @@ class MusicCreator:
                 _log.warning("midi generation failed: %s", exc)
         if with_audio:
             try:
-                song.audio_path = self._render_audio(song, workdir)
+                song.audio_path = self._render_audio(
+                    song, workdir, with_vocals=with_vocals)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("audio render failed: %s", exc)
         if with_score:
@@ -1334,13 +1341,19 @@ class MusicCreator:
             pass
         return b.write(str(target))
 
-    def _render_audio(self, song: Song, workdir: str) -> str:
+    def _render_audio(self, song: Song, workdir: str,
+                      with_vocals: bool = True) -> str:
         """Render the arrangement to a playable WAV.
 
         Backend is profile-aware (see :mod:`nomorals.media.synth_backend`):
         FluidSynth + soundfont on capable machines, the lightweight
         builtin synth on phones.  The choice lands on the song so chat
         can surface a soundfont offer when one would help.
+
+        When ``with_vocals`` is true the chorus hook is synthesized with
+        the lightweight TTS vocal track (:mod:`nomorals.media.vocal_lite`
+        — works on Termux, unlike DiffSinger/RVC) and mixed under the
+        bed.  Missing TTS backend -> honest instrumental, never fake.
         """
         from ..tools.filesystem import safe_path
         from .synth_backend import render_wav as backend_render_wav
@@ -1359,6 +1372,21 @@ class MusicCreator:
         song.synth_backend = choice.name
         song.synth_note = choice.note
         _log.info("audio rendered via %s (%s)", choice.name, choice.reason)
+        if with_vocals:
+            try:
+                from .vocal_lite import add_vocal_track
+                vr = add_vocal_track(song, str(target), str(base))
+                if vr.get("ok"):
+                    song.audio_path = str(vr["path"])
+                    song.vocal_path = str(vr.get("path", ""))
+                    song.vocal_note = str(vr.get("note", ""))
+                    _log.info("vocal track: %s", song.vocal_note)
+                    return song.audio_path
+                song.vocal_note = str(vr.get("reason", ""))
+                _log.info("no vocal track: %s", song.vocal_note)
+            except Exception as exc:  # noqa: BLE001
+                song.vocal_note = f"vocal track failed: {exc}"
+                _log.warning("vocal track failed: %s", exc)
         return str(target)
 
     def _write_score_pdf(self, song: Song, workdir: str) -> str:
@@ -1404,9 +1432,11 @@ def register(registry: Any) -> None:
             "Compose a real song from a topic: style-aware lyrics (model or "
             "offline rhyme engine), section structure, chord progression, "
             "melody description, a playable .mid file, a rendered WAV audio "
-            "file, and a score PDF (lead sheet with chords + lyrics). "
+            "file (with a lightweight TTS hook-vocal mixed under the bed "
+            "when with_vocals=true), and a score PDF (lead sheet with chords "
+            "+ lyrics). "
             "action=compose (topic, style, title, key, seed, with_midi, "
-            "with_audio, with_score) | styles | "
+            "with_audio, with_score, with_vocals) | styles | "
             "song (slug|title) to re-fetch a saved one."
         ),
         capability=Capability.FS_WRITE,
@@ -1415,7 +1445,7 @@ def register(registry: Any) -> None:
         action: str = "compose", topic: str = "", style: str = "pop",
         title: str = "", key: str = "", seed: int = 0,
         with_midi: bool = True, with_audio: bool = True,
-        with_score: bool = True,
+        with_score: bool = True, with_vocals: bool = True,
     ) -> dict[str, Any]:
         if action == "styles":
             return {"styles": {
@@ -1433,7 +1463,8 @@ def register(registry: Any) -> None:
             song = creator.compose(
                 topic, style=style, title=title, key=key,
                 seed=seed or None, with_midi=with_midi,
-                with_audio=with_audio, with_score=with_score)
+                with_audio=with_audio, with_score=with_score,
+                with_vocals=with_vocals)
             return song.to_dict()
         raise ToolError(f"unknown music_writer action {action!r}")
 

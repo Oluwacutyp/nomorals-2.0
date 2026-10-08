@@ -190,14 +190,24 @@ class RuntimeMediaMixin:
             return ("saved songs:\n" + "\n".join(f"  {n}" for n in names)
                     or "saved songs: (none)\n/music <topic> composes one.")
         topic = tail
+        # trailing vocals flag: /music <topic> [style] [vocals|novocals]
+        # (vocals are on by default — lightweight TTS hook, Termux-safe).
+        # Strip the flag BEFORE style detection so "pop novocals" parses.
         style = "pop"
+        with_vocals = True
+        if words and words[-1].lower() in ("vocals", "novocals"):
+            with_vocals = words[-1].lower() == "vocals"
+            words = words[:-1]
         if words and words[-1].lower() in STYLES and len(words) > 1:
             style = words[-1].lower()
             topic = " ".join(words[:-1])
+        else:
+            topic = " ".join(words)
         if not topic:
-            return "usage: /music <topic> [style]"
+            return "usage: /music <topic> [style] [vocals|novocals]"
         try:
-            song = MusicCreator(self.context).compose(topic, style=style)
+            song = MusicCreator(self.context).compose(
+                topic, style=style, with_vocals=with_vocals)
         except Exception as exc:  # noqa: BLE001
             return f"music error: {exc}"
         n_lines = sum(len(sec.lyrics) for sec in song.sections)
@@ -205,6 +215,8 @@ class RuntimeMediaMixin:
                 f"{n_lines} lyric lines across {len(song.sections)} sections")
         if song.synth_backend:
             text += f"\nrendered with: {song.synth_backend}"
+        if song.vocal_note:
+            text += f"\n🎤 {song.vocal_note}"
         if song.synth_note:
             text += f"\n💡 {song.synth_note}"
         # deliver the audio + the written score to this chat

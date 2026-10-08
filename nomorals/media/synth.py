@@ -161,12 +161,22 @@ def _render_hat(n: int, velocity: float, rng: random.Random,
 
 
 #: timbre per track: (harmonics, attack, decay, sustain, release, gain)
+#: bass carries extra upper harmonics (2nd/3rd) so the line stays audible
+#: on small phone speakers (psychoacoustic "missing fundamental"), plus a
+#: sub-octave doubler (see _SUB_BASS_GAIN) for systems with real low end.
+#: Clipping is impossible: both mix paths peak-normalize + soft-clip.
 _TIMBRES = {
     "melody":  ((1.0, 0.45, 0.22, 0.1), 0.008, 0.06, 0.75, 0.09, 1.0),
     "counter": ((1.0, 0.35, 0.15, 0.0), 0.01, 0.08, 0.7, 0.1, 0.8),
     "chords":  ((1.0, 0.28, 0.08, 0.0), 0.05, 0.12, 0.65, 0.18, 0.55),
-    "bass":    ((1.0, 0.3, 0.0, 0.0), 0.006, 0.05, 0.85, 0.06, 0.9),
+    "bass":    ((1.0, 0.5, 0.22, 0.08), 0.006, 0.05, 0.85, 0.06, 1.2),
 }
+
+#: sub-bass octave-doubler gain for the bass track: a pure sine one octave
+#: below each bass note, mixed under. Inaudible on phone speakers (they
+#: can't reproduce it) but felt on real systems; the mix normalizer keeps
+#: it from ever pushing the master into clipping. 0.0 disables.
+_SUB_BASS_GAIN = 0.35
 
 _KICK_NOTES = {35, 36}
 _SNARE_NOTES = {38, 40}
@@ -317,6 +327,12 @@ def _mix_tracks_np(np, parts: dict[str, list], tempo: float,
                                   attack, decay, sustain, release)
             end = min(total_samples, start + len(sig))
             mix[start:end] += sig[:end - start] * gain
+            if track == "bass" and _SUB_BASS_GAIN > 0:
+                # sub-octave doubler: pure sine one octave down
+                sub = _render_tone_np(np, freq / 2.0, n, e.velocity,
+                                      (1.0,), attack, decay, sustain,
+                                      release)
+                mix[start:end] += sub[:end - start] * _SUB_BASS_GAIN
     # soft clip + normalize (same curve as the stdlib path)
     if total_samples:
         peak = float(np.max(np.abs(mix)))
@@ -361,6 +377,14 @@ def _mix_tracks_stdlib(parts: dict[str, list], tempo: float,
                 idx = start + i
                 if idx < total_samples:
                     mix[idx] += s * gain
+            if track == "bass" and _SUB_BASS_GAIN > 0:
+                # sub-octave doubler: pure sine one octave down
+                sub = _render_tone(freq / 2.0, n, e.velocity, (1.0,),
+                                   attack, decay, sustain, release)
+                for i, s in enumerate(sub):
+                    idx = start + i
+                    if idx < total_samples:
+                        mix[idx] += s * _SUB_BASS_GAIN
     # soft clip + normalize
     peak = max((abs(s) for s in mix), default=0.0)
     if peak > 0:
