@@ -2179,6 +2179,17 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "send":
+            # Self-hosted send layer (#98) — Devon owns the mailgun,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...marketing.send import control_send
+            return control_send(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.

@@ -219,6 +219,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "valuepick": (0, None),   # /valuepick <estimate id> <1,2,4> — refine from picked comparables
     "watch": (0, None),       # /watch 2bed Yaba under 1.5m [for 7|14|28d] | list | stop <id> — persistent match alerts
     "aeo": (0, None),         # /aeo track <brand> [prompts] | report [brand] | briefs [brand] — share-of-answer visibility (owner only)
+    "send": (0, None),        # /send campaign <template> to <a,b> [via <provider>] | queue | process | status — self-hosted send layer (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1045,6 +1046,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/aeo track <brand> [prompt1; prompt2; …] | /aeo report [brand] | /aeo briefs [brand]",
             "example": "/aeo track Acme",
             "related": "/research"},
+    "send": {"what": "Self-hosted send layer — Devon owns the mailgun. SQLite queue, per-provider sliding-window rate limits, exponential-backoff retry, DSN bounce processing with auto-blocklist, conditional templates, provider registry (SMTP/SES/Twilio/custom). Every bulk send routes through #68 cost-awareness. Owner only.",
+            "usage": "/send template add <name> | <body> | /send provider add <name> <kind> [rate/min] | /send campaign <template> to <a@b.com, c@d.com> [via <provider>] | /send process | /send queue | /send status | /send bounce <address>",
+            "example": "/send campaign launch to a@x.com, b@y.com via ses-main",
+            "related": "/aeo /watch"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1397,7 +1402,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1607,7 +1612,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1725,6 +1730,7 @@ LIST_ONELINERS: dict[str, str] = {
     "valuepick": "refine a value estimate from picked comparables",
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
+    "send": "self-hosted send layer — campaigns, queue, bounce handling (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

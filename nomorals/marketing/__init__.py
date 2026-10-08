@@ -5,5 +5,6 @@ tracking (share of answer, not rank), self-hosted send layers, etc.
 """
 
 from .aeo import AEOTracker, VisibilityReport
+from .send import SendEngine, control_send, get_engine, render_template
 
-__all__ = ["AEOTracker", "VisibilityReport"]
+__all__ = ["AEOTracker", "VisibilityReport", "SendEngine", "control_send", "get_engine", "render_template"]
