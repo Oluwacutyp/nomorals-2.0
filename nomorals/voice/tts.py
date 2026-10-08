@@ -1404,7 +1404,7 @@ class SystemTTSBackend:
 
     _MISSING = ("system TTS: no OS speech service found — macOS ships "
                 "`say`; on Linux install espeak-ng (`apt install "
-                "espeak-ng`, Termux: `pkg install espeak-ng`); Windows "
+                "espeak-ng`, Termux: `pkg install espeak`); Windows "
                 "needs PowerShell")
 
     def __init__(self, *, lang: Optional[str] = None) -> None:
