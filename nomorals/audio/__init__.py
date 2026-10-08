@@ -41,6 +41,17 @@ from .audiobook import (
     master_lufs,
     split_chapters,
 )
+from .pipeline import (
+    STAGES,
+    EngineRegistry,
+    KeytermStore,
+    PipelineConfig,
+    VoicePipeline,
+    control_voice,
+    detect_profile,
+    run_pipeline,
+    transcribe_clean,
+)
 
 __all__ = [
     "Edit",
@@ -67,4 +78,22 @@ __all__ = [
     "OverviewStore",
     "control_overview",
     "make_overview",
+    "DISCLOSURE_RULES",
+    "KNOWN_STORES",
+    "Audiobook",
+    "AudiobookStore",
+    "BookChapter",
+    "control_audiobook",
+    "epub_to_audiobook",
+    "master_lufs",
+    "split_chapters",
+    "STAGES",
+    "EngineRegistry",
+    "KeytermStore",
+    "PipelineConfig",
+    "VoicePipeline",
+    "control_voice",
+    "detect_profile",
+    "run_pipeline",
+    "transcribe_clean",
 ]

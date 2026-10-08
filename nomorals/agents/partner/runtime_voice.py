@@ -159,6 +159,13 @@ class RuntimeVoiceMixin:
         verb = parts[0].lower() if parts else "list"
         rest = parts[1] if len(parts) > 1 else ""
 
+        # Unified voice pipeline (#108) subcommands — the architecture under
+        # all of Phase 24. Kept under /voice so the chat surface stays one.
+        if verb in ("pipeline", "engines", "keyterms"):
+            from ...audio.pipeline import control_voice as _pipeline_control
+            return _pipeline_control(tail or "", context=self.context,
+                                     chat=chat_key)
+
         if verb in ("list", "ls"):
             voices = cat.list()
             if not voices:
