@@ -166,10 +166,8 @@ class DiscordAdapter(ChatAdapter):
                 "discord.py is not installed: pip install nomorals[chat]"
             ) from None
 
-        intents = discord.Intents.default()
-        intents.message_content = True
-
-        bot = discord.Client(intents=intents)
+        # discord.py-self 2.x: user accounts take no intents
+        bot = discord.Client()
         self._bot = bot
 
         @bot.event
