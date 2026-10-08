@@ -1497,27 +1497,28 @@ def list_catalog(topic: str = "") -> str:
         groups = [(g, ks) for g, ks in LIST_GROUPS
                   if t in g.lower().replace(" — ", " ") or g.lower() == want
                   or any(t == k for k in ks)]
-    lines = ["🥷 Devon — commands (tap any /command to run it):"]
+    from .style import section, cmd, cta, escape
+    lines = [f"🥷 <b>Devon</b> — commands (tap any {cmd('/command')} to run it):"]
     shown = 0
     for group, kinds in groups:
         emoji = _GROUP_EMOJI.get(group, "•")
         lines.append("")
-        lines.append(f"{emoji} {group.upper()}")
+        lines.append(section(emoji, group))
         for k in kinds:
             if k not in CONTROL_COMMANDS:
                 continue
             one = LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))
-            lines.append(f"  /{k} — {one}")
+            lines.append(f"  {cmd('/' + k)} — {escape(one)}")
             shown += 1
     if not shown:
         groups_now = [g for g, _ in groups]
         all_groups = " | ".join(dict.fromkeys(_LIST_GROUP_ALIASES.values()))
-        return (f"no group '{t}' — available: {all_groups}")
+        return (f"no group '{t}' — available: {escape(all_groups)}")
     lines += [
         "",
-        f"📦 {shown} commands",
-        "  /help <command> — full page  ·  /help budget|goals|builds|skills|missions|modes — topics",
-        "🎯 try /game arena or /search to start",
+        f"📦 <b>{shown} commands</b>",
+        f"  {cmd('/help')} &lt;command&gt; — full page  ·  {cmd('/help')} topics — subject guides",
+        cta("try /game arena or /search to start"),
     ]
     return "\n".join(lines)
 
@@ -1540,15 +1541,16 @@ def detailed_help(topic: str = "") -> str:
     if not t:
         return _detailed_overview()
     if t in COMMAND_DETAILS:
+        from .style import cmd, escape
         d = COMMAND_DETAILS[t]
-        lines = [f"📖 {d['usage']}",
-                 f"{d['what']}",
+        lines = [f"📖 <code>{escape(d['usage'])}</code>",
+                 escape(d['what']),
                  "",
-                 f"💡 try: {d['example']}"]
+                 f"💡 try: {cmd(d['example'])}"]
         if d.get("related"):
-            lines.append(f"🔗 related: {d['related']}")
+            lines.append(f"🔗 related: {cmd(d['related'])}")
         lines.append("")
-        lines.append("/help — catalog  ·  /help budget|goals|builds|skills|missions|modes — topics")
+        lines.append(f"{cmd('/help')} — catalog  ·  {cmd('/help')} topics — subject guides")
         return "\n".join(lines)
     if t in _TOPIC_PAGES:
         return _TOPIC_PAGES[t]

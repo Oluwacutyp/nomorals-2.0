@@ -657,7 +657,11 @@ class PartnerRuntime(
                 if reply:
                     try:
                         self._typing_for(message.chat, reply)
-                        self.gateway.send(message.chat.platform, message.chat, reply)
+                        # Septorch-style outputs carry HTML tags — render
+                        # them formatted, everything else stays plain text.
+                        _pm = "HTML" if ("<b>" in reply or "<code>" in reply) else ""
+                        self.gateway.send(message.chat.platform, message.chat,
+                                          reply, parse_mode=_pm)
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return

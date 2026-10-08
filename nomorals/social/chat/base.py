@@ -417,12 +417,16 @@ class ChatAdapter(ABC):
     # ── sending ──────────────────────────────────────────────────────────────
     @abstractmethod
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
-             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+             buttons: list[list[tuple[str, str]]] | None = None,
+             parse_mode: str = "") -> SendResult:
         """Send one text message. Returns a result, never raises for ordinary failure.
 
         ``buttons`` is ``[[(label, callback_data), ...], ...]`` — an inline
         keyboard. Adapters whose platform has no button concept ignore it;
         TelegramBotAdapter renders it as an inline keyboard.
+
+        ``parse_mode`` (e.g. "HTML") enables rich formatting — opt-in per
+        message so plain-text messages are never accidentally parsed.
         """
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:

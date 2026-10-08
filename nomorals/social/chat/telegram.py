@@ -1790,13 +1790,16 @@ class TelegramBotAdapter(ChatAdapter):
 
     # ── outbound ──────────────────────────────────────────────────────────
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
-             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+             buttons: list[list[tuple[str, str]]] | None = None,
+             parse_mode: str = "") -> SendResult:
         from .tgbot_buttons import buttons_for_text
 
         started = time.perf_counter()
         last_id = ""
         try:
             params_base: dict[str, Any] = {"chat_id": int(chat.chat_id)}
+            if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+                params_base["parse_mode"] = parse_mode
             if chat.thread_id:
                 try:
                     params_base["message_thread_id"] = int(chat.thread_id)

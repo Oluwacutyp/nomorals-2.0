@@ -418,6 +418,7 @@ class ChatGateway:
         reply_to: str = "",
         ordered: bool = True,
         buttons: list[list[tuple[str, str]]] | None = None,
+        parse_mode: str = "",
     ) -> SendResult:
         """Send one message on one platform. Ordered per chat by default.
 
@@ -439,7 +440,7 @@ class ChatGateway:
 
         def _do() -> SendResult:
             result = adapter.send(chat, text, reply_to=reply_to,
-                                  buttons=buttons)
+                                  buttons=buttons, parse_mode=parse_mode)
             if result.ok:
                 self.touch(chat)
             return result
