@@ -619,3 +619,39 @@ class RuntimeMemoryMixin:
         else:
             out += (f"\n\nReply `/routine confirm {draft.id}` to activate it.")
         return out
+
+    def _control_home(self, tail: str, *, chat_key: str = "") -> str:
+        """Home digital twin. Owner-only.
+
+        /home status            current snapshot
+        /home what changed [h]  changes in the last h hours (default 12)
+        /home unusual?          statistical anomalies
+        """
+        from ...integrations.digital_twin import HomeTwin
+        twin = getattr(self, "_home_twin", None)
+        if twin is None:
+            twin = HomeTwin()
+            self._home_twin = twin
+        rest = (tail or "").strip().lower()
+        if not rest or rest == "status":
+            return twin.summary()
+        if rest.startswith("what changed"):
+            hours = 12.0
+            parts = rest.split()
+            if len(parts) > 2:
+                try:
+                    hours = float(parts[2])
+                except ValueError:
+                    pass
+            import time as _t
+            return twin.what_changed(_t.time() - hours * 3600)
+        if rest in ("unusual?", "unusual", "anomalies"):
+            anomalies = twin.anomalies()
+            if not anomalies:
+                return "nothing unusual — everything matches your home's normal patterns."
+            lines = ["⚠️ unusual:"]
+            for a in anomalies[:8]:
+                lines.append(f"• {a.message}")
+            return "\n".join(lines)
+        return ("usage: /home status | /home what changed [hours] | "
+                "/home unusual?")
