@@ -891,7 +891,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/course <topic> | /course waec <subject> | /course set <field> <value> | /course build | /course list | /course teach <id>",
                  "example": "/course quadratic equations",
                  "related": "/tutor"},
-    "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice.",
+    "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
                "related": "/tutor"},

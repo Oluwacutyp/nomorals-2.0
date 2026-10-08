@@ -920,6 +920,14 @@ class BriefingComposer:
             self.providers.append(FromYourPastProvider())
         except Exception:  # noqa: BLE001
             pass
+        # Readiness (health coaching, build-map #53): lazy import to avoid
+        # an import cycle (coach.py imports BriefingSection from here).
+        # No health data or readiness not low → provider returns None.
+        try:
+            from ..health.coach import ReadinessBriefingProvider
+            self.providers.append(ReadinessBriefingProvider())
+        except Exception:  # noqa: BLE001
+            pass
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)

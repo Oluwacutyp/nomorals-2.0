@@ -425,6 +425,9 @@ class RuntimeMemoryMixin:
         /health log <text>     log an event ("headache, 3/5, since morning")
         /health timeline       chronological entries
         /health summary [days] human-readable recap (default 30 days)
+        /health ask <question> ask your biometrics (sleep/recovery/activity)
+        /health readiness      recovery score from sleep + HRV + strain
+        /health week           this week's movement/sleep/recovery recap
         /health route <symptoms>  conservative care routing (navigation only)
         /health costs          typical Nigerian private-hospital costs (approximate)
         /health prep [symptoms] pre-visit packet: timeline + questions + what to bring
@@ -447,6 +450,9 @@ class RuntimeMemoryMixin:
             return ("usage: /health log <text> — e.g. /health log headache, "
                     "3/5, since morning\n"
                     "       /health timeline | /health summary [days]\n"
+                    "       /health ask <question> — e.g. /health ask how "
+                    "did I sleep this week?\n"
+                    "       /health readiness | /health week\n"
                     "       /health route <symptoms> — where to go next\n"
                     "       /health costs — typical private-hospital costs\n"
                     "       /health prep [symptoms] — pre-visit packet\n"
@@ -504,8 +510,25 @@ class RuntimeMemoryMixin:
                     return "usage: /health visited <what the doctor said>"
                 return format_recap(
                     summarize_visit(rest.strip(), timeline=tl))
+            if verb == "ask":
+                if not rest.strip():
+                    return ("usage: /health ask <question> — e.g. /health ask "
+                            "how did I sleep this week?")
+                from ...health.coach import HealthCoach
+                coach = HealthCoach(timeline=tl)
+                return coach.ask(rest.strip()).text
+            if verb == "readiness":
+                from ...health.coach import HealthCoach
+                coach = HealthCoach(timeline=tl)
+                return coach.readiness().format()
+            if verb == "week":
+                from ...health.coach import HealthCoach
+                coach = HealthCoach(timeline=tl)
+                return coach.weekly_recap().text
             return ("usage: /health log <text> | /health timeline | "
-                    "/health summary [days] | /health route <symptoms> | "
+                    "/health summary [days] | /health ask <question> | "
+                    "/health readiness | /health week | "
+                    "/health route <symptoms> | "
                     "/health costs | /health prep [symptoms] | "
                     "/health visited <notes>")
         finally:
