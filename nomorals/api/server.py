@@ -887,6 +887,24 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     parse_qs(parsed.query),
                 )
                 return
+            if method == "POST" and parsed.path == "/acp" and \
+                    "text/event-stream" in \
+                    self.headers.get("Accept", "").lower():
+                # ACP streaming: same precedent as /stream above — SSE cannot
+                # go through the JSON dispatch. The ACP server streams
+                # session/update notifications, then the final response.
+                from .acp import serve_acp_sse
+                acp_server = getattr(server, "_acp_server", None)
+                if acp_server is None:
+                    self._respond(503, {"error": "ACP is not mounted on this "
+                                                "API server (register_acp)"})
+                    return
+                data, error, status = self._read_body()
+                if error is not None:
+                    self._respond(status, {"error": error})
+                    return
+                serve_acp_sse(self, server, acp_server, data or b"")
+                return
             body: dict[str, Any] = {}
             if method != "GET":
                 data, error, status = self._read_body()
