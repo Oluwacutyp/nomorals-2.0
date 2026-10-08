@@ -220,6 +220,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "watch": (0, None),       # /watch 2bed Yaba under 1.5m [for 7|14|28d] | list | stop <id> — persistent match alerts
     "aeo": (0, None),         # /aeo track <brand> [prompts] | report [brand] | briefs [brand] — share-of-answer visibility (owner only)
     "send": (0, None),        # /send campaign <template> to <a,b> [via <provider>] | queue | process | status — self-hosted send layer (owner only)
+    "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
+    "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1046,6 +1048,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/aeo track <brand> [prompt1; prompt2; …] | /aeo report [brand] | /aeo briefs [brand]",
             "example": "/aeo track Acme",
             "related": "/research"},
+    "brief": {"what": "SERP-derived content brief — keywords, questions people ask, competitor angles, outline. First step of the brief-first pipeline: no brief, no draft, no schedule. Owner only.",
+            "usage": "/brief <topic> | /brief run <topic>",
+            "example": "/brief nigerian landlords",
+            "related": "/content"},
+    "content": {"what": "Brief-first content pipeline — score drafts against their brief, predict engagement, schedule (refuses drafts with no brief attached). Owner only.",
+            "usage": "/content score <draft> | /content schedule <draft_id> <when> | /content run <topic>",
+            "example": "/content score Lagos rents are wild right now",
+            "related": "/brief"},
     "send": {"what": "Self-hosted send layer — Devon owns the mailgun. SQLite queue, per-provider sliding-window rate limits, exponential-backoff retry, DSN bounce processing with auto-blocklist, conditional templates, provider registry (SMTP/SES/Twilio/custom). Every bulk send routes through #68 cost-awareness. Owner only.",
             "usage": "/send template add <name> | <body> | /send provider add <name> <kind> [rate/min] | /send campaign <template> to <a@b.com, c@d.com> [via <provider>] | /send process | /send queue | /send status | /send bounce <address>",
             "example": "/send campaign launch to a@x.com, b@y.com via ses-main",
@@ -1731,6 +1741,8 @@ LIST_ONELINERS: dict[str, str] = {
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
     "send": "self-hosted send layer — campaigns, queue, bounce handling (owner only)",
+    "brief": "SERP-derived content brief — keywords, questions, angles (owner only)",
+    "content": "brief-first pipeline — score, predict, schedule (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

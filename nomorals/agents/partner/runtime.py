@@ -2190,6 +2190,28 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "brief":
+            # Brief-first content pipeline (#99) — SERP-derived briefs,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...marketing.briefs import control_brief
+            return control_brief(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
+        if kind == "content":
+            # Brief-first content pipeline (#99) — score/predict/schedule,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...marketing.briefs import control_content
+            return control_content(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.
