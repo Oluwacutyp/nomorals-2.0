@@ -153,7 +153,10 @@ class ProactiveEngine:
         self.calendar = calendar
         self.email = email
         self.shopping = shopping
-        
+
+        # Task-scoped identity this engine acts under (None = Devon herself).
+        self._identity: Any = None
+
         # Pattern storage
         self._patterns: dict[str, list[Pattern]] = defaultdict(list)  # user_id -> patterns
         self._habits: dict[str, list[UserHabit]] = defaultdict(list)  # user_id -> habits
@@ -211,8 +214,49 @@ class ProactiveEngine:
         
         # Sort by priority, then confidence
         filtered.sort(key=lambda s: (-s.priority, -s.confidence))
-        
+
+        # Tag suggestions with the active task identity, if any.
+        if self._identity is not None:
+            ident = self._identity
+            for s in filtered:
+                try:
+                    s.metadata["identity_id"] = ident.id
+                    s.metadata["identity_label"] = ident.label()
+                except Exception:
+                    pass
+
         return filtered[:limit]
+
+    # ── task identity (Google CC/Carly pattern) ───────────────────────
+
+    def set_identity(self, identity: Any) -> bool:
+        """Act under a task-scoped identity. Never raises."""
+        try:
+            self._identity = identity
+            return True
+        except Exception:
+            return False
+
+    def clear_identity(self) -> None:
+        """Back to Devon herself. Never raises."""
+        try:
+            self._identity = None
+        except Exception:
+            pass
+
+    @property
+    def acting_as(self) -> Any:
+        """The active task identity, or None for Devon herself."""
+        return self._identity
+
+    def identity_signature(self) -> str:
+        """How outbound work should sign itself. Never raises."""
+        try:
+            if self._identity is not None:
+                return self._identity.signature()
+            return "Devon"
+        except Exception:
+            return "Devon"
     
     async def record_action(
         self,

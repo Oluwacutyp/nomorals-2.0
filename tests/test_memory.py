@@ -191,5 +191,70 @@ class MemoryManagerTests(unittest.TestCase):
         self.assertGreater(stats["embedder"]["dimensions"], 0)
 
 
+class SupersessionTests(unittest.TestCase):
+    """Facts are never deleted, only superseded — audit trail preserved."""
+
+    def setUp(self):
+        self.home = temp_dir()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        settings = Settings(home=self.home)
+        self.context = build_context(settings)
+        self.context.__enter__()
+        self.memory = self.context.memory
+
+    def tearDown(self):
+        self.context.__exit__(None, None, None)
+
+    def test_supersede_links_old_and_new(self):
+        old_id = self.memory.remember("Lagos rent is 2m", kind="fact")
+        new_id = self.memory.supersede(old_id, "Lagos rent is 2.5m", kind="fact")
+        self.assertTrue(new_id)
+        self.assertNotEqual(old_id, new_id)
+        old = self.memory.get(old_id)
+        new = self.memory.get(new_id)
+        # Old record kept, marked superseded.
+        self.assertIsNotNone(old)
+        self.assertEqual(old.metadata.get("superseded_by"), new_id)
+        self.assertIn("superseded_at", old.metadata)
+        # New record links back.
+        self.assertEqual(new.metadata.get("supersedes"), old_id)
+        self.assertEqual(new.content, "Lagos rent is 2.5m")
+
+    def test_supersede_unknown_id_returns_empty(self):
+        self.assertEqual(self.memory.supersede("nope", "x"), "")
+        self.assertEqual(self.memory.supersede("", "x"), "")
+
+    def test_superseded_excluded_from_default_recall(self):
+        old_id = self.memory.remember("the sky is green", kind="fact", importance=0.9)
+        self.memory.supersede(old_id, "the sky is blue", kind="fact", importance=0.9)
+        hits = self.memory.recall("sky", limit=10)
+        ids = [r.id for r in hits.records]
+        self.assertNotIn(old_id, ids)
+
+    def test_include_superseded_brings_back_history(self):
+        old_id = self.memory.remember("the sky is green", kind="fact", importance=0.9)
+        self.memory.supersede(old_id, "the sky is blue", kind="fact", importance=0.9)
+        hits = self.memory.recall("sky", limit=10, include_superseded=True)
+        ids = [r.id for r in hits.records]
+        self.assertIn(old_id, ids)
+
+    def test_supersession_chain_oldest_to_newest(self):
+        id1 = self.memory.remember("v1", kind="fact")
+        id2 = self.memory.supersede(id1, "v2", kind="fact")
+        id3 = self.memory.supersede(id2, "v3", kind="fact")
+        chain = self.memory.supersession_chain(id3)
+        self.assertEqual([r.id for r in chain], [id1, id2, id3])
+        # Chain from the middle also resolves fully.
+        chain2 = self.memory.supersession_chain(id2)
+        self.assertEqual([r.id for r in chain2], [id1, id2, id3])
+
+    def test_chain_unknown_id_is_empty(self):
+        self.assertEqual(self.memory.supersession_chain("nope"), [])
+
+    def test_supersede_never_raises_on_garbage(self):
+        self.assertEqual(self.memory.supersede(None, None), "")
+        self.assertEqual(self.memory.supersession_chain(None), [])
+
+
 if __name__ == "__main__":
     unittest.main()

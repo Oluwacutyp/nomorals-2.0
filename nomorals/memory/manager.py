@@ -250,6 +250,7 @@ class MemoryManager:
         include_private: bool = False,
         tags: str = "",
         origin: str = "",
+        include_superseded: bool = False,
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
@@ -262,6 +263,11 @@ class MemoryManager:
 
         Private-marked records are excluded unless ``include_private`` is
         set — proactive recall and training pipelines never see them.
+
+        Superseded records (replaced via ``supersede()``) are excluded
+        unless ``include_superseded`` is set — recall surfaces the
+        current fact; the audit trail stays reachable via ``get()`` and
+        ``supersession_chain()``.
         """
         wanted_tags = {t.strip() for t in (tags or "").split(",") if t.strip()}
         started = time.perf_counter()
@@ -270,6 +276,9 @@ class MemoryManager:
             recents = self._recent(limit, kind=kind)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
+            if not include_superseded:
+                recents = [r for r in recents
+                           if not (r.metadata or {}).get("superseded_by")]
             return RecallResult(records=recents, query=query)
         self.stats["recalls"] += 1
 
@@ -305,6 +314,9 @@ class MemoryManager:
             recents = self._recent(limit, kind=kind)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
+            if not include_superseded:
+                recents = [r for r in recents
+                           if not (r.metadata or {}).get("superseded_by")]
             return RecallResult(records=recents, query=query,
                                 elapsed_ms=(time.perf_counter() - started) * 1000)
 
@@ -317,6 +329,8 @@ class MemoryManager:
             if record.expired and not include_expired:
                 continue
             if not include_private and _is_private(record):
+                continue
+            if not include_superseded and (record.metadata or {}).get("superseded_by"):
                 continue
             if kind and record.kind != kind:
                 continue
@@ -413,6 +427,61 @@ class MemoryManager:
             self.semantic.put(self.embedder.embed(payload["content"]), record_id)
             self._index_text(record_id, payload["content"])
         return count
+
+    def supersede(self, old_record_id: str, new_content: str, **kwargs: Any) -> str:
+        """Replace a fact without deleting it — the audit trail is preserved.
+
+        Personal-AI-army pattern: facts are never deleted, only superseded.
+        The old record keeps its content but is marked
+        ``metadata.superseded_by``; the new record links back via
+        ``metadata.supersedes``. Superseded records are excluded from
+        default recall (they're stale) but stay queryable through
+        ``get()`` and ``supersession_chain()``. Never raises.
+        """
+        try:
+            old = self.get(old_record_id)
+            if old is None:
+                return ""
+            md = dict(kwargs.pop("metadata", None) or {})
+            md["supersedes"] = old_record_id
+            new_id = self.remember(new_content, metadata=md, **kwargs)
+            if not new_id:
+                return ""
+            old_md = dict(old.metadata or {})
+            old_md["superseded_by"] = new_id
+            old_md["superseded_at"] = time.time()
+            self.update(old_record_id, metadata=old_md)
+            self.stats["superseded"] = self.stats.get("superseded", 0) + 1
+            return new_id
+        except Exception:
+            return ""
+
+    def supersession_chain(self, record_id: str) -> list[MemoryRecord]:
+        """Oldest → newest chain of supersessions. Never raises."""
+        try:
+            rec = self.get(record_id)
+            if rec is None:
+                return []
+            # Walk back to the oldest ancestor.
+            seen = {rec.id}
+            while (rec.metadata or {}).get("supersedes"):
+                parent_id = rec.metadata["supersedes"]
+                if parent_id in seen:
+                    break
+                parent = self.get(parent_id)
+                if parent is None:
+                    break
+                seen.add(parent.id)
+                rec = parent
+            # Walk forward to the newest descendant.
+            chain = []
+            while rec is not None and rec.id not in {r.id for r in chain}:
+                chain.append(rec)
+                nxt = (rec.metadata or {}).get("superseded_by")
+                rec = self.get(nxt) if nxt else None
+            return chain
+        except Exception:
+            return []
 
     def forget(self, record_id: str) -> int:
         self.semantic.delete_owner(record_id)
