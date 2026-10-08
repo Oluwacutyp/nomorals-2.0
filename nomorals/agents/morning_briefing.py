@@ -928,6 +928,13 @@ class BriefingComposer:
             self.providers.append(ReadinessBriefingProvider())
         except Exception:  # noqa: BLE001
             pass
+        # Mood patterns (build-map #55): lazy import, same cycle story.
+        # No strong patterns → provider returns None.
+        try:
+            from ..health.patterns import PatternsBriefingProvider
+            self.providers.append(PatternsBriefingProvider())
+        except Exception:  # noqa: BLE001
+            pass
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)

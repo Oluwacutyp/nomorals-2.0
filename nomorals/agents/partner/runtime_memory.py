@@ -428,6 +428,7 @@ class RuntimeMemoryMixin:
         /health ask <question> ask your biometrics (sleep/recovery/activity)
         /health readiness      recovery score from sleep + HRV + strain
         /health week           this week's movement/sleep/recovery recap
+        /health patterns       mood↔sleep correlations from your logs
         /health route <symptoms>  conservative care routing (navigation only)
         /health costs          typical Nigerian private-hospital costs (approximate)
         /health prep [symptoms] pre-visit packet: timeline + questions + what to bring
@@ -537,6 +538,9 @@ class RuntimeMemoryMixin:
                 from ...health.coach import HealthCoach
                 coach = HealthCoach(timeline=tl)
                 return coach.weekly_recap().text
+            if verb == "patterns":
+                from ...health.patterns import detect_patterns, format_patterns
+                return format_patterns(detect_patterns(tl, days=30))
             return ("usage: /health log <text> | /health timeline | "
                     "/health summary [days] | /health ask <question> | "
                     "/health readiness | /health week | "
