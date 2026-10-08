@@ -132,9 +132,11 @@ class MediaRef:
     mime: str = ""
     kind: str = "image"  # image | video | audio | document
     name: str = ""
+    voice_note: bool = False  # True → send as a Telegram voice bubble
 
     def to_dict(self) -> dict[str, Any]:
-        return {"path": self.path, "mime": self.mime, "kind": self.kind, "name": self.name}
+        return {"path": self.path, "mime": self.mime, "kind": self.kind,
+                "name": self.name, "voice_note": self.voice_note}
 
 
 @dataclass
@@ -432,7 +434,8 @@ class ChatAdapter(ABC):
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "") -> SendResult:
         return SendResult(ok=False, platform=self.name, error="media not supported")
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+             action: str = "typing") -> bool:
         """Show a typing indicator. Best-effort; adapters without one return False."""
         return False
 

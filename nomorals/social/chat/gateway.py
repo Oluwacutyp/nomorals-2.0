@@ -495,13 +495,14 @@ class ChatGateway:
         with self._lock_for(chat):
             return _do()
 
-    def typing(self, platform: str, chat: ChatRef | str, seconds: float = 3.0) -> bool:
+    def typing(self, platform: str, chat: ChatRef | str, seconds: float = 3.0,
+             action: str = "typing") -> bool:
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
         if adapter is None or self.dry_run:
             return False
         try:
-            return adapter.typing(chat, seconds)
+            return adapter.typing(chat, seconds, action=action)
         except Exception as exc:  # noqa: BLE001 - typing is cosmetic
             _log.debug("typing failed on %s: %s", platform, exc)
             return False

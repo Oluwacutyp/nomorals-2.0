@@ -1298,6 +1298,8 @@ class TelegramAdapter(ChatAdapter):
             if entity is None:
                 entity = await self._resolve(chat)
             kwargs = self._thread_kwargs(chat)
+            if getattr(media, "voice_note", False):
+                kwargs["voice_note"] = True
             try:
                 result = await client.send_file(
                     entity, media.path, caption=caption or None, **kwargs
@@ -1318,7 +1320,9 @@ class TelegramAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+             action: str = "typing") -> bool:
+        """Chat action indicator: "typing" or "recording" (voice)."""
         client = self._client
         if client is None or seconds <= 0:
             _log.debug("telegram typing: skipped (client=%s, seconds=%s)", client is not None, seconds)
@@ -1332,7 +1336,10 @@ class TelegramAdapter(ChatAdapter):
 
         async def _do() -> bool:
             from telethon.tl.functions.messages import SetTypingRequest
-            from telethon.tl.types import SendMessageTypingAction
+            from telethon.tl.types import (SendMessageRecordAudioAction,
+                                           SendMessageTypingAction)
+            _action = (SendMessageRecordAudioAction()
+                       if action == "recording" else SendMessageTypingAction())
 
             # Try to use cached input entity first (most reliable for DMs)
             entity = self._input_entity_cache.get(chat.chat_id)
@@ -1359,7 +1366,7 @@ class TelegramAdapter(ChatAdapter):
                     # Use the low-level SetTypingRequest directly — more
                     # reliable than send_action("typing") across Telethon
                     # versions and userbot/bot differences.
-                    await client(SetTypingRequest(entity, SendMessageTypingAction()))
+                    await client(SetTypingRequest(entity, _action))
                     sent_count += 1
                     _log.debug("telegram typing: SetTypingRequest succeeded for chat_id=%s (count=%d)", 
                               chat.chat_id, sent_count)
@@ -1368,7 +1375,7 @@ class TelegramAdapter(ChatAdapter):
                                 chat.chat_id, exc)
                     # Fallback: try send_action with string
                     try:
-                        await client.send_action(entity, "typing")
+                        await client.send_action(entity, "record-audio" if action == "recording" else "typing")
                         sent_count += 1
                         _log.debug("telegram typing: send_action fallback succeeded for chat_id=%s", chat.chat_id)
                     except Exception as exc2:

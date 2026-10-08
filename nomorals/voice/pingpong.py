@@ -125,6 +125,19 @@ def synthesize_voice_reply(context: Any, text: str) -> str:
     return to_ogg(str(path))
 
 
+def ogg_duration(ogg_path: str) -> float:
+    """Length of an .ogg voice note in seconds (ffprobe).  0.0 on failure."""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", ogg_path],
+            capture_output=True, timeout=10)
+        return max(0.0, float((proc.stdout or b"").decode().strip() or 0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def to_ogg(src_path: str) -> str:
     """Convert any audio file to opus .ogg (Telegram sendVoice format)."""
     src = Path(src_path)

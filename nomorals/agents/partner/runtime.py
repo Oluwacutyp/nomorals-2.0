@@ -757,8 +757,12 @@ class PartnerRuntime(
 
     def _send_voice_reply(self, message: ChatMessage,
                             parts: list[str]) -> bool:
-        """Reply with voice note(s).  True when at least one went out."""
-        from ...voice.pingpong import synthesize_voice_reply
+        """Reply with voice note(s).  True when at least one went out.
+
+        Shows the "recording voice" indicator (not "typing") for the
+        actual length of the note, and sends it as a voice bubble.
+        """
+        from ...voice.pingpong import synthesize_voice_reply, ogg_duration
         from ...social.chat.base import MediaRef
         sent_any = False
         for part in parts:
@@ -767,8 +771,16 @@ class PartnerRuntime(
                 continue
             try:
                 ogg_path = synthesize_voice_reply(self.context, text)
+                # recording indicator matches the note's real length
+                try:
+                    secs = max(1.0, min(60.0, ogg_duration(ogg_path)))
+                    self.gateway.typing(message.chat.platform, message.chat,
+                                        seconds=secs, action="recording")
+                except Exception:  # noqa: BLE001 - cosmetic
+                    pass
                 media = MediaRef(path=ogg_path, kind="audio",
-                                 name="reply.ogg", mime="audio/ogg")
+                                 name="reply.ogg", mime="audio/ogg",
+                                 voice_note=True)
                 adapter = self.gateway._adapter_for(message.chat.platform)
                 if adapter is None or self.gateway.dry_run:
                     return sent_any
