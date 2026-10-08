@@ -76,6 +76,9 @@ class PartnerRuntime(
         self.context = context
         self.settings = context.settings
         self.brain = brain or PartnerBrain(context)
+        #: Two-tier memory (build-map #36): lazy, opt-in via
+        #: memory.two_tier_enabled. None until the first observed exchange.
+        self._two_tier: Any = None
         #: Monotonic boot time — drives the console dashboard uptime.
         import time as _time
 
@@ -781,6 +784,46 @@ class PartnerRuntime(
             return
         self._bump("replies")
         self._send_reply(message, outcome.parts)
+        # Two-tier memory (build-map #36): opt-in parallel layer. Runs AFTER
+        # the reply is sent and AFTER all existing memory work — it never
+        # replaces or precedes the trusted recall path.
+        self._two_tier_observe(message, outcome)
+
+    def _two_tier_observe(self, message: Any, outcome: Any) -> None:
+        """Feed one exchange to the two-tier memory layer. Opt-in via
+        ``memory.two_tier_enabled`` (default off). Never raises — a memory
+        failure must never break chat."""
+        try:
+            mem_settings = getattr(self.settings, "memory", None)
+            if not getattr(mem_settings, "two_tier_enabled", False):
+                return
+            if not getattr(message, "incoming", False):
+                return
+            user_text = (getattr(message, "text", "") or "").strip()
+            parts = getattr(outcome, "parts", None) or []
+            reply_text = "\n".join(str(p) for p in parts).strip()
+            if not user_text and not reply_text:
+                return
+            from ...memory.tiers import TwoTierMemory
+            if self._two_tier is None:
+                self._two_tier = TwoTierMemory(
+                    settings=self.settings, llm_fn=self._two_tier_llm)
+            exchange = f"user: {user_text}\ndevon: {reply_text}"
+            self._two_tier.observe(exchange, tags=f"chat:{message.chat.platform}")
+        except Exception:  # noqa: BLE001 — memory never breaks chat
+            _log.exception("two-tier observe failed")
+
+    def _two_tier_llm(self, prompt: str) -> str:
+        """Synchronous LLM call for the Muninn extraction pass."""
+        from ...llm.base import Message, SamplingParams
+        response = self.context.router.chat(
+            [Message.system("Output JSON only. No prose around it."),
+             Message.user(prompt)],
+            SamplingParams(temperature=0.2, max_tokens=500),
+        )
+        if not response.ok or not response.text:
+            raise RuntimeError(response.error or "empty LLM response")
+        return response.text
 
     def _schedule_delayed(self, message: ChatMessage, presence: Presence) -> None:
         """She's busy: the reply lands later, on its own daemon thread.

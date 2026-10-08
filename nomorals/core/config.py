@@ -176,6 +176,10 @@ class MemorySettings:
     extract_llm: bool = False
     #: fuzzy similarity above which a candidate counts as a duplicate
     extract_dedupe_ratio: float = 0.8
+    #: two-tier memory (Khoj pattern, build-map #36): parallel opt-in layer
+    #: alongside MemoryManager — events + distilled facts. OFF by default:
+    #: the existing recall is trusted and stays exactly as it is.
+    two_tier_enabled: bool = False
 
 
 @dataclass
@@ -750,6 +754,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_OPENAI_MODEL": "llm.openai_model",
     "NM_EMBED_PROVIDER": "embedding.provider",
     "NM_EMBED_MODEL": "embedding.model",
+    "NM_MEMORY_TWO_TIER": "memory.two_tier_enabled",
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
