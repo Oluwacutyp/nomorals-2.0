@@ -1916,6 +1916,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_ekiti(command.tail or arg,
                                        chat_key=chat_key)
+        if kind == "course":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_course(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "stt":

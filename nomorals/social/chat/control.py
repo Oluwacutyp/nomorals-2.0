@@ -203,6 +203,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
+    "course": (0, None),      # /course <topic> | waec <subject> | set <field> <value> | build | list | teach <id> | status
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -885,6 +886,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/tutor [guide me] <topic> | /tutor answer <text> | /tutor hint | /tutor status | /tutor stop",
                  "example": "/tutor guide me fractions",
                  "related": "/review"},
+    "course": {"what": "WAEC/JAMB course builder — scoping questions, syllabus-mapped lessons, embedded tutor.",
+                 "usage": "/course <topic> | /course waec <subject> | /course set <field> <value> | /course build | /course list | /course teach <id>",
+                 "example": "/course quadratic equations",
+                 "related": "/tutor"},
     "ekiti": {"what": "Ekiti/Ilawe Ekiti dialect tutoring — conversation, debate, pronunciation, reference audio.",
                  "usage": '/ekiti converse <text> | /ekiti debate <topic> | /ekiti say <text> | /ekiti check "<expected>" | /ekiti tones',
                  "example": "/ekiti debate school",
@@ -1187,7 +1192,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course"]),
     ("money & spending", ["spend", "budget", "spending"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1400,7 +1405,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti"]),
+      "review", "tutor", "ekiti", "course"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",

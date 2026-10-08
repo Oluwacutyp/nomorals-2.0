@@ -291,6 +291,7 @@ class TutorSession:
         expected_answer: str = "",
         source: str = "chat",
         citations: list[str] | None = None,
+        syllabus: Any | None = None,
     ) -> None:
         if mode not in ("socratic", "direct"):
             raise ValueError(f"mode must be 'socratic' or 'direct', got {mode!r}")
@@ -302,6 +303,10 @@ class TutorSession:
         self.expected_answer = expected_answer
         self.source = source
         self.citations = list(citations or [])
+        # Optional WAEC/JAMB syllabus grounding (#48): a SyllabusTopic or a
+        # topic string to resolve. When set, the tutor references the
+        # syllabus code and follows syllabus topic order.
+        self.syllabus = syllabus
         self.skill = (sub_skills or ["general"])[0]
         self.turns = 0
         self._hint_level = 0
@@ -312,17 +317,34 @@ class TutorSession:
     def start(self) -> TutorTurn:
         """Open the session: present the first question (socratic) or the
         teaching (direct)."""
+        # Resolve a syllabus string to a real topic (#48, additive).
+        if isinstance(self.syllabus, str):
+            try:
+                from .curriculum import find_topic
+                found = find_topic(self.syllabus)
+                self.syllabus = found if found is not None else self.syllabus
+            except Exception:  # noqa: BLE001
+                pass
+        code_line = ""
+        if self.syllabus is not None and not isinstance(self.syllabus, str):
+            try:
+                from .curriculum import syllabus_code
+                code_line = f"\n📖 {syllabus_code(self.syllabus)}"
+            except Exception:  # noqa: BLE001
+                pass
         if self.mode == "direct":
             teaching = self._teach_direct()
-            return TutorTurn(feedback="", prompt=teaching, revealed=True,
+            return TutorTurn(feedback="", prompt=teaching + code_line,
+                             revealed=True,
                              mastery=self.mastery.snapshot(),
                              citations=self.citations)
         question = self._first_question()
         self._current_question = question
-        return TutorTurn(feedback=f"Let's work through '{self.topic}' together.",
-                         prompt=self.engine.guard(question, self.expected_answer),
-                         mastery=self.mastery.snapshot(),
-                         citations=self.citations)
+        return TutorTurn(
+            feedback=f"Let's work through '{self.topic}' together.{code_line}",
+            prompt=self.engine.guard(question, self.expected_answer),
+            mastery=self.mastery.snapshot(),
+            citations=self.citations)
 
     def respond(self, student_answer: str) -> TutorTurn:
         """Student answered the current question -> feedback + next prompt."""

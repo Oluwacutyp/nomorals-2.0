@@ -246,6 +246,131 @@ class RuntimeMemoryMixin:
         except Exception as exc:  # noqa: BLE001
             return f"ekiti tutor failed: {exc}"
 
+    def _control_course(self, tail: str, *, chat_key: str = "") -> str:
+        """/course — WAEC/JAMB course builder. Owner-only.
+
+        /course <topic>          start scoping (3 questions first — never
+                                 builds from a bare prompt)
+        /course waec <subject>   browse the syllabus topics for a subject
+        /course set <field> <v>  answer a scoping question (level/depth/start)
+        /course build            storyboard + build the course
+        /course list             saved courses
+        /course teach <id>       start the embedded course tutor
+        /course status           pending scoping state
+        """
+        from ...learn.curriculum import (
+            Course, CourseScope, build_course, clear_pending_scope,
+            courses_dir, find_topic, pending_scope, scoping_prompt,
+            set_pending_scope, subject_topics, syllabus_code,
+        )
+        raw = (tail or "").strip()
+        if not raw:
+            return ("usage: /course <topic> — e.g. /course quadratic equations\n"
+                    "       /course waec physics | /course build | /course list")
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+
+        if verb == "waec":
+            subject = rest.strip()
+            topics = subject_topics(subject)
+            if not topics:
+                return ("unknown subject — try: physics, chemistry, biology, "
+                        "mathematics, english, economics")
+            lines = [f"📖 WAEC {topics[0].subject} syllabus "
+                     f"({len(topics)} topics):"]
+            for t in topics:
+                jamb = " ·JAMB" if t.jamb else ""
+                lines.append(f"  {t.code.split()[-1]} {t.title}{jamb}")
+            return "\n".join(lines)
+
+        if verb == "list":
+            files = sorted(courses_dir().glob("*.json"))
+            if not files:
+                return "no courses yet — /course <topic> to start one."
+            lines = ["📚 saved courses:"]
+            for f in files:
+                c = Course.load(f.stem)
+                if c is not None:
+                    lines.append(f"  {c.id} — {c.title} "
+                                 f"({len(c.lessons)} lessons)")
+            return "\n".join(lines)
+
+        if verb == "status":
+            scope = pending_scope(chat_key)
+            if scope is None:
+                return "no course being scoped — /course <topic> to start."
+            return (f"📚 scoping **{scope.topic}**: level={scope.level}, "
+                    f"depth={scope.depth}, start={scope.start}\n"
+                    f"{scoping_prompt(scope).splitlines()[1]}")
+
+        if verb == "set":
+            scope = pending_scope(chat_key)
+            if scope is None:
+                return "nothing to set — /course <topic> first."
+            field, _, value = rest.partition(" ")
+            field, value = field.strip().lower(), value.strip().lower()
+            if field == "level" and value in ("waec", "jamb", "both"):
+                scope.level = value
+            elif field == "depth" and value in ("quick", "full"):
+                scope.depth = value
+            elif field == "start" and value:
+                scope.start = value
+            elif field == "weeks" and value.isdigit():
+                scope.weeks = max(1, int(value))
+            else:
+                return ("usage: /course set level <waec|jamb|both> | "
+                        "/course set depth <quick|full> | "
+                        "/course set start <code|topic|syllabus order> | "
+                        "/course set weeks <n>")
+            set_pending_scope(chat_key, scope)
+            return f"set {field}={value} for **{scope.topic}**."
+
+        if verb == "build":
+            scope = pending_scope(chat_key)
+            if scope is None:
+                return "nothing to build — /course <topic> first."
+            try:
+                course = build_course(scope)
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:  # noqa: BLE001
+                return f"course build failed: {exc}"
+            course.save()
+            clear_pending_scope(chat_key)
+            lines = [f"✅ **{course.title}** — {len(course.lessons)} lessons:"]
+            for ls in course.lessons[:10]:
+                lines.append(f"  {ls.n}. {ls.title} ({ls.syllabus_code})")
+            if len(course.lessons) > 10:
+                lines.append(f"  …and {len(course.lessons) - 10} more")
+            lines.append(f"\n/course teach {course.id} — start the tutor")
+            return "\n".join(lines)
+
+        if verb == "teach":
+            cid = rest.strip().split()[0] if rest.strip() else ""
+            course = Course.load(cid) if cid else None
+            if course is None:
+                return "unknown course id — /course list to see them."
+            try:
+                from ...learn.curriculum import course_tutor
+                from ...learn.tutor import set_session
+                session = course_tutor(course)
+                set_session(chat_key, session)
+                turn = session.start()
+            except Exception as exc:  # noqa: BLE001
+                return f"couldn't start the course tutor: {exc}"
+            return (f"📚 tutoring from **{course.title}** "
+                    f"(course content only)\n\n{turn.feedback}\n{turn.prompt}")
+
+        # Otherwise: the tail is a topic -> start scoping (never build bare).
+        scope = CourseScope(topic=raw)
+        hit = find_topic(raw)
+        if hit is not None:
+            scope.subject = hit.subject
+        set_pending_scope(chat_key, scope)
+        code_hint = f"\n🔎 matched syllabus: {syllabus_code(hit)}" \
+            if hit is not None else ""
+        return scoping_prompt(scope) + code_hint
+
     def _control_forget(self, tail: str) -> str:
         """Forget by id, or by the best matching description."""
         target = (tail or "").strip()
