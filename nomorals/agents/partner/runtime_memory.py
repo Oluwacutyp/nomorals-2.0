@@ -628,6 +628,18 @@ class RuntimeMemoryMixin:
         from ...audio.overview import control_overview
         return control_overview(tail or "")
 
+    def _control_character(self, tail: str, *, chat_key: str = "") -> str:
+        """Conversational story characters — talk to them. Owner-only.
+
+        /character list — talkable characters
+        /character talk <name> <question> — interview them
+        /character add <name> [book] [--cutoff N] — add a character
+        /character cutoff <name> <chapter> — move their knowledge cutoff
+        /character forget <name> — remove a character
+        """
+        from ...audio.characters import control_character
+        return control_character(tail or "")
+
     def _control_graph(self, tail: str, *, chat_key: str = "") -> str:
         """Live world-graph planning substrate. Owner-only.
 

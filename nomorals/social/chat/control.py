@@ -210,6 +210,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "film": (0, None),        # /film analyze <video> <game> [exercise] | games | fingerprint [game] | list [game] | export <id>
     "audio": (0, None),       # /audio edit <file> [lang] | fillers <file> [lang] | enhance <file>
     "overview": (0, None),    # /overview make <format> [lang] <Title :: text ;; ...> | list | ask <q> | voices
+    "character": (0, None),   # /character talk <name> <question> | list | add <name> [book] | cutoff <name> <N>
     "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
     "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
     "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
@@ -1017,6 +1018,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/overview make <deep-dive|debate|brief> [lang] <Title :: text ;; Title2 :: text2> | /overview list | /overview ask <question> | /overview voices",
               "example": "/overview make deep-dive yo-ekiti \"Lagos rents :: notes here\"",
               "related": "/audio"},
+    "character": {"what": "Conversational story characters — interview the people in your books, in character, with a hard knowledge cutoff. Spoiler discipline: the character only knows up to their chapter cutoff, enforced in the system prompt.",
+              "usage": "/character list | /character talk <name> <question> | /character add <name> [book] [--cutoff N] | /character cutoff <name> <chapter> | /character forget <name>",
+              "example": "/character talk Renfield what do you want most?",
+              "related": "/overview"},
     "graph": {"what": "Live world-graph planning substrate — people, projects, commitments, flights and deadlines as nodes with depends_on/blocks edges. Disruptions propagate: cancel a flight and every dependent meeting gets flagged.",
               "usage": "/graph add <type> <label> | /graph link <from-id> <to-id> <type> | /graph disrupt <id> [note] | /graph show [id] | /graph breaks <id> | /graph path | /graph sync",
               "example": "/graph add schedule \"Lagos flight 14:00\"",
@@ -1627,7 +1632,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
       "deliver"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "hub", "podcast", "zip", "audio", "overview"]),
+     ["music", "play", "video", "hub", "podcast", "zip", "audio", "overview", "character"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
@@ -1765,6 +1770,7 @@ LIST_ONELINERS: dict[str, str] = {
     "valuepick": "refine a value estimate from picked comparables",
     "audio": "transcript-as-timeline audio editing (owner only)",
     "overview": "interactive audio overviews — the podcast you can talk to (owner only)",
+    "character": "conversational story characters — talk to them in character (owner only)",
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
     "send": "self-hosted send layer — campaigns, queue, bounce handling (owner only)",

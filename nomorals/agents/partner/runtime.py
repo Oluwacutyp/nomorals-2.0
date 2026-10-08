@@ -2476,6 +2476,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_overview(command.tail or arg,
                                           chat_key=chat_key)
+        if kind == "character":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_character(command.tail or arg,
+                                           chat_key=chat_key)
         if kind == "graph":
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
