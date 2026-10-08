@@ -255,6 +255,27 @@ class TaskRouter:
         except Exception:  # noqa: BLE001
             return "", complexity
 
+    # ── Jev: the cheap decision classifier (build-map #18 extension) ──
+    def jev_decide(self, prompt: str) -> dict[str, Any]:
+        """Deliberate Jev consult: classify/route/moderate before any brain spend.
+
+        Hercules "Jev" pattern — the cheap decision classifier is a *named
+        primitive*, explicitly separate from the main brain (zero LLM calls
+        inside).  Callers reach for it deliberately instead of asking the
+        big model "what kind of request is this?".  Never raises.
+        """
+        try:
+            from .jev import jev
+            return jev.decide(prompt).to_dict()
+        except Exception:  # noqa: BLE001 — Jev must never break routing
+            _log.debug("jev_decide failed; defaulting", exc_info=True)
+            return {
+                "classification": {"kind": "chat", "complexity": "medium"},
+                "route": {"task_type": "chat", "handler": "chat"},
+                "moderation": {"level": "safe", "reasons": []},
+                "elapsed_ms": 0.0,
+            }
+
     # ── routing ──────────────────────────────────────────────────────────────
     @staticmethod
     def _to_messages(messages: list[Any]) -> list[Any]:
