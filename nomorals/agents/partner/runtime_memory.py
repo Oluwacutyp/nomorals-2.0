@@ -626,6 +626,22 @@ class RuntimeMemoryMixin:
             self._world_graph = g
         return control_graph(tail or "", graph=g)
 
+    def _control_route(self, tail: str, *, chat_key: str = "") -> str:
+        """Predict → Build → Solve routing pipeline. Owner-only.
+
+        /route plan <stop1>; <stop2>; ... — optimal order + honest times
+        /route add <label> [lat,lng] — save a stop
+        /route stops — list saved stops
+        /route record <from> > <to> <minutes> [cost_kobo] — teach the model
+        /route stats — what the cost model has learned
+        """
+        from ...planning.route import RoutePlanner, control_route
+        p = getattr(self, "_route_planner", None)
+        if p is None:
+            p = RoutePlanner()
+            self._route_planner = p
+        return control_route(tail or "", planner=p)
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 

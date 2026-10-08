@@ -209,6 +209,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "form": (0, None),        # /form analyze <video> <exercise> | gait <video> | movements | apply <id>
     "film": (0, None),        # /film analyze <video> <game> [exercise] | games | fingerprint [game] | list [game] | export <id>
     "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
+    "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -995,6 +996,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/graph add <type> <label> | /graph link <from-id> <to-id> <type> | /graph disrupt <id> [note] | /graph show [id] | /graph breaks <id> | /graph path | /graph sync",
               "example": "/graph add schedule \"Lagos flight 14:00\"",
               "related": "/routine"},
+    "route": {"what": "Predict → Build → Solve routing — \"I need to do these 5 things this afternoon\" → optimal order with honest arrival times. The cost model learns from your recorded trips.",
+              "usage": "/route plan <stop1>; <stop2>; ... | /route add <label> [lat,lng] | /route stops | /route record <from> > <to> <min> [kobo] | /route stats",
+              "example": "/route plan home; market; bank",
+              "related": "/graph"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1327,7 +1332,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1540,7 +1545,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph"]),
+      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
