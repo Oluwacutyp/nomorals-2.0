@@ -607,6 +607,16 @@ class RuntimeMemoryMixin:
             self._fingerprint_store = fps
         return control_film(tail or "", store=store, fingerprints=fps)
 
+    def _control_audio(self, tail: str, *, chat_key: str = "") -> str:
+        """Transcript-as-timeline audio editing. Owner-only.
+
+        /audio edit <file> [lang] — transcribe with word timings
+        /audio fillers <file> [lang] — cut filler words
+        /audio enhance <file> — denoise before transcribing
+        """
+        from ...audio.edit import control_audio
+        return control_audio(tail or "")
+
     def _control_graph(self, tail: str, *, chat_key: str = "") -> str:
         """Live world-graph planning substrate. Owner-only.
 

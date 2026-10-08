@@ -2466,6 +2466,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_film(command.tail or arg,
                                       chat_key=chat_key)
+        if kind == "audio":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_audio(command.tail or arg,
+                                       chat_key=chat_key)
         if kind == "graph":
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."

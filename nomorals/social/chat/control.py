@@ -208,6 +208,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "train": (0, None),       # /train plan <goal> [equipment] [weeks] | today | readiness | log [completed|skipped] [rpe] | list
     "form": (0, None),        # /form analyze <video> <exercise> | gait <video> | movements | apply <id>
     "film": (0, None),        # /film analyze <video> <game> [exercise] | games | fingerprint [game] | list [game] | export <id>
+    "audio": (0, None),       # /audio edit <file> [lang] | fillers <file> [lang] | enhance <file>
     "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
     "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
     "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
@@ -1007,6 +1008,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/film analyze <video> <game> [exercise] | /film games | /film fingerprint [game] | /film list [game] | /film export <id>",
               "example": "/film analyze /tmp/match.mp4 valorant",
               "related": "/form"},
+    "audio": {"what": "Transcript-as-timeline audio editing — transcribe any voice note/meeting with word timings, then edit the text: deletions cut, rewrites re-speak in the speaker's cloned voice.",
+              "usage": "/audio edit <file> [lang] | /audio fillers <file> [lang] | /audio enhance <file>",
+              "example": "/audio fillers /tmp/voice_note.m4a",
+              "related": "/podcast"},
     "graph": {"what": "Live world-graph planning substrate — people, projects, commitments, flights and deadlines as nodes with depends_on/blocks edges. Disruptions propagate: cancel a flight and every dependent meeting gets flagged.",
               "usage": "/graph add <type> <label> | /graph link <from-id> <to-id> <type> | /graph disrupt <id> [note] | /graph show [id] | /graph breaks <id> | /graph path | /graph sync",
               "example": "/graph add schedule \"Lagos flight 14:00\"",
@@ -1617,7 +1622,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
       "deliver"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "hub", "podcast", "zip"]),
+     ["music", "play", "video", "hub", "podcast", "zip", "audio"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion"]),
@@ -1753,6 +1758,7 @@ LIST_ONELINERS: dict[str, str] = {
     "truecost": "true rental move-in cost from listing text (owner only)",
     "value": "DIY property valuation — value range with confidence band + comparables",
     "valuepick": "refine a value estimate from picked comparables",
+    "audio": "transcript-as-timeline audio editing (owner only)",
     "watch": "persistent match alerts — saved listing searches",
     "aeo": "AEO/GEO visibility tracking — share of answer (owner only)",
     "send": "self-hosted send layer — campaigns, queue, bounce handling (owner only)",
