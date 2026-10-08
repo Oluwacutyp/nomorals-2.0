@@ -564,3 +564,478 @@ _HELP = ("/miniapp — group mini-apps (polls, shared expenses, RSVPs)\n"
          "/miniapp expense <id> <amount> <what> [for name1,name2]\n"
          "/miniapp settle <id> <from> <to> <amount>\n"
          "/miniapp rsvp <id> yes|no|maybe   •   /miniapp nudge <id>")
+
+
+# ── Panels (Hark pattern): persistent, connector-backed mini-apps ──────────
+#
+# A Panel is a user-described mini-app wired to LIVE data:
+#   "track my marathon training" → Panel(data_source="strava")
+# Panels persist (not one-shot), refresh from their connector on a cadence,
+# and answer questions in chat: "how's my marathon training going?"
+#
+# Data fetching goes through an injectable ``fetcher`` seam
+# (``fetcher(connector_id) -> dict``) so tests and the chat layer can supply
+# mock or real connectors. The default fetcher is honest: it reports that
+# no live connector is wired rather than fabricating data.
+
+
+_PANEL_DIR = Path.home() / ".devon" / "community" / "panels"
+
+#: refresh cadences (seconds)
+_PANEL_CADENCES = {"hourly": 3600, "daily": 86400, "weekly": 604800, "manual": 0}
+
+
+@dataclass
+class Panel:
+    """A persistent, connector-backed mini-app.
+
+    ``data_source`` names a connector id (e.g. ``"strava"``, ``"mono"``).
+    ``data`` is the last fetched snapshot; ``last_refresh`` its timestamp.
+    """
+
+    id: str
+    name: str
+    user_key: str  # owner-scoped: "owner" or a community member id
+    data_source: str
+    description: str = ""  # the user's own words: "track my marathon training"
+    query_template: str = ""  # optional hint for how to read the data
+    refresh_cadence: str = "daily"  # hourly | daily | weekly | manual
+    last_refresh: float = 0.0
+    data: dict[str, Any] = field(default_factory=dict)
+    created_ts: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Panel":
+        return cls(
+            id=str(data.get("id", "")),
+            name=str(data.get("name", "")),
+            user_key=str(data.get("user_key", "owner")),
+            data_source=str(data.get("data_source", "")),
+            description=str(data.get("description", "")),
+            query_template=str(data.get("query_template", "")),
+            refresh_cadence=str(data.get("refresh_cadence", "daily")),
+            last_refresh=float(data.get("last_refresh") or 0.0),
+            data=dict(data.get("data") or {}),
+            created_ts=float(data.get("created_ts") or 0.0),
+        )
+
+    def needs_refresh(self) -> bool:
+        """True when the cadence says it's time for fresh data."""
+        try:
+            cadence = _PANEL_CADENCES.get(self.refresh_cadence, 86400)
+            if not cadence:
+                return False  # manual
+            return (time.time() - self.last_refresh) >= cadence
+        except Exception:  # noqa: BLE001 — never raises
+            return False
+
+    def age_str(self) -> str:
+        """Human age of the current snapshot."""
+        try:
+            if not self.last_refresh:
+                return "never refreshed"
+            age = time.time() - self.last_refresh
+            if age < 90:
+                return "just now"
+            if age < 3600:
+                return f"{int(age // 60)}m ago"
+            if age < 86400:
+                return f"{int(age // 3600)}h ago"
+            return f"{int(age // 86400)}d ago"
+        except Exception:  # noqa: BLE001
+            return "unknown"
+
+
+class PanelStore:
+    """Owner-scoped JSON persistence. Files only — never raises."""
+
+    def __init__(self, data_dir: Path | str | None = None) -> None:
+        self.data_dir = Path(data_dir) if data_dir else _PANEL_DIR
+
+    def _path(self, user_key: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", user_key).strip("_") or "owner"
+        return self.data_dir / f"{safe}.json"
+
+    def load(self, user_key: str) -> list[Panel]:
+        """All panels for a user. Malformed file → empty list, never raises."""
+        try:
+            raw = json.loads(self._path(user_key).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        panels: list[Panel] = []
+        for item in raw if isinstance(raw, list) else []:
+            try:
+                panel = Panel.from_dict(item)
+                if panel.id and panel.name:
+                    panels.append(panel)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return panels
+
+    def save(self, user_key: str, panels: list[Panel]) -> None:
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._path(user_key).with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps([p.to_dict() for p in panels], ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            tmp.replace(self._path(user_key))
+        except OSError as exc:
+            _log.warning("panel save failed for %s: %s", user_key, exc)
+
+    def get(self, user_key: str, panel_id: str) -> Panel | None:
+        for panel in self.load(user_key):
+            if panel.id == panel_id or panel.id.startswith(panel_id):
+                return panel
+        return None
+
+    def find_by_name(self, user_key: str, name: str) -> Panel | None:
+        needle = (name or "").strip().lower()
+        for panel in self.load(user_key):
+            if panel.name.lower() == needle or needle in panel.name.lower():
+                return panel
+        return None
+
+    def put(self, panel: Panel) -> None:
+        panels = [p for p in self.load(panel.user_key) if p.id != panel.id]
+        panels.append(panel)
+        self.save(panel.user_key, panels)
+
+    def remove(self, user_key: str, panel_id: str) -> bool:
+        panels = self.load(user_key)
+        kept = [p for p in panels if not (p.id == panel_id or p.id.startswith(panel_id))]
+        if len(kept) == len(panels):
+            return False
+        self.save(user_key, kept)
+        return True
+
+
+# ── creation ───────────────────────────────────────────────────────────────
+
+
+def create_panel(
+    name: str,
+    user_key: str,
+    data_source: str,
+    description: str = "",
+    *,
+    refresh_cadence: str = "daily",
+    query_template: str = "",
+    store: PanelStore | None = None,
+) -> Panel:
+    """Create a persistent panel. Never raises — returns the panel."""
+    try:
+        name = (name or "").strip()[:80] or "Untitled panel"
+        user_key = (user_key or "owner").strip() or "owner"
+        data_source = (data_source or "").strip().lower() or "manual"
+        cadence = refresh_cadence if refresh_cadence in _PANEL_CADENCES else "daily"
+        panel = Panel(
+            id="panel_" + new_short_id(),
+            name=name,
+            user_key=user_key,
+            data_source=data_source,
+            description=(description or "").strip()[:300],
+            query_template=(query_template or "").strip()[:300],
+            refresh_cadence=cadence,
+            created_ts=time.time(),
+        )
+        (store or PanelStore()).put(panel)
+        return panel
+    except Exception:  # noqa: BLE001 — never raises
+        return Panel(
+            id="panel_" + new_short_id(),
+            name="Untitled panel",
+            user_key="owner",
+            data_source="manual",
+            created_ts=time.time(),
+        )
+
+
+# ── live refresh ───────────────────────────────────────────────────────────
+
+
+def _default_fetcher(connector_id: str) -> dict[str, Any]:
+    """Honest default: no live connector wired — say so, don't fabricate."""
+    return {
+        "_error": (
+            f"no live connector wired for {connector_id!r} — "
+            "wire a fetcher or connect the account first"
+        )
+    }
+
+
+def refresh_panel(
+    panel_id: str,
+    user_key: str = "owner",
+    *,
+    fetcher: Any = None,
+    store: PanelStore | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Pull live data for a panel. Returns {"ok", "panel"|"reason"}.
+
+    ``fetcher`` is ``fetcher(connector_id) -> dict`` — inject a mock in
+    tests or the real connector adapter in production. Never raises.
+    """
+    try:
+        st = store or PanelStore()
+        panel = st.get(user_key, panel_id)
+        if panel is None:
+            return {"ok": False, "reason": f"no panel {panel_id!r}"}
+        if not force and not panel.needs_refresh() and panel.data:
+            return {"ok": True, "panel": panel, "cached": True}
+        fetch = fetcher or _default_fetcher
+        try:
+            data = fetch(panel.data_source)
+        except Exception as exc:  # noqa: BLE001 — fetcher failure is data
+            data = {"_error": f"fetch failed: {exc}"}
+        if not isinstance(data, dict):
+            data = {"_error": "fetcher returned non-dict", "value": str(data)[:200]}
+        panel.data = data
+        panel.last_refresh = time.time()
+        st.put(panel)
+        return {"ok": True, "panel": panel, "cached": False}
+    except Exception as exc:  # noqa: BLE001 — never raises
+        return {"ok": False, "reason": f"refresh failed: {exc}"}
+
+
+# ── Q&A over panel data ────────────────────────────────────────────────────
+
+
+def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Flatten nested dicts/lists to dotted key paths for keyword matching."""
+    flat: dict[str, Any] = {}
+    try:
+        for key, value in data.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                flat.update(_flatten(value, path))
+            elif isinstance(value, (list, tuple)):
+                flat[path] = value
+                for i, item in enumerate(value[:10]):
+                    if isinstance(item, dict):
+                        flat.update(_flatten(item, f"{path}[{i}]"))
+                    else:
+                        flat[f"{path}[{i}]"] = item
+            else:
+                flat[path] = value
+    except Exception:  # noqa: BLE001
+        pass
+    return flat
+
+
+def _fmt_value(value: Any) -> str:
+    try:
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if isinstance(value, float):
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        if isinstance(value, int):
+            return f"{value:,}"
+        if isinstance(value, (list, tuple)):
+            return f"{len(value)} items"
+        return str(value)[:120]
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+_SUMMARY_WORDS = {"summary", "overview", "how", "going", "status", "report", "all", "everything"}
+
+
+def ask_panel(
+    panel_id: str,
+    question: str,
+    user_key: str = "owner",
+    *,
+    store: PanelStore | None = None,
+) -> dict[str, Any]:
+    """Answer a question from a panel's data. Returns {"ok", "answer"|"reason"}.
+
+    Keyword-matches the question against flattened data keys; falls back
+    to a summary of the snapshot. Never raises.
+    """
+    try:
+        st = store or PanelStore()
+        panel = st.get(user_key, panel_id)
+        if panel is None:
+            return {"ok": False, "reason": f"no panel {panel_id!r}"}
+        question = (question or "").strip()
+        if not question:
+            return {"ok": False, "reason": "ask me something about the panel"}
+        data = panel.data or {}
+        if data.get("_error"):
+            return {
+                "ok": True,
+                "answer": (
+                    f"⚠️ {panel.name}: {data['_error']}\n"
+                    f"Refresh with `/panel refresh {panel.id}` once it's wired up."
+                ),
+            }
+        if not data:
+            return {
+                "ok": True,
+                "answer": (
+                    f"📊 {panel.name} has no data yet — "
+                    f"run `/panel refresh {panel.id}` first."
+                ),
+            }
+        flat = _flatten(data)
+        words = set(re.findall(r"[a-z]{3,}", question.lower()))
+        # summary-style questions → overview of the snapshot
+        if words & _SUMMARY_WORDS and len(words - _SUMMARY_WORDS) < 3:
+            lines = [f"📊 {panel.name} — updated {panel.age_str()}"]
+            for path, value in list(flat.items())[:12]:
+                if isinstance(value, (dict, list)):
+                    continue
+                label = path.replace("_", " ").replace(".", " › ")
+                lines.append(f"• {label}: {_fmt_value(value)}")
+            if panel.query_template:
+                lines.append(f"\n_{panel.query_template}_")
+            return {"ok": True, "answer": "\n".join(lines)}
+        # keyword match: score each key path by word overlap
+        scored: list[tuple[int, str, Any]] = []
+        for path, value in flat.items():
+            if isinstance(value, (dict, list)) or value is None:
+                continue
+            key_words = set(re.findall(r"[a-z]{3,}", path.lower().replace("_", " ")))
+            overlap = len(words & key_words)
+            if overlap:
+                scored.append((overlap, path, value))
+        scored.sort(key=lambda t: -t[0])
+        if not scored:
+            keys = ", ".join(sorted(set(
+                re.findall(r"[a-z]{3,}", " ".join(flat.keys()).lower())
+            ))[:15])
+            return {
+                "ok": True,
+                "answer": (
+                    f"🤔 Nothing in {panel.name} matched {question!r}.\n"
+                    f"I track: {keys or '—'}.\n"
+                    f"Try `/panel ask {panel.id} summary`."
+                ),
+            }
+        lines = [f"📊 {panel.name} — {_fmt_value(v)}" for _, path, v in scored[:1]]
+        for _, path, value in scored[1:6]:
+            label = path.replace("_", " ").replace(".", " › ")
+            lines.append(f"• {label}: {_fmt_value(value)}")
+        lines.append(f"\n_updated {panel.age_str()}_")
+        return {"ok": True, "answer": "\n".join(lines)}
+    except Exception as exc:  # noqa: BLE001 — never raises
+        return {"ok": False, "reason": f"ask failed: {exc}"}
+
+
+def render_panel(panel: Panel) -> str:
+    """Chat render of a panel."""
+    try:
+        lines = [
+            f"📊 {panel.name}",
+            f"  source: {panel.data_source} · refresh: {panel.refresh_cadence} "
+            f"· updated {panel.age_str()}",
+        ]
+        if panel.description:
+            lines.append(f"  _{panel.description[:120]}_")
+        data = panel.data or {}
+        if data.get("_error"):
+            lines.append(f"  ⚠️ {str(data['_error'])[:120]}")
+        else:
+            shown = 0
+            for path, value in _flatten(data).items():
+                if isinstance(value, (dict, list)) or value is None or shown >= 6:
+                    continue
+                label = path.replace("_", " ").replace(".", " › ")
+                lines.append(f"  • {label}: {_fmt_value(value)}")
+                shown += 1
+            if not shown:
+                lines.append("  _(no data yet — /panel refresh)_")
+        lines.append(f"\n`/panel ask {panel.id} <question>` · `/panel refresh {panel.id}`")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return f"📊 {panel.name}"
+
+
+# ── chat ───────────────────────────────────────────────────────────────────
+
+
+_PANEL_HELP = (
+    "/panel — persistent live-data panels (Hark pattern)\n"
+    "/panel new \"<name>\" <connector> [hourly|daily|weekly|manual] — create\n"
+    "/panel list   •   /panel show <id>   •   /panel rm <id>\n"
+    "/panel refresh <id>   •   /panel ask <id> <question>"
+)
+
+
+def control_panel(
+    text: str,
+    user_id: str = "owner",
+    user_name: str = "",
+    *,
+    store: PanelStore | None = None,
+    fetcher: Any = None,
+) -> str:
+    """Chat entry point for panels. Never raises."""
+    try:
+        st = store or PanelStore()
+        parts = (text or "").strip().split(None, 2)
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        rest = parts[2] if len(parts) > 2 else ""
+
+        if sub in ("new", "create"):
+            # /panel new "Marathon training" strava daily
+            m = re.match(r'"([^"]+)"\s+(\S+)(?:\s+(hourly|daily|weekly|manual))?', rest)
+            if not m:
+                m2 = re.match(r"(\S+)\s+(\S+)(?:\s+(hourly|daily|weekly|manual))?", rest)
+                name, source, cadence = (m2.groups() if m2 else (None, None, None))
+            else:
+                name, source, cadence = m.groups()
+            if not name or not source:
+                return "Usage: /panel new \"<name>\" <connector> [hourly|daily|weekly|manual]"
+            panel = create_panel(
+                name, user_id, source,
+                refresh_cadence=cadence or "daily", store=st,
+            )
+            return f"✅ Panel created:\n\n{render_panel(panel)}"
+
+        if sub == "list":
+            panels = st.load(user_id)
+            if not panels:
+                return "No panels yet. Create one: /panel new \"<name>\" <connector>"
+            lines = ["📊 Your panels:"]
+            for p in panels:
+                lines.append(f"• {p.name} ({p.data_source}, {p.refresh_cadence}) — `{p.id}`")
+            return "\n".join(lines)
+
+        if sub in ("show", "refresh", "rm", "delete", "ask"):
+            pid = rest.split(None, 1)[0] if rest else ""
+            if not pid:
+                return f"Usage: /panel {sub} <id> [question]"
+            if sub == "show":
+                panel = st.get(user_id, pid)
+                return render_panel(panel) if panel else f"No panel {pid!r}."
+            if sub in ("rm", "delete"):
+                ok = st.remove(user_id, pid)
+                return "🗑️ Panel deleted." if ok else f"No panel {pid!r}."
+            if sub == "refresh":
+                result = refresh_panel(pid, user_id, fetcher=fetcher, store=st, force=True)
+                if not result["ok"]:
+                    return f"⚠️ {result['reason']}"
+                panel = result["panel"]
+                note = " (cached)" if result.get("cached") else ""
+                return f"🔄 Refreshed{note}:\n\n{render_panel(panel)}"
+            # ask
+            question = rest.split(None, 1)[1] if len(rest.split(None, 1)) > 1 else ""
+            # resolve by name too: /panel ask marathon how's it going?
+            panel = st.get(user_id, pid) or st.find_by_name(user_id, pid)
+            if panel is None:
+                return f"No panel {pid!r}."
+            if not question:
+                return f"Usage: /panel ask {pid} <question>"
+            result = ask_panel(panel.id, question, user_id, store=st)
+            return result.get("answer", result.get("reason", "?"))
+
+        return f"Unknown /panel subcommand {sub!r}.\n\n{_PANEL_HELP}"
+    except Exception as exc:  # noqa: BLE001 — never raises
+        return f"⚠️ panel error: {exc}"

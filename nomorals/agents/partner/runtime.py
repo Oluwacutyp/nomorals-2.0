@@ -2023,6 +2023,16 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "panel":
+            # Persistent live-data panels — owner's personal data, owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...community.miniapps import control_panel
+            return control_panel(
+                command.tail or arg,
+                user_id="owner",
+                user_name=getattr(message, "sender", "") if message else "",
+            )
         if kind == "contract":
             # Contract risk review — owner's private documents, owner-only.
             if message is not None and not self._is_operator(message):

@@ -246,6 +246,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "budget": (1, None),     # /budget set <category> <amount> | /budget list
     "spending": (0, 1),      # /spending [week|month] — summary vs budgets
     "miniapp": (0, None),      # /miniapp … — group mini-apps (poll/expenses/rsvp)
+    "panel": (0, None),        # /panel … — persistent live-data panels (Hark pattern)
     "gtrip": (0, None),        # /gtrip … — group-travel stack (polls, expenses, legs)
     "contract": (0, None),     # /contract review [type] <text> | types — letter-grade contract risk review (Nigerian playbooks)
     "legal": (0, None),        # /legal [language] <question> — plain-language legal information (EN/PCM/YO/HA/IG)
@@ -650,6 +651,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/miniapp new <poll|expenses|rsvp> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe",
                 "example": "/miniapp new poll \"Best day?\" Mon Tue Wed",
                 "related": "/game"},
+    "panel": {"what": "persistent live-data panels: user-described mini-apps wired to connectors (fitness, finance, …). Panels refresh on a cadence and answer questions in chat — \"how's my marathon training going?\".",
+                "usage": "/panel new \"<name>\" <connector> [hourly|daily|weekly|manual] | /panel list | /panel show <id> | /panel refresh <id> | /panel ask <id> <question> | /panel rm <id>",
+                "example": "/panel new \"Marathon training\" strava daily",
+                "related": "/miniapp"},
     "gtrip": {"what": "group-travel stack: polls with deadlines, shared expenses with minimized settle-up, per-person budgets, per-traveler flight legs, proposals vs agreed items, merged itinerary. Group chats only — state is group-scoped and isolated from my private memory.",
                 "usage": "/gtrip new <name> | /gtrip poll <q> | <opt1> | <opt2> [deadline 2h] | /gtrip vote <id> <opt> | /gtrip expense <amount> <what> [for <m1,m2>] | /gtrip settle | /gtrip leg <flight> | /gtrip propose <idea> | /gtrip agree <id> | /gtrip itinerary",
                 "example": "/gtrip poll where should we eat? | suya spot | pizza place",
@@ -1457,7 +1462,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1667,7 +1672,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1802,6 +1807,7 @@ LIST_ONELINERS: dict[str, str] = {
     "redteam": "attack my own loop in a sandbox and report the holes",
     "predict": "prediction pit — call a d100 roll, win 2x (unlock: beat challenges)",
     "miniapp": "group mini-apps: polls, shared expenses, RSVPs",
+    "panel": "persistent live-data panels: track fitness, finance, … and ask questions",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",
