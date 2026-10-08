@@ -171,9 +171,9 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "fs_delete",
-        description="Delete a file or directory inside the workspace. Requires confirmation.",
+        description="Delete a file or directory inside the workspace. Requires fingerprint approval.",
         capability=Capability.FS_DELETE,
-        confirm=True,
+        confirm="biometric",
     )
     def fs_delete(path: str, *, recursive: bool = False) -> dict[str, Any]:
         target = safe_path(context, path, must_exist=True)

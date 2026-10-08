@@ -37,7 +37,9 @@ class ToolSpec:
     description: str = ""
     capability: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
-    confirm: bool = False
+    # Confirmation level: False = none, True = text confirmation token,
+    # "biometric" = fingerprint approval (above True).
+    confirm: bool | str = False
     kind: str = "io"
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -74,7 +76,7 @@ class ToolRegistry:
         description: str = "",
         capability: str = "",
         parameters: dict[str, Any] | None = None,
-        confirm: bool = False,
+        confirm: bool | str = False,
         kind: str = "io",
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
@@ -390,6 +392,46 @@ class ToolRegistry:
         with ThreadPoolExecutor(max_workers=max_workers,
                                 thread_name_prefix="tool-call") as pool:
             return list(pool.map(_one, calls))
+
+    def request_approval(
+        self,
+        name: str,
+        *,
+        actor: str = "",
+        title: str = "",
+        timeout_s: float = 60.0,
+    ) -> str | None:
+        """Mint a confirmation token for a sensitive tool via fingerprint.
+
+        Uses the biometric path when the tool requires it — either declared
+        (``spec.confirm == "biometric"``) or via the policy (the capability
+        is in :attr:`Capability.BIOMETRIC` or a ``biometric`` rule matches).
+        Returns None when no biometric is required (the text-confirm flow
+        owns plain confirmations), when the tool is unknown, when no policy
+        is attached, or on any failure. Never raises and never prompts on
+        its own: callers invoke this explicitly from an interactive context
+        only — ``call()`` itself never blocks on a fingerprint dialog.
+        """
+        try:
+            spec = self._tools.get(name)
+            if spec is None:
+                return None
+            policy = getattr(self.context, "policy", None) if self.context else None
+            biometric_required = spec.confirm == "biometric"
+            if not biometric_required and policy is not None and spec.capability:
+                biometric_required = policy.requires_biometric(spec.capability)
+            if not biometric_required or policy is None:
+                return None
+            from ..core.policy import approve_with_biometric
+
+            return approve_with_biometric(
+                policy,
+                spec.capability,
+                title=title or f"approve {name}",
+                timeout_s=timeout_s,
+            )
+        except Exception:  # noqa: BLE001 - approval must never raise
+            return None
 
     # ── auditing ─────────────────────────────────────────────────────────────
     def _audit(

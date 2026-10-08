@@ -30,12 +30,18 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from .logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
+    "AUDIT_BIOMETRIC",
     "AUDIT_DENY",
     "Capability",
     "CapabilitySet",
     "Policy",
     "PolicyDecision",
+    "approve_with_biometric",
 ]
 
 
@@ -93,6 +99,12 @@ class Capability:
     CONFIRMABLE: frozenset[str] = frozenset(
         {FS_DELETE, EXEC_INSTALL, DB_ADMIN, SOCIAL_DM, SOCIAL_BULK, SYS_SHUTDOWN}
     )
+
+    #: Capabilities that require *biometric* (fingerprint) approval on top of
+    #: the confirmation token. A subset of the irreversible ones: the token
+    #: for these must be minted through the fingerprint prompt
+    #: (:func:`approve_with_biometric`), never through the text flow.
+    BIOMETRIC: frozenset[str] = frozenset({FS_DELETE, DB_ADMIN, SYS_SHUTDOWN})
 
 
 #: Preset grants. Roles pick one; operators can widen or narrow it.
@@ -261,6 +273,7 @@ def _expand(patterns: Iterable[str]) -> set[str]:
 AUDIT_ALLOW = "allow"
 AUDIT_DENY = "deny"
 AUDIT_CONFIRM = "confirm"
+AUDIT_BIOMETRIC = "biometric"
 
 
 @dataclass
@@ -272,6 +285,7 @@ class PolicyDecision:
     capability: str = ""
     actor: str = ""
     needs_confirmation: bool = False
+    needs_biometric: bool = False
     audit_id: str = ""
 
     def __bool__(self) -> bool:
@@ -294,6 +308,7 @@ class PolicyDecision:
             "capability": self.capability,
             "actor": self.actor,
             "needs_confirmation": self.needs_confirmation,
+            "needs_biometric": self.needs_biometric,
             "audit_id": self.audit_id,
         }
 
@@ -301,7 +316,7 @@ class PolicyDecision:
 @dataclass
 class _Rule:
     capability: str
-    effect: str  # allow | deny | confirm
+    effect: str  # allow | deny | confirm | biometric
     note: str = ""
     priority: int = 0
 
@@ -311,7 +326,9 @@ class Policy:
 
     Evaluation order:
       1. explicit ``deny`` rules
-      2. ``confirm`` rules → require a valid confirmation token
+      2. ``biometric`` / ``confirm`` rules → require a valid confirmation token
+         (biometric rules additionally require the token to be minted through
+         the fingerprint prompt)
       3. explicit ``allow`` rules
       4. the actor's :class:`CapabilitySet`
       5. default deny
@@ -335,7 +352,7 @@ class Policy:
         self._audit_limit = 2000
         self._lock = threading.RLock()
         self._clock = clock or _DefaultClock()
-        self._counts = {"allow": 0, "deny": 0, "confirm": 0}
+        self._counts = {"allow": 0, "deny": 0, "confirm": 0, "biometric": 0}
 
     # -- rule management -----------------------------------------------------
     def allow(self, capability: str, *, note: str = "", priority: int = 10) -> Policy:
@@ -346,6 +363,11 @@ class Policy:
 
     def confirm(self, capability: str, *, note: str = "", priority: int = 50) -> Policy:
         return self._add(_Rule(capability, "confirm", note, priority))
+
+    def biometric(self, capability: str, *, note: str = "", priority: int = 60) -> Policy:
+        """Gate on fingerprint approval: the confirmation token for this
+        capability must be minted through :func:`approve_with_biometric`."""
+        return self._add(_Rule(capability, "biometric", note, priority))
 
     def _add(self, rule: _Rule) -> Policy:
         with self._lock:
@@ -395,6 +417,30 @@ class Policy:
             }
             return len(self._confirmations)
 
+    def requires_biometric(self, capability: str) -> bool:
+        """True when this capability needs fingerprint approval.
+
+        Mirrors :meth:`check`'s rule evaluation without recording an audit
+        entry: the first matching rule decides (``biometric`` → True,
+        ``deny`` → False since the action is refused outright); otherwise
+        the :attr:`Capability.BIOMETRIC` set applies. Never raises.
+        """
+        try:
+            with self._lock:
+                for rule in self._rules:
+                    if not fnmatch.fnmatchcase(capability, rule.capability):
+                        continue
+                    if rule.effect == "deny":
+                        return False
+                    if rule.effect == "biometric":
+                        return True
+                    # confirm/allow: rule settled the level; the BIOMETRIC
+                    # set still applies on top, same as in check().
+                    break
+            return capability in Capability.BIOMETRIC
+        except Exception:  # noqa: BLE001 - fail closed on evaluation errors
+            return True
+
     # -- evaluation ----------------------------------------------------------
     def check(
         self,
@@ -409,6 +455,7 @@ class Policy:
         effective = grant if grant is not None else self.default_grant
         reason = ""
         needs_confirm = False
+        needs_biometric = False
 
         with self._lock:
             for rule in self._rules:
@@ -423,6 +470,11 @@ class Policy:
                     )
                     self._record(AUDIT_DENY, decision, context)
                     return decision
+                if rule.effect == "biometric":
+                    needs_confirm = True
+                    needs_biometric = True
+                    reason = rule.note or f"requires biometric approval: {rule.capability}"
+                    break
                 if rule.effect == "confirm":
                     needs_confirm = True
                     reason = rule.note or f"requires confirmation: {rule.capability}"
@@ -432,6 +484,7 @@ class Policy:
 
         granted = effective.grants(capability)
         confirmable = needs_confirm or capability in Capability.CONFIRMABLE
+        biometric_required = needs_biometric or capability in Capability.BIOMETRIC
 
         if not self.enforce:
             decision = PolicyDecision(
@@ -463,8 +516,13 @@ class Policy:
                 capability=capability,
                 actor=actor,
                 needs_confirmation=True,
+                needs_biometric=biometric_required,
             )
-            self._record(AUDIT_CONFIRM, decision, context)
+            self._record(
+                AUDIT_BIOMETRIC if biometric_required else AUDIT_CONFIRM,
+                decision,
+                context,
+            )
             return decision
 
         decision = PolicyDecision(
@@ -550,9 +608,12 @@ class Policy:
             return bool(decision.allowed)
         if kind == AUDIT_DENY:
             return not decision.allowed
-        # AUDIT_CONFIRM: the verdict was "denied pending confirmation";
-        # a flipped bit would claim a grant that was never confirmed.
-        return not decision.allowed or decision.needs_confirmation
+        # AUDIT_CONFIRM / AUDIT_BIOMETRIC: the verdict was "denied pending
+        # confirmation"; a flipped bit would claim a grant that was never
+        # confirmed.
+        if kind in (AUDIT_CONFIRM, AUDIT_BIOMETRIC):
+            return not decision.allowed or decision.needs_confirmation
+        return False
 
     # -- helpers -------------------------------------------------------------
     def grant_for_role(self, role: str) -> CapabilitySet:
@@ -585,6 +646,45 @@ class Policy:
         if not self.default_grant.patterns:
             return preset
         return preset.intersect(self.default_grant)
+
+
+def approve_with_biometric(
+    policy: Policy,
+    capability: str,
+    *,
+    title: str = "",
+    timeout_s: float = 60.0,
+) -> str | None:
+    """Mint a confirmation token through the fingerprint prompt.
+
+    Returns the capability-bound single-use token when the user
+    authenticates, else None (biometric unavailable, prompt denied, or any
+    failure — the caller falls back to the text-confirm flow). Never raises
+    and never prompts implicitly: callers invoke this explicitly from an
+    interactive context only.
+    """
+    try:
+        from ..native.biometric import biometric_available, request_biometric
+    except Exception:  # noqa: BLE001 - no biometric module, no biometric path
+        _log.debug("biometric module unavailable for %s", capability)
+        return None
+    try:
+        available, reason = biometric_available()
+    except Exception:  # noqa: BLE001 - fail closed
+        return None
+    if not available:
+        _log.debug("biometric unavailable (%s); caller keeps the text flow", reason)
+        return None
+    try:
+        approved = request_biometric(title or f"approve {capability}", timeout_s=timeout_s)
+    except Exception:  # noqa: BLE001 - any prompt failure is a denial
+        return None
+    if not approved:
+        return None
+    try:
+        return policy.issue_confirmation(capability)
+    except Exception:  # noqa: BLE001 - fail closed
+        return None
 
 
 class _DefaultClock:

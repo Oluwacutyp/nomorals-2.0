@@ -310,9 +310,9 @@ def register(registry: Any) -> None:
 
     @registry.register(
         "git_push",
-        description="Push the current branch to a remote. Requires confirmation.",
+        description="Push the current branch to a remote. Requires fingerprint approval.",
         capability=Capability.NET_OUT,
-        confirm=True,
+        confirm="biometric",
     )
     def _git_push(remote: str = "origin", branch: str | None = None,
                   repo: str | None = None) -> dict[str, Any]:
