@@ -137,8 +137,14 @@ class TaskRouter:
 
     # ── scoring ──────────────────────────────────────────────────────────────
     def score(self, profile: ModelProfile, task_type: str,
-              objective: str) -> float:
-        """Higher = better for this task+objective."""
+              objective: str, complexity: str | None = None) -> float:
+        """Higher = better for this task+objective.
+
+        ``complexity`` (``"easy"``/``"medium"``/``"hard"``, build-map #18)
+        biases the pick: easy work belongs on cheap/fast models, hard work
+        on the strongest available one.  ``None`` keeps the pre-complexity
+        scoring exactly as it was.
+        """
         s = 0.0
         required = _required_capability(task_type)
         if required and required not in profile.capabilities:
@@ -163,13 +169,24 @@ class TaskRouter:
         elif objective == "quality":
             if profile.local:
                 s -= 1.0  # cloud/8B+ usually beat a tiny local for quality
+        # complexity bias (build-map #18): orthogonal to the objective.
+        # "Strong" here means non-local — consistent with the quality
+        # objective above, which already penalizes local models.
+        cx = (complexity or "").strip().lower()
+        if cx == "easy":
+            if profile.local or profile.free:
+                s += 2.0
+        elif cx == "hard":
+            if not profile.local:
+                s += 2.0
         # reliability
         if profile.error_rate > 0.3:
             s -= 1.5
         return s
 
     def select(self, task_type: str = "chat",
-               objective: str = "balanced") -> ModelProfile | None:
+               objective: str = "balanced",
+               complexity: str | None = None) -> ModelProfile | None:
         """Return the best profile, or None when routing is off/unavailable."""
         task_type = (task_type or "chat").strip().lower()
         objective = (objective or "balanced").strip().lower()
@@ -178,26 +195,29 @@ class TaskRouter:
         best: ModelProfile | None = None
         best_score = float("-inf")
         for p in self.profiles():
-            sc = self.score(p, task_type, objective)
+            sc = self.score(p, task_type, objective, complexity=complexity)
             if sc > best_score:
                 best_score = sc
                 best = p
         return best
 
     def decision(self, task_type: str = "chat",
-                 objective: str = "balanced") -> dict[str, Any]:
+                 objective: str = "balanced",
+                 complexity: str | None = None) -> dict[str, Any]:
         task_type = (task_type or "chat").strip().lower()
         objective = (objective or "balanced").strip().lower()
+        cx = (complexity or "").strip().lower() or None
         scored = []
         if self.enabled():
             for p in self.profiles():
-                scored.append({"provider": p.name, "score": round(self.score(p, task_type, objective), 3)})
+                scored.append({"provider": p.name, "score": round(self.score(p, task_type, objective, complexity=cx), 3)})
             scored.sort(key=lambda d: d["score"], reverse=True)
-        choice = self.select(task_type, objective)
+        choice = self.select(task_type, objective, complexity=cx)
         return {
             "enabled": self.enabled(),
             "task_type": task_type,
             "objective": objective,
+            "complexity": cx,
             "choice": choice.name if choice else None,
             "reason": (
                 "intelligent routing off (default); using the standard chain"
@@ -206,6 +226,34 @@ class TaskRouter:
             ),
             "scored": scored,
         }
+
+    def route_by_complexity(
+        self, prompt: str, *, task_type: str | None = None
+    ) -> tuple[str, str]:
+        """Classify ``prompt`` complexity, then pick a provider.
+
+        Returns ``(provider_name, complexity)``.  When intelligent routing
+        is off, the provider is the chain's active provider (today's
+        behavior) and the complexity is still reported.
+        """
+        from .complexity import classify_complexity
+        kind = (task_type or "").strip().lower()
+        if not kind:
+            try:
+                from .task_type import classify_task
+                kind = classify_task(
+                    self.context, prompt, use_model=False).kind or "chat"
+            except Exception:  # noqa: BLE001 — keyword layer is best-effort
+                kind = "chat"
+        complexity, _confidence = classify_complexity(prompt, task_type=kind)
+        choice = self.select(task_type=kind or "chat", objective="balanced",
+                             complexity=complexity)
+        if choice is not None:
+            return choice.name, complexity
+        try:
+            return self._router().active or "", complexity
+        except Exception:  # noqa: BLE001
+            return "", complexity
 
     # ── routing ──────────────────────────────────────────────────────────────
     @staticmethod
@@ -231,25 +279,40 @@ class TaskRouter:
 
     def route(self, messages: list[Any], *,
               task_type: str = "chat", objective: str = "balanced",
+              complexity: str | None = None,
               system: str = "", temperature: float = 0.7,
               max_tokens: int = 2048, **kwargs: Any):
         """Chat via the chosen provider, falling back to the default chain.
 
-        Returns an :class:`~nomorals.llm.base.LLMResponse`.
+        ``complexity`` (``"easy"``/``"medium"``/``"hard"``, build-map #18)
+        biases the provider pick and is recorded as the call's tier in the
+        cost log.  Returns an :class:`~nomorals.llm.base.LLMResponse`.
         """
         from ..llm.base import Message, SamplingParams
+        from ..llm.router import log_llm_call
         msgs = self._to_messages(messages)
         if system:
             msgs = [Message.system(system)] + msgs
         params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+        # A caller-supplied tier wins over the complexity argument.
+        tier = kwargs.pop("tier", None) or (complexity or "")
         router = self._router()
-        choice = self.select(task_type, objective)
+        choice = self.select(task_type, objective, complexity=complexity)
         if choice is not None:
             provider = getattr(router, "get", lambda n: None)(choice.name)
             if provider is not None:
                 try:
                     resp = provider.chat(msgs, params, **kwargs)
                     if resp.ok:
+                        # Direct-provider path bypasses LLMRouter._dispatch,
+                        # so log the metered cost here.
+                        try:
+                            log_llm_call(
+                                choice.name,
+                                getattr(provider, "model_id", "") or "",
+                                resp, tier=tier, operation="chat")
+                        except Exception:  # noqa: BLE001
+                            _log.debug("cost log failed", exc_info=True)
                         return resp
                     choice_error = resp.error or "unknown error"
                     _log.warning(
@@ -269,7 +332,7 @@ class TaskRouter:
                     "falling back to the default chain", choice.name)
         else:
             choice_error = ""
-        chain_resp = router.chat(msgs, params, **kwargs)
+        chain_resp = router.chat(msgs, params, tier=tier, **kwargs)
         # The chosen provider failed and the chain answered: attribute the
         # full degradation chain on the response instead of swallowing it.
         if choice_error and chain_resp is not None:
@@ -299,26 +362,34 @@ def register(registry: Any) -> None:
         "model_route",
         description=("Route a task to the best model for its type and objective "
                      "(off by default). action=decision (show the pick + scores), "
-                     "status (profiles), route (chat via the chosen model)."),
+                     "status (profiles), route (chat via the chosen model), "
+                     "by_complexity (classify a prompt, name the provider)."),
         capability="model.call",
         parameters={
-            "action": "str — decision | status | route",
+            "action": "str — decision | status | route | by_complexity",
             "task_type": "str — chat|coding|reasoning|vision|… (decision/route)",
             "objective": "str — quality|speed|cost|balanced (decision/route)",
-            "messages_json": "json str [{role, content}] (route)",
+            "complexity": "str — easy|medium|hard bias (decision/route, optional)",
+            "messages_json": "json str [{role, content}] (route) or raw prompt (by_complexity)",
         },
     )
     def model_route(
         action: str = "decision", *, task_type: str = "chat",
-        objective: str = "balanced", messages_json: str = "",
+        objective: str = "balanced", complexity: str = "",
+        messages_json: str = "",
         temperature: str = "0.7", max_tokens: str = "2048",
     ) -> dict[str, Any]:
         router = TaskRouter(context)
         action = (action or "decision").strip().lower()
+        cx = (complexity or "").strip().lower() or None
         if action == "status":
             return router.status()
         if action == "decision":
-            return router.decision(task_type, objective)
+            return router.decision(task_type, objective, complexity=cx)
+        if action == "by_complexity":
+            name, level = router.route_by_complexity(
+                messages_json, task_type=task_type or None)
+            return {"ok": True, "provider": name, "complexity": level}
         if action == "route":
             import json
             try:
@@ -329,6 +400,7 @@ def register(registry: Any) -> None:
                 return {"ok": False, "error": "messages_json is empty"}
             resp = router.route(
                 messages, task_type=task_type, objective=objective,
+                complexity=cx,
                 temperature=float(temperature) if temperature else 0.7,
                 max_tokens=int(max_tokens) if max_tokens else 2048,
             )
@@ -336,6 +408,6 @@ def register(registry: Any) -> None:
                 "ok": bool(resp.ok),
                 "model": resp.model,
                 "text": (resp.text or "")[:2000],
-                "routed": router.select(task_type, objective),
+                "routed": router.select(task_type, objective, complexity=cx),
             }
         return {"ok": False, "error": f"unknown action: {action}"}

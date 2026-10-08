@@ -80,6 +80,17 @@ class ResearchBudget:
         """Spend, rounded for reports."""
         return round(self.spent, 6)
 
+    def refund(self, amount: float) -> float:
+        """Credit back an over-charged estimate.  Never lets spend go
+        negative.  Used by the measured-cost true-up (build-map #18):
+        the pre-call charge is a planning estimate; when the router
+        meters the real cost and it came in lower, the difference is
+        refunded so the ledger reflects reality."""
+        credit = round(float(amount), 9)
+        with self._lock:
+            self._spent = round(max(0.0, self._spent - credit), 9)
+            return self._spent
+
 
 class _BudgetExhausted(Exception):
     """Internal: an LLM phase hit the budget cap. Caught by the phase's
@@ -87,12 +98,49 @@ class _BudgetExhausted(Exception):
     so exhaustion degrades the run instead of killing it."""
 
 
+def _true_up_llm_cost(llm_fn: Any, budget: "ResearchBudget") -> None:
+    """Replace the flat planning estimate with the metered cost, when known.
+
+    The pre-call ``charge("llm_call")`` is the *guard*: it stops a run from
+    starting work it can't afford.  When the router-measured cost is
+    available on ``llm_fn.last_response`` (set by :func:`_router_llm_fn`),
+    true-up the delta so the budget ledger reflects reality instead of the
+    estimate — charged when the call cost more, refunded when it cost less.
+    Never raises and never double-counts.
+    """
+    try:
+        from ..llm.router import estimate_cost
+        resp = getattr(llm_fn, "last_response", None)
+        usage = getattr(resp, "usage", None) if resp is not None else None
+        if usage is None:
+            return
+        prompt_t = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_t = int(getattr(usage, "completion_tokens", 0) or 0)
+        if not (prompt_t or completion_t):
+            return
+        measured = estimate_cost(
+            getattr(resp, "provider", "") or "",
+            getattr(resp, "model", "") or "",
+            prompt_t,
+            completion_t,
+        )
+        delta = round(measured - COST_TABLE["llm_call"], 9)
+        if delta > 0:
+            # Already have the result; exhaustion latches for later calls.
+            budget.charge("llm_call", amount=delta)
+        elif delta < 0:
+            budget.refund(-delta)
+    except Exception:  # noqa: BLE001 — ledger accuracy never breaks research
+        _log.debug("budget true-up failed", exc_info=True)
+
+
 def _budgeted_llm(llm_fn: Any, budget: "ResearchBudget | None") -> Any:
     """Wrap an llm_fn so each call charges ``llm_call`` first.
 
     When the charge fails the wrapper raises ``_BudgetExhausted``, which
     the pipeline's LLM phases already catch (they all degrade to free
-    fallbacks on LLM failure).
+    fallbacks on LLM failure).  After a successful call the flat estimate
+    is trued-up against the router-metered cost when available.
     """
     if llm_fn is None or budget is None:
         return llm_fn
@@ -100,7 +148,9 @@ def _budgeted_llm(llm_fn: Any, budget: "ResearchBudget | None") -> Any:
     def wrapper(prompt: str) -> str:
         if not budget.charge("llm_call"):
             raise _BudgetExhausted("research budget exhausted")
-        return llm_fn(prompt)
+        result = llm_fn(prompt)
+        _true_up_llm_cost(llm_fn, budget)
+        return result
 
     return wrapper
 
@@ -920,14 +970,21 @@ class DeepReport:
 
 
 def _router_llm_fn(router: Any) -> Any:
-    """Adapt an LLM router to the ``prompt -> text`` shape, or None."""
+    """Adapt an LLM router to the ``prompt -> text`` shape, or None.
+
+    The full ``LLMResponse`` is stashed on ``llm_fn.last_response`` so the
+    budget wrapper can true-up the flat planning estimate against the
+    router-metered cost (build-map #18).
+    """
     if router is None:
         return None
 
     def llm_fn(prompt: str) -> str:
         resp = router.complete(prompt)
+        llm_fn.last_response = resp
         return resp.text if hasattr(resp, "text") else str(resp)
 
+    llm_fn.last_response = None
     return llm_fn
 
 

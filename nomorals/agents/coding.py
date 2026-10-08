@@ -638,6 +638,72 @@ class CodingAgent:
         """Simple chat interface for tools like EditLoop and CodeExecutor."""
         return self.router.chat([{"role": "user", "content": prompt}])
 
+    # ── complexity-routed model selection (build-map #18) ────────────────────
+    def _select_model(self, phase: str) -> Any:
+        """Return the chat target for a coding phase.
+
+        ``phase="plan"`` (Architect): hard complexity, quality objective —
+        the strongest available model does the planning.  ``phase="edit"``
+        (Editor): medium complexity, cost objective — a fast/cheap model
+        applies the edits.
+
+        When intelligent routing is off (the default) this returns
+        ``self.router`` unchanged: today's failover chain, zero behavior
+        change.  Never raises.
+        """
+        try:
+            from .router_select import TaskRouter
+            picker = TaskRouter(self.context)
+            if not picker.enabled():
+                return self.router
+            if phase == "plan":
+                choice = picker.select(
+                    task_type="coding", objective="quality", complexity="hard")
+            else:
+                choice = picker.select(
+                    task_type="coding", objective="cost", complexity="medium")
+            if choice is not None:
+                provider = self.router.get(choice.name)
+                if provider is not None:
+                    return provider
+        except Exception:  # noqa: BLE001 — routing must never break coding
+            _log.debug("complexity routing unavailable; using default chain",
+                       exc_info=True)
+        return self.router
+
+    def _phase_chat(self, phase: str, messages: Any,
+                    params: Any = None, **kw: Any) -> Any:
+        """Phase-aware chat: routed provider first, failover chain on failure.
+
+        When routing is off (or the routed pick fails), this is exactly
+        ``self.router.chat(...)`` — the existing behavior, untouched.
+        """
+        target = self._select_model(phase)
+        if target is self.router:
+            return self.router.chat(messages, params, **kw)
+        tier = "hard" if phase == "plan" else "medium"
+        try:
+            resp = target.chat(messages, params, **kw)
+            if resp is not None and getattr(resp, "ok", False):
+                try:
+                    from ..llm.router import log_llm_call
+                    log_llm_call(
+                        getattr(target, "name", "?"),
+                        getattr(target, "model_id", "") or "",
+                        resp, tier=tier, operation="chat")
+                except Exception:  # noqa: BLE001
+                    _log.debug("cost log failed", exc_info=True)
+                return resp
+            _log.warning(
+                "coding %s phase: provider %s failed (%s); chain fallback",
+                phase, getattr(target, "name", "?"),
+                getattr(resp, "error", "?") if resp is not None else "?")
+        except Exception as exc:  # noqa: BLE001 — fall through to the chain
+            _log.warning("coding %s phase: provider %s raised (%s); "
+                         "chain fallback",
+                         phase, getattr(target, "name", "?"), exc)
+        return self.router.chat(messages, params, **kw)
+
     # ── public ──────────────────────────────────────────────────────────────
     def run(
         self,
@@ -1114,7 +1180,9 @@ class CodingAgent:
         if repo_map:
             user += ("\n\nRepository map — real layout, prefer these paths "
                      "when choosing files:\n" + repo_map)
-        response = self.router.chat(
+        # Architect phase (build-map #18): hard complexity, quality objective.
+        response = self._phase_chat(
+            "plan",
             [Message.system(system), Message.user(user)],
             SamplingParams(temperature=0.2),
         )
@@ -1187,7 +1255,9 @@ class CodingAgent:
             traps = self._trap_warning()
             if traps:
                 user += "\n\n" + traps
-        response = self.router.chat(
+        # Editor phase (build-map #18): medium complexity, cost objective.
+        response = self._phase_chat(
+            "edit",
             [Message.system(system), Message.user(user)],
             SamplingParams(temperature=0.2),
         )
@@ -1396,7 +1466,9 @@ class CodingAgent:
             traps = self._trap_warning()
             if traps:
                 user += "\n\n" + traps
-        response = self.router.chat(
+        # Editor phase (build-map #18): medium complexity, cost objective.
+        response = self._phase_chat(
+            "edit",
             [Message.system(system), Message.user(user)],
             SamplingParams(temperature=0.2),
         )

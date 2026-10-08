@@ -11,20 +11,236 @@ rather than an exception from whichever provider happened to be last.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import ModelError, ProviderUnavailable, classify
 from ..core.events import EventBus
 from ..core.logging_setup import get_logger
+from ..research.pipeline import COST_TABLE
 from .base import LLMProvider, LLMResponse, Message, SamplingParams
 
-__all__ = ["LLMRouter", "ProviderHealth"]
+__all__ = [
+    "LLMRouter",
+    "ProviderHealth",
+    "CostLog",
+    "estimate_cost",
+    "log_llm_call",
+    "get_cost_log",
+    "total_spend",
+]
 
 _log = get_logger(__name__)
+
+
+# ── per-call cost logging (build-map #18) ────────────────────────────────────
+#
+# Every successful _dispatch records provider, model, tier, token usage and
+# an estimated USD cost to ~/.nomorals/llm/cost.jsonl.  This is the metered
+# counterpart to the research budget's planning estimates (#7): the budget
+# caps a run *before* it spends; the cost log records what was *actually*
+# spent, per call.  Costs are estimates, not invoices — providers change
+# prices, and free tiers cost nothing.
+
+#: Flat per-call planning estimate reused from the research budget (#7)
+#: when a model has no token price below.
+_FLAT_LLM_CALL_USD: float = float(COST_TABLE.get("llm_call", 0.0008))
+
+#: USD per 1M tokens (prompt, completion) — rough public pricing for the
+#: providers Devon actually uses.  Matched by provider-name substring,
+#: then model-name substring.  Local/free providers are (0.0, 0.0).
+_TOKEN_PRICES: dict[str, tuple[float, float]] = {
+    "groq": (0.35, 0.40),
+    "hf_serverless": (0.50, 0.50),
+    "openrouter": (1.50, 3.00),
+    "openai_compat": (2.50, 10.00),
+    "llama_cpp": (0.0, 0.0),
+    "mock": (0.0, 0.0),
+    "ocr": (0.0, 0.0),
+}
+
+
+def _default_cost_path() -> Path:
+    return Path.home() / ".nomorals" / "llm" / "cost.jsonl"
+
+
+def estimate_cost(
+    provider_name: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
+    """Estimated USD for one LLM call.  Never raises.
+
+    Token-priced when the provider/model is in the table, otherwise the
+    flat research planning estimate (an overestimate for free tiers —
+    deliberately conservative).
+    """
+    try:
+        price: tuple[float, float] | None = None
+        for needle in ((provider_name or "").lower(), (model or "").lower()):
+            if not needle:
+                continue
+            for name, p in _TOKEN_PRICES.items():
+                if name in needle:
+                    price = p
+                    break
+            if price is not None:
+                break
+        if price is None:
+            return _FLAT_LLM_CALL_USD
+        per_m_prompt, per_m_completion = price
+        return round(
+            (max(0, prompt_tokens) / 1_000_000) * per_m_prompt
+            + (max(0, completion_tokens) / 1_000_000) * per_m_completion,
+            9,
+        )
+    except Exception:  # noqa: BLE001 — cost math never breaks the caller
+        return _FLAT_LLM_CALL_USD
+
+
+class CostLog:
+    """Append-only JSONL log of metered LLM spend.  Thread-safe."""
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else _default_cost_path()
+        self._lock = threading.Lock()
+
+    def record(
+        self,
+        *,
+        provider: str,
+        model: str = "",
+        tier: str = "",
+        operation: str = "chat",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: float = 0.0,
+    ) -> dict[str, Any]:
+        """Append one call record.  Never raises; returns the entry."""
+        entry: dict[str, Any] = {
+            "ts": time.time(),
+            "provider": provider,
+            "model": model,
+            "tier": tier,
+            "operation": operation,
+            "prompt_tokens": int(prompt_tokens),
+            "completion_tokens": int(completion_tokens),
+            "cost_usd": round(float(cost_usd), 9),
+            "latency_ms": round(float(latency_ms), 2),
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry) + "\n")
+        except Exception:  # noqa: BLE001 — logging never breaks routing
+            _log.debug("cost log write failed", exc_info=True)
+        return entry
+
+    def entries(self, since: float = 0.0) -> list[dict[str, Any]]:
+        """Read back entries with ts >= since.  Never raises."""
+        out: list[dict[str, Any]] = []
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and float(row.get("ts", 0.0)) >= since:
+                        out.append(row)
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001
+            _log.debug("cost log read failed", exc_info=True)
+        return out
+
+    def total_spend(self, since: float = 0.0) -> float:
+        """Sum of cost_usd for entries with ts >= since.  Never raises."""
+        try:
+            return round(
+                sum(float(r.get("cost_usd", 0.0)) for r in self.entries(since)), 9
+            )
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+
+_cost_log: CostLog | None = None
+_cost_log_lock = threading.Lock()
+
+
+def _shared_log(path: str | Path | None = None) -> CostLog:
+    global _cost_log
+    if path is not None:
+        return CostLog(path)
+    with _cost_log_lock:
+        if _cost_log is None:
+            _cost_log = CostLog()
+        return _cost_log
+
+
+def log_llm_call(
+    provider_name: str,
+    model: str,
+    response: Any,
+    *,
+    tier: str = "",
+    operation: str = "chat",
+    path: str | Path | None = None,
+) -> float:
+    """Record one successful LLM call in the cost log.
+
+    Returns the estimated USD.  Never raises — safe to call on the hot path.
+    Set ``NM_COST_LOG=off`` to skip recording (handy for test harnesses);
+    the estimate is still returned.
+    """
+    import os as _os
+
+    usage = getattr(response, "usage", None)
+    prompt_t = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_t = int(getattr(usage, "completion_tokens", 0) or 0)
+    if path is None and _os.environ.get("NM_COST_LOG", "").strip().lower() in (
+        "off", "0", "no",
+    ):
+        # Opt-out of the default home-dir log (test harnesses); an explicit
+        # path always records.  The estimate is still returned.
+        return estimate_cost(provider_name, model, prompt_t, completion_t)
+    try:
+        cost = estimate_cost(provider_name, model, prompt_t, completion_t)
+        _shared_log(path).record(
+            provider=provider_name,
+            model=model or "",
+            tier=tier or "",
+            operation=operation,
+            prompt_tokens=prompt_t,
+            completion_tokens=completion_t,
+            cost_usd=cost,
+            latency_ms=float(getattr(response, "latency_ms", 0.0) or 0.0),
+        )
+        return cost
+    except Exception:  # noqa: BLE001
+        _log.debug("log_llm_call failed", exc_info=True)
+        return 0.0
+
+
+def get_cost_log(since: float = 0.0, path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Cost-log entries with ts >= since.  Never raises."""
+    return _shared_log(path).entries(since)
+
+
+def total_spend(since: float = 0.0, path: str | Path | None = None) -> float:
+    """Total metered USD spend since ts.  Never raises."""
+    return _shared_log(path).total_spend(since)
 
 
 @dataclass
@@ -343,12 +559,16 @@ class LLMRouter:
             return ([active] if active else []) + others
 
     def chat(
-        self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
+        self, messages: Sequence[Message], params: SamplingParams | None = None,
+        tier: str | None = None, **kw: Any
     ) -> LLMResponse:
-        return self._dispatch("chat", lambda p: p.chat(messages, params, **kw))
+        return self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
+                              tier=tier)
 
-    def complete(self, prompt: str, params: SamplingParams | None = None, **kw: Any) -> LLMResponse:
-        return self._dispatch("complete", lambda p: p.complete(prompt, params, **kw))
+    def complete(self, prompt: str, params: SamplingParams | None = None,
+                 tier: str | None = None, **kw: Any) -> LLMResponse:
+        return self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
+                              tier=tier)
 
     def embed(self, texts: Sequence[str], **kw: Any) -> list[list[float]]:
         chain = [p for p in self._chain() if "embed" in p.capabilities]
@@ -375,12 +595,14 @@ class LLMRouter:
         raise ProviderUnavailable(f"all embedding providers failed; last error: {last_error}")
 
     def describe_image(
-        self, image: bytes, prompt: str = "", params: SamplingParams | None = None, **kw: Any
+        self, image: bytes, prompt: str = "", params: SamplingParams | None = None,
+        tier: str | None = None, **kw: Any
     ) -> LLMResponse:
         return self._dispatch(
             "vision",
             lambda p: p.describe_image(image, prompt, params, **kw),
             require="vision",
+            tier=tier,
         )
 
     def _dispatch(
@@ -389,6 +611,7 @@ class LLMRouter:
         call: Callable[[LLMProvider], LLMResponse],
         *,
         require: str | None = None,
+        tier: str | None = None,
     ) -> LLMResponse:
         # Broker consult (opt-in): let the capability broker pick the starting
         # provider for this operation.  Best-effort — on any failure the
@@ -450,6 +673,16 @@ class LLMRouter:
                         operation, provider.name, success=True,
                         latency_s=self._clock() - attempt_start,
                     )
+                # Per-call cost logging (build-map #18): metered spend for
+                # the call that just succeeded.  Best-effort and silent —
+                # it must never add latency or break the hot path.
+                log_llm_call(
+                    provider.name,
+                    getattr(provider, "model_id", "") or "",
+                    response,
+                    tier=tier or "",
+                    operation=operation,
+                )
                 if failed:
                     # A failover happened: the response must say WHICH
                     # provider failed and WHAT fallback served it — the
