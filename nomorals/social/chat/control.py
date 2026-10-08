@@ -323,6 +323,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 73: media orchestrator + CI loop
     "hub": (0, None),        # /hub [song <topic…> [style]|video <q…>|podcast <q…>|status]
     "podcast": (1, None),    # /podcast <query…> — find→download→transcribe→chapters
+    "dj": (0, 1),           # /dj [trending|<genre>] — radio show w/ voice breaks
     "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
 }
 
@@ -1509,6 +1510,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/podcast <query…> [platform]",
             "example": "/podcast developer keynote 2026",
             "related": "/hub podcast (same pipeline) · /stt · nm hub on the console"},
+    "dj": {"what": "Radio DJ: builds a Devon FM show from today's trending charts "
+                   "plus your own generated tracks — DJ voice breaks, chart "
+                   "shoutouts, crossfades and filter-sweep transitions, one WAV.",
+            "usage": "/dj [trending|<genre>]",
+            "example": "/dj uk-drill",
+            "related": "/music · /play · /podcast"},
     "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
                     "model rewrites it and it runs again, until exit 0 (or the "
                     "expected text appears in stdout). Reports every round — exit "
@@ -1549,7 +1556,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "hub", "podcast"]),
+    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",

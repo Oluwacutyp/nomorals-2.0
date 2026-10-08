@@ -505,6 +505,50 @@ class RuntimeMediaMixin:
 
     # ── end _control_play ────────────────────────────────────────────────
 
+    def _control_dj(self, tail: str, chat_key: str = "") -> str:
+        """/dj [trending|<genre>] — Devon FM radio show.
+
+        /dj            → full show: trending charts + own tracks, voice breaks
+        /dj trending   → just list what's hot right now
+        /dj <genre>    → show built around a genre (uk-drill, afrobeats, …)
+        """
+        from ...media.dj import DJ
+
+        tail = (tail or "").strip()
+        dj = DJ(self.context)
+        if tail.lower() == "trending":
+            res = dj.fetch_trending()
+            if not res.get("ok"):
+                return f"charts unavailable: {res.get('reason', '?')}"
+            lines = [f"🔥 trending ({res['source']}):"]
+            for t in res["tracks"][:10]:
+                lines.append(f"  #{t.get('rank', '?')} {t['title']} — {t['artist']}")
+            return "\n".join(lines)
+
+        genre = tail
+        try:
+            show = dj.build_show(genre=genre, n_tracks=4)
+        except Exception as exc:  # noqa: BLE001
+            return f"dj error: {exc}"
+        if not show.get("ok"):
+            return f"couldn't build the show: {show.get('reason', '?')}"
+        lines = [f"📻 Devon FM ({show['genre']}) — "
+                 f"{show['duration_s']}s, {len(show['tracklist'])} tracks"]
+        for t in show["tracklist"]:
+            mark = "▶" if t.get("status") == "played" else "⏭"
+            lines.append(f"  {mark} {t['label']}")
+        text = "\n".join(lines)
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None and show.get("path"):
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    show["path"], caption="📻 Devon FM — full show")
+            except Exception:  # noqa: BLE001
+                pass
+        return text
+
+
 
 def _looks_like_spotify_uri(text: str) -> bool:
     """True for real Spotify URIs/links (not a `spotify:<query>` force)."""
