@@ -801,6 +801,11 @@ _RE_EDITTEXT_BARE = re.compile(
 _RE_EDITTEXT_CHANGE = re.compile(
     r"^change\s+(?:the\s+)?text\s+[\"'](.+?)[\"']\s+to\s+[\"'](.+?)[\"']"
     r"(?:\s+in\s+(?:this|the)\s+(?:image|photo|pic(?:ture)?))?\s*$", re.I)
+# caption pipeline (#25): "add captions" / "add captions to this video" /
+# "caption this video". Narrow: the whole message must match.
+_RE_CAPTIONS = re.compile(
+    r"^add\s+captions(?:\s+to\s+(?:this|the)\s+video)?\s*$"
+    r"|^caption\s+(?:this|the)\s+video\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -861,6 +866,12 @@ def _image_intent(text: str) -> Intent | None:
         return Intent("vision_faceswap", 0.88, target=stripped[:200],
                       action="faceswap", route="media",
                       why="face swap request")
+    # caption pipeline (#25) — needs an attached VIDEO, not an image
+    m = _RE_CAPTIONS.match(stripped)
+    if m:
+        return Intent("vision_captions", 0.9, target=stripped[:200],
+                      action="captions", route="media",
+                      why="caption request")
     # text replacement in photos (#24)
     m = _RE_EDITTEXT.match(stripped) or _RE_EDITTEXT_CHANGE.match(stripped)
     if m:
@@ -1699,6 +1710,7 @@ class CoreMind:
             "vision_upscale": self._dispatch_vision,
             "vision_faceswap": self._dispatch_vision,
             "vision_edittext": self._dispatch_vision,
+            "vision_captions": self._dispatch_vision,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2279,23 +2291,25 @@ class CoreMind:
 
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
-        """NL vision utilities (#23/#24): bg removal, SR upscale, face swap,
-        text replacement.
+        """NL vision utilities (#23/#24) + caption pipeline (#25): bg removal,
+        SR upscale, face swap, text replacement, video captions.
 
         Runs on a background thread (heavy models), delivers via
-        send_media. Needs an attached image; faceswap wants two (the
-        second is the face donor). Nothing is faked: a missing library
-        raises with the pip hint, and the reply says exactly that.
+        send_media. Needs an attached image (captions: a video); faceswap
+        wants two images. Nothing is faked: a missing library raises with
+        the pip hint, and the reply says exactly that.
         """
         from ..social.chat.base import MediaRef
 
-        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap" | "edittext"
+        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap" |
+        # "edittext" | "captions"
         media = list(getattr(message, "media", None) or [])
-        images = [m for m in media
-                  if getattr(m, "kind", "") == "image"
-                  and getattr(m, "path", "")]
+        want_kind = "video" if action == "captions" else "image"
+        files = [m for m in media
+                 if getattr(m, "kind", "") == want_kind
+                 and getattr(m, "path", "")]
         need = 2 if action == "faceswap" else 1
-        if len(images) < need:
+        if len(files) < need:
             hints = {
                 "bgremove": ("🖼️ attach the image, then say:\n"
                              "`remove the background`"),
@@ -2305,13 +2319,16 @@ class CoreMind:
                              "donor second), then say:\n`swap faces`"),
                 "edittext": ("🖼️ attach the image, then say:\n"
                              "`replace \"OLD\" with \"NEW\" in this image`"),
+                "captions": ("🎬 attach the video, then say:\n"
+                             "`add captions`"),
             }
             return hints[action]
-        src_paths = [m.path for m in images[:need]]
+        src_paths = [m.path for m in files[:need]]
         labels = {"bgremove": "✂️ removing background",
                   "upscale_sr": "🔍 upscaling",
                   "faceswap": "🔄 swapping faces",
-                  "edittext": "✏️ replacing text"}
+                  "edittext": "✏️ replacing text",
+                  "captions": "💬 adding captions"}
 
         def job() -> str:
             from ..media_edit.images import load_image
@@ -2319,6 +2336,33 @@ class CoreMind:
             out_dir = Path(self.context.settings.resolve(
                 "data/generations"))
             out_dir.mkdir(parents=True, exist_ok=True)
+            if action == "captions":
+                # #25: video captions — transcribe → burn → deliver video +
+                # .srt sidecar. Video path, not the image pipeline below.
+                from ..media_edit.captions import caption_video
+                run = caption_video(src_paths[0], style="hormozi",
+                                    out_dir=str(out_dir))
+                if self.runtime is None:
+                    return f"🎬 captioned: {run['output']}"
+                ref = self.runtime._ref_from_key(chat_key)
+                adapter = self.runtime.gateway._adapter_for(ref.platform)
+                if adapter is None:
+                    return f"❌ done but no adapter for {ref.platform}"
+                out_mp4 = Path(run["output"])
+                result = adapter.send_media(
+                    ref, MediaRef(path=str(out_mp4), kind="video",
+                                  mime="video/mp4", name=out_mp4.name),
+                    caption="🎬 💬 adding captions — done")
+                if not result.ok:
+                    return (f"❌ captions done but couldn't send: "
+                            f"{result.error}")
+                srt = Path(src_paths[0]).with_suffix(".srt")
+                if srt.exists():
+                    adapter.send_media(
+                        ref, MediaRef(path=str(srt), kind="document",
+                                      mime="text/plain", name=srt.name),
+                        caption="📄 .srt sidecar for your editor")
+                return "🎬 done — adding captions"
             if action == "bgremove":
                 from ..media_edit.segment import remove_background
                 out = remove_background(load_image(src_paths[0]))
@@ -2364,7 +2408,7 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             f"{labels[action]} — I'll send it when it's ready.",
-            kind="image")
+            kind="video" if action == "captions" else "image")
 
     def _dispatch_finance_log(self, intent: Intent, job_id: str, chat_key: str,
                               message: Any) -> str:
