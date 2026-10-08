@@ -418,3 +418,57 @@ class RuntimeMemoryMixin:
         reply = self.mind._dispatch(intent, chat_key, self._fake_message(chat_key))
         return f"decision: {intent.kind} (route {intent.route}) — {intent.why}\n" + \
             (reply or "(no reply)")
+
+    def _control_health(self, tail: str, *, chat_key: str = "") -> str:
+        """Patient-side health timeline. Owner-only. TRACKING ONLY.
+
+        /health log <text>     log an event ("headache, 3/5, since morning")
+        /health timeline       chronological entries
+        /health summary [days] human-readable recap (default 30 days)
+
+        Devon is not a doctor. This records what the user reports;
+        it never interprets medically.
+        """
+        from ...health.timeline import HealthTimeline, parse_health_note
+        raw = (tail or "").strip()
+        if not raw:
+            return ("usage: /health log <text> — e.g. /health log headache, "
+                    "3/5, since morning\n"
+                    "       /health timeline | /health summary [days]\n"
+                    "tracking only — I'm not a doctor; show the log to "
+                    "yours for medical guidance.")
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+        try:
+            tl = HealthTimeline()
+        except Exception as exc:  # noqa: BLE001
+            return f"health log unavailable: {exc}"
+        try:
+            if verb == "log":
+                if not rest.strip():
+                    return "usage: /health log <text>"
+                draft = parse_health_note(rest)
+                ev = tl.log(draft["event_type"], draft["text"],
+                            severity=draft["severity"], source="chat")
+                sev = f" [{ev.severity}/5]" if ev.severity else ""
+                return (f"logged 🩺 {ev.event_type}{sev}: "
+                        f"{ev.text[:120]}")
+            if verb == "timeline":
+                events = tl.timeline(limit=50)
+                if not events:
+                    return "health timeline is empty — /health log <text> to start."
+                lines = [f"🩺 health timeline ({len(events)} entries):"]
+                for ev in events[-20:]:
+                    sev = f" [{ev.severity}/5]" if ev.severity else ""
+                    lines.append(f"• {ev.when_str()} · {ev.event_type}{sev}: "
+                                 f"{ev.text[:100]}")
+                return "\n".join(lines)
+            if verb == "summary":
+                days = 30
+                if rest.strip().isdigit():
+                    days = max(1, min(365, int(rest.strip())))
+                return tl.summary(days=days)
+            return ("usage: /health log <text> | /health timeline | "
+                    "/health summary [days]")
+        finally:
+            tl.close()
