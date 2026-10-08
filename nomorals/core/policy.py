@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import re
 import threading
 import time
 from collections.abc import Iterable
@@ -37,11 +38,19 @@ _log = get_logger(__name__)
 __all__ = [
     "AUDIT_BIOMETRIC",
     "AUDIT_DENY",
+    "AUDIT_OBSERVE",
+    "AUDIT_PROPOSE",
+    "GRADIENT_ACT_SILENT",
+    "GRADIENT_ACT_WITH_APPROVAL",
+    "GRADIENT_OBSERVE",
+    "GRADIENT_PROPOSE",
     "Capability",
     "CapabilitySet",
+    "PermissionGradient",
     "Policy",
     "PolicyDecision",
     "approve_with_biometric",
+    "is_explicit_instruction",
 ]
 
 
@@ -274,6 +283,17 @@ AUDIT_ALLOW = "allow"
 AUDIT_DENY = "deny"
 AUDIT_CONFIRM = "confirm"
 AUDIT_BIOMETRIC = "biometric"
+AUDIT_OBSERVE = "observe"
+AUDIT_PROPOSE = "propose"
+
+
+#: Permission-gradient levels (Dots pattern: read-only-proactive →
+#: engaged-active). The gradient governs *autonomous* action; explicit
+#: owner instructions bypass it (see :func:`is_explicit_instruction`).
+GRADIENT_OBSERVE = "observe"
+GRADIENT_PROPOSE = "propose"
+GRADIENT_ACT_WITH_APPROVAL = "act_with_approval"
+GRADIENT_ACT_SILENT = "act_silent"
 
 
 @dataclass
@@ -286,6 +306,10 @@ class PolicyDecision:
     actor: str = ""
     needs_confirmation: bool = False
     needs_biometric: bool = False
+    needs_proposal: bool = False
+    proposal_id: str = ""
+    gradient: str = ""
+    explicit_override: bool = False
     audit_id: str = ""
 
     def __bool__(self) -> bool:
@@ -309,6 +333,10 @@ class PolicyDecision:
             "actor": self.actor,
             "needs_confirmation": self.needs_confirmation,
             "needs_biometric": self.needs_biometric,
+            "needs_proposal": self.needs_proposal,
+            "proposal_id": self.proposal_id,
+            "gradient": self.gradient,
+            "explicit_override": self.explicit_override,
             "audit_id": self.audit_id,
         }
 
@@ -362,7 +390,14 @@ class Policy:
         self._audit_limit = 2000
         self._lock = threading.RLock()
         self._clock = clock or _DefaultClock()
-        self._counts = {"allow": 0, "deny": 0, "confirm": 0, "biometric": 0}
+        self._counts = {
+            "allow": 0,
+            "deny": 0,
+            "confirm": 0,
+            "biometric": 0,
+            "observe": 0,
+            "propose": 0,
+        }
 
     # -- rule management -----------------------------------------------------
     def allow(self, capability: str, *, note: str = "", priority: int = 10) -> Policy:
@@ -479,12 +514,25 @@ class Policy:
         grant: CapabilitySet | None = None,
         confirmation: str | None = None,
         context: dict[str, Any] | None = None,
+        explicit_override: bool = False,
+        audit_kind: str | None = None,
     ) -> PolicyDecision:
-        """Evaluate whether ``actor`` may exercise ``capability``."""
+        """Evaluate whether ``actor`` may exercise ``capability``.
+
+        ``explicit_override``: an explicit owner instruction ("post it",
+        "send it", "do it now") jumps straight to execution — the
+        confirmation-token gate is bypassed. Deny rules and grants still
+        apply, and biometric (fingerprint) approval remains mandatory.
+        ``audit_kind``: optional audit-kind override for the allow record
+        (used by the permission gradient's observe level).
+        """
         effective = grant if grant is not None else self.default_grant
         reason = ""
         needs_confirm = False
         needs_biometric = False
+        ctx = dict(context or {})
+        if explicit_override:
+            ctx["explicit_override"] = True
 
         with self._lock:
             for rule in self._rules:
@@ -496,8 +544,9 @@ class Policy:
                         reason=rule.note or f"denied by policy rule: {rule.capability}",
                         capability=capability,
                         actor=actor,
+                        explicit_override=explicit_override,
                     )
-                    self._record(AUDIT_DENY, decision, context)
+                    self._record(AUDIT_DENY, decision, ctx)
                     return decision
                 if rule.effect == "biometric":
                     needs_confirm = True
@@ -525,8 +574,9 @@ class Policy:
                 reason="policy enforcement disabled",
                 capability=capability,
                 actor=actor,
+                explicit_override=explicit_override,
             )
-            self._record(AUDIT_ALLOW, decision, context)
+            self._record(AUDIT_ALLOW, decision, ctx)
             return decision
 
         if not granted:
@@ -535,11 +585,16 @@ class Policy:
                 reason=f"actor {actor or 'anonymous'!r} lacks capability {capability!r}",
                 capability=capability,
                 actor=actor,
+                explicit_override=explicit_override,
             )
-            self._record(AUDIT_DENY, decision, context)
+            self._record(AUDIT_DENY, decision, ctx)
             return decision
 
-        if confirmable and (
+        # Explicit owner instructions bypass the confirmation-token gate
+        # (execute without reconfirming), but biometric fingerprint approval
+        # stays structural.
+        skip_confirmation = explicit_override and not biometric_required
+        if confirmable and not skip_confirmation and (
             not confirmation or not self._consume_confirmation(confirmation, capability)
         ):
             decision = PolicyDecision(
@@ -550,21 +605,25 @@ class Policy:
                 actor=actor,
                 needs_confirmation=True,
                 needs_biometric=biometric_required,
+                explicit_override=explicit_override,
             )
             self._record(
                 AUDIT_BIOMETRIC if biometric_required else AUDIT_CONFIRM,
                 decision,
-                context,
+                ctx,
             )
             return decision
 
         decision = PolicyDecision(
             allowed=True,
-            reason="granted",
+            reason="granted (explicit owner instruction)"
+            if explicit_override
+            else "granted",
             capability=capability,
             actor=actor,
+            explicit_override=explicit_override,
         )
-        self._record(AUDIT_ALLOW, decision, context)
+        self._record(audit_kind or AUDIT_ALLOW, decision, ctx)
         return decision
 
     def require(
@@ -641,6 +700,13 @@ class Policy:
             return bool(decision.allowed)
         if kind == AUDIT_DENY:
             return not decision.allowed
+        if kind == AUDIT_OBSERVE:
+            return bool(decision.allowed)
+        if kind == AUDIT_PROPOSE:
+            # A proposal verdict: denied pending owner approval, carrying
+            # the proposal id. A flipped bit would claim a grant that was
+            # never approved.
+            return (not decision.allowed) and bool(decision.proposal_id)
         # AUDIT_CONFIRM / AUDIT_BIOMETRIC: the verdict was "denied pending
         # confirmation"; a flipped bit would claim a grant that was never
         # confirmed.
@@ -724,3 +790,299 @@ class _DefaultClock:
     @staticmethod
     def now() -> float:
         return time.time()
+
+
+# -- permission gradient (Dots pattern) --------------------------------------
+
+
+#: Capabilities the agent may exercise autonomously without any approval:
+#: read data, gather context, prepare drafts. Everything else the gradient
+#: classifies as propose / act_with_approval / act_silent.
+_OBSERVE_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        Capability.FS_READ,
+        Capability.MEM_READ,
+        Capability.DB_READ,
+        Capability.SOCIAL_READ,
+        Capability.MODEL_CALL,
+        Capability.NET_OUT,
+        Capability.NET_BROWSER,
+        Capability.NET_DOWNLOAD,
+    }
+)
+
+#: Phrases that mark an explicit owner instruction. Matched case-insensitively
+#: on word boundaries; a negation ("don't", "do not", ...) just before the
+#: phrase, or a trailing "?", disqualifies the match.
+_EXPLICIT_PATTERNS: tuple[str, ...] = (
+    "post it",
+    "send it",
+    "do it now",
+    "just do it",
+    "go ahead",
+    "run it",
+    "submit it",
+    "apply now",
+    "book it",
+    "buy it",
+    "ship it",
+    "publish it",
+    "delete it",
+    "execute it",
+    "yes do it",
+    "do it",
+    "confirm",
+    "confirmed",
+    "approved",
+    "go for it",
+    "proceed",
+    "make it so",
+)
+
+_NEGATION_RE = re.compile(r"\b(don't|do not|never|stop|not)\b")
+
+
+def is_explicit_instruction(text: str) -> bool:
+    """True when ``text`` is an explicit owner directive to execute.
+
+    ("post it", "send it", "do it now", ...). Explicit instructions jump
+    straight to execution regardless of gradient level; the gradient
+    governs *autonomous* action. A trailing "?" (asking) or a negation
+    ("don't post it") disqualifies the match. Never raises.
+    """
+    try:
+        t = (text or "").strip().lower()
+        if not t or t.endswith("?"):
+            return False
+        for pattern in _EXPLICIT_PATTERNS:
+            match = re.search(r"\b" + re.escape(pattern) + r"\b", t)
+            if not match:
+                continue
+            before = t[max(0, match.start() - 14) : match.start()]
+            if _NEGATION_RE.search(before):
+                continue
+            return True
+        return False
+    except Exception:  # noqa: BLE001 - never raises
+        return False
+
+
+class PermissionGradient:
+    """Dots-pattern permission gradient for autonomous action.
+
+    Levels, from most to least restrained::
+
+        observe → propose → act_with_approval → act_silent
+
+    * **observe** — read data, gather context, prepare drafts. No approval.
+    * **propose** — the agent prepares a draft and records a proposal; the
+      action executes only after the owner approves the proposal (which
+      mints a confirmation token through the existing flow).
+    * **act_with_approval** — needs a confirmation/biometric token (existing
+      :class:`Policy` flow).
+    * **act_silent** — fully autonomous (explicit allow rules, owner role).
+
+    The gradient governs *autonomous* action. An explicit owner instruction
+    (see :func:`is_explicit_instruction`) bypasses the gradient entirely:
+    ``check(..., explicit_override=True)`` executes per the underlying
+    rules, skipping the confirmation-token gate. Deny rules and grants
+    still apply, and biometric (fingerprint) approval remains mandatory.
+    """
+
+    def __init__(self, policy: Policy | None = None) -> None:
+        self.policy = policy if policy is not None else Policy()
+        self._proposals: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    def level_for(self, capability: str) -> str | None:
+        """Gradient level for ``capability``.
+
+        Returns one of the ``GRADIENT_*`` constants, or None when a deny
+        rule refuses the capability outright. Never raises (fail closed).
+        """
+        try:
+            with self.policy._lock:
+                rules = list(self.policy._rules)
+            for rule in rules:
+                if not fnmatch.fnmatchcase(capability, rule.capability):
+                    continue
+                if rule.effect == "deny":
+                    return None
+                if rule.effect in ("biometric", "confirm"):
+                    return GRADIENT_ACT_WITH_APPROVAL
+                if rule.effect == "allow":
+                    return GRADIENT_ACT_SILENT
+            if capability in Capability.CONFIRMABLE or capability in Capability.BIOMETRIC:
+                return GRADIENT_ACT_WITH_APPROVAL
+            if capability in _OBSERVE_CAPABILITIES:
+                return GRADIENT_OBSERVE
+            return GRADIENT_PROPOSE
+        except Exception:  # noqa: BLE001 - fail closed on evaluation errors
+            return None
+
+    def check(
+        self,
+        capability: str,
+        *,
+        actor: str = "",
+        grant: CapabilitySet | None = None,
+        autonomous: bool = True,
+        explicit_override: bool = False,
+        draft: str = "",
+        context: dict[str, Any] | None = None,
+    ) -> PolicyDecision:
+        """Evaluate ``capability`` under the gradient. Never raises.
+
+        * ``explicit_override=True`` — bypass the gradient, execute per the
+          underlying rules (confirmation-token gate skipped; deny rules,
+          grants, and biometric approval still enforced).
+        * ``autonomous=True`` (default) — the propose level records a
+          proposal and returns a denied-pending-approval decision carrying
+          its id.
+        * ``autonomous=False`` — fall back to a plain policy check (the
+          caller is handling a user request, not acting on its own).
+        """
+        try:
+            if explicit_override:
+                decision = self.policy.check(
+                    capability,
+                    actor=actor,
+                    grant=grant,
+                    context=context,
+                    explicit_override=True,
+                )
+                decision.gradient = GRADIENT_ACT_SILENT
+                decision.explicit_override = True
+                return decision
+
+            level = self.level_for(capability)
+            if level is None:
+                decision = self.policy.check(
+                    capability, actor=actor, grant=grant, context=context
+                )
+                decision.gradient = ""
+                return decision
+
+            if level == GRADIENT_PROPOSE and autonomous:
+                proposal = self.propose(
+                    capability,
+                    actor=actor,
+                    draft=draft or f"autonomous {capability}",
+                    context=context,
+                )
+                decision = PolicyDecision(
+                    allowed=False,
+                    reason=(
+                        "autonomous action requires owner approval "
+                        f"(proposal {proposal['proposal_id']})"
+                    ),
+                    capability=capability,
+                    actor=actor,
+                    needs_proposal=True,
+                    proposal_id=proposal["proposal_id"],
+                    gradient=GRADIENT_PROPOSE,
+                )
+                self.policy._record(AUDIT_PROPOSE, decision, context)
+                return decision
+
+            decision = self.policy.check(
+                capability,
+                actor=actor,
+                grant=grant,
+                context=context,
+                audit_kind=AUDIT_OBSERVE if level == GRADIENT_OBSERVE else None,
+            )
+            decision.gradient = level
+            return decision
+        except Exception as exc:  # noqa: BLE001 - never raises, fail closed
+            return PolicyDecision(
+                allowed=False,
+                reason=f"gradient evaluation failed: {exc}",
+                capability=str(capability),
+                actor=actor,
+            )
+
+    # -- proposals -----------------------------------------------------------
+    def propose(
+        self,
+        capability: str,
+        *,
+        actor: str = "",
+        draft: str = "",
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a proposal for an autonomous action. Returns the proposal."""
+        from .ids import new_short_id
+
+        proposal_id = new_short_id("prp_")
+        proposal = {
+            "proposal_id": proposal_id,
+            "capability": capability,
+            "actor": actor,
+            "draft": draft,
+            "status": "pending",
+            "ts": time.time(),
+            "context": dict(context or {}),
+        }
+        try:
+            with self._lock:
+                self._proposals[proposal_id] = proposal
+        except Exception:  # noqa: BLE001 - never raises
+            pass
+        return dict(proposal)
+
+    def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock:
+                proposal = self._proposals.get(proposal_id)
+                return dict(proposal) if proposal else None
+        except Exception:  # noqa: BLE001 - never raises
+            return None
+
+    def pending_proposals(self) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                return [
+                    dict(p)
+                    for p in self._proposals.values()
+                    if p.get("status") == "pending"
+                ]
+        except Exception:  # noqa: BLE001 - never raises
+            return []
+
+    def approve_proposal(self, proposal_id: str) -> str | None:
+        """Owner approves a proposal → mint the confirmation token.
+
+        The agent then passes the token to :meth:`Policy.check` and the
+        action executes through the existing confirmation flow. Returns
+        None for unknown/already-resolved proposals. Never raises.
+        """
+        try:
+            with self._lock:
+                proposal = self._proposals.get(proposal_id)
+                if proposal is None or proposal.get("status") != "pending":
+                    return None
+                proposal["status"] = "approved"
+                capability = proposal.get("capability", "")
+            if not capability:
+                return None
+            token = self.policy.issue_confirmation(capability)
+            with self._lock:
+                proposal["token_issued"] = True
+            return token
+        except Exception:  # noqa: BLE001 - never raises
+            return None
+
+    def reject_proposal(self, proposal_id: str, *, note: str = "") -> bool:
+        """Owner rejects a proposal. Never raises."""
+        try:
+            with self._lock:
+                proposal = self._proposals.get(proposal_id)
+                if proposal is None or proposal.get("status") != "pending":
+                    return False
+                proposal["status"] = "rejected"
+                if note:
+                    proposal["reject_note"] = note
+                return True
+        except Exception:  # noqa: BLE001 - never raises
+            return False

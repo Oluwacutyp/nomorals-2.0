@@ -16,10 +16,16 @@ no matter what ceiling was configured. These tests pin the fixed semantics:
 import unittest
 
 from nomorals.core.policy import (
+    GRADIENT_ACT_SILENT,
+    GRADIENT_ACT_WITH_APPROVAL,
+    GRADIENT_OBSERVE,
+    GRADIENT_PROPOSE,
     ROLE_PRESETS,
     Capability,
     CapabilitySet,
+    PermissionGradient,
     Policy,
+    is_explicit_instruction,
 )
 
 
@@ -95,6 +101,177 @@ class TestGrantForRole(unittest.TestCase):
             Policy(default_grant=CapabilitySet.of(Capability.FS_READ)).grant_for_role(
                 "wizard"
             )
+
+
+class TestPermissionGradient(unittest.TestCase):
+    """Build-map extension #8: Dots-pattern permission gradient."""
+
+    def setUp(self) -> None:
+        self.gradient = PermissionGradient()
+        self.owner = CapabilitySet.all()
+
+    # -- level classification -------------------------------------------------
+    def test_read_capabilities_are_observe(self) -> None:
+        for cap in (
+            Capability.FS_READ,
+            Capability.MEM_READ,
+            Capability.DB_READ,
+            Capability.SOCIAL_READ,
+            Capability.MODEL_CALL,
+            Capability.NET_OUT,
+        ):
+            self.assertEqual(
+                self.gradient.level_for(cap), GRADIENT_OBSERVE, cap
+            )
+
+    def test_write_capabilities_default_to_propose(self) -> None:
+        self.assertEqual(self.gradient.level_for(Capability.FS_WRITE), GRADIENT_PROPOSE)
+        self.assertEqual(self.gradient.level_for(Capability.SOCIAL_POST), GRADIENT_PROPOSE)
+        self.assertEqual(self.gradient.level_for(Capability.EXEC_SHELL), GRADIENT_PROPOSE)
+
+    def test_confirmable_capabilities_are_act_with_approval(self) -> None:
+        self.assertEqual(
+            self.gradient.level_for(Capability.FS_DELETE), GRADIENT_ACT_WITH_APPROVAL
+        )
+        self.assertEqual(
+            self.gradient.level_for(Capability.SOCIAL_DM), GRADIENT_ACT_WITH_APPROVAL
+        )
+
+    def test_deny_rule_returns_none(self) -> None:
+        self.gradient.policy.deny(Capability.NET_OUT)
+        self.assertIsNone(self.gradient.level_for(Capability.NET_OUT))
+
+    def test_allow_rule_is_act_silent(self) -> None:
+        self.gradient.policy.allow(Capability.SOCIAL_POST)
+        self.assertEqual(
+            self.gradient.level_for(Capability.SOCIAL_POST), GRADIENT_ACT_SILENT
+        )
+
+    # -- autonomous evaluation ------------------------------------------------
+    def test_autonomous_observe_allowed_silently(self) -> None:
+        d = self.gradient.check(Capability.MEM_READ, actor="agent-1", grant=self.owner)
+        self.assertTrue(d.allowed)
+        self.assertEqual(d.gradient, GRADIENT_OBSERVE)
+
+    def test_autonomous_propose_records_proposal(self) -> None:
+        d = self.gradient.check(
+            Capability.SOCIAL_POST, actor="agent-1", grant=self.owner, draft="Draft post"
+        )
+        self.assertFalse(d.allowed)
+        self.assertTrue(d.needs_proposal)
+        self.assertEqual(d.gradient, GRADIENT_PROPOSE)
+        self.assertTrue(d.proposal_id)
+        pending = self.gradient.pending_proposals()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["draft"], "Draft post")
+
+    def test_proposal_approval_mints_token_and_executes(self) -> None:
+        d = self.gradient.check(
+            Capability.SOCIAL_POST, actor="agent-1", grant=self.owner
+        )
+        token = self.gradient.approve_proposal(d.proposal_id)
+        self.assertTrue(token)
+        d2 = self.gradient.policy.check(
+            Capability.SOCIAL_POST, actor="agent-1", grant=self.owner, confirmation=token
+        )
+        self.assertTrue(d2.allowed)
+
+    def test_rejected_proposal_cannot_be_approved(self) -> None:
+        d = self.gradient.check(
+            Capability.SOCIAL_POST, actor="agent-1", grant=self.owner
+        )
+        self.assertTrue(self.gradient.reject_proposal(d.proposal_id, note="nope"))
+        self.assertIsNone(self.gradient.approve_proposal(d.proposal_id))
+
+    def test_non_autonomous_falls_back_to_plain_check(self) -> None:
+        d = self.gradient.check(
+            Capability.FS_WRITE, actor="agent-1", grant=self.owner, autonomous=False
+        )
+        self.assertTrue(d.allowed)
+        self.assertEqual(d.gradient, GRADIENT_PROPOSE)
+
+    # -- explicit override ----------------------------------------------------
+    def test_explicit_override_bypasses_confirmation_gate(self) -> None:
+        # social.dm is confirmable: normally needs a token.
+        plain = self.gradient.policy.check(
+            Capability.SOCIAL_DM, actor="agent-1", grant=self.owner
+        )
+        self.assertFalse(plain.allowed)
+        self.assertTrue(plain.needs_confirmation)
+        d = self.gradient.check(
+            Capability.SOCIAL_DM, actor="agent-1", grant=self.owner, explicit_override=True
+        )
+        self.assertTrue(d.allowed)
+        self.assertTrue(d.explicit_override)
+        self.assertEqual(d.gradient, GRADIENT_ACT_SILENT)
+
+    def test_explicit_override_keeps_biometric_structural(self) -> None:
+        d = self.gradient.check(
+            Capability.FS_DELETE, actor="agent-1", grant=self.owner, explicit_override=True
+        )
+        self.assertFalse(d.allowed)
+        self.assertTrue(d.needs_biometric)
+
+    def test_explicit_override_still_honors_deny(self) -> None:
+        self.gradient.policy.deny(Capability.SOCIAL_DM)
+        d = self.gradient.check(
+            Capability.SOCIAL_DM, actor="agent-1", grant=self.owner, explicit_override=True
+        )
+        self.assertFalse(d.allowed)
+
+    # -- explicit-instruction detection ---------------------------------------
+    def test_is_explicit_instruction_positives(self) -> None:
+        for text in (
+            "post it",
+            "send it",
+            "do it now",
+            "just do it",
+            "go ahead",
+            "Post it at 6 for engagement",
+            "book it",
+            "apply now",
+            "confirmed",
+        ):
+            self.assertTrue(is_explicit_instruction(text), text)
+
+    def test_is_explicit_instruction_negatives(self) -> None:
+        for text in (
+            "",
+            "should I post it?",
+            "don't post it",
+            "do not send it",
+            "never delete it",
+            "thinking about posting later",
+        ):
+            self.assertFalse(is_explicit_instruction(text), text)
+
+    # -- audit ----------------------------------------------------------------
+    def test_observe_records_observe_audit_kind(self) -> None:
+        self.gradient.check(Capability.DB_READ, actor="agent-1", grant=self.owner)
+        entries = self.gradient.policy.audit_log(kind="observe")
+        self.assertTrue(entries)
+        self.assertEqual(entries[-1]["capability"], Capability.DB_READ)
+
+    def test_propose_decision_verifies_against_audit(self) -> None:
+        d = self.gradient.check(
+            Capability.SOCIAL_POST, actor="agent-1", grant=self.owner
+        )
+        self.assertTrue(self.gradient.policy.verify_decision(d))
+
+    def test_to_dict_carries_gradient_fields(self) -> None:
+        d = self.gradient.check(Capability.MEM_READ, actor="agent-1", grant=self.owner)
+        payload = d.to_dict()
+        self.assertEqual(payload["gradient"], GRADIENT_OBSERVE)
+        self.assertFalse(payload["needs_proposal"])
+        self.assertFalse(payload["explicit_override"])
+
+    # -- robustness -----------------------------------------------------------
+    def test_gradient_never_raises_on_garbage(self) -> None:
+        d = self.gradient.check(None, actor="x")  # type: ignore[arg-type]
+        self.assertFalse(d.allowed)
+        self.assertFalse(is_explicit_instruction(None))  # type: ignore[arg-type]
+        self.assertIsNone(self.gradient.approve_proposal("nope"))
+        self.assertFalse(self.gradient.reject_proposal("nope"))
 
 
 if __name__ == "__main__":
