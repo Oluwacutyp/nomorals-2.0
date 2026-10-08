@@ -617,6 +617,17 @@ class RuntimeMemoryMixin:
         from ...audio.edit import control_audio
         return control_audio(tail or "")
 
+    def _control_overview(self, tail: str, *, chat_key: str = "") -> str:
+        """Interactive Audio Overviews — the podcast you can talk to. Owner-only.
+
+        /overview make <deep-dive|debate|brief> [lang] <Title :: text ;; ...>
+        /overview list — saved overviews
+        /overview ask <question> — interrupt, get a grounded answer
+        /overview voices — the two hosts
+        """
+        from ...audio.overview import control_overview
+        return control_overview(tail or "")
+
     def _control_graph(self, tail: str, *, chat_key: str = "") -> str:
         """Live world-graph planning substrate. Owner-only.
 
