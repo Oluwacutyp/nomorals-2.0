@@ -425,16 +425,32 @@ class RuntimeMemoryMixin:
         /health log <text>     log an event ("headache, 3/5, since morning")
         /health timeline       chronological entries
         /health summary [days] human-readable recap (default 30 days)
+        /health route <symptoms>  conservative care routing (navigation only)
+        /health costs          typical Nigerian private-hospital costs (approximate)
+        /health prep [symptoms] pre-visit packet: timeline + questions + what to bring
+        /health visited <notes> post-visit recap: what the doctor said, structured
 
         Devon is not a doctor. This records what the user reports;
         it never interprets medically.
         """
+        from ...health.previsit import (
+            format_costs,
+            format_recap,
+            format_route,
+            prepare_visit,
+            summarize_visit,
+            triage_route,
+        )
         from ...health.timeline import HealthTimeline, parse_health_note
         raw = (tail or "").strip()
         if not raw:
             return ("usage: /health log <text> — e.g. /health log headache, "
                     "3/5, since morning\n"
                     "       /health timeline | /health summary [days]\n"
+                    "       /health route <symptoms> — where to go next\n"
+                    "       /health costs — typical private-hospital costs\n"
+                    "       /health prep [symptoms] — pre-visit packet\n"
+                    "       /health visited <notes> — post-visit recap\n"
                     "tracking only — I'm not a doctor; show the log to "
                     "yours for medical guidance.")
         verb, _, rest = raw.partition(" ")
@@ -468,7 +484,29 @@ class RuntimeMemoryMixin:
                 if rest.strip().isdigit():
                     days = max(1, min(365, int(rest.strip())))
                 return tl.summary(days=days)
+            if verb == "route":
+                if not rest.strip():
+                    return ("usage: /health route <symptoms> — e.g. "
+                            "/health route headache and fever since morning")
+                symptoms = [s.strip() for s in rest.split(",") if s.strip()]
+                route = triage_route(
+                    symptoms or [rest.strip()],
+                    history=tl.timeline(event_type="symptom", limit=20))
+                return format_route(route)
+            if verb == "costs":
+                return format_costs()
+            if verb == "prep":
+                symptoms = [s.strip() for s in rest.split(",")
+                            if s.strip()] or None
+                return prepare_visit(symptoms, timeline=tl)
+            if verb == "visited":
+                if not rest.strip():
+                    return "usage: /health visited <what the doctor said>"
+                return format_recap(
+                    summarize_visit(rest.strip(), timeline=tl))
             return ("usage: /health log <text> | /health timeline | "
-                    "/health summary [days]")
+                    "/health summary [days] | /health route <symptoms> | "
+                    "/health costs | /health prep [symptoms] | "
+                    "/health visited <notes>")
         finally:
             tl.close()
