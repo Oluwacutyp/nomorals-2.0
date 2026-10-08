@@ -232,6 +232,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, 1),        # /notify [n] — recent alerts
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
+    "email": (0, None),        # /email triage|drafts|send <id>|followups — AI email triage
     "mission": (0, None),    # /mission status|list|stall|clear|pause|resume|cancel|retry|watch|unwatch|new
                              #   /mission new <research|build|fix> <args>
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
@@ -311,6 +312,7 @@ _HELP_TEXT = "\n".join(
         "  — she speaks first (owner DMs only, never anyone else) —",
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
+        "  /email triage|drafts|send <id>|followups  AI email triage + draft queue",
         "  /mission status [id|name]             mission progress, ETA, stall reasons",
         "  /mission pause|resume|cancel|retry  pause, resume, stop, or restart a mission",
         "  /mission watch|unwatch <id>          this chat gets milestone updates",
@@ -960,6 +962,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                   "usage": "/proactive",
                   "example": "/proactive",
                   "related": "/notify /watch"},
+    "email": {"what": ("AI email triage: classifies unread mail "
+                       "(urgent/action/fyi), drafts voice-matched replies "
+                       "for review, and resurfaces threads gone quiet 48h. "
+                       "Drafts are never auto-sent."),
+              "usage": "/email triage | drafts | send <id> | followups",
+              "example": "/email triage",
+              "related": "/notify"},
     "mission": {"what": ("mission progress in chat: % complete, current step, "
                          "an honest ETA, and — when stuck — the concrete "
                          "stall reason. Milestones (started / step / stalled / "
@@ -1123,7 +1132,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz"]),
+                            "bet", "finance", "weather", "tz", "email"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1477,6 +1486,7 @@ LIST_ONELINERS: dict[str, str] = {
     "notify": "recent alerts",
     "proactive": "proactive push sends: switches + delivery states",
     "mission": "mission progress + ETA + stall reasons",
+    "email": "AI email triage: urgent/action/fyi + draft queue + 48h follow-ups",
     "features": "feature toggles (arena, vision, search, …)",
     "list": "this catalog — every executable command, categorized",
     "help": "the full help: catalog, per-command pages, topics",

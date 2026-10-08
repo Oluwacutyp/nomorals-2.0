@@ -630,6 +630,25 @@ class PartnerRuntime(
                 except Exception:  # noqa: BLE001
                     _log.exception("wisdom reply send failed")
                 return
+        # Explicit-override (user directive 2026-10-07): the owner saying
+        # "send it" right after a draft preview sends that draft with no
+        # re-confirmation. Owner chats only; never fires without an armed
+        # draft, and the draft preview already showed the exact payload.
+        if message.incoming and self._is_operator(message):
+            try:
+                from ..email_triage import check_explicit_send
+
+                send_reply = check_explicit_send(message.text,
+                                                 context=self.context)
+            except Exception:  # noqa: BLE001 - never eat the chat
+                send_reply = None
+            if send_reply is not None:
+                try:
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      send_reply)
+                except Exception:  # noqa: BLE001
+                    _log.warning("explicit-send reply failed")
+                return
         # Control commands: from the console or the owner chat, a *known*
         # slash command is a command, not conversation. Unknown slashes and
         # stray / from non-operators fall through to her as ordinary text.
@@ -1460,6 +1479,12 @@ class PartnerRuntime(
             from ..proactive import control_memory
 
             return control_memory(command.tail or arg, context=self.context)
+        if kind == "email":
+            # AI email triage. Drafts are never auto-sent; sending needs
+            # an approved draft or the owner's explicit "send it".
+            from ..email_triage import control_email
+
+            return control_email(command.tail or arg, context=self.context)
         if kind == "book":
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
         if kind in {"wisdom", "wis"}:

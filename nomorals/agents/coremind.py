@@ -100,6 +100,7 @@ _DISPATCH_RETRY_BACKOFF_S = 1.0
 #: Intent kinds whose dispatch is read-only (safe to retry more).
 _DISPATCH_READONLY_KINDS = frozenset({
     "research", "status", "browse", "game", "owner", "fastchat",
+    "email_query",
 })
 
 #: Intent kinds with side effects (retry conservatively).
@@ -731,6 +732,32 @@ def _account_intent(text: str) -> Intent | None:
     return None
 
 
+_RE_EMAIL_QUERY = re.compile(
+    r"what did\s+(.+?)\s+say about\s+(.+?)\s*\??\s*$", re.I)
+
+
+def _email_intent(text: str) -> Intent | None:
+    """Detect "what did <vendor> say about <topic>?" — routes to Gmail search.
+
+    Narrow by design: the whole message must match the vendor-query shape,
+    so ordinary mail talk never misfires into it.
+    """
+    m = _RE_EMAIL_QUERY.match((text or "").strip())
+    if not m:
+        return None
+    vendor, topic = m.group(1).strip(), m.group(2).strip()
+    if not vendor or not topic or len(vendor) > 60 or len(topic) > 120:
+        return None
+    # "what did you/they say about X" isn't a vendor query — that's chat.
+    if vendor.lower() in ("you", "u", "ya", "yall", "they", "he", "she",
+                          "it", "we", "everyone", "anyone"):
+        return None
+    return Intent("email_query", 0.9, target=text.strip()[:200],
+                  action="search", route="email",
+                  meta={"vendor": vendor, "topic": topic},
+                  why=f"vendor mail query: {vendor[:30]} / {topic[:30]}")
+
+
 def _owner_intent(text: str) -> Intent | None:
     """Owner identity assertion — "I'm peace", "drop the act".
 
@@ -995,7 +1022,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     cands: list[Intent] = []
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
-               _research_intent, _account_intent, _build_intent):
+               _research_intent, _account_intent, _email_intent, _build_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1503,6 +1530,7 @@ class CoreMind:
             "music": self._dispatch_music,
             "play": self._dispatch_play,
             "owner": self._dispatch_owner,
+            "email_query": self._dispatch_email,
         }.get(intent.kind)
         if fn is None:
             self._job_done(job_id, True, "no route — treated as chat")
@@ -1979,6 +2007,18 @@ class CoreMind:
     def _dispatch_status(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
         return self.status()
+
+    def _dispatch_email(self, intent: Intent, job_id: str, chat_key: str,
+                        message: Any) -> str:
+        """Vendor mail query: Gmail search + short synthesis. Read-only."""
+        from .email_triage import _get_gmail, answer_vendor_query
+
+        gmail = _get_gmail(self.context)
+        if gmail is None:
+            return ("📧 gmail isn't connected — run "
+                    "`nm connectors connect --name gmail` first.")
+        reply = answer_vendor_query(gmail, intent.target)
+        return reply or "couldn't parse that mail query."
 
     def _dispatch_multi(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:
