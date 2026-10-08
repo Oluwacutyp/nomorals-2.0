@@ -1019,7 +1019,22 @@ class PlaybackEngine:
         props = self._mpv_get_props([
             "playback-status", "playlist-index", "time-pos", "volume"],
             timeout=1.0, sock_path=path)
-        return props is not None
+        if props is None:
+            return False
+        # A dead mpv leaves a stale socket file behind: every property
+        # comes back None. Require at least one real value, otherwise
+        # treat mpv as dead (this was the "/play lost the mpv IPC
+        # connection" bug on Termux — the phone's OOM killer takes mpv
+        # out and the stale socket fooled the alive check).
+        if not any(v is not None for v in props.values()):
+            try:
+                os.unlink(path)
+            except OSError:  # noqa: E103 - best-effort stale cleanup
+                pass
+            self._state.pop("mpv_sock", None)
+            self._state.pop("mpv_map", None)
+            return False
+        return True
 
     def _mpv_connect(self, sock_path: str,
                      timeout: float = 8.0) -> socket.socket | None:
@@ -1046,6 +1061,12 @@ class PlaybackEngine:
         cmd = [self.backend.binary, "--idle=yes", "--really-quiet",
                "--no-terminal", f"--input-ipc-server={sock_path}",
                f"--volume={int(self._state.get('volume', 80))}"]
+        # Termux: the default audio output often has no server to talk
+        # to (no PulseAudio). opensles is the reliable path on Android —
+        # without it mpv starts then dies silently, leaving the stale
+        # socket that broke /play.
+        if os.environ.get("PREFIX", "").startswith("/data/data/com.termux"):
+            cmd.append("--ao=opensles")
         try:
             subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1161,16 +1182,38 @@ class PlaybackEngine:
             return False, f"queue item {pos} is not mpv-playable"
         self._state["mpv_map"] = queue_indexes
         self._save_state()
-        # sync the durable queue into the playlist, then jump to pos
-        for j, (_, path) in enumerate(entries):
-            how = "replace" if j == 0 else "append"
-            if not self._mpv_ipc(sock_path, ["loadfile", path, how]):
-                return False, "lost the mpv IPC connection"
-        jump = queue_indexes.index(pos)
-        if not self._mpv_ipc(sock_path, ["set_property", "playlist-pos",
-                                         jump]):
-            return False, "lost the mpv IPC connection"
-        return True, ""
+        # sync the durable queue into the playlist, then jump to pos.
+        # If mpv dies mid-sync (phone OOM killer, audio device hiccup),
+        # respawn once and retry the whole sync before reporting failure.
+        for attempt in range(2):
+            failed = False
+            for j, (_, path) in enumerate(entries):
+                how = "replace" if j == 0 else "append"
+                if not self._mpv_ipc(sock_path, ["loadfile", path, how]):
+                    failed = True
+                    break
+            if not failed:
+                jump = queue_indexes.index(pos)
+                if self._mpv_ipc(sock_path, ["set_property", "playlist-pos",
+                                             jump]):
+                    return True, ""
+                failed = True
+            if failed and attempt == 0:
+                _log.debug("mpv IPC failed during playlist sync, "
+                           "respawning once")
+                ok, new_sock, err = self._mpv_spawn()
+                if not ok:
+                    return False, (
+                        "mpv died and wouldn't restart: "
+                        f"{err}. On Termux: pkg install mpv")
+                self._state["mpv_sock"] = new_sock
+                self._save_state()
+                sock_path = new_sock
+        return False, (
+            "lost the mpv IPC connection twice — mpv keeps dying. "
+            "On Termux try: pkg install mpv (then /play again). "
+            "If it persists, the phone may be killing background audio; "
+            "keep the Termux session in the foreground.")
 
     def _mpv_map_is_identity(self) -> bool:
         """True when mpv's playlist mirrors the queue 1:1 — the only case
