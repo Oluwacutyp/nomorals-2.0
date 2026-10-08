@@ -209,6 +209,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
     "mandate": (0, None),     # /mandate issue <scope> <per-txn> [per-day] [days] | list | revoke <id> | stop all
+    "track": (0, None),       # /track LOS LHR 2026-12-01 [under 400k] | list
+    "untrack": (1, None),     # /untrack <watch_id>
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -917,6 +919,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/mandate issue <scope> <per-txn-₦> [per-day-₦] [days-valid] | /mandate list | /mandate revoke <id> | /mandate stop all",
               "example": "/mandate issue transfer 50000 200000 30",
               "related": "/spend"},
+    "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
+              "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
+              "example": "/track LOS LHR 2026-12-01 under 400k",
+              "related": "/untrack"},
+    "untrack": {"what": "stop a flight price watcher.",
+              "usage": "/untrack <watch_id>",
+              "example": "/untrack watch_abc123",
+              "related": "/track"},
     "health": {"what": "patient-side health timeline — your own log of symptoms, visits, meds, measurements. Tracking only; not medical advice. Plus biometric coaching: /health ask, /health readiness, /health week (HealthKit/Health Connect data).",
                "usage": "/health log <text> | /health timeline | /health summary [days] | /health route <symptoms> | /health costs | /health prep [symptoms] | /health visited <notes>",
                "example": "/health route headache and fever since morning",
@@ -1253,7 +1263,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1463,7 +1473,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

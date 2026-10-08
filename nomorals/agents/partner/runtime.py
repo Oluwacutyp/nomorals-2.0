@@ -854,6 +854,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("music-full reply send failed: %s", exc)
                 return
+        # Build-map #71: "track this flight for me" → price watcher.
+        # Owner only, non-slash.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                track_reply = self._track_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("track hook failed")
+                track_reply = None
+            if track_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, track_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      track_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("track reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -1502,6 +1520,42 @@ class PartnerRuntime(
             return f"couldn't send: {result['error']}"
         return None
 
+    def _track_hook(self, message: ChatMessage) -> str | None:
+        """Build-map #71: "track LOS LHR flights for me" → price watcher.
+
+        Returns a reply string when a tracking intent fired, else None.
+        Never raises.
+        """
+        import re
+        text = (message.text or "").strip()
+        low = text.lower()
+        if not re.search(r"\btrack\b.*\b(flight|fare|price)", low):
+            return None
+        from ...travel.watchers import PriceWatcher, parse_watch_request
+        parsed = parse_watch_request(text)
+        if parsed is None or not parsed.get("departure_date"):
+            return ("sure — which route and date? e.g. "
+                    "'track LOS to LHR on 2026-12-01 under 400k'.")
+        try:
+            watcher = getattr(self, "_price_watcher", None)
+            if watcher is None:
+                watcher = PriceWatcher()
+                self._price_watcher = watcher
+            w = watcher.watch(
+                parsed["origin"], parsed["destination"],
+                parsed["departure_date"],
+                target_kobo=parsed["target_kobo"])
+        except ValueError as exc:
+            return f"couldn't start the watch: {exc}"
+        try:
+            alert = watcher.check(w)
+        except Exception:  # noqa: BLE001
+            alert = None
+        msg = f"👀 watching {w.route} on {w.departure_date} (id {w.id})."
+        if alert is not None:
+            msg += "\n" + alert.text
+        return msg
+
     def _music_full_hook(self, message: ChatMessage) -> str | None:
         """Build-map #58: "make me a song about X" → full vocal pipeline.
 
@@ -2105,6 +2159,16 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_store(command.tail or arg,
                                        chat_key=chat_key)
+        if kind == "track":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_track(command.tail or arg,
+                                       chat_key=chat_key)
+        if kind == "untrack":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_untrack(command.tail or arg,
+                                         chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "stt":

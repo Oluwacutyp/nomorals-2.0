@@ -729,6 +729,81 @@ class RuntimeMemoryMixin:
         result = mgr.manage(store, parts[1])
         return result.get("message", str(result))
 
+    def _control_track(self, tail: str, *, chat_key: str = "") -> str:
+        """Flight price watchers — persistent monitoring as a sentence.
+
+        Owner-only.
+
+        /track LOS LHR 2026-12-01 [under 400k]   watch a route
+        /track list                              active watchers
+        /untrack <watch_id>                      stop watching
+        """
+        from ...finance.ledger import format_naira
+        from ...travel.watchers import PriceWatcher, parse_watch_request
+        watcher = getattr(self, "_price_watcher", None)
+        if watcher is None:
+            watcher = PriceWatcher()
+            self._price_watcher = watcher
+        rest = (tail or "").strip()
+        if not rest:
+            return ("usage: /track LOS LHR 2026-12-01 [under 400k] | "
+                    "/track list | /untrack <watch_id>")
+        low = rest.lower()
+        if low == "list":
+            watches = watcher.list_watches()
+            if not watches:
+                return ("no active watchers — /track LOS LHR 2026-12-01 "
+                        "to start one.")
+            lines = ["✈️ watching:"]
+            for w in watches:
+                target = (f" (target {format_naira(w.target_kobo)})"
+                          if w.target_kobo else "")
+                last = (f" — last {format_naira(w.last_kobo)}"
+                        if w.last_kobo else "")
+                lines.append(f"• {w.id}: {w.route} {w.departure_date}"
+                             f"{target}{last}")
+            return "\n".join(lines)
+        parsed = parse_watch_request(rest)
+        if parsed is None or not parsed.get("departure_date"):
+            return ("I need a route and date — e.g. "
+                    "'/track LOS LHR 2026-12-01 under 400k'.")
+        try:
+            w = watcher.watch(
+                parsed["origin"], parsed["destination"],
+                parsed["departure_date"],
+                target_kobo=parsed["target_kobo"])
+        except ValueError as exc:
+            return f"couldn't start the watch: {exc}"
+        # immediate first check so the owner sees a price right away
+        alert = None
+        try:
+            alert = watcher.check(w)
+        except Exception:  # noqa: BLE001 - first check is best-effort
+            pass
+        msg = (f"👀 watching {w.route} on {w.departure_date}")
+        if w.target_kobo:
+            msg += f" — I'll ping you under {format_naira(w.target_kobo)}"
+        msg += f" (id {w.id})."
+        if alert is not None:
+            msg += "\n" + alert.text
+        elif w.last_kobo:
+            msg += f" Current: {format_naira(w.last_kobo)}."
+        return msg
+
+    def _control_untrack(self, tail: str, *, chat_key: str = "") -> str:
+        """Stop a price watcher. Owner-only. /untrack <watch_id>"""
+        from ...travel.watchers import PriceWatcher
+        watcher = getattr(self, "_price_watcher", None)
+        if watcher is None:
+            watcher = PriceWatcher()
+            self._price_watcher = watcher
+        wid = (tail or "").strip()
+        if not wid:
+            return "usage: /untrack <watch_id> — see /track list."
+        if watcher.unwatch(wid):
+            return f"stopped watching {wid}."
+        return f"no watcher '{wid}'. Use /track list."
+
     def _control_mandate(self, tail: str, *, chat_key: str = "") -> str:
         """Payment mandates — the agent's standing authority to move money.
 
