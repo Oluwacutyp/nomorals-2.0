@@ -233,6 +233,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "vnote": (0, None),        # /vnote … — voice notes in chat (audio + searchable transcripts)
     "match": (0, None),        # /match … — curated daily batches + stable two-sided matching
     "cgroup": (0, None),       # /cgroup … — themed groups, events, meetups (#84)
+    "challenge": (0, None),    # /challenge … — photo-proof challenges + streaks + squads (#87)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -664,6 +665,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/cgroup new <name> | <topic> · join <group_id> · list · post <group_id> <text> · show <group_id> · discover [member] · nudge | /cgroup event new <group_id> | <title> | <YYYY-MM-DD HH:MM> | [where] | [weekly] · rsvp <event_id> <yes|no|maybe> · list · summary · ritual · nudge | /cgroup meetup poll <event_id> | <venue>… · vote · results · attendees · checkin · turnout",
                 "example": "/cgroup event new grp_x | Lagos Devs dinner | 2026-10-10 19:00 | Ikeja | weekly",
                 "related": "/miniapp /gtrip /match"},
+    "challenge": {"what": "photo-proof fitness challenges + streaks + squads — Seer-verified workout photos, leaderboards, daily streaks with loss-aversion nudges, small workout squads (3–8), and challenge-completion badges (features-as-loot). Not owner-gated (shared surfaces).",
+                "usage": "/challenge create <name> | <type> | <days> [target N] · join <id> · log <id> · proof <id> <photo-path> · board <id> · streak · risk · squad create <name> | <m1,m2,…> · squad board <squad_id>",
+                "example": "/challenge create October Grind | workout-count | 31 target 20",
+                "related": "/train /form /cgroup"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1332,7 +1337,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1542,7 +1547,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1650,6 +1655,7 @@ LIST_ONELINERS: dict[str, str] = {
     "mandate": "money & spending",
     "train": "memory & thinking",
     "form": "memory & thinking",
+    "challenge": "photo-proof challenges + streaks + squads",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
