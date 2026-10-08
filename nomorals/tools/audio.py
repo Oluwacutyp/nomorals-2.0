@@ -359,23 +359,33 @@ def register(registry: Any) -> None:
         return Path(rel)
 
     def _api_pair() -> tuple[str, str]:
-        # Explicit audio settings win, then the LLM's endpoint, then the
-        # provider env vars the LLM broker itself uses (GROQ_API_KEY etc.).
+        # Explicit audio settings win, then the LLM's per-provider keys
+        # (groq_api_key etc. — populated from NM_GROQ_API_KEY and friends),
+        # then the raw provider env vars the LLM broker itself uses.
         # Base URL and key stay paired — never mix providers.
         base = getattr(audio_settings, "stt_base_url", "") or ""
         key = getattr(audio_settings, "stt_api_key", "") or ""
         if base and key:
             return base, key
-        base = getattr(llm_settings, "base_url", "") or ""
-        key = getattr(llm_settings, "api_key", "") or ""
-        if base and key:
-            return base, key
+        if llm_settings is not None:
+            for prefix in ("groq", "openai", "openrouter"):
+                pkey = getattr(llm_settings, f"{prefix}_api_key", "") or ""
+                pbase = getattr(llm_settings, f"{prefix}_base_url", "") or ""
+                if pkey and pbase:
+                    return pbase, pkey
+            base = getattr(llm_settings, "base_url", "") or ""
+            key = getattr(llm_settings, "api_key", "") or ""
+            if base and key:
+                return base, key
         if os.environ.get("OPENAI_API_KEY", ""):
             return (os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
                     os.environ["OPENAI_API_KEY"])
         if os.environ.get("GROQ_API_KEY", ""):
             return (os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
                     os.environ["GROQ_API_KEY"])
+        if os.environ.get("NM_GROQ_API_KEY", ""):
+            return ("https://api.groq.com/openai/v1",
+                    os.environ["NM_GROQ_API_KEY"])
         return "", ""
 
     def api_base() -> str:
