@@ -129,3 +129,52 @@ def register(registry: Any) -> None:
         if not items:
             lines.append("  none yet — /budget set <category> <amount>")
         return {"ok": True, "text": "\n".join(lines), "budgets": items}
+
+    @registry.register(
+        "finance_send",
+        description=(
+            "Send money as a chat primitive ('send 5k to Mama'). Args: to "
+            "(recipient name), amount (e.g. '5k'), note (optional). Flow: "
+            "resolves recipient (asks when unknown, never guesses) → guard "
+            "check (warns on anomalies, advisory only) → stages → returns "
+            "a biometric prompt. Money moves ONLY via finance_confirm_send "
+            "with a biometric token. override_warning=True executes after "
+            "an explicit 'send it anyway'."
+        ),
+        capability="finance",
+        parameters={
+            "to": "str — recipient name, e.g. 'Mama'",
+            "amount": "str|int — amount, e.g. '5k' or 5000",
+            "note": "str — optional note",
+            "override_warning": "bool — set true after explicit 'send it anyway'",
+        },
+    )
+    def finance_send(
+        context: Any, to: str = "", amount: Any = "", note: str = "",
+        override_warning: bool = False,
+    ) -> dict[str, Any]:
+        from .send import send_money
+        return send_money(to, amount, note=note, context=context,
+                          override_warning=bool(override_warning))
+
+    @registry.register(
+        "finance_confirm_send",
+        description=(
+            "Execute a staged transfer after biometric approval. Args: "
+            "staged_id (from finance_send), biometric_token (capability-bound "
+            "token from policy.approve_with_biometric — no token, no movement)."
+        ),
+        capability="finance",
+        parameters={
+            "staged_id": "str — staged transfer id",
+            "biometric_token": "str — token from approve_with_biometric()",
+        },
+    )
+    def finance_confirm_send(
+        context: Any, staged_id: str = "", biometric_token: str = "",
+    ) -> dict[str, Any]:
+        from .send import RecipientStore, confirm_send
+        paystack = getattr(context, "paystack", None)
+        return confirm_send(staged_id, biometric_token or None,
+                            context=context, paystack=paystack,
+                            recipients=RecipientStore())

@@ -766,6 +766,25 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("explicit-post reply send failed: %s", exc)
                 return
+        # Build-map #49: conversational money — "send 5k to Mama" is a
+        # first-class chat primitive (owner only). Guard warnings surface
+        # here with [Send anyway] [Cancel]; biometric gates the movement.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                money_reply = self._money_send_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("money-send hook failed")
+                money_reply = None
+            if money_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, money_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      money_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("money-send reply send failed: %s", exc)
+                return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -1386,6 +1405,33 @@ class PartnerRuntime(
         if isinstance(meta, dict) and meta.get("is_owner") is True:
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
+
+    def _money_send_hook(self, message: ChatMessage) -> str | None:
+        """Build-map #49: "send 5k to Mama" → staged transfer + guard.
+
+        Returns a reply string when a money-send intent fired, else None.
+        Never raises — failures return honest error strings.
+        """
+        from ..finance.send import parse_send_request, send_money
+        req = parse_send_request(message.text)
+        if req is None:
+            return None
+        _log.info("money-send intent: %s → %s", req["amount_kobo"], req["to"])
+        # Explicit "send it anyway" after a warning → override the guard.
+        override = "send it anyway" in message.text.lower()
+        result = send_money(req["to"], req["amount_kobo"], context=self.context,
+                            override_warning=override)
+        if result.get("warning"):
+            w = result["warning"]
+            return (w["message"] + "\n\nReply 'send it anyway' to proceed, "
+                    "or 'cancel' to drop it.")
+        if result.get("needs") == "recipient":
+            return result["ask"]
+        if result.get("needs") == "biometric":
+            return (result["prompt"] + " (confirm on your phone to complete)")
+        if result.get("error"):
+            return f"couldn't send: {result['error']}"
+        return None
 
     def _explicit_post_override(self, message: ChatMessage) -> str | None:
         """Build-map #43: the owner's explicit post instruction = execute.
