@@ -101,6 +101,24 @@ class SocialManager:
 
         for module in (mastodon, bluesky):
             self.register_adapter(module.Adapter())
+        self.register_postiz()
+        return self
+
+    def register_postiz(self) -> "SocialManager":
+        """Register the Postiz adapter when a Postiz instance is configured.
+
+        One adapter → 30+ networks via the operator's own Postiz (self-hosted
+        or cloud). Only registers when ``POSTIZ_URL`` is set, so installs
+        without Postiz behave exactly as before.
+        """
+        import os
+
+        if not os.environ.get("POSTIZ_URL", "").strip():
+            return self
+        from .adapters import postiz
+
+        self.register_adapter(postiz.Adapter())
+        _log.info("registered Postiz publishing backend")
         return self
 
     def adapter_for(self, platform: str) -> PlatformAdapter:

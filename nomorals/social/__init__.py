@@ -22,13 +22,17 @@ from __future__ import annotations
 
 from .base import Account, PlatformAdapter, PostResult, PostStatus, SocialError
 from .manager import PublishOutcome, SocialManager
+from .tone import ChannelSpec, Publisher, adapt_tone
 
 __all__ = [
     "Account",
+    "ChannelSpec",
     "PlatformAdapter",
     "PostResult",
     "PostStatus",
     "PublishOutcome",
+    "Publisher",
     "SocialError",
     "SocialManager",
+    "adapt_tone",
 ]
