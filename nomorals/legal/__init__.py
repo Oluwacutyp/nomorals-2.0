@@ -48,6 +48,22 @@ from .portfolio import (
     ensure_schedule as ensure_portfolio_schedule,
 )
 
+from .regulatory import (
+    REGCHECK_ACTION,
+    REGCHECK_CRON,
+    REGULATORS,
+    Control,
+    OBLIGATION_CONTROLS,
+    RegWatch,
+    RegulatoryItem,
+    RegulatoryWatch,
+    alert_text,
+    check_all as regulatory_check_all,
+    control_regwatch,
+    controls_for,
+    ensure_schedule as ensure_regulatory_schedule,
+)
+
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
@@ -85,4 +101,17 @@ __all__ = [
     "portfolio_check_all",
     "control_contracts",
     "ensure_portfolio_schedule",
+    "REGCHECK_ACTION",
+    "REGCHECK_CRON",
+    "REGULATORS",
+    "Control",
+    "OBLIGATION_CONTROLS",
+    "RegWatch",
+    "RegulatoryItem",
+    "RegulatoryWatch",
+    "alert_text",
+    "regulatory_check_all",
+    "control_regwatch",
+    "controls_for",
+    "ensure_regulatory_schedule",
 ]

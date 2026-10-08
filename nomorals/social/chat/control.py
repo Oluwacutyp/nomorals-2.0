@@ -226,6 +226,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "legal": (0, None),        # /legal [language] <question> — plain-language legal information (EN/PCM/YO/HA/IG)
     "research": (0, None),    # /research <legal question> — grounded RAG with confidence + traceable citations
     "contracts": (0, None),    # /contracts … — contract portfolio: obligations, renewals, SLA tracking
+    "regwatch": (0, None),     # /regwatch … — regulatory change monitoring (CBN/SEC/NDPA/FIRS)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -637,6 +638,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/contracts | /contracts attention [days] | /contracts add <name> | <paste contract text> | /contracts obligations <id> | /contracts track <id> | <desc> | <YYYY-MM-DD> | /contracts done <obligation id> | /contracts sla <id> <metric> | <target> | /contracts breach <id> <metric> | [note] | /contracts timeline",
                 "example": "/contracts attention 30",
                 "related": "/contract /legal"},
+    "regwatch": {"what": "regulatory change monitoring — watch CBN, SEC, NDPA (data protection), FIRS for rule changes affecting your business. Plain-language alerts with official source links. Legal information, never legal advice; Devon is not a lawyer. Owner only.",
+                "usage": "/regwatch add CBN [topics…] | /regwatch list | /regwatch remove <id> | /regwatch check | /regwatch regulators",
+                "example": "/regwatch add CBN fintech AML",
+                "related": "/contracts /research"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1297,7 +1302,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1507,7 +1512,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
