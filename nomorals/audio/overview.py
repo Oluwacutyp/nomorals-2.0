@@ -305,9 +305,14 @@ def _render_audio(script: OverviewScript, *,
 
 def _audio_duration(p: Path) -> float:
     try:
-        from ..media_edit.videos import run_ffprobe_json
-        info = run_ffprobe_json(str(p))
-        return float((info.get("format") or {}).get("duration") or 0.0)
+        import shutil, subprocess
+        if shutil.which("ffprobe") is None:
+            return 0.0
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+            capture_output=True, text=True, timeout=30)
+        return float((out.stdout or "").strip() or 0.0)
     except Exception:  # noqa: BLE001
         return 0.0
 

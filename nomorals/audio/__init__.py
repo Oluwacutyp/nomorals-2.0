@@ -30,6 +30,17 @@ from .characters import (
     control_character,
     talk_to,
 )
+from .audiobook import (
+    DISCLOSURE_RULES,
+    KNOWN_STORES,
+    Audiobook,
+    AudiobookStore,
+    BookChapter,
+    control_audiobook,
+    epub_to_audiobook,
+    master_lufs,
+    split_chapters,
+)
 
 __all__ = [
     "Edit",

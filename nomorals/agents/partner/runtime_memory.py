@@ -640,6 +640,15 @@ class RuntimeMemoryMixin:
         from ...audio.characters import control_character
         return control_character(tail or "")
 
+    def _control_audiobook(self, tail: str, *, chat_key: str = "") -> str:
+        """EPUB → audiobook, one click + store disclosure. Owner-only.
+
+        /audiobook make <epub> [narrator=<ref>] [stores...] — build it
+        /audiobook status — produced audiobooks
+        """
+        from ...audio.audiobook import control_audiobook
+        return control_audiobook(tail or "")
+
     def _control_graph(self, tail: str, *, chat_key: str = "") -> str:
         """Live world-graph planning substrate. Owner-only.
 
