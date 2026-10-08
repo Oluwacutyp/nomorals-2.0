@@ -1695,6 +1695,12 @@ class PartnerRuntime(
                                           chat_key=chat_key, message=message)
         if kind == "code":
             return self._control_code(command.tail, chat_key=chat_key)
+        if kind == "checkpoint":
+            return self._control_checkpoint(command.tail, chat_key=chat_key)
+        if kind == "rewind":
+            return self._control_rewind(command.tail, chat_key=chat_key)
+        if kind == "checkpoints":
+            return self._control_checkpoints(command.tail, chat_key=chat_key)
         if kind == "py":
             return self._control_py(command.tail, chat_key=chat_key)
         if kind == "remember":

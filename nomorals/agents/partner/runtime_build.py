@@ -98,6 +98,58 @@ class RuntimeBuildMixin:
                     f"it's in the workspace if you want to take over.")
         return self._send_long_checked(chat.platform, chat, text)
 
+    # ── checkpoints + rewind (item #17) ──────────────────────────────────
+    def _control_checkpoint(self, tail: str, chat_key: str) -> str:
+        """/checkpoint [label] — snapshot the coding workdir + session."""
+        from ..coding import CodingAgent
+
+        label = (tail or "").strip()
+        try:
+            ckpt = CodingAgent(self.context).checkpoint(label=label)
+        except Exception as exc:  # noqa: BLE001
+            return f"checkpoint failed: {exc}"
+        code = "code+convo" if ckpt.code_captured else "convo-only"
+        label_bit = f" ({ckpt.label})" if ckpt.label else ""
+        note = f"\n⚠️ {ckpt.note}" if ckpt.note else ""
+        return (f"📸 checkpoint {ckpt.id}{label_bit} saved — {code}, "
+                f"{len(ckpt.scope_files)} tracked + "
+                f"{len(ckpt.untracked_files)} untracked file(s).{note}\n"
+                f"/rewind 1 restores it.")
+
+    def _control_rewind(self, tail: str, chat_key: str) -> str:
+        """/rewind [n] — restore the nth-latest checkpoint (1 = latest)."""
+        from ..coding import CodingAgent
+
+        raw = (tail or "").strip()
+        n = 1
+        if raw:
+            try:
+                n = int(raw)
+            except ValueError:
+                return "usage: /rewind [n] — e.g. /rewind 1 for the latest"
+        try:
+            return CodingAgent(self.context).rewind(n)
+        except Exception as exc:  # noqa: BLE001
+            return f"rewind failed: {exc}"
+
+    def _control_checkpoints(self, tail: str, chat_key: str) -> str:
+        """/checkpoints — list saved checkpoints, newest first."""
+        from ..coding import CodingAgent
+
+        try:
+            ckpts = CodingAgent(self.context).list_checkpoints()
+        except Exception as exc:  # noqa: BLE001
+            return f"could not list checkpoints: {exc}"
+        if not ckpts:
+            return ("no checkpoints yet — /checkpoint [label] to save one.\n"
+                    "Plans auto-checkpoint before execute_plan() runs.")
+        lines = ["📸 checkpoints (newest first):"]
+        lines.extend(f"  {c.short}" for c in ckpts[:15])
+        if len(ckpts) > 15:
+            lines.append(f"  … +{len(ckpts) - 15} older")
+        lines.append("/rewind <n> restores one (n=1 is the latest)")
+        return "\n".join(lines)
+
     # ── code interpreter (run python, keep a session) ───────────────────────
     def _control_py(self, tail: str, chat_key: str) -> str:
         """/py <python code> — run code in the sandbox and get the result.

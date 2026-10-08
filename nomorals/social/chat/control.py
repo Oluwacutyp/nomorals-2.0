@@ -195,6 +195,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "news": (0, 2),          # /news [run|status]
     "research": (0, 2),      # /research [run [domain]|status]
     "code": (1, None),       # /code <what to build> — the coding bot
+    "checkpoint": (0, None),  # /checkpoint [label] — snapshot the coding workdir
+    "rewind": (0, 1),      # /rewind [n] — restore the nth-latest checkpoint
+    "checkpoints": (0, 0),  # /checkpoints — list saved checkpoints
     "py": (1, None),         # /py <python code> — run in the sandbox (-s/-r sessions)
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
     "recall": (0, None),     # /recall [query] — what she has stored
@@ -359,6 +362,9 @@ _HELP_TEXT = "\n".join(
         "  /news [run|status]                      fetch + summarize the feeds",
         "  /research [run [domain]|status]         lifestyle | tech | cyber",
         "  /code <what to build>                   the coding bot (draft→run→fix)",
+        "  /checkpoint [label]                   snapshot the coding workdir",
+        "  /rewind [n]                           restore a checkpoint (n=1 latest)",
+        "  /checkpoints                          list saved checkpoints",
         "  /py <python code>                       run it sandboxed; -s name keeps a session, -r resets",
         "  /remember <text> [kind] [tags:a,b]      store it in her long-term memory",
         "  /recall [query]                         what she remembers (top 5)",
@@ -855,6 +861,15 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "py": {"what": "run python in the sandbox; -s name keeps a session, -r resets it.",
            "usage": "/py <code> [-s name] [-r]", "example": "/py print(6*7)",
            "related": "/code"},
+    "checkpoint": {"what": "snapshot the coding workdir + session state so a bad run can be rewound.",
+           "usage": "/checkpoint [label]", "example": "/checkpoint before refactor",
+           "related": "/rewind /checkpoints /code"},
+    "rewind": {"what": "restore a checkpoint's files (HEAD never moves); a pre-rewind safety checkpoint is saved first.",
+           "usage": "/rewind [n]", "example": "/rewind 1",
+           "related": "/checkpoint /checkpoints"},
+    "checkpoints": {"what": "list saved coding checkpoints, newest first.",
+           "usage": "/checkpoints", "example": "/checkpoints",
+           "related": "/checkpoint /rewind"},
     "remember": {"what": "store something in her long-term memory.",
                  "usage": "/remember <text> [kind] [tags:a,b]",
                  "example": "/remember mom's birthday is May 4 tags:people",

@@ -282,6 +282,12 @@ class CodingAgent:
         # targets outside the set are rejected (no silent scope creep).
         self._plan_scope: set[str] | None = None
         self._mission_touched: list[str] = []
+        # Checkpoint conversation state (item #17): what the agent was
+        # working on, serialized into checkpoints and restored by rewind().
+        self._last_task: str = ""
+        self._last_plan_id: str = ""
+        self._last_scope: list[str] = []
+        self._last_iterations: int = 0
 
     def _error_recall(self) -> Any:
         """The Phase C embedding recall index (lazy, cached, best-effort)."""
@@ -468,6 +474,96 @@ class CodingAgent:
         self._mission_touched = []
         return ok
 
+    # ── checkpoints + rewind (item #17) ──────────────────────────────
+    def _checkpoint_store(self) -> Any:
+        """The disk-backed checkpoint store for this agent's workdir."""
+        from .checkpoints import CheckpointStore
+        return CheckpointStore(
+            settings=getattr(self.context, "settings", None))
+
+    def _convo_state(self) -> dict[str, Any]:
+        """Serializable snapshot of what the agent is working on."""
+        return {
+            "task": self._last_task,
+            "plan_id": self._last_plan_id,
+            "scope": list(self._last_scope),
+            "iterations": self._last_iterations,
+            "captured_at": time.time(),
+        }
+
+    def _restore_convo(self, convo: dict[str, Any]) -> None:
+        """Restore conversation state from a checkpoint snapshot."""
+        if not isinstance(convo, dict):
+            return
+        self._last_task = str(convo.get("task", "") or "")
+        self._last_plan_id = str(convo.get("plan_id", "") or "")
+        scope = convo.get("scope") or []
+        self._last_scope = [str(s) for s in scope] \
+            if isinstance(scope, list) else []
+        try:
+            self._last_iterations = int(convo.get("iterations", 0) or 0)
+        except (TypeError, ValueError):
+            self._last_iterations = 0
+
+    def checkpoint(self, label: str = "",
+                   *, convo: dict[str, Any] | None = None) -> Any:
+        """Save a recovery checkpoint of the workdir + conversation state.
+
+        Code is captured with ``git stash create`` (a stash *commit* —
+        the user's own ``git stash`` list is never touched); untracked
+        file contents are copied into the checkpoint dir.  Never raises:
+        when git is unavailable a convo-only checkpoint is stored instead.
+        """
+        store = self._checkpoint_store()
+        workdir = self._resolve(".")
+        try:
+            ckpt = store.capture(
+                workdir, label=label,
+                convo=convo if convo is not None else self._convo_state())
+            return store.save(ckpt)
+        except Exception as exc:  # noqa: BLE001 — checkpoint never kills a run
+            _log.warning("checkpoint failed, storing convo-only: %s", exc)
+            fallback = store.capture(
+                Path("__no_repo__"), label=label,
+                convo=self._convo_state())
+            fallback.code_captured = False
+            fallback.note = f"capture failed ({exc})"
+            return store.save(fallback)
+
+    def rewind(self, n: int = 1) -> str:
+        """Restore the nth-latest checkpoint (n=1 → latest).
+
+        A ``pre-rewind`` safety checkpoint is saved first, so the rewind
+        itself is reversible.  Only working-tree files inside the
+        checkpoint's scope are rewritten — HEAD is never moved.  Returns
+        a human summary (never raises).
+        """
+        store = self._checkpoint_store()
+        try:
+            n = max(1, int(n))
+        except (TypeError, ValueError):
+            return f"bad checkpoint number {n!r} — /checkpoints to list."
+        try:
+            target = store.get_nth(n)
+        except Exception as exc:  # noqa: BLE001
+            return f"could not read checkpoints: {exc}"
+        if target is None:
+            return "no checkpoints yet — /checkpoint to save one first."
+        safety = self.checkpoint(label="pre-rewind")
+        summary = store.rewind_to(target)
+        self._restore_convo(target.convo)
+        return (summary +
+                f"\n🛟 safety checkpoint {safety.id} (label 'pre-rewind') "
+                "saved — /rewind 1 undoes this rewind.")
+
+    def list_checkpoints(self) -> list[Any]:
+        """All checkpoints, newest first. Never raises."""
+        try:
+            return self._checkpoint_store().list()
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("list_checkpoints: %s", exc)
+            return []
+
     def _rollback_after_failure(self, changed: list[str]) -> str:
         """Roll back a failed mission that made changes.
 
@@ -600,6 +696,11 @@ class CodingAgent:
             pass
 
         workdir = self._resolve(".")
+        # Item #17: track conversation state for checkpoints.
+        self._last_task = task
+        self._last_plan_id = ""
+        self._last_scope = []
+        self._last_iterations = 0
         # Simple scripts (no tests anywhere) just run — the pytest runner's
         # "nothing ran" output confuses more than it helps.
         if use_runner and not _workdir_has_tests(workdir):
@@ -628,6 +729,9 @@ class CodingAgent:
             if mode == "always" or (mode == "auto" and is_complex(plan)):
                 code_plan = PlanStore.new(draft_task, plan,
                                           approach="", risks=[])
+                self._last_plan_id = code_plan.id
+                self._last_scope = [str(s.get("path", ""))
+                                    for s in plan if s.get("path")]
                 return CodingResult(
                     ok=False,
                     iterations=0,
@@ -636,6 +740,9 @@ class CodingAgent:
                     plan_text=render_plan(code_plan),
                     seconds=round(time.perf_counter() - started, 2),
                 )
+        self._last_scope = [str(s.get("path", "")) if isinstance(s, dict)
+                            else str(s["path"])
+                            for s in plan if s.get("path")]
         per_file = max(1, max_iterations // max(1, len(plan)))
         budgets = {spec["path"]: per_file for spec in plan}
         # Phase D: explore phase reads all planned files in one parallel
@@ -654,6 +761,7 @@ class CodingAgent:
         gate_exhausted = False
 
         for attempt in range(1, rounds + 1):
+            self._last_iterations = attempt  # item #17: checkpoint state
             if not any(v > 0 for v in budgets.values()):
                 break  # every file spent its budget — stop, don't re-verify
             diffs: dict[str, str] = {}
@@ -952,6 +1060,17 @@ class CodingAgent:
                   "new_file": bool(f.get("new_file"))}
                  for f in plan.files if f.get("path")]
         self._plan_scope = {s["path"] for s in specs}
+        # Item #17: checkpoint the pre-execution state (after the approval
+        # check) so a bad run rewinds cleanly.  Never kills the run.
+        try:
+            self.checkpoint(
+                label=f"plan:{plan_id}",
+                convo={"task": plan.task, "plan_id": plan_id,
+                       "scope": sorted(self._plan_scope),
+                       "iterations": 0, "captured_at": time.time()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("execute_plan: pre-run checkpoint failed: %s", exc)
         try:
             return self.run(plan.task, _plan=specs, plan_mode="never")
         finally:
