@@ -566,6 +566,26 @@ class RuntimeMemoryMixin:
             self._training_coach = coach
         return control_train(tail or "", coach=coach)
 
+    def _control_form(self, tail: str, *, chat_key: str = "") -> str:
+        """Seer-powered form coach — video movement analysis. Owner-only.
+
+        /form analyze <video-or-photo> <exercise> — form read + fixes
+        /form gait <video> — running gait risk flags
+        /form movements — the 5 coached movements
+        /form apply <analysis-id> — mobility work into today's session
+        """
+        from ...health.form import FormStore, control_form
+        from ...health.training import TrainingCoach
+        coach = getattr(self, "_training_coach", None)
+        if coach is None:
+            coach = TrainingCoach()
+            self._training_coach = coach
+        store = getattr(self, "_form_store", None)
+        if store is None:
+            store = FormStore()
+            self._form_store = store
+        return control_form(tail or "", coach=coach, store=store)
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 
