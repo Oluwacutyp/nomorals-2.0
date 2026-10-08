@@ -256,7 +256,8 @@ class DiscordAdapter(ChatAdapter):
 
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
-             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+             buttons: list[list[tuple[str, str]]] | None = None,
+             parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         try:
 

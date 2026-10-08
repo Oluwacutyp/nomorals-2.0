@@ -1232,13 +1232,14 @@ class TelegramAdapter(ChatAdapter):
     # ── outbound ─────────────────────────────────────────────────────────────
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
-             buttons: list[list[tuple[str, str]]] | None = None) -> SendResult:
+             buttons: list[list[tuple[str, str]]] | None = None,
+             parse_mode: str = "") -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
         started = time.perf_counter()
         try:
-            result = self._run_on_loop(self._send_async(client, chat, text, reply_to))
+            result = self._run_on_loop(self._send_async(client, chat, text, reply_to, parse_mode))
             return SendResult(
                 ok=True, platform=self.name, message_id=str(getattr(result, "id", "")),
                 seconds=time.perf_counter() - started,
@@ -1257,7 +1258,8 @@ class TelegramAdapter(ChatAdapter):
         except (TypeError, ValueError):
             return {}
 
-    async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str) -> Any:
+    async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str,
+                          parse_mode: str = "") -> Any:
         # Try to use cached input entity first (most reliable for DMs)
         entity = self._input_entity_cache.get(chat.chat_id)
         if entity is None:
@@ -1266,6 +1268,8 @@ class TelegramAdapter(ChatAdapter):
         kwargs: dict[str, Any] = {}
         if reply_to:
             kwargs["reply_to"] = int(reply_to)
+        if parse_mode in ("html", "HTML", "md", "markdown"):
+            kwargs["parse_mode"] = parse_mode
         kwargs.update(self._thread_kwargs(chat))
         result = None
         for chunk in _chunk_text(text, 4096):
