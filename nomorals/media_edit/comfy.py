@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 import threading
 import time
 import urllib.error
@@ -174,6 +175,56 @@ def _upscale_workflow(*, image_name: str,
     wf = _load_workflow("upscale")
     _single(wf, "LoadImage")["inputs"]["image"] = image_name
     _single(wf, "UpscaleImageBy")["inputs"]["scale_by"] = float(scale)
+    return wf
+
+
+#: Node types the Wan 2.2 template needs. ComfyUI reports unknown node
+#: types in /prompt's ``node_errors``; when that happens we name the
+#: custom-node packs to install instead of failing cryptically.
+_WAN_WORKFLOW_NOTE = (
+    "the wan22_t2v workflow needs ComfyUI-WanVideoWrapper "
+    "(WanVideoModelLoader, WanVideoVAELoader, WanVideoTextEncode, "
+    "WanVideoEmptyEmbeds, WanVideoEmptyLatent, WanVideoSampler, "
+    "WanVideoDecode) and ComfyUI-VideoHelperSuite (VHS_VideoCombine). "
+    "Install both custom-node packs in ComfyUI Manager, restart, "
+    "and place the Wan 2.2 + VAE weights in ComfyUI/models/diffusion_models "
+    "and ComfyUI/models/vae."
+)
+
+
+def _wan22_t2v_workflow(*, prompt: str, negative_prompt: str | None,
+                        width: int | None, height: int | None,
+                        num_frames: int, steps: int | None,
+                        seed: int | None, cfg: float | None,
+                        model_file: str | None,
+                        vae_file: str | None) -> dict[str, Any]:
+    """Parameterize the wan22_t2v template. Node types are walked by
+    class_type (same discipline as the image templates); unknown node
+    types fail at submit time with _WAN_WORKFLOW_NOTE."""
+    if num_frames < 1:
+        raise GenerativeEditError(
+            f"num_frames must be >= 1, got {num_frames}")
+    wf = _load_workflow("wan22_t2v")
+    if model_file:
+        _single(wf, "WanVideoModelLoader")["inputs"]["model"] = model_file
+    if vae_file:
+        _single(wf, "WanVideoVAELoader")["inputs"]["model"] = vae_file
+    enc = _single(wf, "WanVideoTextEncode")["inputs"]
+    enc["positive_prompt"] = prompt
+    enc["negative_prompt"] = negative_prompt or ""
+    w, h = int(width or 1280), int(height or 720)
+    for ct in ("WanVideoEmptyEmbeds", "WanVideoEmptyLatent"):
+        node = _single(wf, ct)["inputs"]
+        node["width"] = w
+        node["height"] = h
+        node["num_frames"] = int(num_frames)
+    sampler = _single(wf, "WanVideoSampler")["inputs"]
+    sampler["seed"] = int(seed) if seed is not None else _random_seed()
+    if steps:
+        sampler["steps"] = int(steps)
+    if cfg:
+        sampler["cfg"] = float(cfg)
+    sampler["num_frames"] = int(num_frames)
     return wf
 
 
@@ -358,6 +409,38 @@ class ComfyUIBackend(GenerativeBackend):
                 "ComfyUI finished but produced no images")
         return images
 
+    def _download_videos(self, entry: dict[str, Any],
+                         out_dir: str | Path | None = None) -> list[Path]:
+        """Download rendered videos (VHS_VideoCombine puts them under
+        the ``gifs`` key). Saves to ``out_dir`` (default: temp dir) and
+        returns the local paths. Never fakes: empty output raises."""
+        outputs = entry.get("outputs") or {}
+        paths: list[Path] = []
+        dest = Path(out_dir) if out_dir else Path(tempfile.gettempdir())
+        dest.mkdir(parents=True, exist_ok=True)
+        for _node_id, node_out in outputs.items():
+            if not isinstance(node_out, dict):
+                continue
+            for vid_info in node_out.get("gifs") or []:
+                query = urllib.parse.urlencode({
+                    "filename": vid_info.get("filename", ""),
+                    "subfolder": vid_info.get("subfolder", ""),
+                    "type": vid_info.get("type", "output"),
+                })
+                _status, body, _ctype = self._request(
+                    "GET", f"/view?{query}")
+                name = str(vid_info.get("filename") or
+                           f"devon_video_{uuid.uuid4().hex}.mp4")
+                if not name.lower().endswith((".mp4", ".webm", ".mov")):
+                    name += ".mp4"
+                path = dest / name
+                path.write_bytes(body)
+                paths.append(path)
+        if not paths:
+            raise GenerativeEditError(
+                "ComfyUI finished but produced no video files")
+        return paths
+
     def _run_workflow(self, workflow: dict[str, Any],
                       progress_cb: Callable[[float], None] | None = None
                       ) -> list[Any]:
@@ -465,6 +548,56 @@ class ComfyUIBackend(GenerativeBackend):
         wf = _upscale_workflow(image_name=name, scale=scale)
         _log.info("comfy upscale scale=%.2f", scale)
         return self._run_workflow(wf, progress_cb)[0]
+
+    def generate_video(self, prompt: str, *, duration_s: int = 5,
+                       fps: int = 16, seed: int | None = None,
+                       negative_prompt: str | None = None,
+                       steps: int | None = None,
+                       cfg: float | None = None,
+                       width: int | None = None, height: int | None = None,
+                       model_file: str | None = None,
+                       vae_file: str | None = None,
+                       out_dir: str | Path | None = None,
+                       progress_cb: Callable[[float], None] | None = None
+                       ) -> Path:
+        """Text-to-video via the wan22_t2v workflow (Wan 2.2).
+
+        Returns the local mp4 path. Holds the GPU lock for the whole
+        render. A server that rejects the Wan node types raises with
+        the install note instead of a cryptic error.
+        """
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-video needs a prompt")
+        duration_s = int(duration_s)
+        if duration_s < 1:
+            raise GenerativeEditError(
+                f"duration_s must be >= 1, got {duration_s}")
+        num_frames = max(1, duration_s * int(fps))
+        wf = _wan22_t2v_workflow(
+            prompt=prompt, negative_prompt=negative_prompt,
+            width=width, height=height, num_frames=num_frames,
+            steps=steps, seed=seed, cfg=cfg,
+            model_file=model_file, vae_file=vae_file)
+        _log.info("comfy t2v %ds@%dfps (%d frames) prompt=%.60r",
+                  duration_s, fps, num_frames, prompt)
+        sem = self._sem
+        if not sem.acquire(timeout=self.queue_timeout_s):
+            raise GenerativeEditError(
+                "timed out waiting for the ComfyUI GPU lock after "
+                f"{self.queue_timeout_s:.0f}s — another generation is running")
+        try:
+            try:
+                prompt_id = self._submit(wf)
+            except GenerativeEditError as exc:
+                if "rejected the workflow" in str(exc):
+                    raise GenerativeEditError(
+                        f"{exc}\n{_WAN_WORKFLOW_NOTE}") from exc
+                raise
+            _log.info("comfy video prompt %s submitted", prompt_id)
+            entry = self._wait(prompt_id, progress_cb)
+            return self._download_videos(entry, out_dir)[0]
+        finally:
+            sem.release()
 
     def describe(self) -> str:
         return (f"generative backend 'comfy' "

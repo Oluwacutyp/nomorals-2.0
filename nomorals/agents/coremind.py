@@ -806,6 +806,14 @@ _RE_EDITTEXT_CHANGE = re.compile(
 _RE_CAPTIONS = re.compile(
     r"^add\s+captions(?:\s+to\s+(?:this|the)\s+video)?\s*$"
     r"|^caption\s+(?:this|the)\s+video\s*$", re.I)
+# text-to-video (#26): "generate a 5-second video of ..." / "make a video
+# of ...". Narrow whole-message shapes; duration optional (default 5s).
+# "make a video call" must NOT match — the "of <prompt>" anchor prevents it.
+_RE_VIDEO_GEN = re.compile(
+    r"^(?:generate|create|make)\s+a\s+(\d{1,2})\s*[- ]?s(?:econd)?s?\s+"
+    r"video\s+of\s+(.+?)\s*$", re.I)
+_RE_VIDEO_GEN_NODUR = re.compile(
+    r"^(?:generate|create|make)\s+a\s+video\s+of\s+(.+?)\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -897,6 +905,31 @@ def _image_intent(text: str) -> Intent | None:
                               why=f"text replacement: {old[:30]!r} -> "
                                   f"{new[:30]!r}")
     return None
+
+
+def _video_intent(text: str) -> Intent | None:
+    """Detect text-to-video requests (#26) — routes to the video router.
+
+    Narrow by design: the whole message must match one of the two
+    shapes, so "make a video call" or "generate a video idea" never
+    misfire into a GPU render. Duration is capped at 30s (models top
+    out at ~10s; the router enforces the real cap per model).
+    """
+    stripped = (text or "").strip()
+    m = _RE_VIDEO_GEN.match(stripped)
+    if m:
+        duration, prompt = int(m.group(1)), m.group(2).strip()
+    else:
+        m = _RE_VIDEO_GEN_NODUR.match(stripped)
+        if not m:
+            return None
+        duration, prompt = 5, m.group(1).strip()
+    if not prompt or len(prompt) > 500 or not 1 <= duration <= 30:
+        return None
+    return Intent("video_gen", 0.9, target=prompt[:500],
+                  action="generate_video", route="media",
+                  meta={"prompt": prompt, "duration_s": duration},
+                  why=f"video request: {prompt[:40]} ({duration}s)")
 
 
 def _finance_intent(text: str) -> Intent | None:
@@ -1195,7 +1228,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
-               _finance_intent, _image_intent):
+               _finance_intent, _image_intent, _video_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1711,6 +1744,7 @@ class CoreMind:
             "vision_faceswap": self._dispatch_vision,
             "vision_edittext": self._dispatch_vision,
             "vision_captions": self._dispatch_vision,
+            "video_gen": self._dispatch_video,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2288,6 +2322,52 @@ class CoreMind:
             chat_key, job, job_id,
             "🎨 generating — I'll send it when it's ready.",
             kind="image")
+
+    def _dispatch_video(self, intent: Intent, job_id: str, chat_key: str,
+                        message: Any) -> str:
+        """NL text-to-video (#26): route via VideoModelRouter, render on a
+        background thread, deliver the mp4.
+
+        Video renders are SLOW (minutes on local GPU), so the chat thread
+        only acknowledges; the job delivers via send_media(kind="video")
+        when done. Paid API routes keep the googleflow connector's
+        confirmation gating: unconfirmed renders open a human checkpoint
+        through db (or fail with the exact confirmation needed when no
+        db is available) — the paid gate is never bypassed.
+        """
+        from ..media_edit.video_models import generate_video
+        from ..social.chat.base import MediaRef
+
+        prompt = str(intent.meta.get("prompt") or intent.target or "")
+        duration_s = int(intent.meta.get("duration_s") or 5)
+
+        def job() -> str:
+            try:
+                out_path = generate_video(
+                    prompt, duration_s=duration_s,
+                    confirmed=False, db=self.context.db,
+                    context=self.context)
+            except Exception as exc:  # noqa: BLE001 - report honestly
+                return f"❌ video render failed: {exc}"
+            if self.runtime is None:
+                return f"🎬 saved to {out_path}"
+            ref = self.runtime._ref_from_key(chat_key)
+            adapter = self.runtime.gateway._adapter_for(ref.platform)
+            if adapter is None:
+                return f"❌ rendered but no adapter for {ref.platform}"
+            result = adapter.send_media(
+                ref, MediaRef(path=str(out_path), kind="video",
+                              mime="video/mp4", name=out_path.name),
+                caption=f"🎬 {prompt[:80]}")
+            if not result.ok:
+                return (f"❌ rendered but couldn't send: {result.error}")
+            return f"🎬 done — {out_path.name}"
+
+        return self._send_async(
+            chat_key, job, job_id,
+            "🎬 rendering your video — this takes a few minutes, "
+            "I'll send it when it's done.",
+            kind="video")
 
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
