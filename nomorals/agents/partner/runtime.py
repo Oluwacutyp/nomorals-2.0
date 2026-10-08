@@ -2148,6 +2148,28 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "passport":
+            # Rental passport (#94) — owner's private identity data,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...property.passport import control_passport
+            return control_passport(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
+        if kind == "truecost":
+            # True-cost calculator (#94) — pairs with the passport,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...property.passport import control_truecost
+            return control_truecost(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "gtrip":
             # Group-travel stack: NOT owner-gated (every member drives it),
             # group chats only — control_gtrip refuses DMs itself.

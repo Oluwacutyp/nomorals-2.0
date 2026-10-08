@@ -213,6 +213,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
     "congestion": (0, None),  # /congestion status | register <name> [kind] [capacity] | advise <resource> [agents=N] | predict <resource> | alternate <r> <alt>
     "scamcheck": (0, None),   # /scamcheck <jiji/propertypro link or listing text> [photo:<path>] — six automated scam checks
+    "passport": (0, None),    # /passport generate | show | income <band> | history/ref/doc add — verify-once rental passport (owner only)
+    "truecost": (0, None),    # /truecost <listing text> | afford <listing> — real move-in cost (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1015,6 +1017,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/scamcheck <jiji/propertypro link or listing text> [photo:<path>]",
             "example": "/scamcheck https://jiji.ng/...",
             "related": "/contract"},
+    "passport": {"what": "Verify-once rental passport — reusable tenant profile: KYC summary, income band (never exact), rental history, references, vault document references. Owner only.",
+            "usage": "/passport generate [name] | show [id] | income <band> | history add <address> | <landlord> | <years> | ref add <name> | <relationship> | <contact-ref-id> | doc add <vault-doc-id> | <label> | export [id]",
+            "example": "/passport generate",
+            "related": "/truecost /scamcheck"},
+    "truecost": {"what": "True rental move-in cost — parses a listing's fee language, fills gaps with Lagos norms (agency 10%, legal 10%), shows headline vs real move-in. Owner only.",
+            "usage": "/truecost <paste listing text> | /truecost afford <listing text>",
+            "example": "/truecost 2br Yaba ₦2,200,000/yr",
+            "related": "/passport /scamcheck"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1367,7 +1377,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1577,7 +1587,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1689,6 +1699,8 @@ LIST_ONELINERS: dict[str, str] = {
     "graph": "memory & thinking",
     "challenge": "photo-proof challenges + streaks + squads",
     "scamcheck": "Nigerian rental scam check — six automated checks",
+    "passport": "verify-once rental passport — reusable tenant profile (owner only)",
+    "truecost": "true rental move-in cost from listing text (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

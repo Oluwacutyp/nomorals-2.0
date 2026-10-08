@@ -9,6 +9,23 @@ from nomorals.property.scam import (
     check_listing,
     control_scamcheck,
 )
+from nomorals.property.passport import (
+    AFFORDABILITY_RATIO,
+    AGENCY_PCT,
+    LEGAL_PCT,
+    INCOME_BANDS,
+    CostBreakdown,
+    DocRef,
+    RentalHistory,
+    RentalPassport,
+    Reference,
+    PassportStore,
+    affordability,
+    can_afford,
+    control_passport,
+    control_truecost,
+    true_cost,
+)
 
 __all__ = [
     "AREA_NORMS",
@@ -18,4 +35,19 @@ __all__ = [
     "ScamStore",
     "check_listing",
     "control_scamcheck",
+    "AFFORDABILITY_RATIO",
+    "AGENCY_PCT",
+    "LEGAL_PCT",
+    "INCOME_BANDS",
+    "CostBreakdown",
+    "DocRef",
+    "RentalHistory",
+    "RentalPassport",
+    "Reference",
+    "PassportStore",
+    "affordability",
+    "can_afford",
+    "control_passport",
+    "control_truecost",
+    "true_cost",
 ]
