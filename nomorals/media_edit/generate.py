@@ -855,36 +855,29 @@ def op_upscale(img: Any, scale: float = 2.0) -> Any:
 
 def op_bg_remove(img: Any, *,
                  mode: str = "auto",
+                 model: str = "",
                  chroma_color: str | tuple[int, int, int] | None = None,
                  tolerance: int = 40,
                  feather: int = 2) -> Any:
     """Remove the background → RGBA image with transparent background.
 
     ``mode``:
-    - ``"auto"``: use rembg (AI segmentation) if installed, else fail fast
-      with the pip hint — never a silent quality downgrade.
-    - ``"rembg"``: require rembg (``pip install rembg``).
+    - ``"auto"``: AI segmentation via :mod:`nomorals.media_edit.segment`
+      (profile-aware model: u2netp on termux, birefnet-general elsewhere);
+      fails fast with the pip hint when rembg is missing — never a silent
+      quality downgrade.
+    - ``"rembg"``: same as auto but with an explicit model via ``model=``.
     - ``"chroma"``: chroma-key removal, pure PIL. Key color defaults to
       the most common corner color; ``tolerance`` is RGB distance.
     """
     Image = _require_pillow()
-    if mode == "auto":
+    if mode in ("auto", "rembg"):
+        from .segment import remove_background, SegmentationError
         try:
-            import rembg  # noqa: F401
-            mode = "rembg"
-        except ImportError:
-            raise GenerativeEditError(
-                "background removal needs rembg: pip install rembg "
-                "(or use mode='chroma' for chroma-key removal without "
-                "extra dependencies)") from None
-    if mode == "rembg":
-        try:
-            from rembg import remove
-        except ImportError as exc:
-            raise GenerativeEditError(
-                "background removal needs rembg: pip install rembg") from exc
-        out = remove(img.convert("RGB"))
-        return out.convert("RGBA")
+            return remove_background(
+                img, model=(model or "" if mode == "rembg" else ""))
+        except SegmentationError as exc:
+            raise GenerativeEditError(str(exc)) from exc
     if mode == "chroma":
         from PIL import ImageFilter
         rgba = img.convert("RGBA")
@@ -975,6 +968,16 @@ def _register() -> None:
     _images.OP_ALLOWLIST.add("bg_remove")
     _images._OP_FUNCS["bg_replace"] = op_bg_replace
     _images.OP_ALLOWLIST.add("bg_replace")
+    # vision utility stack (#23): dedicated modules, lazy heavy deps
+    from .segment import op_bg_remove_v2
+    _images._OP_FUNCS["bg_remove_v2"] = op_bg_remove_v2
+    _images.OP_ALLOWLIST.add("bg_remove_v2")
+    from .upscale import op_upscale_sr
+    _images._OP_FUNCS["upscale_sr"] = op_upscale_sr
+    _images.OP_ALLOWLIST.add("upscale_sr")
+    from .faceswap import op_faceswap
+    _images._OP_FUNCS["faceswap"] = op_faceswap
+    _images.OP_ALLOWLIST.add("faceswap")
 
 
 _register()

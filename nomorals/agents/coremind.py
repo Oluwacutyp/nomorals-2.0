@@ -779,6 +779,17 @@ _RE_IMAGE_GEN = re.compile(
 _RE_IMAGE_DRAW = re.compile(r"^draw\s+(.+?)\s*$", re.I)
 _RE_IMAGE_EDIT = re.compile(
     r"^edit\s+(?:this\s+)?image\s*:\s*(.+?)\s*$", re.I)
+# vision utility stack (#23): "remove the background" / "upscale this
+# image" / "swap faces" — narrow whole-message shapes, same discipline
+# as _image_intent. All need an attached image; faceswap wants two.
+_RE_BG_REMOVE = re.compile(
+    r"^remove\s+(?:the\s+)?background(?:\s+(?:from\s+)?(?:this|the)\s+"
+    r"(?:image|photo|pic(?:ture)?))?\s*$", re.I)
+_RE_UPSCALE_SR = re.compile(
+    r"^upscale(?:\s+(?:this\s*)?(?:image|photo|pic(?:ture)?)?)?\s*$", re.I)
+_RE_FACESWAP = re.compile(
+    r"^swap\s+faces?(?:\s+with\s+(?:this|the|my)\s+"
+    r"(?:other\s+)?(?:image|photo|face))?\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -823,6 +834,22 @@ def _image_intent(text: str) -> Intent | None:
                       action="generate", route="media",
                       meta={"prompt": prompt},
                       why=f"draw request: {prompt[:40]}")
+    # vision utility stack (#23)
+    m = _RE_BG_REMOVE.match(stripped)
+    if m:
+        return Intent("vision_bgremove", 0.9, target=stripped[:200],
+                      action="bgremove", route="media",
+                      why="background removal request")
+    m = _RE_UPSCALE_SR.match(stripped)
+    if m:
+        return Intent("vision_upscale", 0.9, target=stripped[:200],
+                      action="upscale_sr", route="media",
+                      why="super-resolution upscale request")
+    m = _RE_FACESWAP.match(stripped)
+    if m:
+        return Intent("vision_faceswap", 0.88, target=stripped[:200],
+                      action="faceswap", route="media",
+                      why="face swap request")
     return None
 
 
@@ -1633,6 +1660,9 @@ class CoreMind:
             "email_query": self._dispatch_email,
             "image_gen": self._dispatch_image,
             "image_edit": self._dispatch_image,
+            "vision_bgremove": self._dispatch_vision,
+            "vision_upscale": self._dispatch_vision,
+            "vision_faceswap": self._dispatch_vision,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2209,6 +2239,80 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             "🎨 generating — I'll send it when it's ready.",
+            kind="image")
+
+    def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
+                         message: Any) -> str:
+        """NL vision utilities (#23): bg removal, SR upscale, face swap.
+
+        Runs on a background thread (heavy models), delivers via
+        send_media. Needs an attached image; faceswap wants two (the
+        second is the face donor). Nothing is faked: a missing library
+        raises with the pip hint, and the reply says exactly that.
+        """
+        from ..social.chat.base import MediaRef
+
+        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap"
+        media = list(getattr(message, "media", None) or [])
+        images = [m for m in media
+                  if getattr(m, "kind", "") == "image"
+                  and getattr(m, "path", "")]
+        need = 2 if action == "faceswap" else 1
+        if len(images) < need:
+            hints = {
+                "bgremove": ("🖼️ attach the image, then say:\n"
+                             "`remove the background`"),
+                "upscale_sr": ("🖼️ attach the image, then say:\n"
+                                "`upscale this image`"),
+                "faceswap": ("🖼️ attach TWO images (target first, face "
+                             "donor second), then say:\n`swap faces`"),
+            }
+            return hints[action]
+        src_paths = [m.path for m in images[:need]]
+        labels = {"bgremove": "✂️ removing background",
+                  "upscale_sr": "🔍 upscaling",
+                  "faceswap": "🔄 swapping faces"}
+
+        def job() -> str:
+            from ..media_edit.images import load_image
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            out_dir = Path(self.context.settings.resolve(
+                "data/generations"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if action == "bgremove":
+                from ..media_edit.segment import remove_background
+                out = remove_background(load_image(src_paths[0]))
+                name = "bgcut"
+            elif action == "upscale_sr":
+                from ..media_edit.upscale import upscale
+                out = upscale(load_image(src_paths[0]), scale=4.0)
+                name = "upscaled"
+            else:
+                from ..media_edit.faceswap import swap_face
+                donor = load_image(src_paths[1])
+                target = load_image(src_paths[0])
+                out = swap_face(donor, target)
+                name = "faceswap"
+            out_path = out_dir / f"{name}-{stamp}.png"
+            out.save(out_path)
+            if self.runtime is None:
+                return f"🖼️ saved to {out_path}"
+            ref = self.runtime._ref_from_key(chat_key)
+            adapter = self.runtime.gateway._adapter_for(ref.platform)
+            if adapter is None:
+                return f"❌ done but no adapter for {ref.platform}"
+            result = adapter.send_media(
+                ref, MediaRef(path=str(out_path), kind="image",
+                              mime="image/png", name=out_path.name),
+                caption=f"🖼️ {labels[action]} — done")
+            if not result.ok:
+                return (f"❌ {labels[action]} done but couldn't send: "
+                        f"{result.error}")
+            return f"🖼️ done — {labels[action].split(' ', 1)[1]}"
+
+        return self._send_async(
+            chat_key, job, job_id,
+            f"{labels[action]} — I'll send it when it's ready.",
             kind="image")
 
     def _dispatch_finance_log(self, intent: Intent, job_id: str, chat_key: str,
