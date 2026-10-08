@@ -358,13 +358,31 @@ def register(registry: Any) -> None:
             return Path(settings.resolve(rel))
         return Path(rel)
 
+    def _api_pair() -> tuple[str, str]:
+        # Explicit audio settings win, then the LLM's endpoint, then the
+        # provider env vars the LLM broker itself uses (GROQ_API_KEY etc.).
+        # Base URL and key stay paired — never mix providers.
+        base = getattr(audio_settings, "stt_base_url", "") or ""
+        key = getattr(audio_settings, "stt_api_key", "") or ""
+        if base and key:
+            return base, key
+        base = getattr(llm_settings, "base_url", "") or ""
+        key = getattr(llm_settings, "api_key", "") or ""
+        if base and key:
+            return base, key
+        if os.environ.get("OPENAI_API_KEY", ""):
+            return (os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                    os.environ["OPENAI_API_KEY"])
+        if os.environ.get("GROQ_API_KEY", ""):
+            return (os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+                    os.environ["GROQ_API_KEY"])
+        return "", ""
+
     def api_base() -> str:
-        return (getattr(audio_settings, "stt_base_url", "")
-                or getattr(llm_settings, "base_url", "") or "")
+        return _api_pair()[0]
 
     def api_key() -> str:
-        return (getattr(audio_settings, "stt_api_key", "")
-                or getattr(llm_settings, "api_key", "") or "")
+        return _api_pair()[1]
 
     def _check_net() -> None:
         checker = getattr(context, "check", None)
