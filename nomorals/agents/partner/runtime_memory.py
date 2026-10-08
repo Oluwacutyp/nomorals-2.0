@@ -607,6 +607,25 @@ class RuntimeMemoryMixin:
             self._fingerprint_store = fps
         return control_film(tail or "", store=store, fingerprints=fps)
 
+    def _control_graph(self, tail: str, *, chat_key: str = "") -> str:
+        """Live world-graph planning substrate. Owner-only.
+
+        /graph add <type> <label> — node (person|project|commitment|asset|schedule|deadline)
+        /graph link <from-id> <to-id> <type> — edge (depends_on|blocks|owned_by|due)
+        /graph disrupt <id> [note] — mark disrupted, propagate to dependents
+        /graph clear <id> — clear a disruption
+        /graph show [id] — summary, or one node + dependents
+        /graph breaks <id> — what breaks if this node fails
+        /graph path — critical path (longest dependency chain)
+        /graph sync — project memory into the graph (read-only)
+        """
+        from ...planning.graph import WorldGraph, control_graph
+        g = getattr(self, "_world_graph", None)
+        if g is None:
+            g = WorldGraph()
+            self._world_graph = g
+        return control_graph(tail or "", graph=g)
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 

@@ -208,6 +208,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "train": (0, None),       # /train plan <goal> [equipment] [weeks] | today | readiness | log [completed|skipped] [rpe] | list
     "form": (0, None),        # /form analyze <video> <exercise> | gait <video> | movements | apply <id>
     "film": (0, None),        # /film analyze <video> <game> [exercise] | games | fingerprint [game] | list [game] | export <id>
+    "graph": (0, None),       # /graph add <type> <label> | link <from> <to> <type> | disrupt <id> [note] | show [id] | breaks <id> | path | sync
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -990,6 +991,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/film analyze <video> <game> [exercise] | /film games | /film fingerprint [game] | /film list [game] | /film export <id>",
               "example": "/film analyze /tmp/match.mp4 valorant",
               "related": "/form"},
+    "graph": {"what": "Live world-graph planning substrate — people, projects, commitments, flights and deadlines as nodes with depends_on/blocks edges. Disruptions propagate: cancel a flight and every dependent meeting gets flagged.",
+              "usage": "/graph add <type> <label> | /graph link <from-id> <to-id> <type> | /graph disrupt <id> [note] | /graph show [id] | /graph breaks <id> | /graph path | /graph sync",
+              "example": "/graph add schedule \"Lagos flight 14:00\"",
+              "related": "/routine"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1322,7 +1327,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1535,7 +1540,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health", "train", "form", "film"]),
+      "review", "tutor", "ekiti", "course", "health", "train", "form", "film", "graph"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1661,6 +1666,7 @@ LIST_ONELINERS: dict[str, str] = {
     "train": "memory & thinking",
     "form": "memory & thinking",
     "film": "memory & thinking",
+    "graph": "memory & thinking",
     "challenge": "photo-proof challenges + streaks + squads",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
