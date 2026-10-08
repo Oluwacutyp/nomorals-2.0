@@ -412,9 +412,12 @@ def register(registry: Any) -> None:
         },
     )
     def transcribe(path: str, *, language: str = "en", provider: str = "auto") -> dict[str, Any]:
-        from .filesystem import safe_path
+        from .filesystem import safe_media_path
 
-        target = safe_path(context, path, must_exist=True)
+        # voice notes land in the chat media dir (outside the workspace
+        # sandbox by design) — safe_media_path allows Devon's own
+        # downloads without opening the sandbox.
+        target = safe_media_path(context, path, must_exist=True)
         base, key = api_base(), api_key()
         if provider == "openai_compat" or (provider == "auto" and base and key):
             _check_net()

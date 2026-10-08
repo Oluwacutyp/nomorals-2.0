@@ -56,6 +56,34 @@ def safe_path(context: Any, path: str | os.PathLike[str], *, must_exist: bool = 
     return resolved
 
 
+def safe_media_path(context: Any, path: str | os.PathLike[str],
+                    *, must_exist: bool = False) -> Path:
+    """Resolve ``path`` inside the workspace OR the chat media dirs.
+
+    Chat adapters download inbound media (voice notes, photos) to
+    ``~/.nomorals/data/media/<platform>/`` — outside the workspace
+    sandbox by design.  Tools that consume inbound media (transcribe,
+    vision) use this instead of :func:`safe_path` so Devon's own
+    downloads are reachable without opening the sandbox to arbitrary
+    absolute paths.
+    """
+    candidate = Path(os.path.expanduser(str(path)))
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        # allowlist: the chat media roots
+        home = Path(os.path.expanduser("~/.nomorals")).resolve()
+        media_roots = [home / "data" / "media", home / "data"]
+        for root in media_roots:
+            try:
+                resolved.relative_to(root)
+                if must_exist and not resolved.exists():
+                    raise NotFound(f"no such path: {resolved}")
+                return resolved
+            except ValueError:
+                continue
+    return safe_path(context, path, must_exist=must_exist)
+
+
 def register(registry: Any) -> None:
     """Attach the filesystem tools to a registry."""
     context = registry.context

@@ -151,11 +151,6 @@ class PartnerBrain:
         if media.path is None:
             return ""
         try:
-            settings = Settings.load()
-            has_api = bool(settings.audio.stt_api_key or settings.llm.api_key)
-            has_whisper_cpp = bool(os.environ.get("NM_WHISPER_CPP_BIN"))
-            if not (has_api or has_whisper_cpp):
-                return ""
             outcome = self.context.tools.call("transcribe", path=str(media.path),
                                               provider="auto")
             if not outcome.ok:
