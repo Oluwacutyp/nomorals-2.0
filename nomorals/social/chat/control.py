@@ -224,6 +224,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
     "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
     "guardrails": (0, None),   # /guardrails add <rule> | list | run | override … — rule-based ad-spend safety (owner only)
+    "competitor": (0, None),   # /competitor track <account> | report <account> | digest | vs <them> <you> — no-access competitor intel (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1062,6 +1063,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/guardrails add <rule> | list | run | override <action> <adset> [pct] | stop <id> | audit",
             "example": "/guardrails add pause if cpa > ₦50000 for 3 days on adset123",
             "related": "/mandate /send"},
+    "competitor": {"what": "No-access competitor intel — benchmark any public account without logins or credentials. Content pillars, posting cadence by format, engagement trends, window-vs-window digests, plus an AEO share-of-answer face-off against your brand. Owner only.",
+            "usage": "/competitor track <account> [platform] | report <account> [platform] | digest [account] | list | untrack <account> | vs <competitor> <your-brand>",
+            "example": "/competitor report rivalbrand",
+            "related": "/aeo /brief"},
     "send": {"what": "Self-hosted send layer — Devon owns the mailgun. SQLite queue, per-provider sliding-window rate limits, exponential-backoff retry, DSN bounce processing with auto-blocklist, conditional templates, provider registry (SMTP/SES/Twilio/custom). Every bulk send routes through #68 cost-awareness. Owner only.",
             "usage": "/send template add <name> | <body> | /send provider add <name> <kind> [rate/min] | /send campaign <template> to <a@b.com, c@d.com> [via <provider>] | /send process | /send queue | /send status | /send bounce <address>",
             "example": "/send campaign launch to a@x.com, b@y.com via ses-main",
@@ -1422,7 +1427,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1755,6 +1760,7 @@ LIST_ONELINERS: dict[str, str] = {
     "brief": "SERP-derived content brief — keywords, questions, angles (owner only)",
     "content": "brief-first pipeline — score, predict, schedule (owner only)",
     "guardrails": "rule-based ad-spend guardrails — pause/scale rules, mandate-gated (owner only)",
+    "competitor": "no-access competitor intel — pillars, cadence, engagement, AEO face-off (owner only)",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

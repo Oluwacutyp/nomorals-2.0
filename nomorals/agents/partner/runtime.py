@@ -2233,6 +2233,17 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "competitor":
+            # No-access competitor intel (#102) — public data only,
+            # owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...marketing.competitor import control_competitor
+            return control_competitor(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.
