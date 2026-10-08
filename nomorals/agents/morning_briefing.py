@@ -422,6 +422,94 @@ class CalendarProvider(_Provider):
         return []
 
 
+def _people_dir(ctx: Any) -> Any:
+    """People pages dir: settings override, else ~/.devon/people."""
+    settings = getattr(ctx, "settings", None)
+    override = getattr(settings, "people_dir", None) if settings else None
+    if override:
+        return override
+    try:
+        override = _prefs(ctx).get("people_dir")
+    except Exception:  # noqa: BLE001
+        override = None
+    if override:
+        return override
+    from pathlib import Path as _Path
+    return _Path.home() / ".devon" / "people"
+
+
+class PeopleProvider(_Provider):
+    """Relationship cadence: who you're neglecting, upcoming birthdays.
+    Quiet (None) when there's nothing to say. Neglect nudges run through
+    DeliveryScorer so she doesn't nag; capped at 2 per briefing."""
+    name = "people"
+    title = "People"
+    priority = 25
+    _MAX_NUDGES = 2
+    _MIN_SCORE = 0.35
+
+    def __init__(self) -> None:
+        # Persistent scorer: repeat_cooldown is the anti-nag memory across
+        # briefings — a fresh scorer per collect() would never trigger it.
+        try:
+            from ..memory.delivery import DeliveryScorer
+            self._scorer: Any = DeliveryScorer()
+        except Exception:  # noqa: BLE001 — scorer optional, nudges still work
+            self._scorer = None
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            from .proactive import RelationshipCadence
+        except Exception:  # noqa: BLE001 — optional surface
+            return None
+        try:
+            cadence = RelationshipCadence(people_dir=_people_dir(ctx))
+            now = time.time()
+            nudges = cadence.neglected(now, limit=6)
+            bdays = cadence.upcoming_birthdays(now, within_days=14)
+        except Exception as exc:  # noqa: BLE001 — never sink the briefing
+            _log.debug("people provider skipped: %s", exc)
+            return None
+
+        lines: list[str] = []
+        if nudges:
+            scored = self._score_nudges(nudges)
+            for nudge in scored[: self._MAX_NUDGES]:
+                lines.append(f"• {nudge.text()}")
+            # anti-nag: what we surfaced now scores low next briefing
+            if self._scorer is not None:
+                self._scorer.mark_surfaced_many(
+                    [f"people-neglect-{n.name}" for n in scored[: self._MAX_NUDGES]])
+        for b in bdays[: self._MAX_NUDGES]:
+            lines.append(f"• 🎂 {b.text()}")
+        if not lines:
+            return None
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="relationship-cadence", lines=lines)
+
+    def _score_nudges(self, nudges: list[Any]) -> list[Any]:
+        """DeliveryScorer pass over neglect nudges; drops low scores."""
+        if self._scorer is None:
+            return list(nudges)
+
+        class _Candidate:
+            def __init__(self, n: Any) -> None:
+                self.id = f"people-neglect-{n.name}"
+                self.content = n.text()
+                # close relationships earn delivery leeway
+                self.importance = {"close": 0.9, "normal": 0.6,
+                                   "distant": 0.4}.get(n.closeness, 0.5)
+
+        scored = self._scorer.score([_Candidate(n) for n in nudges])
+        ok_ids = {s.memory_id for s in scored if s.score >= self._MIN_SCORE}
+        kept = [n for n in nudges if f"people-neglect-{n.name}" in ok_ids]
+        # preserve scorer ranking
+        rank = {s.memory_id: i for i, s in enumerate(scored)}
+        kept.sort(key=lambda n: rank.get(f"people-neglect-{n.name}", 999))
+        return kept
+
+
 class MarketsProvider(_Provider):
     """Market snapshot for the owner's followed symbols (settings list;
     empty list = section hidden)."""
@@ -762,6 +850,7 @@ class BriefingComposer:
         self.providers: list[_Provider] = [
             OvernightAlertsProvider(),
             CalendarProvider(),
+            PeopleProvider(),
             MarketsProvider(),
             RepoProvider(),
             NewsProvider(),

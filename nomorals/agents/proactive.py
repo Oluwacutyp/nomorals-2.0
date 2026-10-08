@@ -615,3 +615,422 @@ class ProactiveEngine:
     def get_patterns(self, user_id: str) -> list[Pattern]:
         """Get all patterns for a user."""
         return self._patterns.get(user_id, [])
+
+
+# ── relationship cadence ───────────────────────────────────────────────────
+# Tracks per-person contact cadence from markdown people pages (the store —
+# no new infrastructure). Powers neglect detection, birthday surfacing, the
+# morning briefing's People section, and the /memory trust command.
+
+#: Default nudge thresholds (days without contact) per closeness tier.
+DEFAULT_CADENCE_THRESHOLDS: dict[str, float] = {
+    "close": 7.0,
+    "normal": 30.0,
+    "distant": 90.0,
+}
+
+#: Ranking weights per closeness tier.
+CLOSENESS_WEIGHTS: dict[str, float] = {"close": 3.0, "normal": 1.0, "distant": 0.4}
+
+#: People pages live here unless a people_dir is given explicitly.
+DEFAULT_PEOPLE_DIR = "people"
+
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%Y/%m/%d", "%d %b %Y", "%d %B %Y",
+    "%b %d, %Y", "%B %d, %Y", "%d/%m/%Y", "%m/%d/%Y",
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
+)
+_MONTHDAY_FORMATS = ("%m-%d", "%m/%d", "%b %d", "%B %d", "%d %b", "%d %B")
+
+_LAST_CONTACT_KEYS = ("last contact", "last spoke", "last seen", "last talked")
+
+
+def _parse_date(value: str) -> float | None:
+    """Parse a full date string → epoch seconds. None when unparseable."""
+    value = value.strip()
+    if not value:
+        return None
+    try:  # ISO first (fromisoformat handles most variants)
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        pass
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_month_day(value: str) -> tuple[int, int] | None:
+    """Parse a month/day birthday → (month, day). Year is ignored."""
+    value = value.strip()
+    if not value:
+        return None
+    for fmt in _MONTHDAY_FORMATS:
+        try:
+            dt = datetime.strptime(value, fmt)
+            return (dt.month, dt.day)
+        except ValueError:
+            continue
+    # numeric "02-29"/"2/29" — strptime rejects Feb 29 in non-leap 1900,
+    # so fall back to a direct parse that tolerates it.
+    import re as _re
+    m = _re.fullmatch(r"(\d{1,2})[-/](\d{1,2})", value)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31 and not (month == 2 and day > 29):
+            return (month, day)
+    # ISO-ish "1990-05-04" → take month/day
+    ts = _parse_date(value)
+    if ts is not None:
+        dt = datetime.fromtimestamp(ts)
+        return (dt.month, dt.day)
+    return None
+
+
+def _slugify(name: str) -> str:
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug or "person"
+
+
+@dataclass
+class PersonRecord:
+    """One person parsed from a people page. Malformed pages are skipped,
+    never raised — fields fall back to None/'normal'."""
+    name: str
+    last_contact_ts: float | None = None
+    closeness: str = "normal"  # close | normal | distant
+    birthday: tuple[int, int] | None = None  # (month, day)
+    anniversary: tuple[int, int] | None = None
+    path: Any = None
+
+    def days_since_contact(self, now: float) -> float | None:
+        if self.last_contact_ts is None:
+            return None
+        return max(0.0, (now - self.last_contact_ts) / 86400.0)
+
+
+@dataclass
+class PersonNudge:
+    """A relationship nudge: neglect or upcoming birthday."""
+    kind: str  # "neglect" | "birthday" | "anniversary"
+    name: str
+    days_overdue: float = 0.0      # neglect: days past threshold
+    days_until: float = 0.0        # birthday: days until the date
+    closeness: str = "normal"
+    score: float = 0.0             # closeness weight × days overdue
+    detail: str = ""
+    total_days: float | None = None  # neglect: total days since contact
+
+    def text(self) -> str:
+        if self.kind == "neglect":
+            if self.total_days is None:
+                return f"No contact recorded with {self.name} — worth checking in"
+            return f"Haven't talked to {self.name} in {int(round(self.total_days))} days"
+        label = "birthday" if self.kind == "birthday" else "anniversary"
+        when = "today" if self.days_until < 1 else f"in {int(self.days_until)} days"
+        return f"{self.name}'s {label} {when}"
+
+
+class RelationshipCadence:
+    """Per-person contact cadence over markdown people pages.
+
+    Page format (all fields optional except the name):
+        # Adaeze
+        Closeness: close
+        Birthday: May 4
+        Anniversary: 2020-12-12
+        Last contact: 2026-09-20
+
+    Closeness: explicit ``Closeness:`` line wins; otherwise derived from
+    ``INDEX.md`` ordering (top third → close, middle → normal, rest →
+    distant); missing → "normal".
+    """
+
+    def __init__(
+        self,
+        people_dir: Any = None,
+        *,
+        thresholds: dict[str, float] | None = None,
+    ) -> None:
+        from pathlib import Path as _Path
+        if people_dir is None:
+            people_dir = _Path.home() / ".devon" / DEFAULT_PEOPLE_DIR
+        self.people_dir = _Path(people_dir)
+        self.thresholds = dict(DEFAULT_CADENCE_THRESHOLDS)
+        if thresholds:
+            self.thresholds.update(thresholds)
+
+    # -- parsing -----------------------------------------------------------
+    def _index_order(self) -> list[str]:
+        """Names in INDEX.md order (closest first). [] when absent."""
+        index = self.people_dir / "INDEX.md"
+        names: list[str] = []
+        try:
+            for line in index.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("- **"):
+                    name = line[4:].split("**")[0].strip()
+                    if name:
+                        names.append(name)
+        except OSError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — malformed index, ignore
+            _log.debug("people INDEX.md unreadable: %s", exc)
+        return names
+
+    def _parse_page(self, path: Any, index_rank: dict[str, int],
+                    index_total: int) -> PersonRecord | None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("skipping unreadable people page %s: %s", path, exc)
+            return None
+        name: str | None = None
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("# ") and name is None:
+                name = s[2:].strip()
+            elif ":" in s and not s.startswith("#"):
+                key, _, val = s.partition(":")
+                fields[key.strip().lower()] = val.strip()
+        if not name:
+            name = path.stem.replace("-", " ").replace("_", " ").strip() or "person"
+
+        last_contact: float | None = None
+        for key in _LAST_CONTACT_KEYS:
+            if key in fields:
+                last_contact = _parse_date(fields[key])
+                if last_contact is not None:
+                    break
+
+        closeness = fields.get("closeness", "").lower()
+        if closeness not in ("close", "normal", "distant"):
+            rank = index_rank.get(name.lower())
+            if rank is not None and index_total > 0:
+                third = index_total / 3.0
+                closeness = ("close" if rank < third
+                             else "normal" if rank < 2 * third else "distant")
+            else:
+                closeness = "normal"
+
+        return PersonRecord(
+            name=name,
+            last_contact_ts=last_contact,
+            closeness=closeness,
+            birthday=_parse_month_day(fields.get("birthday", "")),
+            anniversary=_parse_month_day(fields.get("anniversary", "")),
+            path=path,
+        )
+
+    def people(self) -> list[PersonRecord]:
+        """All parseable people. Never raises — malformed pages are skipped."""
+        try:
+            pages = sorted(self.people_dir.glob("*.md"))
+        except OSError:
+            return []
+        order = self._index_order()
+        rank = {n.lower(): i for i, n in enumerate(order)}
+        out: list[PersonRecord] = []
+        for page in pages:
+            if page.name.upper() == "INDEX.MD":
+                continue
+            try:
+                rec = self._parse_page(page, rank, len(order))
+            except Exception as exc:  # noqa: BLE001 — fail closed per page
+                _log.debug("skipping people page %s: %s", page, exc)
+                continue
+            if rec is not None:
+                out.append(rec)
+        return out
+
+    # -- neglect -----------------------------------------------------------
+    def neglected(self, now: float | None = None, *, limit: int = 5) -> list[PersonNudge]:
+        """People past their closeness threshold, ranked by
+        closeness-weight × days overdue. People with no recorded contact
+        are treated as maximally overdue."""
+        now = time.time() if now is None else now
+        nudges: list[PersonNudge] = []
+        for person in self.people():
+            threshold = self.thresholds.get(person.closeness, 30.0)
+            days = person.days_since_contact(now)
+            if days is None:
+                overdue = threshold  # unknown → nudge once, gently
+                total = threshold
+            else:
+                overdue = days - threshold
+                total = days
+            if overdue <= 0:
+                continue
+            weight = CLOSENESS_WEIGHTS.get(person.closeness, 1.0)
+            nudges.append(PersonNudge(
+                kind="neglect", name=person.name, days_overdue=overdue,
+                closeness=person.closeness, score=weight * overdue,
+                detail=f"last contact {total:.0f} days ago (threshold {threshold:.0f})",
+                total_days=None if days is None else total,
+            ))
+        nudges.sort(key=lambda n: -n.score)
+        return nudges[:limit]
+
+    # -- birthdays ---------------------------------------------------------
+    @staticmethod
+    def _days_until(month: int, day: int, now: float) -> float:
+        from datetime import date as _date
+        today = _date.fromtimestamp(now)
+        year = today.year
+        # Feb 29 → Feb 28 in non-leap years
+        try:
+            candidate = _date(year, month, day)
+        except ValueError:
+            candidate = _date(year, 2, 28)
+        if candidate < today:
+            try:
+                candidate = _date(year + 1, month, day)
+            except ValueError:
+                candidate = _date(year + 1, 2, 28)
+        return (candidate - today).days
+
+    def upcoming_birthdays(self, now: float | None = None,
+                           *, within_days: int = 14) -> list[PersonNudge]:
+        """Birthdays/anniversaries within the window, soonest first."""
+        now = time.time() if now is None else now
+        out: list[PersonNudge] = []
+        for person in self.people():
+            for kind, md in (("birthday", person.birthday),
+                             ("anniversary", person.anniversary)):
+                if md is None:
+                    continue
+                days = self._days_until(md[0], md[1], now)
+                if 0 <= days <= within_days:
+                    out.append(PersonNudge(
+                        kind=kind, name=person.name, days_until=float(days),
+                        closeness=person.closeness,
+                        score=CLOSENESS_WEIGHTS.get(person.closeness, 1.0) * 2.0,
+                        detail=f"{kind} in {int(days)} days",
+                    ))
+        out.sort(key=lambda n: (n.days_until, -n.score))
+        return out
+
+    # -- recording ---------------------------------------------------------
+    def record_contact(self, name: str, ts: float | None = None) -> Any:
+        """Update (or create) a person's page with today's last-contact line.
+        Idempotent: same timestamp → byte-identical page. Returns the page path."""
+        from pathlib import Path as _Path
+        ts = time.time() if ts is None else ts
+        stamp = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        self.people_dir.mkdir(parents=True, exist_ok=True)
+        want = _slugify(name)
+        path = self.people_dir / f"{want}.md"
+        if not path.exists():
+            # Match an existing page case-insensitively: on case-sensitive
+            # filesystems "Ada.md" and "ada.md" are different files, and we
+            # must update the page the user actually has, not fork a second one.
+            try:
+                for cand in self.people_dir.glob("*.md"):
+                    if _slugify(cand.stem) == want:
+                        path = cand
+                        break
+            except OSError:
+                pass
+        if path.exists():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            lines = text.splitlines()
+            replaced = False
+            for i, line in enumerate(lines):
+                key = line.strip().split(":")[0].strip().lower()
+                if key in _LAST_CONTACT_KEYS:
+                    lines[i] = f"Last contact: {stamp}"
+                    replaced = True
+                    break
+            if not replaced:
+                # insert after the heading when there is one
+                insert_at = 1 if lines and lines[0].startswith("#") else 0
+                lines.insert(insert_at, f"Last contact: {stamp}")
+            new_text = "\n".join(lines) + "\n"
+        else:
+            new_text = f"# {name.strip()}\nLast contact: {stamp}\n"
+        # idempotent write: skip when nothing changed
+        try:
+            if path.exists() and path.read_text(encoding="utf-8") == new_text:
+                return path
+        except OSError:
+            pass
+        path.write_text(new_text, encoding="utf-8")
+        _log.info("recorded contact with %s", name)
+        return path
+
+
+def control_memory(arg: str, context: Any) -> str:
+    """`/memory` — trust view: what Devon remembers. Summaries only,
+    never raw memory dumps. Slash commands are already owner-only
+    (runtime gates control commands to owner chats)."""
+    arg = (arg or "").strip()
+    people_dir = getattr(getattr(context, "settings", None), "people_dir", None)
+    cadence = RelationshipCadence(people_dir=people_dir)
+    people = cadence.people()
+
+    if arg:
+        wanted = arg.lower()
+        match = next((p for p in people if p.name.lower() == wanted), None)
+        if match is None:
+            match = next((p for p in people if wanted in p.name.lower()), None)
+        if match is None:
+            return f"No person page for '{arg}'. I track {len(people)} people."
+        lines = [f"**{match.name}**", f"Closeness: {match.closeness}"]
+        if match.last_contact_ts:
+            days = (time.time() - match.last_contact_ts) / 86400.0
+            lines.append(f"Last contact: {days:.0f} days ago")
+        else:
+            lines.append("Last contact: not recorded")
+        if match.birthday:
+            lines.append(f"Birthday: {match.birthday[1]:02d}-{match.birthday[0]:02d}")
+        if match.anniversary:
+            lines.append(f"Anniversary: {match.anniversary[1]:02d}-{match.anniversary[0]:02d}")
+        return "\n".join(lines)
+
+    # summary view
+    mem = getattr(context, "memory", None)
+    counts: dict[str, int] = {}
+    total = 0
+    if mem is not None:
+        try:
+            counts = mem.counts_by_kind() or {}
+            total = sum(counts.values())
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("/memory counts unavailable: %s", exc)
+    recent = sorted(
+        (p for p in people if p.last_contact_ts),
+        key=lambda p: -p.last_contact_ts,  # type: ignore[operator]
+    )[:5]
+    lines = [
+        f"I track **{len(people)} people** and **{total} long-term memories**"
+        + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(counts.items()))})" if counts else "")
+        + ".",
+    ]
+    if recent:
+        lines.append("Recent contact:")
+        for p in recent:
+            days = (time.time() - p.last_contact_ts) / 86400.0  # type: ignore[operator]
+            lines.append(f"• {p.name} — {days:.0f} days ago")
+    else:
+        lines.append("No contact history recorded yet.")
+    lines.append("Ask `/memory <name>` for one person's summary.")
+    return "\n".join(lines)
+
+
+__all__ += [
+    "RelationshipCadence",
+    "PersonRecord",
+    "PersonNudge",
+    "DEFAULT_CADENCE_THRESHOLDS",
+    "CLOSENESS_WEIGHTS",
+    "control_memory",
+]

@@ -1455,6 +1455,11 @@ class PartnerRuntime(
             from ..redteam import control_redteam
 
             return control_redteam(command.tail or arg, context=self.context)
+        if kind == "memories":
+            # Trust view: what she remembers. Summaries only, never raw dumps.
+            from ..proactive import control_memory
+
+            return control_memory(command.tail or arg, context=self.context)
         if kind == "book":
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
         if kind in {"wisdom", "wis"}:

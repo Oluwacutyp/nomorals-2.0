@@ -197,6 +197,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
+    "memories": (0, 1),      # /memories [name] — trust view: what she remembers
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -347,6 +348,7 @@ _HELP_TEXT = "\n".join(
         "  /remember <text> [kind] [tags:a,b]      store it in her long-term memory",
         "  /recall [query]                         what she remembers (top 5)",
         "  /forget <id or description>             delete a memory",
+        "  /memories [name]                        trust view: people tracked, memory counts",
         "  — voice / screen / tools —",
         "  /tts <text>                             speak it aloud (audio sent back)",
         "  /stt <path>                             transcribe an audio file",
@@ -828,6 +830,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "forget": {"what": "delete a memory by id or description.",
                "usage": "/forget <id or description>", "example": "/forget mom's birthday",
                "related": "/recall"},
+    "memories": {"what": "trust view: how many people she tracks, how many long-term memories she holds, recent contact. A name narrows to that person.",
+               "usage": "/memories [name]", "example": "/memories Adaeze",
+               "related": "/recall /remember"},
     "tts": {"what": "speak text aloud and send the audio file back.",
             "usage": "/tts <text>", "example": "/tts morning",
             "related": "/speak /stt"},
@@ -1098,7 +1103,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
-    ("memory & thinking", ["remember", "recall", "forget", "think",
+    ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1310,7 +1315,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
-     ["remember", "recall", "forget", "think", "benchmark", "redteam"]),
+     ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1358,6 +1363,7 @@ _LIST_GROUP_ALIASES = {
     "build": "building for real — code & missions",
     "code": "building for real — code & missions",
     "memory": "memory & thinking",
+    "memories": "memory & thinking",
     "think": "memory & thinking",
     "voice": "voice & vision",
     "vision": "voice & vision",
@@ -1423,6 +1429,7 @@ LIST_ONELINERS: dict[str, str] = {
     "remember": "store something in long-term memory",
     "recall": "what she remembers (top 5)",
     "forget": "delete a memory",
+    "memories": "trust view — people tracked, memory counts, recent contact",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
