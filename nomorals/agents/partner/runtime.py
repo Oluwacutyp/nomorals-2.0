@@ -1357,6 +1357,16 @@ class PartnerRuntime(
         from ...social.chat.control import detailed_help, parse_control
         from ..power import power_mode_for
 
+        # Natural phrasing for the representation review: "/how did I do"
+        # (and variants) routes to the review command.  Checked before
+        # parse_control because multi-word kinds aren't slash commands.
+        _how = text.strip().lower().rstrip("?").rstrip()
+        if _how in ("/how did i do", "/how did i do?",
+                    "how did i do", "how did i do?"):
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_review("", chat_key=chat_key)
+
         command = parse_control(text)
         if command is None:
             return ""  # not actually a control command; let normal flow handle it
@@ -1734,6 +1744,11 @@ class PartnerRuntime(
             return self._control_recall(command.tail or arg)
         if kind == "forget":
             return self._control_forget(command.tail or arg)
+        if kind == "review":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_review(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "tts":
             return self._control_tts(command.tail or arg, chat_key=chat_key)
         if kind == "stt":

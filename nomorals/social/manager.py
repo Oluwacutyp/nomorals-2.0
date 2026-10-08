@@ -208,6 +208,18 @@ class SocialManager:
             "published to %d/%d platforms in %.2fs",
             len(outcome.posted), len(targets), outcome.seconds,
         )
+        try:
+            from ..cognition.representation import log_representation_action
+            posted = [getattr(r, "platform", "?") for r in outcome.posted]
+            log_representation_action(
+                "post", f"published to {', '.join(posted) or 'no platforms'}: "
+                        f"{content[:80]}",
+                outcome=("success" if outcome.posted and not outcome.failed
+                         else "partial" if outcome.posted else "failed"),
+                metadata={"platforms": posted,
+                          "failed": len(outcome.failed)})
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
         return outcome
 
     def _resolve_targets(

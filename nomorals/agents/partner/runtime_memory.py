@@ -58,6 +58,28 @@ class RuntimeMemoryMixin:
             lines.append(f"  [{r.kind}]{tags} {r.content[:130]}  ({age}, id {r.id[:6]})")
         return "\n".join(lines)
 
+    # ── representation review: /review /how did I do ─────────────────────
+    def _control_review(self, tail: str, *, chat_key: str = "") -> str:
+        """/review [days] — how well did I represent you?  Owner-only."""
+        from ...cognition.representation import _ledger_for
+
+        days = 30.0
+        raw = (tail or "").strip()
+        if raw:
+            try:
+                days = float(raw.split()[0])
+            except (ValueError, IndexError):
+                return "usage: /review [days] — e.g. /review 7"
+            if not 0 < days <= 365:
+                return "/review takes 1–365 days"
+        try:
+            ledger = _ledger_for(
+                getattr(self, "context", None)
+                and getattr(self.context, "settings", None))
+            return ledger.summary(limit=10, since_days=days)
+        except Exception as exc:  # noqa: BLE001 — review never breaks chat
+            return f"couldn't pull the review: {exc}"
+
     def _control_forget(self, tail: str) -> str:
         """Forget by id, or by the best matching description."""
         target = (tail or "").strip()

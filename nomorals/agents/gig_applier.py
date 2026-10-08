@@ -248,6 +248,14 @@ class GigApplier:
         app.transition("submitted")
         self.store.save(app)
         _log.info("submitted application for %s (explicit=%s)", gig_id, explicit)
+        try:
+            from ..cognition.representation import log_representation_action
+            log_representation_action(
+                "apply", f"gig application submitted: {gig_id}",
+                settings=self.settings,
+                metadata={"gig_id": gig_id, "explicit": explicit})
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
         return app
 
     def set_status(self, gig_id: str, status: str,

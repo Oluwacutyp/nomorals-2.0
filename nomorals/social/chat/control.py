@@ -200,6 +200,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "checkpoints": (0, 0),  # /checkpoints — list saved checkpoints
     "py": (1, None),         # /py <python code> — run in the sandbox (-s/-r sessions)
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
+    "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "recall": (0, None),     # /recall [query] — what she has stored
     "forget": (1, None),     # /forget <id or description>
     "memories": (0, 1),      # /memories [name] — trust view: what she remembers
@@ -874,6 +875,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/remember <text> [kind] [tags:a,b]",
                  "example": "/remember mom's birthday is May 4 tags:people",
                  "related": "/recall /forget"},
+    "review": {"what": "how well did I represent you? reviews my autonomous actions on your behalf — outcomes, quality scores, weak spots.",
+                 "usage": "/review [days]  (also: /how did I do)",
+                 "example": "/review 7",
+                 "related": "/spending"},
     "recall": {"what": "what she remembers, ranked; a query narrows it.",
                "usage": "/recall [query]", "example": "/recall python",
                "related": "/remember /forget"},
@@ -1172,7 +1177,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam"]),
+                           "benchmark", "redteam", "review"]),
     ("money & spending", ["spend", "budget", "spending"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1384,7 +1389,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
-     ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam"]),
+     ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
+      "review"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",

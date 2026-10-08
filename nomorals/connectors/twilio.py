@@ -236,6 +236,16 @@ class TwilioConnector(Connector):
             f"/2010-04-01/Accounts/{cred.username}/Messages.json",
             form={"From": sender, "To": to, "Body": body},
         )
+        try:
+            from ..cognition.representation import log_representation_action
+            sid = data.get("sid", "") if isinstance(data, dict) else ""
+            log_representation_action(
+                "message", f"SMS sent to {to}: {body[:80]}",
+                outcome="success",
+                metadata={"to": to, "sid": sid,
+                          "segments": (len(body) // 160) + 1})
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
         return data if isinstance(data, dict) else {}
 
     def make_call(
