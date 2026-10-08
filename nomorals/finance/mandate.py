@@ -37,6 +37,9 @@ __all__ = [
     "require_mandate",
     "check_mandate",
     "daily_transfer_spend",
+    "SCOPE_ALL",
+    "SCOPE_TRANSFER",
+    "SCOPE_TRAVEL",
 ]
 
 #: Scope that covers every money-moving operation.
@@ -44,6 +47,10 @@ SCOPE_ALL = "all"
 
 #: Scope for bank transfers (Paystack ``POST /transfer``).
 SCOPE_TRANSFER = "transfer"
+
+#: Scope for travel bookings (Duffel orders). An ``"all"`` mandate covers
+#: this too; a ``"transfer"`` mandate does not.
+SCOPE_TRAVEL = "travel"
 
 
 class MandateError(Exception):
