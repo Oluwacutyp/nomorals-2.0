@@ -455,8 +455,8 @@ def render_hummed_vocal(song: Any, workdir: str, melody_events: Any,
         hum_path = str(base / "hum_vocal.wav")
         if not _write_mono_wav(hum_path, out, SAMPLE_RATE):
             return {"ok": False, "reason": "could not write hum wav"}
-        note = ("hummed vocal melody (no TTS installed — install "
-                "termux-api or piper-tts for sung lyrics)")
+        note = ("hummed vocal melody (no TTS installed — `pkg install espeak-ng` "
+                "for sung lyrics)")
         return {"ok": True, "path": hum_path, "backend": "hum",
                 "note": note, "notes": len(events)}
     except Exception as exc:  # noqa: BLE001
