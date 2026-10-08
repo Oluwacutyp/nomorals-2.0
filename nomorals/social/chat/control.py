@@ -256,6 +256,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "match": (0, None),        # /match … — curated daily batches + stable two-sided matching
     "cgroup": (0, None),       # /cgroup … — themed groups, events, meetups (#84)
     "challenge": (0, None),    # /challenge … — photo-proof challenges + streaks + squads (#87)
+    "room": (0, None),           # /room … — live audio rooms: host → speakers → hand-raise (#107)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends the audio file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -691,6 +692,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/challenge create <name> | <type> | <days> [target N] · join <id> · log <id> · proof <id> <photo-path> · board <id> · streak · risk · squad create <name> | <m1,m2,…> · squad board <squad_id>",
                 "example": "/challenge create October Grind | workout-count | 31 target 20",
                 "related": "/train /form /cgroup"},
+    "room": {"what": "live audio rooms for communities — host → speakers → hand-raise queue → listeners (Clubhouse/Spaces grammar). Rooms are scoped to a community; opt-in recording with always-visible state, live captions on by default, host mic controls + mute/block/report moderation, and tips. Not owner-gated (shared surfaces).",
+             "usage": "/room create <community_id> | <title> · list [community_id] · join <room_id> · leave <room_id> · raise <room_id> · lower <room_id> · speak <room_id> <user_id> · drop <room_id> <user_id> · mute|unmute <room_id> <user_id> · block <room_id> <user_id> · report <room_id> <user_id> <reason> · record <room_id> on|off · captions <room_id> on|off · tip <room_id> <user_id> <naira> · show <room_id> · end <room_id>",
+             "example": "/room create grp_devs | Friday AMA",
+             "related": "/cgroup /match /challenge"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -1447,7 +1452,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1657,7 +1662,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1768,6 +1773,7 @@ LIST_ONELINERS: dict[str, str] = {
     "film": "memory & thinking",
     "graph": "memory & thinking",
     "challenge": "photo-proof challenges + streaks + squads",
+    "room": "live audio rooms — host → speakers → hand-raise → listeners",
     "scamcheck": "Nigerian rental scam check — six automated checks",
     "passport": "verify-once rental passport — reusable tenant profile (owner only)",
     "truecost": "true rental move-in cost from listing text (owner only)",

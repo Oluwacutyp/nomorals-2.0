@@ -2128,6 +2128,17 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "room":
+            # Live audio rooms (#107) — not owner-gated (shared surfaces,
+            # community-scoped). Anyone in the community drives it.
+            from ...community.audio_rooms import control_room
+            return control_room(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "challenge":
             # Photo-proof challenges + streaks + squads (#87) — not
             # owner-gated (owner + community). Anyone drives it.
