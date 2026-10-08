@@ -1553,7 +1553,8 @@ class PartnerRuntime(
         if kind == "news":
             return self._control_news(command.tail or arg)
         if kind == "research":
-            return self._control_research(command.tail or arg)
+            return self._control_research(command.tail or arg,
+                                          chat_key=chat_key, message=message)
         if kind == "code":
             return self._control_code(command.tail, chat_key=chat_key)
         if kind == "py":

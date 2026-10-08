@@ -115,13 +115,28 @@ def _chunk(text: str, size: int = 1200, overlap: int = 200) -> list[str]:
 
 
 class GroundedSession:
-    """A question-answering session bound to a fixed set of documents."""
+    """A question-answering session bound to a fixed set of documents.
 
-    def __init__(self, *, chunk_size: int = 1200) -> None:
+    With ``embedder`` and ``vector_db`` both provided, retrieval is hybrid:
+    FTS keyword search merged with vector search via reciprocal rank fusion.
+    Either lane may be missing or fail at runtime — the session always falls
+    back to FTS-only rather than failing the question.
+    """
+
+    #: vector lanes key chunks by their chunk doc id ("<base>#c<i>")
+    _RRF_K = 60
+
+    def __init__(self, *, chunk_size: int = 1200,
+                 embedder: Any = None, vector_db: Any = None) -> None:
         self.index = DocumentIndex()
         self.chunk_size = chunk_size
         self.doc_ids: list[str] = []
         self.created_at = time.time()
+        self.embedder = embedder
+        self.vector_db = vector_db
+        self._vector_enabled = embedder is not None and vector_db is not None
+        # chunk_id -> (title, snippet); resolves vector hits without a db round-trip
+        self._vec_meta: dict[str, tuple[str, str]] = {}
 
     # ── ingest ───────────────────────────────────────────────────
 
@@ -155,13 +170,27 @@ class GroundedSession:
                 f"document {getattr(doc, 'id', '?')} has no indexable text")
         base_id = str(getattr(doc, "id", "") or f"doc-{len(self.doc_ids)}")
         title = str(getattr(doc, "title", "") or base_id)
+        chunk_ids: list[str] = []
         for i, chunk_text in enumerate(chunks):
+            chunk_id = f"{base_id}#c{i}"
+            chunk_title = f"{title} (part {i + 1})"
             chunk_doc = Document(
-                id=f"{base_id}#c{i}",
-                title=f"{title} (part {i + 1})",
+                id=chunk_id,
+                title=chunk_title,
                 sections=[Section(heading="", text=chunk_text)],
             )
             self.index.add(chunk_doc)
+            chunk_ids.append(chunk_id)
+            if self._vector_enabled:
+                self._vec_meta[chunk_id] = (chunk_title, chunk_text[:300])
+        if self._vector_enabled:
+            try:
+                vectors = self.embedder.embed_many(chunks)
+                self.vector_db.put_many(list(zip(vectors, chunk_ids)))
+            except Exception as exc:  # noqa: BLE001 - vector lane is best-effort
+                _log.debug("grounded session: vector index failed (%s) — FTS-only",
+                           exc)
+                self._vector_enabled = False
         self.doc_ids.append(base_id)
         _log.info("grounded session: indexed %s (%d chunks)",
                   base_id, len(chunks))
@@ -179,16 +208,9 @@ class GroundedSession:
             raise GroundedError("empty question")
         if not self.doc_ids:
             raise GroundedError("no documents ingested yet")
-        hits = self.index.search(question, limit=top_k)
-        if not hits:
+        sources = self._retrieve(question, top_k)
+        if not sources:
             return self._answer_ungrounded(question, llm_fn, context)
-
-        sources = [
-            Source(doc_id=h["doc_id"], title=h.get("title", h["doc_id"]),
-                   snippet=h.get("snippet", "")[:300],
-                   score=float(h.get("score", 0) or 0))
-            for h in hits
-        ]
         # label each source for the model: [S1], [S2], ...
         labeled = []
         for i, s in enumerate(sources, 1):
@@ -206,6 +228,84 @@ class GroundedSession:
         if "CANNOT_ANSWER" in raw.upper():
             return self._answer_ungrounded(question, llm_fn, context)
         return self._number_citations(raw, sources, question)
+
+    # ── retrieval ──────────────────────────────────────────────────
+
+    def _retrieve(self, question: str, top_k: int) -> list[Source]:
+        """Retrieve candidate sources, FTS-only or hybrid.
+
+        The FTS-only path preserves the exact historical behavior (including
+        raising on unindexable queries). The hybrid path merges both lanes
+        with reciprocal rank fusion; any lane failure degrades to FTS-only.
+        """
+        if not self._vector_enabled:
+            return self._fts_sources(question, top_k)
+        try:
+            return self._hybrid_sources(question, top_k)
+        except Exception as exc:  # noqa: BLE001 - never fail a question on retrieval
+            _log.debug("grounded session: hybrid retrieval failed (%s) — FTS-only",
+                       exc)
+            return self._fts_sources(question, top_k)
+
+    def _fts_sources(self, question: str, top_k: int) -> list[Source]:
+        hits = self.index.search(question, limit=top_k)
+        return [
+            Source(doc_id=h["doc_id"], title=h.get("title", h["doc_id"]),
+                   snippet=h.get("snippet", "")[:300],
+                   score=float(h.get("score", 0) or 0))
+            for h in hits
+        ]
+
+    def _hybrid_sources(self, question: str, top_k: int) -> list[Source]:
+        fts_hits: list[dict] = []
+        fts_error: Exception | None = None
+        try:
+            fts_hits = self.index.search(question, limit=top_k * 2)
+        except Exception as exc:  # noqa: BLE001 - lane failure, not a question failure
+            fts_error = exc
+            _log.debug("grounded session: FTS lane failed (%s)", exc)
+
+        vec_hits: list[Any] = []
+        vec_error: Exception | None = None
+        try:
+            qvec = self.embedder.embed(question)
+            vec_hits = self.vector_db.search(qvec, limit=top_k * 2)
+        except Exception as exc:  # noqa: BLE001 - lane failure, not a question failure
+            vec_error = exc
+            _log.debug("grounded session: vector lane failed (%s)", exc)
+
+        if fts_error is not None and vec_error is not None:
+            # both lanes down — surface the FTS error like the FTS-only
+            # path would, instead of silently answering ungrounded
+            raise fts_error
+
+        # reciprocal rank fusion over the shared chunk-id key space
+        fused: dict[str, dict[str, Any]] = {}
+
+        def _add(chunk_id: str, title: str, snippet: str, rank: int) -> None:
+            entry = fused.setdefault(
+                chunk_id,
+                {"rrf": 0.0, "title": title, "snippet": snippet[:300]})
+            entry["rrf"] = float(entry["rrf"]) + 1.0 / (self._RRF_K + rank)
+
+        for rank, h in enumerate(fts_hits, 1):
+            cid = str(h["doc_id"])
+            _add(cid, h.get("title", cid), h.get("snippet", ""), rank)
+        for rank, vh in enumerate(vec_hits, 1):
+            cid = str(getattr(vh, "owner_id", None)
+                      or (vh.get("owner_id") if isinstance(vh, dict) else "") or "")
+            if not cid:
+                continue
+            title, snippet = self._vec_meta.get(cid, (cid, ""))
+            _add(cid, title, snippet, rank)
+
+        ranked = sorted(fused.items(),
+                        key=lambda kv: (-float(kv[1]["rrf"]), kv[0]))
+        return [
+            Source(doc_id=cid, title=e["title"], snippet=e["snippet"],
+                   score=float(e["rrf"]))
+            for cid, e in ranked[:top_k]
+        ]
 
     def _answer_ungrounded(self, question: str,
                            llm_fn: Callable[[str], str] | None,

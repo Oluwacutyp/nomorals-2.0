@@ -79,7 +79,8 @@ class RuntimeLiveMixin:
         return "usage: /news [run [n]|status]"
 
     # ── always-on research ───────────────────────────────────────────────────
-    def _control_research(self, tail: str) -> str:
+    def _control_research(self, tail: str, chat_key: str = "",
+                          message: Any = None) -> str:
         from ..features import feature_enabled
         from ..news import NewsAgent  # noqa: F401 - keeps imports local & symmetric
         from ..notifier import Notifier
@@ -87,9 +88,11 @@ class RuntimeLiveMixin:
 
         if not feature_enabled(self.context, "research"):
             return "research is off. /features research on"
-        agent = ResearchAgent(self.context, notifier=Notifier(self.context, self.gateway))
-        parts = tail.split()
+        parts = (tail or "").split()
         verb = parts[0].lower() if parts else "status"
+        if verb in {"from", "ask", "docs", "done", "clear"}:
+            return self._research_grounded(verb, parts[1:], chat_key, message)
+        agent = ResearchAgent(self.context, notifier=Notifier(self.context, self.gateway))
         if verb == "status":
             counts: dict[str, int] = {}
             try:
@@ -148,7 +151,140 @@ class RuntimeLiveMixin:
                     f"{str(row.get('topic'))[:56]}"
                 )
             return "\n".join(lines)
-        return "usage: /research [run [lifestyle|tech|cyber]|status|ideas [n]|approve <id|latest>|deny <id|latest>|history [n]]"
+        return ("usage: /research [run [lifestyle|tech|cyber]|status|ideas [n]|approve <id|latest>|deny <id|latest>|history [n]]\n"
+                "grounded: /research from [paths] | /research ask <question> | /research docs | /research done")
+
+    # ── source-grounded research (per-chat document sessions) ──────────────
+
+    #: mime types treated as groundable documents (besides kind == "document"
+    #: attachments and text/*)
+    _GROUNDED_DOC_MIMES = frozenset({
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.oasis.opendocument.text",
+        "application/epub+zip",
+        "application/json",
+        "application/rtf",
+        "text/csv",
+    })
+
+    #: extensions treated as groundable documents when the mime is missing
+    _GROUNDED_DOC_EXTS = frozenset({
+        ".pdf", ".txt", ".md", ".markdown", ".rst", ".rtf",
+        ".doc", ".docx", ".odt", ".epub",
+        ".html", ".htm", ".csv", ".tsv", ".json",
+    })
+
+    def _grounded_store(self):
+        """Chat-bound grounded session store, created lazily per runtime."""
+        store = getattr(self, "_grounded_sessions", None)
+        if store is None:
+            from pathlib import Path
+
+            from ...research.grounded_store import GroundedSessionStore
+
+            settings = getattr(self.context, "settings", None)
+            resolve = getattr(settings, "resolve", None)
+            root = resolve("grounded") if callable(resolve) else Path("data/grounded")
+            store = GroundedSessionStore(root)
+            self._grounded_sessions = store
+        return store
+
+    @staticmethod
+    def _is_groundable_media(m: Any) -> bool:
+        path = getattr(m, "path", None)
+        if not path:
+            return False
+        if getattr(m, "kind", "") == "document":
+            return True
+        mime = (getattr(m, "mime", "") or "").lower()
+        if mime.startswith("text/") or mime in RuntimeLiveMixin._GROUNDED_DOC_MIMES:
+            return True
+        from pathlib import Path
+
+        return Path(str(path)).suffix.lower() in RuntimeLiveMixin._GROUNDED_DOC_EXTS
+
+    def _research_grounded(self, verb: str, args: list[str],
+                           chat_key: str, message: Any) -> str:
+        """/research from|ask|docs|done — source-grounded Q&A over chat documents."""
+        from ...research.grounded import GroundedError
+
+        store = self._grounded_store()
+        if verb == "from":
+            return self._grounded_from(store, args, chat_key, message)
+        if verb in ("done", "clear"):
+            store.drop(chat_key)
+            return "grounded session cleared — documents removed."
+        session = store.get(chat_key)
+        if session is None:
+            return ("no grounded session for this chat yet — "
+                    "attach documents with /research from first.")
+        if verb == "docs":
+            docs = store.list_docs(chat_key)
+            if not docs:
+                return "grounded session is empty — /research from to add documents."
+            lines = [f"grounded documents ({len(docs)}):"]
+            lines.extend(f"· {d['doc_id']} — {d['title']}" for d in docs)
+            return "\n".join(lines)
+        # ask
+        question = " ".join(args).strip()
+        if not question:
+            return "usage: /research ask <question>"
+        try:
+            answer = session.ask(question, context=self.context)
+        except GroundedError as exc:
+            return f"grounded research failed: {exc}"
+        return answer.render()
+
+    def _grounded_from(self, store: Any, args: list[str],
+                       chat_key: str, message: Any) -> str:
+        """Ingest the triggering message's document attachments and/or tail
+        file paths into the chat-bound grounded session."""
+        from pathlib import Path
+
+        from ...research.grounded import GroundedError
+
+        media_docs = []
+        if message is not None:
+            for m in (getattr(message, "media", None) or []):
+                if self._is_groundable_media(m):
+                    media_docs.append(m)
+        path_args = [a for a in args if Path(a).is_file()]
+        if not media_docs and not path_args:
+            return ("nothing to ground on — attach a document to the message "
+                    "or pass file paths: /research from <path> ...")
+
+        titles: list[str] = []
+        errors: list[str] = []
+        jobs: list[tuple[str, str, str]] = []  # (filename, source path, mime)
+        for m in media_docs:
+            jobs.append((getattr(m, "name", "") or Path(str(m.path)).name,
+                         str(m.path), getattr(m, "mime", "") or ""))
+        for p in path_args:
+            jobs.append((Path(p).name, p, ""))
+
+        for filename, source, mime in jobs:
+            try:
+                data = Path(source).read_bytes()
+            except OSError as exc:
+                errors.append(f"{filename}: unreadable ({exc})")
+                continue
+            try:
+                store.add_upload(chat_key, data, filename, mime=mime)
+            except (GroundedError, ValueError) as exc:
+                errors.append(f"{filename}: {exc}")
+                continue
+            titles.append(filename)
+
+        if not titles:
+            detail = "; ".join(errors[:3])
+            return "couldn't ingest any documents" + (f": {detail}" if detail else ".")
+        reply = (f"grounded on {len(titles)} document(s): {', '.join(titles)}. "
+                 f"Ask with /research ask <question>")
+        if errors:
+            reply += f" ({len(errors)} failed: " + "; ".join(errors[:2]) + ")"
+        return reply
 
     # ── finance: the native-TA FinancialExpert ─────────────────────────────
     def _control_finance(self, tail: str, chat_key: str) -> str:
