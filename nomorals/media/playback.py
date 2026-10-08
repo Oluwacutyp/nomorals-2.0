@@ -674,7 +674,15 @@ class PlaybackEngine:
                 try:
                     url = self._soundcloud_play_url(item)
                 except Exception as exc:  # noqa: BLE001
-                    return {"ok": False, "reason": f"SoundCloud resolve failed: {exc}"}
+                    # The SoundCloud api-v2 has bad days (rotated client
+                    # ids, rate limits, regional blocks).  Instead of dying
+                    # here, fall back to yt-dlp on the permalink URL —
+                    # yt-dlp extracts SoundCloud natively with no API key,
+                    # so the track still downloads.
+                    _log.info("soundcloud API failed for %r (%s); "
+                              "falling back to yt-dlp",
+                              item.get("path"), exc)
+                    url = str(item.get("path", ""))
             if not url:
                 return {"ok": False, "reason": "no URL to download"}
             tools = getattr(self.context, "tools", None)

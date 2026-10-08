@@ -308,8 +308,12 @@ class RuntimeMediaMixin:
         via mpv/ffmpeg as before.
 
         /play <workspace path to audio/midi>
-        /play <song title>   → resolved via workspace scan, then Spotify
-                              (when linked), SoundCloud, YouTube
+        /play <song title>   → dynamic strategy chain (SourceResolver):
+                              local file → SoundCloud search → YouTube
+                              search → Spotify (when linked)
+        /play <any URL>     → yt-dlp universal extraction (1000+ sites),
+                              SoundCloud API as metadata optimization
+                              with automatic yt-dlp fallback
         /play spotify:<query>  → force Spotify (honest when not linked)
         /play youtube:<query|url> → force YouTube (needs yt-dlp)
         /play queue|status|pause|…   (transport actions)
@@ -383,11 +387,6 @@ class RuntimeMediaMixin:
                         r.path_or_url, r.kind, r.title or r.path_or_url,
                         artist=r.artist, duration=r.duration))
                 queue_len = len(engine.queue())
-                if not added:
-                    return (f"couldn't find {rest[:80]!r} — not a file, "
-                            f"nothing on Spotify/SoundCloud/YouTube. "
-                            f"/play <path-or-url> plays directly; "
-                            f"/play spotify:<query> forces Spotify.")
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
