@@ -457,6 +457,7 @@ class RuntimeMemoryMixin:
                     "       /health costs — typical private-hospital costs\n"
                     "       /health prep [symptoms] — pre-visit packet\n"
                     "       /health visited <notes> — post-visit recap\n"
+                    "       /health meal — photo meal logging (2 questions)\n"
                     "tracking only — I'm not a doctor; show the log to "
                     "yours for medical guidance.")
         verb, _, rest = raw.partition(" ")
@@ -510,6 +511,17 @@ class RuntimeMemoryMixin:
                     return "usage: /health visited <what the doctor said>"
                 return format_recap(
                     summarize_visit(rest.strip(), timeline=tl))
+            if verb == "meal":
+                # Photo meal logging (owner-only, tracking only).
+                # /health meal — arms the flow: send a photo of your meal,
+                # Devon identifies it and asks at most 2 questions the photo
+                # can't answer (hidden fats, portion, drinks).
+                from ...health import nutrition as _nut
+                _nut.arm_meal_flow(chat_key)
+                return ("send a photo of your meal — I'll identify the foods "
+                        "and ask at most 2 questions the photo can't answer "
+                        "(oil, portion size, drinks). estimates are always "
+                        "approximate ranges, never exact numbers.")
             if verb == "ask":
                 if not rest.strip():
                     return ("usage: /health ask <question> — e.g. /health ask "

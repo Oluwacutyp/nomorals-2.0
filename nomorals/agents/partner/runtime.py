@@ -549,6 +549,47 @@ class PartnerRuntime(
                                         _log.exception(
                                             "ekiti check reply failed")
                                     return
+        # Meal photo logging (owner only): a photo with meal intent — or an
+        # armed /health meal — starts the 2-question flow. The next text
+        # message answers the questions and completes the log.
+        if message.incoming and self._is_operator(message):
+            from ...health import nutrition as _nut
+            try:
+                images = [m for m in (message.media or [])
+                          if getattr(m, "kind", "") == "image"]
+                chat_key = message.chat.key
+                text = (message.text or "").strip()
+                if images and (_nut.meal_flow_armed(chat_key)
+                               or _nut.meal_intent_in_text(text)):
+                    _nut.disarm_meal_flow(chat_key)
+                    draft = _nut.log_meal(getattr(images[0], "path", ""))
+                    if draft.ok:
+                        _nut.arm_meal(chat_key, draft)
+                        reply = _nut.format_draft_message(draft)
+                    else:
+                        reply = (f"couldn't log this one — {draft.error}. "
+                                 "try a clearer photo of the food.")
+                    try:
+                        self.gateway.send(message.chat.platform,
+                                          message.chat, reply)
+                    except Exception:  # noqa: BLE001
+                        _log.exception("meal photo reply failed")
+                    return
+                pending = _nut.pending_meal(chat_key)
+                if (pending and text and not text.startswith("/")
+                        and not images):
+                    questions = _nut.follow_up_questions(pending)
+                    answers = _nut.parse_meal_answers(text, questions)
+                    meal_log = _nut.complete_meal(pending, answers)
+                    _nut.consume_meal(chat_key)
+                    try:
+                        self.gateway.send(message.chat.platform,
+                                          message.chat, meal_log.summary())
+                    except Exception:  # noqa: BLE001
+                        _log.exception("meal summary reply failed")
+                    return
+            except Exception:  # noqa: BLE001
+                _log.exception("meal photo flow failed")
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
