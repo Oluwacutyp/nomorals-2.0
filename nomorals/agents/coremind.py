@@ -814,6 +814,14 @@ _RE_VIDEO_GEN = re.compile(
     r"video\s+of\s+(.+?)\s*$", re.I)
 _RE_VIDEO_GEN_NODUR = re.compile(
     r"^(?:generate|create|make)\s+a\s+video\s+of\s+(.+?)\s*$", re.I)
+# talking head (#27): "make this photo talk: <text>" /
+# "make this photo say <text>". Narrow whole-message shapes; the text
+# anchor prevents misfires ("make this photo talk to me" has no text
+# payload and does NOT match).
+_RE_AVATAR_TALK = re.compile(
+    r"^make\s+this\s+photo\s+talk\s*:\s*(.+?)\s*$", re.I)
+_RE_AVATAR_SAY = re.compile(
+    r"^make\s+this\s+photo\s+say\s+(.+?)\s*$", re.I)
 _IMAGE_DRAW_DENYLIST = (
     "conclusion", "comparison", "distinction", "line", "the line",
     "curtains", "blinds", "salary", "pay", "attention",
@@ -930,6 +938,26 @@ def _video_intent(text: str) -> Intent | None:
                   action="generate_video", route="media",
                   meta={"prompt": prompt, "duration_s": duration},
                   why=f"video request: {prompt[:40]} ({duration}s)")
+
+
+def _avatar_intent(text: str) -> Intent | None:
+    """Detect talking-head requests — routes to the avatar pipeline (#27).
+
+    Narrow by design: the whole message must match one of the two shapes,
+    and a non-empty text payload is required, so ordinary chat never
+    misfires into a lip-sync job.
+    """
+    stripped = (text or "").strip()
+    m = _RE_AVATAR_TALK.match(stripped) or _RE_AVATAR_SAY.match(stripped)
+    if not m:
+        return None
+    said = m.group(1).strip()
+    if not said or len(said) > 500:
+        return None
+    return Intent("avatar", 0.9, target=said[:500],
+                  action="talking_head", route="media",
+                  meta={"text": said},
+                  why=f"talking head request: {said[:40]}")
 
 
 def _finance_intent(text: str) -> Intent | None:
@@ -1228,7 +1256,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     for fn in (_owner_intent, _status_intent, _schedule_intent, _mission_intent, _game_intent,
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
-               _finance_intent, _image_intent, _video_intent):
+               _finance_intent, _image_intent, _video_intent, _avatar_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1745,6 +1773,7 @@ class CoreMind:
             "vision_edittext": self._dispatch_vision,
             "vision_captions": self._dispatch_vision,
             "video_gen": self._dispatch_video,
+            "avatar": self._dispatch_avatar,
             "finance_log": self._dispatch_finance_log,
             "finance_summary": self._dispatch_finance_summary,
         }.get(intent.kind)
@@ -2367,6 +2396,63 @@ class CoreMind:
             chat_key, job, job_id,
             "🎬 rendering your video — this takes a few minutes, "
             "I'll send it when it's done.",
+            kind="video")
+
+    def _dispatch_avatar(self, intent: Intent, job_id: str, chat_key: str,
+                         message: Any) -> str:
+        """NL talking head (#27): photo + text → lip-synced video.
+
+        Runs on a background thread (TTS + LatentSync are SLOW), delivers
+        via send_media(kind="video"). Needs an attached photo; the text
+        comes from the intent. Nothing is faked: a missing LatentSync
+        setup raises with the exact setup steps, and the reply says so.
+        """
+        from pathlib import Path
+        from ..social.chat.base import MediaRef
+
+        said = str(intent.meta.get("text") or intent.target or "").strip()
+        media = list(getattr(message, "media", None) or [])
+        photos = [m for m in media
+                  if getattr(m, "kind", "") == "image"
+                  and getattr(m, "path", "")]
+        if not photos:
+            return ("🖼️ attach the photo, then say:\n"
+                    "`make this photo talk: <what it should say>`")
+        if not said:
+            return "tell me what the photo should say."
+
+        photo_path = photos[0].path
+
+        def job() -> str:
+            from ..media_edit.avatar import talking_head
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            out_dir = Path(self.context.settings.resolve(
+                "data/generations"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                out = talking_head(
+                    photo_path, said,
+                    out_path=str(out_dir / f"talking-head-{stamp}.mp4"))
+            except Exception as exc:  # noqa: BLE001 - report honestly
+                return f"❌ talking head failed: {exc}"
+            if self.runtime is None:
+                return f"🗣️ saved to {out}"
+            ref = self.runtime._ref_from_key(chat_key)
+            adapter = self.runtime.gateway._adapter_for(ref.platform)
+            if adapter is None:
+                return f"❌ rendered but no adapter for {ref.platform}"
+            result = adapter.send_media(
+                ref, MediaRef(path=str(out), kind="video",
+                              mime="video/mp4", name=out.name),
+                caption=f"🗣️ {said[:80]}")
+            if not result.ok:
+                return (f"❌ rendered but couldn't send: {result.error}")
+            return f"🗣️ done — {out.name}"
+
+        return self._send_async(
+            chat_key, job, job_id,
+            "🗣️ voicing your photo — TTS plus lip-sync takes a few "
+            "minutes, I'll send the video when it's done.",
             kind="video")
 
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
