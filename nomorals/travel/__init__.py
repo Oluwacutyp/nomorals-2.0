@@ -1,4 +1,5 @@
-"""Travel: price watchers (build-map #71) + auto itineraries (#72)."""
+"""Travel: price watchers (build-map #71) + auto itineraries (#72)
++ white-label clients (#73)."""
 from .watchers import (
     PriceWatcher, PriceWatch, PriceAlert, PricePoint,
     PRICE_WATCH_ACTION, ensure_schedule, check_all,
@@ -9,6 +10,10 @@ from .itinerary import (
     parse_confirmation, ItineraryBuilder,
     confirmation_hook, added_message,
 )
+from .whitelabel import (
+    TravelClient, TravelClientStore, client_knowledge,
+    answer, viki_template, NG_AIRLINES,
+)
 
 __all__ = [
     "PriceWatcher", "PriceWatch", "PriceAlert", "PricePoint",
@@ -17,4 +22,6 @@ __all__ = [
     "Flight", "HotelStay", "CarRental", "Trip",
     "parse_confirmation", "ItineraryBuilder",
     "confirmation_hook", "added_message",
+    "TravelClient", "TravelClientStore", "client_knowledge",
+    "answer", "viki_template", "NG_AIRLINES",
 ]
