@@ -205,6 +205,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
     "course": (0, None),      # /course <topic> | waec <subject> | set <field> <value> | build | list | teach <id> | status
     "health": (0, None),      # /health log <text> | timeline | summary [days]
+    "train": (0, None),       # /train plan <goal> [equipment] [weeks] | today | readiness | log [completed|skipped] [rpe] | list
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -970,6 +971,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/mandate issue <scope> <per-txn-₦> [per-day-₦] [days-valid] | /mandate list | /mandate revoke <id> | /mandate stop all",
               "example": "/mandate issue transfer 50000 200000 30",
               "related": "/spend"},
+    "train": {"what": "recovery-gated training plans — text-to-structured-plan (12-week blocks), daily workouts gated by readiness (HRV/sleep/RHR), voice coaching cues. Never a hard session on a low-recovery day.",
+              "usage": "/train plan <goal> [equipment] [weeks] | /train today | /train readiness | /train log [completed|skipped] [rpe] [notes] | /train list",
+              "example": "/train plan strength full 12",
+              "related": "/health"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1302,7 +1307,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "data", "evolve", "upgrade", "arena", "trial",
                            "identity", "book", "features"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health"]),
+                           "benchmark", "redteam", "review", "tutor", "ekiti", "course", "health", "train"]),
     ("money & spending", ["spend", "budget", "spending", "mandate"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
@@ -1515,7 +1520,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["music", "play", "video", "hub", "podcast", "zip"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "ekiti", "course", "health"]),
+      "review", "tutor", "ekiti", "course", "health", "train"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -1638,6 +1643,7 @@ LIST_ONELINERS: dict[str, str] = {
     "budget": "money & spending",
     "spending": "money & spending",
     "mandate": "money & spending",
+    "train": "memory & thinking",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

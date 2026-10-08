@@ -550,6 +550,22 @@ class RuntimeMemoryMixin:
         finally:
             tl.close()
 
+    def _control_train(self, tail: str, *, chat_key: str = "") -> str:
+        """Recovery-gated training plans + voice coaching. Owner-only.
+
+        /train plan <goal> [equipment] [weeks] — periodized plan
+        /train today — today's workout, gated by recovery
+        /train readiness — recovery score from sleep + HRV + strain
+        /train log [completed|skipped] [rpe] [notes]
+        /train list — your plans
+        """
+        from ...health.training import TrainingCoach, control_train
+        coach = getattr(self, "_training_coach", None)
+        if coach is None:
+            coach = TrainingCoach()
+            self._training_coach = coach
+        return control_train(tail or "", coach=coach)
+
     def _control_routine(self, tail: str, *, chat_key: str = "") -> str:
         """Natural-language smart-home routines. Owner-only.
 
