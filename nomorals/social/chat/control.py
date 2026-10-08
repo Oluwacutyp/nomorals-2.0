@@ -217,6 +217,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "truecost": (0, None),    # /truecost <listing text> | afford <listing> — real move-in cost (owner only)
     "value": (0, None),       # /value <desc> — DIY valuation: range + confidence band + comparables
     "valuepick": (0, None),   # /valuepick <estimate id> <1,2,4> — refine from picked comparables
+    "watch": (0, None),       # /watch 2bed Yaba under 1.5m [for 7|14|28d] | list | stop <id> — persistent match alerts
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1035,6 +1036,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/valuepick <estimate id> <comp numbers, e.g. 1,2,4>",
             "example": "/valuepick val_abc123 1,2,4",
             "related": "/value"},
+    "watch": {"what": "Persistent match alerts — saved searches that push the moment a listing matches: 'tell me the moment a 2-bed under \u20a61.5M hits Yaba'. Property first; gig/flight inherit. Auto-expires (7/14/28d). Owner only.",
+            "usage": "/watch 2bed Yaba under 1.5m [for 7|14|28 days] | /watch gig <query> | /watch flight <route> | /watch list | /watch stop <id> | /watch check",
+            "example": "/watch 2bed Yaba under 1.5m",
+            "related": "/track /scamcheck"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1387,7 +1392,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1597,7 +1602,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck", "passport", "truecost", "value", "valuepick", "watch"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1713,6 +1718,7 @@ LIST_ONELINERS: dict[str, str] = {
     "truecost": "true rental move-in cost from listing text (owner only)",
     "value": "DIY property valuation — value range with confidence band + comparables",
     "valuepick": "refine a value estimate from picked comparables",
+    "watch": "persistent match alerts — saved listing searches",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",

@@ -2159,6 +2159,16 @@ class PartnerRuntime(
                 context=self.context,
                 chat=chat,
             )
+        if kind == "watch":
+            # Persistent match alerts (#96) — owner-only.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...triggers.saved_search import control_watch
+            return control_watch(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+            )
         if kind == "truecost":
             # True-cost calculator (#94) — pairs with the passport,
             # owner-only.
