@@ -212,6 +212,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "route": (0, None),       # /route plan <s1>; <s2>; ... | add <label> [lat,lng] | stops | record <from> > <to> <min> [kobo] | stats
     "eta": (0, None),         # /eta <task> [seg=min] ... | record <task> <pred> <actual> | risk <task> <elapsed> | stats [task]
     "congestion": (0, None),  # /congestion status | register <name> [kind] [capacity] | advise <resource> [agents=N] | predict <resource> | alternate <r> <alt>
+    "scamcheck": (0, None),   # /scamcheck <jiji/propertypro link or listing text> [photo:<path>] — six automated scam checks
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
     "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
@@ -1010,6 +1011,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/congestion status | /congestion register <name> [kind] [capacity] | /congestion advise <resource> [agents=N] | /congestion predict <resource> | /congestion alternate <resource> <alternate>",
             "example": "/congestion advise groq-key agents=6",
             "related": "/route"},
+    "scamcheck": {"what": "Nigerian rental scam check — six automated checks on any listing: price anomaly, duplicates, reverse-image, illegal fees, vague address, payment channel.",
+            "usage": "/scamcheck <jiji/propertypro link or listing text> [photo:<path>]",
+            "example": "/scamcheck https://jiji.ng/...",
+            "related": "/contract"},
     "track": {"what": "flight price watchers — 'track this for me' as persistent monitoring. Daily Duffel checks, owner-DM alert on drops with [Book] [Dismiss].",
               "usage": "/track LOS LHR 2026-12-01 [under 400k] | /track list",
               "example": "/track LOS LHR 2026-12-01 under 400k",
@@ -1362,7 +1367,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge"]),
+                            "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck"]),
     ("platform control", ["start", "stop", "profile"]),
     ("discovery", ["list", "commands", "menu", "help"]),
 ]
@@ -1572,7 +1577,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "api", "proxy", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cipher",
-      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge"]),
+      "monitor", "investigate", "bet", "finance", "weather", "tz", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "scamcheck"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -1683,6 +1688,7 @@ LIST_ONELINERS: dict[str, str] = {
     "film": "memory & thinking",
     "graph": "memory & thinking",
     "challenge": "photo-proof challenges + streaks + squads",
+    "scamcheck": "Nigerian rental scam check — six automated checks",
     "think": "explicit multi-step reasoning with the full trace",
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
