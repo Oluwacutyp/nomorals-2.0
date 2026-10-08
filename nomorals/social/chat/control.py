@@ -432,6 +432,7 @@ _HELP_TEXT = "\n".join(
         "  — media system (music · playback · video) —",
         "  /music <topic> [style]                  compose a real song (lyrics + MIDI)",
         "  /music styles | /music song [slug]      browse styles / re-fetch a saved song",
+        "  /music bed <topic> [style]              AI instrumental bed (ACE-Step, needs GPU)",
         "  /play <paths…>                          queue + play audio (mpv when installed)",
         "  /play status | queue | pause | resume | stop | next | prev",
         "  /play seek <s> | volume <n> | remove <n> | clear",
@@ -1114,7 +1115,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "style-aware lyrics, section structure, chord "
                       "progression, melody description, and a playable .mid "
                       "file (real MIDI, opens in any player).",
-              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]",
+              "usage": "/music <topic> [style]  |  /music styles  |  /music song [slug]  |  /music bed <topic> [style]",
               "example": "/music the first rain in lagos lofi",
               "related": "/play (queue the midi or audio) · nm music on the console"},
     "play": {"what": "media player: durable queue + transport for audio. "

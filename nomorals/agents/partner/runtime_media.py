@@ -37,6 +37,44 @@ class RuntimeMediaMixin:
 
     # ── wave 72 systems: media · execution · archives · builders ───────────
 
+    def _control_music_bed(self, tail: str, chat_key: str = "") -> str:
+        """ /music bed <topic> [style] — AI instrumental bed via ACE-Step 1.5.
+
+        Lyrics come from MusicCreator's real engine; the bed is AI-generated.
+        Fails honestly when the model isn't installed — never fake audio.
+        """
+        from ...media.ace_step import (
+            ACEModelUnavailable, make_bed, parse_bed_request)
+        from ...media.music import STYLES
+
+        req = parse_bed_request(f"bed {tail}", STYLES)
+        if req is None:
+            return ("usage: /music bed <topic> [style]\n"
+                    "e.g. /music bed lagos nights afrobeats")
+        try:
+            res = make_bed(req.topic, style=req.style,
+                           duration_s=req.duration_s, context=self.context)
+        except ACEModelUnavailable as exc:
+            return f"🎹 couldn't make the AI bed:\n{exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"music bed error: {exc}"
+        text = (f"🎹 “{res.title}” — AI instrumental bed "
+                f"[{res.variant}, {res.duration_s:.0f}s]\n"
+                f"tags: {res.tags}\n{res.note}")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None and res.audio_path:
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    res.audio_path,
+                    caption=f"🎹 {res.title} — AI bed (vocals come next)")
+                text += "\nsent the bed to this chat."
+            except Exception:  # noqa: BLE001
+                text += f"\naudio: {res.audio_path}"
+        else:
+            text += f"\naudio: {res.audio_path or '(render failed)'}"
+        return text
+
     def _control_music(self, tail: str, chat_key: str = "") -> str:
         """ /music <topic> [style] — composes a real song and sends the
         audio + the score PDF (lead sheet) straight to this chat.
@@ -52,6 +90,8 @@ class RuntimeMediaMixin:
             return ("styles:\n" + "\n".join(
                 f"  {k:12s} {v.label}  ({v.mode}, {v.tempo[0]}-{v.tempo[1]} bpm)"
                 for k, v in STYLES.items()))
+        if words[0].lower() == "bed":
+            return self._control_music_bed(" ".join(words[1:]), chat_key)
         if words[0].lower() == "song":
             from ...media.music import _saved_songs
 
