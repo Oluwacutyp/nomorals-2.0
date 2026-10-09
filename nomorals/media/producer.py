@@ -692,5 +692,249 @@ class Producer:
         return "\n".join(lines)
 
 
+    # ── SongSpec render path (LLM-first composition) ────────────────────
+    def produce_from_spec(self, spec: "SongSpec", *,
+                          seed: int | None = None,
+                          workdir: str = "produced") -> dict[str, Any]:
+        """Render a SongSpec into audio — the LLM-first pipeline.
+
+        The spec carries the model's composition (lyrics, chords, groove,
+        arrangement).  This method executes it: motif development guided by
+        each section's melody_idea, harmony from the spec's roman numerals,
+        drums from the generative rhythm engine, bass locked to the kick.
+
+        Never raises.
+        """
+        from .songspec import SongSpec  # noqa: F811
+        try:
+            if seed is None:
+                seed = int(hashlib.sha256(
+                    f"{spec.title}|{spec.tempo}|{time.time():.0f}"
+                    .encode()).hexdigest()[:8], 16)
+            rng = random.Random(seed)
+
+            motif = write_motif(spec.key, spec.mode, bars=2, rng=rng)
+            scale = _scale_degrees(spec.key, spec.mode)
+            parts = self._compose_from_spec(spec, motif, scale, rng, seed)
+
+            out_path = self._render_spec(spec, parts, seed, workdir)
+            notes = self._spec_notes(spec, seed)
+            return {"ok": True, "path": out_path, "title": spec.title,
+                    "notes": notes, "bpm": spec.tempo, "key": spec.key,
+                    "mode": spec.mode, "seed": seed,
+                    "sections": [s.name for s in spec.sections],
+                    "spec_source": spec.source}
+        except Exception as exc:  # noqa: BLE001 - produce never raises
+            _log.exception("produce_from_spec failed: %s", exc)
+            return {"ok": False, "reason": str(exc)[:200]}
+
+    def _compose_from_spec(self, spec: "SongSpec",
+                           motif: list[MotifNote], scale: list[int],
+                           rng: random.Random, seed: int) -> dict[str, list]:
+        """SongSpec → parts.  The rhythm engine drives drums + bass."""
+        from ..core.midi import NoteEvent, chord_progression
+        from .rhythm import generate_drums, generate_bass
+
+        parts: dict[str, list] = {"melody": [], "counter": [],
+                                 "chords": [], "bass": [], "drums": []}
+        bar = 0
+        sections = spec.sections
+
+        for idx, sec in enumerate(sections):
+            # — melody: the LLM's ABC notation wins; motif development is
+            #   the fallback.  Research: ABC is the proven LLM-music format
+            #   (ChatMusician, NotaGen, ComposerX). —
+            abc_notes = self._abc_for_section(sec, bar, rng)
+            if abc_notes is not None:
+                parts["melody"].extend(abc_notes)
+            else:
+                dev = self._develop_for_idea(motif, sec.melody_idea, rng)
+                sec_beats = sec.bars * 4.0
+                t = bar * 4.0
+                end = t + sec_beats
+                vel = 100 if sec.energy > 0.65 else 88
+                rep = 0
+                while t < end - 0.01:
+                    use = dev
+                    if rep > 0 and rng.random() < 0.3:
+                        use = develop_motif(
+                            dev, rng.choice(["fragment", "sequence"]),
+                            **({"steps": rng.choice([-1, 1])}
+                               if rng.random() < 0.5 else {}))
+                    evs = realize_motif(use, scale, t, velocity=vel)
+                    for evn in evs:
+                        if evn.start < end:
+                            evn.duration = min(evn.duration, end - evn.start)
+                            parts["melody"].append(evn)
+                    motif_len = sum(n.dur for n in use)
+                    t += motif_len if motif_len > 0 else 4.0
+                    rep += 1
+
+            # — harmony: the SPEC's chord progression, not a random pick —
+            from .songspec import normalize_roman
+            raw_prog = [normalize_roman(c, spec.mode) for c in sec.chords]
+            prog = (raw_prog *
+                    ((sec.bars // max(1, len(raw_prog))) + 1))[:sec.bars]
+            try:
+                chord_sets = chord_progression(spec.key, spec.mode, prog,
+                                               base_octave=3)
+            except Exception:  # noqa: BLE001 - bad numerals → fallback
+                chord_sets = chord_progression(spec.key, spec.mode,
+                                               ["i"] * sec.bars,
+                                               base_octave=3)
+            for b in range(sec.bars):
+                triad = chord_sets[b] if b < len(chord_sets) else chord_sets[0]
+                bstart = (bar + b) * 4.0
+                if sec.energy > 0.65:
+                    for off in (0.0, 1.5, 2.5):
+                        for n in triad:
+                            parts["chords"].append(NoteEvent(
+                                note=n, start=bstart + off, duration=0.4,
+                                velocity=92))
+                elif sec.energy < 0.35:
+                    for n in triad:
+                        parts["chords"].append(NoteEvent(
+                            note=n + 12, start=bstart, duration=4.0,
+                            velocity=64))
+                else:
+                    for n in triad:
+                        parts["chords"].append(NoteEvent(
+                            note=n + 12, start=bstart, duration=2.0,
+                            velocity=76))
+
+            # — drums: GENERATIVE rhythm engine (no pattern tables) —
+            next_e = (sections[idx + 1].energy
+                      if idx + 1 < len(sections) else None)
+            drums = generate_drums(spec, sec, bar, rng, next_energy=next_e)
+            parts["drums"].extend(drums)
+
+            # — bass: locked to the actual kick pattern —
+            kick_attacks = self._kick_attacks_per_bar(drums, bar, sec.bars)
+            roots = [min(c) - 12 for c in
+                     (chord_sets[b] if b < len(chord_sets) else chord_sets[0]
+                      for b in range(sec.bars))]
+            bass_evs, _ = generate_bass(spec, sec, bar, roots,
+                                        kick_attacks, rng)
+            parts["bass"].extend(bass_evs)
+
+            # — counter-melody in low-energy sections —
+            if sec.energy < 0.35 and sec.name in ("break", "bridge", "intro"):
+                inv = develop_motif(motif, "inversion")
+                inv = develop_motif(inv, "octave", up=False)
+                parts["counter"].extend(
+                    realize_motif(inv, scale, bar * 4.0, velocity=72))
+
+            bar += sec.bars
+        return parts
+
+    @staticmethod
+    def _abc_for_section(sec: "SectionSpec", bar: int,
+                         rng: random.Random) -> list | None:
+        """Parse the section's ABC melody into NoteEvents at the right
+        absolute position.  Returns None when no usable ABC is present
+        (caller falls back to motif development)."""
+        from ..core.midi import NoteEvent
+        from .abc_melody import parse_abc_melody, validate_abc
+
+        abc = (sec.melody_abc or "").strip()
+        if not abc:
+            return None
+        # validate musically (not just structurally) — ComposerX reviewer pattern
+        problems = validate_abc(abc, expected_beats=sec.bars * 4.0)
+        # hard problems (no notes) → fallback; soft problems (range/leaps)
+        # → use it anyway, the model's intent wins
+        parsed = parse_abc_melody(abc)
+        if not parsed:
+            return None
+        for p in problems:
+            _log.debug("ABC melody note: %s", p)
+        vel = 100 if sec.energy > 0.65 else 88
+        base = bar * 4.0
+        return [NoteEvent(note=m, start=base + s, duration=d, velocity=vel)
+                for m, s, d in parsed]
+
+    @staticmethod
+    def _develop_for_idea(motif: list[MotifNote], idea: str,
+                          rng: random.Random) -> list[MotifNote]:
+        """Map the model's melody_idea text to a development technique."""
+        idea = (idea or "").lower()
+        if any(w in idea for w in ("inversion", "contrast", "mirror")):
+            return develop_motif(motif, "inversion")
+        if any(w in idea for w in ("retrograde", "backwards", "reverse")):
+            return develop_motif(motif, "retrograde")
+        if any(w in idea for w in ("rising", "climbing", "build", "ascent",
+                                   "lift")):
+            return develop_motif(motif, "sequence", steps=1)
+        if any(w in idea for w in ("falling", "descending", "dissolv")):
+            return develop_motif(motif, "sequence", steps=-1)
+        if any(w in idea for w in ("stabs", "rhythmic", "fragment",
+                                   "sparse", "space")):
+            return develop_motif(motif, "fragment")
+        if any(w in idea for w in ("anthem", "wide", "leap", "octave",
+                                   "peak")):
+            return develop_motif(motif, "octave", up=True)
+        if any(w in idea for w in ("diminution", "squeeze", "tighter")):
+            return develop_motif(motif, "diminution")
+        if any(w in idea for w in ("augmentation", "stretch", "longer")):
+            return develop_motif(motif, "augmentation")
+        return motif
+
+    @staticmethod
+    def _kick_attacks_per_bar(drums: list, start_bar: int,
+                              bars: int) -> list[list[float]]:
+        """Extract kick hit positions per bar from drum events."""
+        per_bar: list[list[float]] = [[] for _ in range(bars)]
+        for ev in drums:
+            if getattr(ev, "note", None) == 36:  # KICK
+                rel = float(getattr(ev, "start", 0)) - start_bar * 4.0
+                b = int(rel // 4.0)
+                if 0 <= b < bars:
+                    per_bar[b].append(round(rel % 4.0, 2))
+        return per_bar
+
+    def _render_spec(self, spec: "SongSpec", parts: dict[str, list],
+                     seed: int, workdir: str) -> str:
+        from ..tools.filesystem import safe_path
+        from .synth_backend import render_wav
+        from ..core.midi import MidiBuilder
+
+        base = safe_path(self.context, (workdir or "produced").strip("/"))
+        base.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-",
+                      (spec.title or "produced").lower()).strip("-") or "produced"
+        target = base / f"{slug}-{seed % 100000:05d}.wav"
+
+        b = MidiBuilder(tempo=spec.tempo,
+                        time_signature=tuple(spec.time_signature))
+        for ch, pname in enumerate(["melody", "chords", "bass", "drums"]):
+            b.add_notes(b.new_track(pname), parts.get(pname, []))
+        midi_path = str(target.with_suffix(".mid"))
+        try:
+            b.write(midi_path)
+        except Exception:  # noqa: BLE001 - midi is best-effort
+            midi_path = ""
+
+        choice = render_wav(parts, float(spec.tempo), seed, midi_path,
+                            str(target), context=self.context)
+        _log.info("spec-rendered via %s (%s)", choice.name, choice.reason)
+        return str(target)
+
+    def _spec_notes(self, spec: "SongSpec", seed: int) -> str:
+        lines = [
+            f"🎛 COMPOSED ({spec.source}) — {spec.title}",
+            f"{spec.tempo} BPM · {spec.key} {spec.mode} · {spec.mood}",
+            f"groove: {spec.groove.feel}",
+            f"bass: {spec.bass_approach}",
+            "sections: " + " → ".join(
+                f"{s.name}({s.bars}b, e={s.energy:.2f})"
+                for s in spec.sections),
+            "drums: generative rhythm engine (no preset patterns) — "
+            "kick locks to harmonic rhythm + bass, fills at boundaries",
+        ]
+        if spec.arrangement_notes:
+            lines.append(f"arc: {spec.arrangement_notes}")
+        return "\n".join(lines)
+
+
 def register() -> dict[str, Any]:
     return {"produce": Producer}

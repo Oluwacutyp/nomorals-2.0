@@ -83,6 +83,7 @@ ROMAN_DEGREES: dict[str, tuple[int, bool]] = {
     # minor-key lowercase
     "i": (0, False), "iv": (3, False), "v": (4, False),
     "vii": (6, False), "bVI": (5, True), "bVII": (6, True),
+    "bIII": (2, True),
 }
 
 

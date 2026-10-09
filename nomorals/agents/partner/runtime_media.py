@@ -737,15 +737,30 @@ class RuntimeMediaMixin:
                         return _deliver(res, "🎛 reworked:")
 
             # ── link or description ──────────────────────────────────
-            res = producer.produce(tail)
+            # LLM-first: the model writes the song as a SongSpec, the
+            # producer renders it.  Spotify links contribute their musical
+            # DNA as style context; descriptions go straight to composition.
+            from ...media.composer_llm import compose_song_spec
+            if "open.spotify.com" in tail:
+                from ...media.producer import analyze_reference
+                ref_prof = analyze_reference(tail)
+                style_ctx = (
+                    f"{ref_prof.genre} at {ref_prof.bpm:g} BPM in "
+                    f"{ref_prof.key} {ref_prof.mode}, mood: {ref_prof.mood or ', '.join(ref_prof.energy_words[:2])}"
+                    if ref_prof.ok else "")
+                spec = compose_song_spec(
+                    self.context, tail, style_hint=style_ctx)
+                res = producer.produce_from_spec(spec)
+                if res.get("ok"):
+                    store.record_production(
+                        describe_to_profile(tail), source="link", ref=tail)
+                return _deliver(res, "🎛 produced:")
+            # pure description → LLM composes the song spec directly
+            spec = compose_song_spec(self.context, tail)
+            res = producer.produce_from_spec(spec)
             if res.get("ok"):
-                src = "link" if "open.spotify.com" in tail else "description"
-                ref_profile = res.get("profile")
-                if ref_profile is not None:
-                    store.record_production(ref_profile, source=src, ref=tail)
-                else:  # pragma: no cover - safety net
-                    store.record_production(describe_to_profile(tail),
-                                            source=src, ref=tail)
+                store.record_production(describe_to_profile(tail),
+                                        source="description", ref=tail)
             return _deliver(res, "🎛 produced:")
         except Exception as exc:  # noqa: BLE001
             return f"produce error: {exc}"
