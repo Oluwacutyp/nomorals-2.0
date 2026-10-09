@@ -159,6 +159,17 @@ class TestSystemTTS(unittest.TestCase):
         self.assertEqual(kind, "espeak")
         self.assertIn("espeak-ng", exe)
 
+    def test_detect_espeak_on_android(self):
+        # Termux Python 3.13+ reports sys.platform == "android" (PEP 738)
+        # while still being a Linux userland — espeak-ng must be found.
+        self._install("espeak-ng", FAKE_ESPEAK)
+        with mock.patch.object(sys, "platform", "android"):
+            kind, exe = SystemTTSBackend.detect()
+        self.assertEqual(kind, "espeak")
+        self.assertIn("espeak-ng", exe)
+        with mock.patch.object(sys, "platform", "android"):
+            self.assertTrue(SystemTTSBackend.available())
+
     def test_detect_prefers_espeak_ng_over_espeak(self):
         self._install("espeak", FAKE_ESPEAK)
         ng = self._install("espeak-ng", FAKE_ESPEAK)

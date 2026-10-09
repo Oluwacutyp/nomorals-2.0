@@ -1418,7 +1418,10 @@ class SystemTTSBackend:
         if plat == "darwin":
             exe = shutil.which("say")
             return ("say", exe) if exe else (None, None)
-        if plat.startswith("linux"):
+        # "android": Termux's Python 3.13+ implements PEP 738, so
+        # sys.platform reports "android" instead of "linux" — but it is
+        # still a Linux userland and espeak-ng works the same there.
+        if plat.startswith("linux") or plat == "android":
             for candidate in ("espeak-ng", "espeak"):
                 exe = shutil.which(candidate)
                 if exe:
