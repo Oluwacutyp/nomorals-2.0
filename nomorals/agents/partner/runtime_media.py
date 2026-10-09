@@ -38,6 +38,129 @@ class RuntimeMediaMixin:
 
     # ── wave 72 systems: media · execution · archives · builders ───────────
 
+    def _active_draft_path(self, chat_key: str) -> str | None:
+        drafts = getattr(self, "_active_drafts", None) or {}
+        return drafts.get(chat_key)
+
+    def _set_active_draft(self, chat_key: str, path: str) -> None:
+        drafts = getattr(self, "_active_drafts", None)
+        if drafts is None:
+            drafts = self._active_drafts = {}
+        drafts[chat_key] = path
+
+    def _control_music_draft(self, tail: str, chat_key: str = "") -> str:
+        """ /music draft <topic> [style] — the artist's notebook: a full
+        song draft (lyrics + cadence + melody contour + emotional arc +
+        artist notes). The draft is inspectable and revisable. """
+        from ...media.song_draft import draft_song, render_notebook, save_draft
+        from ...media.music import STYLES
+        words = (tail or "").strip().split()
+        if not words:
+            return ("usage: /music draft <topic> [style]\n"
+                    f"styles: {', '.join(STYLES)}")
+        style = "pop"
+        if words[-1].lower() in STYLES and len(words) > 1:
+            style = words[-1].lower()
+            words = words[:-1]
+        topic = " ".join(words)
+        try:
+            draft = draft_song(topic, style=style, context=self.context)
+        except Exception as exc:  # noqa: BLE001
+            return f"draft failed: {exc}"
+        try:
+            path = save_draft(draft)
+            self._set_active_draft(chat_key, path)
+        except Exception:  # noqa: BLE001
+            pass
+        nb = render_notebook(draft)
+        # chat gets the notebook; keep it readable, not the whole wall
+        lines = nb.splitlines()
+        preview = "\n".join(lines[:40])
+        if len(lines) > 40:
+            preview += f"\n… ({len(lines) - 40} more lines — /music perform to hear it)"
+        return (f"📝 draft: “{draft.title}”\n\n{preview}\n\n"
+                f"revise: /music revise <note>  |  perform: /music perform")
+
+    def _control_music_revise(self, tail: str, chat_key: str = "") -> str:
+        """ /music revise <note> — revise the active draft in plain words. """
+        from ...media.song_draft import revise_draft, render_notebook, save_draft, load_draft
+        note = (tail or "").strip()
+        if not note:
+            return "usage: /music revise <note> — e.g. /music revise make the chorus hit harder"
+        path = self._active_draft_path(chat_key)
+        if not path:
+            return "no active draft — start one with /music draft <topic>"
+        try:
+            draft = load_draft(path)
+            new = revise_draft(draft, note, context=self.context)
+            new_path = save_draft(new)
+            self._set_active_draft(chat_key, new_path)
+        except Exception as exc:  # noqa: BLE001
+            return f"revise failed: {exc}"
+        nb = render_notebook(new)
+        lines = nb.splitlines()
+        preview = "\n".join(lines[:30])
+        if len(lines) > 30:
+            preview += f"\n… ({len(lines) - 30} more lines)"
+        return f"📝 revised: “{new.title}”\n\n{preview}"
+
+    def _control_music_perform(self, chat_key: str = "") -> str:
+        """ /music perform — perform the active draft: beat + vocals shaped
+        together from the draft's own melody contours. """
+        from ...media.song_draft import load_draft
+        from ...media.draft_perform import perform_draft
+        path = self._active_draft_path(chat_key)
+        if not path:
+            return "no active draft — start one with /music draft <topic>"
+        try:
+            draft = load_draft(path)
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't load the draft: {exc}"
+        res = perform_draft(draft, context=self.context)
+        if not res.get("ok"):
+            return f"performance failed: {res.get('reason')}"
+        out_path = res.get("path", "")
+        if out_path:
+            try:
+                self.gateway.send_file(
+                    "telegram", chat_key, out_path,
+                    caption=f"🎵 {res.get('draft_title', '')} — performed from draft")
+            except Exception:  # noqa: BLE001
+                pass
+        return f"{res.get('note', '')}\n{out_path}"
+
+    def _control_music_freestyle(self, tail: str, chat_key: str = "") -> str:
+        """ /music freestyle [seed] [bars N] — live improvisation over a
+        beat. Genuinely generative, bar by bar. """
+        from ...media.freestyle import start_session
+        words = (tail or "").strip().split()
+        n_bars = 8
+        seed_words: list[str] = []
+        i = 0
+        while i < len(words):
+            if words[i].lower() == "bars" and i + 1 < len(words):
+                try:
+                    n_bars = max(1, min(32, int(words[i + 1])))
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                seed_words.append(words[i])
+                i += 1
+        seed = " ".join(seed_words)
+        try:
+            sess = start_session(seed=seed, bpm=92, energy=0.7,
+                                 feel="hungry, in the pocket")
+            bars = sess.spit(n_bars, context=self.context)
+        except Exception as exc:  # noqa: BLE001
+            return f"freestyle failed: {exc}"
+        out = [f"🎤 freestyle — {sess.bpm} BPM · {len(bars)} bars",
+               f"*seed: {seed or '(open)'}*", ""]
+        out.extend(f"{b}" for b in bars)
+        out.append(f"\n*say /music freestyle {seed} bars 8 for another round*"
+                   if seed else "\n*say /music freestyle <seed> bars 8 for another round*")
+        return "\n".join(out)
+
     def _control_music_bed(self, tail: str, chat_key: str = "") -> str:
         """ /music bed <topic> [style] — AI instrumental bed via ACE-Step 1.5.
 
@@ -154,7 +277,9 @@ class RuntimeMediaMixin:
         """ /music <topic> [style] — composes a real song and sends the
         audio + the score PDF (lead sheet) straight to this chat.
         /music styles | /music song [slug] | /music bed <topic> [style]
-        | /music full <topic> [style] [voice_id] | /music voices."""
+        | /music full <topic> [style] [voice_id] | /music voices
+        | /music draft <topic> [style] | /music revise <note>
+        | /music perform | /music freestyle [seed] [bars N]."""
         from ...media.music import STYLES, MusicCreator
 
         tail = (tail or "").strip()
@@ -172,9 +297,16 @@ class RuntimeMediaMixin:
             return self._control_music_full(" ".join(words[1:]), chat_key)
         if words[0].lower() == "voices":
             return self._control_music_voices(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "draft":
+            return self._control_music_draft(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "revise":
+            return self._control_music_revise(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "perform":
+            return self._control_music_perform(chat_key)
+        if words[0].lower() == "freestyle":
+            return self._control_music_freestyle(" ".join(words[1:]), chat_key)
         if words[0].lower() == "song":
             from ...media.music import _saved_songs
-
             lookup = " ".join(words[1:]).strip()
             out = _saved_songs(self.context, lookup)
             if lookup:
