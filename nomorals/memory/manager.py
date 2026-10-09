@@ -37,7 +37,6 @@ from .base import (
     MemoryRecord,
     infer_trust,
     normalize_scores,
-    score_memory,
 )
 from .embeddings import Embedder
 from .vector_backends import VectorBackend, select_vector_backend
@@ -54,6 +53,42 @@ def _is_private(record: MemoryRecord) -> bool:
 
 
 _log = get_logger(__name__)
+
+
+def _explain_score(
+    record: MemoryRecord,
+    *,
+    semantic: float = 0.0,
+    lexical: float = 0.0,
+    weights: dict[str, float] | None = None,
+    half_life_seconds: float = 259200.0,
+    now: float | None = None,
+) -> tuple[float, dict[str, float]]:
+    """``score_memory`` with its work shown.
+
+    Returns ``(score, contributions)`` where the contributions are the four
+    weighted signal terms — they sum to ``score`` (before recall-time
+    adjustments like the session boost). The scoring math is identical to
+    :func:`nomorals.memory.base.score_memory`; this exists so
+    ``recall(..., explain=True)`` can trace the path without duplicating
+    (and drifting from) the formula.
+    """
+    w = weights or DEFAULT_WEIGHTS
+    total = sum(w.values()) or 1.0
+    recency = record.recency(half_life_seconds, now)
+    importance = max(0.0, min(1.0, record.importance + record.reinforcement()))
+    semantic = max(0.0, min(1.0, max(-1.0, min(1.0, semantic))))
+    lexical = max(0.0, min(1.0, lexical))
+    contributions = {
+        "recency": w.get("recency", 0.0) * recency / total,
+        "importance": w.get("importance", 0.0) * importance / total,
+        "semantic": w.get("semantic", 0.0) * semantic / total,
+        "lexical": w.get("lexical", 0.0) * lexical / total,
+    }
+    score = max(0.0, min(1.0, sum(contributions.values())))
+    # Full precision: the contributions must sum to the score exactly, so
+    # rounding happens at display time, not here.
+    return score, contributions
 
 
 @dataclass
@@ -142,9 +177,25 @@ class MemoryManager:
         )
         self.stats = {"remembered": 0, "recalls": 0, "consolidations": 0, "forgotten": 0}
         self._last_consolidation = 0.0
+        #: Last consolidation report (from consolidate() or
+        #: consolidate_additive()); surfaced by health().
+        self._last_consolidation_report: dict[str, Any] = {}
+        #: Degraded-recall events: (timestamp, lane, reason). Bounded so a
+        #: long-running process can't grow it without limit.
+        self._health_events: list[dict[str, Any]] = []
         # Trust provenance columns (migration 82) — belt and braces for DBs
         # that were created without running migrations. Never raises.
         self._ensure_trust_columns()
+
+    def _note_health_event(self, lane: str, reason: str) -> None:
+        """Record a degraded-path event for health(). Never raises."""
+        try:
+            self._health_events.append(
+                {"at": time.time(), "lane": lane, "reason": str(reason)[:300]}
+            )
+            del self._health_events[:-50]
+        except Exception:  # noqa: BLE001
+            pass
 
     def _ensure_trust_columns(self) -> None:
         """Make sure ``memories`` has the trust/session_id columns.
@@ -261,6 +312,13 @@ class MemoryManager:
             self.semantic.put_many(
                 [(vectors[i], ids[i]) for i in range(len(ids))]
             )
+            # NB: embedding_id is intentionally not written back here. The
+            # VectorBackend.put_many contract returns one id per input but
+            # does NOT guarantee input order (usearch groups by dimension),
+            # so positional mapping would corrupt the pointer on some
+            # backends. The column is informational only — nothing reads it
+            # functionally — and repair_embeddings() sets it correctly via
+            # the single-put path, which is per-owner by contract.
             self.fts.put_many(
                 (self._rowid(ids[i]), [materialized[i][0]]) for i in range(len(ids))
             )
@@ -294,6 +352,7 @@ class MemoryManager:
         origin: str = "",
         include_superseded: bool = False,
         trust_filter: str = "",
+        explain: bool = False,
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
@@ -317,6 +376,16 @@ class MemoryManager:
         unless ``include_superseded`` is set — recall surfaces the
         current fact; the audit trail stays reachable via ``get()`` and
         ``supersession_chain()``.
+
+        ``explain=True`` attaches a per-record ``explanation`` dict tracing
+        the recall path: each signal's weighted contribution, which lane(s)
+        surfaced the record and at what rank, and every adjustment applied
+        (session boost, trust downrank). The ranking itself is unchanged.
+
+        The semantic lane degrades, never dies: if the vector index fails
+        (e.g. embedding dimension drift after a provider switch), recall
+        continues on the lexical lane and the incident is recorded for
+        ``health()``. Recall never raises.
         """
         wanted_tags = {t.strip() for t in (tags or "").split(",") if t.strip()}
         trust_wanted = (trust_filter or "").strip().lower()
@@ -331,18 +400,42 @@ class MemoryManager:
             if not include_superseded:
                 recents = [r for r in recents
                            if not (r.metadata or {}).get("superseded_by")]
-            return RecallResult(records=recents, query=query)
+            if explain:
+                for record in recents:
+                    record.explanation = {
+                        "lane": "recent-fallback",
+                        "signals": {},
+                        "weights": dict(self.weights),
+                        "score_before_adjustments": 0.0,
+                        "adjustments": [],
+                        "trust": record.trust,
+                        "note": "empty query: recency order, no scoring",
+                    }
+            return RecallResult(records=recents, query=query,
+                                elapsed_ms=(time.perf_counter() - started) * 1000)
         self.stats["recalls"] += 1
 
         candidates: dict[str, MemoryRecord] = {}
         semantic_scores: dict[str, float] = {}
         lexical_scores: dict[str, float] = {}
+        semantic_ranks: dict[str, int] = {}
+        lexical_ranks: dict[str, int] = {}
 
         # Semantic pass: over-fetch, because the merge re-ranks.
+        # Degraded, never dead: a broken vector index (dimension drift,
+        # corrupt store) falls back to lexical-only recall and is logged
+        # for health(). A recall that raises is a recall that loses the
+        # user's memories.
         vector = self.embedder.embed(query)
-        for hit in self.semantic.search(vector, limit=limit * 6):
-            semantic_scores[hit.owner_id] = hit.score
-            candidates[hit.owner_id] = hit.owner_id  # placeholder, resolved below
+        try:
+            for rank, hit in enumerate(self.semantic.search(vector, limit=limit * 6)):
+                semantic_scores[hit.owner_id] = hit.score
+                semantic_ranks.setdefault(hit.owner_id, rank)
+                candidates[hit.owner_id] = hit.owner_id  # placeholder, resolved below
+        except Exception as exc:  # noqa: BLE001 — degrade, don't die
+            _log.warning("memory recall: semantic lane failed (%s); lexical-only",
+                         classify(exc).message)
+            self._note_health_event("semantic", classify(exc).message)
 
         # Lexical pass: catches identifiers and rare terms vectors blur.
         # rowid→id is resolved in ONE query, not one per hit (N+1): with a
@@ -355,10 +448,11 @@ class MemoryManager:
                 [hit.rowid for hit in fts_hits],
             )
             rowid_to_id = {row["rowid"]: row["id"] for row in id_rows}
-            for hit in fts_hits:
+            for rank, hit in enumerate(fts_hits):
                 record_id = rowid_to_id.get(hit.rowid)
                 if record_id:
                     lexical_scores[record_id] = max(0.0, min(1.0, (hit.score + 20.0) / 25.0))
+                    lexical_ranks.setdefault(record_id, rank)
                     candidates.setdefault(record_id, record_id)
 
         ids = list(candidates)
@@ -394,7 +488,7 @@ class MemoryManager:
                     continue
             record.semantic = semantic_scores.get(record.id, 0.0)
             record.lexical = lexical_scores.get(record.id, 0.0)
-            record.score = score_memory(
+            base_score, contributions = _explain_score(
                 record,
                 semantic=record.semantic,
                 lexical=record.lexical,
@@ -402,10 +496,13 @@ class MemoryManager:
                 half_life_seconds=self.half_life,
                 now=now,
             )
+            record.score = base_score
+            adjustments: list[str] = []
             # Session boost: memories from the same origin (chat) rank higher.
             # This is a boost, not a filter — global knowledge stays accessible.
             if origin and record.origin == origin:
                 record.score = min(1.0, record.score + 0.15)
+                adjustments.append("session_boost:+0.15")
             # Trust downrank (mem-false-fact): tool output / external content
             # never outranks the owner's own memories, no matter how well it
             # matches. Cross-session untrusted content is downranked further
@@ -415,16 +512,44 @@ class MemoryManager:
             if record.is_untrusted:
                 try:
                     record.score *= 0.5
+                    adjustments.append("untrusted_downrank:x0.5")
                     rec_session = (record.session_id or record.origin or "").strip()
                     if origin and rec_session and rec_session != origin.strip():
                         record.score *= 0.5
+                        adjustments.append("cross_session_downrank:x0.5")
                 except Exception:  # noqa: BLE001
                     pass
+            if explain:
+                lanes = []
+                if record.id in semantic_ranks:
+                    lanes.append("semantic")
+                if record.id in lexical_ranks:
+                    lanes.append("lexical")
+                record.explanation = {
+                    "lane": "+".join(lanes) if lanes else "unscored",
+                    "signals": contributions,
+                    "weights": dict(self.weights),
+                    "score_before_adjustments": round(base_score, 5),
+                    "adjustments": adjustments,
+                    "semantic_rank": semantic_ranks.get(record.id),
+                    "lexical_rank": lexical_ranks.get(record.id),
+                    "trust": record.trust,
+                    "note": "contributions sum to score_before_adjustments",
+                }
             if record.score >= min_score:
                 scored.append(record)
 
         scored.sort(key=lambda r: -r.score)
         top = scored[:limit]
+        if explain and top:
+            # normalize_scores rescales so the top hit is 1.0 — record the
+            # factor so the explanation traces the final score exactly.
+            peak = max(r.score for r in top)
+            factor = (1.0 / peak) if peak > 0 else 1.0
+            for record in top:
+                if record.explanation:
+                    record.explanation["adjustments"].append(
+                        f"normalize:x{round(factor, 4)}")
         normalize_scores(top)
         if top:
             self._touch([r.id for r in top])
@@ -713,7 +838,266 @@ class MemoryManager:
             report["forgotten"] += self.forget_below(self.forget_threshold)
         report["seconds"] = round(time.perf_counter() - started, 3)
         report["remaining"] = self.repo.count()
+        self._last_consolidation_report = dict(report)
         _log.debug("consolidation: %s", report)
+        return report
+
+    @staticmethod
+    def _metadata_dict(row: dict[str, Any]) -> dict[str, Any]:
+        """Parse a row's metadata into a dict. Never raises.
+
+        Raw ``db.query`` rows carry metadata as a JSON string (only the
+        Repository encodes/decodes it), so consolidation and health checks
+        that read rows directly need this normalization.
+        """
+        try:
+            md = row.get("metadata")
+            if isinstance(md, str):
+                md = json.loads(md or "{}")
+            return dict(md or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def consolidate_additive(
+        self, *, min_episodes: int = 5, batch: int = 50
+    ) -> dict[str, Any]:
+        """Distil episodes into durable facts WITHOUT deleting anything.
+
+        The additive sibling of :meth:`consolidate`: raw episodes stay fully
+        recallable (the owner's "forget only on explicit command" rule), and
+        each distilled episode is marked ``metadata.distilled_into`` so a
+        re-run never distils the same episode twice. The distilled fact links
+        back via ``metadata.distilled_ids``. Never raises.
+        """
+        started = time.perf_counter()
+        report: dict[str, Any] = {
+            "mode": "additive", "episodes": 0, "batches": 0,
+            "summaries": 0, "forgotten": 0, "skipped_distilled": 0,
+        }
+        try:
+            rows = self.db.query(
+                "SELECT id, content, metadata, created_at FROM memories "
+                "WHERE kind = ? ORDER BY created_at",
+                (MemoryKind.EPISODE,),
+            )
+            pending: list[dict[str, Any]] = []
+            for row in rows:
+                if self._metadata_dict(row).get("distilled_into"):
+                    report["skipped_distilled"] += 1
+                    continue
+                pending.append(row)
+            report["episodes"] = len(pending)
+            if len(pending) < min_episodes:
+                # Not enough undistilled episodes to be worth a summary run.
+                report["seconds"] = round(time.perf_counter() - started, 3)
+                report["remaining"] = self.repo.count()
+                self._last_consolidation_report = dict(report)
+                return report
+            for start in range(0, len(pending), batch):
+                chunk = pending[start:start + batch]
+                if len(chunk) < min_episodes:
+                    # Small tail chunk: leave it to accumulate for the next
+                    # run rather than forcing a thin summary.
+                    report["deferred"] = report.get("deferred", 0) + len(chunk)
+                    continue
+                summary = self._summarize_episodes([r["content"] for r in chunk])
+                if not summary:
+                    continue
+                fact_id = self.remember(
+                    summary,
+                    kind=MemoryKind.FACT,
+                    importance=0.7,
+                    source="consolidation",
+                    metadata={
+                        "distilled_from": len(chunk),
+                        "distilled_ids": [r["id"] for r in chunk],
+                        "additive": True,
+                    },
+                )
+                if not fact_id:
+                    continue
+                report["batches"] += 1
+                report["summaries"] += 1
+                for row in chunk:
+                    md = self._metadata_dict(row)
+                    md["distilled_into"] = fact_id
+                    self.update(row["id"], metadata=md)
+        except Exception as exc:  # noqa: BLE001 — consolidation never breaks chat
+            _log.warning("additive consolidation failed: %s", classify(exc).message)
+            report["error"] = classify(exc).message
+        report["seconds"] = round(time.perf_counter() - started, 3)
+        report["remaining"] = self.repo.count()
+        self._last_consolidation = time.time()
+        self._last_consolidation_report = dict(report)
+        self.stats["consolidations"] += 1
+        return report
+
+    # ── health & repair ──────────────────────────────────────────────────
+    def health(self) -> dict[str, Any]:
+        """Memory-system diagnostics. Never raises.
+
+        Reports record counts, index parity (records ↔ vectors ↔ FTS),
+        embedding dimension drift, the embedder's state, the last
+        consolidation, and any degraded-recall incidents. The parity
+        checks are what catch silent index corruption before it eats
+        recall quality.
+        """
+        report: dict[str, Any] = {"ok": True, "problems": []}
+        try:
+            report["records"] = self.repo.count()
+        except Exception:  # noqa: BLE001
+            report["records"] = -1
+            report["problems"].append("record count unreadable")
+        try:
+            report["by_kind"] = self.counts_by_kind()
+        except Exception:  # noqa: BLE001
+            report["by_kind"] = {}
+        try:
+            report["vectors"] = self.semantic.count()
+            report["vector_backend"] = self.semantic.name
+        except Exception as exc:  # noqa: BLE001
+            report["vectors"] = -1
+            report["problems"].append(f"vector backend unreadable: {exc}")
+        try:
+            report["fts_documents"] = self.fts.count()
+        except Exception:  # noqa: BLE001
+            report["fts_documents"] = -1
+        try:
+            report["embedder"] = self.embedder.stats_snapshot()
+            report["embedder_dims"] = int(self.embedder.dimensions)
+        except Exception:  # noqa: BLE001
+            report["embedder"] = {}
+            report["embedder_dims"] = -1
+
+        # Index parity: every record should have exactly one vector and one
+        # FTS document; every vector/FTS doc should point at a live record.
+        emb_table = VectorStore.TABLE
+        try:
+            missing_vectors = self.db.query(
+                f"SELECT m.id FROM memories m LEFT JOIN \"{emb_table}\" e "
+                "ON e.owner_id = m.id AND e.owner_type = 'memory' "
+                "WHERE e.id IS NULL LIMIT 20"
+            )
+            orphan_vectors = self.db.query(
+                f"SELECT e.owner_id FROM \"{emb_table}\" e LEFT JOIN memories m "
+                "ON m.id = e.owner_id WHERE e.owner_type = 'memory' "
+                "AND m.id IS NULL LIMIT 20"
+            )
+            fts_orphans = self.db.scalar(
+                "SELECT COUNT(*) FROM memories_fts WHERE rowid NOT IN "
+                "(SELECT rowid FROM memories)",
+                default=0,
+            )
+            records_missing_fts = self.db.query(
+                "SELECT m.id FROM memories m LEFT JOIN memories_fts f "
+                "ON f.rowid = m.rowid WHERE f.rowid IS NULL LIMIT 20"
+            )
+            report["parity"] = {
+                "records_missing_vectors": [r["id"] for r in missing_vectors],
+                "orphan_vectors": [r["owner_id"] for r in orphan_vectors],
+                "orphan_fts_documents": int(fts_orphans or 0),
+                "records_missing_fts": [r["id"] for r in records_missing_fts],
+            }
+            for key, bad in (
+                ("records_missing_vectors", report["parity"]["records_missing_vectors"]),
+                ("orphan_vectors", report["parity"]["orphan_vectors"]),
+                ("records_missing_fts", report["parity"]["records_missing_fts"]),
+            ):
+                if bad:
+                    report["problems"].append(f"{key}: {len(bad)}+ (showing first 20)")
+            if report["parity"]["orphan_fts_documents"]:
+                report["problems"].append(
+                    f"orphan_fts_documents: {report['parity']['orphan_fts_documents']}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            report["parity"] = {"error": str(exc)[:200]}
+
+        # Dimension drift: vectors stored under a different embedding
+        # dimension than the current embedder produces. The semantic lane
+        # degrades to lexical-only until repair_embeddings() runs.
+        try:
+            dim_rows = self.db.query(
+                f"SELECT DISTINCT dim FROM \"{emb_table}\" WHERE owner_type = 'memory'"
+            )
+            dims = sorted(int(r["dim"]) for r in dim_rows)
+            report["stored_dims"] = dims
+            report["dimension_drift"] = len(dims) > 1 or (
+                len(dims) == 1 and dims[0] != report.get("embedder_dims", dims[0])
+            )
+            if report["dimension_drift"]:
+                report["problems"].append(
+                    f"dimension drift: stored dims {dims} vs embedder "
+                    f"{report.get('embedder_dims')} — run repair_embeddings()"
+                )
+        except Exception as exc:  # noqa: BLE001
+            report["stored_dims"] = []
+            report["dimension_drift"] = False
+            report["problems"].append(f"drift check failed: {exc}")
+
+        report["last_consolidation"] = self._last_consolidation
+        report["last_consolidation_report"] = dict(self._last_consolidation_report)
+        report["degraded_recalls"] = len(self._health_events)
+        report["recent_events"] = list(self._health_events[-10:])
+        report["stats"] = dict(self.stats)
+        report["weights"] = dict(self.weights)
+        if report["problems"]:
+            report["ok"] = False
+        return report
+
+    def repair_embeddings(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """Re-embed records whose vectors are missing or dimension-drifted.
+
+        Additive repair: records are never touched, only their vectors are
+        rebuilt with the current embedder. Fixes the state ``health()``
+        reports as ``dimension_drift`` or ``records_missing_vectors`` —
+        e.g. after switching the embedding provider. Never raises.
+        """
+        report: dict[str, Any] = {
+            "dry_run": dry_run, "repaired": 0, "missing": 0,
+            "drifted": 0, "failed": 0,
+        }
+        try:
+            try:
+                current_dims = int(self.embedder.dimensions)
+            except Exception:  # noqa: BLE001
+                current_dims = 0
+            emb_table = VectorStore.TABLE
+            rows = self.db.query(
+                f"SELECT m.id, m.content, e.dim AS dim FROM memories m "
+                f"LEFT JOIN \"{emb_table}\" e ON e.owner_id = m.id "
+                "AND e.owner_type = 'memory'"
+            )
+            targets: list[tuple[str, str, str]] = []
+            for row in rows:
+                if not (row.get("content") or "").strip():
+                    continue
+                dim = row.get("dim")
+                if dim is None:
+                    report["missing"] += 1
+                    targets.append((row["id"], row["content"], "missing"))
+                elif current_dims and int(dim) != current_dims:
+                    report["drifted"] += 1
+                    targets.append((row["id"], row["content"], "drifted"))
+            report["targets"] = len(targets)
+            if dry_run:
+                report["target_ids"] = [t[0] for t in targets[:20]]
+                return report
+            for record_id, content, _reason in targets:
+                try:
+                    vector = self.embedder.embed(content)
+                    self.semantic.delete_owner(record_id)
+                    embedding_id = self.semantic.put(vector, record_id)
+                    self.db.execute(
+                        "UPDATE memories SET embedding_id = ? WHERE id = ?",
+                        (embedding_id, record_id),
+                    )
+                    report["repaired"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    report["failed"] += 1
+                    _log.warning("repair_embeddings: %s failed: %s",
+                                 record_id, classify(exc).message)
+        except Exception as exc:  # noqa: BLE001
+            report["error"] = classify(exc).message
         return report
 
     def _summarize_episodes(self, contents: Sequence[str]) -> str:

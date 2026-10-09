@@ -159,6 +159,10 @@ class MemoryRecord:
     semantic: float = 0.0
     lexical: float = 0.0
     embedding_id: str = ""
+    #: Populated by ``MemoryManager.recall(..., explain=True)``: the full
+    #: trace of why this record ranked where it did — per-signal weighted
+    #: contributions, surfacing lane(s) and ranks, adjustments applied.
+    explanation: dict[str, Any] = field(default_factory=dict)
 
     def age(self, now: float | None = None) -> float:
         return max(0.0, (now or time.time()) - self.created_at)
@@ -198,7 +202,7 @@ class MemoryRecord:
         return min(0.2, 0.05 * math.log1p(self.access_count))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "kind": self.kind,
             "content": self.content,
@@ -218,6 +222,9 @@ class MemoryRecord:
             "semantic": round(self.semantic, 5),
             "lexical": round(self.lexical, 5),
         }
+        if self.explanation:
+            payload["explanation"] = self.explanation
+        return payload
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "MemoryRecord":

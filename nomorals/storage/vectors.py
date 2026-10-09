@@ -137,6 +137,7 @@ class VectorStore:
             except Exception:  # noqa: BLE001 — no extension is not an error
                 self._native = False
         self._matrix: Any = None
+        self._dim_set: frozenset[int] = frozenset()
         self._meta: list[dict[str, Any]] = []
         self._centroids: list[_Centroid] = []
         self._index_dirty = True
@@ -255,6 +256,15 @@ class VectorStore:
             for r in rows
         ]
         vectors = [_unpack(r["vector"], r["dim"]) for r in rows]
+        # Fail fast on dimension drift HERE, before numpy sees the rows:
+        # ``asarray`` on ragged vectors raises a raw ValueError whose message
+        # says nothing about dimensions, while the documented contract is the
+        # catchable StorageError below. One rule for all backends.
+        self._dim_set = frozenset(r["dim"] for r in rows)
+        if len(self._dim_set) > 1:
+            raise StorageError(
+                f"index mixes vector dimensions {sorted(self._dim_set)}; rebuild required"
+            )
         if self._numpy is not None and vectors:
             self._matrix = self._numpy.asarray(vectors, dtype="float32")
         else:
@@ -319,12 +329,9 @@ class VectorStore:
             return []
 
         query = normalize(vector)
-        # Fail fast on dimension drift: zip-based scoring would silently
-        # truncate a mismatched query and return garbage scores, while the
-        # numpy path would raise a broadcast error. One rule for all backends.
-        dims = {meta["dim"] for meta in self._meta}
-        if len(dims) > 1:
-            raise StorageError(f"index mixes vector dimensions {sorted(dims)}; rebuild required")
+        # Dimension checks run against the cached dim set from _load() — no
+        # O(n) set rebuild per search. Mixed dims already raised in _load().
+        dims = self._dim_set
         if dims and len(query) != next(iter(dims)):
             raise ValidationError(
                 f"query dimension {len(query)} does not match stored dimension {next(iter(dims))}"
@@ -365,10 +372,19 @@ class VectorStore:
             idx = list(candidates)
             if not idx:
                 return []
-            sub = self._matrix[idx]
-            sims = sub @ self._numpy.asarray(query, dtype="float32")
-            for position, score in enumerate(sims.tolist()):
-                scored.append((float(score), idx[position]))
+            # The common case scans the whole index: fancy-indexing
+            # ``self._matrix[idx]`` copies the entire matrix (~14MB per query
+            # at 7k×512) for zero benefit. Score against it in place instead —
+            # identical scores, no copy.
+            if len(idx) == total and idx[0] == 0 and idx[-1] == total - 1:
+                sims = self._matrix @ self._numpy.asarray(query, dtype="float32")
+                for position, score in enumerate(sims.tolist()):
+                    scored.append((float(score), position))
+            else:
+                sub = self._matrix[idx]
+                sims = sub @ self._numpy.asarray(query, dtype="float32")
+                for position, score in enumerate(sims.tolist()):
+                    scored.append((float(score), idx[position]))
         else:
             lists = self._as_lists()
             for i in candidates:
