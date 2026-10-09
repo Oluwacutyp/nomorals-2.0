@@ -1705,27 +1705,26 @@ class PartnerRuntime(
         _log.info("music-full intent: %s [%s]", req["topic"], req["style"])
         registry = RVCVoiceRegistry()
         default = registry.default()
-        if default is None:
-            known = ", ".join(sorted(registry.all())) or "(none)"
-            return ("I can make the song, but no voice is registered yet — "
-                    "register one first:\n"
-                    "/music voices add <id> <model.pth> <source>\n"
-                    f"known voices: {known}")
+        # No RVC voice? No problem — make_full_song falls back to TTS
+        # vocals automatically (the phone path). Never dead-end.
+        voice_id = default.voice_id if default is not None else ""
         try:
             res = make_full_song(req["topic"], style=req["style"],
-                                 voice_id=default.voice_id,
+                                 voice_id=voice_id,
                                  audience="private", context=self.context)
         except Exception as exc:  # noqa: BLE001 - both model errors
             return f"🎵 couldn't make the full song:\n{exc}"
-        text = (f"🎵 “{res.title}” — full song [{default.voice_id}]\n"
+        vlabel = voice_id or "tts vocals"
+        text = (f"🎵 “{res.title}” — full song [{vlabel}]\n"
                 f"{res.note}")
         if res.master_path:
+            vocal_txt = "AI vocals" if res.vocal_path else "instrumental"
             try:
                 self.gateway.send_file(
                     message.chat.platform,
                     f"{message.chat.platform}:{message.chat.chat_id}",
                     res.master_path,
-                    caption=f"🎵 {res.title} — AI instrumental + AI vocals")
+                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
                 text += "\nsent the master to this chat."
             except Exception:  # noqa: BLE001
                 text += f"\nmaster: {res.master_path}"

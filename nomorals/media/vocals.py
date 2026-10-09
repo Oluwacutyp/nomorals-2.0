@@ -596,16 +596,22 @@ def make_full_song(topic: str, *, style: str = "pop", voice_id: str = "",
                    seed: int = 0, context: Any = None, profile: str = "",
                    workdir: str = "songs",
                    chain: "VocalChain | None" = None) -> FullSongResult:
-    """Topic → #57 bed → DiffSinger vocal → RVC voice → master.
+    """Topic → bed → vocals → master.
 
-    Raises VocalModelUnavailable / ACEModelUnavailable when a stage
-    can't run — never fake audio.
+    Vocal strategy, in order:
+    1. DiffSinger + RVC (full singing synthesis) when both are available
+       and a voice_id is given/registered.
+    2. TTS vocal track (sung/hook/hum via vocal_lite) when the heavy
+       models aren't available — e.g. on the phone. Real vocals, real
+       mix, honest note about the backend.
+    3. Honest instrumental when no TTS backend exists either.
+
+    Never fails closed with "no voice registered" — always produces a
+    song. Raises VocalModelUnavailable only when nothing at all can run.
     """
     from .ace_step import make_bed, ACEModelUnavailable
     if not (topic or "").strip():
         raise VocalModelUnavailable("topic is required")
-    if not (voice_id or "").strip():
-        raise VocalModelUnavailable("voice_id is required — pick a voice")
     bed = make_bed(topic, style=style, duration_s=duration_s, seed=seed,
                    context=context, profile=profile,
                    workdir=str(Path(workdir) / "bed"))
@@ -615,17 +621,42 @@ def make_full_song(topic: str, *, style: str = "pop", voice_id: str = "",
                                          with_midi=False, with_audio=False,
                                          with_score=False)
     melody = list(song.melody_notes or [])
-    if not melody:
-        raise VocalModelUnavailable(
-            "the composer produced no melody notes for this song")
-    vc = chain or VocalChain(profile=profile,
-                             voices=RVCVoiceRegistry().all())
-    # make sure the requested voice exists before the expensive bed work
-    # is wasted — select_voice raises on unknown / public-XTTS.
-    select_voice(voice_id, audience, vc._voices)
-    return vc.full_song(bed.audio_path, bed.lyrics, melody, voice_id,
-                        audience=audience, title=bed.title or topic,
-                        workdir=workdir)
+    title = bed.title or topic
+
+    # Strategy 1: full DiffSinger + RVC when everything's available.
+    ds = probe_diffsinger(profile)
+    rv = probe_rvc(profile)
+    if ds.available and rv.available and (voice_id or "").strip():
+        if not melody:
+            raise VocalModelUnavailable(
+                "the composer produced no melody notes for this song")
+        vc = chain or VocalChain(profile=profile,
+                                 voices=RVCVoiceRegistry().all())
+        select_voice(voice_id, audience, vc._voices)
+        return vc.full_song(bed.audio_path, bed.lyrics, melody, voice_id,
+                            audience=audience, title=title,
+                            workdir=workdir)
+
+    # Strategy 2: TTS vocal track — the phone path. Real lyrics sung/
+    # spoken over the bed via the voice catalogue TTS.
+    from .vocal_lite import add_vocal_track
+    vr = add_vocal_track(song, bed.audio_path, str(Path(workdir) / "tts"),
+                         vocal_mode="auto",
+                         melody_events=melody or None)
+    if vr.get("ok"):
+        return FullSongResult(
+            ok=True, master_path=str(vr["path"]), bed_path=bed.audio_path,
+            vocal_path=str(vr.get("path", "")), title=title,
+            voice_id="tts:" + str(vr.get("backend", "auto")),
+            audience=audience,
+            note=(str(vr.get("note", "")) +
+                  " (TTS vocals — DiffSinger/RVC not available here)"))
+
+    # Strategy 3: honest instrumental.
+    return FullSongResult(
+        ok=True, master_path=bed.audio_path, bed_path=bed.audio_path,
+        vocal_path="", title=title, voice_id="", audience=audience,
+        note="instrumental — " + str(vr.get("reason", "no vocal backend")))
 
 
 def register(registry: Any) -> None:

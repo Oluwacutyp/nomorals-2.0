@@ -102,26 +102,23 @@ class RuntimeMediaMixin:
             req["topic"] = " ".join(words[:-1]).strip() or "untitled"
         if not voice_id:
             default = registry.default()
-            if default is None:
-                known = ", ".join(sorted(registry.all())) or "(none)"
-                return ("no voice registered yet — register one first:\n"
-                        "/music voices add <id> <model.pth> <source>\n"
-                        f"known voices: {known}")
-            voice_id = default.voice_id
+            voice_id = default.voice_id if default is not None else ""
         try:
             res = make_full_song(req["topic"], style=req["style"],
                                  voice_id=voice_id, audience="private",
                                  context=self.context)
         except Exception as exc:  # noqa: BLE001 - both model errors
             return f"🎵 couldn't make the full song:\n{exc}"
-        text = (f"🎵 “{res.title}” — full song [{voice_id}]\n{res.note}")
+        vlabel = voice_id or "tts vocals"
+        text = (f"🎵 “{res.title}” — full song [{vlabel}]\n{res.note}")
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None and res.master_path:
+            vocal_txt = "AI vocals" if res.vocal_path else "instrumental"
             try:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     res.master_path,
-                    caption=f"🎵 {res.title} — AI instrumental + AI vocals")
+                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
                 text += "\nsent the master to this chat."
             except Exception:  # noqa: BLE001
                 text += f"\nmaster: {res.master_path}"
