@@ -57,6 +57,9 @@ _MAX_STORED_CONTENT = 100_000
 _MAX_FETCH_BYTES = 1_000_000
 #: consecutive errors before a "watch is down" alert (and until recovery)
 _ERROR_ALERT_STREAK = 3
+#: consecutive errors before a permanently-broken watch auto-disables.
+#: A file that never existed (or a dead URL) should not burn ticks forever.
+_ERROR_DISABLE_STREAK = 10
 
 
 def _hmac_hex(secret: str, body: bytes) -> str:
@@ -203,6 +206,20 @@ class MonitorAgent:
         if kind == "page" and not target.lower().startswith(
                 ("http://", "https://")):
             raise ValueError("a page watch needs an http(s) URL")
+        if kind == "file":
+            # Fail fast: a file watch on a nonexistent/unreachable path
+            # would fail every tick forever. Validate now so the owner
+            # gets a clear error instead of a "watch down" alert after
+            # 3 silent failures.
+            from ..tools.filesystem import safe_path
+            from ..core.errors import NotFound, ValidationError
+            try:
+                safe_path(self.context, target, must_exist=True)
+            except (NotFound, ValidationError):
+                raise ValueError(
+                    f"file watch target is not a readable workspace file: "
+                    f"{target!r} — use a workspace path or an http(s) URL"
+                )
         watch = watch if watch in ("content", "size") else "content"
         interval = max(30.0, float(interval or 300.0))
         webhook = (webhook or "").strip()
@@ -561,6 +578,24 @@ class MonitorAgent:
         self.db.execute(
             "UPDATE monitors SET error_streak=?, last_ok=0 WHERE id=?",
             (streak, row["id"]))
+        if streak >= _ERROR_DISABLE_STREAK:
+            # Permanently broken (bad file path, dead URL that never
+            # recovers): stop burning ticks. The owner can re-enable
+            # manually if the target comes back.
+            self.db.execute(
+                "UPDATE monitors SET enabled=0 WHERE id=?", (row["id"],))
+            if self.notifier is not None:
+                try:
+                    self.notifier.publish(
+                        kind="monitor",
+                        title=f"watch auto-disabled: {row['target']}",
+                        body=f"{streak} consecutive failures, latest: "
+                             f"{error[:200]}. Re-enable manually if the "
+                             f"target is fixed.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if streak == _ERROR_ALERT_STREAK:
             now = now if now is not None else time.time()
             throttled = self._throttled(row, now)
