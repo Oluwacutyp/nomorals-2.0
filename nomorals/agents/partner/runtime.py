@@ -2686,7 +2686,7 @@ class PartnerRuntime(
         if kind == "deliver":
             return self._control_deliver(command.tail or arg, chat_key)
         if kind == "data":
-            return self._control_data(command.tail or arg)
+            return self._control_data(command.tail or arg, chat_key=chat_key)
         if kind == "evolve":
             return self._control_evolve(command.tail or arg, chat_key=chat_key)
         if kind == "upgrade":
