@@ -452,6 +452,21 @@ class PartnerRuntime(
 
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
+        # Autonomy: every inbound message resets the idle clock and feeds
+        # the pattern/interest models. Cheap, never blocks.
+        try:
+            from ...autonomy.idle import note_activity
+            from ...autonomy.patterns import record_activity, record_interests
+            from ...storage.db import Database
+            ws_dir = getattr(self.context.settings, "workspace_dir", ".")
+            _adb = Database(ws_dir)
+            note_activity(_adb)
+            if message.incoming:
+                record_activity(_adb)
+                if message.text:
+                    record_interests(_adb, message.text)
+        except Exception:  # noqa: BLE001 - autonomy hooks never break chat
+            pass
         # Pending voice-clone naming: /voice clone with no name holds the
         # audio and asks; the next short text message in that chat is the
         # name. Checked before anything else so it can't be misread as chat.
@@ -1437,6 +1452,31 @@ class PartnerRuntime(
                         )
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # Autonomous nervous system (nomorals/autonomy): the organs
+                # work without commands. Idle monitor watches for quiet
+                # periods; presence heartbeat notices/prepares every 30m.
+                # Idempotent; safe to call on every boot.
+                try:
+                    from ...autonomy.idle import IdleMonitor, note_activity
+                    from ...autonomy.presence import ensure_heartbeat_job
+                    from ...autonomy.coordinator import IdleCoordinator
+                    ws_dir = getattr(self.context.settings,
+                                     "workspace_dir", ".")
+                    self._idle_monitor = IdleMonitor(ws_dir)
+                    self._idle_monitor.start()
+                    self._idle_coordinator = IdleCoordinator(ws_dir)
+                    self._idle_coordinator.subscribe()
+                    ensure_heartbeat_job(self._scheduler)
+                    # Seed the activity clock so we don't start "idle".
+                    try:
+                        from ...storage.db import Database
+                        _adb = Database(ws_dir)
+                        note_activity(_adb)
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("autonomy nervous system not started: %s",
+                                 exc)
                 # Trigger engine (nomorals/triggers): the automation layer
                 # that lets systems wake each other.  Message-source
                 # triggers evaluate inbound chat via message_hook (wired

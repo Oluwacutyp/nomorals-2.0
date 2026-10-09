@@ -195,6 +195,7 @@ class ToolRegistry:
             "trading",
             "characters",
             "games",
+            "autonomy",
             # the agent bridge registers last: agent modules own the real
             # implementations, and thin tools/ wrappers of the same name
             # must never shadow them (last registration wins).

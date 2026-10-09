@@ -282,9 +282,11 @@ class ToolCallingLoop:
         try:
             outcome = fut.result(timeout=self.tool_timeout_s)
         except FuturesTimeout:
+            self._note_tool_weakness(call.name, "timeout")
             return (f"[tool error] '{call.name}' timed out after "
                     f"{self.tool_timeout_s:.0f}s.")
         except Exception as exc:  # noqa: BLE001 — execution must not kill the loop
+            self._note_tool_weakness(call.name, f"crashed: {exc}")
             return f"[tool error] '{call.name}' crashed: {exc}"
 
         # Outcome is Ok/Err — unwrap honestly.
@@ -297,10 +299,32 @@ class ToolCallingLoop:
             msg = getattr(err, "message", str(err)) if err is not None else "unknown error"
             denied = "denied" in str(msg).lower() or "capability" in str(msg).lower()
             tag = "denied" if denied else "failed"
+            if not denied:
+                self._note_tool_weakness(call.name, msg)
             return (f"[tool {tag}] '{call.name}': {msg} — "
                     f"{'you lack permission for this tool.' if denied else 'adapt or report honestly.'}")
         except Exception as exc:  # noqa: BLE001
             return f"[tool error] '{call.name}' result unreadable: {exc}"
+
+    def _note_tool_weakness(self, tool_name: str, error: str) -> None:
+        """Feed tool failures into weakness detection. Never breaks the loop."""
+        try:
+            from ...autonomy.weakness import report_weakness
+            from ...storage.db import Database
+            import time as _t
+            # Workspace dir from loop_ctx if available.
+            ws = None
+            try:
+                ws = getattr(self, "_workspace_dir", None)
+            except Exception:  # noqa: BLE001
+                pass
+            if not ws:
+                return
+            db = Database(ws)
+            report_weakness(db, "tool_failure", tool_name,
+                            {"error": str(error)[:300], "ts": _t.time()})
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _render_value(value: Any, _depth: int = 0) -> str:
