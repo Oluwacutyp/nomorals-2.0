@@ -19,6 +19,99 @@ import math
 import torch
 from pathlib import Path
 
+# ── Kaggle session persistence ─────────────────────────────────────
+# Kaggle kills notebooks at ~12h and wipes local disk. With KAGGLE_SYNC=1:
+#   - start: pulls abliterated model + latest checkpoints from your datasets
+#   - abliteration runs ONCE ever (reused from the dataset afterwards)
+#   - training stops itself at KAGGLE_MAX_HOURS (default 11) and pushes
+#     checkpoints back, so the next session resumes instead of restarting.
+# One-time setup on kaggle.com: create two (empty, private) datasets, e.g.
+#   Cutyp/codebeast-abliterated  and  Cutyp/codebeast-checkpoints
+# In the notebook: add KAGGLE_USERNAME / KAGGLE_KEY to Secrets, then run:
+#   KAGGLE_SYNC=1 KAGGLE_MODEL_DS=Cutyp/codebeast-abliterated \
+#   KAGGLE_CKPT_DS=Cutyp/codebeast-checkpoints python abliterate_and_train.py
+KAGGLE_SYNC      = os.environ.get("KAGGLE_SYNC", "0") == "1"
+KAGGLE_MODEL_DS  = os.environ.get("KAGGLE_MODEL_DS", "")
+KAGGLE_CKPT_DS   = os.environ.get("KAGGLE_CKPT_DS", "")
+KAGGLE_MAX_HOURS = float(os.environ.get("KAGGLE_MAX_HOURS", "11"))
+_KAGGLE_T0       = None
+
+
+def _kaggle(cmd):
+    import subprocess
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.returncode == 0, (r.stdout + r.stderr)[-2000:]
+
+
+def kaggle_pull():
+    """Fetch abliterated model + checkpoints from Kaggle datasets (best effort)."""
+    if not KAGGLE_SYNC:
+        return
+    import shutil
+    if KAGGLE_MODEL_DS and not (ABLITERATED / "config.json").exists():
+        print(f"↓ Pulling abliterated model from {KAGGLE_MODEL_DS}...")
+        tmp = Path("/tmp/kmodel")
+        shutil.rmtree(tmp, ignore_errors=True)
+        ok, out = _kaggle(["kaggle", "datasets", "download", "-d",
+                           KAGGLE_MODEL_DS, "-p", str(tmp), "--unzip", "-q"])
+        if ok and (tmp / "config.json").exists():
+            ABLITERATED.mkdir(parents=True, exist_ok=True)
+            for f in tmp.iterdir():
+                shutil.move(str(f), str(ABLITERATED / f.name))
+            print("✓ Abliterated model restored — skipping Phase 1.")
+        else:
+            print(f"  (no model dataset yet — will abliterate this session)\n  {out[-300:]}")
+    if KAGGLE_CKPT_DS and not any(CHECKPOINTS.glob("checkpoint-*")):
+        print(f"↓ Pulling checkpoints from {KAGGLE_CKPT_DS}...")
+        tmp = Path("/tmp/kckpt")
+        shutil.rmtree(tmp, ignore_errors=True)
+        ok, out = _kaggle(["kaggle", "datasets", "download", "-d",
+                           KAGGLE_CKPT_DS, "-p", str(tmp), "--unzip", "-q"])
+        if ok and any(tmp.glob("checkpoint-*")):
+            CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+            for f in tmp.iterdir():
+                shutil.move(str(f), str(CHECKPOINTS / f.name))
+            print("✓ Checkpoints restored — training will resume.")
+        else:
+            print(f"  (no checkpoint dataset yet — starting fresh)\n  {out[-300:]}")
+
+
+def kaggle_push():
+    """Push abliterated model + checkpoints back to Kaggle datasets (best effort)."""
+    if not KAGGLE_SYNC:
+        return
+    import json as _json
+    for ds, src in ((KAGGLE_MODEL_DS, ABLITERATED), (KAGGLE_CKPT_DS, CHECKPOINTS)):
+        if not ds or not src.exists():
+            continue
+        files = list(src.iterdir())
+        if not files:
+            continue
+        meta = {"title": ds.split("/")[-1], "id": ds,
+                "licenses": [{"name": "other"}]}
+        (src / "dataset-metadata.json").write_text(_json.dumps(meta))
+        print(f"↑ Pushing {len(files)} files to {ds}...")
+        ok, out = _kaggle(["kaggle", "datasets", "version", "-p", str(src),
+                           "-m", "codebeast sync", "-q"])
+        print("✓ Pushed." if ok else f"  push failed:\n  {out[-500:]}")
+
+
+class _KaggleTimeStop:
+    """Stops training gracefully before Kaggle's session limit hits."""
+    def __init__(self):
+        import time
+        self.t0 = time.time()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        import time
+        elapsed_h = (time.time() - self.t0) / 3600
+        if KAGGLE_SYNC and elapsed_h >= KAGGLE_MAX_HOURS:
+            print(f"\n⏰ {elapsed_h:.1f}h elapsed — stopping gracefully "
+                  f"before the session limit. Checkpoints will sync.")
+            control.should_training_stop = True
+        return control
+
+
 # ── Config ──────────────────────────────────────────────────────────
 BASE_MODEL   = "Qwen/Qwen2.5-VL-7B-Instruct"
 OUTPUT_DIR   = Path("./codebeast_run")
@@ -377,6 +470,7 @@ def train(abliterated_path):
         train_dataset=dataset,
         dataset_text_field="text",
         max_seq_length=SEQ_LEN,
+        callbacks=[_KaggleTimeStop()] if KAGGLE_SYNC else None,
         args=SFTConfig(
             output_dir=str(CHECKPOINTS),
             per_device_train_batch_size=BATCH_SIZE,
@@ -396,7 +490,10 @@ def train(abliterated_path):
     )
 
     print(f"Starting training ({len(dataset)} rows)...")
-    trainer.train(resume_from_checkpoint=resume_from)
+    try:
+        trainer.train(resume_from_checkpoint=resume_from)
+    finally:
+        kaggle_push()   # sync checkpoints even if stopped early
 
     print("Saving final adapter...")
     model.save_pretrained(str(FINAL_ADAPTER))
@@ -420,5 +517,7 @@ def train(abliterated_path):
 
 if __name__ == "__main__":
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    kaggle_pull()          # restore abliterated model + checkpoints (KAGGLE_SYNC=1)
     abliterated = abliterate()
     train(abliterated)
+    kaggle_push()          # final sync (also runs on early stop via finally)
