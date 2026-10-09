@@ -1328,6 +1328,34 @@ class PartnerRuntime(
                         )
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("mining session job not registered: %s", exc)
+                # Autonomous organs: research + wisdom run their own ticks on
+                # the durable scheduler. Idempotent by name; the tools do one
+                # full organ cycle each. No commands needed — this is the
+                # "system works together without tripping commands" wiring.
+                # Research tick is light (due-check + gaps); wisdom tick is
+                # heavy (fetch + parse + index).
+                for _name, _spec, _tool, _heavy in (
+                    ("research organ tick", "every 30m",
+                     "research_organ_tick", False),
+                    ("wisdom organ tick", "every 6h",
+                     "wisdom_organ_tick", True),
+                    # Memory consolidation: additive distillation on a
+                    # schedule. She reviews and distills without being asked.
+                    # Never deletes — consolidation is additive only.
+                    ("memory consolidation", "every 12h",
+                     "memory_consolidate", False),
+                ):
+                    try:
+                        _have = [j for j in self._scheduler.list_jobs()
+                                 if j.get("name") == _name]
+                        if not _have:
+                            self._scheduler.add(
+                                _name, _spec, "tool",
+                                {"tool": _tool, "args": {}},
+                                heavy=_heavy,
+                            )
+                    except Exception as exc:  # noqa: BLE001 - optional
+                        _log.warning("%s job not registered: %s", _name, exc)
                 # Prompt 01: skill self-rewrite loop + synthesis scan jobs.
                 # ensure_improvement_schedule is idempotent by name; both
                 # jobs are no-ops while settings.improvement.mode == "off".
