@@ -466,6 +466,17 @@ class PartnerRuntime(
                             pass
                         return
                     del pending[message.chat.key]  # expired
+        # Live DJ room sensing: if DJ Vrede is performing in this chat,
+        # every incoming message feeds the room sensor (non-blocking).
+        # The brain still processes the message normally — the DJ listens
+        # alongside, it doesn't replace her.
+        if message.incoming and (message.text or "").strip():
+            try:
+                from ...media.dj_live import notify_live_message
+                notify_live_message(message.chat.key,
+                                    message.text, message.sender)
+            except Exception:  # noqa: BLE001
+                pass
         # SMS fallback surface (build-map #19): SMS can't carry media into
         # the brain. Answer honestly instead of letting her hallucinate
         # about a picture she never received.

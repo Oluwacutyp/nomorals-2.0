@@ -757,10 +757,31 @@ class RuntimeMediaMixin:
         /dj            → full show: trending charts + own tracks, voice breaks
         /dj trending   → just list what's hot right now
         /dj <genre>    → show built around a genre (uk-drill, afrobeats, …)
+        /dj live [genre,…] → LIVE set in this chat: real-time performance,
+                             reads the room, takes requests, talks
+        /dj live stop  → end the live set
         """
         from ...media.dj import DJ
 
         tail = (tail or "").strip()
+        if tail.lower().startswith("live"):
+            from ...media.dj_live import control_dj_live
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is None:
+                return "run /dj live from a chat — the DJ needs a room."
+            gateway = self.gateway
+
+            def _da(path: str, caption: str) -> None:
+                gateway.send_file(chat.platform,
+                                  f"{chat.platform}:{chat.chat_id}",
+                                  path, caption=caption[:1024])
+
+            def _dt(text: str) -> None:
+                gateway.send(chat.platform,
+                             f"{chat.platform}:{chat.chat_id}", text)
+            return control_dj_live(tail[4:].strip(), chat_key=chat_key,
+                                   deliver_audio=_da, deliver_text=_dt,
+                                   context=self.context)
         dj = DJ(self.context)
         if tail.lower() == "trending":
             res = dj.fetch_trending()
