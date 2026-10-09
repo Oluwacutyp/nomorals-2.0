@@ -93,9 +93,9 @@ def apply_stats_to_fighter(fighter: dict[str, Any], stats: StatBlock,
 
     Mutates the fighter in place:
 
-    * strength → +1 attack per 2 points
-    * stamina → +3 max HP per point, +1 defense per 4 points
-    * mana → sets the fighter's mana pool (base 30 + 2 per mana point)
+    * strength → +1 attack per point (1 assigned point = 2 effective)
+    * stamina → +6 max HP per point, +1 defense per 2 points
+    * mana → sets the fighter's mana pool (base 30 + 4 per mana point)
     * intelligence → stored for skill-power and combo rolls
 
     Gear bonuses (from ``gear_stat_bonuses``) stack on top.
@@ -106,13 +106,13 @@ def apply_stats_to_fighter(fighter: dict[str, Any], stats: StatBlock,
     man = stats.total("mana", gear_bonus.get("mana", 0))
     int_ = stats.total("intelligence", gear_bonus.get("intelligence", 0))
 
-    fighter["atk"] = int(fighter.get("atk", 10)) + str_ // 2
-    hp_gain = sta * 3
+    fighter["atk"] = int(fighter.get("atk", 10)) + str_
+    hp_gain = sta * 6
     fighter["max_hp"] = int(fighter.get("max_hp", 50)) + hp_gain
     fighter["hp"] = int(fighter.get("hp", 50)) + hp_gain
-    fighter["def"] = int(fighter.get("def", 5)) + sta // 4
-    fighter["mana"] = BASE_MANA + man * 2
-    fighter["max_mana"] = BASE_MANA + man * 2
+    fighter["def"] = int(fighter.get("def", 5)) + sta // 2
+    fighter["mana"] = BASE_MANA + man * 4
+    fighter["max_mana"] = BASE_MANA + man * 4
     fighter["intelligence"] = int_
     fighter["stat_strength"] = str_
     fighter["stat_stamina"] = sta

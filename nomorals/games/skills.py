@@ -559,13 +559,13 @@ def combo_success_chance(combo: ComboDef, tier1: int, tier2: int,
     """Success chance for a dual-cast.
 
     Base chance minus 8% per tier above 1 on either skill (higher
-    mastery = harder weave), plus 1% per 2 intelligence, clamped to
+    mastery = harder weave), plus 1% per intelligence point, clamped to
     5%–95%.
     """
     chance = float(combo.base_success)
     chance -= 0.08 * (max(1, int(tier1)) - 1)
     chance -= 0.08 * (max(1, int(tier2)) - 1)
-    chance += 0.01 * (max(0, int(intelligence)) // 2)
+    chance += 0.01 * max(0, int(intelligence))
     return max(0.05, min(0.95, chance))
 
 

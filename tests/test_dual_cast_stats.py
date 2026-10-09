@@ -91,15 +91,15 @@ class StatBlockTests(unittest.TestCase):
         fighter = {"hp": 50, "max_hp": 50, "atk": 10, "def": 5}
         stats = StatBlock(strength=6, stamina=4, mana=5, intelligence=8)
         apply_stats_to_fighter(fighter, stats)
-        # strength 6 → +3 atk
-        self.assertEqual(fighter["atk"], 13)
-        # stamina 4 → +12 max HP, +1 def
-        self.assertEqual(fighter["max_hp"], 62)
-        self.assertEqual(fighter["hp"], 62)
-        self.assertEqual(fighter["def"], 6)
-        # mana 5 → 30 + 10 pool
-        self.assertEqual(fighter["mana"], 40)
-        self.assertEqual(fighter["max_mana"], 40)
+        # strength 6 → +6 atk (1 point = 2 effective)
+        self.assertEqual(fighter["atk"], 16)
+        # stamina 4 → +24 max HP, +2 def
+        self.assertEqual(fighter["max_hp"], 74)
+        self.assertEqual(fighter["hp"], 74)
+        self.assertEqual(fighter["def"], 7)
+        # mana 5 → 30 + 20 pool
+        self.assertEqual(fighter["mana"], 50)
+        self.assertEqual(fighter["max_mana"], 50)
         # intelligence stored for combo rolls
         self.assertEqual(fighter["intelligence"], 8)
 
