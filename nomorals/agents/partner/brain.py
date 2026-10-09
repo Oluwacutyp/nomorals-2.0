@@ -274,6 +274,76 @@ class PartnerBrain:
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
 
+    def _tool_loop(self) -> Any:
+        """The brain-driven tool-calling loop (the spine). Built lazily."""
+        loop = getattr(self, "_tool_loop_inst", None)
+        if loop is None:
+            from .tool_loop import ToolCallingLoop
+            llm = self.responder._brain_for_reply()
+            registry = getattr(self.context, "tools", None)
+            loop = ToolCallingLoop(llm, registry)
+            self._tool_loop_inst = loop
+        return loop
+
+    def generate_with_tools(
+        self,
+        message: ChatMessage,
+        *,
+        context_lines: list[str] | tuple[str, ...] = (),
+        history: list[Any] | tuple[Any, ...] = (),
+        gate_mode: str = "open",
+        is_owner: bool = True,
+    ) -> list[str]:
+        """Generate a reply via the tool-calling loop.
+
+        The LLM sees the full tool registry and dynamically selects tools
+        from plain language — no hardcoded intent routing. Gating is
+        enforced at execution: restricted actors get a filtered tool list
+        AND capability denial at call time.
+        """
+        from ...core.policy import CapabilitySet, Capability
+        loop = self._tool_loop()
+        chat = message.chat
+        actor = "owner" if is_owner else "outsider"
+        # Restricted chats: the model only sees public-safe tools, and the
+        # registry denies anything else at call time. Code-enforced, not
+        # prompt-only. Outsiders get read-only + model-call: no writes,
+        # no execution, no private memory.
+        capabilities: Any = None
+        if not is_owner:
+            try:
+                capabilities = CapabilitySet.of(
+                    Capability.MODEL_CALL,
+                    Capability.MEM_READ,
+                    Capability.FS_READ,
+                )
+            except Exception:
+                capabilities = None
+        loop_ctx = {
+            "platform": getattr(chat, "platform", ""),
+            "chat_key": getattr(chat, "key", ""),
+            "chat_kind": str(getattr(chat, "kind", "")),
+            "is_owner": is_owner,
+            "gate_mode": gate_mode,
+        }
+        result = loop.run(
+            message.text or "",
+            context_lines=context_lines,
+            history=history,
+            actor=actor,
+            capabilities=capabilities,
+            loop_ctx=loop_ctx,
+        )
+        if not result.ok and not result.answer:
+            _log.warning("tool loop failed: %s", result.error)
+            return [f"couldn't do that: {result.error}"]
+        parts = [result.answer] if result.answer else []
+        if result.degraded and result.degrade_note and is_owner:
+            # The owner sees the degradation honestly; outsiders get the
+            # clean surface.
+            parts.append(f"⏬ {result.degrade_note}")
+        return parts
+
     def _note_reply(self, bundle: Any, chat: ChatRef) -> None:
         """Record the reply for the status beacon (which model answered,
         latency, whether it fell back).  Fallback replies also capture the
@@ -476,19 +546,45 @@ class PartnerBrain:
             digest = self._reasoning_digest(message.text)
             if digest:
                 continuity = list(continuity) + [digest]
+        # ── THE SPINE: brain-driven tool-calling loop ──────────────────
+        # The owner gets the full loop: the LLM sees every tool and uses
+        # them dynamically from plain language. Restricted chats keep the
+        # single-shot path (the loop is available via generate_with_tools
+        # when explicitly invoked). If the loop fails, we fall back to
+        # single-shot rather than dropping the reply.
+        tool_loop_parts: list[str] | None = None
+        if is_owner and not restricted:
+            try:
+                tool_loop_parts = self.generate_with_tools(
+                    message,
+                    context_lines=list(background_lines) + list(continuity),
+                    history=list(history),
+                    gate_mode=gate_mode,
+                    is_owner=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — fall back, never drop
+                _log.warning("tool loop failed, falling back: %s", exc)
+                tool_loop_parts = None
         # Interactive budget: the provider chain behind router.chat can stall
         # for minutes; the chat thread gets INTERACTIVE_REPLY_TIMEOUT_S and
         # then an honest fallback — never a ~90s polite wait.
-        bundle = self.responder.respond_bounded(
-            chat_platform=chat.platform,
-            user_text=message.text,
-            gate_mode=gate_mode,
-            history=history,
-            memories=memories,
-            background_lines=background_lines,
-            continuity_lines=continuity,
-            media_notes=media_notes,
-        )
+        if tool_loop_parts:
+            # Wrap the loop's answer in the bundle shape the tail expects.
+            from types import SimpleNamespace
+            bundle = SimpleNamespace(
+                parts=tool_loop_parts, model="tool-loop",
+                degraded=False, degraded_note="")
+        else:
+            bundle = self.responder.respond_bounded(
+                chat_platform=chat.platform,
+                user_text=message.text,
+                gate_mode=gate_mode,
+                history=history,
+                memories=memories,
+                background_lines=background_lines,
+                continuity_lines=continuity,
+                media_notes=media_notes,
+            )
 
         # Persist + downstream hooks.
         parts = bundle.parts
