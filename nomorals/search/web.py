@@ -390,18 +390,21 @@ class DdgsWebSource(WebSearchSource):
                 "ddgs package not installed (pip install ddgs)"
             ) from exc
         backend = _env("NM_DDGS_BACKEND", "DDGS_BACKEND", default="auto") or "auto"
+        # dual-scope transport: NM_DDGS_REGION="ng-ng" pins Nigeria-flavoured
+        # results, "us-en" the US; default "wt-wt" (no region) keeps it global
+        region = _env("NM_DDGS_REGION", "DDGS_REGION", default="wt-wt") or "wt-wt"
         timeout = _timeout(15.0)
         try:
             client = DDGS(timeout=int(timeout))
             try:
                 rows = client.text(
-                    query, region="wt-wt", safesearch="moderate",
+                    query, region=region, safesearch="moderate",
                     backend=backend, max_results=limit,
                 )
             except TypeError:
                 # older ddgs without the backend kwarg
                 rows = client.text(
-                    query, region="wt-wt", safesearch="moderate",
+                    query, region=region, safesearch="moderate",
                     max_results=limit,
                 )
             out = []

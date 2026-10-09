@@ -17,15 +17,18 @@ deep path this adds:
 * **Cited synthesis** — the model must reference sources as ``[n]``; every
   citation is validated against the source list before the report is
   accepted. Fails closed to the extractive, cited format.
-* **The dig loop** (``dig=True``, the default) — after the first batch of
-  sources is read, the researcher digs one level deeper, keyless and
-  capped: it mines 2-3 word terms that actually appeared in the read pages
-  (cross-page signal, query-relevant) and searches for them as follow-up
-  queries; then it follows the strongest external links out of the sources
-  (scored by anchor-text overlap, one per domain, robots-aware).  PDFs are
-  read as first-class sources, not dropped as junk.
+* **The dig loop** (``dig=True``, the default) — bounded multi-hop: after
+  the first batch of sources is read, each hop mines 2-3 word terms that
+  actually appeared in the *newest* pages (cross-page signal,
+  query-relevant) and searches them as follow-up queries, reading fresh
+  pages; the loop stops after ``max_hops`` (3) or as soon as a hop yields
+  no new pages (reflection gate — no progress, no more budget). Then it
+  follows the strongest external links out of the sources (scored by
+  anchor-text overlap, one per domain, robots-aware).  PDFs are read as
+  first-class sources, not dropped as junk.
 * **Dig report fields** — ``followups`` (queries mined and issued),
-  ``external_followed`` (urls followed out of the sources), ``pdfs_read``.
+  ``external_followed`` (urls followed out of the sources), ``pdfs_read``,
+  ``hops`` / ``hop_detail`` (per-hop follow-ups and new-page counts).
 
 The report keeps the same shape quick/deep consumers already parse
 (sub_queries, results, pages_read, summary, seconds) and adds
@@ -209,6 +212,7 @@ class DeepResearcher:
         dig: bool = True,
         max_followups: int = 2,
         follow_links: int = 3,
+        max_hops: int = 3,
     ) -> None:
         self.context = context
         self.engine = engine or SearchEngine(context)
@@ -220,10 +224,15 @@ class DeepResearcher:
         self.dig = bool(dig)
         self.max_followups = max(0, min(int(max_followups), 3))
         self.follow_links = max(0, min(int(follow_links), 4))
+        #: Bounded multi-hop: the dig loop re-mines follow-up queries from
+        #: the *new* pages each hop, up to this many hops, then synthesizes.
+        #: Reflection rule — a hop that yields zero new pages stops the loop
+        #: early; no progress, no more budget spent.
+        self.max_hops = max(1, min(int(max_hops), 3))
         self._seen_urls: set[str] = set()
 
     # ── query expansion ──────────────────────────────────────────────────────
-    def expand_queries(self, query: str) -> list[str]:
+    def expand_queries(self, query: str, *, scope: str = "auto") -> list[str]:
         subs = self.engine._decompose(query) or [query]
         subs = [s.strip() for s in subs if s and s.strip()][: self.max_subqueries]
         if not subs:
@@ -239,6 +248,19 @@ class DeepResearcher:
                 break
             if variant.lower() not in [s.lower() for s in subs]:
                 subs.append(variant)
+        # dual-scope fan-out: when the question is scope-sensitive, give
+        # Nigeria and the US their own sub-queries so neither region's
+        # press wins by default
+        try:
+            from .scope import regional_variants
+
+            for variant, _label in regional_variants(query, scope=scope):
+                if len(subs) >= self.max_subqueries:
+                    break
+                if variant.lower() not in [s.lower() for s in subs]:
+                    subs.append(variant)
+        except Exception:  # noqa: BLE001 - scope fan-out is a bonus, not a gate
+            _log.debug("scope expansion skipped", exc_info=True)
         return subs[: self.max_subqueries]
 
     # ── search fan-out ───────────────────────────────────────────────────────
@@ -311,13 +333,13 @@ class DeepResearcher:
         return out
 
     # ── the run ──────────────────────────────────────────────────────────────
-    def run(self, query: str) -> dict[str, Any]:
+    def run(self, query: str, *, scope: str = "auto") -> dict[str, Any]:
         started = time.time()
         query = (query or "").strip()
         if not query:
             raise ValueError("deep research needs a query")
 
-        subs = self.expand_queries(query)
+        subs = self.expand_queries(query, scope=scope)
         candidates = self.fan_out(subs, started)
         if time.time() - started > self.wall_seconds:
             raise TimeoutError("deep research hit its wall clock before ranking")
@@ -334,11 +356,13 @@ class DeepResearcher:
                 page["_subs"] = res.get("_subs", [])
                 pages.append(page)
 
-        # ── the dig loop: one level deeper, keyless and capped ─────────────
+        # ── the dig loop: up to max_hops, keyless and capped ─────────────────
         followups: list[str] = []
         external_followed: list[str] = []
+        hop_detail: list[dict[str, Any]] = []
         if self.dig and pages:
-            pages = self._dig(query, pages, started, followups, external_followed)
+            pages = self._dig(query, pages, started, followups,
+                              external_followed, hop_detail)
 
         # keep the corpus bounded; first-batch pages stay ahead in the list
         pages = pages[: self.max_pages + 4]
@@ -376,6 +400,8 @@ class DeepResearcher:
             "external_followed": external_followed,
             "pdfs_read": [p["url"] for p in pages if p.get("pdf")],
             "dig": self.dig,
+            "hops": len(hop_detail),
+            "hop_detail": hop_detail,
             "pages_read": [p["url"] for p in pages],
             "pages": pages,
             "summary": summary,
@@ -394,29 +420,55 @@ class DeepResearcher:
         started: float,
         followups: list[str],
         external_followed: list[str],
+        hop_detail: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """One level deeper: mine follow-up queries from what was read, search
-        them, read the new pages; then follow the strongest external links
-        out of the sources.  Every step is wall-clocked and deduped."""
-        # pass 1 — follow-up queries mined from the read pages
-        mined = mine_followups(query, pages, max_followups=self.max_followups)
-        for phrase in mined:
+        """Up to ``max_hops`` deeper: each hop mines follow-up queries from
+        the pages the *previous* hop added, searches them, and reads the
+        new pages.  The loop is reflection-gated — a hop that yields zero
+        new pages stops it early (no progress → synthesize instead of
+        burning budget).  The visited-URL set makes it circle-proof: a
+        page is never read twice and a follow-up that only rediscovers
+        seen URLs ends its hop.  After the hops, the strongest external
+        links out of the sources are followed once, as before."""
+        frontier: list[dict[str, Any]] = list(pages)
+        for hop in range(1, self.max_hops + 1):
             if time.time() - started > self.wall_seconds:
                 break
-            fu = f"{query} {phrase}"
-            followups.append(fu)
-            for res in self._search_one(fu):
+            # mine only from the newest evidence — each hop digs deeper,
+            # not sideways over the same corpus
+            mined = mine_followups(query, frontier, max_followups=self.max_followups)
+            added: list[dict[str, Any]] = []
+            hop_followups: list[str] = []
+            for phrase in mined:
                 if time.time() - started > self.wall_seconds:
                     break
-                key = _url_key(res.get("url", ""))
-                if key in self._seen_urls:
-                    continue
-                page = self.engine.read(res["url"], max_chars=40000)
-                if page:
-                    self._seen_urls.add(_url_key(page["url"]))
-                    page["_score"] = float(res.get("_score", res.get("score", 0.0))) * 0.9
-                    page["_dig"] = fu
-                    pages.append(page)
+                fu = f"{query} {phrase}"
+                followups.append(fu)
+                hop_followups.append(fu)
+                for res in self._search_one(fu):
+                    if time.time() - started > self.wall_seconds:
+                        break
+                    key = _url_key(res.get("url", ""))
+                    if key in self._seen_urls:
+                        continue
+                    page = self.engine.read(res["url"], max_chars=40000)
+                    if page:
+                        self._seen_urls.add(_url_key(page["url"]))
+                        page["_score"] = float(res.get("_score", res.get("score", 0.0))) * 0.9
+                        page["_dig"] = fu
+                        page["_hop"] = hop
+                        added.append(page)
+            hop_detail.append({
+                "hop": hop,
+                "followups": hop_followups,
+                "new_pages": len(added),
+            })
+            if not added:
+                # reflection: this hop produced nothing new — further hops
+                # would just re-mine the same evidence
+                break
+            pages.extend(added)
+            frontier = added
 
         # pass 2 — follow the strongest external links out of the sources
         for page in self._follow_external(query, pages, started):

@@ -25,27 +25,40 @@ def _sentences(text: str) -> list[str]:
 
 
 def extractive_summarize(query: str, pages: Sequence[dict[str, Any]], max_sentences: int = 6) -> str:
-    """Frequency-ranked sentences from the fetched pages, cited by domain."""
+    """Frequency-ranked sentences from the fetched pages, cited by number.
+
+    Every sentence cites its source as ``[n]`` and the footer carries the
+    numbered ``Sources:`` block with full URLs — a claim is verifiable
+    only if the reader can click through to it. The domain rides along
+    in each citation (``[1 · a.com]``) so the source's identity is visible
+    at a glance.
+    """
     q_terms = set(_WORD.findall(query.lower()))
-    scored: list[tuple[float, int, str, str]] = []
-    for page in pages:
-        dom = page.get("domain") or domain(page.get("url", ""))
+    numbered = list(pages)  # [n] below indexes into this list
+    scored: list[tuple[float, int, str, int]] = []
+    for n, page in enumerate(numbered):
         for idx, sent in enumerate(_sentences(page.get("text", ""))):
             terms = set(_WORD.findall(sent.lower()))
             if not terms:
                 continue
             overlap = len(terms & q_terms) / max(len(q_terms), 1)
             density = min(len(sent) / 180.0, 1.0)
-            scored.append((round(0.8 * overlap + 0.2 * density, 6), idx, sent, dom))
+            scored.append((round(0.8 * overlap + 0.2 * density, 6), idx, sent, n))
     scored.sort(key=lambda t: (-t[0], t[1]))
     picked = scored[:max_sentences]
     # restore document order within the pick so it reads as prose, not a scatter
-    picked.sort(key=lambda t: t[1])
-    lines = [f"extractive summary (no live model — top sentences, cited):"]
-    for _s, _idx, sent, dom in picked:
-        lines.append(f"  • {sent}  [{dom}]")
+    picked.sort(key=lambda t: (t[3], t[1]))
+    lines = ["extractive summary (no live model — top sentences, cited):"]
+    for _s, _idx, sent, n in picked:
+        dom = numbered[n].get("domain") or domain(numbered[n].get("url", ""))
+        lines.append(f"  • {sent}  [{n + 1} · {dom}]")
     if not picked:
         lines.append("  • (no readable text on the fetched pages)")
+    lines.append("")
+    lines.append("Sources:")
+    for n, page in enumerate(numbered):
+        title = (page.get("title") or "").strip() or "(untitled)"
+        lines.append(f"  [{n + 1}] {title} — {page.get('url', '')}")
     return "\n".join(lines)
 
 

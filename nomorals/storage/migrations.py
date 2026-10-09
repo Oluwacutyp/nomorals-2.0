@@ -1396,6 +1396,45 @@ CREATE INDEX IF NOT EXISTS idx_schedule_depends ON schedule_jobs(depends_on);
 """
 
 
+_V83_NOTIFICATION_DELIVERY_RETRY = """
+-- Notification delivery retry + dead-letter bookkeeping.
+-- channel: which delivery path succeeded ('telegram', 'termux', ...) — ''
+--   while undelivered.  Powers the delivery-confirmation view.
+-- retry_count: redelivery attempts so far (quiet-hour holds don't count).
+-- next_retry_at: unix ts when the next redelivery attempt is due — the
+--   retry queue only picks up rows whose time has come (backoff).
+ALTER TABLE notifications ADD COLUMN channel TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE notifications ADD COLUMN next_retry_at REAL NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_notifications_retry
+    ON notifications(delivered, next_retry_at);
+"""
+
+
+_V84_NOTIFICATION_DELIVERIES = """
+-- Per-channel delivery attempts: every Notifier._deliver pass records one
+-- row per resolved owner target (state sent/failed/skipped, the platform's
+-- message_id on success, the error/reason on failure).  This is what makes
+-- /notify honest about WHY a notification didn't land instead of a bare
+-- "failed" — the audit found 0-deliveries with no recorded reason.
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_id TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    chat_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    attempted_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_nid
+    ON notification_deliveries(notification_id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_attempted
+    ON notification_deliveries(attempted_at);
+"""
+
+
 _V82_MEMORY_TRUST_COLUMNS = """
 -- Trust provenance for memory records (hardens mem-false-fact,
 -- mem-pref-override, mem-cross-session): `trust` is "trusted" (direct
@@ -2200,6 +2239,20 @@ def _apply_search_engine_schema(db: object) -> None:
             fetched_at REAL NOT NULL DEFAULT 0
         )"""
     )
+    db.execute(  # type: ignore[attr-defined]
+        """CREATE TABLE IF NOT EXISTS research_jobs (
+            id         TEXT PRIMARY KEY,
+            query      TEXT NOT NULL DEFAULT '',
+            mode       TEXT NOT NULL DEFAULT 'quick',
+            params     TEXT NOT NULL DEFAULT '{}',
+            state      TEXT NOT NULL DEFAULT 'queued',
+            progress   TEXT NOT NULL DEFAULT '',
+            result     TEXT NOT NULL DEFAULT '',
+            error      TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0
+        )"""
+    )
     wanted = {
         "search_log": {
             "mode": "TEXT NOT NULL DEFAULT 'quick'",
@@ -2982,6 +3035,10 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql=_V81_SCHEDULER_UPGRADES),
     Migration(82, "memory_trust_columns",
               sql=_V82_MEMORY_TRUST_COLUMNS),
+    Migration(83, "notifications_delivery_retry",
+              sql=_V83_NOTIFICATION_DELIVERY_RETRY),
+    Migration(84, "notification_deliveries",
+              sql=_V84_NOTIFICATION_DELIVERIES),
 )
 
 

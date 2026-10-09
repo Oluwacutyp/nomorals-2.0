@@ -255,7 +255,7 @@ class SearchEngine:
 
     # ── the runs ────────────────────────────────────────────────────────────
     def run(self, query: str, mode: str = "quick", pages: int = 3, crawl: bool = False,
-            dig: bool = True, freshness: str = "") -> dict[str, Any]:
+            dig: bool = True, freshness: str = "", scope: str = "auto") -> dict[str, Any]:
         started = time.time()
         if mode not in {"quick", "deep"}:
             raise ToolError(f"unknown mode {mode!r}: quick | deep")
@@ -269,25 +269,35 @@ class SearchEngine:
                                         pages_per_query=max(2, pages // 3),
                                         dig=dig)
             try:
-                return researcher.run(query)
+                return researcher.run(query, scope=scope)
             except TimeoutError as exc:
                 raise ToolError(str(exc)) from exc
 
-        sub_queries = [query]
-        all_results: list[dict[str, str]] = []
+        # quick mode is multi-query, not single-shot: when the question is
+        # scope-sensitive the variants cover Nigeria and the US alongside
+        # the global phrasing, so neither region wins by default
+        from .scope import regional_variants, scope_relevance
+
+        variants = regional_variants(query, scope=scope)
+        per_variant = max(2, adaptive_result_limit(query) // max(1, len(variants)))
+
         sub_reports: list[dict[str, Any]] = []
-        for sub in sub_queries:
+        all_results: list[dict[str, str]] = []
+        for variant, region in variants:
             if time.time() - started > _DEEP_WALL_SECONDS:
                 _log.info("search wall clock hit; stopping sub-queries")
                 break
-            raw = self.search(sub, freshness=freshness) if freshness else self.search(sub)
-            results = curate.curate(raw, sub, top_n=pages + 2)
+            raw = self.search(variant, max_results=per_variant,
+                              freshness=freshness) if freshness else self.search(variant, max_results=per_variant)
+            results = curate.curate(raw, variant, top_n=pages + 2)
+            for r in results:
+                r["_scope"] = region
             all_results.extend(results)
-            sub_reports.append({"query": sub, "results": results})
+            sub_reports.append({"query": variant, "scope": region, "results": results})
 
         unique = curate.dedupe(all_results)
         unique.sort(key=lambda r: -float(r.get("score", 0)))
-        top = unique[: max(1, pages)]
+        top = self._scope_spread(unique, max(1, pages))
 
         # wave 85: source trust — every result carries a trust score, and
         # each read attempt feeds back (a source that keeps failing to
@@ -320,6 +330,11 @@ class SearchEngine:
             except Exception as exc:  # noqa: BLE001
                 _log.debug("crawl failed: %s", exc)
 
+        # source quality: a page that read empty is not a source — it can
+        # stay in the result list for transparency, but it must not feed
+        # the summary or claim a citation slot
+        read_pages = [p for p in read_pages if (p.get("chars") or 0) > 0]
+
         model_on = self._model_available()
         error = ""
         try:
@@ -329,12 +344,25 @@ class SearchEngine:
             error = str(exc)
             summary = summarize_mod.extractive_summarize(query, read_pages)
 
+        sources = [
+            {
+                "n": i + 1,
+                "url": p["url"],
+                "title": p.get("title", ""),
+                "domain": p.get("domain", ""),
+            }
+            for i, p in enumerate(read_pages)
+        ]
         report = {
             "id": new_short_id("search"),
             "query": query,
             "mode": mode,
-            "sub_queries": sub_queries,
+            "sub_queries": [v for v, _region in variants],
+            "scopes": sorted({region for _v, region in variants}),
+            "scope_relevance": scope_relevance(query),
             "results": top,
+            "sources": sources,
+            "citations": {str(s["n"]): s["url"] for s in sources},
             "pages_read": [p["url"] for p in read_pages],
             "pages": read_pages,
             "summary": summary,
@@ -344,6 +372,39 @@ class SearchEngine:
         }
         self._journal(report)
         return report
+
+    @staticmethod
+    def _scope_spread(results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        """Pick the top set so every searched scope is represented: the
+        best result of each scope first (in score order), then the rest by
+        score.  Keeps a dual-scope run from returning five US links and
+        zero Nigerian ones."""
+        if limit <= 0:
+            return []
+        by_scope: dict[str, list[dict[str, Any]]] = {}
+        for r in results:
+            by_scope.setdefault(str(r.get("_scope", "global")), []).append(r)
+        picked: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        # round 1 — best of each non-global scope, best-first by score
+        scoped = sorted(
+            (rs[0] for rs in by_scope.values() if rs and rs[0].get("_scope") != "global"),
+            key=lambda r: -float(r.get("score", 0)),
+        )
+        for r in scoped:
+            if len(picked) >= limit:
+                break
+            picked.append(r)
+            seen.add(id(r))
+        # round 2 — everything else by score
+        for r in sorted(results, key=lambda r: -float(r.get("score", 0))):
+            if len(picked) >= limit:
+                break
+            if id(r) in seen:
+                continue
+            picked.append(r)
+            seen.add(id(r))
+        return picked
 
     def leads(self, save: bool = True) -> list[dict[str, Any]]:
         """Research pass over legitimate 'get paid for small tasks' platforms:
@@ -447,34 +508,58 @@ def register(registry: Any) -> None:
         description=(
             "Research a question on the open web: search (multi-engine), read the top "
             "pages (PDFs included), return a summarized, sourced answer. deep=true "
-            "(power mode only) decomposes the question, reads more, and digs one level "
-            "deeper (mined follow-up queries + external links); crawl=true also reads "
-            "through the best site; freshness=d|w|m|y biases recency. Keyless, robots-aware."
+            "(power mode only) decomposes the question, reads more, and digs up to "
+            "3 hops deeper (mined follow-up queries + external links); crawl=true also reads "
+            "through the best site; freshness=d|w|m|y biases recency. Scope-sensitive "
+            "questions automatically fan out to Nigerian and US sources. "
+            "background=true runs it as a background job and returns a job id "
+            "immediately — check research_status, fetch with research_result. "
+            "Keyless, robots-aware."
         ),
         capability=Capability.NET_OUT,
     )
     def web_research(query: str, *, deep: bool = False, pages: int = 3,
-                     crawl: bool = False, dig: bool = True, freshness: str = "") -> dict[str, Any]:
+                     crawl: bool = False, dig: bool = True, freshness: str = "",
+                     scope: str = "auto", background: bool = False) -> dict[str, Any]:
+        if background:
+            from .jobs import start as _start
+
+            job_id = _start(context, query, mode="deep" if deep else "quick",
+                            pages=pages, crawl=crawl, dig=dig,
+                            freshness=freshness, scope=scope)
+            return {"job_id": job_id, "state": "queued", "query": query,
+                    "hint": "research_status(job_id) to check; research_result(job_id) when done"}
         return SearchEngine(context).run(query, mode="deep" if deep else "quick",
                                          pages=pages, crawl=crawl, dig=dig,
-                                         freshness=freshness)
+                                         freshness=freshness, scope=scope)
 
     @registry.register(
         "deep_search",
         description=(
             "full deep research: parallel sub-queries, diverse fresh sources, "
-            "section-level extraction, cited synthesis, then a dig loop "
-            "(follow-up queries mined from what was read + strongest external "
-            "links followed; PDFs read as sources). Power mode only."
+            "section-level extraction, cited synthesis, then a bounded dig loop "
+            "(up to 3 hops of follow-up queries mined from what was read + "
+            "strongest external links followed; PDFs read as sources). "
+            "Nigeria/US dual-scope fan-out when the question is scope-sensitive. "
+            "background=true returns a job id immediately instead of blocking. "
+            "Power mode only."
         ),
         capability=Capability.NET_OUT,
         parameters={
             "query": "str — the research question",
             "pages": "int (optional, default 8, max 12) — how many sources to read",
             "dig": "bool (optional, true) — the deeper-dig loop (follow-ups + external links)",
+            "background": "bool (optional, false) — run as a background job, return a job id",
         },
     )
-    def deep_search(query: str, *, pages: int = 8, dig: bool = True) -> dict[str, Any]:
+    def deep_search(query: str, *, pages: int = 8, dig: bool = True,
+                    background: bool = False) -> dict[str, Any]:
+        if background:
+            from .jobs import start as _start
+
+            job_id = _start(context, query, mode="deep", pages=pages, dig=dig)
+            return {"job_id": job_id, "state": "queued", "query": query,
+                    "hint": "research_status(job_id) to check; research_result(job_id) when done"}
         from ..power import power_mode_for
         from .deep import DeepResearcher
 
@@ -487,3 +572,65 @@ def register(registry: Any) -> None:
             return researcher.run(query)
         except TimeoutError as exc:
             raise ToolError(str(exc)) from exc
+
+    @registry.register(
+        "research_async",
+        description=(
+            "Start a background research job (quick or deep) and return a job id "
+            "immediately — deep research no longer blocks the chat. The job "
+            "delivers through the notifier when done. research_status(job_id) "
+            "checks progress; research_result(job_id) fetches the report. "
+            "mode='deep' is a power-mode capability (fails fast with a clear "
+            "message when power mode is off)."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "query": "str — the research question",
+            "mode": "str (optional, 'quick'|'deep', default 'quick')",
+            "pages": "int (optional, default 3 quick / 8 deep)",
+            "dig": "bool (optional, true) — the multi-hop dig loop (deep)",
+            "freshness": "str (optional) — d|w|m|y recency bias",
+            "scope": "str (optional, auto|ng|us|global) — region fan-out",
+        },
+    )
+    def research_async(query: str, *, mode: str = "quick", pages: int = 3,
+                       dig: bool = True, freshness: str = "",
+                       scope: str = "auto") -> dict[str, Any]:
+        from .jobs import start as _start
+
+        job_id = _start(context, query, mode=mode, pages=pages, dig=dig,
+                        freshness=freshness, scope=scope)
+        return {"job_id": job_id, "state": "queued", "query": query,
+                "hint": "research_status(job_id) to check; research_result(job_id) when done"}
+
+    @registry.register(
+        "research_status",
+        description="Check a background research job: queued|running|done|failed, "
+                    "progress note, elapsed seconds.",
+        capability=Capability.DB_READ,
+    )
+    def research_status(job_id: str) -> dict[str, Any]:
+        from .jobs import status as _status
+
+        return _status(context, job_id)
+
+    @registry.register(
+        "research_result",
+        description="Fetch the full report of a finished background research job "
+                    "(None while it is still running).",
+        capability=Capability.DB_READ,
+    )
+    def research_result(job_id: str) -> dict[str, Any] | None:
+        from .jobs import result as _result
+
+        return _result(context, job_id)
+
+    @registry.register(
+        "research_cancel",
+        description="Cancel a queued/running background research job.",
+        capability=Capability.DB_READ,
+    )
+    def research_cancel(job_id: str) -> dict[str, Any]:
+        from .jobs import cancel as _cancel
+
+        return {"job_id": job_id, "cancelled": _cancel(context, job_id)}
