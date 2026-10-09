@@ -153,6 +153,7 @@ class Job:
     id: str
     niche: str
     topic: str
+    style: str = ""  # edit style preset; "" = niche default
     status: str = "queued"  # queued|rendering|ready|posted|failed
     attempts: int = 0
     platforms: list = field(default_factory=list)
@@ -239,6 +240,7 @@ class PlannedPost:
     id: str
     niche: str
     topic: str
+    style: str = ""
     platforms: list = field(default_factory=list)
     scheduled_for: str = ""  # ISO UTC; "" = ASAP
     status: str = "queued"   # queued|rendering|ready|posted|failed
@@ -301,11 +303,12 @@ class ContentCalendar:
     # -- queue -------------------------------------------------------
     def add(self, niche: str, topic: str, *,
             platforms: list | None = None,
-            scheduled_for: str = "") -> PlannedPost:
+            scheduled_for: str = "",
+            style: str = "") -> PlannedPost:
         """Schedule a post.  Returns the entry."""
         post = PlannedPost(
             id="post_" + uuid.uuid4().hex[:10],
-            niche=niche, topic=topic,
+            niche=niche, topic=topic, style=style,
             platforms=list(platforms or []),
             scheduled_for=scheduled_for,
         )
@@ -656,9 +659,11 @@ class ShortPipeline:
 
     # -- planning ----------------------------------------------------
     def plan(self, niche: str, topic: str, *,
-             platforms: list | None = None) -> Job:
+             platforms: list | None = None,
+             style: str = "") -> Job:
         """Create a queued :class:`Job` (no rendering yet)."""
         job = Job(id=new_job_id(), niche=niche, topic=topic,
+                  style=style,
                   platforms=list(platforms or []),
                   created_at=_utcnow())
         self.jobs.save(job)
@@ -1112,7 +1117,22 @@ class ShortPipeline:
                    os.path.relpath(r["path"], run_dir)
                    for i, r in enumerate(records)}}
 
-    # ── stage: edit (beat-synced) ──────────────────────────────────
+    def _resolve_style(self, ctx: dict) -> str:
+        """Edit style preset: job override → niche default → phonk."""
+        job = ctx.get("job")
+        explicit = (getattr(job, "style", "") or "").strip()
+        if explicit:
+            return explicit
+        niche = ctx.get("niche")
+        if niche is None:
+            try:
+                niche = self._get_niche(getattr(job, "niche", ""))
+            except Exception:  # noqa: BLE001 — never break a render
+                niche = None
+        default = (getattr(niche, "default_style", "") or "").strip()
+        return default or "phonk"
+
+    # ── stage: edit ─────────────────────────────────────────────────
     def _stage_edit(self, ctx: dict) -> dict:
         run_dir = ctx["run_dir"]
         vo = ctx.get("voiceover") or self._read_vo_meta(run_dir)
@@ -1146,10 +1166,12 @@ class ShortPipeline:
                            "effect": f.get("effect", "kenburns"),
                            "zoom_direction": f.get("zoom_direction", "in")})
 
+        style = self._resolve_style(ctx)
         payload = {"scenes": scenes, "audio": audio_path, "captions": "",
                    "music": "", "beat_times": beats,
                    "output": str(run_dir / "draft.mp4"),
-                   "width": 1080, "height": 1920, "fps": 30}
+                   "width": 1080, "height": 1920, "fps": 30,
+                   "style": style}
         (run_dir / "edit_spec.json").write_text(
             json.dumps(payload, indent=2), encoding="utf-8")
         spec = self._construct_spec(payload)

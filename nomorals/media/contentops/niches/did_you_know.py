@@ -8,6 +8,7 @@ from .registry import register
 
 class DidYouKnowNiche(NichePlugin):
     name = "did_you_know"
+    default_style = "documentary"
     thesis = "Facts that sound fake until the 20-second mechanism reveal makes them obvious."
     cadence = 2.0
     target_seconds = (25, 45)

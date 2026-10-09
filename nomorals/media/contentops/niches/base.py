@@ -160,6 +160,9 @@ class NichePlugin(ABC):
     hashtags: dict[str, list[str]] | list[str] = {}
     voice_spec: VoiceSpec = VoiceSpec()
     ypp_rationale: str = ""
+    #: edit style preset for this niche (see contentops.styles).
+    #: Overridable per job via ``nm shorts make --style``.
+    default_style: str = "phonk"
 
     # ── the two core methods ──
 

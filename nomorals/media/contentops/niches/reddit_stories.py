@@ -8,6 +8,7 @@ from .registry import register
 
 class RedditStoriesNiche(NichePlugin):
     name = "reddit_stories"
+    default_style = "minimal"
     thesis = "The wildest thread of the day, condensed to 45 seconds with a cliffhanger that fills the comments."
     cadence = 3.0
     target_seconds = (25, 50)

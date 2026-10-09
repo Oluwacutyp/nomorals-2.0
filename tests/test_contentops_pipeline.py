@@ -125,6 +125,7 @@ class FakeEditSpec:
     width: int = 320
     height: int = 568
     fps: int = 15
+    style: str = ""
 
 
 def _fake_detect_beats(audio_path):

@@ -8,6 +8,7 @@ from .registry import register
 
 class FinanceFactsNiche(NichePlugin):
     name = "finance_facts"
+    default_style = "minimal"
     thesis = "One counterintuitive money fact, then exactly why it matters to you."
     cadence = 1.0
     target_seconds = (25, 50)

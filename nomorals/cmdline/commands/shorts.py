@@ -42,7 +42,8 @@ def _cmd_make(args: argparse.Namespace, context) -> int:
     try:
         pipe = _pipeline(args)
         platforms = [p.strip() for p in (args.platforms or "").split(",") if p.strip()]
-        job = pipe.plan(args.niche, args.topic, platforms=platforms or None)
+        job = pipe.plan(args.niche, args.topic, platforms=platforms or None,
+                        style=getattr(args, "style", "") or "")
         if args.now:
             result = pipe.run(job)
             if result.ok:
@@ -59,7 +60,8 @@ def _cmd_queue(args: argparse.Namespace, context) -> int:
         platforms = [p.strip() for p in (args.platforms or "").split(",") if p.strip()]
         post = pipe.calendar.add(args.niche, args.topic,
                                  platforms=platforms or None,
-                                 scheduled_for=args.at or "")
+                                 scheduled_for=args.at or "",
+                                 style=getattr(args, "style", "") or "")
         when = f" at {args.at}" if args.at else ""
         return _ok(f"scheduled {post.id}{when} ({args.niche} — {args.topic[:60]})")
     except Exception as exc:  # noqa: BLE001
