@@ -24,8 +24,12 @@ def register(registry: Any) -> None:
     @registry.register(
         "finance_price",
         description=(
-            "Get the current live price for a symbol. "
-            "Args: symbol (e.g. BTC, XAUUSD, AAPL), market (crypto|forex|stock, default crypto)."
+            "Get the current live price for a symbol — USE THIS for every "
+            "price query (do NOT fetch price API URLs directly; many "
+            "well-known endpoints like CoinDesk v1 are retired). "
+            "Args: symbol (e.g. BTC, XAUUSD, AAPL), market (crypto|forex|stock, default crypto). "
+            "Built-in fallback chain: Binance → CoinGecko (crypto), "
+            "Yahoo → Stooq (stocks), Frankfurter (forex)."
         ),
         capability="network",
         parameters={

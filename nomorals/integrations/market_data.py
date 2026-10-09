@@ -8,7 +8,7 @@ via environment variables — never required.
 
 Endpoint matrix (see ``docs/FREE_MARKET_DATA.md`` for the full table):
 
-crypto  (default chain) : binance → kraken → coinbase → coingecko
+crypto  (default chain) : binance → coingecko   [quote(); OHLC also tries kraken/coinbase]
 stocks  (default chain) : yahoo → stooq → [alphavantage|twelvedata|finnhub if keyed]
 forex   (default chain) : frankfurter → yahoo → stooq → [alphavantage|twelvedata if keyed]
 

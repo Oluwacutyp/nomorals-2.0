@@ -38,6 +38,34 @@ _log = get_logger(__name__)
 DEFAULT_UA = "NoMoralsCore/0.1 (+https://github.com/Oluwacutyp/No-morals-ai)"
 
 
+# ── Retired endpoint registry ─────────────────────────────────────────
+# APIs that training knowledge still suggests but no longer exist. Matched
+# by (host, path-prefix); the request is rejected BEFORE any network I/O
+# with redirect guidance, instead of dying on a cryptic DNS/HTTP error.
+# Add entries here as dead endpoints are discovered — never silently drop.
+DEAD_ENDPOINTS: tuple[tuple[str, str, str], ...] = (
+    # CoinDesk v1 price API was retired; the host no longer serves it.
+    ("api.coindesk.com", "/v1/bpi/",
+     "CoinDesk v1 price API is retired. Use the finance_price tool "
+     "(Binance → CoinGecko fallback chain) for crypto prices."),
+)
+
+
+def _check_dead_endpoint(url: str) -> None:
+    """Reject known-retired API endpoints with redirect guidance."""
+    try:
+        parts = urllib.parse.urlparse(url)
+        host = (parts.hostname or "").lower()
+        path = parts.path or "/"
+    except Exception:  # noqa: BLE001 - unparseable; SSRF guard handles it
+        return
+    for dead_host, dead_prefix, guidance in DEAD_ENDPOINTS:
+        if host == dead_host and path.startswith(dead_prefix):
+            raise RequestError(
+                f"Retired endpoint {host}{dead_prefix}* — {guidance}")
+    return None
+
+
 class RequestError(ProviderError):
     code = "http.request"
 
@@ -328,6 +356,9 @@ class HttpClient:
             separator = "&" if urllib.parse.urlparse(url).query else "?"
             target = f"{url}{separator}{urllib.parse.urlencode(params)}"
 
+        # Retired-endpoint guard first: fail fast with redirect guidance
+        # before SSRF/DNS (a dead endpoint stays dead whatever DNS says).
+        _check_dead_endpoint(target)
         # SSRF guard: check the initial URL before connecting
         self._check_ssrf(target)
 
