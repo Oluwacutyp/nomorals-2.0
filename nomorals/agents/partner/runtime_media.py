@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
 from ...search.adaptive import adaptive_result_limit
 
@@ -794,6 +795,93 @@ class RuntimeMediaMixin:
             lines.append("Checked: " + ", ".join(st.get("checked", [])))
         return "\n".join(lines)
 
+    def _control_sham(self, tail: str, chat_key: str = "",
+                      message: Any = None) -> str:
+        """ /sham — identify the song in a replied-to voice note or audio.
+
+        Reply to an audio/voice message with /sham, or send audio with
+        /sham as the caption. Uses AudD music recognition; the result
+        links straight into /play.
+        """
+        try:
+            return self._sham_identify(message)
+        except Exception as exc:  # noqa: BLE001 - never raises
+            return f"couldn't identify that audio ({exc})"
+
+    def _sham_identify(self, message: Any) -> str:
+        """Core /sham logic. Returns the reply text. Never raises."""
+        from ...connectors.registry import create_connector
+        from ...accounts.vault import CredentialVault
+
+        audio_path = self._sham_find_audio(message)
+        if not audio_path:
+            return (
+                "nothing to identify — reply to a voice note or audio "
+                "message with /sham, or send audio with /sham as the caption."
+            )
+        vault = CredentialVault(
+            getattr(self.context, "db", None),
+            master_passphrase=__import__("os").environ.get(
+                "NM_VAULT_PASSPHRASE", ""))
+        try:
+            audd = create_connector("audd", vault)
+        except Exception:
+            return (
+                "music recognition isn't wired up yet — it's one free API "
+                "key away."
+            )
+        res = audd.recognize(audio_path)
+        if not res.get("ok"):
+            return str(res.get("reason") or "couldn't identify that audio")
+        artist = res.get("artist", "Unknown artist")
+        title = res.get("title", "Unknown title")
+        album = res.get("album", "")
+        release = res.get("release_date", "")
+        song_link = res.get("song_link", "")
+        lines = [f"🎵 {artist} — {title}"]
+        if album:
+            detail = album
+            if release:
+                detail += f" ({release[:4]})"
+            lines.append(f"💿 {detail}")
+        spotify = res.get("spotify") or {}
+        sp_url = ""
+        if isinstance(spotify, dict):
+            sp_url = str(
+                (spotify.get("external_urls") or {}).get("spotify") or "")
+        if song_link:
+            lines.append(f"🔗 {song_link}")
+        # One tap into /play: the resolver's strategy chain takes it.
+        lines.append(f"/play {artist} {title}")
+        return "\n".join(lines)
+
+    def _sham_find_audio(self, message: Any) -> str:
+        """Locate the audio file for /sham. Returns a local path or "".
+
+        1. Audio attached to the command message itself (caption flow).
+        2. Replied-to audio on Telegram (file_id stashed in message meta,
+           downloaded on demand via the adapter).
+        Never raises.
+        """
+        try:
+            media = getattr(message, "media", None) or []
+            for m in media:
+                if getattr(m, "kind", "") == "audio" and getattr(m, "path", ""):
+                    return str(m.path)
+            # Replied-to audio (Telegram): download on demand.
+            meta = getattr(message, "meta", None) or {}
+            file_id = str(meta.get("replied_audio_file_id") or "")
+            if file_id and self.gateway is not None:
+                adapter = self.gateway.adapters.get("telegram")
+                download = getattr(adapter, "download_file", None)
+                if callable(download):
+                    path = download(file_id, "sham.ogg")
+                    if path:
+                        return path
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        return ""
+
     def _produce_hook(self, message: Any) -> str | None:
         """NL music production for the owner DM (non-slash only).
 
@@ -911,6 +999,124 @@ class RuntimeMediaMixin:
             lines.append(f"  {i}. {title}{dur}{extra}\n     {r['url']}")
         lines.append("download: /video download <url>")
         return "\n".join(lines)
+
+    def _control_caption(self, tail: str, chat_key: str = "",
+                         message: Any = None) -> str:
+        """`/caption [style]` — burn AI subtitles into a video.
+
+        Attach a video to the command message, or pass a file path.
+        Styles: hormozi (default), mrbeast, karaoke, minimal.
+        """
+        from ...media_edit.captions import caption_styles, caption_video
+        from ...media_edit.videos import MediaEditError
+
+        parts = (tail or "").strip().split(None, 1)
+        style = "hormozi"
+        path_arg = ""
+        if parts:
+            # First word might be a style or a path.
+            if parts[0].lower() in caption_styles():
+                style = parts[0].lower()
+                path_arg = parts[1] if len(parts) > 1 else ""
+            else:
+                path_arg = tail.strip()
+
+        # Find the video: attached media first, then path argument.
+        video_path = ""
+        if message is not None:
+            for media in getattr(message, "media", None) or []:
+                if getattr(media, "kind", "") == "video":
+                    video_path = getattr(media, "path", "")
+                    break
+        if not video_path and path_arg:
+            video_path = path_arg
+        if not video_path:
+            return ("usage: /caption [style] — attach a video to the command "
+                    f"or pass a path. styles: {', '.join(caption_styles())}")
+
+        try:
+            res = caption_video(video_path, style=style)
+        except MediaEditError as exc:
+            return f"caption failed: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"caption failed: {exc}"
+
+        out_path = res.get("output", "")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None and out_path:
+            try:
+                self.gateway.send_file(
+                    chat.platform, f"{chat.platform}:{chat.chat_id}",
+                    out_path,
+                    caption=f"🎬 captioned ({style} style)")
+                return f"🎬 captioned video sent ({style} style)."
+            except Exception:  # noqa: BLE001
+                pass
+        return f"🎬 captioned ({style}): {out_path or '(render failed)'}"
+
+    def _control_vision(self, tail: str, chat_key: str = "",
+                        message: Any = None) -> str:
+        """`/vision [question]` — analyze an image with the vision model.
+
+        Attach an image to the command message, or pass a path/URL.
+        The path/URL can come first or last: `/vision /tmp/img.png what's
+        this?` and `/vision what's this? /tmp/img.png` both work.
+        """
+        def _looks_like_target(s: str) -> bool:
+            s = (s or "").strip()
+            if not s:
+                return False
+            if s.startswith(("http://", "https://", "/", "./", "~/")):
+                return True
+            # Windows paths and bare filenames with extensions.
+            if len(s) > 3 and "." in s:
+                low = s.lower()
+                if any(low.endswith(ext) for ext in
+                       (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+                        ".tiff", ".heic")):
+                    return True
+            return False
+
+        tail = (tail or "").strip()
+        target = ""
+        question = tail
+        if tail:
+            tokens = tail.split()
+            if _looks_like_target(tokens[0]):
+                target = tokens[0]
+                question = " ".join(tokens[1:]).strip()
+            elif len(tokens) > 1 and _looks_like_target(tokens[-1]):
+                target = tokens[-1]
+                question = " ".join(tokens[:-1]).strip()
+
+        # Attached image takes priority over a path argument.
+        if message is not None:
+            for media in getattr(message, "media", None) or []:
+                if getattr(media, "kind", "") == "image":
+                    target = getattr(media, "path", "")
+                    break
+        if not target:
+            return ("usage: /vision [question] — attach an image or pass "
+                    "a path/URL")
+
+        try:
+            outcome = self.context.tools.call(
+                "vision_describe", path=target, prompt=question)
+        except Exception as exc:  # noqa: BLE001
+            return f"vision failed: {exc}"
+        if not outcome.ok:
+            return (f"vision failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        value = outcome.value or {}
+        description = value.get("description") or "(no description returned)"
+        provider = value.get("provider") or "vision"
+        text = f"👁 [{provider}]\n{description}"
+        # Vision output is untrusted data — the tool already marks it.
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None:
+            return self._send_long_checked(chat.platform, chat,
+                                           text[:6000])
+        return text[:6000]
 
     def _control_image(self, tail: str) -> str:
         ref = (tail or "").strip()

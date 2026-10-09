@@ -145,7 +145,8 @@ class RuntimeVoiceMixin:
 
         /voice list                              catalogue + active voice
         /voice use <name>                        switch this chat's voice now
-        /voice say <text>                        speak as the chat's voice
+        /voice say [voice] <text>                speak as the chat's voice,
+                                                 or one-shot in [voice]
         /voice clone <name> [path]               clone a voice note / file
         /voice transcript <name> <text>          set a clone's prompt text
         /voice describe <name> <text>            describe a catalogue voice
@@ -197,10 +198,23 @@ class RuntimeVoiceMixin:
         if verb == "say":
             text = rest.strip()
             if not text:
-                return "usage: /voice say <text>"
+                return "usage: /voice say [voice] <text>"
             mood = self._voice_mood()
+            # optional one-shot voice override: /voice say <voicename> <text>
+            first, _, remainder = text.partition(" ")
+            voice_name = ""
+            if remainder.strip() and cat.get(first) is not None:
+                voice_name, text = first, remainder.strip()
+                if not text:
+                    return "usage: /voice say [voice] <text>"
             try:
-                out = cat.speak(text, chat_key=chat_key, mood=mood or "neutral")
+                if voice_name:
+                    out = cat.speak_as(text, voice_name)
+                else:
+                    out = cat.speak(text, chat_key=chat_key,
+                                    mood=mood or "neutral")
+            except KeyError:
+                return f"unknown voice {voice_name!r} — /voices"
             except Exception as exc:  # noqa: BLE001
                 return f"voice say failed: {exc}"
             return self._deliver_voice_note(chat_key, out["path"], text,
@@ -280,9 +294,174 @@ class RuntimeVoiceMixin:
                 return f"unknown voice {name!r} — /voice list"
             return f"removed '{name}' from the catalogue"
 
-        return ("usage: /voice list | use <name> | say <text> | clone <name> "
-                "[path] | transcript <name> <text> | describe <name> <text> | "
-                "backend <name> <backend> | rm <name>")
+        return (f"usage: /voice list | use <name> | say [voice] <text> | "
+                f"clone <name> [path] | transcript <name> <text> | "
+                f"describe <name> <text> | backend <name> <backend> | "
+                f"rm <name>")
+
+    # ── /clonevoice <name> — zero-shot voice cloning, top-level ──────────
+    def _control_clonevoice(self, tail: str, chat_key: str,
+                            message: Any = None) -> str:
+        """Clone a voice from a voice note into the catalogue.
+
+        /clonevoice <name> — attach a voice note / audio to the message.
+        Persists via the voice catalogue (survives restarts).
+        """
+        from ...voice.catalogue import default_catalogue, VoiceCatalogue
+
+        parts = (tail or "").strip().split(None, 1)
+        name = parts[0] if parts else ""
+        if not name:
+            return ("usage: /clonevoice <name> — attach a voice note or "
+                    "audio file to the command message")
+        # validate the name before touching any audio — fail fast
+        try:
+            name = VoiceCatalogue._check_name(name)
+        except ValueError as exc:
+            return f"clone failed: {exc}"
+        path = ""
+        if message is not None:
+            for media in getattr(message, "media", None) or []:
+                if getattr(media, "kind", "") in ("audio", "voice"):
+                    path = getattr(media, "path", "")
+                    break
+        if not path:
+            if getattr(message, "reply_to", ""):
+                return ("I can see you replied to a message, but I can't pull "
+                        "audio from the replied message — attach the voice "
+                        "note directly to your /clonevoice message instead.")
+            return ("no audio found — attach a voice note or audio file to "
+                    "your /clonevoice message")
+        if not os.path.exists(path):
+            return "couldn't read that audio file — try attaching it again"
+        cat = default_catalogue()
+        # transcript is a bonus for zero-shot backends that need it
+        transcript = ""
+        try:
+            outcome = self.context.tools.call("transcribe", path=path)
+            if outcome.ok and outcome.value:
+                transcript = outcome.value.get("text", "") or ""
+        except Exception:  # noqa: BLE001 - transcript is a bonus
+            transcript = ""
+        try:
+            voice = cat.clone(name, path, transcript=transcript,
+                              description="cloned by owner via /clonevoice")
+        except (ValueError, KeyError) as exc:
+            return f"clone failed: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return f"clone failed: {exc}"
+        return (f"🎙️ cloned '{voice.name}' — say something in it:\n"
+                f"/voice say {voice.name} hello there")
+
+    def _control_say_tts(self, voice_name: str, text: str,
+                         chat_key: str) -> str:
+        """TTS path for /say: /say <voice> <text> speaks as a voice note.
+
+        Never raises — unknown voices and engine failures return text.
+        """
+        from ...voice.catalogue import default_catalogue
+
+        cat = default_catalogue()
+        if cat.get(voice_name) is None:
+            return (f"unknown voice {voice_name!r} — /voices to list\n"
+                    f"usage: /say <voice> <text>")
+        try:
+            out = cat.speak_as(text, voice_name)
+        except Exception as exc:  # noqa: BLE001
+            return f"say failed: {exc}"
+        path = out.get("path", "")
+        if not path:
+            return "say failed: no audio produced"
+        return self._deliver_voice_note(chat_key, path, text,
+                                        out.get("backend", "?"))
+
+    def _control_voices(self, tail: str, chat_key: str = "") -> str:
+        """`/voices` — unified voice picker across all TTS backends.
+
+        Lists every usable voice: system (espeak), Piper downloads,
+        and the voice catalogue. Use `/voice use <name>` to switch,
+        `/voice say <text>` to speak.
+        """
+        lines = ["🎙️ voices — every backend, one list:"]
+
+        # 1. System backend (espeak / say / powershell)
+        try:
+            from ...voice.tts import SystemTTSBackend
+            kind, exe = SystemTTSBackend.detect()
+            if kind:
+                lines.append(f"\n🖥️ system [{kind}] — {exe}")
+                lines.append("   `system` — the OS voice, always available")
+            else:
+                lines.append("\n🖥️ system — not detected")
+        except Exception:  # noqa: BLE001
+            lines.append("\n🖥️ system — detection failed")
+
+        # 2. Piper downloaded voices (.onnx files on disk)
+        try:
+            from ...voice.tts import PiperBackend
+            piper_voices: list[str] = []
+            for d in PiperBackend._search_dirs():
+                try:
+                    for entry in sorted(os.listdir(d)):
+                        if (entry.endswith(".onnx")
+                                and not entry.endswith(".onnx.json")):
+                            piper_voices.append(entry[:-5])  # strip .onnx
+                except OSError:
+                    pass
+            if piper_voices:
+                lines.append(f"\n🔊 piper ({len(piper_voices)} downloaded):")
+                for v in piper_voices[:12]:
+                    lines.append(f"   `{v}`")
+                if len(piper_voices) > 12:
+                    lines.append(f"   … +{len(piper_voices) - 12} more")
+            else:
+                lines.append("\n🔊 piper — no voices downloaded")
+                lines.append("   fetch one: `nm voice fetch --backend piper "
+                             "--voice en_US-lessac-medium`")
+        except Exception:  # noqa: BLE001
+            lines.append("\n🔊 piper — unavailable")
+
+        # 3. Voice catalogue (clones, presets, per-chat voices)
+        try:
+            from ...voice.catalogue import default_catalogue
+            cat = default_catalogue()
+            voices = cat.list()
+            if voices:
+                lines.append(f"\n📚 catalogue ({len(voices)}):")
+                for v in voices[:15]:
+                    mark = "●" if v.get("active") else "○"
+                    chat_mark = (" [this chat]"
+                                 if cat.chat_overrides.get(chat_key)
+                                 == v.get("name") else "")
+                    tags = v.get("tags", []) or []
+                    kind_mark = " 🧬" if "cloned" in tags else ""
+                    lines.append(f"   {mark} `{v['name']}` "
+                                 f"[{v.get('backend', '?')}]"
+                                 f"{kind_mark}{chat_mark}")
+                if len(voices) > 15:
+                    lines.append(f"   … +{len(voices) - 15} more")
+            else:
+                lines.append("\n📚 catalogue — empty")
+                lines.append("   clone one: `/voice clone <name>` "
+                             "(attach a voice note)")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"\n📚 catalogue — error: {exc}")
+
+        # 4. Other backends (availability only)
+        try:
+            from ...voice.tts import available_backends
+            backends = available_backends()
+            # Filter out the ones already covered above.
+            others = [b for b in backends
+                      if b not in ("system", "piper")]
+            if others:
+                lines.append(f"\n⚙️ other backends: {', '.join(others)}")
+                lines.append("   (via `/voice backend <name> <backend>`)")
+        except Exception:  # noqa: BLE001
+            pass
+
+        lines.append("\nswitch: `/voice use <name>` · speak: `/voice say <text>`")
+        return "\n".join(lines)
 
     def _voice_mood(self) -> str:
         """Best-effort current mood label for voice performances."""
