@@ -1263,6 +1263,112 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"imggen failed: {exc}"
 
+    def _control_shorts(self, tail: str) -> str:
+        """Devon's short-form content empire in chat.
+
+        /shorts make <niche> "<topic>" [--now]     — queue or render now
+        /shorts status [job_id]                    — job list / inspect
+        /shorts resume <run_id>                    — resume a failed render
+        /shorts niches                             — list niches
+        /shorts calendar [--due]                   — content calendar
+        /shorts ledger                             — what got posted where
+        /shorts estimate <niche> "<topic>"         — time/cost estimate
+        """
+        import shlex
+
+        ref = (tail or "").strip()
+        if not ref:
+            return ("🎬 /shorts — Devon's short-form content empire:\n"
+                    "/shorts make <niche> \"<topic>\" [--now]\n"
+                    "/shorts niches — list content niches\n"
+                    "/shorts status [job] · /shorts resume <run_id>\n"
+                    "/shorts calendar [--due] · /shorts ledger\n"
+                    "/shorts estimate <niche> \"<topic>\"")
+        try:
+            toks = shlex.split(ref)
+        except ValueError:
+            toks = ref.split()
+        if not toks:
+            return "usage: /shorts make|status|resume|niches|calendar|ledger|estimate ..."
+        action = toks[0].lower()
+        rest = toks[1:]
+        try:
+            from ...media.contentops.pipeline import ShortPipeline
+
+            pipe = ShortPipeline()
+            if action == "niches":
+                from ...media.contentops.niches import list_niches, get_niche
+
+                lines = ["🎬 niches:"]
+                for name in list_niches():
+                    plugin = get_niche(name)
+                    lines.append(f"• {name} ({getattr(plugin, 'cadence', '?')}/day) — "
+                                 f"{getattr(plugin, 'thesis', '')[:70]}")
+                return "\n".join(lines)
+            if action == "make":
+                if len(rest) < 2:
+                    return "usage: /shorts make <niche> \"<topic>\" [--now]"
+                niche, topic = rest[0], " ".join(rest[1:])
+                now = topic.endswith("--now")
+                if now:
+                    topic = topic[: -len("--now")].strip().strip("\"'")
+                job = pipe.plan(niche, topic.strip().strip("\"'"))
+                if now:
+                    result = pipe.run(job)
+                    if result.ok:
+                        return (f"🎬 rendered {job.id}\n📁 {result.final_path}\n"
+                                f"stages: " + ", ".join(
+                                    f"{k}={v}ms" for k, v in
+                                    (result.stages or {}).items()))
+                    return f"🎬 render failed: {result.error}"
+                return (f"🎬 queued {job.id} ({niche} — {topic[:60]})\n"
+                        f"render now: /shorts resume-later via `nm shorts` "
+                        f"or re-run with --now")
+            if action == "status":
+                jobs = pipe.jobs.list()
+                if rest:
+                    q = rest[0]
+                    jobs = [j for j in jobs if j.id == q or j.id.startswith(q)]
+                if not jobs:
+                    return "no jobs yet"
+                return "\n".join(
+                    f"• {j.id} [{j.status}] {j.niche} — {j.topic[:50]}"
+                    for j in jobs[-10:])
+            if action == "resume":
+                if not rest:
+                    return "usage: /shorts resume <run_id>"
+                result = pipe.resume(rest[0])
+                if result.ok:
+                    return f"🎬 resumed → {result.final_path}"
+                return f"🎬 resume failed: {result.error}"
+            if action == "calendar":
+                posts = pipe.calendar.due() if "--due" in rest else pipe.calendar.list()
+                if not posts:
+                    return "calendar empty"
+                return "\n".join(
+                    f"• {p.id} [{p.status}] {p.niche} — {p.topic[:50]}"
+                    for p in posts[-10:])
+            if action == "ledger":
+                from ...media.contentops.publish.ledger import PublishLedger
+
+                entries = PublishLedger().list()
+                if not entries:
+                    return "nothing posted yet"
+                return "\n".join(
+                    f"• {e.get('at', '')} {e.get('platform', '')} "
+                    f"[{e.get('status', '')}] {str(e.get('title', ''))[:50]}"
+                    for e in entries[-10:])
+            if action == "estimate":
+                if len(rest) < 2:
+                    return "usage: /shorts estimate <niche> \"<topic>\""
+                import json as _json
+
+                est = pipe.estimate(rest[0], " ".join(rest[1:]))
+                return "⏱ estimate:\n" + _json.dumps(est, indent=1, default=str)[:1500]
+            return f"unknown /shorts action {action!r}"
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"shorts failed: {exc}"
+
     def _control_lens(self, tail: str) -> str:
         ref = (tail or "").strip()
         if not ref:

@@ -307,6 +307,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
                              #   /mission new <research|build|fix> <args>
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
     "imggen": (0, None),     # /imggen <prompt> — Devon's own diffusion studio
+    "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
     "devon": (0, None),      # /devon [free text] — plan tools, run, digest, reply
@@ -1462,6 +1463,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/imggen <prompt> [--seed N] [--ar 16:9] | /imggen upscale <path> | /imggen checkpoints | /imggen dashboard <run>",
               "example": "/imggen a danfo bus at sunset --ar 16:9",
               "related": "/image"},
+    "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
+              "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
+              "example": "/shorts make motivation \"discipline beats motivation\" --now",
+              "related": "/imggen /say"},
     "lens": {"what": "reverse image search.",
              "usage": "/lens <path-or-url>", "example": "/lens /sdcard/pic.jpg",
              "related": "/image"},
@@ -2034,6 +2039,7 @@ LIST_ONELINERS: dict[str, str] = {
     "db": "inspect the database (tables|schema|query|counts)",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
+    "shorts": "short-form content empire: make, queue, post vertical videos",
     "notion": "Notion databases, rows, and page creation",
     "gcal": "Google Calendar agenda and event creation",
     "trello": "Trello boards, lists, cards — create cards",

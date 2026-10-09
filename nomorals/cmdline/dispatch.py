@@ -35,6 +35,7 @@ from .commands.idea import _cmd_idea
 from .commands.golden import _cmd_golden
 from .commands.hub import _cmd_hub
 from .commands.imggen import cmd_imggen
+from .commands.shorts import cmd_shorts
 from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
 from .commands.media import _cmd_media, _cmd_studio
@@ -400,6 +401,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_vision(args, context)
         if args.command == "imggen":
             return cmd_imggen(args, context)
+        if args.command == "shorts":
+            return cmd_shorts(args, context)
         if args.command == "inbox":
             return _cmd_inbox(args, context)
         if args.command == "room":

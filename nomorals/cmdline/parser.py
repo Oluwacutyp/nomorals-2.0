@@ -81,6 +81,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "timeline": ["tl"],
     "vision": ["v"],
     "imggen": ["ig"],
+    "shorts": ["sh"],
     "voice": ["vc"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -2009,6 +2010,55 @@ def _parser() -> argparse.ArgumentParser:
     ig_ch.add_argument("--steps", type=int, default=50)
     ig_ch.add_argument("--checkpoint", default="")
     ig_ch.add_argument("--device", default="")
+
+    shorts = sub.add_parser("shorts", aliases=CLI_ALIASES["shorts"],
+        help="Short-form content empire: make, queue, post vertical videos",
+        description=("nm shorts make <niche> \"<topic>\" [--platforms youtube,tiktok] [--now]\n"
+                     "nm shorts queue <niche> \"<topic>\" [--at \"2026-10-10 18:00\"]\n"
+                     "nm shorts status [job_id] [--json]\n"
+                     "nm shorts resume <run_id>\n"
+                     "nm shorts post <job_id> <platform> [--at ISO]\n"
+                     "nm shorts niches | nm shorts niche add <name>\n"
+                     "nm shorts calendar [--due] | nm shorts ledger [--platform X]\n"
+                     "nm shorts estimate <niche> \"<topic>\""),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sh_sub = shorts.add_subparsers(dest="shorts_action", required=True)
+    sh_make = sh_sub.add_parser("make", help="plan (and optionally render) a short")
+    sh_make.add_argument("niche", help="niche name (see: nm shorts niches)")
+    sh_make.add_argument("topic", help="topic / hook for this short")
+    sh_make.add_argument("--platforms", default="",
+                         help="comma list: youtube,tiktok,instagram,facebook,x")
+    sh_make.add_argument("--now", action="store_true",
+                         help="render immediately instead of just queueing")
+    sh_q = sh_sub.add_parser("queue", help="schedule a post on the calendar")
+    sh_q.add_argument("niche")
+    sh_q.add_argument("topic")
+    sh_q.add_argument("--at", default="", help="scheduled time label")
+    sh_q.add_argument("--platforms", default="")
+    sh_st = sh_sub.add_parser("status", help="list jobs / inspect one")
+    sh_st.add_argument("job_id", nargs="?", default="")
+    sh_st.add_argument("--json", action="store_true")
+    sh_rs = sh_sub.add_parser("resume", help="resume a failed run from its run dir")
+    sh_rs.add_argument("run_id")
+    sh_post = sh_sub.add_parser("post", help="publish a rendered job")
+    sh_post.add_argument("job_id")
+    sh_post.add_argument("platform",
+                         help="youtube|tiktok|instagram|facebook|x")
+    sh_post.add_argument("--at", default="",
+                         help="ISO datetime for scheduled publishing")
+    sh_sub.add_parser("niches", help="list content niches")
+    sh_na = sh_sub.add_parser("niche", help="scaffold a new niche plugin")
+    sh_na.add_argument("name")
+    sh_cal = sh_sub.add_parser("calendar", help="content calendar")
+    sh_cal.add_argument("--due", action="store_true")
+    sh_cal.add_argument("--json", action="store_true")
+    sh_ld = sh_sub.add_parser("ledger", help="posting ledger")
+    sh_ld.add_argument("--platform", default="")
+    sh_ld.add_argument("--json", action="store_true")
+    sh_est = sh_sub.add_parser("estimate", help="render time/cost estimate")
+    sh_est.add_argument("niche")
+    sh_est.add_argument("topic")
 
     room = sub.add_parser("room", aliases=CLI_ALIASES["room"],
         help="Project rooms: persistent per-goal workspaces",
