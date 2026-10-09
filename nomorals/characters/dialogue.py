@@ -83,6 +83,20 @@ def converse(brain_persona: str, char: Character, opener: str,
             line = _brain_say(brain_persona, ctx, suggest)
             dlg.add("Devon", line)
         char_turn = not char_turn
+
+    # background pass: relationships + mood shift from what happened
+    try:
+        from .processing import SessionEvent, process_session
+        from .relationships import RelationshipGraph, BRAIN_ID
+        graph = RelationshipGraph()
+        deep = any(len(t.text or "") > 200 for t in dlg.turns)
+        kind = "deep_conversation" if deep else "good_conversation"
+        process_session(
+            [SessionEvent(char.id, BRAIN_ID, kind, salience=0.6,
+                          note=dlg.transcript(3))],
+            {char.id: char}, graph)
+    except Exception:
+        pass
     return dlg
 
 

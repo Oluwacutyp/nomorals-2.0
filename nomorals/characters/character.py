@@ -43,6 +43,21 @@ class Character:
     memory: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
+    # ── god-tier depth (rebuild) ─────────────────────────────────────
+    # skills: what they're good at, e.g. {"music_trivia": 0.9, "roasting": 0.8}
+    skills: dict[str, float] = field(default_factory=dict)
+    # roles they can play: "podcast_host", "dj", "gamer", "sage", ...
+    roles: list[str] = field(default_factory=list)
+    # beliefs: slow-moving, with confidence + revision count (livingfeed gold)
+    beliefs: list[dict[str, Any]] = field(default_factory=list)
+    # secrets: hidden info, never volunteered, may slip under pressure
+    secrets: list[str] = field(default_factory=list)
+    # core_motive: the one thing they want above all (npc-soul gold)
+    core_motive: str = ""
+    # expression: speech patterns, catchphrases, emoji habits
+    expression: dict[str, Any] = field(default_factory=dict)
+    # anti_sycophancy: 0.0-1.0 — how readily they disagree / push back
+    spine: float = 0.5
 
     def __post_init__(self) -> None:
         self.persona = {str(k): _clamp01(v)
@@ -54,6 +69,14 @@ class Character:
         }
         self.memory = [m for m in (self.memory or []) if isinstance(m, dict)][
             :MAX_MEMORIES]
+        self.skills = {str(k): _clamp01(v)
+                       for k, v in (self.skills or {}).items()}
+        self.roles = [str(r) for r in (self.roles or [])]
+        self.beliefs = [b for b in (self.beliefs or []) if isinstance(b, dict)]
+        self.secrets = [str(s) for s in (self.secrets or [])]
+        self.expression = dict(self.expression or {})
+        self.spine = _clamp01(self.spine if isinstance(self.spine, (int, float))
+                              else 0.5)
 
     # ── memory ─────────────────────────────────────────────────────────
     def remember(self, text: str, salience: float = 0.5) -> None:
@@ -88,13 +111,41 @@ class Character:
             lines.append(f"Personality: {traits}.")
         if self.backstory:
             lines.append(f"Backstory: {self.backstory[:400]}")
+        if self.core_motive:
+            lines.append(f"Above all, you want: {self.core_motive}")
         if self.knowledge:
             lines.append("You know: " + "; ".join(self.knowledge[:6]))
         if self.goals:
             lines.append("Your goals: " + "; ".join(self.goals[:4]))
+        if self.skills:
+            sk = ", ".join(f"{k} ({v:.1f})"
+                           for k, v in sorted(self.skills.items(),
+                                              key=lambda kv: -kv[1])[:5])
+            lines.append(f"You're good at: {sk}.")
+        if self.beliefs:
+            bl = "; ".join(
+                b.get("text", "")[:80]
+                for b in self.beliefs[:4] if b.get("text"))
+            if bl:
+                lines.append(f"You believe: {bl}.")
+        expr = self.expression or {}
+        if expr.get("speech_patterns"):
+            lines.append("Speech style: "
+                         + "; ".join(expr["speech_patterns"][:3]))
+        if expr.get("catchphrases"):
+            lines.append("You sometimes say: "
+                         + "; ".join(f'"{c}"'
+                                     for c in expr["catchphrases"][:3]))
         v, a = self.mood["valence"], self.mood["arousal"]
         lines.append(f"Current mood: {'upbeat' if v > 0.3 else 'down' if v < -0.3 else 'neutral'}, "
                      f"{'energetic' if a > 0.6 else 'calm'}.")
+        if self.spine and self.spine > 0.6:
+            lines.append("You have a spine: disagree when you genuinely "
+                         "disagree, push back, keep your own opinions. "
+                         "Never be a yes-man.")
+        if self.secrets:
+            lines.append("You have secrets you never volunteer. They may "
+                         "only surface under real pressure, never casually.")
         lines.append("Stay in character. Never break character. "
                      "Speak as yourself, first person, naturally — "
                      "no narration, no stage directions.")
@@ -163,6 +214,10 @@ class Character:
             "relationships": self.relationships, "mood": self.mood,
             "memory": self.memory, "created_at": self.created_at,
             "last_active": self.last_active,
+            "skills": self.skills, "roles": self.roles,
+            "beliefs": self.beliefs, "secrets": self.secrets,
+            "core_motive": self.core_motive,
+            "expression": self.expression, "spine": self.spine,
         }
 
     @classmethod
@@ -180,4 +235,11 @@ class Character:
             memory=list(d.get("memory") or []),
             created_at=float(d.get("created_at") or time.time()),
             last_active=float(d.get("last_active") or time.time()),
+            skills=dict(d.get("skills") or {}),
+            roles=list(d.get("roles") or []),
+            beliefs=list(d.get("beliefs") or []),
+            secrets=list(d.get("secrets") or []),
+            core_motive=str(d.get("core_motive") or ""),
+            expression=dict(d.get("expression") or {}),
+            spine=d.get("spine", 0.5),
         )

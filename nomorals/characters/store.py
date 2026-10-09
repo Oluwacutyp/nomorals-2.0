@@ -53,6 +53,8 @@ class CharacterStore:
         out: list[Character] = []
         with self._lock:
             for p in sorted(self.dir.glob("*.json")):
+                if p.name.startswith("_"):
+                    continue  # sidecar files, not characters
                 try:
                     out.append(Character.from_dict(
                         json.loads(p.read_text("utf-8"))))
