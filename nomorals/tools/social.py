@@ -411,3 +411,92 @@ def register(registry: Any) -> None:
     )
     def telegram_invite_link(chat_key: str) -> dict[str, Any]:
         return _tg_admin(chat_key, "admin_invite_link")
+
+    @registry.register(
+        "telegram_demote",
+        description="Demote an admin back to member. Owner only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string", "description": "Numeric user ID"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def telegram_demote(chat_key: str, user_id: str) -> dict[str, Any]:
+        return _tg_admin(chat_key, "admin_demote", user_id=user_id)
+
+    @registry.register(
+        "telegram_restrict",
+        description=(
+            "Mute a user in a Telegram group (block sending messages) for "
+            "N minutes. 0 = indefinite. Owner only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "user_id": {"type": "string", "description": "Numeric user ID"},
+                "minutes": {"type": "integer", "description": "Mute duration (default 60, 0=indefinite)"},
+            },
+            "required": ["chat_key", "user_id"],
+        },
+    )
+    def telegram_restrict(chat_key: str, user_id: str,
+                          minutes: int = 60) -> dict[str, Any]:
+        return _tg_admin(chat_key, "admin_restrict", user_id=user_id,
+                         minutes=minutes)
+
+    @registry.register(
+        "telegram_delete",
+        description="Delete a message in a Telegram group/channel (admin). Owner only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "message_id": {"type": "string", "description": "Message to delete"},
+            },
+            "required": ["chat_key", "message_id"],
+        },
+    )
+    def telegram_delete(chat_key: str, message_id: str) -> dict[str, Any]:
+        return _tg_admin(chat_key, "admin_delete", message_id=message_id)
+
+    @registry.register(
+        "telegram_members",
+        description="List members of a Telegram group/channel. Owner only.",
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max members (default 100)"},
+            },
+            "required": ["chat_key"],
+        },
+    )
+    def telegram_members(chat_key: str, limit: int = 100) -> dict[str, Any]:
+        return _tg_admin(chat_key, "admin_members", limit=limit)
+
+    @registry.register(
+        "telegram_forum_topic",
+        description=(
+            "Create a forum topic in a Telegram supergroup (topics must be "
+            "enabled). MTProto path. Owner only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "title": {"type": "string", "description": "Topic title"},
+            },
+            "required": ["chat_key", "title"],
+        },
+    )
+    def telegram_forum_topic(chat_key: str, title: str) -> dict[str, Any]:
+        return _tg_admin(chat_key, "admin_forum_topic", title=title)

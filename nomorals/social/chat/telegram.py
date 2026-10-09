@@ -42,6 +42,29 @@ __all__ = ["TelegramAdapter", "TelegramBotAdapter"]
 
 _log = get_logger(__name__)
 
+def _flood_wait_seconds(exc: BaseException) -> int:
+    """Telegram's native rate-limit signal, duck-typed.
+
+    Telethon raises ``errors.FloodWaitError`` with a ``.seconds`` attr;
+    the Bot API answers HTTP 429 with ``parameters.retry_after``. This
+    helper reads either, so the retry logic doesn't import Telethon at
+    module level (optional dependency). 0 = not a rate-limit signal.
+    """
+    try:
+        seconds = int(getattr(exc, "seconds", 0) or 0)
+        if seconds > 0 and "flood" in type(exc).__name__.lower():
+            return seconds
+    except (TypeError, ValueError):
+        pass
+    try:
+        status = int(getattr(exc, "status", 0) or 0)
+        if status == 429:
+            return int((getattr(exc, "parameters", None) or {}).get("retry_after", 0) or 0)
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
 def media_download_allowed(kind: str, doc_size: int, media_in_groups: bool, media_max_mb: float) -> bool:
     """Pure gate for inbound media downloads (unit-testable without Telethon).
 
@@ -378,10 +401,15 @@ class TelegramAdapter(ChatAdapter):
         media_max_mb: float = 20.0,
         threads_enabled: bool = True,
         companion_bot_id: int | str | None = None,
+        flood_max_wait_s: float = 300.0,
     ) -> None:
         super().__init__(media_dir=media_dir)
         self.media_in_groups = bool(media_in_groups)
         self.media_max_mb = float(media_max_mb)
+        # Telegram flood waits: how long a send retry will honor (per
+        # retry). Larger waits fail fast instead of parking the send
+        # thread — the gateway/outbound caller can retry later.
+        self.flood_max_wait_s = max(1.0, float(flood_max_wait_s))
         # ID of the companion BotFather bot (if any). The bot's messages
         # arrive at this userbot as incoming — without this, the
         # _sender_is_bot guard relies solely on Telethon's .bot flag,
@@ -1259,6 +1287,31 @@ class TelegramAdapter(ChatAdapter):
         except (TypeError, ValueError):
             return {}
 
+    async def _send_with_flood_retry(self, fn: Any, what: str) -> Any:
+        """Run one MTProto send, honoring ONE flood wait.
+
+        Telegram answers bursts with FloodWaitError(seconds) — the native
+        rate-limit signal. We sleep exactly that long (capped at
+        ``flood_max_wait_s``) and retry once; a second flood means the
+        account is genuinely throttled and the send fails honestly instead
+        of parking the thread forever.
+        """
+        try:
+            return await fn()
+        except Exception as exc:  # noqa: BLE001 - check for the native signal
+            wait = _flood_wait_seconds(exc)
+            if wait <= 0:
+                raise
+            if wait > self.flood_max_wait_s:
+                _log.warning(
+                    "telegram %s: flood wait %ds exceeds cap %.0fs — failing fast",
+                    what, wait, self.flood_max_wait_s)
+                raise
+            _log.info("telegram %s: flood wait %ds — sleeping then retrying once",
+                      what, wait)
+            await asyncio.sleep(min(wait, self.flood_max_wait_s))
+            return await fn()
+
     async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str,
                           parse_mode: str = "") -> Any:
         # Try to use cached input entity first (most reliable for DMs)
@@ -1274,13 +1327,15 @@ class TelegramAdapter(ChatAdapter):
         kwargs.update(self._thread_kwargs(chat))
         result = None
         for chunk in _chunk_text(text, 4096):
-            try:
-                result = await client.send_message(entity, chunk, **kwargs)
-            except TypeError:  # older Telethon without message_thread_id
-                thread = kwargs.pop("message_thread_id", None)
-                if thread is not None and not kwargs.get("reply_to"):
-                    kwargs["reply_to"] = thread
-                result = await client.send_message(entity, chunk, **kwargs)
+            async def _one() -> Any:
+                try:
+                    return await client.send_message(entity, chunk, **kwargs)
+                except TypeError:  # older Telethon without message_thread_id
+                    thread = kwargs.pop("message_thread_id", None)
+                    if thread is not None and not kwargs.get("reply_to"):
+                        kwargs["reply_to"] = thread
+                    return await client.send_message(entity, chunk, **kwargs)
+            result = await self._send_with_flood_retry(_one, "send_message")
             # Only the first chunk carries the reply/thread reference.
             kwargs.pop("reply_to", None)
             kwargs.pop("message_thread_id", None)
@@ -1301,15 +1356,19 @@ class TelegramAdapter(ChatAdapter):
             kwargs = self._thread_kwargs(chat)
             if getattr(media, "voice_note", False):
                 kwargs["voice_note"] = True
-            try:
-                result = await client.send_file(
-                    entity, media.path, caption=caption or None, **kwargs
-                )
-            except TypeError:  # older Telethon without message_thread_id
-                kwargs.pop("message_thread_id", None)
-                result = await client.send_file(entity, media.path, caption=caption or None)
-            self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
-            return result
+
+            async def _one() -> Any:
+                try:
+                    result = await client.send_file(
+                        entity, media.path, caption=caption or None, **kwargs
+                    )
+                except TypeError:  # older Telethon without message_thread_id
+                    kwargs.pop("message_thread_id", None)
+                    result = await client.send_file(entity, media.path, caption=caption or None)
+                self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
+                return result
+
+            return await self._send_with_flood_retry(_one, "send_file")
 
         try:
             result = self._run_on_loop(_do())
@@ -1590,6 +1649,81 @@ class TelegramAdapter(ChatAdapter):
             return self._run_on_loop(self._my_rights_coro(chat), timeout=30.0)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"rights check failed: {exc}"}
+
+    async def _restrict_coro(self, chat: ChatRef, user_id: str,
+                             minutes: int = 60) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+        import time as _t
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        until = int(_t.time()) + max(60, minutes * 60) if minutes > 0 else None
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=user,
+            banned_rights=ChatBannedRights(
+                until_date=until, send_messages=True)))
+
+    def admin_restrict(self, chat: ChatRef, user_id: str,
+                       minutes: int = 60) -> dict[str, Any]:
+        """Mute a user (restrict sending) for N minutes. 0 = indefinite."""
+        return self._admin(
+            self._restrict_coro(chat, user_id, minutes), "restrict")
+
+    async def _delete_coro(self, chat: ChatRef, message_id: str) -> None:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        await self._client(functions.channels.DeleteMessagesRequest(
+            channel=entity, id=[int(message_id)]))
+
+    def admin_delete(self, chat: ChatRef, message_id: str) -> dict[str, Any]:
+        """Delete a message (admin)."""
+        return self._admin(self._delete_coro(chat, message_id), "delete")
+
+    async def _members_coro(self, chat: ChatRef,
+                            limit: int = 100) -> list[dict[str, Any]]:
+        entity = await self._resolve(chat)
+        out: list[dict[str, Any]] = []
+        async for u in self._client.iter_participants(
+                entity, limit=max(1, min(500, limit))):
+            out.append({
+                "id": str(getattr(u, "id", "")),
+                "name": " ".join(filter(None, [
+                    getattr(u, "first_name", ""),
+                    getattr(u, "last_name", "")])).strip(),
+                "username": getattr(u, "username", "") or "",
+                "bot": bool(getattr(u, "bot", False)),
+            })
+        return out
+
+    def admin_members(self, chat: ChatRef,
+                      limit: int = 100) -> dict[str, Any]:
+        """List group/channel members."""
+        try:
+            members = self._run_on_loop(
+                self._members_coro(chat, limit), timeout=60.0)
+            return {"ok": True, "members": members,
+                    "count": len(members)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"member list failed: {exc}"}
+
+    async def _forum_topic_coro(self, chat: ChatRef, title: str) -> int:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        result = await self._client(functions.channels.CreateForumTopicRequest(
+            channel=entity, title=title[:128], random_id=__import__(
+                "random").randrange(1, 2**63)))
+        topic = result.updates[0] if getattr(result, "updates", None) else None
+        return int(getattr(topic, "id", 0) or 0)
+
+    def admin_forum_topic(self, chat: ChatRef,
+                          title: str) -> dict[str, Any]:
+        """Create a forum topic (supergroups with topics enabled). MTProto."""
+        try:
+            tid = self._run_on_loop(
+                self._forum_topic_coro(chat, title), timeout=30.0)
+            return {"ok": True, "topic_id": tid}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"forum topic failed: {exc}"}
 
 
 # ── Bot API adapter ────────────────────────────────────────────────────────────
@@ -2148,18 +2282,21 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
         # The Bot API clears a typing indicator after ~5s server-side, so a
         # requested duration longer than that is held by re-firing
         # sendChatAction — the indicator stays up for the whole requested
         # window, proportional to the outgoing message length.
+        # ``action="recording"`` maps to the Bot API's record_voice action.
         if seconds <= 0:
             return False
+        api_action = "record_voice" if action == "recording" else "typing"
         deadline = time.time() + float(seconds)
         sent = False
         try:
             while time.time() < deadline:
-                self._api("sendChatAction", chat_id=int(chat.chat_id), action="typing")
+                self._api("sendChatAction", chat_id=int(chat.chat_id), action=api_action)
                 sent = True
                 time.sleep(min(4.0, max(0.1, deadline - time.time())))
             return sent
