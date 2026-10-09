@@ -285,13 +285,16 @@ def abliterate():
         for i, layer in enumerate(decoder.layers):
             r = harm_means[i] - safe_means[i]
             r_norm = r / (r.norm() + 1e-8)
-            r_norm = r_norm.to(model.device, dtype=torch.float16)
+            # Multi-GPU safe: do the math on the device where THIS layer lives
+            # (device_map="auto" shards layers across cuda:0/cuda:1 on T4 x2).
+            dev = layer.self_attn.o_proj.weight.device
+            r_dev = r_norm.to(dev, dtype=torch.float16)
             # Remove direction r from every matrix that writes to residual stream
             for proj_name in ["o_proj", "down_proj"]:
                 proj = getattr(layer.self_attn if proj_name == "o_proj" else layer.mlp, proj_name)
                 W = proj.weight.data.float()
                 # W' = W - r̂(r̂ᵀW) — kills any component along refusal direction
-                W -= torch.outer(r_norm.float(), r_norm.float() @ W)
+                W -= torch.outer(r_dev.float(), r_dev.float() @ W)
                 proj.weight.data = W.to(proj.weight.dtype)
 
     print(f"Saving abliterated model to {ABLITERATED}...")
