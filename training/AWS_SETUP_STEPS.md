@@ -31,7 +31,7 @@ if you follow step 1 first.
      (this is what keeps it at ~$0.35/hr instead of $1.00/hr)
 3. Click **Launch instance**
 
-**Cost check:** g5.xlarge spot ≈ $0.30–0.40/hr. 5 days ≈ $36–48. Inside your credits.
+**Cost check:** g5.xlarge spot ≈ $0.30–0.40/hr. ~3 days at 273K rows ≈ $25–30. Inside your credits.
 
 ---
 
@@ -69,6 +69,11 @@ pip install torch transformers accelerate unsloth datasets trl peft bitsandbytes
 # Set your HF token (get one at huggingface.co/settings/tokens — needs WRITE access)
 export HF_TOKEN="hf_your_token_here"
 
+# Optional: accept the lmsys license at
+# https://huggingface.co/datasets/lmsys/lmsys-chat-1m
+# with your HF account first to include its 40K rows;
+# otherwise the script warns and trains on ~233K rows.
+
 # Run with nohup so it survives if your SSH drops
 nohup python abliterate_and_train.py > train.log 2>&1 &
 
@@ -79,7 +84,7 @@ tail -f train.log
 **That's it.** The script:
 1. Abliterates Qwen2.5-VL-7B (~30-60 min)
 2. Streams all 6 datasets, stamps Devon persona (~1-2 hrs)
-3. Trains 500K rows, checkpointing every 500 steps (~4-5 days)
+3. Trains 273K rows (sweet spot, rank 32), checkpointing every 500 steps (~3 days)
 4. Pushes the adapter to `Cutyp/codebeast-7b-vl`
 
 **If the spot instance gets interrupted:** just re-run step 5's python command.

@@ -16,7 +16,7 @@ import json
 import random
 from pathlib import Path
 
-TARGET_ROWS = 500_000
+TARGET_ROWS = 273_000 # sweet spot LOCKED 2026-10-09 (matches abliterate_and_train.py)
 VAL_SPLIT   = 0.05
 SEED        = 13
 OUT_DIR     = Path("./codebeast_dataset")

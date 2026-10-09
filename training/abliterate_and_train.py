@@ -3,7 +3,7 @@
 CODE BEAST — Abliterate + Fine-tune pipeline (AWS g5.xlarge / A10G)
 
 Phase 1: Abliterate Qwen2.5-VL-7B-Instruct (remove refusal direction)
-Phase 2: QLoRA fine-tune on 500K Devon-persona dataset via Unsloth
+Phase 2: QLoRA fine-tune on 273K Devon-persona dataset via Unsloth
 Phase 3: Export to HuggingFace (Cutyp account)
 
 Run: python abliterate_and_train.py
