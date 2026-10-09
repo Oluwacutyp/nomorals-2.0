@@ -1,0 +1,145 @@
+"""Code-enforced social gating: the execution layer, not prompts.
+
+The problem: gating lived in prompt text (gate_block). A clever outsider
+message — or a model hiccup — could talk its way past instructions. The
+user's standing rule: gating must be CODE, never prompt-only.
+
+The fix: enforce at the tool-call boundary. The spine's tool loop already
+filters the tool list by capability AND denies at call time. This module
+adds the social-specific layer:
+
+* **Actor model** — every social tool call carries an actor: "owner" or
+  "outsider". Derived from the message's is_owner flag, never from text.
+* **Capability matrix** — what each actor may do, enforced in code:
+    - owner: everything (send, read, admin, bulk, characters, memory).
+    - outsider in DM: may converse (the brain replies), may NOT invoke
+      tools beyond a tiny public set (games in groups, nothing private).
+    - outsider in group: public features only (games, public info).
+      No memory access, no owner tools, no DMs to others.
+* **Deny, don't deflect** — a denied call returns a machine-readable
+  denial. The brain turns it into a natural in-character deflection;
+  the ENFORCEMENT is the denial, not the wording.
+
+This module never sees message text. It sees actors, capabilities, and
+chat kinds. Prompt injection can't reach it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from ..core.policy import Capability
+from ..social.chat.base import ChatKind
+
+__all__ = [
+    "ACTOR_OWNER",
+    "ACTOR_OUTSIDER",
+    "SocialGrant",
+    "grant_for",
+    "check_tool_call",
+]
+
+ACTOR_OWNER = "owner"
+ACTOR_OUTSIDER = "outsider"
+
+#: Tools outsiders may invoke, by chat kind. Everything else is denied
+#: at the call boundary — no prompt needed, no prompt can override.
+PUBLIC_DM_TOOLS: frozenset[str] = frozenset({
+    # An outsider DMing gets conversation only. No tools at all — the
+    # brain replies in character, guarded, with no system access.
+})
+PUBLIC_GROUP_TOOLS: frozenset[str] = frozenset({
+    # Games and public fun, per the user's spec: "in groups, games and
+    # other public features are NOT gated."
+    "game_move",
+    "game_join",
+    "game_list",
+    "game_status",
+    "music_request",   # request a song from the DJ
+    "dj_request",
+})
+
+
+@dataclass(frozen=True)
+class SocialGrant:
+    """What an actor may do on social surfaces."""
+
+    actor: str
+    may_send: bool = False
+    may_read_chats: bool = False
+    may_use_tools: frozenset[str] = frozenset()
+    may_admin: bool = False  # group admin actions (ban, pin, …)
+    may_dm_others: bool = False  # send DMs to people who aren't the owner
+    may_access_memory: bool = False
+    reason: str = ""
+
+
+def grant_for(*, is_owner: bool, chat_kind: str = ChatKind.DM) -> SocialGrant:
+    """One grant per actor per surface. Pure — no I/O, fully testable."""
+    if is_owner:
+        return SocialGrant(
+            actor=ACTOR_OWNER,
+            may_send=True,
+            may_read_chats=True,
+            may_use_tools=frozenset({"*"}),
+            may_admin=True,
+            may_dm_others=True,
+            may_access_memory=True,
+            reason="owner: full capability",
+        )
+    if chat_kind == ChatKind.GROUP:
+        return SocialGrant(
+            actor=ACTOR_OUTSIDER,
+            may_send=False,  # outsiders never send THROUGH her account
+            may_read_chats=False,
+            may_use_tools=PUBLIC_GROUP_TOOLS,
+            may_admin=False,
+            may_dm_others=False,
+            may_access_memory=False,
+            reason="outsider in group: public features only",
+        )
+    return SocialGrant(
+        actor=ACTOR_OUTSIDER,
+        may_send=False,
+        may_read_chats=False,
+        may_use_tools=PUBLIC_DM_TOOLS,
+        may_admin=False,
+        may_dm_others=False,
+        may_access_memory=False,
+        reason="outsider in DM: conversation only, no tools",
+    )
+
+
+def check_tool_call(
+    tool_name: str, *, grant: SocialGrant
+) -> tuple[bool, str]:
+    """Enforce the grant at the call boundary. Returns (allowed, reason).
+
+    Called by the tool loop before executing any social-adjacent tool for
+    a non-owner actor. The owner path never reaches here (full grant).
+    """
+    if grant.actor == ACTOR_OWNER:
+        return True, "owner"
+    allowed = grant.may_use_tools
+    if "*" in allowed or tool_name in allowed:
+        return True, f"public tool: {tool_name}"
+    return False, (
+        f"denied: {tool_name} is not available here "
+        f"({grant.reason})"
+    )
+
+
+def capabilities_for_grant(grant: SocialGrant) -> set[str]:
+    """Map a social grant onto registry capabilities for the tool loop's
+    filtered listing. An outsider's model prompt literally cannot see
+    tools it may not call."""
+    if grant.actor == ACTOR_OWNER:
+        return {"*"}
+    caps: set[str] = set()
+    # Outsiders keep read-only public capabilities at most; sends are
+    # never in their capability set — the registry denies at call time
+    # even if a tool name leaks through.
+    if grant.may_use_tools:
+        caps.add(Capability.SOCIAL_READ)
+    return caps

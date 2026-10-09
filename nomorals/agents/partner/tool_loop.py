@@ -255,6 +255,23 @@ class ToolCallingLoop:
             except Exception:
                 pass
 
+        # Social gate: code-enforced, not prompt-only. For non-owner actors,
+        # social-adjacent tools go through the grant check BEFORE the
+        # registry. The registry's capability enforcement is the second
+        # layer; this is the social-specific first layer.
+        if actor != "owner" and call.name.startswith(
+            ("social_", "telegram_", "game_")
+        ):
+            try:
+                from ..social_gate import check_tool_call, grant_for
+                chat_kind = (loop_ctx or {}).get("chat_kind", "dm")
+                grant = grant_for(is_owner=False, chat_kind=chat_kind)
+                allowed, reason = check_tool_call(call.name, grant=grant)
+                if not allowed:
+                    return f"[denied] {reason}"
+            except Exception:  # noqa: BLE001 — gate failure = deny
+                return "[denied] social gate unavailable"
+
         def _run() -> Any:
             kwargs: dict[str, Any] = {"capabilities": capabilities} \
                 if capabilities is not None else {}

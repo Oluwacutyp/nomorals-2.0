@@ -1455,6 +1455,142 @@ class TelegramAdapter(ChatAdapter):
             _log.debug("telegram history failed: %s", exc)
             return []
 
+    # ── group admin power mode ─────────────────────────────────────
+    # Full admin surface for when the account is an admin. Every method
+    # is owner-gated at the tool layer (social_gate) — the adapter is a
+    # dumb pipe, the enforcement lives in code above it.
+
+    def _admin(self, coro: Any, what: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Run an admin coroutine, returning an honest result dict."""
+        try:
+            self._run_on_loop(coro, timeout=timeout)
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{what} failed: {exc}"}
+
+    async def _pin_coro(self, chat: ChatRef, message_id: str, silent: bool) -> None:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        await self._client(functions.messages.UpdatePinnedMessageRequest(
+            peer=entity, id=int(message_id), silent=silent))
+
+    def admin_pin(self, chat: ChatRef, message_id: str, silent: bool = True) -> dict[str, Any]:
+        """Pin a message in a group/channel."""
+        return self._admin(self._pin_coro(chat, message_id, silent), "pin")
+
+    async def _unpin_coro(self, chat: ChatRef) -> None:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        await self._client(functions.messages.UpdatePinnedMessageRequest(
+            peer=entity, id=0, silent=True))
+
+    def admin_unpin(self, chat: ChatRef) -> dict[str, Any]:
+        """Unpin the pinned message."""
+        return self._admin(self._unpin_coro(chat), "unpin")
+
+    async def _ban_coro(self, chat: ChatRef, user_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=user,
+            banned_rights=ChatBannedRights(
+                until_date=None, view_messages=True)))
+
+    def admin_ban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Ban a user from a group/channel."""
+        return self._admin(self._ban_coro(chat, user_id), "ban")
+
+    async def _unban_coro(self, chat: ChatRef, user_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=user,
+            banned_rights=ChatBannedRights(until_date=None)))
+
+    def admin_unban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Unban a user."""
+        return self._admin(self._unban_coro(chat, user_id), "unban")
+
+    async def _promote_coro(self, chat: ChatRef, user_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatAdminRights
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        await self._client(functions.channels.EditAdminRequest(
+            channel=entity, user_id=user,
+            admin_rights=ChatAdminRights(
+                change_info=True, post_messages=True,
+                edit_messages=True, delete_messages=True,
+                ban_users=True, invite_users=True,
+                pin_messages=True, add_admins=False,
+                manage_call=True),
+            rank="admin"))
+
+    def admin_promote(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Promote a user to admin."""
+        return self._admin(self._promote_coro(chat, user_id), "promote")
+
+    async def _demote_coro(self, chat: ChatRef, user_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatAdminRights
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        await self._client(functions.channels.EditAdminRequest(
+            channel=entity, user_id=user,
+            admin_rights=ChatAdminRights(), rank=""))
+
+    def admin_demote(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Demote an admin."""
+        return self._admin(self._demote_coro(chat, user_id), "demote")
+
+    async def _invite_link_coro(self, chat: ChatRef) -> str:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        result = await self._client(
+            functions.messages.ExportChatInviteRequest(peer=entity))
+        return getattr(result, "link", "")
+
+    def admin_invite_link(self, chat: ChatRef) -> dict[str, Any]:
+        """Get (or create) the group's invite link."""
+        try:
+            link = self._run_on_loop(self._invite_link_coro(chat), timeout=30.0)
+            return {"ok": True, "link": link}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"invite link failed: {exc}"}
+
+    async def _my_rights_coro(self, chat: ChatRef) -> dict[str, Any]:
+        """What admin rights WE have in this chat. Honest capability check."""
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        me = await self._client.get_me()
+        try:
+            result = await self._client(functions.channels.GetParticipantRequest(
+                channel=entity, participant=me))
+            participant = getattr(result, "participant", None)
+            rights = getattr(participant, "admin_rights", None)
+            if rights is None:
+                return {"is_admin": False, "rights": {}}
+            return {
+                "is_admin": True,
+                "rights": {
+                    k: bool(v) for k, v in vars(rights).items()
+                    if not k.startswith("_")
+                },
+            }
+        except Exception:
+            return {"is_admin": False, "rights": {}}
+
+    def admin_my_rights(self, chat: ChatRef) -> dict[str, Any]:
+        """Check our own admin rights in a chat before acting."""
+        try:
+            return self._run_on_loop(self._my_rights_coro(chat), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"rights check failed: {exc}"}
+
 
 # ── Bot API adapter ────────────────────────────────────────────────────────────
 
