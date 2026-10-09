@@ -222,9 +222,24 @@ class RuntimeVoiceMixin:
 
         if verb == "clone":
             cparts = rest.strip().split(None, 1)
+            # No name given: hold the audio, ask for a name. The next
+            # message in this chat names the voice (see _process hook).
             if not cparts:
-                return ("usage: /voice clone <name> [audio path] — attach a "
-                        "voice note to this message or pass a file path")
+                path = ""
+                if message is not None:
+                    for media in getattr(message, "media", None) or []:
+                        if getattr(media, "kind", "") in ("audio", "voice"):
+                            path = getattr(media, "path", "") or ""
+                            break
+                if not path or not os.path.exists(path):
+                    return ("attach a voice note to /voice clone and I'll "
+                            "clone it — then tell me what to call it")
+                pending = getattr(self, "_pending_voice_clones", None)
+                if pending is None:
+                    pending = self._pending_voice_clones = {}
+                pending[chat_key] = {"path": path, "ts": __import__("time").time()}
+                return ("🎙️ got the audio — what should I call this voice? "
+                        "Just reply with a name.")
             name, path = cparts[0], (cparts[1] if len(cparts) > 1 else "")
             if not path and message is not None:
                 for media in getattr(message, "media", None) or []:
@@ -374,6 +389,32 @@ class RuntimeVoiceMixin:
             return "say failed: no audio produced"
         return self._deliver_voice_note(chat_key, path, text,
                                         out.get("backend", "?"))
+
+    def _finish_voice_clone(self, chat_key: str, chat, name: str,
+                            audio_path: str) -> str:
+        """Complete a pending /voice clone once the user supplies a name."""
+        import os
+        from ...voice.catalogue import default_catalogue
+        if not os.path.exists(audio_path):
+            return "🎙️ the audio's gone — send it again with /voice clone"
+        try:
+            cat = default_catalogue()
+        except Exception as exc:  # noqa: BLE001
+            return f"🎙️ voice system failed: {exc}"
+        transcript = ""
+        try:
+            outcome = self.context.tools.call("transcribe", path=audio_path)
+            if outcome.ok and outcome.value:
+                transcript = outcome.value.get("text", "") or ""
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            voice = cat.clone(name, audio_path, transcript=transcript,
+                              description="cloned by owner via /voice clone")
+        except Exception as exc:  # noqa: BLE001
+            return f"🎙️ clone failed: {exc}"
+        return (f"🎙️ '{voice.name}' saved — say something in it:\n"
+                f"/voice say {voice.name} hello there")
 
     def _control_voices(self, tail: str, chat_key: str = "") -> str:
         """`/voices` — unified voice picker across all TTS backends.

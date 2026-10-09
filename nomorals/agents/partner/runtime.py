@@ -443,6 +443,29 @@ class PartnerRuntime(
 
     def _process(self, message: ChatMessage) -> None:
         self._bump("messages")
+        # Pending voice-clone naming: /voice clone with no name holds the
+        # audio and asks; the next short text message in that chat is the
+        # name. Checked before anything else so it can't be misread as chat.
+        if message.incoming and not (message.text or "").strip().startswith("/"):
+            pending = getattr(self, "_pending_voice_clones", None) or {}
+            hold = pending.get(message.chat.key)
+            if hold:
+                name = (message.text or "").strip()
+                # A name is short and single-line; anything else isn't a name.
+                if name and len(name) <= 40 and "\n" not in name:
+                    import time as _t
+                    if _t.time() - hold.get("ts", 0) < 600:  # 10 min window
+                        del pending[message.chat.key]
+                        reply = self._finish_voice_clone(
+                            message.chat.key, message.chat, name, hold["path"])
+                        try:
+                            self._typing_for(message.chat, reply)
+                            self.gateway.send(message.chat.platform,
+                                              message.chat, reply)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return
+                    del pending[message.chat.key]  # expired
         # SMS fallback surface (build-map #19): SMS can't carry media into
         # the brain. Answer honestly instead of letting her hallucinate
         # about a picture she never received.
