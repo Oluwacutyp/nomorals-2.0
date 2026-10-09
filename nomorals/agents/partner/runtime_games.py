@@ -1199,8 +1199,100 @@ class RuntimeGamesMixin:
         return ("usage: /npc list · /npc talk <name> <message> · "
                 "/npc mood <name>")
 
-    def _control_dm(self, tail: str, chat_key: str) -> str:
-        """DM persona: /dm mood [mood] — inspect or set the narrator mood."""
+    def _control_character(self, tail: str, chat_key: str) -> str:
+        """Character agents: /character list | create <name> [trait=0.8 ...]
+        | talk <name> <message> | play <game> <name...> | forget <name>."""
+        from ...characters import (
+            Character, CharacterStore, converse, AgentSeat,
+            run_agent_match, register_with_engine,
+        )
+        store = CharacterStore()
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if verb == "list":
+            chars = store.all()
+            if not chars:
+                return ("no characters yet — create one:\n"
+                        "/character create Zara witty=0.9 bold=0.6")
+            return "\n".join(
+                f"🎭 {c.name} — {', '.join(sorted(c.persona)[:4]) or 'no traits'}"
+                f"{' · voice: ' + c.voice_name if c.voice_name else ''}"
+                for c in chars)
+
+        if verb == "create":
+            bits = rest.split()
+            if not bits:
+                return "usage: /character create <name> [trait=0.0-1.0 ...]"
+            name = bits[0]
+            if store.get_by_name(name):
+                return f"🎭 {name} already exists."
+            persona: dict[str, float] = {}
+            for b in bits[1:]:
+                if "=" in b:
+                    k, v = b.split("=", 1)
+                    try:
+                        persona[k.strip()] = max(0.0, min(1.0, float(v)))
+                    except ValueError:
+                        pass
+            c = Character(name=name, persona=persona)
+            store.save(c)
+            return (f"🎭 {name} is alive. Talk to them:\n"
+                    f"/character talk {name} hello")
+
+        if verb == "talk":
+            bits = rest.split(None, 1)
+            if len(bits) < 2:
+                return "usage: /character talk <name> <message>"
+            c = store.get_by_name(bits[0])
+            if c is None:
+                return f"no character named '{bits[0]}'."
+            suggest = getattr(self.context, "suggest", None)
+            dlg = converse("You are Devon, a warm AI companion.",
+                           c, bits[1], suggest, rounds=1)
+            store.save(c)
+            last = dlg.turns[-1] if dlg.turns else None
+            return f"🎭 {c.name}: {last.text}" if last else "…"
+
+        if verb == "play":
+            bits = rest.split()
+            if len(bits) < 2:
+                return ("usage: /character play <game> <name...> — "
+                        "Devon + characters play a real match")
+            game_name, names = bits[0], bits[1:]
+            chars = []
+            for n in names:
+                c = store.get_by_name(n)
+                if c is None:
+                    return f"no character named '{n}'."
+                chars.append(c)
+            seats = [AgentSeat(kind="brain")] + [
+                AgentSeat(kind="character", character=c) for c in chars]
+            suggest = getattr(self.context, "suggest", None)
+            try:
+                res = run_agent_match(game_name, seats, suggest,
+                                      store=store, max_turns=120)
+            except ValueError as e:
+                return f"🎲 {e}"
+            except Exception as e:  # noqa: BLE001
+                return f"🎲 match failed: {e}"
+            tail_lines = res.transcript[-14:]
+            return ("🎲 " + game_name + f" — Devon vs "
+                    + ", ".join(c.name for c in chars) + "\n"
+                    + "\n".join(tail_lines))
+
+        if verb == "forget":
+            c = store.get_by_name(rest.strip())
+            if c is None:
+                return f"no character named '{rest.strip()}'."
+            store.delete(c.id)
+            return f"🎭 {c.name} is gone."
+
+        return ("usage: /character list · create <name> [trait=0.8] · "
+                "talk <name> <msg> · play <game> <names...> · forget <name>")
+        """DM persona: /dm [mood <m>] | say <text> | intro — the narrator
+        speaks in its own voice, in the table's current mood."""
         from ..features import feature_enabled
         if not feature_enabled(self.context, "games"):
             return "games are off. /features games on"
@@ -1236,6 +1328,14 @@ class RuntimeGamesMixin:
                 send=self._game_send,
                 suggest=self._game_suggest(),
             )
+            # character/brain agent seats play through the live engine
+            try:
+                from ...characters import CharacterStore, register_with_engine
+                register_with_engine(
+                    engine, CharacterStore(),
+                    suggest=self._game_suggest())
+            except Exception:
+                pass
             self._game_engine_obj = engine
         return engine
 

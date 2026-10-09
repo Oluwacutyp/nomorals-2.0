@@ -148,6 +148,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
     "npc": (0, None),        # /npc list | talk <name> <msg> | mood <name> — the living cast
+    "character": (0, None),  # /character list | create | talk | play | forget — persistent agents
     "dm": (0, 2),            # /dm mood [mood] — the narrator's persona
     # wave 87: direct game-start commands — games are social, so they work in
     # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
@@ -1077,6 +1078,16 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                      "/npc mood <name>",
             "example": "/npc list  ·  /npc talk Marlowe \"any advice?\"",
             "related": "/dm · /game"},
+    "character": {"what": "persistent character agents — they converse, "
+                         "remember, and play games with Devon as fellow "
+                         "agents, not scripted NPCs. Foundation for podcast "
+                         "hosts and room participants.",
+            "usage": "/character list · /character create <name> [trait=0.8] · "
+                     "/character talk <name> <message> · "
+                     "/character play <game> <names...> · /character forget <name>",
+            "example": "/character create Zara witty=0.9  ·  "
+                       "/character play auction Zara Kilo",
+            "related": "/npc · /game"},
     "dm": {"what": "the game master's persona — the narrator's mood for "
                    "the current game. Grim, whimsical, epic, deadpan or "
                    "neutral; it shapes how scenes are described.",

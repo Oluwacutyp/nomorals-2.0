@@ -113,9 +113,17 @@ class GameEngine:
         self.board = Leaderboard(self.store)
         self.games: dict[str, MultiGame] = {}
         self._wake = threading.Event()
+        #: Agent seat deciders: key-prefix -> callable(room, player, game,
+        #: mind) -> list[str] | None. Registered by the characters module
+        #: (or others) so character/brain seats play through the real
+        #: engine instead of the built-in house brain. Returning None
+        #: falls back to the game's ai_turn.
+        self.seat_deciders: dict[str, Any] = {}
         self._stopping = False
         self._thread: threading.Thread | None = None
         self._relay_obj: Any = None  # lazy GameRelay (see relay property)
+        self._matchmaker_obj: Any = None  # lazy Matchmaker (see below)
+        self._dm_obj: Any = None  # lazy GameMaster (see dm property)
         self._last_game: dict[str, tuple[str, list[Player], str]] = {}
         self._register_builtins()
         self._start_scheduler()
@@ -961,6 +969,27 @@ class GameEngine:
                 msgs.append(game.final_message(room, self._mind))
             except Exception:  # noqa: BLE001
                 msgs.append("game over.")
+            # fairness reveal: the server seed is published now that the
+            # game is over, with the recipe to re-derive every draw.
+            if room.state.get("fair") is not None:
+                try:
+                    from .fairness import reveal_block
+                    msgs.append(reveal_block(room.state["fair"]))
+                except Exception:  # noqa: BLE001
+                    _log.debug("fair reveal failed", exc_info=True)
+            # the DM gets the last word: drain any remaining feed, then
+            # narrate the finale for games that opted into one.
+            self._drain_dm_feed(room, game, msgs, force=True)
+            if getattr(game, "dm_finale", False):
+                try:
+                    evt = game.dm_finale_event(room)
+                    if evt:
+                        line = self.dm.announce(
+                            game.name, [{"text": evt, "big": True}])
+                        if line:
+                            msgs.append(line)
+                except Exception:  # noqa: BLE001
+                    _log.debug("dm finale failed", exc_info=True)
             # victory loot: games with exclusive drops (raid bosses)
             # roll them here; grants go through GearStore so pieces
             # persist like any other gear.

@@ -2529,6 +2529,10 @@ class PartnerRuntime(
         if kind == "npc":
             # the living cast — game-scoped via the live room in this chat
             return self._control_npc(command.tail or arg, chat_key=chat_key)
+        if kind == "character":
+            # character agents — persistent entities beyond any one game
+            return self._control_character(command.tail or arg,
+                                          chat_key=chat_key)
         if kind == "dm":
             # the narrator's persona for the current game
             return self._control_dm(command.tail or arg, chat_key=chat_key)

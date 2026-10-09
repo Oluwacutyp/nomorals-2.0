@@ -1322,6 +1322,14 @@ class AuctionGame(MultiGame):
     def score(self, room, player):
         return int(room.state.get("profit", {}).get(player.key, 0))
 
+    def describe_options(self, room) -> list[str]:
+        s = room.state
+        lead = int(s.get("leader") or 0)
+        opts = ["pass"]
+        for step in (10, 25, 50, 100, 250):
+            opts.append(f"bid {lead + step}")
+        return opts
+
     def describe_state(self, room):
         s = room.state
         name, _ = s["lots"][s["round"]]

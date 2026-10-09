@@ -268,6 +268,12 @@ class MultiGame:
         """Play one move for an AI seat. Return the messages to send."""
         return []
 
+    def describe_options(self, room: Room) -> list[str]:
+        """Legal moves for the current seat, as exact strings the agent
+        may reply with. Used by character/brain seats to pick valid moves.
+        Default: no structured options (free-text move)."""
+        return []
+
     def on_timeout(self, room: Room, player: Player,
                    mind: GameMind) -> list[str]:
         """The current human's clock ran out. Default: pass the turn."""
