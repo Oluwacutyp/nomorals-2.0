@@ -124,6 +124,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "searchhist": (0, 1),    # /searchhist [n]
     # BookForge: write a real book → PDF → send when done
     "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
+    "novel": (0, None),      # /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]
     # WisdomKeeper: esoteric corpus Q&A, history timeline, guided practice
     "wisdom": (0, None),     # /wisdom ask <q> | practice list|<id>|stop | timeline [t] | compare <t> | status
     "wis": (0, None),        # alias of /wisdom
@@ -820,6 +821,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/book <topic> [chapters]   |   /book status [slug]  |  /book list",
              "example": "/book eBPF for system security 8",
              "related": "/searchdeep (it researches the topic first)"},
+    "novel": {"what": "Story reader + continuer: follow webnovels (freewebnovel, pandanovel, "
+                      "more), read chapters with progress tracking, and continue any story "
+                      "past its ending in the story's own voice (story bible auto-built).",
+             "usage": "/novel follow <url|title> | /novel list | /novel read <slug> [chapter] | /novel continue <slug> [n]",
+             "example": "/novel continue my-vampire-system 3",
+             "related": "/book"},
     "wisdom": {"what": "WisdomKeeper: ask the esoteric corpus (answer + provenance), "
                        "browse the history timeline, or run a guided breathing / "
                        "sitting session right here in chat with timed messages.",

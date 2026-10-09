@@ -2392,6 +2392,8 @@ class PartnerRuntime(
             return control_email(command.tail or arg, context=self.context)
         if kind == "book":
             return self._control_book(tail=command.tail or arg, chat_key=chat_key)
+        if kind == "novel":
+            return self._control_novel(tail=command.tail or arg, chat_key=chat_key)
         if kind in {"wisdom", "wis"}:
             # WisdomKeeper: /wisdom and its /wis alias share one handler.
             return self._control_wisdom(command.tail or arg, chat_key=chat_key,
