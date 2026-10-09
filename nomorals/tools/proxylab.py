@@ -59,7 +59,11 @@ __all__ = [
     "ProxyStore",
     "ProxyLab",
     "ProxyRotationManager",
+    "DomainAffinityManager",
     "default_sources",
+    "rank_proxies",
+    "score_proxy",
+    "empty_pool_guidance",
     "register",
     "proxy_discover",
     "proxy_sources",
@@ -77,6 +81,43 @@ DEFAULT_SOURCES: tuple[tuple[str, str, str], ...] = _BUILTIN_CATALOG
 
 _UA = ("Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 "
        "Firefox/128.0")
+
+#: per-profile concurrency (profile-gating, not designing down: the
+#: lab does the same work everywhere, just with fewer parallel
+#: connections on small devices)
+_PROFILE_WORKERS = {
+    "workstation": {"scrape": 8, "test": 12},
+    "laptop": {"scrape": 6, "test": 8},
+    "termux": {"scrape": 3, "test": 4},
+}
+
+
+def detect_profile(context: Any = None) -> str:
+    """workstation | laptop | termux — settings pin first, then the
+    Termux $PREFIX heuristic (mirrors agent_loop)."""
+    try:
+        settings = getattr(context, "settings", None) if context else None
+        prof = (getattr(settings, "profile", "") or "").strip().lower()
+        if prof in _PROFILE_WORKERS:
+            return prof
+        ctx_prof = (getattr(context, "resource_profile", "") or ""
+                    ).strip().lower()
+        if ctx_prof in _PROFILE_WORKERS:
+            return ctx_prof
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if os.environ.get("PREFIX", "").startswith("/data/data/com.termux"):
+            return "termux"
+    except Exception:  # noqa: BLE001
+        pass
+    return "workstation"
+
+
+def profile_workers(profile: str, kind: str) -> int:
+    """Worker count for ``kind`` ("scrape" | "test") on ``profile``."""
+    return _PROFILE_WORKERS.get((profile or "").lower(),
+                                _PROFILE_WORKERS["workstation"])[kind]
 
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 #: the ip:port token anywhere in a line — plain lists, decorated lists
@@ -99,9 +140,17 @@ class Proxy:
     egress_ip: str = ""
     latency_ms: int = 0
     anonymity: str = ""           # transparent | anonymous | elite | ""
+    claimed_anonymity: str = ""   # the SOURCE's label (never overwrites
+    # a lab test) — e.g. proxydb's "High Anonymous" → elite
     alive: bool = False
     tested_at: float = field(default_factory=time.time)
     error: str = ""
+    # rolling latency samples (ts, ms) — recent ones weigh more in the
+    # decayed average; capped so a long-lived record stays small
+    latency_samples: list[tuple[float, float]] = field(default_factory=list)
+    consecutive_failures: int = 0
+    backoff_until: float = 0.0    # unix ts: excluded from routing until then
+    last_success: float = 0.0
 
     @property
     def url(self) -> str:
@@ -120,12 +169,26 @@ class Proxy:
             "url": self.url, "host": self.host, "port": int(self.port),
             "scheme": self.scheme, "country": self.country,
             "egress_ip": self.egress_ip, "latency_ms": int(self.latency_ms),
-            "anonymity": self.anonymity, "alive": bool(self.alive),
+            "anonymity": self.anonymity,
+            "claimed_anonymity": self.claimed_anonymity,
+            "alive": bool(self.alive),
             "tested_at": float(self.tested_at), "error": self.error,
+            "latency_samples": [[float(t), float(ms)]
+                                for t, ms in self.latency_samples[-12:]],
+            "consecutive_failures": int(self.consecutive_failures),
+            "backoff_until": float(self.backoff_until),
+            "last_success": float(self.last_success),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Proxy":
+        samples = data.get("latency_samples") or []
+        clean: list[tuple[float, float]] = []
+        for s in samples:
+            try:
+                clean.append((float(s[0]), float(s[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
         return cls(
             host=str(data.get("host") or ""),
             port=int(data.get("port") or 0),
@@ -134,10 +197,76 @@ class Proxy:
             egress_ip=str(data.get("egress_ip") or ""),
             latency_ms=int(data.get("latency_ms") or 0),
             anonymity=str(data.get("anonymity") or ""),
+            claimed_anonymity=str(data.get("claimed_anonymity") or ""),
             alive=bool(data.get("alive")),
             tested_at=float(data.get("tested_at") or time.time()),
             error=str(data.get("error") or ""),
+            latency_samples=clean[-12:],
+            consecutive_failures=int(data.get("consecutive_failures") or 0),
+            backoff_until=float(data.get("backoff_until") or 0.0),
+            last_success=float(data.get("last_success") or 0.0),
         )
+
+    # -- latency with time decay -------------------------------------------
+    def record_latency(self, ms: float,
+                       at: float | None = None) -> None:
+        """One more measurement; old samples age out of influence."""
+        self.latency_samples.append((at if at is not None else time.time(),
+                                     max(0.0, float(ms))))
+        del self.latency_samples[:-12]
+        self.latency_ms = round(self.decayed_latency())
+
+    def decayed_latency(self, at: float | None = None,
+                        half_life_hours: float = 6.0) -> float:
+        """Exponentially-decayed latency average: recent measurements
+        weigh more.  Empty history falls back to the last point value."""
+        now = at if at is not None else time.time()
+        half = max(0.25, float(half_life_hours)) * 3600.0
+        total = weight = 0.0
+        for ts, ms in self.latency_samples:
+            age = max(0.0, now - float(ts))
+            w = 0.5 ** (age / half)
+            total += float(ms) * w
+            weight += w
+        if weight > 0:
+            return total / weight
+        return float(self.latency_ms or 0)
+
+    @property
+    def in_backoff(self) -> bool:
+        return float(self.backoff_until or 0.0) > time.time()
+
+    def record_success(self, ms: float,
+                       at: float | None = None) -> None:
+        """A request through this proxy worked: sample the latency,
+        clear the failure streak, drop any backoff."""
+        now = at if at is not None else time.time()
+        self.record_latency(ms, at=now)
+        self.consecutive_failures = 0
+        self.backoff_until = 0.0
+        self.last_success = now
+        self.alive = True
+        self.error = ""
+
+    def record_failure(self, reason: str = "",
+                       backoff_seconds: float = 300.0,
+                       at: float | None = None) -> float:
+        """A request through this proxy failed at the connection level:
+        the failure streak grows, the proxy is demoted with an
+        exponential backoff (base * 2^streak, capped at 1h), and the
+        reason is kept — nothing is dropped silently.  ``alive`` is
+        left alone: a routing failure is transient (retry after the
+        backoff), only the lab's own test marks a proxy dead.
+        Returns the unix timestamp until which the proxy stays out of
+        routing."""
+        now = at if at is not None else time.time()
+        self.consecutive_failures = int(self.consecutive_failures) + 1
+        backoff = min(float(backoff_seconds)
+                      * (2 ** (self.consecutive_failures - 1)), 3600.0)
+        self.backoff_until = now + backoff
+        if reason:
+            self.error = reason[:200]
+        return self.backoff_until
 
 
 # ── transport (raw-socket HTTP + SOCKS4/5 — stdlib only) ────────────────────
@@ -293,11 +422,15 @@ class ProxyScraper:
     def __init__(self, *, fetcher: Callable[[str], bytes] | None = None,
                  timeout: float = 10.0, user_agent: str = _UA,
                  sources: list[tuple[str, str, str]] | None = None,
-                 max_workers: int = 8) -> None:
+                 max_workers: int = 0, profile: str = "") -> None:
         self.timeout = float(timeout)
         self.user_agent = user_agent
         self.sources = list(sources or DEFAULT_SOURCES)
-        self.max_workers = max(1, int(max_workers))
+        # explicit max_workers wins; otherwise the runtime profile picks
+        # (termux = fewer parallel connections, same work)
+        self.max_workers = max(1, int(max_workers)) if max_workers else \
+            profile_workers(profile or detect_profile(), "scrape")
+        self.profile = profile or detect_profile()
         self._fetcher = fetcher or self._http_get
 
     # -- transport ----------------------------------------------------------
@@ -454,6 +587,10 @@ class ProxyScraper:
         for row in re.findall(r"<tr[^>]*>(.*?)</tr>", text,
                               re.IGNORECASE | re.DOTALL):
             host, port = "", 0
+            # anti-scraper junk first: strip display:none elements (proxydb
+            # hides port-poisoning digits in them; tag-stripping alone
+            # would concatenate them onto the real port)
+            row = _HIDDEN_ELT_RE.sub("", row)
             # layout 4: base64-encoded ip/port cell attributes — check
             # the raw row HTML before the tags are stripped
             m_ip = re.search(r'data-ip="([^"]+)"', row)
@@ -508,8 +645,20 @@ class ProxyScraper:
                     break
             country = next((c for c in cells
                             if re.fullmatch(r"[A-Z]{2,3}", c)), "")
+            # the site's claimed anonymity label (proxydb: "High
+            # Anonymous") — the lab's own tested anonymity goes on
+            # Proxy.anonymity later; this never overwrites a test
+            claimed = ""
+            for c in cells:
+                if _valid_ip(c) or c.isdigit():
+                    continue
+                m = _CLAIMED_ANON_RE.search(c)
+                if m:
+                    claimed = _CLAIMED_ANON_MAP[m.group(1).lower()
+                                               .replace("  ", " ")]
+                    break
             out.append(Proxy(host=host, port=port, scheme=row_scheme,
-                             country=country))
+                             country=country, claimed_anonymity=claimed))
         return out
 
     # -- driver -------------------------------------------------------------
@@ -726,6 +875,23 @@ _LEAK_HEADERS = ("x-forwarded-for", "x-real-ip", "proxy-connection",
                  "proxy-client_ip", "proxy-authorization", "forwarded",
                  "via", "x-forwarded-proto")
 
+#: proxydb.net poisons its port cells with <div style="display:none">NN</div>
+#: junk that concatenates onto the real port after tag-stripping
+#: ("12"+"1090" = "121090" — an invalid port, so the whole row was
+#: dropped; ("12"+"80" = "1280" — a WRONG port that passed).  Strip
+#: hidden elements before any cell parsing.
+_HIDDEN_ELT_RE = re.compile(
+    r"<([a-z][a-z0-9]*)[^>]*style=[\"'][^\"']*display\s*:\s*none"
+    r"[^\"']*[\"'][^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL)
+
+#: proxydb.net's per-row anonymity label (the site's CLAIM, not the
+#: lab's tested result — recorded separately on the Proxy).
+_CLAIMED_ANON_RE = re.compile(
+    r"\b(high\s*anonymous|elite|anonymous|transparent)\b", re.IGNORECASE)
+_CLAIMED_ANON_MAP = {"high anonymous": "elite", "elite": "elite",
+                     "anonymous": "anonymous", "transparent": "transparent"}
+
 
 class ProxyTester:
     """Tests proxies for real: liveness, latency, egress IP, anonymity,
@@ -738,14 +904,17 @@ class ProxyTester:
                  country_url: str = "http://ip-api.com/json?fields=country",
                  local_ip_provider: Callable[[], str] | None = None,
                  timeout: float = 6.0,
-                 max_workers: int = 12,
+                 max_workers: int = 0,
+                 profile: str = "",
                  detect_country: bool = True,
                  country_budget: int = 60) -> None:
         self.ip_url = ip_url
         self.echo_url = echo_url
         self.country_url = country_url
         self.timeout = float(timeout)
-        self.max_workers = max(1, int(max_workers))
+        self.max_workers = max(1, int(max_workers)) if max_workers else \
+            profile_workers(profile or detect_profile(), "test")
+        self.profile = profile or detect_profile()
         self.detect_country = bool(detect_country)
         self.country_budget = max(0, int(country_budget))
         self._local_ip_provider = local_ip_provider
@@ -757,9 +926,14 @@ class ProxyTester:
     def _local_ip(self) -> str:
         if not self._local_ip_cache:
             if self._local_ip_provider is not None:
-                self._local_ip_cache = (self._local_ip_provider() or "").strip()
+                candidate = (self._local_ip_provider() or "").strip()
             else:
-                self._local_ip_cache = self._direct_get(self.ip_url).strip()
+                try:
+                    candidate = self._direct_get(self.ip_url).strip()
+                except Exception:  # noqa: BLE001
+                    candidate = ""
+            # same guard as the probe: a rate-limit page is not an IP
+            self._local_ip_cache = candidate if _valid_ip(candidate) else ""
         return self._local_ip_cache
 
     def _direct_get(self, url: str) -> str:
@@ -827,15 +1001,21 @@ class ProxyTester:
             proxy.tested_at = time.time()
             return proxy
         latency = round((time.monotonic() - started) * 1000)
-        if status != 200 or not body.strip():
+        egress = body.strip()[:64]
+        # the probe must come back as an IP — a rate-limit JSON page or
+        # block notice ({"error": "Too Many Requests"}) is NOT proof of
+        # relay; without this a throttled probe URL marks dead proxies
+        # alive with garbage as their "egress IP"
+        if status != 200 or not _valid_ip(egress):
             proxy.alive = False
-            proxy.error = f"probe status {status}"
+            proxy.error = (f"probe status {status}" if status != 200
+                           else f"probe returned non-IP: {egress[:40]}")
             proxy.latency_ms = latency
             proxy.tested_at = time.time()
             return proxy
         proxy.alive = True
-        proxy.latency_ms = latency
-        proxy.egress_ip = body.strip()[:64]
+        proxy.record_success(latency)
+        proxy.egress_ip = egress
         proxy.tested_at = time.time()
 
         # anonymity: does the site see our real IP / proxy headers?
@@ -889,15 +1069,69 @@ class ProxyTester:
         return targets
 
 
-def rank_proxies(proxies: list[Proxy]) -> list[Proxy]:
-    """Alive first, then anonymity (elite > anonymous > unverified >
-    transparent), then fastest."""
-    alive = [p for p in proxies if p.alive]
-    dead = [p for p in proxies if not p.alive]
-    alive.sort(key=lambda p: (-_ANON_SCORE.get(p.anonymity, 1),
-                              p.latency_ms or 10_000, p.url))
-    dead.sort(key=lambda p: p.url)
-    return alive + dead
+#: EU members + UK/CH/NO (low-latency routes from Nigeria on most
+#: backbones; the NG bonus is scored first, EU second).
+_EU_COUNTRIES = frozenset({
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE",
+    "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT",
+    "RO", "SK", "SI", "ES", "SE", "GB", "CH", "NO",
+})
+
+
+def score_proxy(proxy: Proxy, at: float | None = None, *,
+                prefer_countries: frozenset[str] | set[str] | None = None,
+                half_life_hours: float = 6.0) -> float:
+    """One number, higher is better.  Alive first; anonymity outranks
+    speed (an elite 800ms proxy beats a transparent 100ms one); speed
+    uses the time-decayed latency so a proxy that GOT slow recently
+    sinks; failures and backoff demote; a country preference (NG first,
+    EU second for Nigeria-friendly routing) adds a bonus.
+
+    Returns ``float("-inf")`` for proxies that must not route now
+    (dead, in backoff) — callers filter on that, never on silence.
+    """
+    now = at if at is not None else time.time()
+    if not proxy.alive:
+        return float("-inf")
+    if float(proxy.backoff_until or 0.0) > now:
+        return float("-inf")
+    anon = _ANON_SCORE.get(proxy.anonymity, 1)
+    if proxy.anonymity == "transparent":
+        anon = -2  # leaks the real IP — worse than no anonymity data
+    # latency: decayed ms → a 0..1-ish term (5s is effectively "unusable")
+    decayed = proxy.decayed_latency(at=now, half_life_hours=half_life_hours)
+    latency_term = max(0.0, 1.0 - (decayed / 5000.0))
+    # failure streaks drag the score even after the backoff expires
+    failure_term = -0.5 * min(int(proxy.consecutive_failures or 0), 6)
+    country_bonus = 0.0
+    cc = (proxy.country or "").upper()
+    if prefer_countries and cc in prefer_countries:
+        country_bonus = 0.75
+    elif cc == "NG":
+        country_bonus = 1.0      # Nigeria-first, always
+    elif cc in _EU_COUNTRIES:
+        country_bonus = 0.5      # EU second — Nigeria-friendly routes
+    return (anon * 2.0) + (latency_term * 3.0) + failure_term + country_bonus
+
+
+def rank_proxies(proxies: list[Proxy], *,
+                 prefer_countries: frozenset[str] | set[str] | None = None,
+                 at: float | None = None) -> list[Proxy]:
+    """Alive first, then score (anonymity → decayed speed → failures →
+    country preference), dead last.  Backed-off proxies sort with the
+    dead — they must not route until the backoff expires."""
+    now = at if at is not None else time.time()
+    scored: list[tuple[float, Proxy]] = []
+    dead: list[Proxy] = []
+    for p in proxies:
+        s = score_proxy(p, at=now, prefer_countries=prefer_countries)
+        if s == float("-inf"):
+            dead.append(p)
+        else:
+            scored.append((s, p))
+    scored.sort(key=lambda t: (-t[0], t[1].url))
+    dead.sort(key=lambda p: (-int(p.alive), p.url))
+    return [p for _, p in scored] + dead
 
 
 # ── store ───────────────────────────────────────────────────────────────────
@@ -918,12 +1152,17 @@ class ProxyStore:
     def save(self, working: list[Proxy],
              candidates: list[Proxy] | None = None) -> dict[str, int]:
         with self._lock:
-            alive = [p for p in working if p.alive]
-            alive.sort(key=lambda p: p.url)
+            alive = sorted((p for p in working if p.alive),
+                           key=lambda p: p.url)
+            # working.txt: the clean alive-only list for consumers;
+            # working.json: the FULL record (dead + backing-off proxies
+            # keep their failure history — nothing dropped silently)
             self.working_txt.write_text(
                 "".join(p.url + "\n" for p in alive), encoding="utf-8")
             self.working_json.write_text(
-                json.dumps([p.to_dict() for p in alive], indent=1),
+                json.dumps([p.to_dict()
+                            for p in sorted(working, key=lambda p: p.url)],
+                           indent=1),
                 encoding="utf-8")
             if candidates is not None:
                 dedup: dict[tuple[str, int, str], Proxy] = {}
@@ -961,18 +1200,66 @@ class ProxyStore:
     # -- pool queries ---------------------------------------------------------
     def pool(self, *, scheme: str = "", country: str = "",
              anonymity: str = "", max_age_hours: float = 24.0,
-             limit: int = 10) -> list[Proxy]:
-        """Ranked, fresh, working proxies (dead and stale are dropped)."""
+             limit: int = 10,
+             prefer_countries: frozenset[str] | set[str] | None = None,
+             ) -> list[Proxy]:
+        """Ranked, fresh, working proxies (dead and stale are dropped).
+
+        Ranking uses :func:`score_proxy` — anonymity outranks speed,
+        speed is the time-decayed latency, failure streaks demote, and
+        NG/EU countries get a Nigeria-friendly bonus.
+        """
+        now = time.time()
         proxies = self.load_working()
         out = [p for p in proxies
-               if p.alive and p.age_hours <= max_age_hours]
+               if p.alive and p.age_hours <= max_age_hours
+               and float(p.backoff_until or 0.0) <= now]
         if scheme:
             out = [p for p in out if p.scheme == scheme]
         if country:
             out = [p for p in out if p.country.lower() == country.lower()]
         if anonymity:
             out = [p for p in out if p.anonymity == anonymity]
-        return rank_proxies(out)[:max(1, int(limit))]
+        return rank_proxies(out, prefer_countries=prefer_countries,
+                            at=now)[:max(1, int(limit))]
+
+    def by_url(self, url: str) -> Proxy | None:
+        """One stored proxy by its ``scheme://host:port`` URL."""
+        for p in self.load_working():
+            if p.url == url:
+                return p
+        return None
+
+    def record_routing_result(self, url: str, *, ok: bool,
+                              latency_ms: float = 0.0,
+                              reason: str = "",
+                              backoff_seconds: float = 300.0) -> Proxy | None:
+        """Failure-triggered rotation feeds back here: a proxy that
+        failed a real request gets demoted with backoff (recorded on
+        the proxy itself — never dropped silently); a success clears
+        the streak and samples the latency.  Persists the pool."""
+        with self._lock:
+            working = self.load_working()
+            target = next((p for p in working if p.url == url), None)
+            if target is None:
+                return None
+            if ok:
+                target.record_success(latency_ms)
+            else:
+                target.record_failure(reason,
+                                      backoff_seconds=backoff_seconds)
+            # working.txt stays the clean alive-only list; working.json
+            # keeps EVERYTHING (including backing-off proxies) so the
+            # failure streak / backoff is never dropped silently
+            alive = sorted((p for p in working if p.alive),
+                           key=lambda p: p.url)
+            all_sorted = sorted(working, key=lambda p: p.url)
+            self.working_txt.write_text(
+                "".join(p.url + "\n" for p in alive), encoding="utf-8")
+            self.working_json.write_text(
+                json.dumps([p.to_dict() for p in all_sorted], indent=1),
+                encoding="utf-8")
+            return target
 
     def urls(self, **filters: Any) -> list[str]:
         return [p.url for p in self.pool(**filters)]
@@ -1002,6 +1289,170 @@ class ProxyStore:
                 "latency_ms": proxies[0].latency_ms}
 
 
+# ── per-domain proxy affinity ──────────────────────────────────────────────
+
+
+def _domain_of(url: str) -> str:
+    try:
+        host = urlparse(url if "://" in url else f"http://{url}").hostname or ""
+    except ValueError:
+        host = ""
+    return host.strip().lower().lstrip(".")
+
+
+class DomainAffinityManager:
+    """Sticky proxy per site: the same domain keeps using the same proxy
+    (sessions, rate-limit buckets, and login flows all survive rotation).
+
+    Bindings are persisted (``affinity.json`` next to the pool) with a
+    TTL — a binding to a dead / backing-off / stale proxy is dropped on
+    lookup and the caller falls back to a fresh pick, which re-binds.
+    """
+
+    def __init__(self, path: str | os.PathLike[str],
+                 default_ttl_hours: float = 6.0) -> None:
+        self.path = Path(path)
+        self.default_ttl = max(0.5, float(default_ttl_hours or 6.0))
+        self._lock = threading.Lock()
+        self._data: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            if self.path.exists():
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    self._data = {str(k): v for k, v in raw.items()
+                                  if isinstance(v, dict)}
+        except Exception:  # noqa: BLE001 - corrupt affinity = start clean
+            self._data = {}
+
+    def _save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self._data, indent=1),
+                                 encoding="utf-8")
+        except OSError:  # noqa: E103 - affinity is best-effort
+            pass
+
+    def bind(self, domain: str, proxy_url: str,
+             ttl_hours: float | None = None) -> dict[str, Any]:
+        domain = _domain_of(domain)
+        if not domain or not proxy_url:
+            raise ToolError("affinity bind needs a domain and a proxy URL")
+        with self._lock:
+            self._data[domain] = {
+                "proxy_url": proxy_url,
+                "bound_at": time.time(),
+                "ttl_hours": max(0.5, float(ttl_hours or self.default_ttl)),
+            }
+            self._save()
+            return {"domain": domain, **self._data[domain]}
+
+    def lookup(self, domain: str,
+               store: "ProxyStore | None" = None) -> str:
+        """The bound proxy URL, or ``""``.  A binding is only honored
+        when the proxy is still alive, fresh, and out of backoff —
+        otherwise it is dropped (with the reason logged) and the
+        caller re-picks."""
+        domain = _domain_of(domain)
+        if not domain:
+            return ""
+        with self._lock:
+            entry = self._data.get(domain)
+            if not entry:
+                return ""
+            age_h = (time.time() - float(entry.get("bound_at", 0))) / 3600.0
+            if age_h > float(entry.get("ttl_hours", self.default_ttl)):
+                _log.info("affinity: %s binding expired (%.1fh old)",
+                          domain, age_h)
+                del self._data[domain]
+                self._save()
+                return ""
+            url = str(entry.get("proxy_url") or "")
+        if store is not None:
+            proxy = store.by_url(url)
+            if proxy is None or not proxy.alive or proxy.in_backoff \
+                    or proxy.age_hours > 24:
+                with self._lock:
+                    self._data.pop(domain, None)
+                    self._save()
+                _log.info("affinity: %s binding dropped (proxy %s)",
+                          domain,
+                          "gone" if proxy is None
+                          else "in backoff" if proxy.in_backoff
+                          else "dead/stale")
+                return ""
+        return url
+
+    def release(self, domain: str) -> bool:
+        with self._lock:
+            removed = self._data.pop(_domain_of(domain), None) is not None
+            if removed:
+                self._save()
+            return removed
+
+    def bindings(self) -> list[dict[str, Any]]:
+        with self._lock:
+            now = time.time()
+            return [
+                {"domain": d,
+                 "proxy_url": e.get("proxy_url", ""),
+                 "age_hours": round(
+                     (now - float(e.get("bound_at", now))) / 3600.0, 1),
+                 "ttl_hours": float(e.get("ttl_hours", self.default_ttl))}
+                for d, e in sorted(self._data.items())
+            ]
+
+    def prune(self, store: "ProxyStore | None" = None) -> int:
+        """Drop expired / dead-proxy bindings; returns the drop count."""
+        with self._lock:
+            domains = list(self._data)
+        dropped = 0
+        for d in domains:
+            before = self._data.get(d, {}).get("proxy_url", "")
+            if not self.lookup(d, store=store):
+                dropped += 1
+            elif self._data.get(d, {}).get("proxy_url") != before:
+                dropped += 1
+        return dropped
+
+
+# ── honest empty-pool guidance ─────────────────────────────────────────────
+
+
+def empty_pool_guidance(store: "ProxyStore", *, want: str = "") -> str:
+    """Exactly why the pool is empty and what to run — never a bare
+    ``pool empty``.  ``want`` describes the filters that found nothing."""
+    try:
+        all_known = store.load_working()
+        alive = [p for p in all_known if p.alive]
+        backing_off = sum(1 for p in alive if p.in_backoff)
+        candidates = len(store.load_candidates())
+        last_test = max((p.tested_at for p in all_known), default=0.0)
+    except Exception:  # noqa: BLE001
+        alive, backing_off, candidates, last_test = [], 0, 0, 0.0
+    want_s = f" for {want}" if want else ""
+    if backing_off and not [p for p in alive if not p.in_backoff]:
+        return (f"every working proxy{want_s} is in failure backoff right "
+                f"now ({backing_off}) — they cool down automatically, or "
+                f"tap `/proxy refresh` to re-test and rebuild the pool")
+    if not alive:
+        age = ""
+        if last_test:
+            hours = (time.time() - last_test) / 3600.0
+            age = f" (last test {hours:.1f}h ago)"
+        if candidates:
+            return (f"no working proxies{want_s}{age} — {candidates} "
+                    f"candidates are stored but none passed. Tap "
+                    f"`/proxy refresh` to re-test them, or `/proxy scrape` "
+                    f"to pull fresh lists first")
+        return (f"no working proxies{want_s}{age} — nothing stored yet. "
+                f"Tap `/proxy refresh` (scrapes + tests in one go)")
+    return (f"no proxy matches{want_s} ({len(alive)} working, none fit) — "
+            f"loosen the filters or tap `/proxy refresh` for fresh stock")
+
+
 # ── facade used by the tools ─────────────────────────────────────────────────
 
 
@@ -1016,15 +1467,21 @@ class ProxyLab:
         self.store = ProxyStore(Path(os.path.expanduser(home)) / "proxies")
         from .proxysources import SourceRegistry
         self.registry = SourceRegistry(self.store.dir / "sources.json")
-        self._scraper = ProxyScraper(sources=self.registry.sources())
+        self._profile = detect_profile(context)
+        self._scraper = ProxyScraper(sources=self.registry.sources(),
+                                     profile=self._profile)
         self._tester: ProxyTester | None = None
+
+    @property
+    def profile(self) -> str:
+        return self._profile
 
     def scraper(self) -> ProxyScraper:
         return self._scraper
 
     def tester(self) -> ProxyTester:
         if self._tester is None:
-            self._tester = ProxyTester()
+            self._tester = ProxyTester(profile=self._profile)
         return self._tester
 
     def scrape(self, schemes: str = "http,https,socks4,socks5",
@@ -1139,6 +1596,102 @@ class ProxyLab:
             "best": [p.url for p in rank_proxies(alive)[:5]],
         }
 
+    def health(self) -> dict[str, Any]:
+        """The dashboard: pool size by protocol / anonymity / country,
+        decayed-latency average, last refresh, dead-proxy counts,
+        rotation + affinity + schedule state.  Empty pool → honest
+        guidance, never a bare zero."""
+        now = time.time()
+        working = self.store.load_working()
+        alive = [p for p in working if p.alive]
+        fresh = [p for p in alive if p.age_hours <= 24]
+        routable = [p for p in fresh if not p.in_backoff]
+        backing_off = [p for p in alive if p.in_backoff]
+        dead = [p for p in working if not p.alive]
+        tested = [p for p in alive if p.latency_samples or p.latency_ms]
+        avg_latency = (round(sum(p.decayed_latency(at=now) for p in tested)
+                             / len(tested)) if tested else 0)
+
+        def _counts(key: Callable[[Proxy], str]) -> dict[str, int]:
+            out: dict[str, int] = {}
+            for p in routable:
+                k = key(p) or "?"
+                out[k] = out.get(k, 0) + 1
+            return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+        by_scheme = _counts(lambda p: p.scheme)
+        by_anonymity = _counts(lambda p: p.anonymity or "unverified")
+        by_country = _counts(lambda p: (p.country or "?").upper())
+        ng_eu = sum(1 for p in routable
+                    if (p.country or "").upper() in ({"NG"} | _EU_COUNTRIES))
+
+        last_refresh = 0.0
+        try:
+            last_refresh = self.store.working_json.stat().st_mtime
+        except OSError:  # noqa: E103 - never refreshed
+            pass
+
+        # rotation + affinity + schedule state (best-effort; the lab
+        # dashboard must not die because rotation state is missing)
+        rotation: dict[str, Any] = {}
+        affinity_n = 0
+        try:
+            rot = ProxyRotationManager(self.context)
+            rotation = rot.status()
+            aff = DomainAffinityManager(self.store.dir / "affinity.json")
+            affinity_n = len(aff.bindings())
+        except Exception:  # noqa: BLE001
+            pass
+        schedule: dict[str, Any] = {}
+        try:
+            from ..agents.scheduler import Scheduler
+
+            jobs = Scheduler(self.context).list_jobs(include_disabled=True)
+            job = next((j for j in jobs if j.get("name") == "proxy_refresh"),
+                       None)
+            if job:
+                schedule = {"active": bool(job.get("enabled")),
+                            "spec": job.get("spec", ""),
+                            "last_run": job.get("last_run", "")}
+        except Exception:  # noqa: BLE001
+            pass
+
+        report: dict[str, Any] = {
+            "pool": {
+                "routable": len(routable),
+                "fresh_24h": len(fresh),
+                "alive_total": len(alive),
+                "in_backoff": len(backing_off),
+                "dead": len(dead),
+                "candidates": len(self.store.load_candidates()),
+                "by_scheme": by_scheme,
+                "by_anonymity": by_anonymity,
+                "top_countries": dict(list(by_country.items())[:12]),
+                "ng_or_eu": ng_eu,
+                "avg_latency_ms": avg_latency,
+                "last_refresh": (time.strftime("%Y-%m-%d %H:%M",
+                                               time.localtime(last_refresh))
+                                 if last_refresh else "never"),
+                "last_refresh_hours_ago": (round((now - last_refresh) / 3600.0, 1)
+                                           if last_refresh else None),
+            },
+            "rotation": {
+                "enabled": bool(rotation.get("enabled")),
+                "strategy": rotation.get("strategy", ""),
+                "healthy": rotation.get("healthy", 0),
+                "cooling": len(rotation.get("cooling", [])),
+                "direct_fallbacks": (rotation.get("stats") or {})
+                .get("direct_fallbacks", 0),
+            },
+            "affinity_bindings": affinity_n,
+            "schedule": schedule,
+            "store": str(self.store.dir),
+        }
+        if not routable:
+            report["guidance"] = empty_pool_guidance(self.store)
+            report["tap"] = "/proxy refresh"
+        return report
+
 
 # ── rotation ─────────────────────────────────────────────────────────────────
 
@@ -1231,15 +1784,58 @@ class ProxyRotationManager:
 
         core_http.set_proxy_resolver(self._resolver)
         core_http.set_proxy_error_reporter(self.report_error)
+        core_http.set_proxy_success_reporter(self.report_success)
 
     def _unregister_hooks(self) -> None:
         from ..core import http as core_http
 
         core_http.set_proxy_resolver(None)
         core_http.set_proxy_error_reporter(None)
+        core_http.set_proxy_success_reporter(None)
 
-    def _resolver(self) -> str:
-        return self.pick() if self.state.get("enabled") else ""
+    def _resolver(self, target: str = "") -> str:
+        """core.http calls this per request (with the target URL when it
+        knows it).  Domain affinity wins: a site keeps its sticky proxy;
+        otherwise the strategy picks."""
+        if not self.state.get("enabled"):
+            return ""
+        try:
+            lab = self._lab()
+            if target:
+                bound = self._affinity().lookup(target, store=lab.store)
+                if bound:
+                    self._count_served(bound)
+                    return bound
+            chosen = self.pick()
+            if chosen and target:
+                self._affinity().bind(target, chosen)
+            return chosen
+        except Exception as exc:  # noqa: BLE001 - routing must never raise
+            _log.warning("rotation resolver failed: %s", exc)
+            return ""
+
+    # -- lab / affinity ---------------------------------------------------------
+    def _lab(self) -> "ProxyLab":
+        lab = getattr(self, "_lab_cache", None)
+        if lab is None:
+            lab = ProxyLab(self.context)
+            self._lab_cache = lab
+        return lab
+
+    def _affinity(self) -> DomainAffinityManager:
+        aff = getattr(self, "_affinity_cache", None)
+        if aff is None:
+            aff = DomainAffinityManager(self._lab().store.dir / "affinity.json")
+            self._affinity_cache = aff
+        return aff
+
+    def _count_served(self, proxy_url: str) -> None:
+        entry = self.state["usage"].setdefault(proxy_url,
+                                               {"served": 0, "failures": 0})
+        entry["served"] = int(entry.get("served", 0)) + 1
+        self.state["current"] = proxy_url
+        self.state["stats"]["requests"] += 1
+        self._save_state()
 
     # -- pool ------------------------------------------------------------------
     def _pool_urls(self) -> list[str]:
@@ -1272,42 +1868,169 @@ class ProxyRotationManager:
         return [u for u in urls if float(cooldown.get(u, 0)) <= now]
 
     # -- core action ------------------------------------------------------------
-    def pick(self) -> str:
-        """The next proxy for this request ('' = direct fallback)."""
+    def _eligible(self, *, schemes: tuple[str, ...] = (),
+                  min_anonymity: str = "",
+                  countries: set[str] | frozenset[str] | None = None,
+                  ) -> list[Proxy]:
+        """Fresh, alive, out-of-backoff proxies, protocol/anonymity/
+        country-filtered, ranked best-first (score: anonymity → decayed
+        speed → failures → NG/EU preference)."""
+        try:
+            lab = self._lab()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("rotation pool load failed: %s", exc)
+            return []
+        proxies = lab.store.pool(max_age_hours=self.state["max_age_hours"],
+                                 limit=200,
+                                 prefer_countries=countries)
+        out = []
+        for p in proxies:
+            if schemes and p.scheme not in schemes:
+                continue
+            if min_anonymity and _ANON_SCORE.get(p.anonymity, 1) < \
+                    _ANON_SCORE.get(min_anonymity, 0):
+                continue
+            out.append(p)
+        return out
+
+    def pick(self, *, schemes: tuple[str, ...] = (),
+             target: str = "") -> str:
+        """The next proxy for this request ('' = direct fallback).
+
+        ``schemes`` restricts the protocol (protocol-aware routing);
+        ``target`` lets domain affinity pin one proxy per site.
+        """
         st = self.state
         st["stats"]["requests"] += 1
+        lab = self._lab()
+        if target:
+            bound = self._affinity().lookup(target, store=lab.store)
+            if bound:
+                self._count_served(bound)
+                return bound
         healthy = self._healthy(self._pool_urls())
-        if not healthy:
+        # protocol-aware filter on the URL list (cheap) …
+        if schemes:
+            wanted = set(schemes)
+            healthy = [u for u in healthy
+                       if urlparse(u).scheme in wanted]
+        # …but prefer the scored order from the store when we can
+        ranked = [p.url for p in self._eligible(schemes=schemes)]
+        ordered = [u for u in ranked if u in set(healthy)]
+        ordered += [u for u in healthy if u not in set(ranked)]
+        if not ordered:
             st["stats"]["direct_fallbacks"] += 1
             self._save_state()
             return ""
         strategy = st.get("strategy", "round_robin")
         usage = st["usage"]
         if strategy == "round_robin":
-            st["index"] = (int(st.get("index", 0)) + 1) % len(healthy)
-            chosen = healthy[st["index"]]
+            st["index"] = (int(st.get("index", 0)) + 1) % len(ordered)
+            chosen = ordered[st["index"]]
         elif strategy == "random":
             import random
 
-            chosen = random.choice(healthy)
+            chosen = random.choice(ordered)
         elif strategy == "least_used":
-            chosen = min(healthy,
+            chosen = min(ordered,
                          key=lambda u: int((usage.get(u) or {}).get("served", 0)))
         else:  # sticky
-            if st.get("current") in healthy:
+            if st.get("current") in ordered:
                 chosen = st["current"]
             else:
-                chosen = healthy[0]
+                chosen = ordered[0]
         chosen = str(chosen)
         entry = usage.setdefault(chosen, {"served": 0, "failures": 0})
         entry["served"] = int(entry.get("served", 0)) + 1
         st["current"] = chosen
+        if target:
+            self._affinity().bind(target, chosen)
         self._save_state()
         return chosen
 
+    def pick_for_job(self, *, needs_udp: bool = False,
+                     needs_auth: bool = False,
+                     country: str = "", min_anonymity: str = "",
+                     prefer_ng_eu: bool = True,
+                     target: str = "") -> dict[str, Any]:
+        """Protocol-aware routing: choose the right proxy TYPE for the
+        job, not just the next one in line.
+
+          needs_udp  → SOCKS5 only (HTTP proxies can't do UDP)
+          needs_auth → honest answer: the free pool has no authenticated
+                       proxies; returns guidance instead of a fake pick
+          country / min_anonymity → hard filters
+          prefer_ng_eu → NG first, EU second (Nigeria-friendly)
+        """
+        if needs_auth:
+            return {"proxy": "",
+                    "note": "the free-proxy pool holds no authenticated "
+                            "proxies — add your own via the proxypool "
+                            "connector (vault-held credentials) or "
+                            "/proxy set socks5://user:pass@host:port"}
+        schemes: tuple[str, ...] = ()
+        if needs_udp:
+            schemes = ("socks5",)
+        prefer: set[str] | None = {"NG"} | set(_EU_COUNTRIES) \
+            if prefer_ng_eu else None
+        try:
+            lab = self._lab()
+        except Exception as exc:  # noqa: BLE001
+            return {"proxy": "",
+                    "note": f"pool unavailable: {exc}"}
+        proxies = lab.store.pool(
+            max_age_hours=self.state.get("max_age_hours", 24.0),
+            limit=200, prefer_countries=prefer)
+        if schemes:
+            proxies = [p for p in proxies if p.scheme in schemes]
+        if country:
+            proxies = [p for p in proxies
+                       if p.country.lower() == country.lower()]
+        if min_anonymity:
+            floor = _ANON_SCORE.get(min_anonymity, 0)
+            proxies = [p for p in proxies
+                       if _ANON_SCORE.get(p.anonymity, 1) >= floor]
+        if not proxies:
+            return {"proxy": "",
+                    "note": empty_pool_guidance(
+                        lab.store,
+                        want=f"scheme={schemes or 'any'} "
+                             f"country={country or 'any'} "
+                             f"anonymity>={min_anonymity or 'any'}")}
+        best = rank_proxies(proxies, prefer_countries=prefer)[0]
+        why = (f"{best.scheme} · {best.anonymity or 'unverified'} · "
+               f"{round(best.decayed_latency())}ms decayed · "
+               f"{best.country or 'country unknown'}")
+        if needs_udp:
+            why += " · SOCKS5 (UDP-capable)"
+        if target:
+            self._affinity().bind(target, best.url)
+            why += f" · pinned to { _domain_of(target)}"
+        return {"proxy": best.url, "why": why,
+                "details": best.to_dict()}
+
+    def report_success(self, proxy_url: str,
+                       latency_ms: float = 0.0) -> None:
+        """A request through ``proxy_url`` worked: sample the latency,
+        clear the failure streak.  Feeds the store so the decayed
+        average keeps improving with real traffic."""
+        proxy_url = (proxy_url or "").strip()
+        if not proxy_url:
+            return
+        try:
+            self._lab().store.record_routing_result(
+                proxy_url, ok=True, latency_ms=latency_ms)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("rotation success record failed: %s", exc)
+
     def report_error(self, proxy_url: str, reason: str = "") -> None:
         """A request through ``proxy_url`` failed at the connection level.
-        Cooldown now; sticky fails over immediately."""
+
+        The proxy is demoted, not dropped: exponential backoff on the
+        store record (300s * 2^streak, capped at 1h) plus the rotation
+        cooldown — and the failure REASON is recorded, so the health
+        dashboard shows exactly why.  Sticky fails over immediately.
+        """
         st = self.state
         proxy_url = (proxy_url or "").strip()
         if not proxy_url:
@@ -1315,13 +2038,22 @@ class ProxyRotationManager:
         entry = st["usage"].setdefault(proxy_url,
                                        {"served": 0, "failures": 0})
         entry["failures"] = int(entry.get("failures", 0)) + 1
-        st["cooldown"][proxy_url] = time.time() + float(
-            st.get("cooldown_seconds", 300))
+        # exponential backoff on the rotation cooldown too: repeated
+        # offenders stay out longer (capped at 1h)
+        base = max(1.0, float(st.get("cooldown_seconds", 300)))
+        cooldown = min(base * (2 ** (entry["failures"] - 1)), 3600.0)
+        st["cooldown"][proxy_url] = time.time() + cooldown
         st["stats"]["failovers"] += 1
         if st.get("strategy") == "sticky" and st.get("current") == proxy_url:
             st["current"] = ""
-        _log.info("rotation: %s on cooldown (%.0fs) — %s",
-                  proxy_url, float(st.get("cooldown_seconds", 300)),
+        try:
+            self._lab().store.record_routing_result(
+                proxy_url, ok=False, reason=reason,
+                backoff_seconds=base)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("rotation failure record failed: %s", exc)
+        _log.info("rotation: %s demoted (backoff %.0fs, streak %d) — %s",
+                  proxy_url, cooldown, entry["failures"],
                   (reason or "connection failure")[:120])
         self._save_state()
 
@@ -1510,6 +2242,98 @@ def register(registry: Any) -> None:
     )
     def proxy_lab_status() -> dict[str, Any]:
         return ProxyLab(context).status()
+
+    @registry.register(
+        "proxy_health",
+        description=(
+            "Proxy pool health dashboard: routable pool size by protocol / "
+            "anonymity / country, decayed-latency average, last refresh, "
+            "dead + backing-off counts, rotation state, per-domain "
+            "affinity bindings, and the auto-refresh schedule. When the "
+            "pool is empty it says exactly why and what to run."
+        ),
+        capability=Capability.FS_READ,
+        parameters={},
+    )
+    def proxy_health() -> dict[str, Any]:
+        return ProxyLab(context).health()
+
+    @registry.register(
+        "proxy_pick",
+        description=(
+            "Protocol-aware proxy pick: choose the right proxy TYPE for "
+            "the job. needs_udp=true → SOCKS5 only (HTTP proxies can't do "
+            "UDP); country/min_anonymity filter hard; NG/EU preferred by "
+            "default (Nigeria-friendly). Empty pool → honest guidance, "
+            "never a fake pick."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "needs_udp": "bool (optional) — UDP-capable proxy required",
+            "needs_auth": "bool (optional) — authenticated proxy required "
+                          "(the free pool has none; says so honestly)",
+            "country": "str (optional) — 2-letter code",
+            "min_anonymity": "str (optional) — anonymous | elite",
+            "prefer_ng_eu": "bool (optional, true) — Nigeria-friendly",
+            "target": "str (optional) — target URL; pins the pick to the "
+                      "domain (per-domain affinity)",
+        },
+    )
+    def proxy_pick(*, needs_udp: str = "", needs_auth: str = "",
+                   country: str = "", min_anonymity: str = "",
+                   prefer_ng_eu: str = "", target: str = "") -> dict[str, Any]:
+        manager = ProxyRotationManager(context)
+        flag = lambda v, d=False: str(v or ("true" if d else "")).lower() \
+            not in {"", "0", "false", "no", "off"}
+        return manager.pick_for_job(
+            needs_udp=flag(needs_udp),
+            needs_auth=flag(needs_auth),
+            country=(country or "").strip(),
+            min_anonymity=(min_anonymity or "").strip().lower(),
+            prefer_ng_eu=flag(prefer_ng_eu, True),
+            target=(target or "").strip(),
+        )
+
+    @registry.register(
+        "proxy_affinity",
+        description=(
+            "Per-domain proxy affinity: pin one proxy per site so "
+            "sessions, logins, and rate-limit buckets survive rotation. "
+            "bind <domain> <proxy_url> | lookup <domain> | release "
+            "<domain> | list — bindings expire (TTL, default 6h) and drop "
+            "automatically when the proxy dies or backs off."
+        ),
+        capability=Capability.DB_WRITE,
+        parameters={
+            "action": "str — bind | lookup | release | list (default list)",
+            "domain": "str (bind/lookup/release) — site domain or URL",
+            "proxy_url": "str (bind) — scheme://host:port",
+            "ttl_hours": "float (bind, optional, 6)",
+        },
+    )
+    def proxy_affinity(*, action: str = "list", domain: str = "",
+                       proxy_url: str = "", ttl_hours: str = "") -> dict[str, Any]:
+        lab = ProxyLab(context)
+        aff = DomainAffinityManager(lab.store.dir / "affinity.json")
+        action = (action or "list").strip().lower()
+        if action == "bind":
+            try:
+                ttl = float(ttl_hours or 6)
+            except ValueError:
+                ttl = 6.0
+            bound = aff.bind(domain, proxy_url, ttl_hours=ttl)
+            return {"bound": True, **bound}
+        if action == "lookup":
+            url = aff.lookup(domain, store=lab.store)
+            return {"domain": _domain_of(domain), "proxy_url": url,
+                    "note": "" if url else
+                    "no live binding — use proxy_pick with target= to get "
+                    "and pin one"}
+        if action == "release":
+            return {"released": aff.release(domain),
+                    "domain": _domain_of(domain)}
+        bindings = aff.bindings()
+        return {"bindings": bindings, "count": len(bindings)}
 
     @registry.register(
         "proxy_schedule",

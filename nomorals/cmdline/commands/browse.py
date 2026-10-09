@@ -256,6 +256,37 @@ class _LocalBackend:
     def r_download(self, tab_id: str, target: str) -> dict[str, Any]:
         return self._svc.rendered_tab_download(tab_id, target)
 
+    def r_upload(self, tab_id: str, selector: str,
+                 path: str) -> dict[str, Any]:
+        return self._rtab(tab_id).upload(selector, path)
+
+    def r_wait_field(self, tab_id: str, name: str,
+                     timeout: int = 10_000) -> dict[str, Any]:
+        return self._rtab(tab_id).wait_for_field(name, timeout=timeout)
+
+    def r_switch(self, session: str, tab_id: str) -> dict[str, Any]:
+        return self._svc.switch_rendered_tab(session, tab_id)
+
+    def r_active(self, session: str) -> dict[str, Any] | None:
+        return self._svc.active_rendered_tab(session)
+
+    def pacing(self, action: str = "get",
+               **kwargs: Any) -> dict[str, Any]:
+        if action == "get":
+            return self._svc.pacing.describe()
+        preset = str(kwargs.pop("preset", "") or "").strip().lower()
+        if preset:
+            from ...browser.pacing import Pacing
+            if preset == "human":
+                return self._svc.set_pacing(Pacing.human())
+            if preset == "off":
+                return self._svc.set_pacing(Pacing.disabled())
+            if preset == "profile":
+                return self._svc.set_pacing(Pacing.from_profile())
+            raise ValueError(
+                f"unknown pacing preset {preset!r} (want human|off|profile)")
+        return self._svc.set_pacing(**kwargs)
+
     def history(self) -> list[dict[str, Any]]:
         return self._handle().history()
 
@@ -448,6 +479,29 @@ class _DaemonBackend:
         return self._call("r_download", tab_id=tab_id,
                            target=target)["result"]
 
+    def r_upload(self, tab_id: str, selector: str,
+                 path: str) -> dict[str, Any]:
+        return self._call("r_upload", tab_id=tab_id, selector=selector,
+                           path=path)["result"]
+
+    def r_wait_field(self, tab_id: str, name: str,
+                     timeout: int = 10_000) -> dict[str, Any]:
+        return self._call("r_wait_field", tab_id=tab_id, name=name,
+                           timeout=timeout)["result"]
+
+    def r_switch(self, session: str, tab_id: str) -> dict[str, Any]:
+        return self._call("r_switch", session=session,
+                           tab_id=tab_id)["result"]
+
+    def r_active(self, session: str) -> dict[str, Any] | None:
+        return self._call("r_active", session=session)["result"]
+
+    def pacing(self, action: str = "get",
+               **kwargs: Any) -> dict[str, Any]:
+        params: dict[str, Any] = {"action": action}
+        params.update(kwargs)
+        return self._call("pacing", **params)["result"]
+
     def history(self) -> list[dict[str, Any]]:
         return self._call("history")["history"]
 
@@ -490,7 +544,8 @@ def _cmd_browse(args: Any, context: Any) -> int:
               "       nm browse cookies [export|import <path> [--format F]]\n"
               "       nm browse proxy status|rotate|set <url>|clear\n"
               "       nm browse downloads [--category C] [--limit N]\n"
-              "       nm browse rtab open <url> | rtab tabs|shot|fill|fill-form|set-date|fields|eval|storage|persist|click|submit|wait|wait-url|wait-text|wait-state|wait-idle|select|check|captcha|extract|download\n"
+              "       nm browse rtab open <url> | rtab tabs|shot|fill|fill-form|set-date|fields|eval|storage|persist|click|submit|wait|wait-url|wait-text|wait-state|wait-idle|select|check|captcha|extract|download|upload|wait-field|switch|active\n"
+              "       nm browse pacing [get] | nm browse pacing set preset=human|off|profile | enabled=true delay-ms=400 jitter-ms=300\n"
               "       nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
               "       nm browse history | nm browse close | nm browse sessions\n"
               "       nm browse daemon start|stop|status",
@@ -534,6 +589,8 @@ def _cmd_browse(args: Any, context: Any) -> int:
             return _browse_downloads(args, context)
         if verb == "rtab":
             return _browse_rtab(args, context, words[1:])
+        if verb == "pacing":
+            return _browse_pacing(args, context, words[1:])
         if verb == "shot":
             return _browse_shot(args, context)
         if verb == "download":
@@ -911,6 +968,63 @@ def _browse_proxy(args: Any, context: Any, rest: list[str]) -> int:
     return 0
 
 
+def _browse_pacing(args: Any, context: Any, rest: list[str]) -> int:
+    """``nm browse pacing`` — inspect/configure pacing between actions.
+
+    ``nm browse pacing`` → show the active config.
+    ``nm browse pacing set preset=human|off|profile``
+    ``nm browse pacing set enabled=true delay-ms=400 jitter-ms=300``
+
+    Pacing is an explicit owner setting (politeness/rate-limit control),
+    not a default — it starts disabled.
+    """
+    sub = (rest[0] if rest else "get").strip().lower()
+    backend = _backend(args, context)
+    if sub in {"get", "show", "status"}:
+        result = backend.pacing("get")
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    if sub != "set":
+        print("usage: nm browse pacing [get]\n"
+              "       nm browse pacing set preset=human|off|profile\n"
+              "       nm browse pacing set enabled=true delay-ms=400 "
+              "jitter-ms=300", file=sys.stderr)
+        return 2
+    kwargs: dict[str, Any] = {}
+    for token in rest[1:]:
+        if "=" not in token:
+            print(f"pacing: {token!r} is not key=value", file=sys.stderr)
+            return 2
+        key, val = token.split("=", 1)
+        key = key.strip().lower().replace("-", "_")
+        val = val.strip()
+        if key == "enabled":
+            if val.lower() not in {"true", "false", "1", "0", "on", "off"}:
+                print(f"pacing: enabled needs true|false, got {val!r}",
+                      file=sys.stderr)
+                return 2
+            kwargs["enabled"] = val.lower() in {"true", "1", "on"}
+        elif key in {"delay_ms", "jitter_ms"}:
+            if not val.isdigit():
+                print(f"pacing: {key} needs milliseconds, got {val!r}",
+                      file=sys.stderr)
+                return 2
+            kwargs[key] = int(val)
+        elif key == "preset":
+            kwargs["preset"] = val
+        else:
+            print(f"pacing: unknown key {key!r} "
+                  "(enabled|delay-ms|jitter-ms|preset)", file=sys.stderr)
+            return 2
+    try:
+        result = backend.pacing("set", **kwargs)
+    except ValueError as exc:
+        print(f"pacing: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
 def _browse_downloads(args: Any, context: Any) -> int:
     backend = _backend(args, context)
     category = getattr(args, "category", "") or ""
@@ -1121,6 +1235,36 @@ def _browse_rtab(args: Any, context: Any, rest: list[str]) -> int:
                   file=sys.stderr)
             return 2
         result = backend.r_download(rest[1], " ".join(rest[2:]))
+    elif sub == "upload":
+        if len(rest) < 4:
+            print("usage: nm browse rtab upload <tab-id> <selector> <path>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_upload(rest[1], rest[2], " ".join(rest[3:]))
+    elif sub == "wait-field":
+        if len(rest) < 3:
+            print("usage: nm browse rtab wait-field <tab-id> <name> "
+                  "[timeout-ms]", file=sys.stderr)
+            return 2
+        timeout = 10_000
+        name_parts = list(rest[2:])
+        if name_parts and name_parts[-1].isdigit() and len(name_parts) > 1:
+            timeout = int(name_parts.pop())
+        result = backend.r_wait_field(rest[1], " ".join(name_parts),
+                                      timeout=timeout)
+    elif sub == "switch":
+        if len(rest) < 3:
+            print("usage: nm browse rtab switch <session> <tab-id>",
+                  file=sys.stderr)
+            return 2
+        result = backend.r_switch(rest[1], rest[2])
+    elif sub == "active":
+        session = rest[1] if len(rest) > 1 else (
+            getattr(args, "session", "") or "cli")
+        result = backend.r_active(session)
+        if result is None:
+            print(f"no active rendered tab in session {session!r}")
+            return 0
     else:
         print(f"unknown rtab verb: {sub}", file=sys.stderr)
         return 2

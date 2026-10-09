@@ -17,11 +17,13 @@ import json
 import mimetypes
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Mapping, Sequence
@@ -252,6 +254,28 @@ class HttpClient:
         self.allow_private_ips = allow_private_ips
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
 
+    def _effective_proxy(self, target: str) -> str:
+        """Which proxy (if any) this request goes through.
+
+        Precedence: the client's explicit ``proxy_url`` → the
+        registered rotation resolver (called WITH the target URL so
+        per-domain affinity applies; zero-arg resolvers still work) →
+        the process-wide default (``proxy_set``).
+        """
+        if self.proxy_url:
+            return self.proxy_url
+        resolver = get_proxy_resolver()
+        if resolver is not None:
+            try:
+                try:
+                    return resolver(target) or ""
+                except TypeError:
+                    return resolver() or ""
+            except Exception:  # noqa: BLE001 - a broken resolver = direct
+                _log.debug("proxy resolver raised; going direct",
+                           exc_info=True)
+        return get_default_proxy()
+
     def _check_ssrf(self, url: str) -> None:
         """Reject URLs resolving to private/loopback/link-local addresses."""
         if self.allow_private_ips:
@@ -324,6 +348,12 @@ class HttpClient:
             context.verify_mode = ssl.CERT_NONE
             opener_kwargs["context"] = context
 
+        # ── proxy routing: explicit client proxy → rotation resolver
+        # (with the target URL, so domain affinity applies) → the
+        # process-wide default.  This is what makes proxy_set and
+        # proxy_rotate actually route traffic.
+        effective_proxy = self._effective_proxy(target)
+
         destination = Path(stream_to) if stream_to else None
         start_byte = 0
         if destination is not None and resume and destination.exists():
@@ -335,10 +365,17 @@ class HttpClient:
             target, data=data, headers=merged, method=method.upper()
         )
         self.stats["requests"] += 1
+        fetch_start = time.monotonic()
         try:
-            with urllib.request.urlopen(
-                request, timeout=timeout or self.timeout, **opener_kwargs
-            ) as raw:
+            if effective_proxy:
+                raw_cm = _proxied_open(request, effective_proxy,
+                                       timeout or self.timeout,
+                                       opener_kwargs)
+            else:
+                raw_cm = urllib.request.urlopen(
+                    request, timeout=timeout or self.timeout,
+                    **opener_kwargs)
+            with raw_cm as raw:
                 final_url = raw.geturl()
                 response_headers = {k.lower(): v for k, v in raw.headers.items()}
                 if destination is not None:
@@ -352,11 +389,19 @@ class HttpClient:
                             self.stats["bytes"] += len(chunk)
                             if progress:
                                 progress(written, total)
+                    if effective_proxy:
+                        _report_proxy_success(
+                            effective_proxy,
+                            (time.monotonic() - fetch_start) * 1000.0)
                     return HttpResponse(
                         status=raw.status, body=b"", headers=response_headers, url=final_url
                     )
                 payload = self._decode_body(raw.read(), response_headers)
                 self.stats["bytes"] += len(payload)
+                if effective_proxy:
+                    _report_proxy_success(
+                        effective_proxy,
+                        (time.monotonic() - fetch_start) * 1000.0)
                 return HttpResponse(
                     status=raw.status, body=payload, headers=response_headers, url=final_url
                 )
@@ -367,6 +412,17 @@ class HttpClient:
             except Exception:  # noqa: BLE001 - error path must not raise
                 pass
             self.stats["errors"] += 1
+            # an HTTP status came back THROUGH the proxy — it forwarded
+            # fine, so this is a success signal for rotation, not a
+            # failure (except 407: the proxy itself rejected our auth)
+            if effective_proxy:
+                if exc.code == 407:
+                    _report_proxy_failure(
+                        effective_proxy, "proxy authentication failed (407)")
+                else:
+                    _report_proxy_success(
+                        effective_proxy,
+                        (time.monotonic() - fetch_start) * 1000.0)
             try:
                 err_headers = dict(exc.headers.items()) if exc.headers else None
             except Exception:  # noqa: BLE001 - error path must not raise
@@ -376,14 +432,17 @@ class HttpClient:
         except urllib.error.URLError as exc:
             self.stats["errors"] += 1
             reason = str(exc.reason)
+            _report_proxy_failure(effective_proxy, f"URLError: {reason}")
             if "timed out" in reason.lower():
                 raise TimeoutError_(f"request to {target} timed out: {reason}", retryable=True) from exc
             raise RequestError(f"request to {target} failed: {reason}", retryable=True) from exc
         except TimeoutError as exc:
             self.stats["errors"] += 1
+            _report_proxy_failure(effective_proxy, "request timed out")
             raise TimeoutError_(f"request to {target} timed out", retryable=True) from exc
         except OSError as exc:
             self.stats["errors"] += 1
+            _report_proxy_failure(effective_proxy, f"OSError: {exc}")
             raise classify(exc) from exc
 
     def _decode_body(self, payload: bytes, headers: Mapping[str, str]) -> bytes:
@@ -503,6 +562,7 @@ def apply_socks_proxy(proxy_url: str) -> bool:
     Patches :mod:`socket` so urllib and raw-socket code honor the proxy.
     Returns True on success, False if PySocks is not installed.
     """
+    global _ambient_socks_url
     try:
         import socks  # type: ignore[import-not-found]
         import socket as _socket
@@ -525,17 +585,21 @@ def apply_socks_proxy(proxy_url: str) -> bool:
         password=parsed.password,
     )
     _socket.socket = socks.socksocket  # type: ignore[assignment]
+    _ambient_socks_url = proxy_url  # restored after per-request SOCKS windows
     return True
 
 
 def reset_socks_proxy() -> None:
     """Restore direct socket routing (undo :func:`apply_socks_proxy`)."""
+    global _ambient_socks_url
     try:
         import socks  # type: ignore[import-not-found]
         import socket as _socket
     except ImportError:
+        _ambient_socks_url = ""
         return
     socks.set_default_proxy()
+    _ambient_socks_url = ""
     # Restore the original socket class if it was patched.
     if getattr(_socket.socket, "__module__", "") == "socks":
         import _socket as _real_socket  # type: ignore[import-not-found]
@@ -591,3 +655,154 @@ def set_proxy_error_reporter(reporter):
 def get_proxy_error_reporter():
     """Return the currently registered proxy error reporter, or None."""
     return _proxy_error_reporter
+
+
+_proxy_success_reporter = None
+
+
+def set_proxy_success_reporter(reporter):
+    """Register a callable ``(proxy_url, latency_ms)`` for successful
+    requests that went through a proxy — feeds the lab's decayed
+    latency scoring with real traffic.  Pass None to clear.
+    """
+    global _proxy_success_reporter
+    _proxy_success_reporter = reporter
+
+
+def get_proxy_success_reporter():
+    """Return the currently registered proxy success reporter, or None."""
+    return _proxy_success_reporter
+
+
+def _report_proxy_failure(proxy_url: str, reason: str) -> None:
+    if not proxy_url:
+        return
+    reporter = get_proxy_error_reporter()
+    if reporter is None:
+        return
+    try:
+        reporter(proxy_url, reason)
+    except Exception:  # noqa: BLE001 - reporting must never break requests
+        _log.debug("proxy error reporter raised", exc_info=True)
+
+
+def _report_proxy_success(proxy_url: str, latency_ms: float) -> None:
+    if not proxy_url:
+        return
+    reporter = get_proxy_success_reporter()
+    if reporter is None:
+        return
+    try:
+        reporter(proxy_url, latency_ms)
+    except Exception:  # noqa: BLE001 - reporting must never break requests
+        _log.debug("proxy success reporter raised", exc_info=True)
+
+
+_socks_lock = threading.RLock()
+_socks_warned_no_pysocks = False
+
+
+def _socks_available() -> bool:
+    try:
+        import socks  # type: ignore[import-not-found]
+
+        return True
+    except ImportError:
+        return False
+
+
+@contextmanager
+def _temporary_socks_proxy(proxy_url: str):
+    """Route one request through a SOCKS proxy, then restore the ambient
+    SOCKS default.  Serialized: while one request holds the window, no
+    other thread's proxy setting can interleave."""
+    global _socks_warned_no_pysocks
+    parsed = urllib.parse.urlparse(proxy_url)
+    if not _socks_available():
+        if not _socks_warned_no_pysocks:
+            _socks_warned_no_pysocks = True
+            _log.warning("SOCKS proxy %s requested but PySocks is not "
+                         "installed — request goes direct (pip install "
+                         "pysocks)", proxy_url)
+        yield False  # direct fallback; the caller still performs the request
+        return
+    import socks  # type: ignore[import-not-found]
+
+    proxy_type = {
+        "socks5": socks.SOCKS5,
+        "socks5h": socks.SOCKS5,
+        "socks4": socks.SOCKS4,
+        "socks4a": socks.SOCKS4,
+    }.get((parsed.scheme or "").lower(), socks.SOCKS5)
+    with _socks_lock:
+        try:
+            import socket as _socket
+
+            if getattr(_socket.socket, "__module__", "") != "socks":
+                _socket.socket = socks.socksocket  # type: ignore[assignment]
+            socks.set_default_proxy(
+                proxy_type, parsed.hostname, parsed.port,
+                username=parsed.username, password=parsed.password)
+            yield True
+        finally:
+            # restore the ambient SOCKS default (proxy_set's global patch
+            # or nothing), never leave a per-request proxy behind
+            if _ambient_socks_url:
+                _restore_socks_url(_ambient_socks_url)
+            else:
+                socks.set_default_proxy()
+
+
+_ambient_socks_url = ""
+
+
+def _restore_socks_url(proxy_url: str) -> None:
+    """Re-apply a SOCKS default without touching the ambient record."""
+    try:
+        import socks  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    parsed = urllib.parse.urlparse(proxy_url)
+    proxy_type = {
+        "socks5": socks.SOCKS5,
+        "socks5h": socks.SOCKS5,
+        "socks4": socks.SOCKS4,
+        "socks4a": socks.SOCKS4,
+    }.get((parsed.scheme or "").lower(), socks.SOCKS5)
+    socks.set_default_proxy(
+        proxy_type, parsed.hostname, parsed.port,
+        username=parsed.username, password=parsed.password)
+
+
+def _proxied_open(request, proxy_url: str, timeout: float,
+                  opener_kwargs: dict):
+    """Open ``request`` through ``proxy_url``.
+
+    HTTP(S) proxies → urllib ProxyHandler on a dedicated opener (the
+    TLS context still applies).  SOCKS proxies → a scoped PySocks
+    default around a plain opener (urllib cannot speak SOCKS itself).
+    Returns a context manager yielding the response.
+    """
+    scheme = (urllib.parse.urlparse(proxy_url).scheme or "").lower()
+    if scheme in ("http", "https"):
+        handlers: list = [urllib.request.ProxyHandler(
+            {"http": proxy_url, "https": proxy_url})]
+        ctx = opener_kwargs.get("context")
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        opener = urllib.request.build_opener(*handlers)
+        return opener.open(request, timeout=timeout)
+    if scheme not in ("socks4", "socks4a", "socks5", "socks5h", "socks"):
+        _log.warning("unsupported proxy scheme %r — request goes direct",
+                     scheme)
+        return urllib.request.urlopen(request, timeout=timeout,
+                                      **opener_kwargs)
+
+    @contextmanager
+    def _socks_open():
+        with _temporary_socks_proxy(proxy_url):
+            with urllib.request.urlopen(request, timeout=timeout,
+                                        **opener_kwargs) as raw:
+                yield raw
+
+    return _socks_open()

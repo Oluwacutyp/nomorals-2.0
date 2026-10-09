@@ -8,9 +8,14 @@ Providers (all keyless):
 - simcodes.net — country pages list numbers, per-number pages show the
   inbox as server-rendered HTML.  Some messages are login-gated, but
   most verification codes are fully visible.
+- 7sim.net — free, no-registration temp numbers from 50+ countries,
+  real SIM-based (better deliverability than VoIP pools).  Listing
+  structure is best-effort and probe-gated: the provider self-checks
+  before the cascade uses it.
 
 The interface is provider-agnostic so new sources slot in without
-touching callers.
+touching callers.  Use :func:`grab_number_cascade` to try providers in
+order until one yields a usable number.
 """
 from __future__ import annotations
 
@@ -28,8 +33,10 @@ __all__ = [
     "TempNumber",
     "TempSmsProvider",
     "SimcodesProvider",
+    "SevenSimProvider",
     "get_provider",
     "grab_number",
+    "grab_number_cascade",
     "wait_code",
     "PROVIDERS",
 ]
@@ -195,6 +202,128 @@ PROVIDERS: dict[str, type[TempSmsProvider]] = {
 }
 
 
+class SevenSimProvider(TempSmsProvider):
+    """7sim.net — free no-registration temp numbers, 50+ countries.
+
+    BEST-EFFORT / probe-gated: the listing HTML structure was researched
+    (service confirmed live, free, no login, real SIM numbers) but the
+    exact markup was not fully verified, so every parse is tolerant and
+    :meth:`probe` must succeed before the cascade trusts this provider.
+    A failed probe means "skip me" — never an exception to the caller.
+
+    Flow: homepage → discover country/number listing links → number
+    inbox pages with server-rendered messages.
+    """
+
+    name = "7sim"
+    _BASE = "https://7sim.net"
+
+    #: tolerant link patterns for number listing / inbox pages
+    _LISTING_PATTERNS = (
+        r'href="(/[^"]*(?:temporary-numbers|numbers|receive-sms)[^"]*)"',
+        r'href="(/country/[^"]+)"',
+        r'href="(/[^"]*united-states[^"]*)"',
+    )
+    _NUMBER_PATTERNS = (
+        r'href="(/[^"]*(?:number|sms)/[^"]*)"[^>]*>\s*(\+\d[\d\s*\-]{5,})',
+        r'(\+\d[\d\s*\-]{6,})\s*</a>',
+    )
+
+    def probe(self) -> bool:
+        """True if the listing structure parses. Never raises."""
+        try:
+            return bool(self.list_numbers(limit=3))
+        except Exception:  # noqa: BLE001 - probe failure = unavailable
+            _log.debug("7sim probe failed")
+            return False
+
+    def _discover_listing_urls(self, html: str) -> list[str]:
+        urls: list[str] = []
+        for pattern in self._LISTING_PATTERNS:
+            for m in re.finditer(pattern, html, re.I):
+                url = m.group(1)
+                if url.startswith("/"):
+                    url = self._BASE + url
+                if url not in urls:
+                    urls.append(url)
+        return urls[:5]
+
+    def list_numbers(self, country: str = "us",
+                     limit: int = 20) -> list[TempNumber]:
+        try:
+            home = _fetch(self._BASE + "/")
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[TempNumber] = []
+        pages = [self._BASE + "/"] + self._discover_listing_urls(home)
+        for page_url in pages:
+            try:
+                html = home if page_url == self._BASE + "/" else _fetch(
+                    page_url)
+            except Exception:  # noqa: BLE001
+                continue
+            text = re.sub(r"<script.*?</script>", " ", html,
+                          flags=re.I | re.S)
+            text = re.sub(r"<style.*?</style>", " ", text, flags=re.I | re.S)
+            for pattern in self._NUMBER_PATTERNS:
+                for m in re.finditer(pattern, text, re.I):
+                    raw_num = (m.group(2) if m.lastindex and m.lastindex >= 2
+                               else m.group(1))
+                    digits = re.sub(r"\D", "", raw_num or "")
+                    if len(digits) < 7:
+                        continue
+                    link = ""
+                    try:
+                        link = m.group(1)
+                        if link.startswith("/"):
+                            link = self._BASE + link
+                    except IndexError:
+                        pass
+                    out.append(TempNumber(
+                        number=f"+{digits}",
+                        masked=f"+{digits[:6]}****",
+                        country=country.lower(),
+                        provider=self.name,
+                        inbox_id=link,
+                    ))
+                    if len(out) >= limit:
+                        return out
+            if out:
+                break
+        return out
+
+    def get_messages(self, number: TempNumber,
+                     limit: int = 20) -> list[SmsMessage]:
+        inbox_url = number.inbox_id or ""
+        if not inbox_url.startswith("http"):
+            return []
+        try:
+            html = _fetch(inbox_url)
+        except Exception:  # noqa: BLE001
+            return []
+        text = re.sub(r"<script.*?</script>", " ", html, flags=re.I | re.S)
+        text = re.sub(r"<style.*?</style>", " ", text, flags=re.I | re.S)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        out: list[SmsMessage] = []
+        # sender blocks: "From: <sender> <body>" variants
+        for m in re.finditer(
+                r"(?:from|sender)[:\s]+([+\d][\d\s*\-]{5,20}?)\s+"
+                r"(.{10,300}?)\s+(?:\d+\s+(?:second|minute|hour|day)s?\s+ago"
+                r"|just now|today)",
+                text, re.I):
+            sender, body = m.group(1).strip(), m.group(2).strip()
+            if not body or len(body) < 4:
+                continue
+            out.append(SmsMessage(sender=sender, body=body))
+            if len(out) >= limit:
+                break
+        return out
+
+
+PROVIDERS["7sim"] = SevenSimProvider
+
+
 def get_provider(name: str = "simcodes") -> TempSmsProvider:
     """Instantiate a temp-SMS provider by name."""
     cls = PROVIDERS.get(name.lower())
@@ -236,8 +365,8 @@ def wait_code(number_info: dict[str, Any], *,
               timeout: float = 180) -> str:
     """Wait for an SMS verification code on a grabbed number.
 
-    ``number_info`` is the dict returned by :func:`grab_number`.
-    Returns the code or "" on timeout.
+    ``number_info`` is the dict returned by :func:`grab_number` (or
+    :func:`grab_number_cascade`).  Returns the code or "" on timeout.
     """
     prov = get_provider(str(number_info.get("provider", "simcodes")))
     num = TempNumber(
@@ -250,3 +379,66 @@ def wait_code(number_info: dict[str, Any], *,
     )
     return prov.wait_for_code(num, sender_hint=sender_hint,
                              timeout=timeout)
+
+
+#: cascade order — verified providers first; probe-gated ones after.
+CASCADE_PROVIDERS = ("simcodes", "7sim")
+
+
+def grab_number_cascade(
+    country: str = "us",
+    providers: tuple[str, ...] = CASCADE_PROVIDERS,
+    *,
+    extra_countries: tuple[str, ...] = ("uk",),
+    numbers_per_provider: int = 3,
+) -> dict[str, Any]:
+    """Grab a temp number, trying providers (then countries) in order.
+
+    Probe-gated providers (e.g. 7sim) self-check before use and are
+    silently skipped when their structure doesn't parse.  Returns the
+    first usable number dict, or ``{"status": "failed", "notes": ...}``
+    when every source is exhausted — the signup driver treats that as
+    "genuinely stuck" and hands to the owner.
+    """
+    notes: list[str] = []
+    for prov_name in providers:
+        try:
+            prov = get_provider(prov_name)
+        except ValueError as exc:
+            notes.append(str(exc))
+            continue
+        probe = getattr(prov, "probe", None)
+        if callable(probe):
+            try:
+                if not probe():
+                    notes.append(f"{prov_name}: probe failed, skipped")
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"{prov_name}: probe error {exc}")
+                continue
+        for ctry in (country,) + tuple(
+                c for c in extra_countries if c != country):
+            try:
+                numbers = prov.list_numbers(
+                    country=ctry, limit=numbers_per_provider)
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"{prov_name}/{ctry}: {exc}")
+                continue
+            if not numbers:
+                notes.append(f"{prov_name}/{ctry}: no numbers listed")
+                continue
+            n = numbers[0]
+            _log.info("temp-sms cascade: using %s number %s",
+                      prov_name, n.masked or n.number)
+            return {
+                "status": "ok",
+                "number": n.number,
+                "masked": n.masked,
+                "country": n.country,
+                "country_name": n.country_name,
+                "provider": n.provider,
+                "inbox_id": n.inbox_id,
+            }
+    return {"status": "failed",
+            "notes": "all temp-sms sources exhausted: "
+                     + "; ".join(notes)}

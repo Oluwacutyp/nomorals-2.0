@@ -36,6 +36,7 @@ __all__ = [
     "clear_marker",
     "describe_fields",
     "set_value_js",
+    "read_value_js",
     "normalize_date",
 ]
 
@@ -254,6 +255,36 @@ def set_value_js(page: Any, value: str) -> str:
     error when evaluation fails.
     """
     return page.evaluate(_SET_VALUE_JS, str(value))
+
+
+#: Read back the marker-pinned field's live state: typed value, checked
+#: state, and attached files (for file inputs). The verification
+#: counterpart to _SET_VALUE_JS — fill success is confirmed by reading
+#: the DOM back, never assumed from a no-error return.
+_READ_VALUE_JS = """() => {
+  const el = document.querySelector('[' + '""" + FIELD_MARKER + """' + '="1"]');
+  if (!el) return null;
+  const isFile = (el.getAttribute('type') || '').toLowerCase() === 'file';
+  return {
+    value: ('value' in el) ? el.value : null,
+    checked: ('checked' in el) ? !!el.checked : null,
+    files: (isFile && el.files) ? el.files.length : null,
+    fileName: (isFile && el.files && el.files[0]) ? el.files[0].name : null,
+  };
+}"""
+
+
+def read_value_js(page: Any) -> dict[str, Any] | None:
+    """Read back the resolved (marker-pinned) field's live state.
+
+    Returns ``{"value", "checked", "files", "fileName"}`` (fields that do
+    not apply are None), or None when no field is currently pinned.
+    Raises the page's own error when evaluation fails.
+    """
+    result = page.evaluate(_READ_VALUE_JS)
+    if result is None:
+        return None
+    return dict(result)
 
 
 #: date formats accepted by set_date(); normalized to ISO for native inputs.

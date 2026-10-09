@@ -44,6 +44,7 @@ from typing import Any
 
 from ..core.events import Event, global_bus
 from ..core.logging_setup import get_logger
+from . import errors as _errors
 from .service import BrowserError, BrowserService, _mask_proxy
 
 __all__ = [
@@ -72,7 +73,7 @@ _MAX_FRAME = 256 * 1024 * 1024
 _MUTATING_OPS = frozenset({
     "open", "close", "click", "submit",
     "r_fill", "r_click", "r_submit", "r_evaluate", "r_fill_form",
-    "r_set_date", "r_check", "r_select",
+    "r_set_date", "r_check", "r_select", "r_upload", "r_switch",
 })
 #: Cap on bus events buffered between client drains.
 _MAX_BUFFERED_EVENTS = 10_000
@@ -482,6 +483,45 @@ def _get_or_open(svc: BrowserService, name: str):
         return svc.open_session(name)
 
 
+def _handle_pacing_op(svc: BrowserService,
+                      params: dict[str, Any]) -> dict[str, Any]:
+    """The ``pacing`` op: get the active pacing, or configure it.
+
+    ``{"action": "get"}`` returns the config. ``{"action": "set", ...}``
+    accepts ``enabled``/``delay_ms``/``jitter_ms``, or a ``preset``:
+    ``human`` (human-ish cadence), ``profile`` (suggested for this
+    machine's resource profile), ``off`` (no pacing).
+    """
+    from .pacing import Pacing
+
+    action = (params.get("action") or "get").strip().lower()
+    if action == "get":
+        return svc.pacing.describe()
+    if action != "set":
+        raise DaemonError(f"unknown pacing action {action!r}: get|set")
+    preset = (params.get("preset") or "").strip().lower()
+    if preset:
+        if preset == "human":
+            return svc.set_pacing(Pacing.human())
+        if preset == "off":
+            return svc.set_pacing(Pacing.disabled())
+        if preset == "profile":
+            return svc.set_pacing(Pacing.from_profile())
+        raise DaemonError(
+            f"unknown pacing preset {preset!r} (want human|off|profile)")
+    kwargs: dict[str, Any] = {}
+    if "enabled" in params:
+        kwargs["enabled"] = bool(params["enabled"])
+    if "delay_ms" in params:
+        kwargs["delay_ms"] = int(params["delay_ms"])
+    if "jitter_ms" in params:
+        kwargs["jitter_ms"] = int(params["jitter_ms"])
+    if not kwargs:
+        raise DaemonError(
+            "pacing set needs enabled/delay_ms/jitter_ms or a preset")
+    return svc.set_pacing(**kwargs)
+
+
 def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
     """Execute one request against the live service. Mirrors the CLI verbs."""
     if op == "ping":
@@ -625,14 +665,39 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
             full_page=bool(params.get("full_page"))).to_dict()}
     if op == "r_fill":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
-        return {"result": tab.fill(params.get("name") or "",
-                                   params.get("value") or "")}
+        return {"result": tab.fill(
+            params.get("name") or "",
+            params.get("value") or "",
+            verify=bool(params.get("verify", True)),
+            wait_ms=int(params.get("wait_ms") or 0))}
     if op == "r_click":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.click(params.get("target") or "")}
     if op == "r_submit":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
-        return {"result": tab.submit(params.get("target") or "")}
+        return {"result": tab.submit(
+            params.get("target") or "",
+            settle=bool(params.get("settle", False)))}
+    if op == "r_upload":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.upload(
+            params.get("selector") or "",
+            params.get("path") or "",
+            verify=bool(params.get("verify", True)))}
+    if op == "r_wait_field":
+        tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
+        return {"result": tab.wait_for_field(
+            params.get("name") or "",
+            timeout=int(params.get("timeout") or 10_000))}
+    if op == "r_switch":
+        return {"result": svc.switch_rendered_tab(
+            params.get("session") or name,
+            params.get("tab_id") or "")}
+    if op == "r_active":
+        return {"result": svc.active_rendered_tab(
+            params.get("session") or name)}
+    if op == "pacing":
+        return {"result": _handle_pacing_op(svc, params)}
     if op == "r_wait":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.wait_for(
@@ -654,12 +719,14 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         return {"result": tab.select(
             params.get("name") or "",
             params.get("value") or "",
-            by=params.get("by") or "auto")}
+            by=params.get("by") or "auto",
+            verify=bool(params.get("verify", True)))}
     if op == "r_check":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.check(
             params.get("name") or "",
-            bool(params.get("checked", True)))}
+            bool(params.get("checked", True)),
+            verify=bool(params.get("verify", True)))}
     if op == "r_captcha":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.check_captcha(
@@ -680,7 +747,8 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
         if not isinstance(fields, dict):
             raise DaemonError("r_fill_form fields must be a {field: value} object")
         return {"result": tab.fill_form(
-            fields, stop_on_error=bool(params.get("stop_on_error", True)))}
+            fields, stop_on_error=bool(params.get("stop_on_error", True)),
+            verify=bool(params.get("verify", True)))}
     if op == "r_set_date":
         tab = _rendered_tab_or_raise(svc, params.get("tab_id") or "")
         return {"result": tab.set_date(params.get("name") or "",
@@ -790,7 +858,10 @@ def serve(data_dir: str | os.PathLike[str]) -> int:
                     if op in _MUTATING_OPS:
                         svc.save()
                 except BrowserError as exc:
-                    reply = {"ok": False, "error": str(exc)}
+                    # Ship the structured taxonomy alongside the message
+                    # so clients can tell blocks from site/network errors.
+                    reply = {"ok": False, "error": str(exc),
+                             "error_detail": _errors.describe(exc)}
                 except DaemonError as exc:
                     reply = {"ok": False, "error": str(exc)}
                 except Exception as exc:  # noqa: BLE001 - one bad op never kills the daemon

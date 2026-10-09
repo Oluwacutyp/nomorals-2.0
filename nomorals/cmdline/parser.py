@@ -2388,6 +2388,9 @@ def _parser() -> argparse.ArgumentParser:
     trial_assist.add_argument("--yes", action="store_true",
                               help="skip the disposable-identity warning and proceed")
     trial_sub.add_parser("status", help="Status of background assisted signups")
+    trial_confirm = trial_sub.add_parser(
+        "confirm", help="Confirm a drafted disposable identity and start the signup")
+    trial_confirm.add_argument("token", help="confirmation token from the identity draft")
     trial_resume = trial_sub.add_parser(
         "resume", help="Continue a paused account flow after the human step")
     trial_resume.add_argument("checkpoint_id", help="checkpoint id to resume")

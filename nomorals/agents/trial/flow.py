@@ -101,6 +101,12 @@ _SMS_WATCH_TTL = 7 * 24 * 3600
 #: ``/trial sms code`` can poll it without the owner pasting JSON around.
 TEMP_SMS_KV_KEY = "trial.temp_sms"
 
+#: process-local confirmation gate for disposable-persona signups (see
+#: TrialFlow._confirmation_gate).  A restart drops pending
+#: confirmations; ``/trial confirm`` then honestly reports the token as
+#: unknown instead of misfiring.
+_CONFIRM_GATE = None
+
 
 def _format_sms_poll_result(info: dict[str, Any], code: str,
                             timeout: float) -> str:
@@ -218,33 +224,93 @@ class TrialFlow:
         paused-for-human, or failed — is reported back to the owner's chat.
         Returns immediately with a truthful status.
 
-        If no identity is set, generates a disposable one (temp email +
-        generated name) and shows it with a warning — proceeds on explicit
-        confirmation, or immediately with auto_yes=True (--yes flag).
+        If no identity is set, a disposable persona is drafted from the
+        identity bank and shown with a warning — the run proceeds ONLY on
+        explicit confirmation (``/trial confirm <token>``) or immediately
+        with auto_yes=True (--yes flag, the standing go-ahead).
         """
         platform = (platform or "").strip()
         if not platform:
             raise ToolError("usage: /trial assist <platform> [--yes]")
         try:
             from ...accounts.creator import AccountCreator  # noqa: F401
+            from ...accounts.identity_bank import (  # noqa: F401
+                IdentityBank, render_persona_card)
         except Exception as exc:  # noqa: BLE001
             return f"account automation unavailable: {exc}"
-        # Identity bank check — generate a disposable identity if none set.
+        # Owner's own identity wins when set (services tied to them).
+        # Otherwise draft a disposable persona — confirmation-gated.
         identity = self._owner_identity()
+        persona_id = ""
         if not identity.get("name") or not identity.get("email"):
-            identity = self._generate_disposable_identity(platform)
+            bank = self._identity_bank()
+            persona = bank.get_or_mint(platform)
+            persona_id = persona.id
+            identity = {
+                "name": persona.name,
+                "email": "(temp address minted at signup)",
+                "disposable": "true",
+                "persona_id": persona_id,
+            }
             if not auto_yes:
+                gate = self._confirmation_gate()
+                token = gate.request(
+                    subject=f"trial signup: {platform}",
+                    card=render_persona_card(persona, platform),
+                    payload={"platform": platform,
+                             "persona_id": persona_id,
+                             "chat_key": chat_key or ""},
+                )
                 return (
-                    "⚠️ no identity set — I generated a disposable one:\n"
-                    f"  name:  {identity.get('name')}\n"
-                    f"  email: {identity.get('email')} (temp, disposable)\n"
-                    "this is NOT your real identity. reply 'yes' to proceed\n"
-                    f"with this, or use /trial assist {platform} --yes to skip\n"
-                    "this warning. to use your own details instead:\n"
+                    f"{render_persona_card(persona, platform)}\n\n"
+                    f"to proceed: `/trial confirm {token}`\n"
+                    f"or rerun: `/trial assist {platform} --yes`\n"
+                    "to use your own details instead:\n"
                     "  /identity set name <your name>\n"
                     "  /identity set email <your email>"
                 )
-            # auto_yes: proceed with the generated identity, note it in the run
+            # auto_yes: the --yes flag IS the explicit confirmation.
+        return self._launch_assist(platform, chat_key=chat_key,
+                                   identity=identity, persona_id=persona_id)
+
+    def confirm_signup(self, token: str, *, chat_key: str = "") -> str:
+        """Redeem a ``/trial confirm <token>`` — the explicit go-ahead for
+        a drafted disposable persona.  One-shot: the token dies here."""
+        token = (token or "").strip()
+        if not token:
+            return "usage: /trial confirm <token>"
+        gate = self._confirmation_gate()
+        # The `/trial confirm <token>` command itself is the owner's
+        # explicit yes — record it on the gate, then one-shot redeem.
+        if not gate.confirm(token, "yes"):
+            return (
+                "unknown or expired confirmation token — nothing was "
+                "started. Rerun `/trial assist <platform>` for a fresh "
+                "identity draft.")
+        payload = gate.consume(token)
+        if not payload:
+            return (
+                "unknown or expired confirmation token — nothing was "
+                "started. Rerun `/trial assist <platform>` for a fresh "
+                "identity draft.")
+        platform = payload.get("platform", "")
+        return self._launch_assist(
+            platform,
+            chat_key=chat_key or payload.get("chat_key", ""),
+            identity={"name": "(disposable persona)",
+                      "email": "(temp address minted at signup)",
+                      "disposable": "true",
+                      "persona_id": payload.get("persona_id", "")},
+            persona_id=payload.get("persona_id", ""),
+        )
+
+    def _launch_assist(self, platform: str, *, chat_key: str,
+                       identity: dict[str, str], persona_id: str = "",
+                       supersedes: str = "") -> str:
+        """Start the background assist run. The confirmation gate has
+        already been passed by the caller (card + /trial confirm, or
+        --yes); a resume re-drive carries the owner's action as the
+        go-ahead."""
         if not os.environ.get("NM_VAULT_PASSPHRASE", ""):
             return (
                 "vault is locked: set the NM_VAULT_PASSPHRASE environment "
@@ -270,7 +336,8 @@ class TrialFlow:
         self._persist_assist_run(run_id)
         thread = threading.Thread(
             target=self._assist_run,
-            args=(run_id, platform, chat_key, dict(identity)),
+            args=(run_id, platform, chat_key, dict(identity), persona_id,
+                  supersedes),
             name=f"trial-assist-{platform.lower()[:20]}",
             daemon=True,
         )
@@ -278,8 +345,9 @@ class TrialFlow:
         return (
             f"assisted signup for {platform} — started.\n"
             f"identity: {identity.get('name')} <{identity.get('email')}>\n"
-            "I'm driving the signup in the background; I'll report back here "
-            "when it pauses for you (CAPTCHA/verification) or finishes.\n"
+            "I'm driving the whole signup myself — forms, CAPTCHA solver, "
+            "email + SMS verification. I'll ping you only if I get genuinely "
+            "stuck.\n"
             "check status: /trial status"
         )
 
@@ -361,6 +429,34 @@ class TrialFlow:
                     f"✅ human step recorded ({result.title}).\n\n"
                     f"Re-driving the signup automatically:\n{retry}"
                 )
+            if flow == "signup_wall":
+                # Owner acted on a genuinely-stuck signup — re-drive it
+                # with the same persona, linked to the previous attempt.
+                resume_state = result.resume_state or {}
+                attempt_id = resume_state.get("attempt_id", "")
+                persona_id = ""
+                if attempt_id and self.db is not None:
+                    try:
+                        from ...accounts.signup_driver import (
+                            SignupAttemptStore)
+                        from ...accounts.identity_bank import IdentityBank
+
+                        prev = SignupAttemptStore(self.db).get(attempt_id)
+                        persona_id = prev.persona_id
+                        service = service or prev.service
+                    except Exception:  # noqa: BLE001
+                        pass
+                retry = self._launch_assist(
+                    service or "unknown", chat_key=chat_key,
+                    identity={"name": "(disposable persona)",
+                              "email": "(temp address minted at signup)",
+                              "disposable": "true",
+                              "persona_id": persona_id},
+                    persona_id=persona_id, supersedes=attempt_id)
+                return (
+                    f"✅ human step recorded ({result.title}).\n\n"
+                    f"Re-driving the signup automatically:\n{retry}"
+                )
             if flow == "need_identity":
                 return (
                     "✅ identity recorded. Re-run the signup to continue:\n"
@@ -369,9 +465,57 @@ class TrialFlow:
             return f"✅ checkpoint resolved: {result.title}"
         return f"✅ resumed {checkpoint_id}"
 
+    def _assist_run_persona(self, run_id: str, platform: str,
+                              chat_key: str, creator, vault,
+                              persona_id: str, supersedes: str = "") -> str:
+        """Drive the whole signup for a disposable persona.
+
+        Confirmation was already collected (card + ``/trial confirm`` or
+        ``--yes``), so ``confirmed=True`` here is the code-level gate.
+        The owner's real contacts are passed as the invariant set — the
+        driver fails closed if the flow would touch them.
+        """
+        import asyncio
+
+        from ...accounts.identity_bank import IdentityBank
+        from ...accounts.signup_driver import (
+            SignupAttemptStore,
+            SignupDriver,
+            render_attempt_summary,
+        )
+
+        bank = IdentityBank(db=self.db, vault=vault)
+        persona = bank.get(persona_id) or bank.get_or_mint(platform)
+        attempts = SignupAttemptStore(self.db)
+        driver = SignupDriver(
+            creator,
+            attempts,
+            notify=lambda t, b, aid: self._notify_owner(t, b, chat_key),
+            page_factory=self._trial_page_factory,
+        )
+        attempt = asyncio.run(driver.adrive(
+            service=platform,
+            persona=persona,
+            confirmed=True,
+            owner_contacts=self._owner_contacts(),
+            supersedes=supersedes,
+        ))
+        return (
+            f"✅ {attempt.service} account ready — credentials are in the "
+            f"vault.\n{render_attempt_summary(attempt)}"
+        )
+
     def _assist_run(self, run_id: str, platform: str, chat_key: str,
-                    identity: dict[str, str]) -> None:
-        """Background body of :meth:`assist` — runs the real creator."""
+                    identity: dict[str, str], persona_id: str = "",
+                    supersedes: str = "") -> None:
+        """Background body of :meth:`assist`.
+
+        Disposable-persona path (``persona_id`` set): drives the WHOLE
+        signup via :class:`SignupDriver` — form fill, CAPTCHA solver,
+        temp-mail + temp-SMS verification — pinging the owner only when
+        genuinely stuck.  Owner-identity path: the legacy
+        ``AccountCreator`` flow with their own details.
+        """
         self._set_assist_run_state(run_id, "running")
         note = ""
         ok = False
@@ -396,13 +540,19 @@ class TrialFlow:
                 captcha_solver=creator_solver_adapter(
                     settings=getattr(self.context, "settings", None)),
             )
-            account = asyncio.run(
-                creator.create_account(platform, email=identity.get("email")))
-            note = (
-                f"✅ {account.service} account ready — "
-                f"username: {account.username}, email: {account.email}. "
-                "Credentials are stored in the vault."
-            )
+            if persona_id:
+                note = self._assist_run_persona(
+                    run_id, platform, chat_key, creator, vault, persona_id,
+                    supersedes=supersedes)
+            else:
+                account = asyncio.run(
+                    creator.create_account(
+                        platform, email=identity.get("email")))
+                note = (
+                    f"✅ {account.service} account ready — "
+                    f"username: {account.username}, email: {account.email}. "
+                    "Credentials are stored in the vault."
+                )
             ok = True
         except AccountExistsError as exc:
             note = f"ℹ️ {exc}"
@@ -410,7 +560,7 @@ class TrialFlow:
         except AccountCheckpointPending as pending:
             cp = pending.checkpoint
             note = (
-                "⏸️ account creation paused — I need your help:\n\n"
+                "⏸️ signup needs you — I drove it as far as I could:\n\n"
                 f"**{cp.title}**\n{cp.instructions}\n\n"
                 f"When you're done, just say: `/trial resume {cp.id}`\n"
                 f"(or on the machine: `nm account resume --id {cp.id}`)"
@@ -633,7 +783,34 @@ class TrialFlow:
                 if note:
                     lines.append(f"    {note[:220]}")
         lines.extend(watch_lines)
+        lines.extend(self._signup_attempt_lines())
         return "\n".join(lines)
+
+    def _signup_attempt_lines(self) -> list[str]:
+        """Per-attempt signup records for ``/trial status``."""
+        if self.db is None:
+            return []
+        try:
+            from ...accounts.signup_driver import SignupAttemptStore
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            attempts = SignupAttemptStore(self.db).list(limit=10)
+        except Exception:  # noqa: BLE001
+            return []
+        if not attempts:
+            return []
+        lines = ["signup attempts:"]
+        for attempt in attempts:
+            wall = (f" — wall: {attempt.wall_kind.value}"
+                    if attempt.wall_kind.value != "none" else "")
+            lines.append(
+                f"  {attempt.service} [{attempt.stage.value}]{wall} "
+                f"persona: {attempt.persona_name or attempt.persona_id}"
+            )
+            if attempt.note:
+                lines.append(f"    {attempt.note[:200]}")
+        return lines
 
     # ── durable sms-watch state ─────────────────────────────────────────
     #
@@ -1230,36 +1407,74 @@ class TrialFlow:
     def _generate_disposable_identity(self, platform: str) -> dict[str, str]:
         """Generate a disposable identity for trial signups.
 
-        Uses temp/disposable email services — NEVER the owner's real details.
-        Returns dict with name, email, and a flag marking it as generated.
+        Delegates to the vault-side :class:`IdentityBank` — the same
+        persona is reused for the service's retries (same name on the
+        form, same username attempts, same temp email).  Uses
+        temp/disposable contacts — NEVER the owner's real details.
+        Returns dict with name, email slot, persona_id, and a flag
+        marking it as generated.
         """
-        import random
-        import string
+        from ...accounts.identity_bank import IdentityBank
 
-        # Generate a plausible-but-clearly-disposable name
-        first_names = ["Alex", "Sam", "Jordan", "Casey", "Riley", "Morgan"]
-        last_names = ["Trial", "Test", "Demo", "Temp", "Guest"]
-        name = f"{random.choice(first_names)} {random.choice(last_names)}"
-
-        # Generate a temp email via the creator's tempmail
-        # (uses disposable domains, not the owner's real email)
-        try:
-            from ...accounts.creator import AccountCreator
-            creator = AccountCreator(db=self.db)
-            username = "".join(random.choices(string.ascii_lowercase, k=10))
-            account = creator._create_tempmail(username)
-            email = account.get("email", f"{username}@tempmail.plus")
-        except Exception:  # noqa: BLE001
-            # Fallback: clearly-marked disposable address
-            username = "".join(random.choices(string.ascii_lowercase, k=10))
-            email = f"{username}@tempmail.plus"
-
+        bank = self._identity_bank()
+        persona = bank.get_or_mint(platform)
         return {
-            "name": name,
-            "email": email,
+            "name": persona.name,
+            "email": persona.email or "(temp address minted at signup)",
             "disposable": "true",
             "platform": platform,
+            "persona_id": persona.id,
         }
+
+    def _identity_bank(self):
+        """Vault-side identity bank (vault when the passphrase is set)."""
+        from ...accounts.identity_bank import IdentityBank
+        from ...accounts.vault import CredentialVault
+
+        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+        vault = None
+        if passphrase and self.db is not None:
+            try:
+                vault = CredentialVault(self.db,
+                                        master_passphrase=passphrase)
+            except Exception:  # noqa: BLE001 - fall back to table backend
+                vault = None
+        return IdentityBank(db=self.db, vault=vault)
+
+    def _confirmation_gate(self):
+        """Process-local confirmation gate for persona use.
+
+        Process-local by design: a restart drops pending confirmations
+        and ``/trial confirm`` then honestly reports an unknown token
+        (the owner reruns ``/trial assist`` for a fresh card).
+        """
+        global _CONFIRM_GATE
+        if _CONFIRM_GATE is None:
+            from ...accounts.identity_bank import ConfirmationGate
+
+            _CONFIRM_GATE = ConfirmationGate()
+        return _CONFIRM_GATE
+
+    def _owner_contacts(self) -> dict[str, list[str]]:
+        """The owner's real contact details — the signup driver checks
+        every contact it touches against these and fails closed."""
+        identity = self._owner_identity()
+        emails = [identity.get("email", "")] if identity.get("email") else []
+        phones = [identity.get("phone", "")] if identity.get("phone") else []
+        return {"emails": [e for e in emails if e],
+                "phones": [p for p in phones if p]}
+
+    @staticmethod
+    def _trial_page_factory():
+        """Open a real rendered browser tab for form driving.
+
+        Raises when no browser/playwright is available — the driver
+        treats that as "no page" and hands to the owner honestly.
+        """
+        from ...browser.service import BrowserService
+
+        svc = BrowserService()
+        return svc.open_rendered_tab("trial-signup")
 
     # ── save + deliver ───────────────────────────────────────────────────────
     def save(self, platform: str, login: str, secret: str, note: str = "") -> dict:

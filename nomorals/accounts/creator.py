@@ -1273,6 +1273,24 @@ class AccountCreator:
 
         return grab_number(country=country, provider=provider)
 
+    def get_temp_number_cascade(
+        self,
+        country: str = "us",
+        providers: tuple[str, ...] | None = None,
+    ) -> dict:
+        """Grab a temp number, cascading across providers.
+
+        Tries each provider (then fallback countries) until one yields
+        a usable number.  Probe-gated providers self-check and are
+        skipped when unavailable.  Returns ``{"status": "ok", ...}`` or
+        ``{"status": "failed", "notes": ...}`` when every source is
+        exhausted.
+        """
+        from .temp_sms import CASCADE_PROVIDERS, grab_number_cascade
+
+        return grab_number_cascade(
+            country=country, providers=providers or CASCADE_PROVIDERS)
+
     def poll_sms_code(self, number_info: dict, *,
                       sender_hint: str = "",
                       timeout: float = 180) -> str:

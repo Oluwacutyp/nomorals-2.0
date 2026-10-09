@@ -1,0 +1,95 @@
+{
+ "sources": {
+  "monosans-http": {
+   "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+   "kind": "list",
+   "parsed": 226,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "monosans-socks5": {
+   "url": "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+   "kind": "list",
+   "parsed": 764,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "spysme-http": {
+   "url": "https://spys.me/proxy.txt",
+   "kind": "list",
+   "parsed": 400,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "openproxylist-http": {
+   "url": "https://api.openproxylist.xyz/http.txt",
+   "kind": "list",
+   "parsed": 5937,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "thespeedx-socks5": {
+   "url": "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+   "kind": "list",
+   "parsed": 2771,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "geonode": {
+   "url": "https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc",
+   "kind": "json",
+   "parsed": 100,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "proxydb-http": {
+   "url": "https://proxydb.net/?protocol=http",
+   "kind": "html",
+   "parsed": 30,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "proxydb-socks5": {
+   "url": "https://proxydb.net/?protocol=socks5",
+   "kind": "html",
+   "parsed": 30,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "freeproxyworld-socks5": {
+   "url": "https://www.freeproxy.world/?type=socks5",
+   "kind": "html",
+   "parsed": 50,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "advancedname": {
+   "url": "https://advanced.name/freeproxy",
+   "kind": "html",
+   "parsed": 100,
+   "sampled": 15,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  }
+ },
+ "ts": 1791538393.064376
+}

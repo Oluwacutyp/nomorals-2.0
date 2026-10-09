@@ -803,6 +803,47 @@ class ProxyPoolConnector(Connector):
 
     # ── rotation ───────────────────────────────────────────────
 
+    def record_failure(self, proxy_id: str, error: str = "") -> dict[str, Any]:
+        """Demote a proxy that just failed a real request.
+
+        Marks it unhealthy (``rotate()`` skips it) and increments its
+        consecutive-failure count.  Used by the download fallback chain
+        and other consumers so one dead proxy never kills the work —
+        the caller simply moves to the next proxy.
+        """
+        self._record_health(proxy_id, ok=False, latency_ms=None,
+                            status_code=None, error=error or "")
+        _log.info("proxypool: demoted %s (%s)", proxy_id,
+                  (error or "")[:120])
+        return self.get_proxy(proxy_id)
+
+    def record_success(self, proxy_id: str,
+                       latency_ms: float | None = None) -> dict[str, Any]:
+        """Mark a proxy healthy again after a successful real request.
+
+        Resets its consecutive-failure count so a proxy that recovered
+        rejoins rotation.
+        """
+        self._record_health(proxy_id, ok=True, latency_ms=latency_ms,
+                            status_code=None, error="")
+        return self.get_proxy(proxy_id)
+
+    def healthy_proxies(self) -> list[dict[str, Any]]:
+        """Connection details for every currently-healthy proxy.
+
+        Same shape as :meth:`rotate` (includes ``proxy_url`` with auth —
+        treat the result as secret), in insertion order, for consumers
+        that need protocol-aware selection instead of blind round-robin.
+        """
+        out: list[dict[str, Any]] = []
+        for cred in sorted(self._load_all(), key=lambda c: c.id):
+            if ((cred.metadata or {}).get("health") or {}).get("status") \
+                    == HEALTHY:
+                full = self.vault.get(self._service, cred.username,
+                                      mark_used=False)
+                out.append(self._details(full, include_secret=True))
+        return out
+
     def rotate(self) -> dict[str, Any]:
         """Next healthy proxy, round-robin. Includes the credential.
 

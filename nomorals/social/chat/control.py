@@ -141,7 +141,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # feature flags + arena + trial accounts
     "features": (0, 2),      # /features | /features <name> on|off
     "arena": (0, None),      # /arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>]
-    "trial": (0, 5),         # /trial [list|start <p>|assist <p> [--yes]|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]
+    "trial": (0, 5),         # /trial [list|start <p>|assist <p> [--yes]|signup <p>|confirm <tok>|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]
     "identity": (0, 3),      # /identity [show|set <field> <value>|clear] — the profile bank for signups
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
@@ -279,7 +279,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "scan": (1, 6),          # /scan <target> [ports] [banner]
     "whois": (1, 3),         # /whois <domain>
     "ports": (0, 1),         # /ports — what is listening here
-    "proxy": (0, 8),         # /proxy status|scrape|test|pool [scheme]|rotate on|set <url>|ssh <…>
+    "proxy": (0, 8),         # /proxy status|scrape|test|health|pool|pick|affinity|rotate on|set <url>|ssh <…>
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
     "osint": (1, None),      # /osint <target> | campaign <seeds> | graph <verb>…
@@ -459,8 +459,12 @@ _HELP_TEXT = "\n".join(
         "  /ports                                  what is listening on this machine",
         "  /proxy status|list|test|set <url>|clear route outbound traffic (your proxies)",
         "  /proxy scrape|refresh|pool [scheme] free-proxy lab  /proxy rotate on [strategy]",
+        "  /proxy health — pool by protocol/anonymity/country, latency, refresh, backoffs",
+        "  /proxy pick [udp] [country=XX] [anon=elite] — protocol-aware pick",
+        "  /proxy affinity bind|lookup|release|list — sticky proxy per site",
         "  /proxy discover [seed urls] learn new list sources from the internet",
         "  /proxy sources — health of every source (retired ones auto-retry)",
+        "  /proxy schedule on [min] — auto re-check the pool every N minutes",
         "  /proxy ssh start <name> <host> <user> [key] [port] — SSH → SOCKS5 tunnel",
         "  /workspace [status|scale <n>|up|down|pause|resume|add|remove] the virtual CPU farm",
         "  /gen <kind> <name> [json]               generate a validated script",
@@ -880,8 +884,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/arena [status|run [topic]|topics|stream [n]|export [n]|approve <id>|deny <id>|promote <build-id>|ship|apply <proposal-id>|reject <proposal-id> <reason>|scores|sample]",
               "example": "/arena run llama fine-tuning",
               "related": "/features /research"},
-    "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account); assisted signups + temp SMS/email for verification.",
-              "usage": "/trial [list|start <p>|assist <p> [--yes]|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]",
+    "trial": {"what": "plan / store / send ONE trial-account signup you asked for (stored encrypted, one account); full auto signups (forms, CAPTCHA solver, temp email/SMS) with a confirmation gate.",
+              "usage": "/trial [list|start <p>|assist <p> [--yes]|signup <p>|confirm <token>|status|sms [country]|sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]",
               "example": "/trial list", "related": "/say"},
     "identity": {"what": "the profile bank for signups: your name/email/phone stored once, used by account creation flows.",
               "usage": "/identity [show|set <name|email|phone> <value>|clear]",
@@ -1328,9 +1332,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/workspace [status|scale <n>|up|down|pause|resume|add|remove]",
               "example": "/workspace",
               "related": "/status /arena"},
-    "proxy": {"what": "route outbound traffic through your proxies; free-proxy lab (health-tracked sources + internet-wide discovery); SSH→SOCKS5 tunnels.",
-              "usage": "/proxy status|list|test|set <url>|clear | scrape|pool [scheme] | discover [seeds] | sources | rotate on | ssh start <n> <host> <user>",
-              "example": "/proxy status",
+    "proxy": {"what": "route outbound traffic through your proxies; free-proxy lab (health-tracked sources + internet-wide discovery, scored + decayed ranking, per-site affinity, protocol-aware picks); SSH→SOCKS5 tunnels.",
+              "usage": "/proxy status|list|test|set <url>|clear | scrape|refresh|health|pool [scheme]|pick [udp] [country=XX] | affinity bind|lookup|release|list | discover [seeds] | sources | schedule on [min] | rotate on | ssh start <n> <host> <user>",
+              "example": "/proxy health",
               "related": "/scan /osint"},
     "gen": {"what": "generate a validated automation script of a kind and save it "
                     "to her workspace — the script is syntax-checked before it "
@@ -2033,7 +2037,7 @@ LIST_ONELINERS: dict[str, str] = {
     "notion": "Notion databases, rows, and page creation",
     "gcal": "Google Calendar agenda and event creation",
     "trello": "Trello boards, lists, cards — create cards",
-    "proxy": "proxy lab: status|test|set|scrape|refresh|pool|file|rotate|ssh",
+    "proxy": "proxy lab: status|test|set|scrape|refresh|health|pool|pick|affinity|rotate|schedule|ssh",
     "record": "capture actions into a macro",
     "macro": "replay a recorded macro",
     "file": "send a file to any live chat",

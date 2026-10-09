@@ -378,6 +378,64 @@ class BrowserSession:
             "content_type": content_type, "text": text,
         }
 
+    def fetch_bytes(self, url: str, dest_path: "str | os.PathLike[str]", *,
+                    max_bytes: int = 1_073_741_824,
+                    timeout: float | None = None) -> dict[str, Any]:
+        """Download raw bytes through this session's opener.
+
+        Cookies, the session proxy, and headers ride along — this is how
+        the download fallback chain pulls media through an authenticated
+        browser session.  Streams to ``dest_path`` (never holds the whole
+        file in memory); raises :class:`ToolError` on failure.
+        """
+        from pathlib import Path as _Path
+
+        parsed = urllib.parse.urlparse(url or "")
+        if parsed.scheme not in {"http", "https"}:
+            raise ToolError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
+        if self.respect_robots and not _robots_allowed(url, self.user_agent):
+            raise ToolError(f"robots.txt disallows {url}")
+        dest = _Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        request = urllib.request.Request(url, headers={
+            "User-Agent": self.user_agent,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": self.url or url,
+        }, method="GET")
+        started = time.perf_counter()
+        try:
+            with self._opener.open(request,
+                                   timeout=timeout or self.timeout) as response:
+                status = getattr(response, "status", 200)
+                content_type = response.headers.get("Content-Type", "")
+                final_url = response.geturl()
+                written = 0
+                with open(dest, "wb") as fh:
+                    while True:
+                        chunk = response.read(256 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise ToolError(
+                                f"download exceeds {max_bytes} bytes")
+                        fh.write(chunk)
+        except urllib.error.HTTPError as exc:
+            raise ToolError(
+                f"GET {url} -> HTTP {exc.code}: "
+                f"{classify(exc).message}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ToolError(
+                f"GET {url} failed: {classify(exc).message}") from exc
+        self.request_count += 1
+        _log.info("browser fetch_bytes url=%s status=%d bytes=%d "
+                  "type=%s (%.1fs)", url, status, written,
+                  content_type or "?", time.perf_counter() - started)
+        return {"url": final_url, "status": status,
+                "content_type": content_type, "bytes": written,
+                "path": str(dest)}
+
     # -- public actions --------------------------------------------------------
     def do(self, action: str, **kw: Any) -> dict[str, Any]:
         """Dispatch one action. Returns a JSON-able dict; raises ToolError."""

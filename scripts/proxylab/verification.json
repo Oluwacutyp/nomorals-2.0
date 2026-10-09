@@ -1,0 +1,56 @@
+{
+ "sources": {
+  "proxydb-http": {
+   "url": "https://proxydb.net/?protocol=http",
+   "kind": "html",
+   "parsed": 30,
+   "by_scheme": {
+    "http": 30
+   },
+   "sampled": 8,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "proxydb-socks5": {
+   "url": "https://proxydb.net/?protocol=socks5",
+   "kind": "html",
+   "parsed": 30,
+   "by_scheme": {
+    "socks5": 30
+   },
+   "sampled": 8,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "freeproxyworld-socks5": {
+   "url": "https://www.freeproxy.world/?type=socks5",
+   "kind": "html",
+   "parsed": 50,
+   "by_scheme": {
+    "socks4": 5,
+    "socks5": 44,
+    "http": 1
+   },
+   "sampled": 14,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  },
+  "freeproxyworld-socks4": {
+   "url": "https://www.freeproxy.world/?type=socks4",
+   "kind": "html",
+   "parsed": 50,
+   "by_scheme": {
+    "socks4": 31,
+    "http": 19
+   },
+   "sampled": 8,
+   "working": 0,
+   "seconds": 0.0,
+   "working_proxies": []
+  }
+ },
+ "ts": 1791538374.8218257
+}

@@ -125,6 +125,10 @@ def buttons_for_text(text: str) -> Keyboard | None:
     if "pool empty — /proxy refresh to scrape+test" in t:
         return [[("🔄 Refresh pool", "proxy refresh")]]
 
+    # ── proxy health empty — one tap to rebuild ──
+    if "Tap `/proxy refresh`" in t:
+        return [[("🔄 Refresh pool", "proxy refresh")]]
+
     # ── research proposals — approve / deny the latest ──
     if "approve: /research approve" in t and "deny: /research deny" in t:
         return [[("✅ Approve latest", "research approve latest"),

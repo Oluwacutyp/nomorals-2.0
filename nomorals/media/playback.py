@@ -726,7 +726,10 @@ class PlaybackEngine:
                 "(pip install yt-dlp)")
         url = self._youtube_watch_url(video_id)
         try:
-            out = call("media_download", url=url, audio_only=True)
+            # page_url = the watch page itself: the browser stage opens
+            # the real page and extracts the media through the session.
+            out = call("media_download", url=url, audio_only=True,
+                       page_url=url)
         except Exception as exc:  # noqa: BLE001
             raise ToolError(f"youtube audio download failed: {exc}") from exc
         if not getattr(out, "ok", False):
@@ -818,7 +821,12 @@ class PlaybackEngine:
             dl_error: Any = None
             out = None
             try:
-                out = call("media_download", url=url, audio_only=True)
+                # page_url = the source page (permalink / post page) so
+                # the browser stage opens the real page when direct and
+                # proxy stages fail — not the resolved stream URL.
+                page_url = str(item.get("path", "") or "")
+                out = call("media_download", url=url, audio_only=True,
+                           page_url=page_url if page_url != url else "")
             except Exception as exc:  # noqa: BLE001
                 dl_error = exc
             if dl_error is None and not getattr(out, "ok", False):
@@ -842,7 +850,12 @@ class PlaybackEngine:
             if not path or not os.path.isfile(path):
                 return {"ok": False, "reason":
                         "download reported success but produced no file"}
-            return {"ok": True, "path": path, "title": title}
+            res: dict[str, Any] = {"ok": True, "path": path, "title": title}
+            stages = value.get("stages")
+            if stages:
+                res["stages"] = stages  # fallback chain trail, e.g.
+                # ["direct"] or ["direct", "proxy", "browser"]
+            return res
         except Exception as exc:  # noqa: BLE001 - never raises
             return {"ok": False, "reason": f"download error: {exc}"}
 

@@ -237,13 +237,29 @@ def register(registry: Any) -> None:
         audio_only: bool = False,
         format_spec: str = "bestvideo*+bestaudio/best",
         timeout: float = 1800.0,
+        page_url: str = "",
     ) -> dict[str, Any]:
-        from .filesystem import safe_path
+        """Download with the full fallback chain: direct (yt-dlp, retry +
+        backoff) → proxy lab → browser-context fetch → honest failure.
 
-        target_dir = safe_path(context, "media")
-        result = download(
-            url, target_dir, format_spec=format_spec, audio_only=audio_only, timeout=timeout
-        )
+        ``page_url`` is the source page for the browser stage (e.g. the
+        YouTube watch page or a download-blog post) when it differs from
+        ``url`` itself.
+        """
+        from ..media.downloader import MediaDownloader
+
+        downloader = MediaDownloader(context)
+        report = downloader.download(
+            url, audio_only=audio_only, format_spec=format_spec,
+            page_url=page_url, timeout=timeout)
+        if not report.ok:
+            raise MediaError(report.summary())
+        result = {
+            "url": url, "path": report.path, "bytes": report.size_bytes,
+            "title": report.title, "extractor": report.extractor,
+            "seconds": report.total_s,
+            "stages": report.tried(),
+        }
         db = getattr(context, "db", None) if context is not None else None
         if db is not None:
             from ..core.ids import new_id

@@ -44,6 +44,17 @@ __all__ = [
 #: and a dozen renamed/deleted GitHub repos (ALIILAPROXY, yemixzy,
 #: ProxySurf, 0x192/some-proxies, r00tee, specterxyz, ArrayIterator,
 #: proxylist-to [empty], mertguvencli [moved], sunny9577 [moved]).
+#: 2026-10-09 pass: re-verified every headline endpoint live (fetched +
+#: parsed — monosans-json 1104, geonode 200, spys.me 400, openproxylist
+#: 6080, thespeedx-socks5 2771, proxyscrape-v4 2000, advanced.name 100
+#: mixed, free-proxy-list.net 299); added proxydb-http (30) and
+#: freeproxyworld-socks5 (50, mixed per-row types); confirmed the
+#: proxydb-socks5 page parses again after the display:none port-poison
+#: fix (it had silently returned 0 rows).  Relay-verification (traffic
+#: actually flowing through a proxy) is NOT possible from a datacenter
+#: egress — this VM's IP gets RST/garbage from every free proxy tested
+#: (documented in scripts/proxylab/sweep.json); the hermetic fake-proxy
+#: fixtures in tests/test_proxylab_stream1.py prove the relay path.
 #: The catalog is a floor, not a ceiling — proxy_discover learns new
 #: sources from the internet (GitHub search API + aggregator pages)
 #: and they join every future scrape.
@@ -379,6 +390,20 @@ BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
     # ?protocol=socks5&country=XX, empty country = worldwide
     ("proxydb-socks5",
      "https://proxydb.net/?protocol=socks5",
+     "html"),
+    # proxydb HTTP table (sister page of the SOCKS5 one; same per-row
+    # Type/Country/Anonymity cells).  2026-10-09: live, 30 proxies parsed.
+    # NOTE: proxydb poisons port cells with display:none junk — the
+    # parser strips it (proxylab._HIDDEN_ELT_RE); without that the
+    # socks5 page parsed 0 rows and http ports came out corrupted.
+    ("proxydb-http",
+     "https://proxydb.net/?protocol=http",
+     "html"),
+    # freeproxy.world — per-type pages with a per-row type column
+    # (mixed HTTP/SOCKS4/SOCKS5 rows; parser layout 3 handles it).
+    # 2026-10-09: live, 50 proxies parsed (44 socks5, 5 socks4, 1 http).
+    ("freeproxyworld-socks5",
+     "https://www.freeproxy.world/?type=socks5",
      "html"),
 )
 

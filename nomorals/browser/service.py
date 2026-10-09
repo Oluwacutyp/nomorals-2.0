@@ -35,7 +35,15 @@ from ..core.events import Event, global_bus
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..storage.artifacts import Provenance
+from . import errors
 from . import forms
+from .errors import (
+    BrowserBotDetectedError,
+    BrowserError,
+    BrowserNetworkError,
+    BrowserSiteError,
+)
+from .pacing import Pacing, pacing_from_env
 from ..tools.browser import (
     BrowserSession,
     dom_forms,
@@ -48,6 +56,9 @@ from ..tools.browser import (
 
 __all__ = [
     "BrowserError",
+    "BrowserBotDetectedError",
+    "BrowserNetworkError",
+    "BrowserSiteError",
     "Tab",
     "RenderedTab",
     "SessionHandle",
@@ -109,9 +120,10 @@ def _mask_proxy(proxy_url: str) -> str:
     return proxy_url
 
 
-class BrowserError(Exception):
-    """Anything the browser service refuses to fake: navigation failures,
-    unknown tabs/sessions, HTTP errors on download, missing playwright."""
+#: BrowserError lives in nomorals.browser.errors (the error taxonomy);
+#: re-exported here so ``from nomorals.browser.service import BrowserError``
+#: keeps working unchanged.
+assert BrowserError is errors.BrowserError
 
 
 # ── result dataclasses ───────────────────────────────────────────────────────
@@ -175,21 +187,39 @@ class Tab:
         #: ``None`` (default) = no live view; set by
         #: ``nomorals.browser.liveview.LiveView.attach``.
         self.on_action: Any = None
+        #: Pacing between actions (set by the owning BrowserService).
+        #: None = no pacing.
+        self.pacing: Pacing | None = None
+
+    def _pace(self, action: str) -> None:
+        """Sleep the pacing cadence before an action (no-op when pacing
+        is unset or disabled)."""
+        if self.pacing is not None:
+            self.pacing.pause(action)
 
     # -- navigation ----------------------------------------------------------
     def _load_page(self, url: str) -> dict[str, Any]:
         """Open the page in the wrapped session; update url/title. Raises
-        BrowserError on any failure (fail fast — never a half-loaded tab)."""
+        a classified BrowserError on any failure (fail fast — never a
+        half-loaded tab)."""
         url = (url or "").strip()
         if not url:
             raise BrowserError("navigate needs a url")
         try:
             result = self.session.open(url)
         except ToolError as exc:
-            raise BrowserError(f"navigate {url} failed: {exc}") from exc
-        if not result.get("ok", True):
+            # tools.browser wraps urllib failures in ToolError — classify
+            # the underlying signal, never misreport it as generic.
+            raise errors.classify_exception(exc, url=url) from exc
+        status = int(result.get("status") or 0)
+        if status >= 400 or not result.get("ok", True):
+            if status >= 400:
+                raise errors.classify_http_status(
+                    status, url=url,
+                    html=(self.session._raw or "")[:200_000],
+                    title=self.session.title or "")
             raise BrowserError(
-                f"navigate {url} failed: HTTP {result.get('status')}")
+                f"navigate {url} failed: {result.get('error') or 'unknown error'}")
         self.url = self.session.url
         self.title = self.session.title
         self.error = ""
@@ -205,6 +235,7 @@ class Tab:
         url = (url or "").strip()
         if not url:
             raise BrowserError("navigate needs a url")
+        self._pace("navigate")
         attempts = 1 + max(0, int(retries))
         last_exc: BrowserError | None = None
         result: dict[str, Any] = {}
@@ -533,9 +564,31 @@ class RenderedTab:
         self.shot_on_error = bool(shot_on_error)
         #: navigate retries after the first attempt (0 = try once).
         self.retries = max(0, int(retries))
+        #: pacing between mutating actions (shared with the service).
+        self.pacing: Pacing | None = None
+        #: directory auto-captured downloads are saved to (None disables).
+        self._download_dir: Path | None = None
+        #: sink called with each auto-captured download record dict.
+        self._on_auto_download: Any = None
+        #: True while trigger_download() runs its explicit expect_download
+        #: click — the context-level auto-capture must not double-save it.
+        self._auto_suppress = False
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+
+    def _pace(self, action: str) -> None:
+        """Sleep the pacing cadence before an action (no-op when pacing
+        is unset or disabled)."""
+        if self.pacing is not None:
+            self.pacing.pause(action)
+
+    def _can_evaluate(self) -> bool:
+        """True when the page driver can run JavaScript (duck-typed
+        drivers may not — verification then degrades to unverified
+        instead of raising)."""
+        page = self._page
+        return page is not None and callable(getattr(page, "evaluate", None))
 
     # -- browser lifecycle ---------------------------------------------------
     def _ensure_page(self) -> Any:
@@ -566,6 +619,17 @@ class RenderedTab:
             add_init = getattr(self._context, "add_init_script", None)
             if callable(add_init) and self._stealth.get("enabled"):
                 add_init(_WEBDRIVER_HIDE_JS)
+            # Intercept download events at the context level: any download
+            # the page triggers (JS blob saves, location-href file hits,
+            # not just explicit trigger_download clicks) is auto-captured
+            # into the session download dir and reported to the service.
+            on_event = getattr(self._context, "on", None)
+            if callable(on_event):
+                try:
+                    on_event("download", self._handle_auto_download)
+                except Exception as exc:  # noqa: BLE001 - best effort
+                    _log.debug("rendered tab %s: download listener failed: %r",
+                               self.tab_id, exc)
             self._page = self._context.new_page()
         except Exception as exc:  # noqa: BLE001 - launch errors are opaque
             self._teardown_quiet()
@@ -587,6 +651,53 @@ class RenderedTab:
                     close()
                 except Exception:  # noqa: BLE001 - teardown best effort
                     _log.debug("rendered tab teardown %s.close failed", attr)
+
+    def _handle_auto_download(self, download: Any) -> None:
+        """Context-level download handler: save the file and report it.
+
+        Never raises — a broken capture must not kill the page. Downloads
+        triggered via :meth:`trigger_download` set ``_auto_suppress`` so
+        they are saved exactly once (through the explicit path).
+        """
+        if self._auto_suppress:
+            return
+        if self._download_dir is None:
+            _log.debug("rendered tab %s: download ignored (no download dir)",
+                       self.tab_id)
+            return
+        try:
+            suggested = str(
+                getattr(download, "suggested_filename", "") or "download.bin")
+            safe = "".join(c if (c.isalnum() or c in "._-") else "_"
+                           for c in suggested).strip("._") or "download.bin"
+            dest = self._download_dir
+            dest.mkdir(parents=True, exist_ok=True)
+            out = dest / f"{int(time.time() * 1000)}-{safe}"
+            download.save_as(str(out))
+            size = out.stat().st_size if out.is_file() else 0
+            if size == 0:
+                _log.warning("rendered tab %s: auto-captured download %r "
+                             "produced no file", self.tab_id, suggested)
+                return
+            record = {
+                "path": str(out),
+                "size": size,
+                "suggested_filename": suggested,
+                "url": self.url,
+                "trigger": "auto",
+            }
+            sink = self._on_auto_download
+            if callable(sink):
+                try:
+                    sink(record)
+                except Exception as exc:  # noqa: BLE001 - sink is bookkeeping
+                    _log.warning("rendered tab %s: download sink failed: %r",
+                                 self.tab_id, exc)
+            _log.info("rendered tab %s: auto-captured download %r -> %s "
+                      "(%d bytes)", self.tab_id, suggested, out, size)
+        except Exception as exc:  # noqa: BLE001 - capture never kills the page
+            _log.warning("rendered tab %s: auto-capture of download failed: %r",
+                         self.tab_id, exc)
 
     # -- error recovery --------------------------------------------------------
     def _fail_snapshot(self, action: str) -> dict[str, str]:
@@ -628,18 +739,25 @@ class RenderedTab:
 
     def _action_error(self, action: str, exc: Exception,
                       detail: str = "") -> BrowserError:
-        """Wrap an action failure: snapshot the page, then raise a
-        BrowserError that names exactly what failed and where the
-        evidence is."""
+        """Wrap an action failure: snapshot the page, classify the cause,
+        then raise a typed BrowserError that names exactly what failed,
+        which taxonomy bucket it falls in, and where the evidence is.
+
+        Classification never misreports: already-typed errors keep their
+        type; network signals become BrowserNetworkError; anything else
+        stays a plain BrowserError with the raw message.
+        """
         paths = self._fail_snapshot(action)
         where = ""
         if paths:
             where = " (evidence: " + ", ".join(
                 f"{k}={v}" for k, v in paths.items()) + ")"
+        typed = errors.classify_exception(exc, url=self.url or "",
+                                          evidence=paths)
         msg = (f"rendered {action} on {self.url or '(no page)'} failed"
                + (f" — {detail}" if detail else "")
-               + f": {exc}{where}")
-        return BrowserError(msg)
+               + f": {typed}{where}")
+        return typed.with_message(msg)
 
     def persist(self) -> dict[str, Any]:
         """Flush cookies AND localStorage to the session's storage file
@@ -674,23 +792,34 @@ class RenderedTab:
                 f"unknown wait_until {wait_until!r} "
                 f"(want one of {sorted(_GOTO_WAIT_UNTIL)})")
         page = self._ensure_page()
+        self._pace("navigate")
         attempts = 1 + max(0, self.retries if retries is None else retries)
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                page.goto(url, wait_until=wait_until,
-                          timeout=_RENDERED_GOTO_TIMEOUT_MS)
+                self._goto_once(page, url, wait_until)
                 last_exc = None
                 break
+            except BrowserNetworkError as exc:
+                # Network blips are the only failures worth retrying.
+                last_exc = exc
+                if attempt < attempts - 1:
+                    time.sleep(min(2.0 * (attempt + 1), 8.0))
+            except BrowserError as exc:
+                # Classified site errors and bot blocks do not heal on
+                # immediate retry — hammering a block can extend it.
+                # One snapshot, one wrapped message, via _action_error.
+                raise self._action_error(
+                    "navigate", exc, detail=url) from exc
             except Exception as exc:  # noqa: BLE001 - goto errors opaque
                 last_exc = exc
                 if attempt < attempts - 1:
                     time.sleep(min(2.0 * (attempt + 1), 8.0))
         if last_exc is not None:
-            self.error = (f"navigate {url} failed after {attempts} "
-                          f"attempt(s): {last_exc}")
-            raise self._action_error("navigate", last_exc,
-                                     detail=f"{url} ({attempts} attempts)")
+            typed = self._action_error(
+                "navigate", last_exc, detail=f"{url} ({attempts} attempts)")
+            self.error = str(typed)
+            raise typed
         self.url = page.url
         try:
             self.title = page.title()
@@ -706,6 +835,69 @@ class RenderedTab:
         if self._page is None or not self.url:
             raise BrowserError("rendered tab has no loaded page — navigate first")
         return self._page
+
+    def _content_sample(self, limit: int = 200_000) -> str:
+        """Bounded read of the current page HTML (best-effort, "").
+
+        Used for challenge-marker scans — never for content extraction.
+        """
+        page = self._page
+        if page is None:
+            return ""
+        try:
+            content = page.content()
+        except Exception:  # noqa: BLE001 - cosmetic read
+            return ""
+        return (content or "")[:limit]
+
+    def _goto_once(self, page: Any, url: str, wait_until: str) -> None:
+        """One navigation attempt with failure classification.
+
+        Raises a typed :class:`BrowserError` subclass: HTTP error
+        statuses and challenge interstitials are classified immediately
+        (no pointless retries); transport failures surface as
+        :class:`BrowserNetworkError` for the caller's retry decision.
+        Snapshots/evidence are attached by the caller's _action_error —
+        this method only classifies.
+        """
+        try:
+            response = page.goto(url, wait_until=wait_until,
+                                 timeout=_RENDERED_GOTO_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 - goto errors opaque
+            raise errors.classify_exception(exc, url=url) from exc
+        status: int | None = None
+        headers: dict[str, Any] = {}
+        try:
+            if response is not None:
+                status = response.status
+                headers = dict(response.headers or {})
+        except Exception:  # noqa: BLE001 - response introspection is cosmetic
+            status = None
+        if status is not None and status >= 400:
+            raise errors.classify_http_status(
+                status, url=url, html=self._content_sample(),
+                title=self._page_title(), headers=headers)
+        # Challenge interstitials can ship HTTP 200: scan the title
+        # (cheap), confirm with a marker sweep before calling it a block.
+        title = self._page_title()
+        if errors.detect_challenge("", title=title):
+            html = self._content_sample()
+            challenge = errors.detect_challenge(html, title=title)
+            if challenge:
+                label = challenge.replace("-", " ")
+                raise BrowserBotDetectedError(
+                    f"blocked by {label} on {url} — the page is a "
+                    f"{label} interstitial (HTTP 200), not the site",
+                    detection=challenge, url=url)
+
+    def _page_title(self) -> str:
+        page = self._page
+        if page is None:
+            return ""
+        try:
+            return page.title() or ""
+        except Exception:  # noqa: BLE001 - title is cosmetic
+            return ""
 
     def wait_for_load_state(self, state: str = "load",
                             timeout: int = 30_000) -> dict[str, Any]:
@@ -861,34 +1053,158 @@ class RenderedTab:
                 f"no form field {name!r} on {self.url}")
         return {"tag": info.get("tag", ""), "type": info.get("type", "")}
 
-    def fill(self, name: str, value: str) -> dict[str, Any]:
+    def _resolve_field_wait(self, name: str, *, timeout: int,
+                            poll_ms: int) -> tuple[str, dict[str, Any] | None]:
+        """Poll the label-aware resolver until the field appears.
+
+        For dynamic/AJAX forms whose fields render after XHR. Fail fast
+        with a field inventory when the timeout expires.
+        """
+        page = self._require_loaded()
+        name = (name or "").strip()
+        if not name:
+            raise BrowserError("a field name is required")
+        timeout = max(0, int(timeout))
+        poll = max(50, int(poll_ms)) / 1000.0
+        deadline = time.monotonic() + timeout / 1000.0
+        last_err: Exception | None = None
+        while True:
+            try:
+                return forms.resolve(page, name)
+            except forms.FieldNotFound as exc:
+                last_err = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll)
+        fields = forms.describe_fields(page)
+        detail = ""
+        if fields:
+            detail = ("\nfields on this page:\n"
+                      + forms.format_field_list(fields))
+        paths = self._fail_snapshot("wait_for_field")
+        where = ""
+        if paths:
+            where = " (evidence: " + ", ".join(
+                f"{k}={v}" for k, v in paths.items()) + ")"
+        raise BrowserError(
+            f"field {name!r} did not appear on {self.url or '(no page)'} "
+            f"within {timeout}ms{detail}{where}") from last_err
+
+    def wait_for_field(self, name: str, *, timeout: int = 10_000,
+                       poll_ms: int = 250) -> dict[str, Any]:
+        """Wait until a form field matching ``name`` appears in the DOM.
+
+        The dynamic-form counterpart to :meth:`wait_for`: fields that
+        render after AJAX/XHR never exist for the resolver to find on the
+        first pass. Polls the label-aware resolver (label, placeholder,
+        aria-label, name, id); fail fast with a field inventory on
+        timeout — never a silent pass.
+        """
+        _selector, info = self._resolve_field_wait(
+            name, timeout=timeout, poll_ms=poll_ms)
+        _notify_action(self, f"field {name!r} appeared")
+        return {"ok": True, "field": name, "tab_id": self.tab_id,
+                "matched_via": (info or {}).get("by", "") or "name/id"}
+
+    def _verify_field_value(self, name: str, expected: str) -> bool:
+        """Confirm the marker-pinned field really holds ``expected``.
+
+        Reads the live DOM back; on mismatch retries once through the
+        React-compatible JS setter (framework-swallowed fills happen).
+        Returns True when the value is confirmed, False when the driver
+        cannot read the field back (duck-typed drivers) — an
+        unverifiable fill reports ``verified: False`` instead of a false
+        failure. Raises BrowserError naming expected vs actual only when
+        the read-back positively shows the value did not stick.
+        """
+        page = self._require_loaded()
+        if not self._can_evaluate():
+            return False
+        try:
+            readback = forms.read_value_js(page)
+        except Exception as exc:  # noqa: BLE001 - eval errors are opaque
+            raise self._action_error(
+                "fill-verify", exc, detail=f"field {name!r}") from exc
+        if readback is None:
+            return False
+        if readback.get("value") == expected:
+            return True
+        # Framework-controlled inputs swallow native fills: go through
+        # the native property setter + input/change events, then re-read.
+        try:
+            forms.set_value_js(page, expected)
+            readback = forms.read_value_js(page)
+        except Exception as exc:  # noqa: BLE001 - eval errors are opaque
+            raise self._action_error(
+                "fill-verify", exc, detail=f"field {name!r}") from exc
+        if readback is None:
+            return False
+        actual = readback.get("value")
+        if actual != expected:
+            paths = self._fail_snapshot("fill-verify")
+            where = ""
+            if paths:
+                where = " (evidence: " + ", ".join(
+                    f"{k}={v}" for k, v in paths.items()) + ")"
+            raise BrowserError(
+                f"fill of {name!r} did not stick on "
+                f"{self.url or '(no page)'}: expected {expected!r}, "
+                f"the field holds {actual!r}{where}. The page's JS is "
+                f"overwriting the value — try set_date/evaluate, or fill "
+                f"the field and submit without re-reading.")
+        return True
+
+    def fill(self, name: str, value: str, *, verify: bool = True,
+             wait_ms: int = 0) -> dict[str, Any]:
         """Fill a form field by label, placeholder, aria-label, name, or id.
 
         Type-aware: ``<select>`` fields route to :meth:`select`,
-        checkboxes/radios route to :meth:`check`, file inputs fail fast
-        with a pointer to :meth:`upload` — plain ``page.fill`` only ever
-        touches real text-like inputs, so a select no longer dies with an
-        opaque playwright error. The result names which identity matched
-        (``matched_via``: aria-label|label|placeholder|name|id|...), so a
-        surprising match is visible instead of silent.
+        checkboxes/radios route to :meth:`check`, file inputs route to
+        :meth:`upload` when ``value`` is an existing file path (otherwise
+        fail fast with a pointer to :meth:`upload`) — plain ``page.fill``
+        only ever touches real text-like inputs, so a select no longer
+        dies with an opaque playwright error.
+
+        ``verify`` (default True) reads the field's live value back after
+        the fill and retries through a framework-compatible JS setter when
+        the value did not stick; a fill that will not stick raises instead
+        of silently submitting the wrong data. ``wait_ms`` waits up to
+        that long for the field to appear first (dynamic/AJAX forms).
+
+        The result names which identity matched (``matched_via``:
+        aria-label|label|placeholder|name|id|...), so a surprising match
+        is visible instead of silent.
         """
         page = self._require_loaded()
-        selector, info = self._resolve_field(name)
+        self._pace("fill")
+        if wait_ms > 0:
+            selector, info = self._resolve_field_wait(
+                name, timeout=wait_ms, poll_ms=250)
+        else:
+            selector, info = self._resolve_field(name)
         kind = self._kind_of(name, info)
         tag = (kind or {}).get("tag", "")
         ftype = (kind or {}).get("type", "")
         try:
             if tag == "select":
-                return self.select(name, value)
+                return self.select(name, value, verify=verify)
             if tag == "input" and ftype in {"checkbox", "radio"}:
                 truthy = str(value).strip().lower() not in {
                     "", "0", "false", "no", "off", "unchecked"}
                 return self.check(name, checked=truthy)
             if tag == "input" and ftype == "file":
+                candidate = os.path.abspath(
+                    os.path.expanduser(str(value or "").strip()))
+                if candidate and os.path.isfile(candidate):
+                    return self.upload(forms.MARKER_SELECTOR, candidate,
+                                       verify=verify)
                 raise BrowserError(
-                    f"field {name!r} is a file input — use rendered upload, "
-                    "not fill")
+                    f"field {name!r} is a file input and {value!r} is not "
+                    f"an existing file — use rendered upload with a real "
+                    f"file path, not fill")
             page.fill(selector, str(value))
+            verified = self._verify_field_value(name, str(value)) \
+                if verify else False
         except BrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - selector errors opaque
@@ -898,33 +1214,42 @@ class RenderedTab:
             forms.clear_marker(page)
         _notify_action(self, f"filled {name!r}")
         return {"ok": True, "field": name, "tab_id": self.tab_id,
+                "verified": verified,
                 "matched_via": (info or {}).get("by", "") or "name/id"}
 
     def fill_form(self, fields: dict[str, Any], *,
-                  stop_on_error: bool = True) -> dict[str, Any]:
+                  stop_on_error: bool = True,
+                  verify: bool = True) -> dict[str, Any]:
         """Fill many fields in one call: ``{"Email address": "...",
         "country": "ng", "agree": True}``.
 
-        Each value goes through :meth:`fill`, so selects/checkboxes are
-        handled per field. Fail fast by default (``stop_on_error``);
-        otherwise every field is attempted and failures are collected in
-        the result's ``failed`` map.
+        Each value goes through :meth:`fill`, so selects/checkboxes/file
+        inputs are handled per field and every fill is verified by
+        reading the DOM back (``verify=False`` skips the read-back).
+        Fail fast by default (``stop_on_error``); otherwise every field
+        is attempted and failures are collected in the result's
+        ``failed`` map.
         """
         if not isinstance(fields, dict) or not fields:
             raise BrowserError("fill_form needs a non-empty {field: value} mapping")
         filled: list[str] = []
+        verified: list[str] = []
         failed: dict[str, str] = {}
         for name, value in fields.items():
             try:
-                self.fill(str(name), "" if value is None else str(value))
+                result = self.fill(str(name),
+                                   "" if value is None else str(value),
+                                   verify=verify)
             except BrowserError as exc:
                 if stop_on_error:
                     raise
                 failed[str(name)] = str(exc)
                 continue
             filled.append(str(name))
+            if result.get("verified"):
+                verified.append(str(name))
         return {"ok": not failed, "filled": filled, "failed": failed,
-                "tab_id": self.tab_id}
+                "verified": verified, "tab_id": self.tab_id}
 
     def set_date(self, name: str, value: str) -> dict[str, Any]:
         """Set a date field — native ``<input type="date">`` pickers and
@@ -942,6 +1267,7 @@ class RenderedTab:
             iso = forms.normalize_date(value)
         except ValueError as exc:
             raise BrowserError(str(exc)) from exc
+        self._pace("set_date")
         selector, info = self._resolve_field(name)
         kind = self._kind_of(name, info)
         tag = (kind or {}).get("tag", "")
@@ -1045,11 +1371,14 @@ class RenderedTab:
                 "url": self.url}
 
     def select(self, name: str, value: str, *,
-               by: str = "auto") -> dict[str, Any]:
+               by: str = "auto", verify: bool = True) -> dict[str, Any]:
         """Pick an option of a ``<select>`` dropdown by name or id.
 
         ``by``: "auto" (default) tries the option *value* first, then the
-        visible *label*; "value" and "label" pin the match. Fail fast when
+        visible *label*; "value" and "label" pin the match. ``verify``
+        (default True) reads the selected value back from the live DOM —
+        a select that reports success but shows another option raises
+        instead of silently submitting the wrong choice. Fail fast when
         the field is not a ``<select>`` or the option does not exist.
         """
         page = self._require_loaded()
@@ -1060,6 +1389,7 @@ class RenderedTab:
         if by not in {"auto", "value", "label"}:
             raise BrowserError(
                 f"unknown select match {by!r} (want auto|value|label)")
+        self._pace("select")
         selector, info = self._resolve_field(name)
         kind = self._kind_of(name, info)
         if kind is None:
@@ -1074,6 +1404,7 @@ class RenderedTab:
                     else [{"value": value}] if by == "value"
                     else [{"label": value}])
         last_exc: Exception | None = None
+        picked: list[str] = []
         try:
             for kw in attempts:
                 try:
@@ -1082,25 +1413,73 @@ class RenderedTab:
                     last_exc = exc
                     continue
                 if picked:
-                    return {"ok": True, "field": name, "picked": picked,
-                            "tab_id": self.tab_id}
+                    break
                 last_exc = BrowserError(
                     f"no option matching {value!r} in select {name!r}")
+            if not picked:
+                raise self._action_error(
+                    "select",
+                    last_exc or BrowserError("unknown select failure"),
+                    detail=f"field {name!r}, option {value!r}") from last_exc
+            verified = self._verify_select_value(name, picked) \
+                if verify else False
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - opaque
+            raise self._action_error(
+                "select", exc,
+                detail=f"field {name!r}, option {value!r}") from exc
         finally:
             forms.clear_marker(page)
-        raise self._action_error(
-            "select", last_exc or BrowserError("unknown select failure"),
-            detail=f"field {name!r}, option {value!r}") from last_exc
+        return {"ok": True, "field": name, "picked": picked,
+                "verified": verified, "tab_id": self.tab_id}
 
-    def check(self, name: str, checked: bool = True) -> dict[str, Any]:
+    def _verify_select_value(self, name: str, picked: list[str]) -> bool:
+        """Read the marker-pinned ``<select>``'s live value back and make
+        sure it is one of the options playwright reported as selected.
+
+        Returns True when confirmed, False when the driver cannot read
+        the value back. Raises only when the read-back positively shows
+        a different option selected.
+        """
+        if not self._can_evaluate():
+            return False
+        try:
+            actual = self.evaluate(
+                "() => { const el = document.querySelector("
+                "'[data-nm-field=\"1\"]'); "
+                "return el ? el.value : null; }")
+        except Exception as exc:  # noqa: BLE001 - eval errors are opaque
+            raise self._action_error(
+                "select-verify", exc, detail=f"field {name!r}") from exc
+        if actual is None:
+            return False
+        if actual not in (picked or []):
+            paths = self._fail_snapshot("select-verify")
+            where = ""
+            if paths:
+                where = " (evidence: " + ", ".join(
+                    f"{k}={v}" for k, v in paths.items()) + ")"
+            raise BrowserError(
+                f"select of {name!r} did not stick on "
+                f"{self.url or '(no page)'}: picked {picked!r}, the field "
+                f"shows {actual!r}{where}")
+        return True
+
+    def check(self, name: str, checked: bool = True,
+              *, verify: bool = True) -> dict[str, Any]:
         """Check/uncheck a checkbox (or pick a radio) by name or id.
 
-        Fail fast when the field is not a checkable input.
+        ``verify`` (default True) reads the control's live ``checked``
+        state back — a check the page's JS immediately undoes raises
+        instead of silently submitting the wrong state. Fail fast when
+        the field is not a checkable input.
         """
         page = self._require_loaded()
         name = (name or "").strip()
         if not name:
             raise BrowserError("rendered check needs a field name")
+        self._pace("check")
         selector, info = self._resolve_field(name)
         kind = self._kind_of(name, info)
         if kind is None:
@@ -1121,6 +1500,24 @@ class RenderedTab:
                 page.check(selector)
             else:
                 page.uncheck(selector)
+            verified = False
+            if verify and self._can_evaluate():
+                readback = forms.read_value_js(page)
+                actual = (readback or {}).get("checked")
+                if actual is not None and bool(actual) != bool(checked):
+                    paths = self._fail_snapshot("check-verify")
+                    where = ""
+                    if paths:
+                        where = " (evidence: " + ", ".join(
+                            f"{k}={v}" for k, v in paths.items()) + ")"
+                    raise BrowserError(
+                        f"{'check' if checked else 'uncheck'} of "
+                        f"{name!r} did not stick on "
+                        f"{self.url or '(no page)'}: the control still "
+                        f"shows checked={actual!r}{where}")
+                verified = actual is not None
+        except BrowserError:
+            raise
         except Exception as exc:  # noqa: BLE001 - opaque
             raise self._action_error(
                 f"{'check' if checked else 'uncheck'}", exc,
@@ -1128,7 +1525,7 @@ class RenderedTab:
         finally:
             forms.clear_marker(page)
         return {"ok": True, "field": name, "checked": bool(checked),
-                "tab_id": self.tab_id}
+                "verified": verified, "tab_id": self.tab_id}
 
     def click(self, target: str) -> dict[str, Any]:
         """Click a link/button: CSS selector when it looks like one
@@ -1141,6 +1538,7 @@ class RenderedTab:
             raise BrowserError("rendered click needs a target")
         selector = (target if target[:1] in {"#", ".", "["} or ">>" in target
                     else f"text={target}")
+        self._pace("click")
         before = page.url
         try:
             page.click(selector)
@@ -1163,12 +1561,19 @@ class RenderedTab:
         return {"ok": True, "target": target, "url": self.url,
                 "title": self.title, "navigated": after != before}
 
-    def submit(self, target: str = "") -> dict[str, Any]:
+    def submit(self, target: str = "", *,
+               settle: bool = False) -> dict[str, Any]:
         """Submit a form: click ``target`` when given (button text/selector),
         else submit the page's first form directly. URL/title/history
-        refresh after the submit."""
+        refresh after the submit.
+
+        ``settle`` waits for network idle after the submit (best-effort)
+        — for AJAX forms that never navigate, so the caller can read the
+        result instead of racing it. The result reports ``settled``.
+        """
         page = self._require_loaded()
         target = (target or "").strip()
+        self._pace("submit")
         try:
             if target:
                 self.click(target)
@@ -1178,6 +1583,13 @@ class RenderedTab:
             raise
         except Exception as exc:  # noqa: BLE001 - submit errors are opaque
             raise self._action_error("submit", exc) from exc
+        settled = False
+        if settle:
+            try:
+                self.wait_for_network_idle(timeout=15_000)
+                settled = True
+            except BrowserError as exc:
+                _log.debug("submit settle: network never went idle: %s", exc)
         try:
             self.url = page.url
             self.title = page.title()
@@ -1186,7 +1598,8 @@ class RenderedTab:
         self.history.append(
             {"url": self.url, "title": self.title, "ts": time.time()})
         _notify_action(self, f"submitted form{f' via {target!r}' if target else ''}")
-        return {"ok": True, "url": self.url, "title": self.title}
+        return {"ok": True, "url": self.url, "title": self.title,
+                "settled": settled}
 
     def wait_for(self, selector: str = "", *, state: str = "visible",
                  timeout: int = 10_000) -> dict[str, Any]:
@@ -1354,9 +1767,15 @@ class RenderedTab:
         out.sort(key=lambda c: (c["domain"], c["path"], c["name"]))
         return out
 
-    def upload(self, selector: str, file_path: str) -> dict[str, Any]:
-        """Set a ``<input type="file">`` to a local file (playwright
-        set_input_files). The file must exist — fail fast otherwise."""
+    def upload(self, selector: str, file_path: str, *,
+               verify: bool = True) -> dict[str, Any]:
+        """Set a ``<input type="file">`` to a real local file (playwright
+        set_input_files). The file must exist — fail fast otherwise.
+
+        ``verify`` (default True) reads the input's ``files`` list back:
+        an upload the page's JS clears or rejects raises instead of a
+        silent empty submit. The result reports the attached file name.
+        """
         page = self._require_loaded()
         selector = (selector or "").strip()
         path = os.path.abspath(os.path.expanduser((file_path or "").strip()))
@@ -1364,12 +1783,46 @@ class RenderedTab:
             raise BrowserError("rendered upload needs a selector")
         if not os.path.isfile(path):
             raise BrowserError(f"rendered upload: not a file: {file_path!r}")
+        self._pace("upload")
         try:
             page.set_input_files(selector, path)
         except Exception as exc:  # noqa: BLE001 - upload errors are opaque
-            raise BrowserError(
-                f"rendered upload of {file_path!r} on {self.url} failed: {exc}") from exc
+            raise self._action_error(
+                "upload", exc,
+                detail=f"{file_path!r} -> {selector!r}") from exc
+        attached = ""
+        verified = False
+        if verify and self._can_evaluate():
+            try:
+                state = page.evaluate(
+                    """(sel) => {
+                        const el = document.querySelector(sel);
+                        if (!el || !el.files) return null;
+                        return {n: el.files.length,
+                                name: el.files[0] ? el.files[0].name : ''};
+                    }""", selector)
+            except Exception as exc:  # noqa: BLE001 - eval errors opaque
+                raise self._action_error(
+                    "upload-verify", exc,
+                    detail=f"{file_path!r} -> {selector!r}") from exc
+            if state is None:
+                verified = False  # driver cannot read back; not a failure
+            elif not state.get("n"):
+                paths = self._fail_snapshot("upload-verify")
+                where = ""
+                if paths:
+                    where = " (evidence: " + ", ".join(
+                        f"{k}={v}" for k, v in paths.items()) + ")"
+                raise BrowserError(
+                    f"rendered upload of {file_path!r} did not attach on "
+                    f"{self.url or '(no page)'}: the file input holds "
+                    f"0 file(s){where}")
+            else:
+                attached = str(state.get("name") or "")
+                verified = True
+        _notify_action(self, f"uploaded {path!r}")
         return {"ok": True, "selector": selector, "path": path,
+                "attached": attached, "verified": verified,
                 "tab_id": self.tab_id}
 
     def trigger_download(self, target: str,
@@ -1385,13 +1838,19 @@ class RenderedTab:
         dest.mkdir(parents=True, exist_ok=True)
         selector = (target if target[:1] in {"#", ".", "["} or ">>" in target
                     else f"text={target}")
+        self._pace("download")
+        # Suppress the context-level auto-capture while the explicit
+        # expect_download runs — the file must be saved exactly once.
+        self._auto_suppress = True
         try:
             with page.expect_download() as download_info:
                 page.click(selector)
             download = download_info.value
         except Exception as exc:  # noqa: BLE001 - download errors are opaque
-            raise BrowserError(
-                f"download trigger {target!r} on {self.url} failed: {exc}") from exc
+            raise self._action_error(
+                "download", exc, detail=f"trigger {target!r}") from exc
+        finally:
+            self._auto_suppress = False
         suggested = str(getattr(download, "suggested_filename", "") or "download.bin")
         safe = "".join(c if (c.isalnum() or c in "._-") else "_"
                        for c in suggested).strip("._") or "download.bin"
@@ -1561,6 +2020,57 @@ class BrowserService:
         #: download registry: id -> record (persisted to downloads.json).
         self._downloads: dict[str, dict[str, Any]] = {}
         self._load_downloads()
+        #: pacing between browser actions, shared by every tab this
+        #: service opens. NOMORALS_BROWSER_PACING pins it at startup
+        #: ("delay_ms,jitter_ms"); otherwise starts disabled — pacing is
+        #: an explicit owner setting, never a silent default.
+        try:
+            self._pacing = pacing_from_env() or Pacing.disabled()
+        except ValueError as exc:
+            raise BrowserError(str(exc)) from exc
+        #: session name -> active rendered tab id (for tab switching).
+        self._active_rendered: dict[str, str] = {}
+
+    # -- pacing ------------------------------------------------------------------
+    @property
+    def pacing(self) -> Pacing:
+        """The pacing shared by this service's tabs."""
+        return self._pacing
+
+    def set_pacing(self, pacing: Pacing | None = None, *,
+                   enabled: bool | None = None,
+                   delay_ms: int | None = None,
+                   jitter_ms: int | None = None) -> dict[str, Any]:
+        """Configure pacing between browser actions.
+
+        Pass a :class:`Pacing` outright, or keyword tweaks applied over
+        the current one. Because tabs hold a reference to this same
+        object, live tabs pick the change up immediately. Returns the
+        active configuration.
+        """
+        # Mutate in place: tabs hold a reference to this same object, so
+        # live tabs pick the change up immediately.
+        if pacing is not None:
+            if not isinstance(pacing, Pacing):
+                raise BrowserError(
+                    f"set_pacing needs a Pacing, got {type(pacing).__name__}")
+            self._pacing.enabled = pacing.enabled
+            self._pacing.delay_ms = pacing.delay_ms
+            self._pacing.jitter_ms = pacing.jitter_ms
+        else:
+            if enabled is not None:
+                self._pacing.enabled = bool(enabled)
+            if delay_ms is not None:
+                self._pacing.delay_ms = max(0, int(delay_ms))
+            if jitter_ms is not None:
+                self._pacing.jitter_ms = max(0, int(jitter_ms))
+            if ((self._pacing.delay_ms or self._pacing.jitter_ms)
+                    and not self._pacing.enabled):
+                raise BrowserError(
+                    "pacing has delay/jitter configured but enabled=False — "
+                    "pass enabled=True or clear the delays")
+        _emit("browser.pacing.configured", dict(self._pacing.describe()))
+        return self._pacing.describe()
 
     # -- proxies -----------------------------------------------------------------
     def attach_proxy_pool(self, pool: Any) -> dict[str, Any]:
@@ -1674,7 +2184,9 @@ class BrowserService:
         proxy = self._session_proxies.get(handle.name, "")
         if proxy:
             session.set_proxy(proxy)
-        return Tab(tab_id=tab_id, session_name=handle.name, session=session)
+        tab = Tab(tab_id=tab_id, session_name=handle.name, session=session)
+        tab.pacing = self._pacing
+        return tab
 
     def open_session(self, name: str) -> SessionHandle:
         name = (name or "").strip()
@@ -1781,13 +2293,22 @@ class BrowserService:
             shot_on_error=shot_on_error,
             retries=retries,
         )
+        # Wire the tab into the service: shared pacing, the download
+        # auto-capture sink, and the per-session active tab.
+        tab.pacing = self._pacing
+        tab._download_dir = self.data_dir / "downloads" / session_name
+        tab._on_auto_download = (
+            lambda record: self._record_auto_download(tab, record))
         self._rendered_tabs[tab_id] = tab
+        self._active_rendered[session_name] = tab_id
         try:
             if (url or "").strip():
                 tab.navigate(url)
         except BrowserError:
             tab.close()
             del self._rendered_tabs[tab_id]
+            if self._active_rendered.get(session_name) == tab_id:
+                del self._active_rendered[session_name]
             raise
         return tab
 
@@ -1797,6 +2318,82 @@ class BrowserService:
             raise BrowserError(f"unknown rendered tab {tab_id!r}")
         tab.close()
         del self._rendered_tabs[tab_id]
+        if self._active_rendered.get(tab.session_name) == tab_id:
+            # fall back to another live tab of the same session, if any
+            rest = [t.tab_id for t in self._rendered_tabs.values()
+                    if t.session_name == tab.session_name]
+            if rest:
+                self._active_rendered[tab.session_name] = rest[-1]
+            else:
+                self._active_rendered.pop(tab.session_name, None)
+
+    def switch_rendered_tab(self, session_name: str, tab_id: str) -> dict[str, Any]:
+        """Make ``tab_id`` the active rendered tab of ``session_name``.
+
+        Fail fast on unknown tabs; the tab must belong to the session.
+        """
+        session_name = (session_name or "").strip()
+        tab = self._rendered_tabs.get(tab_id)
+        if tab is None:
+            raise BrowserError(f"unknown rendered tab {tab_id!r}")
+        if tab.session_name != session_name:
+            raise BrowserError(
+                f"rendered tab {tab_id!r} belongs to session "
+                f"{tab.session_name!r}, not {session_name!r}")
+        self._active_rendered[session_name] = tab_id
+        _notify_action(tab, f"switched to rendered tab {tab_id}")
+        return {"ok": True, "session": session_name, "tab_id": tab_id,
+                "url": tab.url, "title": tab.title}
+
+    def active_rendered_tab(self, session_name: str) -> dict[str, Any] | None:
+        """The active rendered tab of a session (None when it has none)."""
+        tab_id = self._active_rendered.get((session_name or "").strip(), "")
+        tab = self._rendered_tabs.get(tab_id) if tab_id else None
+        if tab is None:
+            return None
+        return {"tab_id": tab.tab_id, "session": tab.session_name,
+                "url": tab.url, "title": tab.title}
+
+    def _record_auto_download(self, tab: RenderedTab,
+                              record: dict[str, Any]) -> dict[str, Any]:
+        """Register a context-captured download in the download registry.
+
+        Called by the tab's download-event sink with the saved path, size,
+        and suggested filename.
+        """
+        path = record.get("path", "")
+        size = int(record.get("size") or 0)
+        suggested = str(record.get("suggested_filename") or "")
+        mime = (mimetypes.guess_type(path)[0] or "application/octet-stream")
+        download_id = ulid_now()
+        self._record_download({
+            "id": download_id,
+            "session": tab.session_name,
+            "tab_id": "",
+            "rendered_tab_id": tab.tab_id,
+            "url": record.get("url") or tab.url,
+            "filename": suggested,
+            "trigger": record.get("trigger") or "auto",
+            "path": "",
+            "size": 0,
+            "mime": "",
+            "category": "",
+            "status": "in_progress",
+            "started_at": time.time(),
+            "finished_at": 0.0,
+            "error": "",
+        })
+        rec = self._finish_download(
+            download_id, status="completed", path=path,
+            size=size, mime=mime)
+        rec["filename"] = suggested
+        _emit("browser.download.completed", {
+            "url": tab.url, "path": path, "size": size, "mime": mime,
+            "filename": suggested, "trigger": "auto",
+            "session": tab.session_name, "rendered_tab_id": tab.tab_id,
+            "download_id": download_id, "mission_id": self._mission_id,
+        })
+        return rec
 
     def find_rendered_tab(self, tab_id: str) -> RenderedTab | None:
         return self._rendered_tabs.get(tab_id)
@@ -1955,22 +2552,24 @@ class BrowserService:
             with urllib.request.build_opener().open(request, timeout=60) as response:
                 status = getattr(response, "status", 200)
                 if status >= 400:
-                    raise BrowserError(f"download {url} failed: HTTP {status}")
+                    raise errors.classify_http_status(
+                        int(status), url=url,
+                        headers=dict(getattr(response, "headers", {}) or {}))
                 mime = (response.headers.get("Content-Type", "") or "").split(";")[0].strip()
                 data = response.read()
         except BrowserError as exc:
             self._finish_download(download_id, status="failed", error=str(exc))
             raise
         except urllib.error.HTTPError as exc:
+            typed = errors.classify_http_status(int(exc.code), url=url)
             self._finish_download(
-                download_id, status="failed",
-                error=f"download {url} failed: HTTP {exc.code}")
-            raise BrowserError(f"download {url} failed: HTTP {exc.code}") from exc
+                download_id, status="failed", error=str(typed))
+            raise typed from exc
         except urllib.error.URLError as exc:
+            typed = errors.classify_exception(exc, url=url)
             self._finish_download(
-                download_id, status="failed",
-                error=f"download {url} failed: {exc.reason}")
-            raise BrowserError(f"download {url} failed: {exc.reason}") from exc
+                download_id, status="failed", error=str(typed))
+            raise typed from exc
 
         if organize:
             category_dir = dest_dir / _mime_category(mime)
@@ -2089,6 +2688,8 @@ class BrowserService:
             "tab_id": "",
             "rendered_tab_id": tab_id,
             "url": tab.url,
+            "filename": "",
+            "trigger": "explicit",
             "path": "",
             "size": 0,
             "mime": "",
@@ -2108,8 +2709,10 @@ class BrowserService:
         rec = self._finish_download(
             download_id, status="completed", path=path,
             size=os.path.getsize(path), mime=mime)
+        rec["filename"] = result.get("suggested_filename", "")
         _emit("browser.download.completed", {
             "url": tab.url, "path": path, "size": rec["size"], "mime": mime,
+            "filename": rec["filename"], "trigger": "explicit",
             "session": tab.session_name, "rendered_tab_id": tab_id,
             "download_id": download_id, "mission_id": self._mission_id,
         })

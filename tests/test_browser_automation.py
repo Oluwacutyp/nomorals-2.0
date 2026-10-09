@@ -678,8 +678,8 @@ class _StubRenderedTab:
         self.calls.append(("evaluate", js, arg))
         return "stubbed"
 
-    def fill_form(self, fields, stop_on_error=True):
-        self.calls.append(("fill_form", fields, stop_on_error))
+    def fill_form(self, fields, stop_on_error=True, verify=True):
+        self.calls.append(("fill_form", fields, stop_on_error, verify))
         return {"ok": True}
 
     def set_date(self, name, value):
@@ -733,7 +733,7 @@ class DaemonNewOpsTests(unittest.TestCase):
             self.svc, "r_fill_form",
             {"tab_id": "t1", "fields": {"a": "1"}})
         self.assertTrue(out["result"]["ok"])
-        self.assertEqual(("fill_form", {"a": "1"}, True),
+        self.assertEqual(("fill_form", {"a": "1"}, True, True),
                          self.stub.calls[0])
 
     def test_r_fill_form_rejects_non_mapping(self):
