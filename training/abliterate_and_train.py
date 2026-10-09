@@ -311,13 +311,15 @@ def build_dataset(tokenizer):
     rng.shuffle(all_rows)
     seen = set()
     final = []
+    smoke = int(os.environ.get("SMOKE_ROWS", "0"))  # pre-flight: SMOKE_ROWS=100
+    cap = smoke if smoke > 0 else TARGET_ROWS
     for r in all_rows:
         h = hash(r["text"][:200])
         if h in seen:
             continue
         seen.add(h)
         final.append({"text": r["text"]})
-        if len(final) >= TARGET_ROWS:
+        if len(final) >= cap:
             break
 
     print(f"✓ Dataset: {len(final)} rows")
