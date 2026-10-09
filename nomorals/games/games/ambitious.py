@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from ..ai import GameMind
+from ..combat import skill_power_mult
 from ..players import Player
 from .base import MultiGame, Room
 
@@ -1814,7 +1815,8 @@ class BattleArenaGame(MultiGame):
                    f"shadow — {foe_name}'s next attack will miss.")
             if defn.counter_mult:
                 parts = [self._hit(room, src, dst, mind,
-                                   mult=defn.counter_mult)]
+                                   mult=defn.counter_mult
+                                   * skill_power_mult(me))]
                 win = self._check(room)
                 if win:
                     parts.append(win)
@@ -1850,6 +1852,9 @@ class BattleArenaGame(MultiGame):
                 if foe_frac < (defn.execute_below or 0.3):
                     mult = defn.execute_mult
                     parts.append("⚰️ it smells the end — EXECUTION!")
+            # intelligence sharpens every striking technique —
+            # the scholar's build hits differently from the brawler's
+            mult = mult * skill_power_mult(me)
             target_before = foe["hp"]
             if mult > 0:
                 for _ in range(max(1, defn.hits)):
@@ -2031,11 +2036,12 @@ class BattleArenaGame(MultiGame):
                 parts.append("🔥 +5 attack for 4 turns — risen!")
                 s["killing_skill"] = f"combo:{combo.name}"
                 return " ".join(parts)
-        # payoff: the combined strike
+        # payoff: the combined strike — intelligence sharpens the weave
         if combo.mult > 0:
+            tech_mult = combo.mult * skill_power_mult(me)
             for _ in range(max(1, combo.hits)):
                 parts.append(self._hit(room, "you", "house", mind,
-                                       mult=combo.mult,
+                                       mult=tech_mult,
                                        ignore_def=combo.ignore_def_pct))
                 win = self._check(room)
                 if win:
@@ -2164,8 +2170,13 @@ class BattleArenaGame(MultiGame):
             if s["you"]["fury_cd"]:
                 extra.append(f"fury in {s['you']['fury_cd']}")
             tail = f" ({', '.join(extra)})" if extra else ""
-            out.append(f"your turn — {s['you']['hp']} HP "
-                       f"({s['you']['potions']} potions){tail}.")
+            y = s["you"]
+            vitals = f"{y['hp']}/{y['max_hp']} HP"
+            if "max_mana" in y:
+                vitals += (f" · ⚡{int(y.get('mana', 0))}/"
+                           f"{int(y['max_mana'])} mana")
+            out.append(f"your turn — {vitals} "
+                       f"({y['potions']} potions){tail}.")
         return out
 
     def _house_skill_pick(self, room, mind) -> str | None:

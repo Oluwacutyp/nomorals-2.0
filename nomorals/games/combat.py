@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
-__all__ = ["new_fighter", "strike", "tick_fighter"]
+__all__ = ["new_fighter", "strike", "tick_fighter", "skill_power_mult"]
 
 
 def new_fighter(hp: int = 50, atk: int = 10, dfn: int = 5) -> dict[str, Any]:
@@ -69,6 +69,24 @@ def strike(attacker: dict[str, Any], defender: dict[str, Any],
         defender["hp"] = 1
         report["shielded"] = True
     return report
+
+
+def skill_power_mult(fighter: dict[str, Any]) -> float:
+    """Technique damage multiplier from the fighter's intelligence.
+
+    Each intelligence point sharpens striking skills (and dual-cast
+    payoffs) by +2% — the same "1 assigned point = 2 effective"
+    doubling the other attributes use.  Buffs, heals, and dodges are
+    unaffected: intelligence reads as *skill power*, not a flat
+    everything bonus, so an intelligence build fights differently
+    from a strength build instead of just hitting harder with basics.
+    Never raises — garbage intelligence reads as 0.
+    """
+    try:
+        intel = max(0, int((fighter or {}).get("intelligence", 0) or 0))
+    except Exception:  # noqa: BLE001
+        intel = 0
+    return 1.0 + 0.02 * intel
 
 
 def tick_fighter(fighter: dict[str, Any],

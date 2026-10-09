@@ -20,7 +20,7 @@ import random
 from typing import Any
 
 from ..ai import GameMind
-from ..combat import new_fighter, strike, tick_fighter
+from ..combat import new_fighter, strike, tick_fighter, skill_power_mult
 from ..players import Player
 from .base import MultiGame, Room
 
@@ -306,7 +306,7 @@ class _ArenaCombat:
                 pm, rep = self._strike_msg(
                     room, mind, seat, foe_seat, me_name, foe_name,
                     atk_key=player.key, dfn_key=foe_key,
-                    mult=defn.counter_mult)
+                    mult=defn.counter_mult * skill_power_mult(me))
                 msg += f" A strike from the dark! {pm}"
         elif defn.slug == "war_cry":
             me["atk"] += defn.atk_buff
@@ -321,11 +321,13 @@ class _ArenaCombat:
                    f"({me['hp']}/{me['max_hp']}).")
         else:
             parts = []
+            # intelligence sharpens every striking technique
+            tech_mult = (defn.mult or 1.0) * skill_power_mult(me)
             for _ in range(max(1, defn.hits)):
                 pm, rep = self._strike_msg(
                     room, mind, seat, foe_seat, me_name, foe_name,
                     atk_key=player.key, dfn_key=foe_key,
-                    mult=defn.mult or 1.0,
+                    mult=tech_mult,
                     ignore_def=defn.ignore_def_pct)
                 parts.append(pm)
                 if rep.get("crit") and \
@@ -457,13 +459,14 @@ class _ArenaCombat:
                 me["warcry_amt"] = 5
                 parts.append("🔥 +5 attack for 4 turns — risen!")
                 return " ".join(parts)
-        # payoff: the combined strike
+        # payoff: the combined strike — intelligence sharpens the weave
         if combo.mult > 0:
+            tech_mult = combo.mult * skill_power_mult(me)
             for _ in range(max(1, combo.hits)):
                 pm, rep = self._strike_msg(
                     room, mind, seat, foe_seat, me_name, foe_name,
                     atk_key=player.key, dfn_key=foe_key,
-                    mult=combo.mult, ignore_def=combo.ignore_def_pct)
+                    mult=tech_mult, ignore_def=combo.ignore_def_pct)
                 parts.append(pm)
                 if rep.get("crit") and s["fighters"][foe_seat]["hp"] <= 0:
                     s["crit_kill_by"] = seat
@@ -809,7 +812,11 @@ class DuelGame(_ArenaCombat, MultiGame):
         for p in room.humans:
             f = s.get("fighters", {}).get(p.key)
             if f:
-                bits.append(f"{p.name}: {max(0, f['hp'])}/{f['max_hp']} HP")
+                vitals = f"{p.name}: {max(0, f['hp'])}/{f['max_hp']} HP"
+                if "max_mana" in f:
+                    vitals += (f" · ⚡{int(f.get('mana', 0))}/"
+                               f"{int(f['max_mana'])} mana")
+                bits.append(vitals)
         return " · ".join(bits) if bits else "waiting for a challenger…"
 
 

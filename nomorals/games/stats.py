@@ -96,7 +96,9 @@ def apply_stats_to_fighter(fighter: dict[str, Any], stats: StatBlock,
     * strength → +1 attack per point (1 assigned point = 2 effective)
     * stamina → +6 max HP per point, +1 defense per 2 points
     * mana → sets the fighter's mana pool (base 30 + 4 per mana point)
-    * intelligence → stored for skill-power and combo rolls
+    * intelligence → +2% skill/technique damage per point (applied via
+      ``combat.skill_power_mult`` on every striking skill and dual-cast
+      payoff), plus +1% dual-cast success per point
 
     Gear bonuses (from ``gear_stat_bonuses``) stack on top.
     """
@@ -129,14 +131,18 @@ def gear_stat_bonuses(loadout: dict[str, dict[str, Any]]) -> dict[str, int]:
 
 def describe_stats(stats: StatBlock,
                    gear_bonus: dict[str, int] | None = None) -> str:
-    """Human-readable stat sheet."""
+    """Human-readable stat sheet, with the concrete combat effects
+    each attribute actually buys."""
     gear_bonus = gear_bonus or {}
+    int_total = int(getattr(stats, "intelligence")) \
+        + int(gear_bonus.get("intelligence", 0))
     lines = []
     descs = {
-        "strength": "physical attack",
-        "stamina": "max HP + defense",
-        "mana": "skill fuel",
-        "intelligence": "skill power + combo luck",
+        "strength": "physical attack (+1 atk/pt)",
+        "stamina": "max HP + defense (+6 HP, +1 def/2pts)",
+        "mana": "skill fuel (base 30 + 4/pt, +8 regen)",
+        "intelligence": (f"skill damage +{int_total * 2}% · "
+                         f"combo luck +{int_total}%"),
     }
     for name in STAT_NAMES:
         base = int(getattr(stats, name))
