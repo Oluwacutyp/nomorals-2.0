@@ -24,6 +24,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ...core.ids import new_short_id
@@ -40,7 +41,8 @@ from .base import (
     is_owner_chat,
 )
 
-__all__ = ["ChatGateway"]
+__all__ = ["ChatGateway", "OwnerTarget", "parse_chat_keys",
+           "resolve_owner_targets"]
 
 _log = get_logger(__name__)
 
@@ -302,6 +304,27 @@ class ChatGateway:
             _log.info("chat gateway: pruned %d idle rate windows", len(stale))
 
     # ── registry ─────────────────────────────────────────────────────────────
+    def platforms_for_chat_id(self, chat_id: str) -> list[str]:
+        """Platforms the chat registry has seen this chat id on.
+
+        Owner rows first, then most-recently-active — the data-driven way
+        to resolve a bare ``owner_chats`` entry (``"123456789"``) to a
+        platform without guessing.  Never raises.
+        """
+        if self.db is None or not chat_id:
+            return []
+        try:
+            rows = self.db.query(
+                "SELECT platform, MAX(is_owner) AS own, MAX(last_active) AS la "
+                "FROM chats WHERE chat_id = ? "
+                "GROUP BY platform ORDER BY own DESC, la DESC",
+                (str(chat_id),),
+            )
+            return [str(r.get("platform") or "")
+                    for r in rows if r.get("platform")]
+        except Exception:  # noqa: BLE001 - registry is best-effort
+            return []
+
     def register_chat(self, chat: ChatRef) -> dict[str, Any]:
         """Upsert a chat into the registry; returns the row (or a local one)."""
         key = chat.key
@@ -546,3 +569,162 @@ def parse_chat_keys(raw: str, *, platform: str = "") -> set[str]:
         elif platform:
             keys.add(f"{platform}:{part}")
     return keys
+
+
+@dataclass
+class OwnerTarget:
+    """One resolved owner destination: platform + chat id to attempt.
+
+    ``source`` is the raw config entry this came from; ``note`` says how
+    the platform was chosen (``explicit``, ``alias``,
+    ``chat-registry``, ``id-shape`` or ``console-fallback``) so the
+    delivery log can show *why* a target was tried.
+    """
+    platform: str
+    chat_id: str
+    source: str = ""
+    note: str = ""
+
+
+def _running_platforms(status: dict[str, Any] | None) -> set[str]:
+    out: set[str] = set()
+    for name, info in (status or {}).items():
+        if not name or str(name).startswith("_"):
+            continue
+        if isinstance(info, dict) and info.get("running_in_session"):
+            out.add(str(name))
+    return out
+
+
+def _looks_like_phone(value: str) -> bool:
+    v = value.strip().replace(" ", "")
+    return v.startswith("+") and v[1:].isdigit() and len(v) >= 8
+
+
+def _looks_numeric_id(value: str) -> bool:
+    v = value.strip()
+    return v.lstrip("-").isdigit() and len(v.lstrip("-")) >= 3
+
+
+def _family(name: str) -> str:
+    return str(name).strip().lower().split("-")[0]
+
+
+def resolve_owner_targets(
+    raw: str,
+    *,
+    status: dict[str, Any] | None,
+    registry_lookup: Callable[[str], list[str]] | None = None,
+) -> list[OwnerTarget]:
+    """Turn ``partner.owner_chats`` into an ordered delivery-attempt list.
+
+    The audit root cause: ``NM_PARTNER_OWNER_CHATS`` is documented (see
+    ``docs/TERMUX_ENV_TEMPLATE.txt``) as *"your numeric Telegram ID"* — a
+    bare ID with no ``platform:`` prefix.  The old notifier only parsed
+    ``platform:id`` entries and silently skipped bare ones, so ``_deliver``
+    returned 0 and every proactive send was stored ``"failed"`` even with
+    a live gateway.  This resolver closes that gap, systematically:
+
+    * ``platform:id`` entries are kept as-is; when the named platform is
+      unknown to the gateway but a same-family one is known (``telegram``
+      vs ``telegram-bot``), it is aliased — and the alias is noted on the
+      target so the delivery log stays honest.
+    * bare IDs are resolved against the chat registry first (data, not
+      guesses: the platform the registry has seen that chat id on), then
+      by ID shape against *running* platforms — numeric IDs go to the
+      telegram family / discord, ``+``-prefixed numbers to
+      whatsapp/sms.  Numeric IDs are never offered to phone-number
+      platforms (a Telegram user id must not become an SMS recipient).
+    * when nothing resolves and the local console is running, one
+      last-resort ``local:console`` target keeps the alert visible on the
+      owner's terminal instead of silently lost.
+
+    ``status`` is ``gateway.status()``; ``registry_lookup`` maps a chat id
+    to the platforms the chat registry knows it on (owner rows first).
+    The returned order is the attempt order — the fallback chain.
+    Never raises.
+    """
+    targets: list[OwnerTarget] = []
+    try:
+        running = _running_platforms(status)
+        known = {str(n) for n in (status or {}) if n and not str(n).startswith("_")}
+        for part in (raw or "").split(","):
+            entry = part.strip()
+            if not entry:
+                continue
+            if ":" in entry:
+                plat_raw, _, cid = entry.partition(":")
+                plat = plat_raw.strip().lower()
+                cid = cid.strip()
+                if not (plat and cid):
+                    continue
+                if plat in known:
+                    targets.append(OwnerTarget(plat, cid, source=entry,
+                                              note="explicit"))
+                else:
+                    # Same-family alias: prefer a RUNNING platform
+                    # (telegram -> telegram-bot), else any known one.
+                    chosen = next(
+                        (n for n in sorted(known)
+                         if _family(n) == _family(plat) and n in running),
+                        "",
+                    ) or next(
+                        (n for n in sorted(known)
+                         if _family(n) == _family(plat) and n != plat),
+                        "",
+                    )
+                    if chosen:
+                        targets.append(OwnerTarget(
+                            chosen, cid, source=entry,
+                            note=f"alias {plat}->{chosen}"))
+                    else:
+                        targets.append(OwnerTarget(
+                            plat, cid, source=entry,
+                            note="platform not known to gateway"))
+                continue
+            # ── bare entry (no platform prefix) ──
+            resolved: list[str] = []
+            if registry_lookup is not None:
+                try:
+                    resolved = [p for p in (registry_lookup(entry) or [])
+                                if p]
+                except Exception:  # noqa: BLE001 - registry is best-effort
+                    resolved = []
+            if resolved:
+                for plat in resolved:
+                    targets.append(OwnerTarget(
+                        plat.strip().lower(), entry, source=entry,
+                        note="chat-registry"))
+            elif _looks_like_phone(entry):
+                for plat in ("whatsapp", "sms"):
+                    if plat in running:
+                        targets.append(OwnerTarget(
+                            plat, entry, source=entry,
+                            note="id-shape: phone number"))
+            elif _looks_numeric_id(entry):
+                for plat in ("telegram-bot", "telegram", "discord"):
+                    if plat in running:
+                        targets.append(OwnerTarget(
+                            plat, entry, source=entry,
+                            note="id-shape: numeric chat id"))
+            else:
+                targets.append(OwnerTarget(
+                    "", entry, source=entry,
+                    note="could not resolve to a platform"))
+        # dedupe, order-preserving
+        seen: set[tuple[str, str]] = set()
+        unique: list[OwnerTarget] = []
+        for t in targets:
+            key = (t.platform, t.chat_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(t)
+        targets = unique
+        if not targets and "local" in running:
+            targets.append(OwnerTarget(
+                "local", "console", source="",
+                note="console-fallback: no owner channel resolved"))
+        return targets
+    except Exception:  # noqa: BLE001 - resolution must never break delivery
+        return targets

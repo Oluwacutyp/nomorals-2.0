@@ -15,6 +15,8 @@ class RuntimeScheduleMixin:
         scheduler = self._scheduler_or_build()
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else "status"
+        if verb == "health":
+            return self._schedule_health(scheduler)
         if verb in {"status", "list"}:
             jobs = scheduler.list_jobs()
             if not jobs:
@@ -66,11 +68,66 @@ class RuntimeScheduleMixin:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
         return ("usage: /schedule add <name> <when> <message|tool|command> <...> [options] | list | "
-                "rm <name> | enable|disable <name> | run <name>\n"
+                "health | rm <name> | enable|disable <name> | run <name>\n"
                 "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00' | 'daily 22:00 America/New_York'\n"
                 "        | 'cron 0 22 * * *' (minute hour day month weekday)\n"
                 "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V\n"
                 "  options: tz <IANA> | after <job> | retry <n> [delay <secs>]")
+
+    def _schedule_health(self, scheduler: Any) -> str:
+        """Owner-visible scheduler health: ``/schedule health``.
+
+        Answers "is my scheduler alive": tick loop state, last tick,
+        next fire, last job outcome, and the delivery queue (retryable /
+        dead-lettered) with the live owner channels.
+        """
+        try:
+            h = scheduler.health()
+        except Exception as exc:  # noqa: BLE001 - health must never raise
+            return f"scheduler health check failed: {exc}"
+        lines = ["scheduler health: "
+                 + ("OK" if h.get("ok") else "DEGRADED")]
+        loop_state = h.get("loop_state") or (
+            "running" if h.get("running") else "not-started")
+        lines.append(f"  tick loop: {loop_state}"
+                     f" (every {h.get('tick_seconds', '?')}s)")
+        started = h.get("started_at")
+        if started:
+            lines.append("  started: "
+                         + time.strftime("%m-%d %H:%M", time.localtime(started)))
+        age = h.get("last_tick_age_s")
+        lines.append("  last tick: "
+                     + (f"{age}s ago" if age is not None else "never"))
+        if h.get("tick_errors"):
+            lines.append(f"  tick errors: {h['tick_errors']}")
+        jobs = h.get("jobs") or {}
+        lines.append(f"  jobs: {jobs.get('total', 0)} total, "
+                     f"{jobs.get('enabled', 0)} enabled, "
+                     f"{jobs.get('due_now', 0)} due now")
+        nxt = h.get("next_job")
+        if nxt:
+            lines.append(f"  next: {nxt['name']} at {nxt.get('next_run_iso')} "
+                         f"(in {nxt.get('in_s', '?')}s)")
+        last = h.get("last_job")
+        if last:
+            mark = "✅" if last.get("ok") else "❌"
+            lines.append(f"  last ran: {mark} {last['name']} — "
+                         f"{last.get('last_result', '')[:80]}")
+        d = h.get("delivery") or {}
+        q = d.get("queue") or {}
+        lines.append(f"  delivery queue: {q.get('retryable', 0)} retrying, "
+                     f"{q.get('held', 0)} held (quiet hours), "
+                     f"{q.get('dead', 0)} dead-lettered")
+        live = d.get("live_owner_channels") or []
+        lines.append("  live owner channels: " + (", ".join(live) or "NONE"))
+        if d.get("termux_fallback"):
+            lines.append("  fallback: termux-notification available "
+                         "(Android shade when no chat is live)")
+        for reason in h.get("reasons") or []:
+            lines.append(f"  ⚠️ {reason}")
+        for note in h.get("notes") or []:
+            lines.append(f"  ℹ️ {note}")
+        return "\n".join(lines)
 
     def _schedule_add(self, parts: list[str], scheduler: Any) -> str:
         """parts = the tail after 'add': [name, spec..., verb, payload...]"""
@@ -176,7 +233,8 @@ class RuntimeScheduleMixin:
             return "no notifications yet — arena builds, research, news and tasks land here."
         marks = {"sent": "✓", "failed": "✗", "pending": "…",
                  "held-quiet-hours": "⏸", "disabled": "⊘",
-                 "muted": "⊘", "deduped": "⤺"}
+                 "muted": "⊘", "deduped": "⤺", "dead": "✖"}
+        attempt_marks = {"sent": "✓", "failed": "✗", "skipped": "…"}
         lines = [f"notifications ({len(rows)}):"]
         for row in rows:
             when = time.strftime("%m-%d %H:%M", time.localtime(row.get("created_at", 0)))
@@ -188,8 +246,29 @@ class RuntimeScheduleMixin:
                          f"{row.get('title', '')[:50]}")
             if body:
                 lines.append(f"      {body}")
+            # Honest delivery detail: per-channel attempts (sent via
+            # which channel, or WHY each target didn't land) instead of
+            # a bare ✗ failed.  Kept compact — at most 3 attempt lines.
+            if state in ("failed", "dead", "sent"):
+                try:
+                    attempts = notifier.delivery_attempts(
+                        str(row.get("id") or ""))[:3]
+                except Exception:  # noqa: BLE001 - detail is best-effort
+                    attempts = []
+                for a in attempts:
+                    amark = attempt_marks.get(str(a.get("state") or ""), "?")
+                    where = (f"{a.get('platform')}:{a.get('chat_id')}"
+                             if a.get("platform") else
+                             f"entry {a.get('source')!r}")
+                    detail = ""
+                    if a.get("state") == "sent" and a.get("message_id"):
+                        detail = f" (msg {a.get('message_id')})"
+                    elif a.get("error"):
+                        detail = f" — {str(a.get('error'))[:90]}"
+                    lines.append(f"      ↳ {amark} {where}"
+                                 f"{detail}")
         lines.append("states: ✓sent ✗failed …pending ⏸held-quiet-hours "
-                     "⊘disabled/muted ⤺deduped — see `nm briefing status`")
+                     "⊘disabled/muted ⤺deduped ✖dead — see `nm briefing status`")
         return "\n".join(lines)
 
     def _control_proactive(self, arg: str) -> str:
@@ -203,7 +282,7 @@ class RuntimeScheduleMixin:
         s = payload["settings"]
         marks = {"sent": "✓", "failed": "✗", "pending": "…",
                  "held-quiet-hours": "⏸", "disabled": "⊘",
-                 "muted": "⊘", "deduped": "⤺"}
+                 "muted": "⊘", "deduped": "⤺", "dead": "✖"}
         lines = [
             "she speaks first — proactive push sends (owner DMs only):",
             f"  master:   {'ON' if s['proactive_enabled'] else 'OFF'}"

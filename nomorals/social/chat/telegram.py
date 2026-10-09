@@ -1557,18 +1557,42 @@ class TelegramBotAdapter(ChatAdapter):
             self._session = HttpClient()
         return self._session
 
+    #: how many times _api replays a request after a 429 before giving up
+    _API_429_MAX_RETRIES = 2
+
     def _api(self, method: str, **params: Any) -> Any:
         url = _BOT_API.format(token=self.token, method=method)
-        resp = self._sess().post_json(url, params, timeout=self.poll_timeout + 10)
-        try:
-            data = resp.json()
-        except ValueError:
-            raise ValidationError(f"telegram bot api: non-JSON reply from {method}")
-        if not data.get("ok"):
+        for attempt_429 in range(self._API_429_MAX_RETRIES + 1):
+            resp = self._sess().post_json(url, params, timeout=self.poll_timeout + 10)
+            try:
+                data = resp.json()
+            except ValueError:
+                raise ValidationError(f"telegram bot api: non-JSON reply from {method}")
+            if data.get("ok"):
+                return data["result"]
+            # Production behavior (Telegram Bot API): on 429 the response
+            # carries parameters.retry_after — hold for exactly that long
+            # (plus a small buffer) then replay, bounded attempts.  Racing
+            # ahead would only earn more 429s.  Every other error (400/403
+            # like "bot was blocked", chat-not-found, …) fails fast — a
+            # retry can never fix those.
+            if data.get("error_code") == 429 and attempt_429 < self._API_429_MAX_RETRIES:
+                retry_after = (data.get("parameters") or {}).get("retry_after", 1)
+                try:
+                    wait = min(max(int(retry_after), 1), 60) + 1
+                except (TypeError, ValueError):
+                    wait = 2
+                _log.warning("telegram bot api: %s rate-limited (429), "
+                             "retrying in %ds (attempt %d/%d)",
+                             method, wait, attempt_429 + 1,
+                             self._API_429_MAX_RETRIES)
+                time.sleep(wait)
+                continue
             raise ValidationError(
                 f"telegram bot api: {method} failed: {data.get('description', 'unknown')}"
             )
-        return data["result"]
+        # unreachable — the loop either returns or raises
+        raise ValidationError(f"telegram bot api: {method} failed: rate limited")
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def preflight(self) -> None:
@@ -1666,6 +1690,19 @@ class TelegramBotAdapter(ChatAdapter):
         replied = msg.get("reply_to_message") or {}
         if replied.get("message_id"):
             reply_to = str(replied["message_id"])
+        # /sham support: stash the replied-to audio/voice file_id so the
+        # command can download it on demand. The Bot API includes the full
+        # replied message object (with file ids), but there's no
+        # get-by-message-id — this is the only chance to grab it.
+        replied_audio_file_id = ""
+        for _key in ("voice", "audio"):
+            _rm = replied.get(_key) or {}
+            if _rm.get("file_id"):
+                replied_audio_file_id = str(_rm["file_id"])
+                break
+        meta = {"update_id": update.get("update_id")}
+        if replied_audio_file_id:
+            meta["replied_audio_file_id"] = replied_audio_file_id
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
         # Stable numeric Telegram user id — game identity keys off this
         # so username/display-name changes don't split profiles.
@@ -1684,7 +1721,7 @@ class TelegramBotAdapter(ChatAdapter):
             mentioned=mentioned,
             ts=float(msg.get("date", time.time())),
             message_id=str(msg.get("message_id", "")),
-            meta={"update_id": update.get("update_id")},
+            meta=meta,
         )
 
     # ── inline buttons ──────────────────────────────────────────────────
@@ -1829,6 +1866,28 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot media download failed: %s", exc)
             return []
         return [MediaRef(path=str(dest), kind=fkind, name=fname)]
+
+    def download_file(self, file_id: str, fname: str = "audio.ogg") -> str:
+        """Download a Telegram file_id to the media dir. Returns the local
+        path, or "" on failure. Never raises. Used by /sham for
+        replied-to audio the adapter didn't download inline."""
+        if not file_id:
+            return ""
+        try:
+            info = self._api("getFile", file_id=file_id)
+            path = info.get("file_path", "")
+            if not path:
+                return ""
+            dest = Path(self.media_dir) / f"{file_id[:16]}_{fname}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            url = _BOT_FILE_API.format(token=self.token, path=path)
+            resp = self._sess().get(url, timeout=60)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
+            return str(dest)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            _log.debug("telegram-bot download_file failed: %s", exc)
+            return ""
 
     # ── outbound ──────────────────────────────────────────────────────────
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
