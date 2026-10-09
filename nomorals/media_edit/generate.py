@@ -26,6 +26,13 @@ Backends:
   running ComfyUI server over HTTP (stdlib only). Host/port from
   ``COMFYUI_HOST`` / ``COMFYUI_PORT``; workflows in
   ``nomorals/media_edit/workflows/``; one GPU job at a time.
+- ``leonardo`` (:class:`LeonardoBackend`), ``stability_ai``
+  (:class:`StabilityAIBackend`), ``nano_banana`` (:class:`NanoBananaBackend`):
+  paid API backends driving the matching connectors in
+  ``nomorals/connectors/``. Explicit opt-in only (never "auto") — every
+  call costs real money/credits. Keys live in the credential vault
+  (``nm connectors connect --name <backend>``); the vault unlocks via
+  ``NM_VAULT_PASSPHRASE``.
 - ``off`` / unconfigured: :class:`GenerativeEditError` naming the env var —
   never a fake edit.
 
@@ -627,6 +634,502 @@ class DiffusersBackend(GenerativeBackend):
 
 
 # ---------------------------------------------------------------------------
+# paid API backends (opt-in via explicit MEDIA_GEN_BACKEND only)
+# ---------------------------------------------------------------------------
+
+#: Paid image-generation backends. Selectable ONLY by explicit
+#: ``MEDIA_GEN_BACKEND`` value — never by "auto", because every call costs
+#: real money/credits. Each one drives the matching connector in
+#: ``nomorals/connectors/`` (Leonardo AI, Stability AI, Nano Banana).
+PAID_IMAGE_BACKENDS = ("leonardo", "stability_ai", "nano_banana")
+
+
+def _paid_vault(vault: Any | None) -> Any:
+    """Resolve the credential vault for a paid image backend.
+
+    An explicit ``vault`` wins (tests, wired callers). Otherwise build one
+    from the default database + ``NM_VAULT_PASSPHRASE`` — the same vault
+    ``nm connectors`` stores keys in. Fails fast with the exact fix.
+    """
+    if vault is not None:
+        return vault
+    passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+    if not passphrase:
+        raise GenerativeEditError(
+            "paid image backends need the credential vault: set "
+            "NM_VAULT_PASSPHRASE, then connect the backend with "
+            "`nm connectors connect --name <backend>` "
+            "(or /connectors connect <backend> in chat)")
+    try:
+        from ..accounts.vault import CredentialVault
+        from ..core.config import get_settings
+        from ..storage.db import open_database
+        settings = get_settings()
+        storage = settings.storage
+        db, _, _ = open_database(
+            settings.db_path,
+            wal=getattr(storage, "wal", True),
+            busy_timeout_ms=getattr(storage, "busy_timeout_ms", 5000),
+            synchronous=getattr(storage, "synchronous", "NORMAL"),
+        )
+        return CredentialVault(db, master_passphrase=passphrase)
+    except GenerativeEditError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+        raise GenerativeEditError(
+            f"could not open the credential vault: {exc}") from exc
+
+
+class _PaidAPIBackend(GenerativeBackend):
+    """Shared plumbing for paid image-generation connectors.
+
+    Subclasses bind one connector id and translate the
+    generate/edit/img2img/inpaint interface onto that connector's real
+    methods. Every billable call passes ``confirmed=True``: the owner typed
+    the exact prompt in their own chat / CLI invocation, which is explicit
+    approval of the exact payload under ``confirm_or_checkpoint``'s
+    contract. The cost is surfaced in :meth:`describe` and the caller
+    reports it back to the owner.
+    """
+
+    #: registry id in nomorals/connectors, e.g. "leonardo"
+    connector_id = ""
+    #: short cost note shown in describe(), e.g. "costs Leonardo API credits"
+    cost_note = "paid — costs real money/credits per image"
+
+    def __init__(self, vault: Any | None = None) -> None:
+        self._vault = _paid_vault(vault)
+
+    # -- connector ------------------------------------------------------
+    def _connector(self) -> Any:
+        from ..connectors.registry import create_connector
+        try:
+            return create_connector(self.connector_id, self._vault)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"paid backend {self.name!r}: {exc}") from exc
+
+    # -- shared converters ----------------------------------------------
+    @staticmethod
+    def _pil_from_bytes(data: bytes) -> Any:
+        Image = _require_pillow()
+        import io as _io
+        try:
+            return Image.open(_io.BytesIO(data)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                "the backend returned undecodable image data "
+                f"({len(data)} bytes): {exc}"
+            ) from exc
+
+    @staticmethod
+    def _pil_to_png_bytes(image: Any) -> bytes:
+        import io as _io
+        buf = _io.BytesIO()
+        image.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _download(url: str, timeout: float = 60.0) -> bytes:
+        import urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "nomorals-media-edit/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"could not download the generated image: {exc}") from exc
+
+    @staticmethod
+    def _closest_aspect(width: int | None, height: int | None,
+                        allowed: set[str]) -> str:
+        """Pick the allowed "W:H" ratio closest to width/height.
+
+        Systematic nearest-ratio match — no hardcoded preference table.
+        """
+        if not allowed:
+            raise GenerativeEditError("no aspect ratios available")
+        target = ((width or 1) / (height or 1))
+        best, best_err = "1:1", float("inf")
+        for ratio in sorted(allowed):
+            try:
+                w, h = ratio.split(":")
+                value = float(w) / float(h)
+            except (ValueError, ZeroDivisionError):
+                continue
+            err = abs(value - target)
+            if err < best_err:
+                best, best_err = ratio, err
+        return best
+
+    def describe(self) -> str:
+        return f"generative backend '{self.name}' ({self.cost_note})"
+
+
+class LeonardoBackend(_PaidAPIBackend):
+    """Leonardo AI text-to-image / image-to-image (paid).
+
+    Drives :class:`nomorals.connectors.leonardo.LeonardoConnector`:
+    ``generate_image`` polls the job to completion and returns image URLs,
+    which are downloaded here. ``edit_image`` uploads an init image.
+    Strength mapping: our ``strength`` is regeneration amount; Leonardo's
+    ``init_strength`` is input preservation, so init_strength = 1 - strength.
+    Model from ``LEONARDO_MODEL_ID`` (default: Leonardo's default model).
+    """
+
+    name = "leonardo"
+    connector_id = "leonardo"
+    cost_note = "paid — costs Leonardo API credits per generation"
+
+    def __init__(self, vault: Any | None = None) -> None:
+        super().__init__(vault)
+        self.model_id = os.environ.get("LEONARDO_MODEL_ID", "")
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-image needs a prompt")
+        if n < 1:
+            raise GenerativeEditError("n must be >= 1")
+        conn = self._connector()
+        _log.info("text-to-image via leonardo n=%d prompt=%.60r", n, prompt)
+        try:
+            # generate_image returns [{"id", "url"}]; num_images ≤ 8.
+            entries = conn.generate_image(
+                prompt,
+                width=width or 1024, height=height or 1024,
+                num_images=max(1, min(n, 8)),
+                model_id=self.model_id,
+                negative_prompt=negative_prompt or "",
+                seed=int(seed or 0),
+                confirmed=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(f"leonardo generation failed: {exc}"
+                                      ) from exc
+        images = []
+        for entry in entries[:n]:
+            url = (entry.get("url") or "").strip()
+            if not url:
+                continue
+            images.append(self._pil_from_bytes(self._download(url)))
+        if not images:
+            raise GenerativeEditError(
+                "leonardo returned no downloadable images")
+        return images
+
+    def edit(self, image: Any, instruction: str, *,
+             mask: Any | None = None,
+             strength: float = 0.75,
+             seed: int | None = None,
+             negative_prompt: str | None = None,
+             steps: int | None = None,
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
+        if not instruction or not instruction.strip():
+            raise GenerativeEditError("generative edit needs an instruction")
+        result = self.img2img(
+            image, instruction, strength=strength, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, result, mask)
+
+    def img2img(self, image: Any, prompt: str, *,
+                strength: float = 0.6,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("img2img needs a prompt")
+        if not 0 < strength <= 1:
+            raise GenerativeEditError(
+                f"img2img strength must be in (0, 1], got {strength}")
+        conn = self._connector()
+        raw = self._pil_to_png_bytes(image)
+        _log.info("img2img via leonardo strength=%.2f prompt=%.60r",
+                  strength, prompt)
+        try:
+            # Leonardo's init_strength preserves the input (higher = more
+            # input kept); ours regenerates (higher = more change).
+            entries = conn.edit_image(
+                raw, prompt,
+                init_strength=round(1.0 - strength, 3),
+                width=image.size[0], height=image.size[1],
+                model_id=self.model_id,
+                confirmed=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(f"leonardo edit failed: {exc}") from exc
+        url = ((entries[0].get("url") or "").strip()
+               if entries else "")
+        if not url:
+            raise GenerativeEditError("leonardo returned no image URL")
+        return self._pil_from_bytes(self._download(url))
+
+    def inpaint(self, image: Any, mask: Any, prompt: str, *,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        """No native inpainting endpoint: regenerate at high strength and
+        composite through the feathered mask — unmasked pixels stay
+        pixel-identical to the original."""
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("inpaint needs a prompt")
+        regenerated = self.img2img(
+            image, prompt, strength=0.85, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, regenerated, mask)
+
+
+class StabilityAIBackend(_PaidAPIBackend):
+    """Stability AI (SD 3.x) text-to-image / image-to-image (paid).
+
+    Drives :class:`nomorals.connectors.stabilityai.StabilityAIConnector`.
+    Both calls are synchronous and return decoded image bytes. Model from
+    ``STABILITY_MODEL`` (default ``sd3.5-large``); the closest supported
+    aspect ratio is picked systematically from width/height.
+    """
+
+    name = "stability_ai"
+    connector_id = "stability_ai"
+    cost_note = "paid — costs Stability AI credits per image"
+
+    #: aspect ratios the v2beta stable-image endpoint accepts
+    ASPECTS = {"1:1", "16:9", "21:9", "2:3", "3:2",
+               "4:5", "5:4", "9:16", "9:21"}
+
+    def __init__(self, vault: Any | None = None) -> None:
+        super().__init__(vault)
+        self.model = os.environ.get("STABILITY_MODEL", "sd3.5-large")
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-image needs a prompt")
+        if n < 1:
+            raise GenerativeEditError("n must be >= 1")
+        conn = self._connector()
+        aspect = self._closest_aspect(width, height, self.ASPECTS)
+        _log.info("text-to-image via stability_ai model=%s aspect=%s n=%d",
+                  self.model, aspect, n)
+        images = []
+        try:
+            # One synchronous image per call; vary the seed across n.
+            for i in range(n):
+                result = conn.generate_image(
+                    prompt,
+                    model=self.model,
+                    aspect_ratio=aspect,
+                    seed=int(seed or 0) + i if seed is not None else 0,
+                    negative_prompt=negative_prompt or "",
+                    confirmed=True,
+                )
+                images.append(self._pil_from_bytes(result["image_bytes"]))
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"stability_ai generation failed: {exc}") from exc
+        return images
+
+    def edit(self, image: Any, instruction: str, *,
+             mask: Any | None = None,
+             strength: float = 0.75,
+             seed: int | None = None,
+             negative_prompt: str | None = None,
+             steps: int | None = None,
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
+        if not instruction or not instruction.strip():
+            raise GenerativeEditError("generative edit needs an instruction")
+        result = self.img2img(
+            image, instruction, strength=strength, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, result, mask)
+
+    def img2img(self, image: Any, prompt: str, *,
+                strength: float = 0.6,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("img2img needs a prompt")
+        if not 0 < strength <= 1:
+            raise GenerativeEditError(
+                f"img2img strength must be in (0, 1], got {strength}")
+        conn = self._connector()
+        raw = self._pil_to_png_bytes(image)
+        _log.info("img2img via stability_ai strength=%.2f prompt=%.60r",
+                  strength, prompt)
+        try:
+            # Stability's strength = deviation from input: matches ours.
+            result = conn.edit_image(
+                raw, prompt,
+                model=self.model,
+                strength=float(strength),
+                seed=int(seed or 0),
+                negative_prompt=negative_prompt or "",
+                confirmed=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"stability_ai edit failed: {exc}") from exc
+        return self._pil_from_bytes(result["image_bytes"])
+
+    def inpaint(self, image: Any, mask: Any, prompt: str, *,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        """No native inpainting endpoint: regenerate at high strength and
+        composite through the feathered mask."""
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("inpaint needs a prompt")
+        regenerated = self.img2img(
+            image, prompt, strength=0.85, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, regenerated, mask)
+
+
+class NanoBananaBackend(_PaidAPIBackend):
+    """Nano Banana (Google Gemini image models) generation/editing (paid).
+
+    Drives :class:`nomorals.connectors.nanobanana.NanoBananaConnector`.
+    Images come back as base64 inlineData parts. Model from
+    ``NANO_BANANA_MODEL`` (default ``gemini-2.5-flash-image``); the closest
+    supported aspect ratio is picked systematically from width/height.
+    """
+
+    name = "nano_banana"
+    connector_id = "nano_banana"
+    cost_note = "paid — costs per image via Google AI Studio"
+
+    #: aspect ratios the Gemini imageConfig accepts
+    ASPECTS = {"1:1", "2:3", "3:2", "3:4", "4:3",
+               "4:5", "5:4", "9:16", "16:9", "21:9"}
+
+    def __init__(self, vault: Any | None = None) -> None:
+        super().__init__(vault)
+        self.model = os.environ.get("NANO_BANANA_MODEL",
+                                    "gemini-2.5-flash-image")
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list[Any]:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("text-to-image needs a prompt")
+        if n < 1:
+            raise GenerativeEditError("n must be >= 1")
+        conn = self._connector()
+        aspect = self._closest_aspect(width, height, self.ASPECTS)
+        _log.info("text-to-image via nano_banana model=%s aspect=%s n=%d",
+                  self.model, aspect, n)
+        images = []
+        try:
+            # The model returns however many images it returns per call;
+            # repeat for n (each call is billed).
+            for _ in range(n):
+                for entry in conn.generate_image(
+                        prompt, model=self.model,
+                        aspect_ratio=aspect, confirmed=True):
+                    images.append(
+                        self._pil_from_bytes(entry["image_bytes"]))
+                    if len(images) >= n:
+                        break
+                if len(images) >= n:
+                    break
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"nano_banana generation failed: {exc}") from exc
+        if not images:
+            raise GenerativeEditError("nano_banana returned no images")
+        return images[:n]
+
+    def edit(self, image: Any, instruction: str, *,
+             mask: Any | None = None,
+             strength: float = 0.75,
+             seed: int | None = None,
+             negative_prompt: str | None = None,
+             steps: int | None = None,
+             guidance_scale: float | None = None,
+             width: int | None = None,
+             height: int | None = None) -> Any:
+        if not instruction or not instruction.strip():
+            raise GenerativeEditError("generative edit needs an instruction")
+        regenerated = self.img2img(
+            image, instruction, strength=strength, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, regenerated, mask)
+
+    def img2img(self, image: Any, prompt: str, *,
+                strength: float = 0.6,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("img2img needs a prompt")
+        if not 0 < strength <= 1:
+            raise GenerativeEditError(
+                f"img2img strength must be in (0, 1], got {strength}")
+        conn = self._connector()
+        raw = self._pil_to_png_bytes(image)
+        _log.info("edit via nano_banana model=%s prompt=%.60r",
+                  self.model, prompt)
+        try:
+            # Nano Banana edits are instruction-driven (no strength knob);
+            # strength is honored by phrasing, like the HF backend.
+            entries = conn.edit_image(
+                raw, prompt, model=self.model, confirmed=True)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
+            raise GenerativeEditError(
+                f"nano_banana edit failed: {exc}") from exc
+        if not entries:
+            raise GenerativeEditError("nano_banana returned no images")
+        return self._pil_from_bytes(entries[0]["image_bytes"])
+
+    def inpaint(self, image: Any, mask: Any, prompt: str, *,
+                seed: int | None = None,
+                negative_prompt: str | None = None,
+                steps: int | None = None,
+                guidance_scale: float | None = None) -> Any:
+        """Instruction edit + feathered mask composite (no native
+        inpainting endpoint)."""
+        if not prompt or not prompt.strip():
+            raise GenerativeEditError("inpaint needs a prompt")
+        regenerated = self.img2img(
+            image, prompt, strength=0.85, seed=seed,
+            negative_prompt=negative_prompt, steps=steps,
+            guidance_scale=guidance_scale)
+        return _apply_mask(image, regenerated, mask)
+
+
+# ---------------------------------------------------------------------------
 # selection
 # ---------------------------------------------------------------------------
 
@@ -635,21 +1138,42 @@ _NO_BACKEND_MSG = (
     "pip install huggingface_hub and set HF_TOKEN (serverless, "
     "MEDIA_GEN_BACKEND=hf), or pip install diffusers torch for local "
     "inference (MEDIA_GEN_BACKEND=diffusers), or point at a running "
-    "ComfyUI server (MEDIA_GEN_BACKEND=comfy, COMFYUI_HOST/PORT). "
+    "ComfyUI server (MEDIA_GEN_BACKEND=comfy, COMFYUI_HOST/PORT), "
+    "or use a paid API backend you hold a key for "
+    "(MEDIA_GEN_BACKEND=leonardo|stability_ai|nano_banana — connect the "
+    "key first with `nm connectors connect --name <backend>`). "
     "Set MEDIA_GEN_BACKEND=off to silence this check."
 )
 
 
-def get_backend(name: str | None = None) -> GenerativeBackend:
+def _paid_backend(name: str, vault: Any | None) -> GenerativeBackend:
+    """Instantiate a paid image backend by name."""
+    backends = {
+        "leonardo": LeonardoBackend,
+        "stability_ai": StabilityAIBackend,
+        "nano_banana": NanoBananaBackend,
+    }
+    return backends[name](vault=vault)
+
+
+def get_backend(name: str | None = None,
+                vault: Any | None = None) -> GenerativeBackend:
     """Resolve a generative backend.
 
     ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "hf", "diffusers",
-    "comfy", "off". auto prefers local diffusers when importable, else HF when
-    huggingface_hub imports, else raises a clear error (never a fake edit).
+    "comfy", "leonardo", "stability_ai", "nano_banana", "off". auto prefers
+    local diffusers when importable, else HF when huggingface_hub imports,
+    else raises a clear error (never a fake edit). The paid backends are
+    explicit opt-in only — auto never selects them, because every call
+    costs real money/credits. ``vault`` is the credential vault for the
+    paid backends; when omitted it is built lazily from the default
+    database + NM_VAULT_PASSPHRASE.
     """
     want = (name or os.environ.get("MEDIA_GEN_BACKEND", "auto")).lower()
     if want == "off":
         raise GenerativeEditError(_NO_BACKEND_MSG)
+    if want in PAID_IMAGE_BACKENDS:
+        return _paid_backend(want, vault)
     if want == "hf":
         return HFInferenceBackend()
     if want == "comfy":
@@ -671,7 +1195,41 @@ def get_backend(name: str | None = None) -> GenerativeBackend:
             pass
         raise GenerativeEditError(_NO_BACKEND_MSG)
     raise GenerativeEditError(
-        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|hf|diffusers|comfy|off")
+        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|hf|diffusers|comfy|"
+        f"{'|'.join(PAID_IMAGE_BACKENDS)}|off")
+
+
+def _paid_backend_status() -> dict[str, Any]:
+    """Readiness of the paid backends, without network calls.
+
+    A backend is "ready" when the vault unlocks and holds its credential.
+    Never raises — reports the reason instead.
+    """
+    out: dict[str, Any] = {}
+    for name in PAID_IMAGE_BACKENDS:
+        try:
+            vault = _paid_vault(None)
+        except GenerativeEditError as exc:
+            out[name] = {"ready": False, "reason": str(exc)}
+            continue
+        try:
+            from ..connectors.registry import create_connector
+            conn = create_connector(name, vault)
+            cred = conn._load_credential()
+        except Exception as exc:  # noqa: BLE001 - status, not a failure
+            out[name] = {"ready": False, "reason": str(exc)}
+            continue
+        if cred is None:
+            out[name] = {
+                "ready": False,
+                "reason": (f"not connected — run `nm connectors connect "
+                           f"--name {name}` (or /connectors connect {name} "
+                           "in chat)"),
+            }
+        else:
+            out[name] = {"ready": True,
+                         "reason": f"connected as {cred.username}"}
+    return out
 
 
 def backend_status() -> dict[str, Any]:
@@ -695,6 +1253,7 @@ def backend_status() -> dict[str, Any]:
         "comfy_reason": comfy_reason,
         "comfy_host": os.environ.get("COMFYUI_HOST", "127.0.0.1"),
         "comfy_port": int(os.environ.get("COMFYUI_PORT", "8188") or 8188),
+        "paid": _paid_backend_status(),
         "selected": os.environ.get("MEDIA_GEN_BACKEND", "auto"),
     }
 

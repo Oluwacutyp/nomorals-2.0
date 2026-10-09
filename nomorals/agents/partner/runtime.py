@@ -1942,8 +1942,12 @@ class PartnerRuntime(
         if kind == "say":
             target, sep, payload = command.tail.partition(" ")
             payload = payload.strip()
-            if not sep or not payload or ":" not in target:
-                return "usage: /say telegram:123 the text to send"
+            if not sep or not payload:
+                return ("usage: /say telegram:123 the text to send — "
+                        "or /say <voice> <text> to speak it as a voice note")
+            if ":" not in target:
+                # TTS path: /say <voice> <text> — voice names never contain ":"
+                return self._control_say_tts(target, payload, chat_key)
             platform, _, chat_id = target.partition(":")
             if not chat_id:
                 return "usage: /say telegram:123 the text to send"
@@ -2419,6 +2423,14 @@ class PartnerRuntime(
             return self._control_play(command.tail or arg, chat_key=chat_key)
         if kind == "video":
             return self._control_video(command.tail or arg)
+        if kind == "caption":
+            return self._control_caption(command.tail or arg,
+                                         chat_key=chat_key,
+                                         message=message)
+        if kind == "vision":
+            return self._control_vision(command.tail or arg,
+                                        chat_key=chat_key,
+                                        message=message)
         if kind == "exec":
             return self._control_exec(command.tail or arg)
         if kind == "zip":
@@ -2440,6 +2452,9 @@ class PartnerRuntime(
             return self._control_dislike(command.tail or arg)
         if kind == "cookies":
             return self._control_cookies(command.tail or arg)
+        if kind == "sham":
+            return self._control_sham(command.tail or arg, chat_key=chat_key,
+                                      message=message)
         if kind == "fix":
             return self._control_fix(command.tail or arg)
 
@@ -2666,6 +2681,14 @@ class PartnerRuntime(
             return self._control_db(command.tail or arg)
         if kind == "api":
             return self._control_api(command.tail or arg)
+        if kind == "connectors":
+            return self._control_connectors(command.tail or arg)
+        if kind == "notion":
+            return self._control_notion(command.tail or arg)
+        if kind == "gcal":
+            return self._control_gcal(command.tail or arg)
+        if kind == "trello":
+            return self._control_trello(command.tail or arg)
         if kind == "swarm":
             return self._control_swarm(command.tail or arg, chat_key=chat_key)
         if kind == "dns":
@@ -2710,6 +2733,12 @@ class PartnerRuntime(
         if kind == "voice":
             return self._control_voice(command.tail, chat_key,
                                        message=message)
+        if kind == "voices":
+            return self._control_voices(command.tail or arg,
+                                        chat_key=chat_key)
+        if kind == "clonevoice":
+            return self._control_clonevoice(command.tail, chat_key,
+                                            message=message)
         if kind == "bet":
             return self._control_bet(command.tail or arg, chat_key=chat_key)
         if kind == "money":

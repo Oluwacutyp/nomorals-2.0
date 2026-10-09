@@ -465,6 +465,10 @@ def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
                       f"(model: {result['hf_model']})")
                 print(f"diffusers available: {result['diffusers_available']} "
                       f"(model: {result['diffusers_model']})")
+                for _pb, _info in (result.get("paid") or {}).items():
+                    _state = ("ready — " + _info["reason"] if _info["ready"]
+                              else "not ready — " + _info["reason"])
+                    print(f"paid backend {_pb}: {_state}")
                 if not result['hf_installed'] and not result[
                         'diffusers_available']:
                     print("no generative backend ready: pip install "

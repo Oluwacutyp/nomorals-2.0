@@ -269,6 +269,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
     "api": (0, None),        # /api list | <connector> [json params]
+    "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
+    "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
+    "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
+    "trello": (0, None),      # /trello boards|lists|cards|add — Trello
     "swarm": (1, None),      # /swarm <goal> [workers] — parallel devon agents
     # power layer: network, proxies, scripts, osint, macros
     "dns": (1, 5),           # /dns <domain> [record type]
@@ -289,6 +293,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "upgrade": (0, None),    # /upgrade list|show|diff|approve|deny|applied — research→approve→evolve review loop
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
+    "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
+    "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
@@ -318,6 +324,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "distribute": (0, 1),   # /distribute [song.wav] | legal
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
     "video": (0, None),      # /video <query> | download <url> | platforms
+    "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
+    "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
     "exec": (0, None),       # /exec <code> | languages — multi-language sandbox
     "zip": (0, None),        # /zip <paths…> --dest x.zip | list | info | extract | digest
     "apps": (0, None),       # /apps [list|build|serve|stop|served|stacks|info]
@@ -329,6 +337,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "like": (0, None),       # /like [notes…] — last production was good
     "dislike": (0, None),    # /dislike [notes…] — last production missed
     "cookies": (0, 1),       # /cookies [check] — YouTube cookie file status/setup
+    "sham": (0, 0),          # /sham — reply to audio/voice note to identify the song
     "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
 }
 
@@ -438,6 +447,9 @@ _HELP_TEXT = "\n".join(
         "  /schedule list | rm <name> | enable <name> | disable <name> | run <name>",
         "  /db tables | schema <table> | query <sql> | counts",
         "  /api list | <connector> [json]          external APIs (weather, fx, github, …)",
+        "  /connectors [list] | status <name>     manage the service connectors",
+        "  /connectors connect <name>             guided connect (key via env var, never chat)",
+        "  /notion dbs|query|add · /gcal [agenda]|add · /trello boards|lists|cards|add",
         "  /swarm <goal> [workers]                 parallel devon agents + fusion",
         "  — network / proxy / osint / automation —",
         "  /dns <domain> [record]                  A/AAAA/MX/NS/TXT/SPF/CAA (no deps)",
@@ -698,9 +710,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                           "the diagnostic for a silent brain.",
                   "usage": "/providers", "example": "/providers",
                   "related": "/model /status"},
-    "say": {"what": "send a message to a chat as her, from your hands.",
-            "usage": "/say <platform:chat> <text>", "example": "/say telegram:123 hi",
-            "related": "/file /publish"},
+    "say": {"what": "send a message to a chat as her, from your hands — or speak text as a voice note in a named voice.",
+            "usage": "/say <platform:chat> <text> | /say <voice> <text>",
+            "example": "/say telegram:123 hi — or — /say trump hello there",
+            "related": "/file /publish /voices /voice"},
     "proposals": {"what": "list the actions she is waiting for you to approve (suggest mode).",
                   "usage": "/proposals", "example": "/proposals",
                   "related": "/approve /deny"},
@@ -1274,6 +1287,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
+    "connectors": {"what": "manage the service connectors (connect, status): the same adapters `nm connectors` manages, from chat.",
+            "usage": "/connectors [list] | /connectors status <name> | /connectors connect <name>",
+            "example": "/connectors connect leonardo",
+            "related": "/api /notion /gcal /trello"},
+    "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
+            "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
+            "example": "/notion add <page-id> Shopping list | milk | eggs",
+            "related": "/connectors /gcal /trello"},
+    "gcal": {"what": "Google Calendar: today's agenda, upcoming days, create events — through your connected Google account.",
+            "usage": "/gcal | /gcal agenda [days] | /gcal add <summary> | <YYYY-MM-DD HH:MM> | <end or minutes>",
+            "example": "/gcal add Dentist | 2026-10-10 14:00 | 60",
+            "related": "/connectors /notion /trello"},
+    "trello": {"what": "Trello: boards, lists, cards — create cards, through your connected Trello account.",
+            "usage": "/trello boards | /trello lists <board> | /trello cards <list> | /trello add <list> | <name> [| <desc>]",
+            "example": "/trello add Todo | buy milk",
+            "related": "/connectors /notion /gcal"},
     "swarm": {"what": "parallel swarm on one goal — devon builder agents with a fusion of their results, or the research swarm: parallel researchers, trusted sources first, conflicting claims flagged, structured report filed in memory.",
               "usage": "/swarm <goal> [workers]  |  /swarm research <topic>",
               "example": "/swarm audit this repo 4 · /swarm research is termux fast enough for llm inference",
@@ -1347,9 +1376,17 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                "example": "/evolve make search summaries shorter",
                "related": "/benchmark"},
     "voice": {"what": "the voice catalogue: list voices, switch the active voice live (per chat), speak as it, or clone a new voice from a voice note. Also hosts the unified voice pipeline (denoise → transcribe → edit → multi-speaker TTS → master).",
-            "usage": "/voice list | /voice use <name> | /voice say <text> | /voice clone <name> [path] | /voice transcript <name> <text> | /voice describe <name> <text> | /voice rm <name> | /voice pipeline <audio> [lang] [private|public] | /voice engines | /voice keyterms add <term> [kind] [lang]",
+            "usage": "/voice list | /voice use <name> | /voice say [voice] <text> | /voice clone <name> [path] | /voice transcript <name> <text> | /voice describe <name> <text> | /voice rm <name> | /voice pipeline <audio> [lang] [private|public] | /voice engines | /voice keyterms add <term> [kind] [lang]",
             "example": "/voice pipeline /tmp/voice_note.m4a en private",
-            "related": "/speak /stt /audio"},
+            "related": "/speak /stt /audio /clonevoice /voices"},
+    "clonevoice": {"what": "clone a voice from a voice note — zero-shot. Attach the audio to the command message.",
+            "usage": "/clonevoice <name> (with a voice note / audio attached)",
+            "example": "/clonevoice trump",
+            "related": "/voices /voice"},
+    "voices": {"what": "unified voice picker: every voice across all backends — system (espeak), Piper downloads, and the voice catalogue.",
+            "usage": "/voices",
+            "example": "/voices",
+            "related": "/voice /clonevoice /speak /tts"},
     "speak": {"what": "she says it back to you as a neural voice note.",
               "usage": "/speak <text>", "example": "/speak all done",
               "related": "/tts"},
@@ -1479,6 +1516,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
+    "caption": {"what": "Burn AI subtitles into a video: faster-whisper transcription → styled captions → FFmpeg burn-in.",
+              "usage": "/caption [style] — attach a video or pass a path",
+              "example": "/caption karaoke",
+              "related": "/video"},
+    "vision": {"what": "Analyze an image with the vision model: describe, answer questions, read text.",
+              "usage": "/vision [question] — attach an image or pass a path/URL",
+              "example": "/vision what's in this screenshot?",
+              "related": "/look /lens"},
     "exec": {"what": "Execution system: runs code in the sandbox with "
                      "structured results (stdout, stderr, exit code, wall "
                      "time, timeout flag, files written). Languages: python, "
@@ -1547,6 +1592,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/cookies [check]",
                 "example": "/cookies",
                 "related": "/play"},
+    "sham": {"what": "Identify the song in a voice note or audio — reply to it with /sham, or send audio with /sham as the caption.",
+                "usage": "/sham",
+                "example": "/sham (reply to a voice note)",
+                "related": "/play"},
     "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
                     "model rewrites it and it runs again, until exit 0 (or the "
                     "expected text appears in stdout). Reports every round — exit "
@@ -1589,7 +1638,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
+    ("tools & automation", ["schedule", "db", "api", "connectors", "notion",
+                            "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "finance", "weather", "tz", "email", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel"]),
     ("platform control", ["start", "stop", "profile"]),
@@ -1973,6 +2023,10 @@ LIST_ONELINERS: dict[str, str] = {
     "schedule": "cron-style in-process jobs",
     "db": "inspect the database (tables|schema|query|counts)",
     "api": "external API connectors (weather, fx, github, …)",
+    "connectors": "manage the service connectors: list, status, connect",
+    "notion": "Notion databases, rows, and page creation",
+    "gcal": "Google Calendar agenda and event creation",
+    "trello": "Trello boards, lists, cards — create cards",
     "proxy": "proxy lab: status|test|set|scrape|refresh|pool|file|rotate|ssh",
     "record": "capture actions into a macro",
     "macro": "replay a recorded macro",

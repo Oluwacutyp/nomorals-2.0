@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
+
+
+class _ConnectorsChatError(Exception):
+    """User-facing /connectors failure (never a traceback in chat)."""
+
 
 class RuntimeSystemMixin:
     """RuntimeSystemMixin for :class:`PartnerRuntime`."""
@@ -478,6 +484,608 @@ class RuntimeSystemMixin:
         if not outcome.ok:
             return f"api failed: {getattr(outcome.error, 'message', outcome.error)}"
         return f"{name}:\n" + json.dumps(outcome.value, default=str, indent=1)[:4000]
+
+    # ── connector management: /connectors ────────────────────────────────
+    def _connectors_vault(self) -> Any:
+        """The encrypted vault for chat-side connector management.
+
+        Same vault `nm connectors` uses (context db + NM_VAULT_PASSPHRASE).
+        Raises a plain, actionable message when it can't be built.
+        """
+        import os
+
+        from ...accounts.vault import CredentialVault
+
+        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+        db = getattr(self.context, "db", None)
+        if not passphrase:
+            raise _ConnectorsChatError(
+                "the credential vault is locked: set NM_VAULT_PASSPHRASE "
+                "in the bot's environment, then retry")
+        if db is None:
+            raise _ConnectorsChatError(
+                "no database is attached to this chat context — connector "
+                "management needs the vault database")
+        return CredentialVault(db, master_passphrase=passphrase)
+
+    def _control_connectors(self, tail: str) -> str:
+        """Manage the service connectors from chat (whatever the registry holds).
+
+        /connectors                  — status table (vault state, no network)
+        /connectors list             — same
+        /connectors status <name>    — live status check for one connector
+        /connectors connect <name>   — guided connect flow
+
+        Never raises: every failure becomes a chat-readable message. Secrets
+        are never echoed: the guided flow resolves keys from environment
+        variables only — the key never travels through chat.
+        """
+        import difflib
+        import io
+        from contextlib import redirect_stdout
+
+        def _usage() -> str:
+            return (
+                "/connectors [list] — every connector + connected state\n"
+                "/connectors status <name> — live status check\n"
+                "/connectors connect <name> — guided connect flow\n"
+                "keys come from environment variables (never paste them in "
+                "chat); e.g. export LEONARDO_API_KEY=… then "
+                "/connectors connect leonardo")
+
+        try:
+            from ...connectors import create_connector, list_connectors
+            from ...connectors.base import ConnectorError
+            from ...core.http import HttpClient
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"connectors unavailable: {exc}"
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        name = parts[1].strip() if len(parts) > 1 else ""
+        if verb not in ("list", "status", "connect"):
+            # tolerate "/connectors <name>" as a status shortcut
+            if not name:
+                name, verb = verb, "status"
+            else:
+                return _usage()
+
+        try:
+            vault = self._connectors_vault()
+        except _ConnectorsChatError as exc:
+            return f"connectors: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"connectors: could not open the vault: {exc}"
+
+        try:
+            infos = list_connectors()
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"connectors: could not list connectors: {exc}"
+        known = [c["id"] for c in infos]
+
+        def _resolve(target: str) -> str:
+            t = (target or "").strip().lower()
+            if t in known:
+                return t
+            hint = difflib.get_close_matches(t, known, n=1, cutoff=0.6)
+            raise _ConnectorsChatError(
+                f"unknown connector {target!r}"
+                + (f" — did you mean {hint[0]!r}?" if hint else
+                   "") + f" — /connectors list shows all {len(known)}")
+
+        http = HttpClient()
+        if verb == "list":
+            lines = [f"connectors ({len(infos)}):"]
+            for info in infos:
+                cid = info["id"]
+                try:
+                    conn = create_connector(cid, vault, http=http)
+                    cred = conn._load_credential()
+                    mark = f"✅ {cred.username}" if cred else "❌"
+                except Exception:  # noqa: BLE001 - one bad adapter ≠ dead table
+                    mark = "⚠️"
+                lines.append(f"  {mark:24s} {cid:18s} {info['name']}")
+            lines.append("detail: /connectors status <name> · "
+                         "connect: /connectors connect <name>")
+            return "\n".join(lines)
+
+        # status / connect need a concrete connector
+        if not name:
+            return f"usage: /connectors {verb} <name>"
+        try:
+            cid = _resolve(name)
+        except _ConnectorsChatError as exc:
+            return f"connectors: {exc}"
+        try:
+            conn = create_connector(cid, vault, http=http)
+        except ConnectorError as exc:
+            return f"connectors: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"connectors: could not build {cid}: {exc}"
+
+        if verb == "status":
+            try:
+                st = conn.status()
+            except Exception as exc:  # noqa: BLE001 - surfaced as text
+                return f"{cid}: status check failed: {exc}"
+            state = ("connected" + (f" as {st.account}" if st.account else "")
+                     if st.connected else "not connected")
+            detail = f" — {st.detail}" if st.detail else ""
+            scopes = (f"  scopes: {', '.join(st.scopes)}"
+                      if st.scopes else "")
+            return f"{conn.name} ({cid}): {state}{detail}\n{scopes}".rstrip()
+
+        # verb == "connect": the guided flow
+        try:
+            existing = conn._load_credential()
+        except Exception:  # noqa: BLE001 - treat as not connected
+            existing = None
+        if existing is not None:
+            return (f"{conn.name} is already connected as {existing.username} "
+                    f"— one account per service. Disconnect first "
+                    f"(`nm connectors disconnect --name {cid}`) to switch.")
+        # Connectors resolve their own secrets: env var first, else a clear
+        # non-TTY error naming the exact variable to set. Some (OAuth) print
+        # a grant guide — capture it into the reply instead of stdout.
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                result = conn.connect()
+        except ConnectorError as exc:
+            guide = buf.getvalue().strip()
+            msg = str(exc)
+            if guide:
+                msg += "\n" + guide[:1500]
+            return (f"connect {cid} needs input I can't take in chat:\n{msg}\n"
+                    f"set the key in the bot's environment, then run "
+                    f"/connectors connect {cid} again — the key is never "
+                    f"echoed and never travels through chat.")
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"connect {cid} failed: {exc}"
+        guide = buf.getvalue().strip()
+        if result.ok:
+            return (f"✅ {result.message or f'connected as {result.account}'}"
+                    + (f"\n{guide[:1500]}" if guide else ""))
+        # ok=False: the connector parked the flow on the owner (e.g. OAuth
+        # grant guide) — relay its instructions verbatim.
+        out = result.message or f"{cid}: connect needs owner input"
+        if guide:
+            out += "\n" + guide[:1500]
+        return out + ("\nfinish it on the terminal with "
+                      f"`nm connectors connect --name {cid}` if the chat "
+                      "can't complete it.")
+
+    # ── shared connector builder for the chat commands below ───────────
+    def _chat_connector(self, connector_id: str) -> Any:
+        """A connector instance for chat commands; clear message when the
+        vault is locked or the connector isn't connected."""
+        from ...connectors import create_connector
+        from ...connectors.base import ConnectorError
+        from ...core.http import HttpClient
+
+        vault = self._connectors_vault()
+        try:
+            conn = create_connector(connector_id, vault,
+                                    http=HttpClient())
+        except ConnectorError as exc:
+            raise _ConnectorsChatError(str(exc)) from exc
+        try:
+            if conn._load_credential() is None:
+                raise _ConnectorsChatError(
+                    f"{connector_id} is not connected — run "
+                    f"/connectors connect {connector_id} first")
+        except _ConnectorsChatError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            raise _ConnectorsChatError(
+                f"{connector_id}: credential check failed: {exc}") from exc
+        return conn
+
+    # ── notion: /notion ────────────────────────────────────────────────
+    def _control_notion(self, tail: str) -> str:
+        """/notion dbs [query] | query <db> [text] | add <page-id> <title> [| <body>]
+
+        Reads and page-writes through the Notion connector. Writes are the
+        owner's explicit command (confirmed=True); reads need no approval.
+        Never raises — every failure becomes a chat-readable message.
+        """
+        def _usage() -> str:
+            return (
+                "/notion dbs [query] — databases shared with the integration\n"
+                "/notion query <database-id-or-name> [text] — rows (first 10)\n"
+                "/notion add <parent-page-id> <title> [| <body>] — new page\n"
+                "share pages/databases with the integration in Notion "
+                "(⋯ → Connections) or they won't appear")
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb not in ("dbs", "query", "add"):
+            return _usage()
+        try:
+            conn = self._chat_connector("notion")
+        except _ConnectorsChatError as exc:
+            return f"notion: {exc}"
+        try:
+            if verb == "dbs":
+                dbs = conn.list_databases(query=rest)
+                if not dbs:
+                    return ("no databases visible — share them with the "
+                            "integration in Notion (⋯ → Connections)")
+                lines = ["notion databases:"]
+                for db in dbs[:20]:
+                    title = self._notion_title_of(db)
+                    lines.append(f"  {db.get('id', '?')[:8]}…  {title}")
+                return "\n".join(lines)
+            if verb == "query":
+                toks = rest.split(None, 1)
+                if not toks:
+                    return "usage: /notion query <database-id-or-name> [text]"
+                db_id = self._notion_resolve_db(conn, toks[0])
+                text = toks[1] if len(toks) > 1 else ""
+                # schema varies per database — filter client-side on title
+                data = conn.query_database(db_id, page_size=10)
+                rows = data.get("results", []) if isinstance(data, dict) else []
+                if text:
+                    low = text.lower()
+                    rows = [r for r in rows
+                            if low in self._notion_title_of(r).lower()]
+                if not rows:
+                    return "no rows" + (f" matching {text!r}" if text else "")
+                lines = [f"notion rows ({len(rows)}):"]
+                for r in rows:
+                    lines.append(f"  • {self._notion_title_of(r)}")
+                return "\n".join(lines)
+            # verb == "add"
+            head, *body_segs = [s.strip() for s in rest.split("|")]
+            hparts = head.split(None, 1)
+            if len(hparts) < 2 or not hparts[0] or not hparts[1].strip():
+                return ("usage: /notion add <parent-page-id> <title> "
+                        "[| <body>] — separate body paragraphs with |")
+            parent_id, title = hparts[0], hparts[1].strip()
+            children = [self._notion_paragraph(p) for p in body_segs
+                        if p.strip()]
+            # the owner typed the exact page — explicit approval
+            page = conn.create_page(parent_page_id=parent_id, title=title,
+                                    children=children, confirmed=True)
+            url = page.get("url", "")
+            return (f"📝 notion page created: {title}"
+                    + (f"\n{url}" if url else ""))
+        except _ConnectorsChatError as exc:
+            return f"notion: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"notion failed: {exc}"
+
+    @staticmethod
+    def _notion_title_of(obj: dict[str, Any]) -> str:
+        """Best-effort title of a Notion page/database object.
+
+        Systematic: database objects carry a plain "title" list; pages
+        carry it under properties → first property of type "title".
+        """
+        try:
+            title = obj.get("title")
+            if isinstance(title, list):
+                text = "".join(t.get("plain_text", "") for t in title
+                               if isinstance(t, dict)).strip()
+                if text:
+                    return text
+            props = obj.get("properties") or {}
+            for _name, prop in props.items():
+                if isinstance(prop, dict) and prop.get("type") == "title":
+                    text = "".join(t.get("plain_text", "")
+                                   for t in prop.get("title", [])
+                                   if isinstance(t, dict)).strip()
+                    if text:
+                        return text
+            # fall back to the first non-empty rich text we can find
+            for prop in (props.values() if isinstance(props, dict) else []):
+                if isinstance(prop, dict) and prop.get("type") == "rich_text":
+                    text = "".join(t.get("plain_text", "")
+                                   for t in prop.get("rich_text", [])
+                                   if isinstance(t, dict)).strip()
+                    if text:
+                        return text[:80]
+        except Exception:  # noqa: BLE001 - best effort only
+            pass
+        return "(untitled)"
+
+    def _notion_resolve_db(self, conn: Any, ref: str) -> str:
+        """Database id, or unique name match (case-insensitive)."""
+        ref = (ref or "").strip()
+        if not ref:
+            raise _ConnectorsChatError("database id or name is required")
+        dbs = conn.list_databases(query="")
+        for db in dbs:
+            if db.get("id", "").replace("-", "") == ref.replace("-", ""):
+                return db["id"]
+        matches = [db for db in dbs
+                   if self._notion_title_of(db).lower() == ref.lower()]
+        if not matches:
+            matches = [db for db in dbs
+                       if ref.lower() in self._notion_title_of(db).lower()]
+        if len(matches) == 1:
+            return matches[0]["id"]
+        if len(matches) > 1:
+            names = ", ".join(self._notion_title_of(m) for m in matches[:5])
+            raise _ConnectorsChatError(
+                f"{ref!r} matches several databases: {names} — be specific")
+        raise _ConnectorsChatError(
+            f"no database {ref!r} — /notion dbs lists what's shared")
+
+    @staticmethod
+    def _notion_paragraph(text: str) -> dict[str, Any]:
+        """One Notion paragraph block (the documented block shape)."""
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": text[:2000]}}]},
+        }
+
+    # ── google calendar: /gcal ─────────────────────────────────────────
+    def _control_gcal(self, tail: str) -> str:
+        """/gcal | agenda [days] | add <summary> | <start> | <end-or-minutes>
+
+        Reads and event-writes through the Google Calendar connector.
+        Times: "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"; naive times are read in
+        the owner's timezone. Writes are the owner's explicit command.
+        Never raises.
+        """
+        def _usage() -> str:
+            return (
+                "/gcal — today's agenda\n"
+                "/gcal agenda [days] — upcoming days (default 7)\n"
+                "/gcal add <summary> | <YYYY-MM-DD HH:MM> | <end or minutes>\n"
+                '  e.g. /gcal add Dentist | 2026-10-10 14:00 | 60')
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb in ("", "agenda"):
+            days = 7
+            if verb == "agenda" and rest.strip():
+                try:
+                    days = max(1, min(int(rest.strip().split()[0]), 31))
+                except ValueError:
+                    return "usage: /gcal agenda [days]"
+            return self._gcal_agenda(0 if verb == "" else days,
+                                     today_only=(verb == ""))
+        if verb == "add":
+            return self._gcal_add(rest)
+        return _usage()
+
+    def _gcal_agenda(self, days: int, today_only: bool) -> str:
+        try:
+            conn = self._chat_connector("gcalendar")
+        except _ConnectorsChatError as exc:
+            return f"gcal: {exc}"
+        try:
+            from ..weather import now_in_tz, owner_tz
+            tz_name = owner_tz(getattr(self.context, "settings", None))
+            now = now_in_tz(tz_name)
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if today_only:
+                end = start.replace(hour=23, minute=59, second=59)
+                label = "today"
+            else:
+                from datetime import timedelta
+                end = start + timedelta(days=days)
+                label = f"next {days} day(s)"
+            data = conn.list_events(
+                time_min=start.isoformat(), time_max=end.isoformat(),
+                max_results=50)
+            events = data.get("events", []) if isinstance(data, dict) else []
+            if not events:
+                return f"📅 nothing on the calendar {label}"
+            lines = [f"📅 {label}:"]
+            for ev in events[:20]:
+                lines.append("  " + self._gcal_line(ev, tz_name))
+            if len(events) > 20:
+                lines.append(f"  … {len(events) - 20} more")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"gcal failed: {exc}"
+
+    @staticmethod
+    def _gcal_line(ev: dict[str, Any], tz_name: str) -> str:
+        """One agenda line: 'Mon 14:00 — summary' in the owner's tz."""
+        summary = str(ev.get("summary") or "(no title)")
+        start = (ev.get("start") or {})
+        when = start.get("dateTime") or start.get("date") or ""
+        try:
+            from datetime import datetime
+            from ..weather import _zone
+            dt = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(_zone(tz_name))
+            when = dt.strftime("%a %H:%M")
+        except Exception:  # noqa: BLE001 - keep the raw value
+            pass
+        loc = f" @ {ev['location']}" if ev.get("location") else ""
+        return f"{when} — {summary}{loc}"
+
+    def _gcal_add(self, rest: str) -> str:
+        segs = [s.strip() for s in (rest or "").split("|")]
+        if len(segs) < 3 or not all(segs[:3]):
+            return ("usage: /gcal add <summary> | <YYYY-MM-DD HH:MM> | "
+                    "<end YYYY-MM-DD HH:MM or duration minutes>")
+        summary, start_raw, end_raw = segs[0], segs[1], segs[2]
+        try:
+            from ..weather import owner_tz
+            tz_name = owner_tz(getattr(self.context, "settings", None))
+            start = self._gcal_parse_time(start_raw, tz_name)
+            try:
+                minutes = int(end_raw)
+                from datetime import timedelta
+                end = start + timedelta(minutes=minutes)
+            except ValueError:
+                end = self._gcal_parse_time(end_raw, tz_name)
+            if end <= start:
+                return "gcal: the end must be after the start"
+        except _ConnectorsChatError as exc:
+            return f"gcal: {exc}"
+        try:
+            conn = self._chat_connector("gcalendar")
+        except _ConnectorsChatError as exc:
+            return f"gcal: {exc}"
+        try:
+            # the owner typed the exact event — explicit approval
+            ev = conn.create_event(
+                summary,
+                {"dateTime": start.isoformat()},
+                {"dateTime": end.isoformat()},
+                confirmed=True)
+            link = ev.get("htmlLink", "")
+            return (f"📅 event created: {summary}\n"
+                    f"{self._gcal_line(ev, tz_name)}"
+                    + (f"\n{link}" if link else ""))
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"gcal: could not create the event: {exc}"
+
+    @staticmethod
+    def _gcal_parse_time(raw: str, tz_name: str):
+        """Parse "YYYY-MM-DD [HH:MM]"; naive → owner's timezone."""
+        from datetime import datetime
+        from ..weather import _zone
+        raw = (raw or "").strip()
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise _ConnectorsChatError(
+                f"can't parse time {raw!r} — use YYYY-MM-DD HH:MM")
+        return dt.replace(tzinfo=_zone(tz_name))
+
+    # ── trello: /trello ────────────────────────────────────────────────
+    def _control_trello(self, tail: str) -> str:
+        """/trello boards | lists <board> | cards <list> | add <list> | <name> [| <desc>]
+
+        Boards/lists/cards read, card writes through the Trello connector.
+        <board> and <list> accept ids or names (unique match). Writes are
+        the owner's explicit command. Never raises.
+        """
+        def _usage() -> str:
+            return (
+                "/trello boards — your boards\n"
+                "/trello lists <board-id-or-name> — lists on a board\n"
+                "/trello cards <list-id-or-name> — cards on a list\n"
+                "/trello add <list-id-or-name> | <card name> [| <desc>]")
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb not in ("boards", "lists", "cards", "add"):
+            return _usage()
+        try:
+            conn = self._chat_connector("trello")
+        except _ConnectorsChatError as exc:
+            return f"trello: {exc}"
+        try:
+            if verb == "boards":
+                boards = conn.list_boards()
+                if not boards:
+                    return "no open boards"
+                lines = ["trello boards:"]
+                for b in boards[:20]:
+                    lines.append(f"  {b.get('id', '?')}  {b.get('name', '?')}")
+                return "\n".join(lines)
+            if verb == "lists":
+                if not rest.strip():
+                    return "usage: /trello lists <board-id-or-name>"
+                board_id = self._trello_resolve_board(conn, rest.strip())
+                lists = conn.list_lists(board_id)
+                if not lists:
+                    return "no lists on that board"
+                lines = ["trello lists:"]
+                for li in lists:
+                    lines.append(
+                        f"  {li.get('id', '?')}  {li.get('name', '?')}")
+                return "\n".join(lines)
+            if verb == "cards":
+                if not rest.strip():
+                    return "usage: /trello cards <list-id-or-name>"
+                list_id = self._trello_resolve_list(conn, rest.strip())
+                cards = conn.list_cards(list_id)
+                if not cards:
+                    return "no cards on that list"
+                lines = ["trello cards:"]
+                for c in cards[:20]:
+                    due = f" (due {c['due'][:10]})" if c.get("due") else ""
+                    lines.append(f"  • {c.get('name', '?')}{due}")
+                return "\n".join(lines)
+            # verb == "add"
+            segs = [s.strip() for s in rest.split("|")]
+            if len(segs) < 2 or not segs[0] or not segs[1]:
+                return ("usage: /trello add <list-id-or-name> | <card name> "
+                        "[| <desc>]")
+            list_id = self._trello_resolve_list(conn, segs[0])
+            desc = segs[2] if len(segs) > 2 else ""
+            # the owner typed the exact card — explicit approval
+            card = conn.create_card(list_id, segs[1], description=desc,
+                                    confirmed=True)
+            url = card.get("url", "")
+            return (f"📌 trello card created: {segs[1]}"
+                    + (f"\n{url}" if url else ""))
+        except _ConnectorsChatError as exc:
+            return f"trello: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surfaced as text
+            return f"trello failed: {exc}"
+
+    def _trello_resolve_board(self, conn: Any, ref: str) -> str:
+        """Board id, or unique name match (case-insensitive)."""
+        ref = (ref or "").strip()
+        boards = conn.list_boards()
+        for b in boards:
+            if b.get("id") == ref:
+                return b["id"]
+        matches = [b for b in boards
+                   if str(b.get("name", "")).lower() == ref.lower()]
+        if not matches:
+            matches = [b for b in boards
+                       if ref.lower() in str(b.get("name", "")).lower()]
+        if len(matches) == 1:
+            return matches[0]["id"]
+        if len(matches) > 1:
+            names = ", ".join(str(m.get("name")) for m in matches[:5])
+            raise _ConnectorsChatError(
+                f"{ref!r} matches several boards: {names} — be specific")
+        raise _ConnectorsChatError(
+            f"no board {ref!r} — /trello boards lists them")
+
+    def _trello_resolve_list(self, conn: Any, ref: str) -> str:
+        """List id, or unique name match across all boards."""
+        ref = (ref or "").strip()
+        if not ref:
+            raise _ConnectorsChatError("list id or name is required")
+        # fast path: looks like a Trello id — try it directly
+        if len(ref) == 24 and all(c in "0123456789abcdefABCDEF"
+                                 for c in ref):
+            return ref
+        found: list[tuple[str, str]] = []
+        for b in conn.list_boards():
+            try:
+                lists = conn.list_lists(b.get("id", ""))
+            except Exception:  # noqa: BLE001 - skip unreadable boards
+                continue
+            for li in lists:
+                name = str(li.get("name", ""))
+                if name.lower() == ref.lower() or ref.lower() in name.lower():
+                    found.append((li.get("id", ""), name))
+        exact = [f for f in found if f[1].lower() == ref.lower()]
+        pool = exact or found
+        if len(pool) == 1:
+            return pool[0][0]
+        if len(pool) > 1:
+            names = ", ".join(f[1] for f in pool[:5])
+            raise _ConnectorsChatError(
+                f"{ref!r} matches several lists: {names} — use the list id")
+        raise _ConnectorsChatError(
+            f"no list {ref!r} — /trello lists <board> shows ids")
 
     # ── wave 73: media hub / podcast / CI fix ──────────────────────────────
     def _control_hub(self, tail: str, chat_key: str = "") -> str:
