@@ -959,6 +959,27 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("mind reply send failed: %s", exc)
                 return
+        # NL-first: plain-text capability intents ("research X", "continue my
+        # story", "mine my conversations", esoteric questions) route to the
+        # real handlers — no slash command needed. Owner only, non-slash.
+        # High-precision patterns only; anything ambiguous falls through to
+        # the normal conversation flow.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                nl_reply = self._nl_intent_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("nl-intent hook failed")
+                nl_reply = None
+            if nl_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, nl_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      nl_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("nl-intent reply send failed: %s", exc)
+                return
         # While the brain works, the indicator stays up (own thread — the
         # model call must not be delayed by a blocking typing window).
         # In groups she only speaks when addressed — decide BEFORE showing
@@ -1573,6 +1594,44 @@ class PartnerRuntime(
         if isinstance(meta, dict) and meta.get("is_owner") is True:
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
+
+    def _nl_intent_hook(self, message: ChatMessage) -> str | None:
+        """NL-first: plain-text capability intents → real handlers.
+
+        Returns a reply string when an intent fired, else None.
+        Never raises — ambiguity falls through to normal conversation.
+        """
+        from .nl_router import match_nl_intent
+        text = (message.text or "").strip()
+        matched = match_nl_intent(text)
+        if not matched:
+            return None
+        handler, topic = matched
+        chat_key = message.chat.key
+        chat = message.chat
+        try:
+            if handler == "research":
+                if not topic:
+                    return None
+                return self._control_web_research(topic, chat_key=chat_key,
+                                                  chat=chat)
+            if handler == "wisdom":
+                return self._control_wisdom(topic, chat_key=chat_key,
+                                            message=message)
+            if handler == "mine":
+                outcome = self.context.tools.call("train_mine", name="")
+                if not outcome.ok:
+                    return (f"mine failed: "
+                            f"{getattr(outcome.error, 'message', outcome.error)}")
+                v = outcome.value
+                return (f"🧠 mined {v['examples']} training pairs "
+                        f"({v['stats'].get('conversations', 0)} conversations)")
+            if handler == "novel_continue":
+                return self._control_novel(f"continue {topic}".strip(),
+                                            chat_key=chat_key)
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ {handler} failed: {type(exc).__name__}: {exc}"
+        return None
 
     def _money_send_hook(self, message: ChatMessage) -> str | None:
         """Build-map #49: "send 5k to Mama" → staged transfer + guard.
