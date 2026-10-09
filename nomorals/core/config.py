@@ -372,6 +372,11 @@ class PartnerSettings:
     persona_name: str = ""
     disclosure: str = ""
     background_gate: str = "us_or_romantic"
+    #: Sender IDs (WhatsApp JIDs, Telegram numeric IDs) that belong to the
+    #: owner. Used for message-level owner recognition in groups — the
+    #: master gets recognized even when the chat itself isn't an owner
+    #: chat. Comma-separated. Env: NM_PARTNER_OWNER_SENDER_IDS.
+    owner_sender_ids: str = ""
     #: Every owner conversation is a fine-tune pair waiting to happen; the
     #: runtime appends them to data/training/conversations.jsonl by default
     #: (NM_PARTNER_TRAIN_COLLECT=0 turns the recorder off).

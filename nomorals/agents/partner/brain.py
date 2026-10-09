@@ -187,14 +187,23 @@ class PartnerBrain:
                 message.chat, reply_parts, model,
                 session_id=message.meta.get("os_session_id") or message.chat.key)
 
-    def _persist_inbound(self, message: ChatMessage) -> None:
+    def _persist_inbound(self, message: ChatMessage) -> float:
         """The user's message — written the moment she READS it, even if the
-        reply comes minutes later or not at all."""
+        reply comes minutes later or not at all.
+
+        Returns the ``created_at`` timestamp used, so callers can query for
+        strictly-newer messages (double-reply discipline).
+        """
         chat = message.chat
         db = self.context.db
         # Session-scoped conversation id (falls back to chat.key).
         conv_id = message.meta.get("os_session_id") or chat.key
         title = chat.title or chat.peer or chat.chat_id
+        # Own-message echoes (the owner's own outgoing messages in
+        # shared-account mode) persist under a stable marker so the
+        # double-reply check and the chat profile can see them.
+        sender = "__owner__" if message.meta.get("own_message") else message.sender
+        now = time.time()
         try:
             with db.transaction():
                 db.execute(
@@ -202,14 +211,54 @@ class PartnerBrain:
                        VALUES (?, ?, 'partner', ?, 0, ?)
                        ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at,
                                                     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE conversations.title END""",
-                    (conv_id, title, chat.platform, time.time()),
+                    (conv_id, title, chat.platform, now),
                 )
                 db.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (ulid_now(), conv_id, "user", message.text, message.sender, "", time.time()),
+                    (ulid_now(), conv_id, "user", message.text, sender, "", now),
                 )
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
+        return now
+
+    def _already_addressed(self, chat_key: str, persisted_at: float) -> bool:
+        """True when something newer than this message was already answered.
+
+        Checks for a strictly-newer message from the owner (__owner__
+        marker) or from the bot itself (assistant role). Either means the
+        conversation moved past this message — replying now would double up.
+        """
+        try:
+            rows = self.context.db.query(
+                "SELECT role, name FROM messages "
+                "WHERE conversation_id = ? AND created_at > ? "
+                "ORDER BY created_at DESC LIMIT 5",
+                (chat_key, persisted_at),
+            )
+            for r in rows:
+                if (r.get("name") or "") == "__owner__":
+                    return True
+                if (r.get("role") or "") == "assistant":
+                    return True
+        except Exception:  # noqa: BLE001 - the guard must never eat chat
+            pass
+        return False
+
+    def _refresh_profile_async(self, chat_key: str) -> None:
+        """Refresh the per-chat context profile off-thread, never fatal."""
+        def _work() -> None:
+            try:
+                from ...partner.chat_profile import refresh_profile
+                refresh_profile(self.context.db, chat_key)
+            except Exception:  # noqa: BLE001
+                _log.exception("chat profile refresh crashed (%s)", chat_key)
+
+        try:
+            threading.Thread(target=_work,
+                             name=f"chat-profile-{chat_key[:24]}",
+                             daemon=True).start()
+        except Exception:  # noqa: BLE001
+            _log.exception("chat profile hook failed to start")
 
     def _persist_outbound(self, chat: ChatRef, reply_parts: list[str], model: str,
                           *, session_id: str = "") -> None:
@@ -291,6 +340,15 @@ class PartnerBrain:
         session_id = message.meta.get("os_session_id") or chat.key
         message.meta["os_session_id"] = session_id
 
+        # 0. Own-message echo (shared-account mode): the owner's own
+        #    outgoing messages arrive as informational events. Persist them
+        #    (drives the per-chat profile + the double-reply check) but
+        #    never generate a reply to oneself.
+        if message.meta.get("own_message"):
+            self._persist_inbound(message)
+            self._refresh_profile_async(chat.key)
+            return PresenceOutcome()
+
         # 1. Advance time: decay, circadian energy, and the cost of silence.
         self.mood.tick()
         if is_owner:
@@ -338,7 +396,17 @@ class PartnerBrain:
             is_owner=is_owner,
             rng=self.presence_rng,
         )
-        self._persist_inbound(message)
+        persisted_at = self._persist_inbound(message)
+        # 3c. Double-reply discipline: if the owner (or the bot itself) has
+        #     already addressed something newer than this message, it is
+        #     stale — stay silent instead of answering twice. The owner's
+        #     own messages arrive as own_message echoes (see step 0) and
+        #     persist under the __owner__ marker.
+        if self._already_addressed(chat.key, persisted_at):
+            _log.info("double-reply guard in %s: already addressed, staying quiet",
+                      chat.key)
+            self._refresh_profile_async(chat.key)
+            return PresenceOutcome()
         if not presence.reply:
             _log.info("presence in %s: %s", chat.key, presence.reason)
             return PresenceOutcome(presence=presence)
@@ -389,6 +457,17 @@ class PartnerBrain:
             user_in_us=flags["in_us"],
             romantic=romantic,
         )
+        # Per-chat context profile: who talks here, what it's about. Mined
+        # from this chat's own history — keeps replies grounded instead of
+        # weird. Best-effort; a missing profile is just no extra context.
+        try:
+            from ...partner.chat_profile import get_profile, build_context_lines
+            profile_lines = build_context_lines(
+                get_profile(self.context.db, chat.key))
+            if profile_lines:
+                background_lines = list(background_lines) + profile_lines
+        except Exception:  # noqa: BLE001
+            pass
 
         # Generate.
         history = self._history(session_id, limit=self.settings.partner.history_window)
@@ -434,6 +513,7 @@ class PartnerBrain:
             self.relationship.save(self.context.db)
             self._maybe_curate(session_id, is_owner)
             self._maybe_extract(message, session_id, is_owner)
+            self._refresh_profile_async(chat.key)
         except Exception as exc:  # noqa: BLE001 - persistence must never break a reply
             _log.warning("reply persist tail failed: %s", exc)
         return parts
@@ -582,7 +662,13 @@ class PartnerBrain:
     def _should_speak_in_group(self, message: ChatMessage) -> bool:
         """Groups: she listens more than she talks. She speaks when her name
         comes up, the platform tags/mentions the account, or someone is
-        replying to a message in that chat."""
+        replying to a message in that chat.
+
+        The owner is the master: a message from the owner always earns
+        attention, even without a mention.
+        """
+        if self._is_owner_sender(message):
+            return True
         text = message.text.lower()
         name = self.persona.name.lower()
         if message.mentioned:
@@ -592,6 +678,26 @@ class PartnerBrain:
         if name in text:
             return True
         return False
+
+    def _is_owner_sender(self, message: ChatMessage) -> bool:
+        """Message-level owner recognition for groups.
+
+        The adapter flags the owner's own messages (``meta['from_owner']``);
+        the configured ``owner_sender_ids`` allowlist covers the
+        separate-account case.
+        """
+        if message.meta.get("from_owner"):
+            return True
+        sid = (message.sender_id or "").strip()
+        if not sid:
+            return False
+        try:
+            allowed = {s.strip() for s in
+                       (self.settings.partner.owner_sender_ids or "").split(",")
+                       if s.strip()}
+        except Exception:  # noqa: BLE001
+            return False
+        return sid in allowed
 
     def should_speak_in_group(self, message: ChatMessage) -> bool:
         """Public, side-effect-free pre-check: would this group message earn a

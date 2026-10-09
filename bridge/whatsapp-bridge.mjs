@@ -478,9 +478,24 @@ async function connect() {
     if (type !== 'notify') return;
     for (const m of messages) {
       try {
-        if (!m.message || m.key.fromMe) continue;
+        if (!m.message) continue;
         const jid = jidNormalizedUser(m.key.remoteJid || '');
         if (!jid || jid === 'status@broadcast') continue;
+        // Own outgoing messages (shared-account mode): forward as
+        // informational own_message events so the bot can track the
+        // owner's replies (double-reply discipline, per-chat profile).
+        // Never processed as inbound — the brain stays silent on them.
+        if (m.key.fromMe) {
+          const ownOut = {
+            type: 'own_message',
+            chat: { id: jid, kind: kindOf(jid), title: chatTitles.get(jid) || '' },
+            text: textOf(m),
+            ts: Number(m.messageTimestamp || Date.now() / 1000) * 1000,
+          };
+          remember(jid, { ...ownOut, incoming: false, sender: '', key: m.key });
+          broadcast(ownOut);
+          continue;
+        }
         const senderId = m.key.participant ? jidNormalizedUser(m.key.participant) : jid;
         const kind = kindOf(jid);
         let title = chatTitles.get(jid) || '';

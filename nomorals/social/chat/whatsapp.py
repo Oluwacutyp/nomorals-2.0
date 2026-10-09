@@ -441,6 +441,36 @@ class WhatsAppAdapter(ChatAdapter):
             _log.warning("whatsapp QR received — scan it with WhatsApp "
                          "(Linked Devices); also available via health()")
             print("WHATSAPP QR:\n" + self.last_qr)
+        elif kind == "own_message":
+            # The owner's own outgoing message (shared-account mode).
+            # Persist-only: the brain records it (double-reply discipline,
+            # per-chat profile) and stays silent — never replies to self.
+            chat = obj.get("chat") or {}
+            chat_id = str(chat.get("id") or "")
+            if not chat_id:
+                return
+            ts = obj.get("ts") or 0
+            try:
+                ts = float(ts) / 1000.0
+            except (TypeError, ValueError):
+                ts = time.time()
+            msg = ChatMessage(
+                chat=ChatRef(
+                    platform=self.name,
+                    chat_id=chat_id,
+                    kind=str(chat.get("kind") or ChatKind.DM),
+                    title=str(chat.get("title") or ""),
+                    peer=chat_id,
+                ),
+                incoming=False,
+                text=str(obj.get("text") or ""),
+                sender="",
+                ts=ts,
+            )
+            msg.meta["own_message"] = True
+            # The sender IS the owner — flag it for group recognition.
+            msg.meta["from_owner"] = True
+            self._deliver(handler, msg)
         elif kind == "message":
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
