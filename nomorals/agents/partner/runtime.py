@@ -2762,6 +2762,8 @@ class PartnerRuntime(
             return self._control_mission(command.tail or arg, chat_key=chat_key)
         if kind == "image":
             return self._control_image(command.tail or arg)
+        if kind == "imggen":
+            return self._control_imggen(command.tail or arg)
         if kind == "lens":
             return self._control_lens(command.tail or arg)
 

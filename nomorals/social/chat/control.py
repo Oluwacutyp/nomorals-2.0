@@ -306,6 +306,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mission": (0, None),    # /mission status|list|stall|clear|pause|resume|cancel|retry|watch|unwatch|new
                              #   /mission new <research|build|fix> <args>
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
+    "imggen": (0, None),     # /imggen <prompt> — Devon's own diffusion studio
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
     "devon": (0, None),      # /devon [free text] — plan tools, run, digest, reply
@@ -1452,7 +1453,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "image": {"what": "look up an image (path/URL) or generate one from a text prompt.",
               "usage": "/image <path-or-url> | /image <prompt>",
               "example": "/image a cyberpunk city at night",
-              "related": "/lens /look"},
+              "related": "/lens /look /imggen"},
+    "imggen": {"what": "Devon's OWN image studio: native diffusion generation, upscale, checkpoints, training dashboard.",
+              "usage": "/imggen <prompt> [--seed N] [--ar 16:9] | /imggen upscale <path> | /imggen checkpoints | /imggen dashboard <run>",
+              "example": "/imggen a danfo bus at sunset --ar 16:9",
+              "related": "/image"},
     "lens": {"what": "reverse image search.",
              "usage": "/lens <path-or-url>", "example": "/lens /sdcard/pic.jpg",
              "related": "/image"},
@@ -2018,6 +2023,7 @@ LIST_ONELINERS: dict[str, str] = {
     "tz": "timezone conversion + your labeled local time",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
+    "imggen": "Devon's own image studio: native diffusion, upscale, training",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

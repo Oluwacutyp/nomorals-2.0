@@ -277,7 +277,10 @@ class SummarizeTest(unittest.TestCase):
     def test_extractive_picks_relevant_cited_sentences(self) -> None:
         out = extractive_summarize("who created python and when", self.PAGES)
         self.assertIn("Guido van Rossum", out)
-        self.assertIn("[a.com]", out)
+        # numbered citation with the domain visible, and the URL in Sources
+        self.assertIn("[1 · a.com]", out)
+        self.assertIn("https://a.com/p", out)
+        self.assertIn("Sources:", out)
         self.assertNotIn("stew", out)
 
     def test_extractive_empty_pages_honest(self) -> None:

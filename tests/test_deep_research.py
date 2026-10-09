@@ -214,7 +214,12 @@ class DeepResearcherTests(unittest.TestCase):
     def test_quick_run_unchanged(self) -> None:
         report = self.engine.run("the topic", mode="quick")
         self.assertEqual(report["mode"], "quick")
-        self.assertNotIn("citations", report)
+        # quick mode now carries the same URL citations as deep (audit fix:
+        # every claim must be clickable, whatever the mode)
+        self.assertIn("citations", report)
+        self.assertIn("sources", report)
+        for s in report["sources"]:
+            self.assertEqual(report["citations"][str(s["n"])], s["url"])
 
 
 class DeepSearchToolTests(unittest.TestCase):

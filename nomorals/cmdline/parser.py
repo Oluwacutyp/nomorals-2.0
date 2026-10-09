@@ -80,6 +80,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "tui": ["ui"],
     "timeline": ["tl"],
     "vision": ["v"],
+    "imggen": ["ig"],
     "voice": ["vc"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -1907,6 +1908,107 @@ def _parser() -> argparse.ArgumentParser:
     v_shot.add_argument("--prompt", default="",
                         help="optional question about the screenshot")
     v_shot.add_argument("--json", action="store_true", help="Output as JSON")
+
+    imggen = sub.add_parser("imggen", aliases=CLI_ALIASES["imggen"],
+        help="Devon's own image studio: generate, edit, train, upscale",
+        description=("nm imggen generate \"prompt\" [--steps 50] [--seed 42] [--ar 16:9]\n"
+                     "nm imggen img2img in.png \"prompt\" --strength 0.6\n"
+                     "nm imggen inpaint in.png mask.png \"prompt\"\n"
+                     "nm imggen outpaint in.png \"prompt\" --right 200\n"
+                     "nm imggen upscale in.png --scale 2 [--diffusion]\n"
+                     "nm imggen train --data ./photos [--steps 5000]\n"
+                     "nm imggen lora-train --data ./style --base <ckpt>\n"
+                     "nm imggen checkpoints | nm imggen dashboard <run>\n"
+                     "nm imggen merge base.pt other.pt --alpha 0.5\n"
+                     "nm imggen character \"anchor\" \"pose 1\" \"pose 2\""),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ig_sub = imggen.add_subparsers(dest="imggen_action", required=True)
+    ig_gen = ig_sub.add_parser("generate", help="text-to-image")
+    ig_gen.add_argument("prompt", help="text prompt (supports (word:1.3) weighting)")
+    ig_gen.add_argument("--steps", type=int, default=50)
+    ig_gen.add_argument("--guidance", type=float, default=7.5)
+    ig_gen.add_argument("--seed", type=int, default=None)
+    ig_gen.add_argument("--batch", type=int, default=1)
+    ig_gen.add_argument("--size", type=int, default=64)
+    ig_gen.add_argument("--ar", default="", help="aspect ratio, e.g. 16:9")
+    ig_gen.add_argument("--negative", default="", help="negative prompt")
+    ig_gen.add_argument("--sampler", default="ddim", choices=["ddim", "ddpm"])
+    ig_gen.add_argument("--checkpoint", default="")
+    ig_gen.add_argument("--device", default="")
+    ig_i2i = ig_sub.add_parser("img2img", help="prompt-guided edit of an image")
+    ig_i2i.add_argument("image", help="input image path")
+    ig_i2i.add_argument("prompt", help="edit prompt")
+    ig_i2i.add_argument("--strength", type=float, default=0.6)
+    ig_i2i.add_argument("--steps", type=int, default=50)
+    ig_i2i.add_argument("--seed", type=int, default=None)
+    ig_i2i.add_argument("--checkpoint", default="")
+    ig_i2i.add_argument("--device", default="")
+    ig_inp = ig_sub.add_parser("inpaint", help="regenerate masked regions")
+    ig_inp.add_argument("image", help="input image path")
+    ig_inp.add_argument("mask", help="mask path (white = repaint)")
+    ig_inp.add_argument("prompt", help="inpaint prompt")
+    ig_inp.add_argument("--steps", type=int, default=50)
+    ig_inp.add_argument("--seed", type=int, default=None)
+    ig_inp.add_argument("--checkpoint", default="")
+    ig_inp.add_argument("--device", default="")
+    ig_out = ig_sub.add_parser("outpaint", help="extend the canvas")
+    ig_out.add_argument("image", help="input image path")
+    ig_out.add_argument("prompt", help="outpaint prompt")
+    ig_out.add_argument("--left", type=int, default=0)
+    ig_out.add_argument("--right", type=int, default=0)
+    ig_out.add_argument("--top", type=int, default=0)
+    ig_out.add_argument("--bottom", type=int, default=0)
+    ig_out.add_argument("--steps", type=int, default=50)
+    ig_out.add_argument("--seed", type=int, default=None)
+    ig_out.add_argument("--checkpoint", default="")
+    ig_out.add_argument("--device", default="")
+    ig_up = ig_sub.add_parser("upscale", help="upscale an image")
+    ig_up.add_argument("image", help="input image path")
+    ig_up.add_argument("--scale", type=float, default=2.0)
+    ig_up.add_argument("--diffusion", action="store_true",
+                       help="diffusion detail synthesis (slower, needs checkpoint)")
+    ig_up.add_argument("--prompt", default="")
+    ig_up.add_argument("--checkpoint", default="")
+    ig_up.add_argument("--device", default="")
+    ig_tr = ig_sub.add_parser("train", help="train a native text-to-image model")
+    ig_tr.add_argument("--data", required=True, help="folder of training images")
+    ig_tr.add_argument("--run", default="devon-ddpm", help="run name")
+    ig_tr.add_argument("--steps", type=int, default=5000)
+    ig_tr.add_argument("--size", type=int, default=64)
+    ig_tr.add_argument("--batch", type=int, default=16)
+    ig_tr.add_argument("--lr", type=float, default=1e-4)
+    ig_tr.add_argument("--timesteps", type=int, default=1000)
+    ig_tr.add_argument("--checkpoint-every", type=int, default=1000)
+    ig_tr.add_argument("--seed", type=int, default=None)
+    ig_lora = ig_sub.add_parser("lora-train", help="train a LoRA style adapter")
+    ig_lora.add_argument("--data", required=True)
+    ig_lora.add_argument("--base", required=True, help="base checkpoint path")
+    ig_lora.add_argument("--run", default="devon-lora")
+    ig_lora.add_argument("--rank", type=int, default=8)
+    ig_lora.add_argument("--alpha", type=float, default=16.0)
+    ig_lora.add_argument("--steps", type=int, default=2000)
+    ig_lora.add_argument("--size", type=int, default=64)
+    ig_lora.add_argument("--batch", type=int, default=8)
+    ig_lora.add_argument("--lr", type=float, default=1e-4)
+    ig_lora.add_argument("--checkpoint-every", type=int, default=500)
+    ig_lora.add_argument("--seed", type=int, default=None)
+    ig_ck = ig_sub.add_parser("checkpoints", help="list native checkpoints")
+    ig_ck.add_argument("--json", action="store_true")
+    ig_db = ig_sub.add_parser("dashboard", help="training dashboard for a run")
+    ig_db.add_argument("run", help="run name")
+    ig_mg = ig_sub.add_parser("merge", help="weighted merge of two checkpoints")
+    ig_mg.add_argument("base", help="base checkpoint path")
+    ig_mg.add_argument("other", help="other checkpoint path")
+    ig_mg.add_argument("--alpha", type=float, default=0.5)
+    ig_mg.add_argument("--out", default="")
+    ig_ch = ig_sub.add_parser("character", help="character-consistent sheet")
+    ig_ch.add_argument("anchor", help="fixed character description")
+    ig_ch.add_argument("poses", nargs="+", help="pose descriptions")
+    ig_ch.add_argument("--seed", type=int, default=42)
+    ig_ch.add_argument("--steps", type=int, default=50)
+    ig_ch.add_argument("--checkpoint", default="")
+    ig_ch.add_argument("--device", default="")
 
     room = sub.add_parser("room", aliases=CLI_ALIASES["room"],
         help="Project rooms: persistent per-goal workspaces",

@@ -634,6 +634,93 @@ class DiffusersBackend(GenerativeBackend):
 
 
 # ---------------------------------------------------------------------------
+# Devon native backend — our own diffusion code (nomorals.media.imggen)
+# ---------------------------------------------------------------------------
+
+class NativeBackend(GenerativeBackend):
+    """Devon's own image generation: hand-built diffusion, local weights.
+
+    Preferred automatically when a native checkpoint exists. Needs
+    torch; without it (or without a checkpoint) it raises a clear
+    GenerativeEditError telling the user exactly what to do — never
+    a fake image, never a traceback.
+    """
+
+    name = "native"
+
+    @staticmethod
+    def available() -> bool:
+        try:
+            from ..media.imggen import TORCH_AVAILABLE
+            from ..media.imggen.pipeline import list_native_checkpoints
+        except Exception:
+            return False
+        return bool(TORCH_AVAILABLE and list_native_checkpoints())
+
+    @staticmethod
+    def readiness() -> tuple[bool, str]:
+        """(ready, reason) — for honest chat messages."""
+        try:
+            from ..media.imggen import TORCH_AVAILABLE
+        except Exception as exc:
+            return False, f"imggen organ not importable: {exc}"
+        if not TORCH_AVAILABLE:
+            return False, ("torch not installed — native image "
+                           "generation needs it: pip install torch")
+        try:
+            from ..media.imggen.pipeline import list_native_checkpoints
+        except Exception as exc:
+            return False, f"native pipeline broken: {exc}"
+        cks = list_native_checkpoints()
+        if not cks:
+            return False, ("no native checkpoint yet — train one: "
+                           "`nm imggen train --data <photo-folder>` "
+                           "(tiny 64px model trains on CPU in minutes)")
+        return True, f"{len(cks)} checkpoint(s), newest: {cks[0]['run']}"
+
+    def generate(self, prompt: str, *,
+                 seed: int | None = None,
+                 negative_prompt: str | None = None,
+                 steps: int | None = None,
+                 guidance_scale: float | None = None,
+                 width: int | None = None,
+                 height: int | None = None,
+                 n: int = 1) -> list:
+        ok, reason = self.readiness()
+        if not ok:
+            raise GenerativeEditError(f"native backend not ready: {reason}")
+        from ..media.imggen.pipeline import PipelineConfig
+        from ..media.imggen.studio import Studio, StudioConfig
+
+        studio = Studio(StudioConfig())
+        images = []
+        for _ in range(n):
+            paths = studio.generate(
+                prompt,
+                steps=steps or 50,
+                guidance_scale=(guidance_scale if guidance_scale
+                                is not None else 7.5),
+                seed=seed,
+                batch_size=1,
+                width=width or 64, height=height or 64,
+                negative_prompt=negative_prompt or "",
+                save_to=None,
+            )
+            from PIL import Image as _Image
+
+            images.append(_Image.open(paths[0]))
+            if seed is not None:
+                seed += 1  # each image gets its own reproducible seed
+        return images
+
+    def describe(self) -> str:
+        ok, reason = self.readiness()
+        return (f"generative backend 'native' (Devon's own diffusion; "
+                f"{reason})" if ok else
+                f"generative backend 'native' (not ready: {reason})")
+
+
+# ---------------------------------------------------------------------------
 # paid API backends (opt-in via explicit MEDIA_GEN_BACKEND only)
 # ---------------------------------------------------------------------------
 
@@ -1160,8 +1247,9 @@ def get_backend(name: str | None = None,
                 vault: Any | None = None) -> GenerativeBackend:
     """Resolve a generative backend.
 
-    ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "hf", "diffusers",
-    "comfy", "leonardo", "stability_ai", "nano_banana", "off". auto prefers
+    ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "native", "hf",
+    "diffusers", "comfy", "leonardo", "stability_ai", "nano_banana", "off".
+    auto prefers Devon's native backend when a checkpoint exists, then
     local diffusers when importable, else HF when huggingface_hub imports,
     else raises a clear error (never a fake edit). The paid backends are
     explicit opt-in only — auto never selects them, because every call
@@ -1174,6 +1262,12 @@ def get_backend(name: str | None = None,
         raise GenerativeEditError(_NO_BACKEND_MSG)
     if want in PAID_IMAGE_BACKENDS:
         return _paid_backend(want, vault)
+    if want == "native":
+        if not NativeBackend.available():
+            _ok, _reason = NativeBackend.readiness()
+            raise GenerativeEditError(
+                f"MEDIA_GEN_BACKEND=native but {_reason}")
+        return NativeBackend()
     if want == "hf":
         return HFInferenceBackend()
     if want == "comfy":
@@ -1186,6 +1280,8 @@ def get_backend(name: str | None = None,
                 "installed")
         return DiffusersBackend()
     if want == "auto":
+        if NativeBackend.available():
+            return NativeBackend()
         if DiffusersBackend.available():
             return DiffusersBackend()
         try:
@@ -1195,8 +1291,8 @@ def get_backend(name: str | None = None,
             pass
         raise GenerativeEditError(_NO_BACKEND_MSG)
     raise GenerativeEditError(
-        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|hf|diffusers|comfy|"
-        f"{'|'.join(PAID_IMAGE_BACKENDS)}|off")
+        f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|native|hf|diffusers|"
+        f"comfy|{'|'.join(PAID_IMAGE_BACKENDS)}|off")
 
 
 def _paid_backend_status() -> dict[str, Any]:

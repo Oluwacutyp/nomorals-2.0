@@ -1176,6 +1176,93 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - save errors surface as text
             return f"image generated but save failed: {exc}"
 
+    def _control_imggen(self, tail: str) -> str:
+        """Devon's own image studio in chat.
+
+        /imggen <prompt> [--seed N] [--ar 16:9] [--negative "..."]
+        /imggen upscale <path> [--scale 2]
+        /imggen checkpoints | /imggen dashboard <run>
+        """
+        ref = (tail or "").strip()
+        if not ref:
+            return ("imggen — Devon's own image studio:\n"
+                    "/imggen <prompt> [--seed N] [--ar 16:9] "
+                    "[--negative \"...\"]\n"
+                    "/imggen upscale <path> [--scale 2]\n"
+                    "/imggen checkpoints\n"
+                    "/imggen dashboard <run>")
+        parts = ref.split(None, 1)
+        action = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            if action == "checkpoints":
+                from ...media.imggen.pipeline import (
+                    list_native_checkpoints)
+
+                cks = list_native_checkpoints()
+                if not cks:
+                    return ("no native checkpoints yet — train one: "
+                            "`nm imggen train --data <photo-folder>`")
+                return "\n".join(
+                    f"• {c['run']}: {c['path']} "
+                    f"({c['bytes'] / 1e6:.1f} MB)" for c in cks)
+            if action == "dashboard":
+                from ...media.imggen.studio import training_dashboard
+
+                return training_dashboard(rest or "devon-ddpm")
+            if action == "upscale":
+                from ...media.imggen.studio import Studio
+
+                bits = rest.split()
+                scale = 2.0
+                path = rest
+                for i, b in enumerate(bits):
+                    if b == "--scale" and i + 1 < len(bits):
+                        try:
+                            scale = float(bits[i + 1])
+                        except ValueError:
+                            pass
+                        path = " ".join(
+                            bits[:i] + bits[i + 2:]).strip()
+                        break
+                paths = Studio().upscale(path, scale=scale)
+                return f"🎨 upscaled ×{scale}: {paths[0]}"
+            # Default: generation. Parse --flags inline.
+            import shlex
+
+            try:
+                toks = shlex.split(rest or ref)
+            except ValueError:
+                toks = (rest or ref).split()
+            kwargs: dict = {}
+            prompt_toks: list[str] = []
+            i = 0
+            while i < len(toks):
+                t = toks[i]
+                if t == "--seed" and i + 1 < len(toks):
+                    kwargs["seed"] = int(toks[i + 1]); i += 2
+                elif t == "--ar" and i + 1 < len(toks):
+                    from ...media.imggen.pipeline import (
+                        resolve_aspect_ratio)
+
+                    w, h = resolve_aspect_ratio(toks[i + 1])
+                    kwargs["width"], kwargs["height"] = w, h; i += 2
+                elif t == "--negative" and i + 1 < len(toks):
+                    kwargs["negative_prompt"] = toks[i + 1]; i += 2
+                elif t == "--steps" and i + 1 < len(toks):
+                    kwargs["steps"] = int(toks[i + 1]); i += 2
+                else:
+                    prompt_toks.append(t); i += 1
+            prompt = " ".join(prompt_toks).strip()
+            if not prompt:
+                return "usage: /imggen <prompt> [--seed N] [--ar 16:9]"
+            from ...media.imggen.studio import Studio
+
+            paths = Studio().generate(prompt, **kwargs)
+            return f"🎨 generated: {prompt}\nsaved: {paths[0]}"
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"imggen failed: {exc}"
+
     def _control_lens(self, tail: str) -> str:
         ref = (tail or "").strip()
         if not ref:

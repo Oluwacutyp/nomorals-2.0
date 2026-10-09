@@ -88,8 +88,12 @@ class SpecsFromEnvTests(unittest.TestCase):
                                           "HF_TOKEN": "hf-x"}, clear=False):
             specs = specs_from_env()
         names = [s.name for s in specs]
+        # Chain order is opinionated: local first, the owner's own model
+        # (codebeast) before generic cloud, Groq last — the operator has
+        # found Groq unreliable, so it is the fallback of last resort.
         self.assertEqual(names,
-                         ["ollama", "llama_cpp", "groq", "openrouter", "hf_serverless"])
+                         ["ollama", "llama_cpp", "codebeast", "openrouter",
+                          "hf_serverless", "groq"])
 
     def test_spec_availability(self):
         self.assertTrue(ProviderSpec("ollama", "ollama", local=True).available())
