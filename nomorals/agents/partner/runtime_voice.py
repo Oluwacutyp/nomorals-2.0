@@ -148,9 +148,14 @@ class RuntimeVoiceMixin:
         /voice say [voice] <text>                speak as the chat's voice,
                                                  or one-shot in [voice]
         /voice clone <name> [path]               clone a voice note / file
+        /voice match <path>                    which voice sounds like this clip?
         /voice transcript <name> <text>          set a clone's prompt text
         /voice describe <name> <text>            describe a catalogue voice
         /voice backend <name> <backend>          change a voice's backend
+        /voice design <name> <description>       design a voice from words
+        /voice morph <name> <a> <b> [ratio]      blend two voices
+        /voice talk on|off                       voice conversation mode
+        /voice verify enroll                     enroll your voice (biometric)
         /voice rm <name>                         drop a catalogue voice
         """
         from ...voice.catalogue import default_catalogue
@@ -264,8 +269,38 @@ class RuntimeVoiceMixin:
             note = (f" (transcript: {transcript[:80]}…)"
                     if transcript else " (no transcript — set one with "
                     "/voice transcript <name> <text>)")
-            return (f"🎙️ cloned '{voice.name}' from your voice note{note}\n"
+            verdict = ""
+            try:
+                prof = cat.library.get(voice.profile or voice.name)
+                vp = ((prof.voice_print or {}) if prof else {})
+                if vp.get("verdict"):
+                    verdict = f"\n🔬 clip quality: {vp['verdict']}"
+                    warns = [w for w in vp.get("warnings", [])][:2]
+                    if warns:
+                        verdict += f" — {'; '.join(warns)}"
+            except Exception:  # noqa: BLE001 - verdict is a bonus
+                pass
+            return (f"🎙️ cloned '{voice.name}' from your voice note{note}"
+                    f"{verdict}\n"
                     f"say something: /voice say hello there")
+
+        if verb == "match":
+            clip = rest.strip()
+            if not clip and message is not None:
+                for media in getattr(message, "media", None) or []:
+                    if getattr(media, "kind", "") in ("audio", "voice"):
+                        clip = getattr(media, "path", "") or ""
+                        break
+            if not clip or not os.path.exists(clip):
+                return ("usage: /voice match <audio path> — attach a voice "
+                        "note to the message or pass a file path")
+            res = cat.library.match_voice(clip)
+            if not res.get("ok"):
+                return f"🎙️ {res.get('reason', 'no match')}"
+            return (f"🎙️ that sounds most like '{res['name']}' "
+                    f"(distance {res.get('distance')}, "
+                    f"{res.get('verdict', '')})\n"
+                    f"say something in it: /voice say {res['name']} hello")
 
         if verb == "transcript":
             tparts = rest.strip().split(None, 1)
@@ -309,10 +344,99 @@ class RuntimeVoiceMixin:
                 return f"unknown voice {name!r} — /voice list"
             return f"removed '{name}' from the catalogue"
 
+        if verb == "design":
+            dparts = rest.strip().split(None, 1)
+            if len(dparts) < 2:
+                return ("usage: /voice design <name> <description> — e.g. "
+                        "/voice design narrator \"deep warm storyteller\"")
+            from ...voice.design import design_voice
+            res = design_voice(dparts[0], dparts[1])
+            if not res.get("ok"):
+                return f"design failed: {res.get('reason')}"
+            return (f"🎭 designed '{res['voice']}' from {res['from']}: "
+                    f"{', '.join(res['design']['matched'][:3])}\n"
+                    f"try it: /voice say {res['voice']} hello there")
+
+        if verb == "morph":
+            mparts = rest.strip().split()
+            if len(mparts) < 3:
+                return ("usage: /voice morph <name> <voice_a> <voice_b> "
+                        "[ratio] — e.g. /voice morph blend zara kilo 0.5")
+            from ...voice.design import morph_voices
+            try:
+                ratio = float(mparts[3]) if len(mparts) > 3 else 0.5
+            except ValueError:
+                ratio = 0.5
+            res = morph_voices(mparts[0], mparts[1], mparts[2], ratio=ratio)
+            if not res.get("ok"):
+                return f"morph failed: {res.get('reason')}"
+            return (f"🎭 morphed '{res['voice']}' "
+                    f"({res['shift_semitones']:+.1f} semitones)\n"
+                    f"try it: /voice say {res['voice']} hello there")
+
+        if verb in ("talk", "conversation", "voicechat"):
+            from ...voice.conversation import (
+                set_voice_mode, voice_mode_on, list_voice_chats)
+            cparts = rest.strip().split(None, 1)
+            action = (cparts[0] if cparts else "status").lower()
+            if action == "on":
+                set_voice_mode(chat_key, True)
+                return ("🎙️ voice conversation ON — send voice notes and "
+                        "I'll answer in voice")
+            if action == "off":
+                set_voice_mode(chat_key, False)
+                return "🎙️ voice conversation off — back to text"
+            if action == "list":
+                chats = list_voice_chats()
+                return ("voice chats: " + ", ".join(chats)
+                        if chats else "no chats in voice mode")
+            on = voice_mode_on(chat_key)
+            return (f"voice conversation is {'ON' if on else 'off'} here — "
+                    f"/voice talk on | off")
+
+        if verb == "verify":
+            from ...voice import biometrics as _bio
+            vparts = rest.strip().split(None, 1)
+            action = (vparts[0] if vparts else "status").lower()
+            if action == "enroll":
+                path = ""
+                if message is not None:
+                    for media in getattr(message, "media", None) or []:
+                        if getattr(media, "kind", "") in ("audio", "voice"):
+                            path = getattr(media, "path", "") or ""
+                            break
+                if not path:
+                    return ("attach a voice note to /voice verify enroll "
+                            "to register your voice")
+                res = _bio.register_owner_voice(path)
+                if not res.get("ok"):
+                    return f"enroll failed: {res.get('reason')}"
+                return "🔐 your voice is enrolled — I'll recognize you by it"
+            if action == "status":
+                return ("owner voice: "
+                        f"{'enrolled' if _bio.owner_enrolled() else 'not enrolled'}"
+                        " — /voice verify enroll (attach a voice note)")
+            # verify a clip
+            path = vparts[1] if len(vparts) > 1 else ""
+            if not path and message is not None:
+                for media in getattr(message, "media", None) or []:
+                    if getattr(media, "kind", "") in ("audio", "voice"):
+                        path = getattr(media, "path", "") or ""
+                        break
+            if not path:
+                return "attach a voice note to /voice verify to check it"
+            res = _bio.verify_voice(path)
+            if not res.get("ok"):
+                return f"verify failed: {res.get('reason')}"
+            return (f"🔐 {res['verdict']} "
+                    f"(confidence {res.get('confidence', 0):.0%})")
+
         return (f"usage: /voice list | use <name> | say [voice] <text> | "
-                f"clone <name> [path] | transcript <name> <text> | "
+                f"clone <name> [path] | match <path> | "
+                f"transcript <name> <text> | "
                 f"describe <name> <text> | backend <name> <backend> | "
-                f"rm <name>")
+                f"design <name> <description> | morph <name> <a> <b> [ratio] | "
+                f"talk on|off | verify enroll | rm <name>")
 
     # ── /clonevoice <name> — zero-shot voice cloning, top-level ──────────
     def _control_clonevoice(self, tail: str, chat_key: str,

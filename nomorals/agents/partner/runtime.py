@@ -10,6 +10,7 @@ from datetime import datetime
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable
+from ...llm.brain import brain_for
 from ...core.logging_setup import get_logger
 from ...partner.gating import gate_decision, is_owner_chat, is_restricted
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
@@ -160,6 +161,14 @@ class PartnerRuntime(
         # Tools that deliver files into chats (file_send, report_publish)
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
+        # The spine's social tools (social_send, social_history, …) reach
+        # the same live gateway. Bound once here so the brain's hands are
+        # live on every platform from boot.
+        try:
+            from ...tools.social import set_gateway as _bind_social_gateway
+            _bind_social_gateway(self.gateway)
+        except Exception:  # noqa: BLE001 — social tools fail closed anyway
+            pass
 
         # Console-only commands (dashboard, status, jobs, …) for the local
         # terminal adapter. Wired here — not just in run_chat_bot.py — so
@@ -1057,11 +1066,11 @@ class PartnerRuntime(
     def _two_tier_llm(self, prompt: str) -> str:
         """Synchronous LLM call for the Muninn extraction pass."""
         from ...llm.base import Message, SamplingParams
-        response = self.context.router.chat(
+        response = brain_for(self.context).chat(
             [Message.system("Output JSON only. No prose around it."),
              Message.user(prompt)],
             SamplingParams(temperature=0.2, max_tokens=500),
-        )
+        task_kind="chat")
         if not response.ok or not response.text:
             raise RuntimeError(response.error or "empty LLM response")
         return response.text
@@ -1143,6 +1152,15 @@ class PartnerRuntime(
             from ..features import feature_enabled as _fe
             if _fe(self.context, "voice") and self._send_voice_reply(message, parts):
                 return
+        # Voice conversation mode: chat explicitly set to voice — replies go
+        # out as voice notes even when the input was typed.
+        try:
+            from ...voice.conversation import voice_mode_on
+            if voice_mode_on(message.chat.key):
+                if self._send_voice_reply(message, parts):
+                    return
+        except Exception:  # noqa: BLE001 - voice mode is best-effort
+            pass
         partner_cfg = self.settings.partner
         values = self.brain.mood.current().values
         # Typing indicator on every kind of chat, per part: each chunk of a
@@ -1256,12 +1274,24 @@ class PartnerRuntime(
             try:
                 from ..scheduler import Scheduler
 
+                # Resource-aware scheduling: heavy jobs defer (never drop)
+                # while the machine is under pressure.  Best-effort — the
+                # scheduler runs ungated when no advisor is available.
+                _resources = None
+                try:
+                    from ...os.resources import default_manager
+
+                    _resources = default_manager()
+                except Exception:  # noqa: BLE001 - ungated scheduling then
+                    _log.debug("no resource advisor for scheduler",
+                               exc_info=True)
                 self._scheduler = Scheduler(
                     self.context,
                     gateway=self.gateway,
                     tick_seconds=getattr(sched_settings, "tick_seconds", 60.0),
                     max_concurrent=getattr(sched_settings, "max_concurrent", 2),
                     wall_seconds=getattr(sched_settings, "wall_seconds", 300.0),
+                    resources=_resources,
                 )
                 if sched_settings.enabled:
                     self._scheduler.start()
@@ -1358,6 +1388,52 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("morning-pulse job not registered: %s",
                                  exc)
+                # Finance: alert watchtower (every 15m, delivers via
+                # Notifier) + weekly money digest (Sundays 09:00 local).
+                # Idempotent by name; no-ops when no alerts/goals exist.
+                try:
+                    have = [j for j in self._scheduler.list_jobs()
+                            if j.get("name") == "finance alerts"]
+                    if not have:
+                        self._scheduler.add(
+                            "finance alerts", "every 15m", "tool",
+                            {"tool": "finance_alert",
+                             "args": {"action": "check", "deliver": True}},
+                        )
+                    have = [j for j in self._scheduler.list_jobs()
+                            if j.get("name") == "finance digest"]
+                    if not have:
+                        self._scheduler.add(
+                            "finance digest", "cron 0 9 * * SUN", "tool",
+                            {"tool": "finance_digest", "args": {}},
+                        )
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("finance jobs not registered: %s", exc)
+                # Trigger engine (nomorals/triggers): the automation layer
+                # that lets systems wake each other.  Message-source
+                # triggers evaluate inbound chat via message_hook (wired
+                # below through attach()); bus-source triggers fire on the
+                # shared event bus (scheduler.job.finished, mission.terminal,
+                # trigger.fired, …) through attach_bus() — that is the real
+                # cross-system wiring.  schedule/file/price/webhook sources
+                # run on the engine's own scheduler worker + poll thread.
+                # Best-effort: automation must never break boot.
+                try:
+                    from ...triggers.engine import TriggerEngine, attach
+
+                    _engine = TriggerEngine(
+                        self.context.db, self.context,
+                        resources=_resources,
+                        send_message=self.say,
+                    )
+                    attach(_engine, self.context)
+                    _engine.attach_bus()
+                    _engine.start()
+                    self._trigger_engine = _engine
+                    _log.info("trigger engine started (bus-attached)")
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("trigger engine not started: %s", exc)
+                    self._trigger_engine = None
                 # Wave E: always-on research loop — one durable
                 # "research loop" job (every NM_RESEARCH_LOOP_HOURS,
                 # default 6h) ticking the Wave C organs (swarm -> digest
@@ -1369,6 +1445,16 @@ class PartnerRuntime(
                     ensure_research_job(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("research loop job not registered: %s", exc)
+                # Memory consolidation cadence: one durable
+                # "memory-consolidation" job (every
+                # consolidation_interval_seconds, default 1h) running the
+                # *additive* consolidation tick.  Idempotent; the tick
+                # itself never deletes anything.
+                try:
+                    from ...memory.cadence import ensure_consolidation_job
+                    ensure_consolidation_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("consolidation job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on
@@ -1509,6 +1595,11 @@ class PartnerRuntime(
         if getattr(self, "_scheduler", None) is not None:
             try:
                 self._scheduler.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if getattr(self, "_trigger_engine", None) is not None:
+            try:
+                self._trigger_engine.stop()
             except Exception:  # noqa: BLE001
                 pass
         engine = getattr(self, "_game_engine_obj", None)
@@ -2121,6 +2212,31 @@ class PartnerRuntime(
             from ...finance.commands import control_spending
 
             return control_spending(command.tail or arg, context=self.context)
+        if kind == "mandate":
+            # Payment mandates: /mandate issue|list|revoke|revoke-all
+            from ...finance.commands import control_mandate
+
+            return control_mandate(command.tail or arg, context=self.context)
+        if kind == "balances":
+            # Unified money view: /balances [mono,binance]
+            from ...finance.commands import control_balances
+
+            return control_balances(command.tail or arg, context=self.context)
+        if kind == "alert":
+            # Price & money alerts: /alert add|list|remove|check
+            from ...finance.commands import control_alert
+
+            return control_alert(command.tail or arg, context=self.context)
+        if kind == "goal":
+            # Savings goals: /goal add|list|done|remove
+            from ...finance.commands import control_goal
+
+            return control_goal(command.tail or arg, context=self.context)
+        if kind == "insights":
+            # Native money analytics: /insights [days]
+            from ...finance.commands import control_insights
+
+            return control_insights(command.tail or arg, context=self.context)
         if kind == "predict":
             # Prediction pit: unlocked by beating challenges (see
             # nomorals/games/unlocks.py). Gated above in _progression_gate.
@@ -2733,6 +2849,10 @@ class PartnerRuntime(
             return self._control_gcal(command.tail or arg)
         if kind == "trello":
             return self._control_trello(command.tail or arg)
+        if kind == "exness":
+            return self._control_exness(command.tail or arg)
+        if kind == "stripe":
+            return self._control_stripe(command.tail or arg)
         if kind == "swarm":
             return self._control_swarm(command.tail or arg, chat_key=chat_key)
         if kind == "dns":

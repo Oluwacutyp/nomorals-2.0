@@ -582,3 +582,121 @@ def register(registry: Any) -> None:
         if action == "remove":
             return {"ok": lib.remove(name or "")}
         raise ToolError(f"unknown tts_voices action {action!r}")
+
+    # ── voice design + morphing (God-tier voice lab) ─────────────────────
+
+    @registry.register(
+        "design_voice",
+        description=(
+            "Design a voice from a natural description "
+            "(\"deep warm narrator\", \"bright young female\", "
+            "\"raspy old sailor\"): shapes a base voice with honest DSP "
+            "and registers it in the catalogue. No neural voice model needed."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "name": "str — name for the designed voice",
+            "description": "str — natural-language voice description",
+            "base_voice": "str (optional) — catalogue voice to shape from",
+        },
+    )
+    def design_voice_tool(name: str, description: str,
+                          base_voice: str = "") -> dict[str, Any]:
+        from ..voice.design import design_voice
+        if not (name or "").strip() or not (description or "").strip():
+            raise ToolError("design_voice needs a name and a description")
+        return design_voice(name.strip(), description,
+                            base_voice=(base_voice or "").strip(),
+                            voices_dir=voices_dir())
+
+    @registry.register(
+        "morph_voices",
+        description=(
+            "Morph two catalogue voices into a new blended voice "
+            "(pitch-interpolated DSP morph, honest about its limits). "
+            "ratio 0.0 = all voice_a, 1.0 = all voice_b."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "name": "str — name for the morphed voice",
+            "voice_a": "str — first catalogue voice",
+            "voice_b": "str — second catalogue voice",
+            "ratio": "float (optional, 0.5) — blend ratio",
+        },
+    )
+    def morph_voices_tool(name: str, voice_a: str, voice_b: str,
+                          ratio: str = "") -> dict[str, Any]:
+        from ..voice.design import morph_voices
+        try:
+            r = float(ratio) if str(ratio).strip() else 0.5
+        except ValueError:
+            r = 0.5
+        return morph_voices((name or "").strip(), (voice_a or "").strip(),
+                            (voice_b or "").strip(), ratio=r,
+                            voices_dir=voices_dir())
+
+    # ── voice biometrics (owner recognition signal) ──────────────────────
+
+    @registry.register(
+        "verify_owner_voice",
+        description=(
+            "Check whether an audio clip sounds like the enrolled owner "
+            "voice (acoustic voice-print, no model). Returns match verdict "
+            "+ confidence. Enroll first via action='enroll'."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — verify | enroll | status",
+            "path": "str — audio file (verify/enroll)",
+        },
+    )
+    def verify_owner_voice_tool(action: str,
+                                path: str = "") -> dict[str, Any]:
+        from ..voice import biometrics as _bio
+        from .filesystem import safe_media_path
+        action = (action or "verify").strip().lower()
+        if action == "status":
+            return {"enrolled": _bio.owner_enrolled(voices_dir())}
+        if action == "enroll":
+            target = safe_media_path(context, path, must_exist=True)
+            return _bio.register_owner_voice(str(target),
+                                             voices_dir=voices_dir())
+        target = safe_media_path(context, path, must_exist=True)
+        return _bio.verify_voice(str(target), voices_dir=voices_dir())
+
+    # ── voice conversation mode ──────────────────────────────────────────
+
+    @registry.register(
+        "voice_chat_mode",
+        description=(
+            "Turn a chat into a voice conversation: incoming voice notes "
+            "are transcribed, answered by the brain, and replied as voice "
+            "notes automatically. action = on | off | status | list."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — on | off | status | list",
+            "chat_key": "str — chat key (on/off/status)",
+        },
+    )
+    def voice_chat_mode_tool(action: str,
+                             chat_key: str = "") -> dict[str, Any]:
+        from ..voice import conversation as _conv
+        action = (action or "status").strip().lower()
+        key = (chat_key or "").strip()
+        if action == "on":
+            if not key:
+                raise ToolError("voice_chat_mode on needs a chat_key")
+            _conv.set_voice_mode(key, True, voices_dir())
+            return {"ok": True, "chat": key, "voice_mode": True}
+        if action == "off":
+            if not key:
+                raise ToolError("voice_chat_mode off needs a chat_key")
+            _conv.set_voice_mode(key, False, voices_dir())
+            return {"ok": True, "chat": key, "voice_mode": False}
+        if action == "list":
+            return {"chats": _conv.list_voice_chats(voices_dir())}
+        if not key:
+            raise ToolError("voice_chat_mode status needs a chat_key")
+        return {"chat": key,
+                "voice_mode": _conv.voice_mode_on(key, voices_dir())}
