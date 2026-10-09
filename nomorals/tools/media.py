@@ -39,18 +39,23 @@ def _clean(name: str, limit: int = 120) -> str:
 
 def probe(url: str, *, timeout: float = 60.0) -> dict[str, Any]:
     """Fetch metadata without downloading."""
+    from ..media.cookies import ytdlp_cookie_args, ytdlp_cookie_opts
     module = load_optional("yt_dlp")
     if module is not None:
         try:
-            with module.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            opts.update(ytdlp_cookie_opts())
+            with module.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             return _summarize(info)
         except Exception as exc:  # noqa: BLE001 - fall through to the CLI
             _log.debug("yt_dlp python API probe failed: %s", exc)
     if which("yt-dlp"):
         try:
+            argv = (["yt-dlp", "--dump-single-json", "--no-download"]
+                    + ytdlp_cookie_args() + [url])
             completed = subprocess.run(
-                ["yt-dlp", "--dump-single-json", "--no-download", url],
+                argv,
                 capture_output=True, text=True, timeout=timeout, check=False,
             )
             if completed.returncode == 0:
@@ -120,6 +125,12 @@ def _download_python_api(
         "concurrent_fragment_downloads": 4,
         "continuedl": True,
     }
+    from ..media.cookies import ytdlp_cookie_opts
+    _cookie_opts = ytdlp_cookie_opts()
+    if _cookie_opts:
+        options.update(_cookie_opts)
+        _log.debug("yt-dlp: using cookies from %s",
+                   _cookie_opts.get("cookiefile", "?"))
     if audio_only:
         options["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
@@ -158,10 +169,14 @@ def _download_cli(
     timeout: float,
     started: float,
 ) -> dict[str, Any]:
+    from ..media.cookies import ytdlp_cookie_args
+    _cookie_args = ytdlp_cookie_args()
+    if _cookie_args:
+        _log.debug("yt-dlp: using cookies from %s", _cookie_args[-1])
     argv = [
         "yt-dlp", "-f", format_spec, "-o", str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
-        "--no-playlist", "--retries", "3", "--newline", url,
-    ]
+        "--no-playlist", "--retries", "3", "--newline",
+    ] + _cookie_args + [url]
     if audio_only:
         argv += ["-x", "--audio-format", "mp3"]
     if which("ffmpeg"):

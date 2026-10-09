@@ -328,6 +328,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "produce": (0, None),   # /produce [spotify-url|vibe words…] — compose original music (taste-aware)
     "like": (0, None),       # /like [notes…] — last production was good
     "dislike": (0, None),    # /dislike [notes…] — last production missed
+    "cookies": (0, 1),       # /cookies [check] — YouTube cookie file status/setup
     "fix": (1, None),        # /fix <code> [lang] [--rounds N] — run until the model gets it green
 }
 
@@ -1542,6 +1543,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/dislike [notes…]",
                 "example": "/dislike too slow",
                 "related": "/like · /produce"},
+    "cookies": {"what": "YouTube cookie file status — needed when YouTube blocks downloads.",
+                "usage": "/cookies [check]",
+                "example": "/cookies",
+                "related": "/play"},
     "fix": {"what": "CI loop: runs the code in the sandbox, and while it fails the "
                     "model rewrites it and it runs again, until exit 0 (or the "
                     "expected text appears in stdout). Reports every round — exit "
@@ -1582,7 +1587,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens"]),
     ("decoding & crypto", ["decode", "cookies", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike"]),
+    ("media system", ["music", "distribute", "play", "video", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "api", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",

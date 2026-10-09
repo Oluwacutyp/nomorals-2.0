@@ -2429,6 +2429,8 @@ class PartnerRuntime(
             return self._control_like(command.tail or arg)
         if kind == "dislike":
             return self._control_dislike(command.tail or arg)
+        if kind == "cookies":
+            return self._control_cookies(command.tail or arg)
         if kind == "fix":
             return self._control_fix(command.tail or arg)
 

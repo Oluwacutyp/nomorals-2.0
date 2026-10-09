@@ -578,10 +578,12 @@ class PlaybackEngine:
                 # Suppress yt-dlp's stderr — it writes "ERROR:" lines that
                 # pollute test output and CI logs. We raise ToolError on
                 # failure anyway.
+                from .cookies import ytdlp_cookie_opts as _cookie_opts_fn
+                _opts = {"quiet": True, "no_warnings": True,
+                         "skip_download": True}
+                _opts.update(_cookie_opts_fn())
                 with contextlib.redirect_stderr(io.StringIO()):
-                    with yt_dlp.YoutubeDL(
-                            {"quiet": True, "no_warnings": True,
-                             "skip_download": True}) as ydl:
+                    with yt_dlp.YoutubeDL(_opts) as ydl:
                         info = ydl.extract_info(f"ytsearch1:{query}",
                                                 download=False)
             except Exception as exc:  # noqa: BLE001
@@ -593,9 +595,10 @@ class PlaybackEngine:
         cli = shutil.which("yt-dlp")
         if cli:
             try:
+                from .cookies import ytdlp_cookie_args as _cookie_args_fn
                 proc = subprocess.run(
-                    [cli, "--print", "id", "--skip-download",
-                     f"ytsearch1:{query}"],
+                    [cli, "--print", "id", "--skip-download"]
+                    + _cookie_args_fn() + [f"ytsearch1:{query}"],
                     capture_output=True, text=True, timeout=60)
             except subprocess.TimeoutExpired as exc:
                 raise ToolError("youtube search timed out") from exc
@@ -641,10 +644,12 @@ class PlaybackEngine:
             import contextlib
             import io
             try:
+                from .cookies import ytdlp_cookie_opts as _cookie_opts_fn2
+                _opts2 = {"quiet": True, "no_warnings": True,
+                          "skip_download": True}
+                _opts2.update(_cookie_opts_fn2())
                 with contextlib.redirect_stderr(io.StringIO()):
-                    with yt_dlp.YoutubeDL(
-                            {"quiet": True, "no_warnings": True,
-                             "skip_download": True}) as ydl:
+                    with yt_dlp.YoutubeDL(_opts2) as ydl:
                         info = ydl.extract_info(f"ytsearch{limit}:{query}",
                                                 download=False)
                 entries = (info or {}).get("entries") or []
@@ -658,10 +663,11 @@ class PlaybackEngine:
             if not cli:
                 return []
             try:
+                from .cookies import ytdlp_cookie_args as _cookie_args_fn2
                 proc = subprocess.run(
                     [cli, "--print", "%(id)s\t%(title)s\t%(duration)s\t"
-                     "%(uploader)s", "--skip-download",
-                     f"ytsearch{limit}:{query}"],
+                     "%(uploader)s", "--skip-download"]
+                    + _cookie_args_fn2() + [f"ytsearch{limit}:{query}"],
                     capture_output=True, text=True, timeout=60)
             except (subprocess.TimeoutExpired, OSError) as exc:
                 _log.info("youtube multi-search failed: %s", exc)
@@ -829,6 +835,11 @@ class PlaybackEngine:
         try:
             video_id = self._youtube_search_id(query)
         except Exception as exc:  # noqa: BLE001
+            from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+            if is_bot_detection_error(exc):
+                return {"ok": False,
+                        "reason": f"SoundCloud blocked the download ({sc_error[:80]}). "
+                                  f"{BOT_COOKIE_HELP}"}
             return {"ok": False,
                     "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
                               f"and YouTube search failed: {exc}"}
@@ -838,6 +849,12 @@ class PlaybackEngine:
         try:
             path = self._youtube_audio(yt_item)
         except Exception as exc:  # noqa: BLE001
+            from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+            err = str(exc)
+            if is_bot_detection_error(err):
+                return {"ok": False,
+                        "reason": f"SoundCloud blocked the download ({sc_error[:80]}). "
+                                  f"{BOT_COOKIE_HELP}"}
             return {"ok": False,
                     "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
                               f"and YouTube download failed: {exc}"}

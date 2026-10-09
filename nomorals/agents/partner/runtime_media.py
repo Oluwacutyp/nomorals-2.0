@@ -757,10 +757,27 @@ class RuntimeMediaMixin:
         return store.record_feedback(True, tail or "")
 
     def _control_dislike(self, tail: str) -> str:
-        """/dislike [notes…] — the last production missed; learn from it."""
+        """"/dislike [notes…] — the last production missed; learn from it."""
         from ...media.taste import load_taste
         store = load_taste(getattr(self, "context", None))
         return store.record_feedback(False, tail or "not feeling it")
+
+    def _control_cookies(self, tail: str) -> str:
+        """/cookies [check] — YouTube cookie file status and setup help."""
+        from ...media.cookies import BOT_COOKIE_HELP, cookies_status
+        st = cookies_status()
+        found = st.get("found")
+        lines = []
+        if found:
+            lines.append(f"✅ cookies file found: {found}")
+        else:
+            lines.append("❌ no YouTube cookies file found.")
+            lines.append("")
+            lines.append(BOT_COOKIE_HELP)
+        if (tail or "").strip().lower() == "check" and not found:
+            lines.append("")
+            lines.append("Checked: " + ", ".join(st.get("checked", [])))
+        return "\n".join(lines)
 
     def _produce_hook(self, message: Any) -> str | None:
         """NL music production for the owner DM (non-slash only).
