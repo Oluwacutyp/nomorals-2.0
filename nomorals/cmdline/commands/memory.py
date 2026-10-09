@@ -174,5 +174,132 @@ def _cmd_memory_action(args: argparse.Namespace, context: Any) -> int:
         _emit(args, report, f"curation: {report}")
         return 0
 
+    if action == "consolidate":
+        from ...memory.cadence import consolidate_now
+        report = consolidate_now(memory)
+        _emit(args, report,
+              f"consolidated (additive): {report.get('summaries', 0)} facts "
+              f"from {report.get('episodes', 0)} episodes "
+              f"in {report.get('seconds', 0)}s")
+        return 0 if report.get("ok") else 1
+
+    if action == "health":
+        report = memory.health()
+        _emit(args, report, json.dumps(report, indent=2, default=str))
+        return 0 if report.get("ok") else 1
+
+    if action == "repair":
+        report = memory.repair_embeddings(dry_run=args.dry_run)
+        _emit(args, report, json.dumps(report, indent=2, default=str))
+        return 0
+
+    if action == "timeline":
+        from ...memory.deep_recall import timeline
+        items = timeline(memory, args.topic, limit=args.limit)
+        if args.json:
+            print(json.dumps([r.to_dict() for r in items],
+                             indent=2, default=str))
+            return 0
+        if not items:
+            print(f"nothing on '{args.topic}' yet")
+            return 0
+        import datetime as _dt
+        for r in items:
+            when = _dt.datetime.fromtimestamp(
+                r.created_at).strftime("%Y-%m-%d")
+            flag = " (superseded)" if (r.metadata or {}).get(
+                "superseded_by") else ""
+            print(f"{when} [{r.kind}]{flag} {r.content[:140]}")
+        return 0
+
+    if action == "deep":
+        from ...memory.deep_recall import recall_deep
+        result = recall_deep(memory, args.query, limit=args.limit,
+                             scope=args.scope)
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, default=str))
+            return 0
+        print(f"deep recall ({result.hops} hops"
+              + (f", via: {', '.join(result.expansion_terms)}"
+                 if result.expansion_terms else "") + ")")
+        for r in result.records:
+            print(f"{r.score:.3f} [{r.kind}] {r.content[:140]}")
+        return 0
+
+    if action == "contradictions":
+        from ...memory.contradictions import detect_for
+        targets: list[tuple[str, list]] = []
+        if args.record_id:
+            targets.append((args.record_id,
+                            detect_for(memory, args.record_id)))
+        else:
+            seen: set[str] = set()
+            for kind in ("fact", "preference"):
+                for r in memory.recall("", limit=30,
+                                       kind=kind).records:
+                    if r.id in seen:
+                        continue
+                    seen.add(r.id)
+                    hits = detect_for(memory, r.id)
+                    if hits:
+                        targets.append((r.id, hits))
+                    if len(targets) >= 8:
+                        break
+        payload = [{"record_id": rid,
+                    "contradictions": [c.to_dict() for c in hits]}
+                   for rid, hits in targets if hits]
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+            return 0
+        if not payload:
+            print("no contradictions detected")
+            return 0
+        for entry in payload:
+            for c in entry["contradictions"]:
+                print(f"[{c['strategy']} {c['confidence']:.2f}] {c['note']}")
+        return 0
+
+    if action == "scopes":
+        from ...memory.scopes import scopes_summary
+        counts = scopes_summary(memory)
+        _emit(args, counts,
+              "\n".join(f"{name}: {n}" for name, n in counts.items())
+              or "no memory spaces yet — everything is global")
+        return 0
+
+    if action == "schedule":
+        from ...memory.cadence import status
+        report = status(memory)
+        _emit(args, report, json.dumps(report, indent=2, default=str))
+        return 0
+
+    if action == "backup":
+        from ...memory.backup import backup_to
+        import tempfile as _tf
+        dest = args.dest or _tf.mkdtemp(prefix="nm-mem-backup-")
+        report = backup_to(memory, dest, label="cli")
+        _emit(args, report,
+              f"backup {'ok' if report.get('ok') else 'FAILED'}: "
+              f"{report.get('backup_dir', report.get('error'))}")
+        return 0 if report.get("ok") else 1
+
+    if action == "import":
+        from ...memory.backup import import_records
+        try:
+            with open(args.path, encoding="utf-8") as fh:
+                bundle = json.load(fh)
+        except OSError as exc:
+            print(f"cannot read {args.path}: {exc}", file=sys.stderr)
+            return 1
+        records = bundle.get("records", bundle) if isinstance(
+            bundle, dict) else bundle
+        report = import_records(memory, records,
+                                dry_run=args.dry_run, source="cli-import")
+        _emit(args, report,
+              f"import: {report.get('imported', 0)} imported, "
+              f"{report.get('skipped_duplicate', 0)} duplicates skipped, "
+              f"{report.get('failed', 0)} failed")
+        return 0 if report.get("ok") else 1
+
     print(f"unknown memory action: {action}", file=sys.stderr)
     return 2

@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
+from ..llm.brain import brain_for
 from ..core.errors import classify
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
@@ -38,7 +39,9 @@ from .base import (
     infer_trust,
     normalize_scores,
 )
+from .cadence import status as _cadence_status
 from .embeddings import Embedder
+from .scopes import normalize_scope, record_matches_scope, scope_tag
 from .vector_backends import VectorBackend, select_vector_backend
 
 __all__ = ["MemoryManager"]
@@ -229,12 +232,18 @@ class MemoryManager:
         origin: str = "",
         trust: str = "",
         session_id: str = "",
+        scope: str = "",
     ) -> str:
         """Store a memory and index it for both vector and lexical recall.
 
         The owner decides what is remembered — no content-based refusals.
         Use ``mark_private`` / the ``private`` metadata flag when a record
         should stay out of model context.
+
+        ``scope`` (e.g. ``"project:devon-arena"``) puts the record in a
+        named memory space: ``recall(scope=...)`` sees that space plus
+        global records, and never records scoped to another space.  Empty
+        (default) = global, visible everywhere.
 
         Trust provenance (mem-false-fact hardening): ``trust`` is
         ``"trusted"`` or ``"untrusted"``; when empty it is derived from
@@ -249,6 +258,13 @@ class MemoryManager:
         now = time.time()
         record_id = new_id()
         origin = (origin or "").strip()
+        tag_str = join_tags(tags)
+        scope_name = normalize_scope(scope)
+        if scope_name:
+            # the scope tag leads so the 8-tag cap never drops the space
+            # marker — a scoped record that loses its scope tag leaks.
+            tag_str = (join_tags([scope_tag(scope_name), tag_str])
+                       if tag_str else scope_tag(scope_name))
         row = {
             "id": record_id,
             "kind": kind,
@@ -260,7 +276,7 @@ class MemoryManager:
             "last_access": 0.0,
             "source": source,
             "agent": agent,
-            "tags": join_tags(tags),
+            "tags": tag_str,
             "origin": origin,
             "trust": infer_trust(source, origin, explicit=trust),
             "session_id": (session_id or origin).strip(),
@@ -286,14 +302,24 @@ class MemoryManager:
         return record_id
 
     def remember_many(
-        self, items: Iterable[tuple[str, str]], *, source: str = "", **kw: Any
+        self, items: Iterable[tuple[str, str]], *, source: str = "",
+        scope: str = "", **kw: Any
     ) -> list[str]:
-        """Bulk write as ``(content, kind)`` pairs, indexed in one pass."""
+        """Bulk write as ``(content, kind)`` pairs, indexed in one pass.
+
+        ``scope`` puts every record in the batch into one named memory
+        space (see :meth:`remember`).
+        """
         materialized = [(c.strip(), k) for c, k in items if c and c.strip()]
         if not materialized:
             return []
         now = time.time()
         ids = [new_id() for _ in materialized]
+        scope_name = normalize_scope(scope)
+        batch_tags = join_tags(kw.get("tags", ""))
+        if scope_name:
+            batch_tags = (join_tags([scope_tag(scope_name), batch_tags])
+                          if batch_tags else scope_tag(scope_name))
         rows = [
             {
                 "id": ids[i], "kind": kind, "content": content,
@@ -302,6 +328,7 @@ class MemoryManager:
                 "source": source, "agent": kw.get("agent", ""),
                 "trust": infer_trust(source, kw.get("origin", ""), explicit=kw.get("trust", "")),
                 "session_id": (kw.get("session_id") or kw.get("origin") or "").strip(),
+                "tags": batch_tags,
                 "created_at": now, "updated_at": now, "metadata": kw.get("metadata") or {},
             }
             for i, (content, kind) in enumerate(materialized)
@@ -353,11 +380,17 @@ class MemoryManager:
         include_superseded: bool = False,
         trust_filter: str = "",
         explain: bool = False,
+        scope: str = "",
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
 
         ``tags`` (comma-separated) keeps only records carrying ALL of the
         requested tags — the tag lane the /remember command populates.
+
+        ``scope`` (e.g. ``"project:devon-arena"``) restricts recall to one
+        memory space: records scoped to a *different* space never leak in.
+        Global (unscoped) records are always visible.  Empty (default) =
+        no restriction — historical behaviour.
 
         ``origin`` (e.g. "chat:tg:123") boosts memories from the same
         origin — session-relevant memories rank higher, but global
@@ -391,10 +424,12 @@ class MemoryManager:
         trust_wanted = (trust_filter or "").strip().lower()
         if trust_wanted not in (TRUSTED, UNTRUSTED):
             trust_wanted = ""
+        scope_wanted = normalize_scope(scope)
         started = time.perf_counter()
         limit = limit or self.limit
         if not query.strip():
-            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted)
+            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted,
+                                   scope=scope_wanted)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
             if not include_superseded:
@@ -457,7 +492,8 @@ class MemoryManager:
 
         ids = list(candidates)
         if not ids:
-            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted)
+            recents = self._recent(limit, kind=kind, trust_filter=trust_wanted,
+                                   scope=scope_wanted)
             if not include_private:
                 recents = [r for r in recents if not _is_private(r)]
             if not include_superseded:
@@ -486,6 +522,10 @@ class MemoryManager:
                 have = {t.strip() for t in (record.tags or "").split(",")}
                 if not wanted_tags <= have:
                     continue
+            # Scope gate: a record scoped to another space never leaks in.
+            # Global records (no scope tag) stay visible everywhere.
+            if scope_wanted and not record_matches_scope(record, scope_wanted):
+                continue
             record.semantic = semantic_scores.get(record.id, 0.0)
             record.lexical = lexical_scores.get(record.id, 0.0)
             base_score, contributions = _explain_score(
@@ -556,12 +596,18 @@ class MemoryManager:
         return RecallResult(records=top, query=query, elapsed_ms=(time.perf_counter() - started) * 1000)
 
     def _recent(self, limit: int, *, kind: str = "",
-                trust_filter: str = "") -> list[MemoryRecord]:
-        query = self.repo.query().order_by("created_at DESC").limit(limit)
+                trust_filter: str = "", scope: str = "") -> list[MemoryRecord]:
+        # Scoped recent: over-fetch then gate, so the limit still holds
+        # after the anti-leak filter runs.
+        fetch = limit * 4 if scope else limit
+        query = self.repo.query().order_by("created_at DESC").limit(fetch)
         if kind:
             query.where("kind = ?", kind)
         sql, params = query.build()
         records = [MemoryRecord.from_row(r) for r in self.db.query(sql, params)]
+        if scope:
+            records = [r for r in records
+                       if record_matches_scope(r, scope)][:limit]
         if trust_filter in (TRUSTED, UNTRUSTED):
             records = [r for r in records if r.trust == trust_filter]
         return records
@@ -1036,6 +1082,13 @@ class MemoryManager:
 
         report["last_consolidation"] = self._last_consolidation
         report["last_consolidation_report"] = dict(self._last_consolidation_report)
+        # The consolidation cadence: is the schedule alive, when does it
+        # next run, how big is the undistilled backlog.  Additive-only —
+        # the cadence never deletes, so this is safe to run hands-off.
+        try:
+            report["consolidation_cadence"] = _cadence_status(self)
+        except Exception:  # noqa: BLE001
+            report["consolidation_cadence"] = {}
         report["degraded_recalls"] = len(self._health_events)
         report["recent_events"] = list(self._health_events[-10:])
         report["stats"] = dict(self.stats)
@@ -1106,13 +1159,13 @@ class MemoryManager:
         if router is not None:
             from ..llm.base import Message, SamplingParams
 
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [
                     Message.system("Distil these notes into at most 5 durable facts. One per line."),
                     Message.user(corpus[:8000]),
                 ],
                 SamplingParams(temperature=0.2, max_tokens=512),
-            )
+            task_kind="judge")
             if response.ok and response.text.strip():
                 return response.text.strip()
         return summarize(corpus, max_sentences=5)

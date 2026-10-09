@@ -24,7 +24,7 @@ from ..core.errors import classify
 from ..core.logging_setup import get_logger
 from ..core.text import normalize_text, ngrams
 
-__all__ = ["Embedder"]
+__all__ = ["Embedder", "select_for_profile"]
 
 _log = get_logger(__name__)
 
@@ -140,12 +140,34 @@ class Embedder:
     - ``"auto"``: probe the router for a working embedding backend on first
       use; use it if available, otherwise fall back to hashing. The probe
       result is cached so we don't pay for a failed probe on every call.
+    - ``"native"``: native-first — the local Qwen3-Embedding-0.6B server
+      when it is up, hashing when it is not. NEVER touches the router or
+      any API embedding endpoint: fully offline, zero data egress.
     - ``"qwen3"``: Qwen3-Embedding-0.6B via a local llama-server embeddings
       endpoint (:class:`Qwen3Embedder`); falls back to hashing when the
       server is down.
     - Any other string: use the router's embedding backend directly, falling
       back to hashing on failure (existing behavior).
+
+    Honest quality ladder (no marketing):
+    - ``hashing``: captures *lexical overlap* — shared tokens land in the
+      same dimensions, so "recall what we discussed about X" works. It
+      degrades on paraphrase ("automobile" vs "car") and on cross-lingual
+      queries. Zero cost, zero latency, works on a phone.
+    - ``native``/``qwen3``: real dense semantic embeddings from a 0.6B
+      model running on the owner's own hardware — paraphrase and
+      multilingual recall work at roughly API-class quality for
+      personal-memory scale. Costs: a ~500MB model download, a
+      llama-server process, and workstation-class RAM/CPU. Not a phone
+      default.
+    - router/API embeddings: the best raw quality when online, at the
+      price of an external dependency and sending memory text to a third
+      party. Fallback, never the priority.
     """
+
+    #: quality ladder, weakest → strongest.  Used by
+    #: :func:`select_for_profile` and surfaced in stats.
+    QUALITY_LADDER = ("hashing", "native", "router")
 
     def __init__(
         self,
@@ -171,13 +193,29 @@ class Embedder:
         # qwen3-mode state: lazily-built embedder, None = not probed yet.
         self._qwen3: Qwen3Embedder | None = None
         self._qwen3_works: bool | None = None
+        # Brain over the router for embeddings: the never-raises
+        # ``brain.embed`` returns (vectors, error) instead of raising, so
+        # the hashing fallback below stays simple and honest.
+        self._brain: Any = None
+
+    def _brain_for_embed(self) -> Any:
+        """Brain wrapping ``self.router`` (or the router itself when the
+        wrap is impossible).  Never raises."""
+        if self._brain is None:
+            try:
+                from ..llm.brain import Brain
+
+                self._brain = Brain(router=self.router)
+            except Exception:  # noqa: BLE001
+                return self.router
+        return self._brain
 
     # ── public API ───────────────────────────────────────────────────────────
     @property
     def is_semantic(self) -> bool:
         if self.provider == "hashing":
             return False
-        if self.provider == "qwen3":
+        if self.provider in ("qwen3", "native"):
             # Optimistic until a probe fails — same contract as auto mode.
             return self._qwen3_works is not False
         if self.provider == "auto":
@@ -219,12 +257,14 @@ class Embedder:
         except Exception as exc:  # noqa: BLE001
             _log.debug("embedding auto-mode: provider capability check failed (%s)", exc)
         try:
-            vectors = self.router.embed(["probe"])
+            vectors, error = self._brain_for_embed().embed(["probe"])
             if vectors and len(vectors[0]) > 0:
                 self._auto_works = True
                 self.dimensions = len(vectors[0])
                 _log.info("embedding auto-mode: using router backend (dim=%d)", self.dimensions)
                 return True
+            if error:
+                _log.debug("embedding auto-mode probe failed (%s); using hashing", error)
         except Exception as exc:  # noqa: BLE001
             _log.debug("embedding auto-mode probe failed (%s); using hashing", classify(exc).message)
         self._auto_works = False
@@ -261,44 +301,55 @@ class Embedder:
 
     # ── backends ─────────────────────────────────────────────────────────────
     def _produce(self, texts: Sequence[str]) -> list[list[float]]:
-        # qwen3 mode: local Qwen3-Embedding-0.6B server, hashing on failure.
-        if self.provider == "qwen3":
-            if self._qwen3_works is not False:
-                try:
-                    if self._qwen3 is None:
-                        self._qwen3 = Qwen3Embedder(model=self.model or "")
-                    vectors = self._qwen3.embed_many(list(texts))
-                    if vectors and all(len(v) == len(vectors[0]) for v in vectors):
-                        self._qwen3_works = True
-                        self.dimensions = len(vectors[0])
-                        return [_l2(v) for v in vectors]
-                    _log.warning("qwen3 embedding server returned ragged vectors; using hashing")
-                except Exception as exc:  # noqa: BLE001 - never fail recall over embeddings
-                    _log.debug("qwen3 embedding server failed (%s); using hashing", exc)
-                self._qwen3_works = False
-                self.stats["fallbacks"] += 1
-            return [self._hash(text) for text in texts]
+        # native mode: local Qwen3 server only, never the router/API —
+        # the offline-first default the Devon Studio program demands.
+        # qwen3 mode: same mechanism (historical behaviour preserved:
+        # local server, hashing fallback).  "native" is what profile
+        # selection picks; "qwen3" is the explicit pin.
+        if self.provider in ("native", "qwen3"):
+            return self._produce_qwen3(texts)
         # Auto mode: probe once, then use the cached result.
         if self.provider == "auto":
             if self._probe_auto():
-                try:
-                    vectors = self.router.embed(list(texts))
-                    if vectors and all(len(v) == len(vectors[0]) for v in vectors):
-                        self.dimensions = len(vectors[0])
-                        return [_l2(v) for v in vectors]
-                except Exception as exc:  # noqa: BLE001
-                    _log.debug("embedding backend failed (%s); using hashing", classify(exc).message)
-                self.stats["fallbacks"] += 1
-            return [self._hash(text) for text in texts]
-        if self.is_semantic:
-            try:
-                vectors = self.router.embed(list(texts))
+                vectors, error = self._brain_for_embed().embed(list(texts))
                 if vectors and all(len(v) == len(vectors[0]) for v in vectors):
                     self.dimensions = len(vectors[0])
                     return [_l2(v) for v in vectors]
+                if error:
+                    _log.debug("embedding backend failed (%s); using hashing", error)
+                self.stats["fallbacks"] += 1
+            return [self._hash(text) for text in texts]
+        if self.is_semantic:
+            vectors, error = self._brain_for_embed().embed(list(texts))
+            if vectors and all(len(v) == len(vectors[0]) for v in vectors):
+                self.dimensions = len(vectors[0])
+                return [_l2(v) for v in vectors]
+            if error:
+                _log.debug("embedding provider failed (%s); using hashing", error)
+            else:
                 _log.warning("embedding provider returned ragged vectors; using hashing")
+            self.stats["fallbacks"] += 1
+        return [self._hash(text) for text in texts]
+
+    def _produce_qwen3(self, texts: Sequence[str]) -> list[list[float]]:
+        """Local Qwen3 embedding server with hashing fallback. Never raises.
+
+        Offline-only: the router/API is never consulted here — an embedding
+        provider that phones home is not a native embedding provider.
+        """
+        if self._qwen3_works is not False:
+            try:
+                if self._qwen3 is None:
+                    self._qwen3 = Qwen3Embedder(model=self.model or "")
+                vectors = self._qwen3.embed_many(list(texts))
+                if vectors and all(len(v) == len(vectors[0]) for v in vectors):
+                    self._qwen3_works = True
+                    self.dimensions = len(vectors[0])
+                    return [_l2(v) for v in vectors]
+                _log.warning("qwen3 embedding server returned ragged vectors; using hashing")
             except Exception as exc:  # noqa: BLE001 - never fail recall over embeddings
-                _log.debug("embedding provider failed (%s); using hashing", classify(exc).message)
+                _log.debug("qwen3 embedding server failed (%s); using hashing", exc)
+            self._qwen3_works = False
             self.stats["fallbacks"] += 1
         return [self._hash(text) for text in texts]
 
@@ -357,3 +408,35 @@ def _l2(vector: Sequence[float]) -> list[float]:
     if norm == 0.0:
         return list(vector)
     return [v / norm for v in vector]
+
+
+def select_for_profile(profile: str | None, *,
+                       prefer_local_server: bool = True) -> str:
+    """Pick an embedding provider for a resource profile — never designed
+    down, profile-gated at runtime (standing rule).
+
+    - ``"termux"`` → ``"hashing"``: the phone gets zero-cost, zero-latency
+      lexical recall; a 0.6B embedding server is not a phone workload.
+    - ``"laptop"`` / ``"workstation"`` → ``"native"`` when the local
+      Qwen3 server answers (probed, cached), else ``"hashing"``: full
+      semantic quality where the hardware can run it, honest fallback
+      where it can't.
+    - anything else → ``"auto"`` (historical behaviour: router, then
+      hashing).
+
+    The API embedding path is never *selected* here — it stays available
+    as an explicit ``provider=`` choice or via ``"auto"``, as a fallback,
+    never the priority.
+    """
+    p = (profile or "").strip().lower()
+    if p == "termux":
+        return "hashing"
+    if p in ("laptop", "workstation", "server"):
+        if prefer_local_server:
+            try:
+                if Qwen3Embedder().available():
+                    return "native"
+            except Exception:  # noqa: BLE001 — probe is best-effort
+                pass
+        return "hashing"
+    return "auto"

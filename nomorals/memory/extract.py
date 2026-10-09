@@ -31,6 +31,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
 from .base import ALL_KINDS, MemoryKind
 
@@ -216,13 +217,17 @@ def _llm_pass(context: Any, user_text: str, assistant_text: str, speaker: str) -
         + (f"Her: {assistant_text[:600]}\n" if assistant_text else "")
     )
     try:
-        response = router.chat(
+        # NB: module-level function — the context is the *argument*, not
+        # ``self``.  A previous revision referenced ``self.context`` here,
+        # which raised NameError on every call and silently killed the whole
+        # LLM pass (the except below swallowed it).  This is the fix.
+        response = brain_for(context).chat(
             [
                 Message(role="system", content=_LLM_PROMPT),
                 Message(role="user", content=user_prompt),
             ],
             params=SamplingParams(max_tokens=300, temperature=0.0),
-        )
+        task_kind="extract")
         raw = (getattr(response, "text", "") or "").strip()
     except Exception:  # noqa: BLE001 - LLM pass is best-effort
         _log.debug("memory extraction LLM pass failed; using heuristics only")
@@ -353,13 +358,37 @@ class MemoryExtractor:
         return actions
 
     def _store(self, memory: Any, cand: ExtractedMemory, content: str, chat_key: str) -> dict[str, Any]:
+        from .base import MemoryRecord as _MemoryRecord
+
         ratio = self._dedupe_ratio()
         existing = memory.recall(content, limit=4)
+        dup_of = None
         for record in existing.records:
             if is_duplicate(content, record.content, ratio):
-                memory._touch([record.id])  # reinforce instead of re-storing
-                return {"action": "duplicate", "kind": record.kind,
-                        "content": content[:120], "id": record.id}
+                dup_of = record
+                break
+        # Contradiction check on the write path: a new fact/preference that
+        # disagrees with an older one supersedes it (additive — the old
+        # record is marked, never deleted).  Reuses the dedupe recall, so
+        # this costs no extra query.  Crucially it runs BEFORE the duplicate
+        # decision: a near-duplicate that contradicts is an *update*, not a
+        # dupe ("deadline oct 20" → "deadline oct 25" are ~87% similar —
+        # dedupe alone would swallow the update).
+        contradictions: list[Any] = []
+        if self._wants_contra_check(cand):
+            try:
+                from .contradictions import (AUTO_RESOLVE_CONFIDENCE,
+                                             detect_against)
+                probe = _MemoryRecord(id="", kind=cand.kind, content=content)
+                found = detect_against(probe, existing.records)
+                contradictions = [c for c in found
+                                  if c.confidence >= AUTO_RESOLVE_CONFIDENCE]
+            except Exception as exc:  # noqa: BLE001 — never break extraction
+                _log.debug("extraction contradiction check failed: %s", exc)
+        if dup_of is not None and not contradictions:
+            memory._touch([dup_of.id])  # reinforce instead of re-storing
+            return {"action": "duplicate", "kind": dup_of.kind,
+                    "content": content[:120], "id": dup_of.id}
         record_id = memory.remember(
             content,
             kind=cand.kind,
@@ -369,4 +398,23 @@ class MemoryExtractor:
             origin=f"chat:{chat_key}" if chat_key else "",
             agent="memory_extractor",
         )
-        return {"action": "stored", "kind": cand.kind, "content": content[:120], "id": record_id}
+        action: dict[str, Any] = {"action": "stored", "kind": cand.kind,
+                                  "content": content[:120], "id": record_id}
+        if record_id and contradictions:
+            try:
+                from .contradictions import resolve
+                notes = []
+                for contra in contradictions:
+                    contra.newer_id = record_id
+                    if resolve(memory, contra).get("ok"):
+                        notes.append(contra.note)
+                if notes:
+                    action["contradictions"] = notes
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("extraction contradiction resolve failed: %s",
+                           exc)
+        return action
+
+    def _wants_contra_check(self, cand: ExtractedMemory) -> bool:
+        return (bool(getattr(self._settings, "extract_contradictions", True))
+                and cand.kind in (MemoryKind.FACT, MemoryKind.PREFERENCE))

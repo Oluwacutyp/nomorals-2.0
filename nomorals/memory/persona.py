@@ -784,26 +784,38 @@ def register(registry: Any) -> None:
             "action=recall (query) | show (user model) | list (kind/query) | "
             "remember (text, kind) | update (record_id, text) | forget "
             "(record_id) | private (record_id) | public (record_id) | "
-            "export | rebuild | curate | anticipate (query). "
-            "Writes are explicit; recall never returns private records."
+            "export | rebuild | curate | anticipate (query) | consolidate | "
+            "health | repair | contradictions (record_id) | timeline (query) "
+            "| deep (query) | related (record_id) | scopes | schedule | "
+            "backup (dest) | import (path). "
+            "Writes are explicit; recall never returns private records. "
+            "Consolidation is additive — nothing is ever deleted by it."
         ),
         capability=Capability.MEM_WRITE,
         parameters={
             "action": "str — recall|show|list|remember|update|forget|private|"
-                      "public|export|rebuild|curate|anticipate",
+                      "public|export|rebuild|curate|anticipate|consolidate|"
+                      "health|repair|contradictions|timeline|deep|related|"
+                      "scopes|schedule|backup|import",
             "query": "str (optional) — search text",
             "record_id": "str (optional) — target record",
             "kind": "str (optional) — memory kind filter",
             "text": "str (optional) — content for remember/update",
             "limit": "int (optional) — result limit",
+            "scope": "str (optional) — memory space, e.g. project:devon",
+            "dest": "str (optional) — backup destination directory",
+            "path": "str (optional) — export bundle path for import",
+            "dry_run": "bool (optional) — verify without writing",
         },
     )
     def memory(*, action: str = "recall", query: str = "",
                record_id: str = "", kind: str = "", text: str = "",
-               limit: int = 8) -> dict[str, Any]:
+               limit: int = 8, scope: str = "", dest: str = "",
+               path: str = "", dry_run: bool = False) -> dict[str, Any]:
         manager = _manager(context)
         if action == "recall":
-            result = manager.recall(query, limit=limit, kind=kind or "")
+            result = manager.recall(query, limit=limit, kind=kind or "",
+                                    scope=scope)
             return {"records": [r.to_dict() for r in result.records]}
         if action == "show":
             model = UserModel.rebuild(manager)
@@ -811,7 +823,7 @@ def register(registry: Any) -> None:
             return {"model": model.to_dict(), "guide": guide.to_dict()}
         if action == "list":
             result = manager.recall(query or "", limit=limit,
-                                    kind=kind or "")
+                                    kind=kind or "", scope=scope)
             return {"records": [
                 {"id": r.id, "kind": r.kind,
                  "content": r.content[:200],
@@ -821,7 +833,7 @@ def register(registry: Any) -> None:
         if action == "remember":
             body = text or query
             rid = manager.remember(body, kind=kind or MemoryKind.EPISODE,
-                                   source="agent")
+                                   source="agent", scope=scope)
             note: dict[str, Any] = {}
             if kind in (MemoryKind.FACT, MemoryKind.PREFERENCE) and rid:
                 note = MemoryCurator(manager).check_contradiction(rid)
@@ -856,6 +868,61 @@ def register(registry: Any) -> None:
             model = UserModel.rebuild(manager)
             hints = ProactiveRecall(model).anticipate(query)
             return {"hints": hints}
+        if action == "consolidate":
+            # the scheduled tick, runnable by hand: additive only
+            from .cadence import consolidate_now
+            return consolidate_now(manager)
+        if action == "health":
+            return manager.health()
+        if action == "repair":
+            return manager.repair_embeddings(dry_run=bool(dry_run))
+        if action == "contradictions":
+            from .contradictions import detect_for
+            if not record_id:
+                return {"ok": False, "error": "record_id required"}
+            found = detect_for(manager, record_id)
+            return {"record_id": record_id,
+                    "contradictions": [c.to_dict() for c in found]}
+        if action == "timeline":
+            from .deep_recall import timeline
+            items = timeline(manager, query, limit=limit)
+            return {"query": query,
+                    "timeline": [r.to_dict() for r in items]}
+        if action == "deep":
+            from .deep_recall import recall_deep
+            result = recall_deep(manager, query, limit=limit, scope=scope)
+            return result.to_dict()
+        if action == "related":
+            from .deep_recall import related
+            if not record_id:
+                return {"ok": False, "error": "record_id required"}
+            items = related(manager, record_id, limit=limit)
+            return {"record_id": record_id,
+                    "related": [r.to_dict() for r in items]}
+        if action == "scopes":
+            from .scopes import scopes_summary
+            return {"scopes": scopes_summary(manager)}
+        if action == "schedule":
+            from .cadence import status
+            return status(manager)
+        if action == "backup":
+            from .backup import backup_to
+            if not dest:
+                return {"ok": False, "error": "dest required"}
+            return backup_to(manager, dest)
+        if action == "import":
+            from .backup import import_records
+            import json as _json
+            if not path:
+                return {"ok": False, "error": "path required"}
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    bundle = _json.load(fh)
+            except Exception as exc:
+                return {"ok": False, "error": f"cannot read bundle: {exc}"}
+            records = bundle.get("records", bundle) if isinstance(
+                bundle, dict) else bundle
+            return import_records(manager, records, dry_run=bool(dry_run))
         return {"ok": False, "error": f"unknown action: {action}"}
 
 
