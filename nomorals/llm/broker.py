@@ -11,12 +11,19 @@ Scoring order (highest precedence first):
    never selected.  ``CODE``/``JUDGE`` fall back to any ``CHAT`` card.
 2. **Operator override** — ``promote(model_id)`` pins an explicit primary;
    the pinned card always wins while it can serve the capability.
-3. **Benchmark score** — :class:`BenchmarkDB.score` (0..1, neutral 0.5),
+3. **Owner preference** — when ``BrokerConstraints.prefer_owner`` is set
+   (the default, per the operator's standing preference), selection is
+   restricted to the operator's *own* models (``ModelCard.owner``) whenever
+   at least one can serve.  The owner's brain is the default; everything
+   else is a fallback.  Availability still rules: an owner card in
+   cooldown is skipped by the router's failover, and ``prefer_owner=False``
+   opts back into pure evidence ranking.
+4. **Benchmark score** — :class:`BenchmarkDB.score` (0..1, neutral 0.5),
    plus a cross-candidate latency rank: the fastest measured median wins.
-4. **Trajectory success rate** — from an *optional* injected store
+5. **Trajectory success rate** — from an *optional* injected store
    (duck-typed: ``store.success_rate(task_kind, capability, model_id)``).
    Never imported at module level; never called when absent.
-5. **Soft preferences** — ``task_kind`` specialisation (e.g. a code task
+6. **Soft preferences** — ``task_kind`` specialisation (e.g. a code task
    prefers ``CODE`` cards), local-first when the operator asks, longer
    context as a tie-breaker.
 
@@ -55,6 +62,10 @@ class BrokerConstraints:
     max_cost_per_1k: float = -1.0  # < 0 → no cap
     providers: tuple[str, ...] = ()  # empty → any provider
     prefer_local: bool = False
+    #: Prefer the operator's own models (ModelCard.owner) whenever one can
+    #: serve.  The standing operator preference; set False to rank purely
+    #: on measured evidence.
+    prefer_owner: bool = True
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "BrokerConstraints":
@@ -69,6 +80,7 @@ class BrokerConstraints:
             max_cost_per_1k=float(raw.get("max_cost_per_1k", -1.0)),
             providers=tuple(providers),
             prefer_local=bool(raw.get("prefer_local", False)),
+            prefer_owner=bool(raw.get("prefer_owner", True)),
         )
 
 
@@ -196,6 +208,16 @@ class ModelBroker:
             pinned = next((c for c in candidates if c.id == self._primary_model_id), None)
             if pinned is not None:
                 return pinned
+        # 3. owner preference: the operator's own models are the default
+        # brain; everything else is a fallback.  Still dynamic — evidence
+        # keeps ranking *among* the owner's models, cooldown/failover still
+        # applies at serve time, and prefer_owner=False opts out.
+        if cons.prefer_owner:
+            owned = [c for c in candidates if c.owner]
+            if owned:
+                _log.debug("broker: %d owner card(s) preferred for %s/%s",
+                           len(owned), cap.value, task_kind)
+                candidates = owned
         special = _TASK_KIND_CAPABILITY.get((task_kind or "").lower(), None)
         # One prefetch for every candidate: score + latency rank both derive
         # from the same rows.  This used to cost three identical DB queries
@@ -242,6 +264,10 @@ class ModelBroker:
         with self._lock:
             cands = [c for c in self._cards.values()
                      if c.serves(cap) and self._fits(c, cons)]
+        if cons.prefer_owner:
+            owned = [c for c in cands if c.owner]
+            if owned:
+                cands = owned
         bench_rows = self.benchmarks.samples_many(
             [c.id for c in cands], cap)
         latency_rank = self._latency_rank(bench_rows)
@@ -348,25 +374,45 @@ class ModelBroker:
             "embed": Capability.EMBED,
         }.get(operation)
 
-    def consult(self, router: Any, operation: str, task_kind: str = "") -> ModelCard | None:
+    def consult(self, router: Any, operation: str, task_kind: str = "",
+                constraints: Mapping[str, Any] | BrokerConstraints | None = None,
+                ) -> ModelCard | None:
         """Ask the broker which provider should serve ``operation`` and move
         the router's active provider there.  Best-effort: any failure leaves
         the router exactly as it was (the old name-based path keeps working).
+
+        Providers the router reports as cooling down are skipped — promoting
+        a dead provider to active would just make the next call eat the
+        failover penalty.  (A half-open breaker still admits its probe;
+        ``is_cooling_down`` returns False for it.)  When every candidate is
+        cooling, consult returns ``None`` and the router's failover chain
+        reports the honest "all providers are cooling down" error.
         """
         capability = self.capability_for_operation(operation)
         if capability is None:
             return None
+        cons = constraints if isinstance(constraints, BrokerConstraints) \
+            else BrokerConstraints.from_mapping(constraints)
         try:
-            card = self.select(capability, task_kind)
+            ranked = self.ranked(capability, task_kind, cons)
         except Exception as exc:  # noqa: BLE001
             _log.debug("broker consult failed: %s", exc)
             return None
-        if card is None or not card.provider:
-            return None
-        try:
-            if router.active != card.provider:
-                router.set_active(card.provider)
-        except Exception as exc:  # noqa: BLE001 — never break the call path
-            _log.debug("broker could not activate %s: %s", card.provider, exc)
-            return None
-        return card
+        cooling = getattr(router, "is_cooling_down", None)
+        for card, _score in ranked:
+            if not card.provider:
+                continue
+            if callable(cooling):
+                try:
+                    if cooling(card.provider):
+                        continue
+                except Exception:  # noqa: BLE001 — never break the call path
+                    pass
+            try:
+                if router.active != card.provider:
+                    router.set_active(card.provider)
+            except Exception as exc:  # noqa: BLE001 — never break the call path
+                _log.debug("broker could not activate %s: %s", card.provider, exc)
+                return None
+            return card
+        return None

@@ -55,7 +55,11 @@ _SYSTEM = (
     "no commentary around the JSON."
 )
 
-_PROMPT_TEMPLATE = """Write an original song for this request: {prompt!r}
+# NOTE: the template head is formatted separately from the JSON schema on
+# purpose — SONGSPEC_JSON_SCHEMA contains literal braces, so running
+# str.format() over the concatenated template raises KeyError and silently
+# disables the entire LLM path (every call fell back to algorithmic).
+_PROMPT_HEAD = """Write an original song for this request: {prompt!r}
 
 Style hint: {style_hint}
 Taste profile (what the listener likes): {taste}
@@ -75,7 +79,19 @@ RULES:
 {abc_prompt}
 
 Output ONLY this JSON schema filled in:
-""" + SONGSPEC_JSON_SCHEMA
+"""
+
+
+def _composition_prompt(prompt: str, style_hint: str, taste: str,
+                        abc_prompt: str) -> str:
+    """Render the composition prompt.  Never raises."""
+    head = _PROMPT_HEAD.format(
+        prompt=prompt,
+        style_hint=style_hint,
+        taste=taste,
+        abc_prompt=abc_prompt,
+    )
+    return head + SONGSPEC_JSON_SCHEMA
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -115,16 +131,21 @@ def _taste_summary(context: Any) -> str:
 def compose_song_spec(context: Any, prompt: str, *,
                       style_hint: str = "",
                       seed: int | None = None,
-                      max_retries: int = 2) -> SongSpec:
+                      max_retries: int = 2,
+                      task_kind: str = "music") -> SongSpec:
     """Compose a SongSpec via the LLM, falling back to algorithmic.
 
-    Never raises — worst case returns an algorithmic spec.
+    ``task_kind`` is threaded into the brain so task-aware routing can
+    specialise the model choice (the owner's own models are preferred
+    whenever they can serve).  Never raises — worst case returns an
+    algorithmic spec.
     """
     prompt = (prompt or "").strip() or "an original song"
     if brain_available(context):
         for attempt in range(max_retries + 1):
             try:
-                spec = _llm_compose(context, prompt, style_hint, seed)
+                spec = _llm_compose(context, prompt, style_hint, seed,
+                                    task_kind=task_kind)
                 if spec is not None:
                     return spec
             except Exception as exc:  # noqa: BLE001
@@ -135,25 +156,28 @@ def compose_song_spec(context: Any, prompt: str, *,
 
 
 def _llm_compose(context: Any, prompt: str, style_hint: str,
-                 seed: int | None) -> SongSpec | None:
+                 seed: int | None, task_kind: str = "music") -> SongSpec | None:
     from ..llm.base import Message, SamplingParams
+    from ..llm.brain import Brain
     from .abc_melody import ABC_MELODY_PROMPT
 
-    router = context.router
-    full_prompt = _PROMPT_TEMPLATE.format(
-        prompt=prompt,
-        style_hint=style_hint or "any — choose what fits the request",
-        taste=_taste_summary(context),
-        abc_prompt=ABC_MELODY_PROMPT,
+    # One front door for completions: the Brain owns provider selection
+    # (owner models preferred, task-aware), failover and honest errors.
+    # Wrapping context.router keeps the agent's configured chain; when the
+    # context has no router the Brain builds the env default chain.
+    brain = Brain(router=getattr(context, "router", None))
+    full_prompt = _composition_prompt(
+        prompt,
+        style_hint or "any — choose what fits the request",
+        _taste_summary(context),
+        ABC_MELODY_PROMPT,
     )
     params = SamplingParams(
         temperature=0.85, max_tokens=3000,
         seed=seed,
     )
-    resp = router.chat(
-        [Message.system(_SYSTEM), Message.user(full_prompt)],
-        params,
-    )
+    messages = [Message.system(_SYSTEM), Message.user(full_prompt)]
+    resp = brain.chat(messages, params=params, task_kind=task_kind)
     text = (getattr(resp, "text", "") or "").strip()
     if not text:
         _log.warning("LLM composition returned empty text")

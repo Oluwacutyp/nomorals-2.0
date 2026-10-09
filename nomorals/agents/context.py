@@ -502,6 +502,18 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         from ..llm.broker import ModelBroker
         broker = ModelBroker()
         broker.build_from_router(router)
+        # Owner-model preference: the operator's own backends are marked so
+        # the broker prefers them whenever they can serve — the same hints
+        # the env-based chain applies via llm.defaults.sync_broker_cards.
+        # (ModelCard.from_provider already derives owner from the model id;
+        # this covers provider-name hints like the local llama.cpp server.)
+        try:
+            from ..llm.defaults import CARD_HINTS
+            for _card in broker.cards():
+                if (CARD_HINTS.get(_card.provider) or {}).get("owner"):
+                    _card.owner = True
+        except Exception:  # noqa: BLE001 — best-effort, never breaks boot
+            pass
         # Also register lifecycle-managed models (local GGUFs etc.)
         try:
             from ..llm.lifecycle import ModelLifecycle

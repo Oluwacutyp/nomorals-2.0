@@ -22,6 +22,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from .defaults import is_owner_model
+
 __all__ = ["Capability", "ModelCard", "capability_from", "provider_capabilities"]
 
 
@@ -75,6 +77,11 @@ class ModelCard:
     ``id`` is the stable key the operator uses (``nm models use <id>``).
     ``provider`` names the router provider that serves it, and ``model_id`` is
     the provider-side model name (HF repo id, GGUF filename, …).
+    ``owner`` marks the operator's *own* models (their fine-tunes, their
+    local brain) — the broker prefers these whenever they can serve, per the
+    standing operator preference.  It is a routing preference, not a
+    capability: an owner card that cannot serve is still never selected, and
+    an owner card in cooldown still fails over.
     """
 
     id: str
@@ -87,6 +94,7 @@ class ModelCard:
     cost_per_1k: float = 0.0  #: USD per 1k tokens; 0.0 = free/local
     size_gb: float = 0.0
     notes: str = ""
+    owner: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -126,6 +134,7 @@ class ModelCard:
             "cost_hint": self.cost_hint,
             "size_gb": self.size_gb,
             "notes": self.notes,
+            "owner": self.owner,
         }
 
     @classmethod
@@ -141,12 +150,20 @@ class ModelCard:
         size_gb: float = 0.0,
         capabilities: Iterable[str | Capability] | None = None,
         notes: str = "",
+        owner: bool = False,
     ) -> "ModelCard":
         """Build a card from a live provider, deriving capabilities from its
-        capability tokens plus code-tuned family hints."""
+        capability tokens plus code-tuned family hints.
+
+        ``owner`` marks the operator's own models; when not given
+        explicitly it is derived from the model id (any provider serving
+        the operator's fine-tune counts as theirs).
+        """
         tokens: set[str] = set(getattr(provider, "capabilities", set()) or set())
         name = getattr(provider, "name", "") or ""
         model_id = getattr(provider, "model_id", "") or ""
+        if not owner:
+            owner = is_owner_model(model_id)
         if capabilities is not None:
             caps = {c if isinstance(c, Capability) else capability_from(c)
                     for c in capabilities}
@@ -175,6 +192,7 @@ class ModelCard:
             cost_per_1k=cost_per_1k,
             size_gb=size_gb,
             notes=notes,
+            owner=owner,
         )
 
 

@@ -12,16 +12,18 @@ rather than an exception from whichever provider happened to be last.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..core.errors import ModelError, ProviderUnavailable, classify
 from ..core.events import EventBus
 from ..core.logging_setup import get_logger
+from ..core.retry import CircuitBreaker, CircuitOpen
 from ..research.pipeline import COST_TABLE
 from .base import LLMProvider, LLMResponse, Message, SamplingParams
 
@@ -245,7 +247,13 @@ def total_spend(since: float = 0.0, path: str | Path | None = None) -> float:
 
 @dataclass
 class ProviderHealth:
-    """Rolling health for one provider."""
+    """Rolling health for one provider.
+
+    The skip/retry decision is driven by :attr:`breaker` — the shared
+    three-state :class:`~nomorals.core.retry.CircuitBreaker` (closed →
+    open → half-open probe).  ``cooldown_until`` is kept in sync as the
+    dashboard-facing surface (the console reads it directly).
+    """
 
     name: str
     calls: int = 0
@@ -256,6 +264,7 @@ class ProviderHealth:
     last_error: str = ""
     total_latency_ms: float = 0.0
     cooldown_until: float = 0.0
+    breaker: CircuitBreaker | None = field(default=None, repr=False)
 
     @property
     def error_rate(self) -> float:
@@ -273,14 +282,17 @@ class ProviderHealth:
         self.consecutive_failures = 0
         self.last_success = time.time()
 
-    def record_failure(self, error: str, cooldown: float) -> None:
+    def record_failure(self, error: str, cooldown: float,
+                       now: float | None = None) -> None:
         self.calls += 1
         self.failures += 1
         self.consecutive_failures += 1
         self.last_failure = time.time()
         self.last_error = error
         if cooldown > 0:
-            self.cooldown_until = time.monotonic() + cooldown
+            # `now` lets the router pass its injected clock (tests); the
+            # default keeps the old time.monotonic() behaviour.
+            self.cooldown_until = (time.monotonic() if now is None else now) + cooldown
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -292,6 +304,7 @@ class ProviderHealth:
             "consecutive_failures": self.consecutive_failures,
             "last_error": self.last_error,
             "cooling_down": not self.available(),
+            "breaker_state": self.breaker.state if self.breaker is not None else "closed",
         }
 
 
@@ -310,6 +323,7 @@ class LLMRouter:
         cooldown_seconds: float = 30.0,
         rate_limit_cooldown_seconds: float = 120.0,
         failure_threshold: int = 3,
+        max_cooldown_seconds: float = 900.0,
         bus: EventBus | None = None,
         clock: Callable[[], float] = time.monotonic,
         repair_hooks: dict[str, Callable] | list[Callable] | None = None,
@@ -325,6 +339,12 @@ class LLMRouter:
         # more quota. Back off for 2 minutes on rate limits.
         self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self.failure_threshold = failure_threshold
+        # Circuit breaker: the cooldown grows exponentially with consecutive
+        # failures (LiteLLM's cooldown_time pattern taken one step further —
+        # a provider that fails 20 times in a row is not "transient", it is
+        # down, and should not be re-probed every 30s).  Capped so a long
+        # outage does not park a provider forever.
+        self.max_cooldown_seconds = max_cooldown_seconds
         self.bus = bus
         self._clock = clock
         self.repair_hooks = repair_hooks if repair_hooks is not None else {}
@@ -351,7 +371,18 @@ class LLMRouter:
             # different names (e.g. two different HF models).
             provider.name = key
             self._by_name[key] = provider
-            self._health[key] = ProviderHealth(name=key)
+            health = ProviderHealth(name=key)
+            # One circuit breaker per provider, on the router's clock so
+            # fake-clock tests and the cooldown math agree.  The breaker
+            # drives the skip decision; ProviderHealth stays the stats
+            # surface the console reads.
+            health.breaker = CircuitBreaker(
+                name=f"llm:{key}",
+                failure_threshold=self.failure_threshold,
+                reset_timeout=self.cooldown_seconds,
+                clock=self._clock,
+            )
+            self._health[key] = health
             if primary or not self._active:
                 self._providers.insert(0, provider)
                 self._active = key
@@ -549,6 +580,30 @@ class LLMRouter:
         except Exception:  # noqa: BLE001 — learning must never break routing
             _log.debug("learning hook raised; ignoring", exc_info=True)
 
+    def is_cooling_down(self, name: str) -> bool:
+        """True when the router would currently skip ``name``.
+
+        Used by the broker to avoid promoting a dead provider to active.
+        A half-open breaker (probe admitted) does NOT count as cooling —
+        the probe must be allowed through.
+        """
+        with self._lock:
+            health = self._health.get(name)
+            if health is None:
+                return False
+            if not health.available(self._clock()):
+                return True
+            breaker = health.breaker
+            return breaker is not None and breaker.state == CircuitBreaker.OPEN
+
+    def cooldown_remaining(self, name: str) -> float:
+        """Seconds until ``name`` may be retried (0 when not cooling)."""
+        with self._lock:
+            health = self._health.get(name)
+            if health is None:
+                return 0.0
+            return max(0.0, health.cooldown_until - self._clock())
+
     # ── calling ──────────────────────────────────────────────────────────────
     def _chain(self) -> list[LLMProvider]:
         with self._lock:
@@ -560,15 +615,19 @@ class LLMRouter:
 
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None,
-        tier: str | None = None, **kw: Any
+        tier: str | None = None, task_kind: str = "",
+        constraints: Any = None, **kw: Any
     ) -> LLMResponse:
         return self._dispatch("chat", lambda p: p.chat(messages, params, **kw),
-                              tier=tier)
+                              tier=tier, task_kind=task_kind,
+                              constraints=constraints)
 
     def complete(self, prompt: str, params: SamplingParams | None = None,
-                 tier: str | None = None, **kw: Any) -> LLMResponse:
+                 tier: str | None = None, task_kind: str = "",
+                 constraints: Any = None, **kw: Any) -> LLMResponse:
         return self._dispatch("complete", lambda p: p.complete(prompt, params, **kw),
-                              tier=tier)
+                              tier=tier, task_kind=task_kind,
+                              constraints=constraints)
 
     def embed(self, texts: Sequence[str], **kw: Any) -> list[list[float]]:
         chain = [p for p in self._chain() if "embed" in p.capabilities]
@@ -580,6 +639,11 @@ class LLMRouter:
             health = self._health.get(provider.name)
             if health and not health.available(self._clock()):
                 continue
+            if health and health.breaker is not None:
+                try:
+                    health.breaker.before_call()
+                except CircuitOpen:
+                    continue
             try:
                 vectors = provider.embed(texts, **kw)
             except Exception as exc:  # noqa: BLE001
@@ -596,13 +660,16 @@ class LLMRouter:
 
     def describe_image(
         self, image: bytes, prompt: str = "", params: SamplingParams | None = None,
-        tier: str | None = None, **kw: Any
+        tier: str | None = None, task_kind: str = "vision",
+        constraints: Any = None, **kw: Any
     ) -> LLMResponse:
         return self._dispatch(
             "vision",
             lambda p: p.describe_image(image, prompt, params, **kw),
             require="vision",
             tier=tier,
+            task_kind=task_kind,
+            constraints=constraints,
         )
 
     def _dispatch(
@@ -612,13 +679,18 @@ class LLMRouter:
         *,
         require: str | None = None,
         tier: str | None = None,
+        task_kind: str = "",
+        constraints: Any = None,
     ) -> LLMResponse:
         # Broker consult (opt-in): let the capability broker pick the starting
-        # provider for this operation.  Best-effort — on any failure the
+        # provider for this operation.  The task_kind is threaded through so
+        # the broker's task specialisation (code → code-tuned, vision → VLM)
+        # actually fires — previously consult() dropped it and every call
+        # looked like generic chat.  Best-effort — on any failure the
         # original name-based chain below is used untouched.
         if self._broker is not None:
             try:
-                self._broker.consult(self, operation)
+                self._broker.consult(self, operation, task_kind, constraints)
             except Exception:  # noqa: BLE001 — broker must never break routing
                 _log.debug("broker consult raised; using name-based chain",
                            exc_info=True)
@@ -643,6 +715,15 @@ class LLMRouter:
             health = self._health[provider.name]
             if not health.available(self._clock()):
                 continue
+            # Circuit breaker gate: an open breaker rejects without touching
+            # the dependency; a half-open breaker admits exactly one probe.
+            # This is what stops a dead provider from slowing every request
+            # — the failure is recorded once, then skipped until the probe.
+            if health.breaker is not None:
+                try:
+                    health.breaker.before_call()
+                except CircuitOpen:
+                    continue
             attempted += 1
             # Time the attempt only when something is listening — zero cost
             # otherwise, so the hook is free when learning is off.
@@ -725,24 +806,42 @@ class LLMRouter:
         health = self._health.get(name)
         if health is not None:
             health.record_success()
+            if health.breaker is not None:
+                # A success closes the breaker — including after a half-open
+                # probe, which is how a recovered provider rejoins rotation.
+                health.breaker.record_success()
 
     def _note_failure(self, name: str, error: str) -> None:
         health = self._health.get(name)
         if health is None:
             return
-        # Rate limits get a longer cooldown — the quota window is typically
-        # 60s, so retrying every 30s just burns more quota. Other failures
-        # use the standard cooldown after the threshold.
+        # Dynamic circuit-breaker timeout (LiteLLM's reliability pattern:
+        # cooldown after allowed_fails, immediate cooldown on 429 — with the
+        # backoff made exponential so a provider failing 20 times in a row
+        # is treated as down, not transient).  The first cooldown after the
+        # threshold is the base; each further consecutive failure doubles it,
+        # capped at max_cooldown_seconds, with ±10% jitter so concurrent
+        # callers do not re-probe a recovering provider in lockstep.
         low = (error or "").lower()
         is_rate_limit = ("429" in low or "rate limit" in low
                          or "rate_limit" in low or "ratelimit" in low)
+        consecutive = health.consecutive_failures + 1  # this failure included
         if is_rate_limit:
-            cooldown = self.rate_limit_cooldown_seconds
+            base, steps = self.rate_limit_cooldown_seconds, max(0, consecutive - 1)
+        elif consecutive >= self.failure_threshold:
+            base, steps = self.cooldown_seconds, consecutive - self.failure_threshold
         else:
-            cooldown = (self.cooldown_seconds
-                        if health.consecutive_failures + 1 >= self.failure_threshold
-                        else 0.0)
-        health.record_failure(error, cooldown)
+            base, steps = 0.0, 0
+        if base > 0:
+            cooldown = min(self.max_cooldown_seconds, base * (2.0 ** steps))
+            cooldown = max(1.0, cooldown * random.uniform(0.9, 1.1))
+        else:
+            cooldown = 0.0
+        health.record_failure(error, cooldown, now=self._clock())
+        if health.breaker is not None:
+            if cooldown > 0:
+                health.breaker.reset_timeout = cooldown
+            health.breaker.record_failure()
 
         # Call repair hooks with cooldown
         now = self._clock()
@@ -789,3 +888,5 @@ class LLMRouter:
             for health in self._health.values():
                 health.cooldown_until = 0.0
                 health.consecutive_failures = 0
+                if health.breaker is not None:
+                    health.breaker.reset()
