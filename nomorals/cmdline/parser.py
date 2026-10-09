@@ -804,7 +804,7 @@ def _parser() -> argparse.ArgumentParser:
     s_ai.add_argument("--guidance", type=float, default=None,
                       help="guidance scale")
     s_ai.add_argument("--backend", default=None,
-                      help="hf|diffusers|auto (default auto)")
+                      help="hf|diffusers|comfy|leonardo|stability_ai|nano_banana|auto (default auto)")
     s_ai.add_argument("--width", type=int, default=None,
                       help="output width")
     s_ai.add_argument("--height", type=int, default=None,
@@ -822,7 +822,7 @@ def _parser() -> argparse.ArgumentParser:
     s_gen.add_argument("--guidance", type=float, default=None,
                        help="guidance scale")
     s_gen.add_argument("--backend", default=None,
-                       help="hf|diffusers|auto (default auto)")
+                       help="hf|diffusers|comfy|leonardo|stability_ai|nano_banana|auto (default auto)")
     s_gen.add_argument("--width", type=int, default=None,
                        help="output width")
     s_gen.add_argument("--height", type=int, default=None,
@@ -1716,7 +1716,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"
                      "nm voice say \"text\" [--profile P] [--out PATH] [--perform] [--mood M]\n"
-                     "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini|orpheus|dia\n"
+                     "nm voice fetch --backend cosyvoice|fish-s2-pro|fish-s1-mini|orpheus|dia|piper [--voice VOICE]\n"
                      "nm voice clone <name> <audio> [--transcript T]\n"
                      "nm voice list | nm voice use <name> | nm voice current\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
@@ -1799,7 +1799,10 @@ def _parser() -> argparse.ArgumentParser:
     v_fetch.add_argument("--backend", default="cosyvoice",
                          help="model to fetch: cosyvoice (default), "
                               "fish-s2-pro, fish-s1-mini, orpheus, dia, "
-                              "qwen3-tts")
+                              "qwen3-tts, piper")
+    v_fetch.add_argument("--voice", default="",
+                         help="piper voice id, e.g. en_US-lessac-medium "
+                              "(only with --backend piper)")
     v_fetch.add_argument("--dest", default="",
                          help="destination dir (default: ~/.cache/nomorals/voice_models/<backend>)")
     v_fetch.add_argument("--repo", default="",

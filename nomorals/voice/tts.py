@@ -42,6 +42,15 @@ integrated with the framework:
 Install one backend on the phone:
     pip install piper-tts                          # Piper (CPU, MIT)
     python -m piper.download_voices en_US-lessac-medium
+    # — or on Termux, where piper-tts's espeak-ng phonemizer build can
+    #   fight you, the battle-tested path (used by Termux voice bots in
+    #   production, e.g. aleksbuss/termux-voice-bot):
+    #   1. prebuilt aarch64 piper binary from rhasspy/piper releases
+    #      (piper_linux_aarch64.tar.gz), plus
+    #   2. nm voice fetch --backend piper --voice en_US-lessac-medium
+    #      (pulls .onnx + .onnx.json from huggingface.co/rhasspy/piper-voices
+    #      into PIPER_VOICES_DIR)
+    #   — or the one-click wrapper: pip install termux-tts && termux-tts install
     pip install kokoro                             # Kokoro (CPU)
     pip install chatterbox-tts                     # Chatterbox (MIT)
     pip install qwen-tts                           # Qwen3-TTS (0.6B)
@@ -78,6 +87,8 @@ __all__ = [
     "TagProcessor",
     "mood_to_tagged_text",
     "available_backends",
+    "select_backends",
+    "BACKEND_CAPABILITIES",
     "probe_reference_audio",
     "UniversalTTS",
     "write_wav",
@@ -105,6 +116,11 @@ class VoiceProfile:
     #: Transcript of the reference clip. Zero-shot backends (CosyVoice)
     #: need it to clone; XTTS does not.
     prompt_text: str = ""
+    #: Which backend family cloned/provides this voice ("xtts",
+    #: "chatterbox", "piper", …). Recorded at clone/upload time; the
+    #: engine uses it to enforce audience licensing — an XTTS-cloned
+    #: voice may only serve the private audience, structurally.
+    backend: str = ""
     #: Extra reference clips for the same voice. Cloning backends that
     #: accept several samples (XTTS averages the speaker embeddings)
     #: blend them; single-sample backends use the first clip.
@@ -141,6 +157,7 @@ class VoiceProfile:
             "language": self.language,
             "description": self.description,
             "prompt_text": self.prompt_text,
+            "backend": self.backend,
             "extra_samples": list(self.extra_samples),
         }
 
@@ -185,8 +202,14 @@ class VoiceLibrary:
     def upload_voice(self, name: str, audio_file_path: str,
                      language: str = "en",
                      preset_id: Optional[str] = None,
-                     description: str = "") -> VoiceProfile:
-        """Register a reference clip.  Copies it into managed storage."""
+                     description: str = "",
+                     backend: str = "") -> VoiceProfile:
+        """Register a reference clip.  Copies it into managed storage.
+
+        ``backend`` records which backend family this voice was cloned
+        for (e.g. "xtts", "chatterbox") — the engine enforces audience
+        licensing from it.
+        """
         dest = os.path.join(self.storage_dir, f"{name}.wav")
         try:
             shutil.copy(audio_file_path, dest)
@@ -198,6 +221,7 @@ class VoiceLibrary:
             preset_id=preset_id,
             language=language,
             description=description,
+            backend=(backend or "").lower(),
         )
         self.profiles[name] = profile
         self._save_index()
@@ -205,11 +229,16 @@ class VoiceLibrary:
 
     def register_preset(self, name: str, preset_id: str,
                         language: str = "en",
-                        description: str = "") -> VoiceProfile:
-        """Register a built-in preset voice (no reference audio)."""
+                        description: str = "",
+                        backend: str = "") -> VoiceProfile:
+        """Register a built-in preset voice (no reference audio).
+
+        ``backend`` records which backend family the preset belongs to
+        (e.g. "kokoro", "piper") for audience-license enforcement.
+        """
         profile = VoiceProfile(
             name=name, preset_id=preset_id, language=language,
-            description=description)
+            description=description, backend=(backend or "").lower())
         self.profiles[name] = profile
         self._save_index()
         return profile
@@ -272,6 +301,7 @@ class VoiceLibrary:
                 "cloning": bool(p.reference_audio_path),
                 "language": p.language,
                 "description": p.description,
+                "backend": p.backend,
             })
         return out
 
@@ -477,12 +507,121 @@ def available_backends() -> list[str]:
     return found
 
 
+# ----------------------------------------------------
+# BACKEND CAPABILITIES + SMART SELECTION
+# ----------------------------------------------------
+
+#: Systematic capability scores per backend — the data behind
+#: ``select_backends()``. Scores are 1–5: ``quality`` 5 = best sounding,
+#: ``latency`` 1 = fastest time-to-first-audio. ``streams`` marks a real
+#: chunked-audio API (not whole-utterance). ``needs`` is the cheapest
+#: hardware that runs it well. Sources: Resemble AI (Turbo: 75ms
+#: latency, 6x realtime, 350M params), the chatterbox ``generate_stream``
+#: API (chunk_size/context_window, latency_to_first_chunk metrics),
+#: orpheus-speech ``generate_speech`` (yields PCM chunks, ~200ms),
+#: Piper RTF ~0.28 on plain CPU, Kokoro-82M quality/speed tradeoffs
+#: measured on Android (VoxSherpa-TTS), OmniVoice RTF 0.025 on GPU.
+BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "chatterbox": {"quality": 5, "latency": 2, "streams": True,
+                   "needs": "gpu", "license": "MIT", "clones": True},
+    "f5tts": {"quality": 5, "latency": 4, "streams": False,
+              "needs": "gpu", "license": "CC-BY-NC (pretrained)",
+              "clones": True},
+    "omnivoice": {"quality": 5, "latency": 3, "streams": False,
+                  "needs": "gpu", "license": "Apache-2.0", "clones": True},
+    "qwen3tts": {"quality": 4, "latency": 3, "streams": False,
+                 "needs": "gpu", "license": "Apache-2.0", "clones": True},
+    "orpheus": {"quality": 5, "latency": 2, "streams": True,
+                "needs": "gpu", "license": "Apache-2.0", "clones": True},
+    "dia": {"quality": 5, "latency": 5, "streams": False,
+            "needs": "gpu", "license": "Apache-2.0", "clones": True},
+    "xtts": {"quality": 5, "latency": 3, "streams": False,
+             "needs": "gpu", "license": "CPML (non-commercial)",
+             "clones": True},
+    "cosyvoice": {"quality": 4, "latency": 3, "streams": False,
+                  "needs": "gpu", "license": "MIT", "clones": True},
+    "kokoro": {"quality": 3, "latency": 1, "streams": False,
+               "needs": "cpu", "license": "Apache-2.0", "clones": False},
+    "piper": {"quality": 3, "latency": 1, "streams": False,
+              "needs": "cpu", "license": "MIT", "clones": False},
+    "bark": {"quality": 3, "latency": 5, "streams": False,
+             "needs": "cpu", "license": "Suno (custom)", "clones": False},
+    "hf-endpoint": {"quality": 4, "latency": 4, "streams": False,
+                    "needs": "network", "license": "varies by model",
+                    "clones": True},
+    "system": {"quality": 1, "latency": 1, "streams": False,
+               "needs": "os", "license": "system", "clones": False},
+}
+
+
+#: Backends that may never serve the public audience (non-commercial
+#: licenses). XTTS v2 is CPML — personal use only. Structural, not advisory.
+_NONCOMMERCIAL_BACKENDS = frozenset({"xtts"})
+
+
+def select_backends(purpose: str = "file",
+                    audience: str = "private") -> list[str]:
+    """Order the *installed* backends for a job — computed, not hardcoded.
+
+    - ``purpose="file"``: quality-first (file rendering tolerates
+      latency — briefings, songs, voice notes).
+    - ``purpose="live"``: streaming-capable first, then lowest latency
+      (live calls, the voice loop — time-to-first-audio wins).
+    - ``audience="public"``: structurally excludes non-commercial
+      backends (XTTS), same as everywhere else.
+
+    Scores come from :data:`BACKEND_CAPABILITIES`; ties keep
+    :func:`available_backends` install order (stable sort).
+    """
+    if purpose not in ("file", "live"):
+        raise ValueError(f"purpose must be 'file' or 'live', got {purpose!r}")
+    if audience not in ("private", "public"):
+        raise ValueError(
+            f"audience must be 'private' or 'public', got {audience!r}")
+    avail = available_backends()
+    if audience == "public":
+        avail = [b for b in avail if b not in _NONCOMMERCIAL_BACKENDS]
+
+    def _key(name: str) -> tuple:
+        cap = BACKEND_CAPABILITIES.get(name) or {}
+        quality = cap.get("quality", 1)
+        latency = cap.get("latency", 5)
+        streams = cap.get("streams", False)
+        if purpose == "live":
+            return (0 if streams else 1, latency, -quality, name)
+        return (-quality, latency, name)
+
+    return sorted(avail, key=_key)
+
+
+#: sentence splitter for sentence-chunked streaming (backends without a
+#: native chunked API). Splits on sentence-ending punctuation and hard
+#: line breaks — the live-voice production pattern (sentence TTS +
+#: ordered playback), not a model call.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into speakable sentences. Never raises."""
+    try:
+        parts = [p.strip() for p in _SENTENCE_SPLIT.split(text or "")
+                 if p.strip()]
+        if parts:
+            return parts
+        stripped = (text or "").strip()
+        return [stripped] if stripped else []
+    except Exception:  # noqa: BLE001 - regex on hostile input
+        stripped = (text or "").strip()
+        return [stripped] if stripped else []
+
+
 class BarkBackend:
     """Bark: best tag/non-speech support (laughs, sighs, pauses)."""
 
     name = "bark"
     supports_native_tags = True
     supports_cloning = False   # preset-based, not true cloning
+    supports_streaming = False  # whole-utterance only
     sample_rate = 24000
 
     def __init__(self) -> None:
@@ -507,6 +646,7 @@ class XTTSBackend:
     name = "xtts"
     supports_native_tags = False
     supports_cloning = True
+    supports_streaming = False  # whole-utterance only
     sample_rate = 24000
 
     def __init__(self) -> None:
@@ -546,6 +686,7 @@ class KokoroBackend:
     name = "kokoro"
     supports_native_tags = False
     supports_cloning = False
+    supports_streaming = False  # whole-utterance only
     sample_rate = 24000
 
     def __init__(self) -> None:
@@ -597,6 +738,9 @@ class CosyVoiceBackend:
     name = "cosyvoice"
     supports_native_tags = True    # instruct tokens, see director.py
     supports_cloning = True        # zero-shot from reference clip
+    supports_streaming = False  # stream=True exists in the CosyVoice API
+                                # but this backend calls stream=False;
+                                # enable only after a live GPU test
     sample_rate = 22050
 
     #: Where ``nm voice fetch`` puts the weights; override with
@@ -675,6 +819,7 @@ class DiaBackend:
     name = "dia"
     supports_native_tags = True    # paren tags, see director.render_dia
     supports_cloning = True        # via audio prompt
+    supports_streaming = False  # whole-utterance only
     sample_rate = 44100
 
     def __init__(self, model_id: str = "") -> None:
@@ -729,6 +874,9 @@ class OrpheusBackend:
     name = "orpheus"
     supports_native_tags = True    # angle tags, see director.render_orpheus
     supports_cloning = True        # zero-shot
+    #: generate_speech() yields 16-bit mono PCM chunks at 24kHz — true
+    #: streaming, ~200ms first-chunk latency.
+    supports_streaming = True
     sample_rate = 24000
 
     def __init__(self, model_id: str = "") -> None:
@@ -754,8 +902,28 @@ class OrpheusBackend:
             self.model.generate_speech(prompt=text, voice=voice_id))
         if not pcm:
             raise ValueError("orpheus produced no audio")
+        return self._pcm_to_floats(pcm)
+
+    @staticmethod
+    def _pcm_to_floats(pcm: bytes) -> list[float]:
         vals = struct.unpack("<%dh" % (len(pcm) // 2), pcm)
         return [v / 32768.0 for v in vals]
+
+    def synthesize_stream(self, text: str,
+                          voice: Optional[VoiceProfile] = None,
+                          *, instruct: str = "") -> Any:
+        """Yield float-sample chunks straight off generate_speech().
+
+        The clone audit gate runs once up front, same as
+        :meth:`synthesize`.
+        """
+        if voice is not None:
+            voice.audit_clone(self.name)
+        voice_id = (voice.preset_id if voice and voice.preset_id
+                    else "tara")
+        for pcm in self.model.generate_speech(prompt=text, voice=voice_id):
+            if pcm:
+                yield self._pcm_to_floats(pcm)
 
 
 class HFEndpointBackend:
@@ -779,6 +947,7 @@ class HFEndpointBackend:
     """
 
     name = "hf-endpoint"
+    supports_streaming = False  # one HTTP round-trip per utterance
     sample_rate = 24000
 
     @property
@@ -896,6 +1065,10 @@ class ChatterboxBackend:
 
     name = "chatterbox"
     supports_cloning = True
+    #: True chunked audio: generate_stream() yields (audio_chunk, metrics)
+    #: on both ChatterboxTurboTTS and ChatterboxMultilingualTTS
+    #: (chunk_size in tokens; metrics carry latency_to_first_chunk/RTF).
+    supports_streaming = True
     sample_rate = 24000
 
     _VARIANTS = ("multilingual", "turbo", "nano")
@@ -952,12 +1125,20 @@ class ChatterboxBackend:
             voice.validate_for_cloning()
         ref = voice.reference_audio_path if voice else None
         kwargs: dict[str, Any] = {"exaggeration": 0.5, "cfg_weight": 0.5}
+        out = self._generate(text, voice, ref, kwargs)
+        return self._as_floats(out)
+
+    def _generate(self, text: str, voice: Optional[VoiceProfile],
+                  ref: Optional[str], kwargs: dict[str, Any]) -> Any:
         if self.variant == "multilingual":
-            out = self.model.generate(
+            return self.model.generate(
                 text, language_id=self._language_id(voice),
                 audio_prompt_path=ref, **kwargs)
-        else:
-            out = self.model.generate(text, audio_prompt_path=ref, **kwargs)
+        return self.model.generate(text, audio_prompt_path=ref, **kwargs)
+
+    @staticmethod
+    def _as_floats(out: Any) -> Any:
+        """torch.Tensor / numpy / list → flat float samples."""
         try:
             import torch
 
@@ -971,6 +1152,38 @@ class ChatterboxBackend:
             return np.asarray(out, dtype=np.float32).reshape(-1)
         except ImportError:
             return [float(v) for v in out]
+
+    def synthesize_stream(self, text: str,
+                          voice: Optional[VoiceProfile] = None,
+                          *, instruct: str = "") -> Any:
+        """Yield float-sample audio chunks as they are generated.
+
+        Uses the model's native ``generate_stream()`` (chunk_size=25
+        tokens) when present; older chatterbox releases without it fall
+        back to one whole-utterance chunk. The clone audit gate runs
+        once up front, same as :meth:`synthesize`.
+        """
+        if voice is not None:
+            voice.validate_for_cloning()
+        ref = voice.reference_audio_path if voice else None
+        kwargs: dict[str, Any] = {"exaggeration": 0.5, "cfg_weight": 0.5}
+        stream_fn = getattr(self.model, "generate_stream", None)
+        if stream_fn is None:
+            yield self._as_floats(self._generate(text, voice, ref, kwargs))
+            return
+        if self.variant == "multilingual":
+            gen = stream_fn(text,
+                            language_id=self._language_id(voice),
+                            audio_prompt_path=ref, chunk_size=25, **kwargs)
+        else:
+            gen = stream_fn(text, audio_prompt_path=ref, chunk_size=25,
+                            **kwargs)
+        for item in gen:
+            # generate_stream yields (audio_chunk, metrics)
+            chunk = item[0] if isinstance(item, (tuple, list)) else item
+            floats = self._as_floats(chunk)
+            if len(floats):
+                yield floats
 
 
 class PiperBackend:
@@ -995,6 +1208,8 @@ class PiperBackend:
     name = "piper"
     supports_native_tags = False
     supports_cloning = False
+    supports_streaming = False  # RTF ~0.28 already — one-shot is fast
+                                # enough; the engine sentence-chunks it
 
     def __init__(self, voice_path: str = "") -> None:
         try:
@@ -1105,6 +1320,8 @@ class F5TTSBackend:
     name = "f5tts"
     supports_native_tags = False
     supports_cloning = True
+    supports_streaming = False  # flow-matching needs the full target up
+                                # front — streaming-hostile by design
     sample_rate = 24000
 
     def __init__(self, model: str = "") -> None:
@@ -1160,6 +1377,7 @@ class OmniVoiceBackend:
     name = "omnivoice"
     supports_native_tags = True
     supports_cloning = True
+    supports_streaming = False  # whole-utterance only
     sample_rate = 24000
 
     def __init__(self, model_id: str = "") -> None:
@@ -1220,6 +1438,7 @@ class Qwen3TTSBackend:
 
     name = "qwen3tts"
     supports_native_tags = True    # inline [laugh]/[sigh]/… + [emotion]
+    supports_streaming = False  # whole-utterance in this backend
     supports_cloning = True        # via the Base model
     sample_rate = 24000
 
@@ -1400,6 +1619,7 @@ class SystemTTSBackend:
     name = "system"
     supports_native_tags = False
     supports_cloning = False
+    supports_streaming = False  # one subprocess call per utterance
     sample_rate = 22050
 
     _MISSING = ("system TTS: no OS speech service found — macOS ships "
@@ -1574,36 +1794,56 @@ class UniversalTTS:
     out = engine.speak("[happy] omg baby I missed you [laughs]")
     # out -> {"path": ".../say.wav", "bytes": 240000,
     #         "sample_rate": 24000, "backend": "bark"}
+
+    Live voice: ``speak_stream()`` yields audio chunks as they are
+    generated (native streaming where the backend has a chunked API —
+    Chatterbox Turbo, Orpheus — sentence-chunked for everything else)
+    and never raises; the live loop plays chunk 1 while chunk 2 renders.
     """
 
     #: License map: which backends are safe for which audience.
     #: XTTS v2 is non-commercial — private (owner's own) use only.
     #: Everything else in the preference order is MIT/Apache-2.0 or system.
-    _NONCOMMERCIAL_BACKENDS = frozenset({"xtts"})
+    _NONCOMMERCIAL_BACKENDS = _NONCOMMERCIAL_BACKENDS
+
+    #: Env vars naming the default voice profile per audience. The
+    #: owner's private voice (XTTS clone) vs the public assistant voice
+    #: (Chatterbox) — resolved by :meth:`voice_for`, enforced by
+    #: :meth:`_resolve_voice`.
+    _VOICE_ENV = {"private": "NM_VOICE_PRIVATE", "public": "NM_VOICE_PUBLIC"}
 
     def __init__(self, backend: str = "auto", voices_dir: str = "voices",
                  default_sample_rate: int = 24000,
-                 audience: str = "private") -> None:
+                 audience: str = "private",
+                 purpose: str = "file") -> None:
         """``audience``: "private" (owner's own Devon — XTTS allowed for its
         best-in-class cloning) or "public" (community/shared surfaces —
-        XTTS is structurally excluded, MIT-safe backends only)."""
+        XTTS is structurally excluded, MIT-safe backends only).
+
+        ``purpose``: "file" (quality-first backend selection — briefings,
+        songs, voice notes) or "live" (latency-first + streaming-capable
+        first — the live voice loop).
+        """
         if audience not in ("private", "public"):
             raise ValueError(
                 f"audience must be 'private' or 'public', got {audience!r}")
+        if purpose not in ("file", "live"):
+            raise ValueError(
+                f"purpose must be 'file' or 'live', got {purpose!r}")
         self.tag_processor = TagProcessor()
         self.voices = VoiceLibrary(voices_dir)
         self.default_sample_rate = default_sample_rate
         self._backend_name = (backend or "auto").lower()
         self.audience = audience
+        self.purpose = purpose
         self._loaded = False
         self._impl: Any = None
 
     def _audience_backends(self, audience: str) -> list[str]:
-        """Available backends filtered/routed for the audience.
+        """Installed backends filtered for the audience, in install order.
 
-        Private: XTTS first when installed (best cloning quality), then
-        the normal preference order. Public: the normal order with
-        non-commercial backends REMOVED — structural, not advisory.
+        Kept for compatibility (tests, external callers). New code should
+        use :meth:`_ordered_backends`, which scores by purpose.
         """
         order = available_backends()
         if audience == "public":
@@ -1614,29 +1854,99 @@ class UniversalTTS:
             order = ["xtts"] + [b for b in order if b != "xtts"]
         return order
 
+    def _ordered_backends(self, audience: str, purpose: str) -> list[str]:
+        """Candidate backends for (audience, purpose), best first.
+
+        Systematic: :func:`select_backends` scores installed backends by
+        quality-vs-latency for the purpose; the private audience keeps the
+        owner's standing preference for XTTS first (their own cloned
+        voice) when it's installed.
+        """
+        order = select_backends(purpose=purpose, audience=audience)
+        if audience == "private" and "xtts" in order:
+            order = ["xtts"] + [b for b in order if b != "xtts"]
+        return order
+
+    # -- voice profiles ------------------------------------------------------
+    def voice_for(self, audience: str | None = None) -> str:
+        """Default voice profile name for an audience.
+
+        ``NM_VOICE_PRIVATE`` (owner's own voice — XTTS clone) and
+        ``NM_VOICE_PUBLIC`` (public assistant voice — Chatterbox) name
+        the profiles; "" when unconfigured, meaning "engine default".
+        """
+        aud = (audience or self.audience).lower()
+        if aud not in ("private", "public"):
+            raise ValueError(
+                f"audience must be 'private' or 'public', got {audience!r}")
+        return os.environ.get(self._VOICE_ENV[aud], "").strip()
+
+    def _resolve_voice(self, voice_name: Optional[str],
+                       audience: str) -> Optional[VoiceProfile]:
+        """Resolve the voice for a speak call, enforcing audience licensing.
+
+        The explicit ``voice_name`` wins; otherwise the audience default
+        from :meth:`voice_for`. A voice cloned for a non-commercial
+        backend (XTTS) may NEVER serve the public audience — structural,
+        not advisory: raises with a clear message instead of silently
+        speaking in it.
+        """
+        name = (voice_name or "").strip() or self.voice_for(audience)
+        voice = self.voices.get(name) if name else None
+        if (voice is not None and audience == "public"
+                and (voice.backend or "").lower()
+                in self._NONCOMMERCIAL_BACKENDS):
+            raise RuntimeError(
+                f"voice '{voice.name}' is cloned for the non-commercial "
+                f"{voice.backend!r} backend — it may only serve the private "
+                f"audience. Pick a public voice (NM_VOICE_PUBLIC) or serve "
+                f"this as private.")
+        return voice
+
     # -- backend lifecycle ---------------------------------------------------
-    def _load_backend(self, audience: str | None = None) -> Any:
+    def _load_backend(self, audience: str | None = None,
+                      purpose: str | None = None) -> Any:
         if self._loaded:
             return self._impl
         aud = audience or self.audience
+        purp = purpose or self.purpose
         wanted = self._backend_name
-        if wanted == "auto":
-            available = self._audience_backends(aud)
-            if not available:
-                raise RuntimeError(
-                    "no TTS backend usable — pip install one of: "
-                    "chatterbox-tts (best free cloning, MIT) | piper-tts "
-                    "(phone/CPU, MIT) | kokoro (lightest, Apache-2.0) | "
-                    "qwen-tts (0.6B expressive, Apache-2.0) | f5-tts | "
-                    "omnivoice (600+ langs, Apache-2.0) | TTS (XTTS v2, "
-                    "non-commercial) | cosyvoice (multilingual+paralinguistics, "
-                    "MIT) | orpheus-speech (Orpheus, Apache-2.0, GPU) | "
-                    "git+https://github.com/suno-ai/bark.git | "
-                    "git+https://github.com/nari-labs/dia.git (GPU-only) — "
-                    "or install an OS speech service (espeak-ng) for the "
-                    "zero-dependency 'system' backend")
-            wanted = available[0]
-        if (aud == "public" and wanted in self._NONCOMMERCIAL_BACKENDS):
+        if wanted != "auto":
+            return self._load_explicit(wanted, aud)
+        # auto: TRUE CASCADE — try candidates best-first, fall through on
+        # failure, and only raise when every installed backend failed,
+        # with each failure named. A broken chatterbox install must not
+        # silence the engine when piper/system still work.
+        ordered = self._ordered_backends(aud, purp)
+        failures: list[str] = []
+        for name in ordered:
+            try:
+                self._impl = _BACKENDS[name]()
+            except Exception as exc:
+                failures.append(f"{name}: {exc}")
+                continue
+            self._loaded = True
+            _log.info("TTS backend %s selected (purpose=%s audience=%s)",
+                      name, purp, aud)
+            return self._impl
+        tried = "; ".join(failures) if failures else "none installed"
+        raise RuntimeError(
+            f"no TTS backend usable (tried: {tried}) — pip install one of: "
+            "chatterbox-tts (best free cloning, MIT) | piper-tts "
+            "(phone/CPU, MIT) | kokoro (lightest, Apache-2.0) | "
+            "qwen-tts (0.6B expressive, Apache-2.0) | f5-tts | "
+            "omnivoice (600+ langs, Apache-2.0) | TTS (XTTS v2, "
+            "non-commercial) | cosyvoice (multilingual+paralinguistics, "
+            "MIT) | orpheus-speech (Orpheus, Apache-2.0, GPU) | "
+            "git+https://github.com/suno-ai/bark.git | "
+            "git+https://github.com/nari-labs/dia.git (GPU-only) — "
+            "or install an OS speech service (espeak-ng) for the "
+            "zero-dependency 'system' backend")
+
+    def _load_explicit(self, wanted: str, audience: str) -> Any:
+        """Load one named backend — single shot, helpful errors."""
+        if (audience == "public"
+                and wanted in self._NONCOMMERCIAL_BACKENDS):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is non-commercial and cannot serve "
                 f"the public audience — use a MIT/Apache-2.0 backend")
@@ -1647,7 +1957,7 @@ class UniversalTTS:
         if wanted == "system":
             if not SystemTTSBackend.available():
                 raise RuntimeError(SystemTTSBackend._MISSING)
-        elif not _spec(_BACKEND_SPECS[wanted]):
+        elif not _spec(_BACKEND_SPECS.get(wanted)):
             raise RuntimeError(
                 f"TTS backend {wanted!r} is not installed on this machine")
         self._impl = _BACKENDS[wanted]()
@@ -1737,6 +2047,23 @@ class UniversalTTS:
         # a native-tag backend with no dedicated renderer: Bark format
         return self.tag_processor.to_bark_format(segments), ""
 
+    def _render_for_backend(self, backend: Any,
+                            segments: List[Segment]) -> tuple[str, str, list]:
+        """Parsed segments → ``(final_text, instruct, pause_points)``.
+
+        Shared by :meth:`speak` and :meth:`speak_stream`: native-tag
+        backends get their own vocabulary via ``_render_native``;
+        everything else gets clean text plus pause splice points.
+        """
+        instruct = ""
+        pause_points: list = []
+        if getattr(backend, "supports_native_tags", False):
+            final_text, instruct = self._render_native(backend, segments)
+        else:
+            final_text, pause_points = \
+                self.tag_processor.to_plain_with_pauses(segments)
+        return final_text, instruct, pause_points
+
     def speak(self, tagged_text: str, voice_name: Optional[str] = None,
               out_path: str = "", mood: str = "", mood_level: int = 5,
               audience: str | None = None) -> dict:
@@ -1744,25 +2071,24 @@ class UniversalTTS:
 
         ``audience`` overrides the engine's audience for this call:
         "private" (XTTS allowed) or "public" (MIT-safe backends only).
+        The voice resolves via :meth:`_resolve_voice` — the explicit
+        ``voice_name`` wins, else the audience default (``NM_VOICE_PRIVATE``
+        / ``NM_VOICE_PUBLIC``); a non-commercial-cloned voice on the
+        public audience is refused, structurally.
         """
+        aud = audience or self.audience
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
-        voice = self.voices.get(voice_name) if voice_name else None
-        backend = self._load_backend(audience=audience)
+        voice = self._resolve_voice(voice_name, aud)
+        backend = self._load_backend(audience=aud)
         segments = self.tag_processor.parse(text)
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 
-        instruct = ""
-        if backend.supports_native_tags:
-            final_text, instruct = self._render_native(backend, segments)
-            audio = backend.synthesize(final_text, voice, instruct=instruct)
-            audio = self._insert_pauses(audio, [], text, sample_rate)
-        else:
-            clean_text, pause_points = \
-                self.tag_processor.to_plain_with_pauses(segments)
-            audio = backend.synthesize(clean_text, voice)
-            audio = self._insert_pauses(audio, pause_points, clean_text,
-                                        sample_rate)
+        final_text, instruct, pause_points = self._render_for_backend(
+            backend, segments)
+        audio = backend.synthesize(final_text, voice, instruct=instruct)
+        audio = self._insert_pauses(audio, pause_points, final_text,
+                                    sample_rate)
 
         path = out_path or os.path.join(
             self.voices.storage_dir, "..",
@@ -1776,6 +2102,75 @@ class UniversalTTS:
             "backend": backend.name,
             "segments": len(segments),
         }
+
+    def _sentence_stream(self, backend: Any, text: str,
+                         voice: Optional[VoiceProfile],
+                         instruct: str) -> Any:
+        """One synthesize() per sentence — the universal streaming fallback.
+
+        The production live-voice pattern: sentence TTS + ordered
+        playback. First chunk lands after one sentence renders, not after
+        the whole utterance.
+        """
+        for sentence in _split_sentences(text):
+            yield backend.synthesize(sentence, voice, instruct=instruct)
+
+    def speak_stream(self, tagged_text: str,
+                     voice_name: Optional[str] = None, *,
+                     mood: str = "", mood_level: int = 5,
+                     audience: str | None = None) -> Any:
+        """Yield audio as it is generated — the live-voice path.
+
+        Yields ``{"ok": True, "samples": [...], "sample_rate": int,
+        "backend": str, "chunk": int}`` dicts. Backends with a native
+        chunked API (Chatterbox Turbo, Orpheus) stream token-by-token;
+        everything else is sentence-chunked (one ``synthesize()`` per
+        sentence, yielded in order — first audio lands after the first
+        sentence, not the whole reply). Pause splicing is skipped in
+        streaming; sentence boundaries are the pauses.
+
+        NEVER RAISES: any failure yields exactly one ``{"ok": False,
+        "reason": str, "backend": str}`` and stops, so the live loop can
+        speak the error or fall back to text instead of crashing the call.
+        """
+        aud = audience or self.audience
+        backend_name = ""
+        chunk_no = 0
+        try:
+            text = mood_to_tagged_text(tagged_text, mood, mood_level) \
+                if mood else tagged_text
+            if not (text or "").strip():
+                yield {"ok": False, "reason": "nothing to say — empty text",
+                       "backend": ""}
+                return
+            voice = self._resolve_voice(voice_name, aud)
+            # live purpose: streaming-capable first, then lowest latency
+            backend = self._load_backend(audience=aud, purpose="live")
+            backend_name = getattr(backend, "name", "")
+            sample_rate = getattr(backend, "sample_rate",
+                                  self.default_sample_rate)
+            segments = self.tag_processor.parse(text)
+            final_text, instruct, _pauses = self._render_for_backend(
+                backend, segments)
+            if (getattr(backend, "supports_streaming", False)
+                    and hasattr(backend, "synthesize_stream")):
+                stream = backend.synthesize_stream(final_text, voice,
+                                                   instruct=instruct)
+            else:
+                stream = self._sentence_stream(backend, final_text, voice,
+                                               instruct)
+            for samples in stream:
+                chunk_no += 1
+                if hasattr(samples, "tolist"):
+                    samples = samples.tolist()
+                yield {"ok": True, "samples": list(samples),
+                       "sample_rate": sample_rate, "backend": backend_name,
+                       "chunk": chunk_no}
+        except Exception as exc:  # noqa: BLE001 - the never-raises contract
+            _log.warning("speak_stream failed: %s", exc)
+            yield {"ok": False,
+                   "reason": str(exc) or repr(exc),
+                   "backend": backend_name}
 
     def perform(self, text: str, voice_name: Optional[str] = None,
                 out_path: str = "", *, mood: str = "neutral",
@@ -1813,7 +2208,7 @@ class UniversalTTS:
 
         script = direct(text, mood=mood, intensity=intensity, seed=seed,
                         effect=effect)
-        voice = self.voices.get(voice_name) if voice_name else None
+        voice = self._resolve_voice(voice_name, self.audience)
         backend = self._load_backend()
         sample_rate = getattr(backend, "sample_rate", self.default_sample_rate)
 

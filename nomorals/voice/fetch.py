@@ -9,8 +9,10 @@ so nothing here breaks when it is not installed.
 from __future__ import annotations
 
 import os
+import re
 
-__all__ = ["MODEL_REGISTRY", "default_cache_dir", "fetch_model"]
+__all__ = ["MODEL_REGISTRY", "default_cache_dir", "fetch_model",
+           "fetch_piper_voice"]
 
 #: What's worth pulling, why, and under what license. ``hf_repo`` is the
 #: default; ``nm voice fetch --repo`` can point at any other repo
@@ -32,15 +34,20 @@ MODEL_REGISTRY = {
         "alt_repos": [],
     },
     "piper": {
-        "hf_repo": "",
+        "hf_repo": "rhasspy/piper-voices",
         "license": "MIT",
         "approx_size": "~60-100 MB per voice (.onnx + .onnx.json)",
         "notes": (
             "Best free on-device TTS: ONNX VITS voices, RTF ~0.28 on plain "
-            "CPU, 22.05kHz. Voices are NOT fetched by this tool — use "
-            "'python -m piper.download_voices en_US-lessac-medium' (part of "
-            "piper-tts) into PIPER_VOICES_DIR, or point PIPER_VOICE at a "
-            ".onnx file. Browse rhasspy/piper-voices for the voice list."
+            "CPU, 22.05kHz. Fetch ONE voice (not the whole repo) with "
+            "'nm voice fetch --backend piper --voice en_US-lessac-medium' "
+            "→ fetch_piper_voice() pulls just the .onnx + .onnx.json into "
+            "PIPER_VOICES_DIR. Termux-verified: the aarch64 piper binary "
+            "from rhasspy/piper releases (piper_linux_aarch64.tar.gz) "
+            "runs in Termux directly; 'pip install piper-tts' + "
+            "'python -m piper.download_voices <voice>' works where the "
+            "onnxruntime/espeak-ng wheels build; 'pip install termux-tts' "
+            "is the one-click alternative."
         ),
         "alt_repos": [],
     },
@@ -208,6 +215,75 @@ def default_cache_dir(name: str) -> str:
     return os.path.join(
         os.path.expanduser("~"), ".cache", "nomorals",
         "voice_models", name)
+
+
+#: Piper voices on HuggingFace (rhasspy/piper-voices). Layout verified
+#: 2026-10-09 against the live repo tree:
+#: ``{lang}/{locale}/{speaker}/{quality}/{voice}.onnx`` plus the
+#: ``{voice}.onnx.json`` sidecar, e.g.
+#: ``en/en_US/lessac/medium/en_US-lessac-medium.onnx``.
+_PIPER_VOICES_REPO = "rhasspy/piper-voices"
+
+
+def _piper_voice_files(voice_id: str) -> tuple[str, str]:
+    """Voice id (``en_US-lessac-medium``) → (onnx repo path, json repo path).
+
+    Validates the ``<locale>-<speaker>-<quality>`` shape (``locale`` like
+    ``en`` or ``en_US``); a shape-valid id that does not exist in the
+    repo fails loudly at download time, not here.
+    """
+    parts = (voice_id or "").strip().split("-")
+    locale = parts[0] if parts else ""
+    if len(parts) < 3 or not all(parts) or not re.match(
+            r"^[a-z]{2,3}(_[A-Z]{2})?$", locale):
+        raise ValueError(
+            f"bad piper voice id {voice_id!r} — want "
+            f"<locale>-<speaker>-<quality>, e.g. en_US-lessac-medium")
+    quality = parts[-1]
+    speaker = "-".join(parts[1:-1])
+    lang = locale.split("_")[0]
+    base = f"{lang}/{locale}/{speaker}/{quality}/{voice_id}"
+    return base + ".onnx", base + ".onnx.json"
+
+
+def fetch_piper_voice(voice_id: str, dest_dir: str = "") -> str:
+    """Download ONE Piper voice (.onnx + .onnx.json) — no full-repo pull.
+
+    Puts both files flat into ``dest_dir`` (default ``PIPER_VOICES_DIR``
+    or the fetch cache), exactly where :class:`PiperBackend` looks.
+    Returns the ``.onnx`` path. Needs ``huggingface_hub`` (lazy import).
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is not installed — pip install huggingface_hub"
+        ) from exc
+    import shutil
+    import tempfile
+
+    onnx_rel, json_rel = _piper_voice_files(voice_id)
+    target = (dest_dir
+              or os.environ.get("PIPER_VOICES_DIR", "")
+              or default_cache_dir("piper"))
+    os.makedirs(target, exist_ok=True)
+    # download into a scratch dir, then lay the files flat — the backend
+    # only scans the top level of PIPER_VOICES_DIR
+    tmp = tempfile.mkdtemp(prefix="piper-voice-")
+    try:
+        for rel in (onnx_rel, json_rel):
+            try:
+                got = hf_hub_download(repo_id=_PIPER_VOICES_REPO,
+                                      filename=rel, local_dir=tmp)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"piper voice {voice_id!r} not found in "
+                    f"{_PIPER_VOICES_REPO} ({rel}): {exc}") from exc
+            flat = os.path.join(target, os.path.basename(rel))
+            shutil.move(got, flat)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return os.path.join(target, voice_id + ".onnx")
 
 
 def fetch_model(name: str, dest: str = "", repo: str = "",

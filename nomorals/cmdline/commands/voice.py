@@ -224,6 +224,26 @@ def _cmd_voice_fetch(args: argparse.Namespace, context: Any) -> int:
 
     name = (args.backend or "cosyvoice").lower()
     info = MODEL_REGISTRY.get(name, {})
+    if name == "piper":
+        # one voice, not the whole rhasspy/piper-voices repo
+        from ...voice.fetch import fetch_piper_voice
+
+        voice_id = (args.voice or "en_US-lessac-medium").strip()
+        print(f"fetching piper voice {voice_id} (MIT) from HuggingFace…")
+        try:
+            path = fetch_piper_voice(voice_id, dest=args.dest or "")
+        except Exception as exc:
+            print(f"fetch failed: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps({"backend": name, "voice": voice_id,
+                              "path": path,
+                              "repo": "rhasspy/piper-voices"}, indent=2))
+        else:
+            print(f"voice ready at {path}")
+            print("speak with it: "
+                  f"nm voice say \"hello there\" --backend piper")
+        return 0
     print(f"fetching {name} ({info.get('license', '?')} license) "
           f"from HuggingFace…")
     try:
