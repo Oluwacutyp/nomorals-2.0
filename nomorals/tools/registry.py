@@ -186,7 +186,7 @@ class ToolRegistry:
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
-            "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
+            "sceneintel", "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "wisdom", "social",
             "services",  # 28 service connectors bridged to the spine
             "research",
