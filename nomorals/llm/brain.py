@@ -34,6 +34,7 @@ from .base import LLMResponse, Message, SamplingParams
 
 __all__ = [
     "Brain",
+    "brain_for",
     "explain_failure",
     "get_brain",
     "reset_brain",
@@ -361,3 +362,30 @@ def reset_brain() -> None:
     global _brain
     with _brain_lock:
         _brain = None
+
+
+def brain_for(context: Any) -> Brain:
+    """The brain for an agent context — one Brain per context, cached.
+
+    Wraps ``context.router`` (the operator's settings-driven chain) so
+    every call site gets the task-kind threading, timeouts, failure
+    taxonomy, and context fitting without reimplementing the wiring.
+    When the context has no router, falls back to the shared env-based
+    brain.  Never raises.
+    """
+    try:
+        router = getattr(context, "router", None)
+        if router is None:
+            return get_brain()
+        cached = getattr(context, "_brain_for_ctx", None)
+        if isinstance(cached, Brain) and cached._external_router is router:
+            return cached
+        brain = Brain(router=router)
+        try:
+            context._brain_for_ctx = brain  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — caching is a bonus
+            pass
+        return brain
+    except Exception:  # noqa: BLE001
+        _log.debug("brain_for failed; using shared brain", exc_info=True)
+        return get_brain()
