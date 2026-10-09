@@ -17,7 +17,7 @@ if you follow step 1 first.
 
 ## STEP 2 — Launch the GPU instance (5 min)
 
-1. Go to https://us-east-1.console.aws.amazon.com/ec2/ (N. Virginia — best spot availability)
+1. Go to https://eu-north-1.console.aws.amazon.com/ec2/ (Europe/Stockholm — this account is region-locked here; us-east-1 needs a plan upgrade, not worth it)
 2. **Launch instance**
    - Name: `codebeast-train`
    - AMI: search **"Deep Learning AMI GPU PyTorch"** → pick the latest Ubuntu one
