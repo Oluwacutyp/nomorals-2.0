@@ -177,12 +177,13 @@ class ToolRegistry:
             "build_app", "captcha", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
-            "filesend",
+            "commerce", "filesend",
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
             "lint",
             "edit_loop",
             "error_scan",
             "macros", "media", "media_edit", "media_pipeline", "metadata",
+            "music",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
@@ -190,6 +191,7 @@ class ToolRegistry:
             "workspace",
             "trading",
             "characters",
+            "games",
             # the agent bridge registers last: agent modules own the real
             # implementations, and thin tools/ wrappers of the same name
             # must never shadow them (last registration wins).

@@ -168,7 +168,8 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 def draft_song(topic: str, *, style: str = "pop", tempo: int = 0,
-               key: str = "", context: Any = None) -> SongDraft:
+               key: str = "", context: Any = None,
+               taste_hint: str = "") -> SongDraft:
     """Write a full song draft — the artist's notebook page.
 
     One LLM call, one creative act: lyrics with cadence, melody contours,
@@ -194,6 +195,10 @@ def draft_song(topic: str, *, style: str = "pop", tempo: int = 0,
 
     prompt = _DRAFT_PROMPT.format(style=style_key, topic=topic,
                                   tempo=tempo, key=key, mode="major")
+    if (taste_hint or "").strip():
+        prompt += ("\n\nThe person you're writing for: "
+                   f"{taste_hint.strip()} — let it shape your choices, "
+                   "don't announce it.")
     resp = brain_for(context).chat(
         [Message.user(prompt)],
         SamplingParams(temperature=0.95, max_tokens=4096),
