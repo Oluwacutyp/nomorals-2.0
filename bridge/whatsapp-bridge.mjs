@@ -56,6 +56,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
+import registerGroupCommands from './whatsapp-groups.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -609,7 +610,8 @@ async function handleCommand(sock, req) {
         return reply(sock, id, { ok: true, user: meJid, state: wa ? 'open' : 'closed' });
       }
       default:
-        return reply(sock, id, { ok: false, error: `unknown cmd: ${cmd}` });
+        // workstream 3: group/community commands (read-only) before "unknown cmd"
+        return (await registerGroupCommands({ getSocket: () => wa, reply, log })(sock, req)) || reply(sock, id, { ok: false, error: `unknown cmd: ${cmd}` });
     }
   } catch (e) {
     return reply(sock, id, { ok: false, error: e.message || String(e) });

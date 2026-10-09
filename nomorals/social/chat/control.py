@@ -51,7 +51,8 @@ import re
 from dataclasses import dataclass
 
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
-           "parse_control", "PLATFORMS", "help_text", "help_menu", "detailed_help",
+           "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
+           "detailed_help",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
@@ -274,6 +275,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
+    "exness": (0, None),      # /exness balance|positions|price|buy|sell|close — Exness trading
+    "stripe": (0, None),      # /stripe balance|customers|charges|link — Stripe payments
     "swarm": (1, None),      # /swarm <goal> [workers] — parallel devon agents
     # power layer: network, proxies, scripts, osint, macros
     "dns": (1, 5),           # /dns <domain> [record type]
@@ -373,6 +376,16 @@ _HELP_TEXT = "\n".join(
         "  /book <topic> [chapters]                start a book (auto-sends the pdf)",
         "  /book status [slug] | /book list        progress",
         "  /book build <slug> | /book send <slug> <p> <chat>",
+        "  — story reader (webnovels: freewebnovel · novelfull · royalroad) —",
+        "  /book search-stories <title>             find a story across archives",
+        "  /book follow <url|title>                follow it (progress tracked)",
+        "  /book read <slug> [n] | next | prev     read chapters",
+        "  /book bible <slug>                      auto-built story bible",
+        "  /book continue <slug> [n]               keep the story going in its voice",
+        "  — fiction studio (genre engines, novel|serial) —",
+        "  /book fiction <premise> --genre <g> --mode <novel|serial>",
+        "  /book fiction-write <slug>              next chapter (validated)",
+        "  /book fiction-status <slug>             arcs, threads, cast",
         "  — wisdom keeper (corpus · history · practice) —",
         "  /wisdom ask <query>                     ask the corpus (answer + provenance)",
         "  /wisdom practice list | <session-id>    list sessions / start a guided session here",
@@ -453,6 +466,7 @@ _HELP_TEXT = "\n".join(
         "  /connectors [list] | status <name>     manage the service connectors",
         "  /connectors connect <name>             guided connect (key via env var, never chat)",
         "  /notion dbs|query|add · /gcal [agenda]|add · /trello boards|lists|cards|add",
+        "  /exness balance|positions|price|buy|sell|close · /stripe balance|customers|charges|link",
         "  /swarm <goal> [workers]                 parallel devon agents + fusion",
         "  — network / proxy / osint / automation —",
         "  /dns <domain> [record]                  A/AAAA/MX/NS/TXT/SPF/CAA (no deps)",
@@ -639,6 +653,11 @@ def help_menu(platform: str = "telegram") -> str:
     ``*bold*``/`` `code` `` on WhatsApp. Never raises.
     """
     try:
+        if str(platform or "").strip().lower() in ("whatsapp", "wa"):
+            # workstream 3: WhatsApp gets its OWN menu — text-first,
+            # numbered, no inline-button assumptions. The Telegram
+            # rendering below is untouched.
+            return whatsapp_menu()
         from .style import render_menu
         sections: list[tuple[str, str, list[tuple[str, str]]]] = []
         cur_emoji, cur_title = "🎛️", "control commands"
@@ -678,6 +697,150 @@ def help_menu(platform: str = "telegram") -> str:
             header="Devon — command menu",
             footer="say it in plain words, or tap a command — /help <command> for detail",
         )
+    except Exception:  # noqa: BLE001
+        return help_text()
+
+
+#: WhatsApp-native section curation: (LIST_GROUPS name, display title).
+#: Commands still come from LIST_GROUPS at render time — this table only
+#: sets the WhatsApp-first order and the short titles. An entry naming a
+#: group that no longer exists is skipped; LIST_GROUPS entries missing
+#: here are appended at the end in registry order, so the menu can never
+#: drift from the registry.
+_WHATSAPP_SECTION_ORDER: list[tuple[str, str]] = [
+    ("voice & vision", "voice & vision"),
+    ("media system — music · playback · video · podcast", "media"),
+    ("search & research", "search"),
+    ("wisdom keeper — corpus · history · practice", "wisdom"),
+    ("games — 41, DM + group, start them directly", "games"),
+    ("memory & thinking", "memory"),
+    ("building for real — code & missions", "build"),
+    ("tools & automation", "tools"),
+    ("her day — state & control", "control"),
+    ("discovery", "discovery"),
+]
+
+
+def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """Menu sections for WhatsApp, assembled from the registry at call time.
+
+    The first section comes from the WhatsApp adapter's GROUP_CAPABILITIES
+    table (group/community depth over the Baileys bridge); the rest come
+    from LIST_GROUPS with one-liners from LIST_ONELINERS/COMMAND_DETAILS
+    (the same sources /list renders from). A trailing "more" section
+    catches any registered command missing from every section, so
+    coverage can never drift. Returns ``[(emoji, title, [(cmd, desc)])]``.
+    """
+    from . import whatsapp as _wa  # local import: never at module load
+    sections: list[tuple[str, str, list[tuple[str, str]]]] = [(
+        "💬", "groups & communities",
+        [(f'"{say}"', what) for _, say, what in _wa.GROUP_CAPABILITIES],
+    )]
+    by_name = dict(LIST_GROUPS)
+    ordered = [g for g, _ in _WHATSAPP_SECTION_ORDER if g in by_name]
+    ordered += [g for g, _ in LIST_GROUPS if g not in ordered]
+    titles = dict(_WHATSAPP_SECTION_ORDER)
+    for group in ordered:
+        title = titles.get(group, group)
+        emoji = _GROUP_EMOJI.get(group, "📌")
+        items: list[tuple[str, str]] = []
+        for kind in by_name[group]:
+            if kind not in CONTROL_COMMANDS:
+                continue
+            one = LIST_ONELINERS.get(
+                kind, COMMAND_DETAILS.get(kind, {}).get("what", ""))
+            items.append(("/" + kind, one))
+        sections.append((emoji, title, items))
+    # coverage: every command help_text() knows must appear somewhere
+    shown = {cmd for _, _, items in sections for cmd, _ in items}
+    missing = sorted(
+        kind for kind in CONTROL_COMMANDS
+        if f"/{kind}" not in shown and f"/{kind}" in help_text())
+    if missing:
+        sections.append((
+            "📌", "more",
+            [("/" + kind,
+              LIST_ONELINERS.get(kind,
+                                 COMMAND_DETAILS.get(kind, {}).get("what", "")))
+             for kind in missing],
+        ))
+    return sections
+
+
+def _whatsapp_find_section(sections: list, page: str) -> int | None:
+    """Index of the section ``page`` names (number, title, registry name,
+    or /list alias). None when it names nothing."""
+    key = (page or "").strip().lower()
+    if not key or key == "0":
+        return None
+    if key.isdigit():
+        idx = int(key) - 1
+        return idx if 0 <= idx < len(sections) else None
+    for i, (_, title, _) in enumerate(sections):
+        if key in title.lower():
+            return i
+    registry_name = _LIST_GROUP_ALIASES.get(key)
+    if registry_name:
+        want = dict(_WHATSAPP_SECTION_ORDER).get(registry_name, registry_name)
+        for i, (_, title, _) in enumerate(sections):
+            if title == want:
+                return i
+    return None
+
+
+def whatsapp_menu(page: str = "") -> str:
+    """WhatsApp-native command menu — text-first, no buttons, no HTML.
+
+    Data-driven, never a pasted copy of the Telegram menu: the
+    "groups & communities" section comes from the WhatsApp adapter's
+    GROUP_CAPABILITIES table and every other section comes from the
+    command registry (LIST_GROUPS / LIST_ONELINERS / COMMAND_DETAILS),
+    so it can never drift from what the system actually runs. Only the
+    WhatsApp-first order and short titles are curated
+    (:data:`_WHATSAPP_SECTION_ORDER`).
+
+    * ``page=""`` — the full menu: a numbered section index, then every
+      section fully rendered (the WhatsApp send path chunks long text).
+    * ``page="3"`` — just section 3 (the "reply 3" interaction).
+    * ``page="voice"`` — the section that title/registry name matches.
+
+    Never raises: junk pages fall back to the full menu; total failure
+    falls back to :func:`help_text`.
+    """
+    try:
+        from .style import menu_divider, menu_item, menu_section
+        sections = _whatsapp_sections()
+        n = len(sections)
+
+        def _section_page(idx: int) -> str:
+            emoji, title, items = sections[idx]
+            lines = [menu_section(emoji, title, "whatsapp"), ""]
+            for command, desc in items:
+                lines.append(menu_item(command, desc, "whatsapp"))
+            lines.append("")
+            lines.append("_reply 0 for the full index · "
+                         "/help play for one command's full page_")
+            return "\n".join(lines).rstrip()
+
+        idx = _whatsapp_find_section(sections, page)
+        if idx is not None:
+            return _section_page(idx)
+
+        lines = [menu_section("✨", "Devon — command menu", "whatsapp"), ""]
+        lines.append("_text-first — no buttons, no tapping needed_")
+        lines.append("")
+        for i, (emoji, title, items) in enumerate(sections, 1):
+            lines.append(f"{i} · {emoji} *{title.upper()}* ({len(items)})")
+        for emoji, title, items in sections:
+            lines.append("")
+            lines.append(menu_divider("whatsapp"))
+            lines.append(menu_section(emoji, title, "whatsapp"))
+            for command, desc in items:
+                lines.append(menu_item(command, desc, "whatsapp"))
+        lines.append("")
+        lines.append(f"_reply 1–{n} for just that section · "
+                     "say it in plain words · /help play for one command's full page_")
+        return "\n".join(lines).rstrip()
     except Exception:  # noqa: BLE001
         return help_text()
 
@@ -1316,6 +1479,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/trello boards | /trello lists <board> | /trello cards <list> | /trello add <list> | <name> [| <desc>]",
             "example": "/trello add Todo | buy milk",
             "related": "/connectors /notion /gcal"},
+    "exness": {"what": "Exness trading: balance, positions, prices, market orders — through your connected Exness account (orders are your explicit command).",
+            "usage": "/exness balance | positions | price <symbol> [tf] | buy <symbol> <lots> [sl] [tp] | sell <symbol> <lots> [sl] [tp] | close <position-id>",
+            "example": "/exness buy XAUUSD 0.01",
+            "related": "/connectors /stripe /trade"},
+    "stripe": {"what": "Stripe payments: balance, customers, charges, hosted checkout links — through your connected Stripe account.",
+            "usage": "/stripe balance | customers [email] | charges | link <amount> <currency> <label>",
+            "example": "/stripe link 25.50 usd logo gig",
+            "related": "/connectors /exness /money"},
     "swarm": {"what": "parallel swarm on one goal — devon builder agents with a fusion of their results, or the research swarm: parallel researchers, trusted sources first, conflicting claims flagged, structured report filed in memory.",
               "usage": "/swarm <goal> [workers]  |  /swarm research <topic>",
               "example": "/swarm audit this repo 4 · /swarm research is termux fast enough for llm inference",
@@ -1541,8 +1712,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/caption [style] — attach a video or pass a path",
               "example": "/caption karaoke",
               "related": "/video"},
-    "vision": {"what": "Analyze an image with the vision model: describe, answer questions, read text.",
-              "usage": "/vision [question] — attach an image or pass a path/URL",
+    "vision": {"what": "Devon's eyes: describe, read-text, locate, compare, analyze (native), info.",
+              "usage": "/vision [subcommand] <image> [args] — attach an image or pass a path/URL "
+                       "(describe, read-text, locate, compare, analyze, faces, qr, layout, "
+                       "hash, exif, colors, info)",
               "example": "/vision what's in this screenshot?",
               "related": "/look /lens"},
     "exec": {"what": "Execution system: runs code in the sandbox with "

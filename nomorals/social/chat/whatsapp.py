@@ -12,17 +12,27 @@ Protocol (one JSON object per line):
     {"type":"status","state":"open|closed","user":"<jid>"}
     {"type":"qr","data":"<qr string>"}
     {"type":"message","chat":{"id","kind","title"},"from":{"id","name"},
-     "text":"...","media":[{"path","mime","kind"}],"reply_to":"","ts":<ms>}
+     "text":"...","media":[{"path","mime","kind"}],"reply_to":"","mentioned":false,"ts":<ms>}
+    {"type":"receipt","chat":"<jid>","ids":["<msg id>",...],"kind":"delivered|read"}
     {"id":"<req>","ok":true,"error":""}          # response to a command
 
   python -> bridge
     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":""}
     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
-    {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3}
+    {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,"presence":"composing|recording"}
     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
     {"id":"<req>","cmd":"read","chat":"<jid>"}            # best-effort receipts
     {"id":"<req>","cmd":"chats","limit":30}               # best-effort listing
     {"id":"<req>","cmd":"status"}
+    # group/community depth (bridge/whatsapp-groups.mjs — read-only):
+    {"id":"<req>","cmd":"group_list"}                   # all groups: id/subject/size/isCommunity
+    {"id":"<req>","cmd":"group_info","chat":"<@g.us>"}  # metadata + admins + invite link (if permitted)
+    {"id":"<req>","cmd":"group_participants","chat":"<@g.us>"}  # roster with admin roles
+    {"id":"<req>","cmd":"community_list"}              # communities + their linked groups
+
+Offline resilience: when the bridge is down, ``send``/``send_media`` queue
+to a persistent outbox (``data/chat/outbox/whatsapp.jsonl``) and flush FIFO
+on reconnect — a bridge restart no longer eats composed replies.
 
 The bridge owns the credential state (``.creds/`` directory); this client
 stores nothing. Commands the bridge doesn't implement answer ok:false and
@@ -32,6 +42,8 @@ the adapter degrades gracefully (``mark_read``/``chats`` return False/[]).
 from __future__ import annotations
 
 import json
+import os
+import random as _random
 import socket
 import threading
 import time
@@ -41,9 +53,133 @@ from typing import Any
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
 
-__all__ = ["WhatsAppAdapter"]
+__all__ = ["WhatsAppAdapter", "Outbox", "GROUP_CAPABILITIES"]
 
 _log = get_logger(__name__)
+
+#: Group/community capabilities exposed over the bridge JSON-lines protocol
+#: (bridge/whatsapp-groups.mjs — read-only). One source of truth: the
+#: WhatsApp-native menu (control.whatsapp_menu) renders its
+#: "groups & communities" section from this table, and the adapter methods
+#: below implement it. ``(key, plain_words, what_it_does)``.
+GROUP_CAPABILITIES: tuple[tuple[str, str, str], ...] = (
+    ("groups", "list my groups",
+     "every group: name, member count, community or not"),
+    ("group info", "info on a group by name",
+     "subject, description, admins, settings, invite link"),
+    ("group members", "who is in a group by name",
+     "the member roster with admin roles"),
+    ("communities", "list my communities",
+     "communities and their linked groups"),
+)
+
+#: How many unsent messages the outbox holds (oldest dropped past this).
+OUTBOX_MAX_ENTRIES = 200
+#: Entries older than this are dropped on flush — a day-old "typing…"
+#: reply is worse than silence.
+OUTBOX_TTL_S = 24 * 3600.0
+
+
+def _jittered_backoff(base: float, attempt: int, *, cap: float = 60.0,
+                      rng: Any = None) -> float:
+    """Exponential backoff with full-ish jitter for reconnect loops.
+
+    Deterministic when ``rng`` is an injected ``random.Random`` (tests);
+    uses the module random otherwise.
+    """
+    rng = rng or _random
+    delay = min(base * (2.0 ** max(0, attempt - 1)), cap)
+    return max(0.5, delay * rng.uniform(0.7, 1.3))
+
+
+class Outbox:
+    """Persistent send queue for bridge outages.
+
+    When the WhatsApp bridge is down, sends land here (JSON-lines, one
+    file) instead of dying. The adapter flushes FIFO on reconnect; entries
+    past ``OUTBOX_TTL_S`` are dropped, not delivered stale. Bounded at
+    ``OUTBOX_MAX_ENTRIES`` — the queue is a resilience buffer, not an
+    unbounded log.
+    """
+
+    def __init__(self, path: str, *, max_entries: int = OUTBOX_MAX_ENTRIES,
+                 ttl_s: float = OUTBOX_TTL_S) -> None:
+        self.path = path
+        self.max_entries = max(1, int(max_entries))
+        self.ttl_s = float(ttl_s)
+        self._lock = threading.Lock()
+
+    def _read_all(self) -> list[dict[str, Any]]:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+        except FileNotFoundError:
+            return []
+        except Exception as exc:  # noqa: BLE001 - corrupt queue: start over
+            _log.warning("whatsapp outbox unreadable (%s) — starting fresh", exc)
+            return []
+
+    def _write_all(self, entries: list[dict[str, Any]]) -> None:
+        tmp = self.path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for entry in entries:
+                    fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            os.replace(tmp, self.path)
+        except Exception as exc:  # noqa: BLE001 - outbox is best-effort
+            _log.debug("whatsapp outbox write failed: %s", exc)
+
+    def pending(self) -> list[dict[str, Any]]:
+        """Entries not yet delivered (oldest first). Never raises."""
+        with self._lock:
+            return self._read_all()
+
+    def pending_count(self) -> int:
+        return len(self.pending())
+
+    def enqueue(self, entry: dict[str, Any]) -> bool:
+        """Append one entry. False when the entry was dropped (too old)."""
+        with self._lock:
+            entries = self._read_all()
+            entries.append({**entry, "enqueued_at": time.time()})
+            # Bound: drop oldest first.
+            if len(entries) > self.max_entries:
+                dropped = len(entries) - self.max_entries
+                entries = entries[dropped:]
+                _log.warning("whatsapp outbox full — dropped %d oldest", dropped)
+            self._write_all(entries)
+            return True
+
+    def clear(self) -> None:
+        with self._lock:
+            self._write_all([])
+
+    def flush(self, deliver: Any) -> dict[str, int]:
+        """Deliver queued entries FIFO via ``deliver(entry) -> bool``.
+
+        Expired entries are dropped; failed ones stay queued (in order).
+        Returns ``{"sent": n, "dropped": n, "kept": n}``.
+        """
+        with self._lock:
+            entries = self._read_all()
+            now = time.time()
+            sent, dropped, kept = 0, 0, []
+            for entry in entries:
+                if now - float(entry.get("enqueued_at", now)) > self.ttl_s:
+                    dropped += 1
+                    continue
+                try:
+                    ok = bool(deliver(entry))
+                except Exception as exc:  # noqa: BLE001 - deliver must not break the queue
+                    _log.debug("whatsapp outbox deliver failed: %s", exc)
+                    ok = False
+                if ok:
+                    sent += 1
+                else:
+                    kept.append(entry)
+            self._write_all(kept)
+            return {"sent": sent, "dropped": dropped, "kept": len(kept)}
 
 
 def _split_text(text: str, *, limit: int = 4000) -> list[str]:
@@ -86,6 +222,8 @@ class WhatsAppAdapter(ChatAdapter):
         port: int = 8787,
         reconnect_delay: float = 3.0,
         media_dir: str = "data/media/whatsapp",
+        outbox_dir: str = "data/chat/outbox",
+        outbox_enabled: bool = True,
     ) -> None:
         super().__init__(media_dir=media_dir)
         self.host = host
@@ -103,6 +241,96 @@ class WhatsAppAdapter(ChatAdapter):
         self.last_qr: str = ""
         self.last_qr_at: float = 0.0
         self.bridge_state: str = "unknown"
+        # Outbound resilience: sends while the bridge is down are queued to
+        # disk and flushed on reconnect, so a bridge restart doesn't eat
+        # the reply the brain already composed.
+        self.outbox_enabled = bool(outbox_enabled)
+        self.outbox = Outbox(os.path.join(outbox_dir, "whatsapp.jsonl"))
+        #: Delivery receipts from the bridge's messages.update feed:
+        #: message_id -> {"status": "sent|delivered|read", "ts": float}.
+        #: Bounded — only the freshest few hundred are kept.
+        self._receipts: dict[str, dict[str, Any]] = {}
+        self._receipts_lock = threading.Lock()
+
+    # ── delivery receipts ────────────────────────────────────────────────
+    def delivery_status(self, message_id: str) -> dict[str, Any] | None:
+        """Last known receipt for a sent message, or None. Never raises."""
+        try:
+            with self._receipts_lock:
+                row = self._receipts.get(str(message_id or ""))
+                return dict(row) if row else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _note_receipt(self, message_id: str, status: str) -> None:
+        message_id = str(message_id or "")
+        if not message_id:
+            return
+        with self._receipts_lock:
+            self._receipts[message_id] = {"status": status, "ts": time.time()}
+            if len(self._receipts) > 500:
+                # evict oldest
+                oldest = sorted(self._receipts.items(),
+                                key=lambda kv: kv[1].get("ts", 0.0))[:100]
+                for key, _ in oldest:
+                    self._receipts.pop(key, None)
+
+    # ── outbox ───────────────────────────────────────────────────────────
+    def _chat_from_entry(self, entry: dict[str, Any]) -> ChatRef:
+        return ChatRef(
+            platform=self.name,
+            chat_id=str(entry.get("chat_id") or ""),
+            kind=str(entry.get("chat_kind") or ChatKind.DM),
+            thread_id=str(entry.get("thread_id") or ""),
+        )
+
+    def _enqueue(self, entry: dict[str, Any]) -> SendResult:
+        """Queue one send for the reconnect flush. Returns a queued result."""
+        if not self.outbox_enabled:
+            return SendResult(ok=False, platform=self.name,
+                              error="bridge not connected (outbox disabled)")
+        self.outbox.enqueue(entry)
+        _log.info("whatsapp: bridge down — queued %s send for %s",
+                  entry.get("kind"), entry.get("chat_id"))
+        return SendResult(
+            ok=False, platform=self.name,
+            message_id="queued-" + uuid.uuid4().hex[:8],
+            error="bridge not connected — queued for delivery on reconnect",
+        )
+
+    def _flush_outbox_async(self) -> None:
+        """Flush the outbox on a side thread — never on the reader thread."""
+        def _job() -> None:
+            try:
+                report = self.outbox.flush(self._deliver_entry)
+                if report["sent"] or report["dropped"]:
+                    _log.info("whatsapp outbox flush: %s", report)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("whatsapp outbox flush failed: %s", exc)
+
+        threading.Thread(target=_job, name="wa-outbox-flush", daemon=True).start()
+
+    def _deliver_entry(self, entry: dict[str, Any]) -> bool:
+        """Deliver one outbox entry. True when delivered."""
+        if not self.connected.is_set():
+            return False
+        chat = self._chat_from_entry(entry)
+        kind = str(entry.get("kind") or "text")
+        try:
+            if kind == "media":
+                media = MediaRef(path=str(entry.get("path") or ""),
+                                 kind=str(entry.get("media_kind") or "file"),
+                                 name=str(entry.get("name") or ""))
+                result = self.send_media(chat, media,
+                                         caption=str(entry.get("caption") or ""))
+            else:
+                result = self._send_with_retry(
+                    chat, str(entry.get("text") or ""),
+                    reply_to=str(entry.get("reply_to") or ""))
+            return bool(result.ok)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("whatsapp outbox entry failed: %s", exc)
+            return False
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _jid(self, chat: ChatRef) -> str:
@@ -188,12 +416,24 @@ class WhatsAppAdapter(ChatAdapter):
             state = str(obj.get("state") or "")
             self.bridge_state = state
             if state == "open":
+                was_down = not self.connected.is_set()
                 self.connected.set()
                 _log.info("whatsapp bridge connected as %s", self.user_jid)
+                if was_down:
+                    # Bridge (re)connected — drain anything the brain sent
+                    # while it was away.
+                    self._flush_outbox_async()
             else:
                 self.connected.clear()
                 if state:
                     _log.warning("whatsapp bridge state: %s", state)
+        elif kind == "receipt":
+            # Delivery receipts from the bridge's messages.update feed:
+            # {"type":"receipt","chat":"<jid>","ids":[...],"kind":"delivered|read"}
+            status = str(obj.get("kind") or "").strip().lower()
+            if status in ("delivered", "read"):
+                for mid in obj.get("ids") or []:
+                    self._note_receipt(str(mid or ""), status)
         elif kind == "qr":
             self.last_qr = str(obj.get("data") or "")
             self.last_qr_at = time.time()
@@ -231,14 +471,18 @@ class WhatsAppAdapter(ChatAdapter):
                         if m.get("path")
                     ],
                     reply_to=str(obj.get("reply_to") or ""),
+                    # @-mentions of this account in groups — the bridge
+                    # computes it from contextInfo.mentionedJid, so group
+                    # replies trigger exactly like Telegram's _mentions_me.
+                    mentioned=bool(obj.get("mentioned")),
                     ts=ts,
                 ),
             )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def run(self, handler: IncomingHandler) -> None:
-        """Connect, read forever, reconnect with backoff."""
-        delay = self.reconnect_delay
+        """Connect, read forever, reconnect with jittered exponential backoff."""
+        attempt = 0
         while not self.stopped:
             try:
                 sock = socket.create_connection((self.host, self.port), timeout=15)
@@ -247,22 +491,21 @@ class WhatsAppAdapter(ChatAdapter):
                 reader = threading.Thread(target=self._reader_loop, args=(handler,),
                                           name=f"wa-{self.name}-reader", daemon=True)
                 reader.start()
-                delay = self.reconnect_delay
+                attempt = 0  # a live connection resets the backoff ladder
                 # The reader clears `connected` on exit. If it dies the
                 # socket dropped and we must reconnect — watch its
                 # liveness, don't just sleep until stopped.
                 while not self.stopped and reader.is_alive():
                     time.sleep(0.25)
                 if not self.stopped:
-                    _log.warning("whatsapp bridge connection lost; "
-                                 "reconnecting in %.0fs", delay)
+                    _log.warning("whatsapp bridge connection lost")
             except OSError as exc:
                 self.connected.clear()
                 self._sock = None
                 if self.stopped:
                     return
-                _log.warning("whatsapp bridge unreachable at %s:%s (%s); retrying in %.0fs",
-                             self.host, self.port, exc, delay)
+                _log.warning("whatsapp bridge unreachable at %s:%s (%s)",
+                             self.host, self.port, exc)
             finally:
                 if self._sock is not None:
                     try:
@@ -272,8 +515,11 @@ class WhatsAppAdapter(ChatAdapter):
                     self._sock = None
             if self.stopped:
                 return
+            attempt += 1
+            delay = _jittered_backoff(self.reconnect_delay, attempt, cap=60.0)
+            _log.warning("whatsapp bridge: reconnecting in %.0fs (attempt %d)",
+                         delay, attempt)
             time.sleep(delay)
-            delay = min(delay * 2, 60.0)
 
     def wait_for_bridge(self, timeout: float = 60.0) -> bool:
         started = time.time()
@@ -333,8 +579,14 @@ class WhatsAppAdapter(ChatAdapter):
              parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
-            return SendResult(ok=False, platform=self.name, error="bridge not connected",
-                              seconds=time.perf_counter() - started)
+            return self._enqueue({
+                "kind": "text",
+                "chat_id": chat.chat_id,
+                "chat_kind": chat.kind,
+                "thread_id": chat.thread_id,
+                "text": text,
+                "reply_to": reply_to,
+            })
         # Convert Telegram HTML / canonical markdown to WhatsApp markdown
         # (game output and styled menus are authored Telegram-first).
         try:
@@ -357,17 +609,27 @@ class WhatsAppAdapter(ChatAdapter):
 
     def send_media(self, chat: ChatRef, media: MediaRef, *,
                    caption: str = "") -> SendResult:
-        """Send a photo/video/audio/document via the bridge's send_media."""
+        """Send a photo/video/audio/document via the bridge's send_media.
+
+        When the bridge is down the media is queued (path + caption) and
+        flushed on reconnect — same as text."""
         started = time.perf_counter()
-        if not self.connected.is_set():
-            return SendResult(ok=False, platform=self.name,
-                              error="bridge not connected",
-                              seconds=time.perf_counter() - started)
         path = (media.path or "").strip()
         if not path:
             return SendResult(ok=False, platform=self.name,
                               error="media has no path",
                               seconds=time.perf_counter() - started)
+        if not self.connected.is_set():
+            return self._enqueue({
+                "kind": "media",
+                "chat_id": chat.chat_id,
+                "chat_kind": chat.kind,
+                "thread_id": chat.thread_id,
+                "path": path,
+                "media_kind": (media.kind or "").lower(),
+                "name": media.name or "",
+                "caption": caption,
+            })
         cmd: dict[str, Any] = {
             "cmd": "send_media",
             "chat": self._jid(chat),
@@ -423,12 +685,139 @@ class WhatsAppAdapter(ChatAdapter):
             })
         return [c for c in out if c["id"]]
 
-    def typing(self, chat: ChatRef, seconds: float = 3.0) -> bool:
+    # ── groups & communities (bridge/whatsapp-groups.mjs — read-only) ────────
+    def _group_jid(self, chat: ChatRef | str) -> str:
+        """Normalize a chat ref or raw string to a group JID for group calls."""
+        if isinstance(chat, ChatRef):
+            jid = self._jid(chat)
+        else:
+            jid = str(chat or "").strip()
+        return jid
+
+    def groups(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Every group the account participates in.
+
+        ``[{"id", "subject", "size", "is_community", "linked_parent"}]``,
+        sorted by subject. Best-effort: [] when the bridge is down or an
+        older bridge doesn't implement ``group_list``.
+        """
+        if not self.connected.is_set():
+            return []
+        response = self._send_cmd({"cmd": "group_list"}, timeout=30)
+        if not response.get("ok"):
+            return []
+        out = []
+        for entry in response.get("groups") or []:
+            try:
+                out.append({
+                    "id": str(entry.get("id") or ""),
+                    "subject": str(entry.get("subject") or ""),
+                    "size": int(entry.get("size") or 0),
+                    "is_community": bool(entry.get("isCommunity")),
+                    "is_community_announce": bool(entry.get("isCommunityAnnounce")),
+                    "linked_parent": str(entry.get("linkedParent") or ""),
+                })
+            except (TypeError, ValueError):  # noqa: BLE001 - skip malformed rows
+                continue
+        return [g for g in out if g["id"]][:max(1, int(limit))]
+
+    def group_info(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Full metadata for one group: subject, description, size, admins,
+        settings flags, and the invite link when the account may see it.
+        {} when unknown, unreachable, or not a group.
+        """
+        if not self.connected.is_set():
+            return {}
+        response = self._send_cmd(
+            {"cmd": "group_info", "chat": self._group_jid(chat)}, timeout=20)
+        if not response.get("ok"):
+            return {}
+        group = response.get("group") or {}
+        return {
+            "id": str(group.get("id") or ""),
+            "subject": str(group.get("subject") or ""),
+            "desc": str(group.get("desc") or ""),
+            "size": int(group.get("size") or 0),
+            "creation": float(group.get("creation") or 0),
+            "owner": str(group.get("owner") or ""),
+            "is_community": bool(group.get("isCommunity")),
+            "linked_parent": str(group.get("linkedParent") or ""),
+            "announce": bool(group.get("announce")),
+            "restrict": bool(group.get("restrict")),
+            "member_add_mode": bool(group.get("memberAddMode")),
+            "join_approval_mode": bool(group.get("joinApprovalMode")),
+            "ephemeral_hours": int(group.get("ephemeralHours") or 0),
+            "admins": [str(j) for j in (group.get("admins") or [])],
+            "invite": str(group.get("invite") or ""),
+        }
+
+    def group_participants(self, chat: ChatRef | str) -> list[dict[str, Any]]:
+        """The member roster: ``[{"jid", "name", "role"}]`` where role is
+        ``""``/``"admin"``/``"superadmin"``. Names come from the local
+        contact store and may be empty for strangers — never invented.
+        [] on failure.
+        """
+        if not self.connected.is_set():
+            return []
+        response = self._send_cmd(
+            {"cmd": "group_participants", "chat": self._group_jid(chat)},
+            timeout=20)
+        if not response.get("ok"):
+            return []
+        out = []
+        for entry in response.get("participants") or []:
+            try:
+                out.append({
+                    "jid": str(entry.get("jid") or ""),
+                    "name": str(entry.get("name") or ""),
+                    "role": str(entry.get("role") or ""),
+                })
+            except (TypeError, ValueError):  # noqa: BLE001 - skip malformed rows
+                continue
+        return [p for p in out if p["jid"]]
+
+    def communities(self) -> list[dict[str, Any]]:
+        """Communities the account participates in, each with its linked
+        groups: ``[{"id", "subject", "desc", "size", "groups": [...]}]``.
+        [] on failure.
+        """
+        if not self.connected.is_set():
+            return []
+        response = self._send_cmd({"cmd": "community_list"}, timeout=30)
+        if not response.get("ok"):
+            return []
+        out = []
+        for entry in response.get("communities") or []:
+            try:
+                out.append({
+                    "id": str(entry.get("id") or ""),
+                    "subject": str(entry.get("subject") or ""),
+                    "desc": str(entry.get("desc") or ""),
+                    "size": int(entry.get("size") or 0),
+                    "groups": [
+                        {"id": str(g.get("id") or ""),
+                         "subject": str(g.get("subject") or ""),
+                         "size": int(g.get("size") or 0)}
+                        for g in (entry.get("groups") or [])
+                        if g.get("id")
+                    ],
+                })
+            except (TypeError, ValueError):  # noqa: BLE001 - skip malformed rows
+                continue
+        return [c for c in out if c["id"]]
+
+    def typing(self, chat: ChatRef, seconds: float = 3.0,
+               action: str = "typing") -> bool:
+        """Typing indicator. ``action="recording"`` maps to WhatsApp's
+        recording presence (voice-note replies); anything else is the
+        regular "typing" indicator."""
         if not self.connected.is_set() or seconds <= 0:
             return False
+        presence = "recording" if action == "recording" else "composing"
         response = self._send_cmd(
             {"cmd": "typing", "chat": self._jid(chat),
-             "seconds": max(1, int(seconds))}, timeout=5)
+             "seconds": max(1, int(seconds)), "presence": presence},
+            timeout=5)
         return bool(response.get("ok"))
 
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
@@ -470,4 +859,6 @@ class WhatsAppAdapter(ChatAdapter):
                 "bridge_state": self.bridge_state,
                 "qr_pending": bool(self.last_qr),
                 "qr_age_s": round(time.time() - self.last_qr_at, 1)
-                if self.last_qr else None}
+                if self.last_qr else None,
+                "outbox_pending": self.outbox.pending_count(),
+                "receipts_tracked": len(self._receipts)}
