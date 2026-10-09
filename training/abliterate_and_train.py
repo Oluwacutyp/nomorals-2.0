@@ -29,7 +29,7 @@ FINAL_ADAPTER = OUTPUT_DIR / "final_adapter"
 SEQ_LEN      = 2048       # VL needs room for image tokens
 LORA_RANK    = 32         # 7B deserves more rank than 3.8B's 16
 LORA_ALPHA   = 64
-TARGET_ROWS  = 500_000
+TARGET_ROWS  = 273_000    # sweet spot LOCKED 2026-10-09 (caps total 272,770)
 BATCH_SIZE   = 2
 GRAD_ACCUM   = 8          # effective batch 16
 LEARNING_RATE = 2e-4
@@ -405,7 +405,7 @@ def train(abliterated_path):
         print(f"Pushing to {HF_REPO}...")
         from huggingface_hub import HfApi
         api = HfApi(token=HF_TOKEN)
-        api.create_repo(HF_REPO, exist_ok=True, private=False)
+        api.create_repo(HF_REPO, exist_ok=True, private=True)   # PRIVATE locked 2026-10-09
         api.upload_folder(folder_path=str(FINAL_ADAPTER), repo_id=HF_REPO)
         print(f"✓ Pushed to https://huggingface.co/{HF_REPO}")
     else:
