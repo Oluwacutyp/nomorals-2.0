@@ -163,9 +163,17 @@ class SourceResolver:
             # must not kill the other
             _log.info("resolver candidates: soundcloud failed: %s", exc)
         try:
+            out.extend(self._netnaija_search_many(q, limit))
+        except Exception as exc:  # noqa: BLE001
+            _log.info("resolver candidates: netnaija failed: %s", exc)
+        try:
             out.extend(self._youtube_search_many(q, limit))
         except Exception as exc:  # noqa: BLE001
             _log.info("resolver candidates: youtube failed: %s", exc)
+        try:
+            out.extend(self._boomplay_search_many(q, limit))
+        except Exception as exc:  # noqa: BLE001
+            _log.info("resolver candidates: boomplay failed: %s", exc)
         seen: set[tuple[str, str]] = set()
         deduped: list[ResolvedAudio] = []
         for r in out:
@@ -209,6 +217,32 @@ class SourceResolver:
                 duration=row.get("duration") or 0.0,
                 kind="youtube",
                 source_name="YouTube search (yt-dlp)"))
+        return out
+
+    def _netnaija_search_many(self, query: str,
+                             limit: int) -> list[ResolvedAudio]:
+        from .sources import NetNaijaSource  # lazy: same layer
+
+        out: list[ResolvedAudio] = []
+        for c in NetNaijaSource().search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.url, title=c.title,
+                artist=c.artist, duration=c.duration, kind="netnaija",
+                source_name="NetNaija search"))
+        return out
+
+    def _boomplay_search_many(self, query: str,
+                             limit: int) -> list[ResolvedAudio]:
+        from .sources import BoomplaySource  # lazy: same layer
+
+        out: list[ResolvedAudio] = []
+        for c in BoomplaySource().search(query, limit=limit):
+            out.append(ResolvedAudio(
+                ok=True, path_or_url=c.url, title=c.title,
+                artist=c.artist, kind="boomplay",
+                source_name="Boomplay search", downloadable=False,
+                hint="Boomplay streams are protected — open in the "
+                     "Boomplay app"))
         return out
 
     # ── chain machinery ───────────────────────────────────────────────
@@ -294,6 +328,7 @@ class SourceResolver:
         # the SoundCloud API is purely a metadata optimization with a
         # yt-dlp fallback — its failure is never fatal.
         return self._run_chain(result, [
+            ("audiomack", lambda: self._s_audiomack_url(url)),
             ("soundcloud-api", lambda: self._s_soundcloud_url(url)),
             ("yt-dlp", lambda: self._s_ytdlp_url(url)),
             ("direct-url", lambda: self._s_direct_url(url)),
@@ -302,12 +337,16 @@ class SourceResolver:
     def _resolve_text(self, query: str,
                       result: ResolvedAudio) -> ResolvedAudio:
         # Downloadable sources first; Spotify last — it can only play on
-        # a linked device, never produce a file for chat.
+        # a linked device, never produce a file for chat.  Nigerian
+        # sources (NetNaija) get priority for direct MP3s; Boomplay is
+        # metadata-only (protected streams) so it sits with Spotify.
         return self._run_chain(result, [
             ("workspace-scan", lambda: self._s_workspace_scan(query)),
+            ("netnaija-search", lambda: self._s_netnaija_search(query)),
             ("soundcloud-search",
              lambda: self._s_soundcloud_search(query)),
             ("youtube-search", lambda: self._s_youtube_search(query)),
+            ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("spotify-search", lambda: self._s_spotify_search(query)),
         ])
 
@@ -473,6 +512,54 @@ class SourceResolver:
             path_or_url=PlaybackEngine._youtube_watch_url(video_id),
             title=query, kind="youtube",
             source_name="YouTube search (yt-dlp)")
+
+    def _s_audiomack_url(self, url: str) -> ResolvedAudio:
+        """First-class Audiomack URLs — yt-dlp's audiomack extractor
+        handles the download (verified in yt-dlp 2026.08.19)."""
+        from .sources import AudiomackSource  # lazy: same layer
+
+        src = AudiomackSource()
+        if not src.handles_url(url):
+            raise ResolutionError("audiomack", "not an Audiomack track URL")
+        title = url
+        try:
+            info = probe(url)
+            title = str((info or {}).get("title") or url)
+        except Exception:  # noqa: BLE001 — title is a nicety, not required
+            pass
+        _log.info("resolver: audiomack URL -> %s", title[:60])
+        return ResolvedAudio(ok=True, path_or_url=url, title=title,
+                             kind="audiomack",
+                             source_name="Audiomack (yt-dlp)")
+
+    def _s_netnaija_search(self, query: str) -> ResolvedAudio:
+        """NetNaija text search — Nigerian download blog, direct MP3s."""
+        from .sources import NetNaijaSource  # lazy: same layer
+
+        cands = NetNaijaSource().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                "netnaija-search", f"no NetNaija results for {query!r}")
+        c = cands[0]
+        _log.info("resolver: netnaija hit -> %s", c.title[:60])
+        return ResolvedAudio(ok=True, path_or_url=c.url, title=c.title,
+                             artist=c.artist, kind="netnaija",
+                             source_name="NetNaija search")
+
+    def _s_boomplay_search(self, query: str) -> ResolvedAudio:
+        """Boomplay text search — metadata only (protected streams)."""
+        from .sources import BoomplaySource  # lazy: same layer
+
+        cands = BoomplaySource().search(query, limit=5)
+        if not cands:
+            raise ResolutionError(
+                "boomplay-search", f"no Boomplay results for {query!r}")
+        c = cands[0]
+        return ResolvedAudio(
+            ok=True, path_or_url=c.url, title=c.title, artist=c.artist,
+            kind="boomplay", source_name="Boomplay search",
+            downloadable=False,
+            hint="Boomplay streams are protected — open in the Boomplay app")
 
     # ── strategies: leftovers ─────────────────────────────────────────
 

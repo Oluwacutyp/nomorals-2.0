@@ -750,8 +750,10 @@ class PlaybackEngine:
         - file: already local → path as-is
         - youtube: download + cache via _youtube_audio
         - soundcloud: resolve stream URL, download via media_download
+        - audiomack: download via media_download (yt-dlp extractor)
+        - netnaija: scrape the post page for the direct MP3, then download
         - url: download via media_download (yt-dlp or direct HTTP)
-        - spotify: honest refusal (DRM, no downloadable stream)
+        - spotify / boomplay: honest refusal (DRM / protected streams)
         """
         try:
             kind = str(item.get("kind", ""))
@@ -761,6 +763,12 @@ class PlaybackEngine:
                         "Spotify tracks can't be downloaded (DRM) — "
                         "they play on your linked Spotify device, not in chat. "
                         "Try /play youtube:<song> instead."}
+            if kind == "boomplay":
+                return {"ok": False, "reason":
+                        "Boomplay streams are protected — they play in the "
+                        "Boomplay app, not in chat. "
+                        "Try /play youtube:<song> or /play netnaija:<song> "
+                        "instead."}
             if kind == "file":
                 path = str(item.get("path", ""))
                 if path and os.path.isfile(path):
@@ -772,7 +780,8 @@ class PlaybackEngine:
                 except Exception as exc:  # noqa: BLE001
                     return {"ok": False, "reason": f"YouTube download failed: {exc}"}
                 return {"ok": True, "path": path, "title": title}
-            # soundcloud + generic url: resolve then download
+            # soundcloud + audiomack + netnaija + generic url:
+            # resolve then download
             url = str(item.get("path", ""))
             if kind == "soundcloud":
                 try:
@@ -787,6 +796,18 @@ class PlaybackEngine:
                               "falling back to yt-dlp",
                               item.get("path"), exc)
                     url = str(item.get("path", ""))
+            if kind == "netnaija":
+                from .sources import NetNaijaSource, SourceCandidate
+                direct = NetNaijaSource().download_url(SourceCandidate(
+                    source="netnaija", title=title, url=url))
+                if not direct:
+                    _log.info("netnaija: no direct MP3 for %r; "
+                              "trying YouTube fallback", title)
+                    return self._download_youtube_fallback(
+                        item, title, "NetNaija download page unreachable",
+                        source_label="NetNaija")
+                url = direct
+                _log.info("netnaija: direct MP3 resolved for %r", title)
             if not url:
                 return {"ok": False, "reason": "no URL to download"}
             tools = getattr(self.context, "tools", None)
@@ -804,12 +825,17 @@ class PlaybackEngine:
                 dl_error = getattr(out, "error", "unknown error")
             if dl_error is not None:
                 err_msg = str(dl_error)
-                # SoundCloud tracks sometimes come back DRM/private-locked.
-                # Fall back to YouTube once using the known artist/title
-                # instead of failing outright.
-                if kind == "soundcloud" and is_protection_error(err_msg):
-                    return self._download_youtube_fallback(item, title,
-                                                           err_msg)
+                # SoundCloud/Audiomack/NetNaija tracks sometimes come back
+                # DRM/private-locked or unreachable.  Fall back to YouTube
+                # once using the known artist/title instead of failing
+                # outright.
+                if kind in ("soundcloud", "audiomack",
+                            "netnaija") and is_protection_error(err_msg):
+                    return self._download_youtube_fallback(
+                        item, title, err_msg,
+                        source_label={"soundcloud": "SoundCloud",
+                                      "audiomack": "Audiomack",
+                                      "netnaija": "NetNaija"}[kind])
                 return {"ok": False, "reason": f"download failed: {err_msg}"}
             value = out.value if isinstance(out.value, dict) else {}
             path = str(value.get("path", ""))
@@ -821,8 +847,9 @@ class PlaybackEngine:
             return {"ok": False, "reason": f"download error: {exc}"}
 
     def _download_youtube_fallback(self, item: dict[str, Any], title: str,
-                                   sc_error: str) -> dict[str, Any]:
-        """One-shot YouTube fallback after a SoundCloud protection failure.
+                                   sc_error: str,
+                                   source_label: str = "SoundCloud") -> dict[str, Any]:
+        """One-shot YouTube fallback after a source protection failure.
 
         Reuses the item's known artist/title to search YouTube and
         downloads the top result. Never raises — returns the honest
@@ -830,18 +857,18 @@ class PlaybackEngine:
         """
         artist = str(item.get("artist", "") or "").strip()
         query = f"{artist} {title}".strip() if artist else title.strip()
-        _log.info("soundcloud download blocked (%s); trying YouTube for %r",
-                  sc_error[:80], query)
+        _log.info("%s download blocked (%s); trying YouTube for %r",
+                  source_label, sc_error[:80], query)
         try:
             video_id = self._youtube_search_id(query)
         except Exception as exc:  # noqa: BLE001
             from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
             if is_bot_detection_error(exc):
                 return {"ok": False,
-                        "reason": f"SoundCloud blocked the download ({sc_error[:80]}). "
+                        "reason": f"{source_label} blocked the download ({sc_error[:80]}). "
                                   f"{BOT_COOKIE_HELP}"}
             return {"ok": False,
-                    "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
+                    "reason": f"{source_label} blocked the download ({sc_error[:80]}) "
                               f"and YouTube search failed: {exc}"}
         yt_item = {"kind": "youtube",
                    "path": self._youtube_watch_url(video_id),
@@ -853,14 +880,14 @@ class PlaybackEngine:
             err = str(exc)
             if is_bot_detection_error(err):
                 return {"ok": False,
-                        "reason": f"SoundCloud blocked the download ({sc_error[:80]}). "
+                        "reason": f"{source_label} blocked the download ({sc_error[:80]}). "
                                   f"{BOT_COOKIE_HELP}"}
             return {"ok": False,
-                    "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
+                    "reason": f"{source_label} blocked the download ({sc_error[:80]}) "
                               f"and YouTube download failed: {exc}"}
         _log.info("youtube fallback succeeded for %r", query)
         return {"ok": True, "path": path, "title": title,
-                "note": "via YouTube (SoundCloud was DRM-locked)"}
+                "note": f"via YouTube ({source_label} was blocked)"}
 
     def _add_youtube(self, target: str, title: str = "") -> list[dict[str, Any]]:
         """Enqueue a YouTube URL or search query (audio extracted at play)."""
