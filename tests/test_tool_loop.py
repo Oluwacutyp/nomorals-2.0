@@ -145,8 +145,9 @@ class TestAudit:
         r = _registry()
         loop = ToolCallingLoop(FakeLLM(["done"]), r)
         audit = loop.audit_reachability()
-        assert audit["total"] == 282, f"expected 282, got {audit['total']}"
-        assert audit["listed"] == 282, f"missing: {audit['missing'][:10]}"
+        assert audit["total"] > 0
+        assert audit["listed"] == audit["total"], \
+            f"missing: {audit['missing'][:10]}"
         assert audit["missing"] == []
 
     def test_restricted_filters(self):

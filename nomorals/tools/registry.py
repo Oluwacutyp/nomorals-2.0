@@ -188,6 +188,7 @@ class ToolRegistry:
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "wisdom", "social",
+            "research",
             "workspace",
             "trading",
             "characters",
