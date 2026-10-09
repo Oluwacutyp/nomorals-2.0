@@ -26,8 +26,6 @@ from .outcome import PresenceOutcome
 from .approvals import _key_set
 _log = get_logger(__name__)
 
-_JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
-
 
 class PartnerBrain:
     """All the cognition. The runtime calls :meth:`handle_message` per message."""
@@ -521,6 +519,17 @@ class PartnerBrain:
         media_notes = self._media_notes(message)
         _origin = f"chat:{message.chat.key}" if message.chat else ""
         memories = () if restricted else self.responder.recall(message.text, limit=5, origin=_origin)
+        # Proactive recall: memories relevant enough to surface unprompted.
+        # Spine-native — the loop can also call memory_recall deliberately,
+        # but high-value memories shouldn't wait to be asked for.
+        proactive_lines: list[str] = []
+        if not restricted and self.context.memory is not None:
+            try:
+                from ..memory.proactive import surface as _proactive_surface
+                proactive_lines = _proactive_surface(
+                    message.text, self.context.memory, origin=_origin)
+            except Exception:  # noqa: BLE001 - proactive is a bonus, never load-bearing
+                proactive_lines = []
         romantic = is_owner and self.relationship.is_romantic()
         background_lines = self.background.context(
             message.text,
@@ -557,7 +566,8 @@ class PartnerBrain:
             try:
                 tool_loop_parts = self.generate_with_tools(
                     message,
-                    context_lines=list(background_lines) + list(continuity),
+                    context_lines=(list(background_lines) + list(continuity)
+                                   + list(proactive_lines)),
                     history=list(history),
                     gate_mode=gate_mode,
                     is_owner=True,
@@ -865,22 +875,22 @@ class PartnerBrain:
             f"Segment:\n{transcript[:6000]}"
         )
         try:
-            response = self.context.router.chat(
-                [Message.system("Output JSON only. No prose around it."), Message.user(prompt)],
-                SamplingParams(temperature=0.2, max_tokens=700),
+            from ...llm.brain import brain_for
+
+            # chat_json runs the repair loop natively: the old code did
+            # one shot + regex + json.loads and gave up on malformed
+            # output; now a bad draft gets a repair nudge automatically.
+            data, response = brain_for(self.context).chat_json(
+                [Message.user(prompt)],
+                task_kind="judge",
+                params=SamplingParams(temperature=0.2, max_tokens=700),
             )
         except Exception as exc:  # noqa: BLE001
             _log.warning("curator LLM failed: %s", exc)
             return {"curated": False, "error": str(exc)}
-        if not response.ok or not response.text:
-            return {"curated": False, "error": response.error or "empty"}
-        match = _JSON_BLOCK.search(response.text)
-        if not match:
-            return {"curated": False, "error": "no json in response"}
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            return {"curated": False, "error": f"bad json: {exc}"}
+        if not isinstance(data, dict):
+            return {"curated": False,
+                    "error": response.error or "no json in response"}
 
         summary = str(data.get("summary") or "").strip()
         written: dict[str, Any] = {"curated": bool(summary), "summary": summary[:200]}
