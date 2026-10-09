@@ -175,6 +175,28 @@ SOURCES = [
 # PHASE 1: ABLITERATION
 # ═══════════════════════════════════════════════════════════════════
 
+def _text_decoder(model):
+    """Locate the LLM decoder (text path) across transformers versions.
+
+    Older transformers: model.language_model
+    Current transformers: model.model.language_model (Qwen2_5_VLModel)
+    Vision tower is never touched. Fails loudly instead of guessing.
+    """
+    for path in ("language_model", "model.language_model"):
+        obj = model
+        try:
+            for part in path.split("."):
+                obj = getattr(obj, part)
+        except AttributeError:
+            continue
+        if hasattr(obj, "layers") and len(obj.layers) > 0:
+            print(f"  text decoder at .{path} ({len(obj.layers)} layers)")
+            return obj
+    raise AttributeError(
+        "Could not locate the text decoder (tried .language_model and "
+        ".model.language_model). Refusing to guess — vision untouched.")
+
+
 def abliterate():
     """Remove the refusal direction from Qwen2.5-VL-7B's language layers.
     Standard method: harmful vs harmless activation difference → orthogonalize.
@@ -198,6 +220,7 @@ def abliterate():
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
     processor = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
     model.eval()
+    decoder = _text_decoder(model)   # text path only — vision tower untouched
 
     # Contrastive prompts: refusal-triggering vs benign
     harmful = [
@@ -232,16 +255,16 @@ def abliterate():
                 acts[name] = h[:, -1, :].detach().float().cpu()
             return fn
         # Hook each decoder layer output (language model only)
-        for i, layer in enumerate(model.language_model.layers):
+        for i, layer in enumerate(decoder.layers):
             hooks.append(layer.register_forward_hook(hook_fn(f"layer_{i}")))
         with torch.no_grad():
-            model.language_model(**inputs)
+            decoder(**inputs)
         for h in hooks:
             h.remove()
         return acts
 
     print("Collecting activations (harmful vs harmless)...")
-    n_layers = len(model.language_model.layers)
+    n_layers = len(decoder.layers)
     harm_means = [torch.zeros(model.config.text_config.hidden_size) for _ in range(n_layers)]
     safe_means = [torch.zeros(model.config.text_config.hidden_size) for _ in range(n_layers)]
 
@@ -259,7 +282,7 @@ def abliterate():
 
     print("Orthogonalizing weights against refusal direction...")
     with torch.no_grad():
-        for i, layer in enumerate(model.language_model.layers):
+        for i, layer in enumerate(decoder.layers):
             r = harm_means[i] - safe_means[i]
             r_norm = r / (r.norm() + 1e-8)
             r_norm = r_norm.to(model.device, dtype=torch.float16)
