@@ -183,6 +183,336 @@ def register(registry: Any) -> None:
             "library": _library().list_books(),
         }
 
+    # ── the story reader: webnovel archives, natively ───────────────────
+    def _reader() -> Any:
+        from .reader import StoryReader
+
+        return StoryReader(context)
+
+    @registry.register(
+        "story_search",
+        description=(
+            "Search webnovel archives (freewebnovel, novelfull, royalroad) "
+            "for a story by title. Returns matches with URLs — follow one "
+            "with story_follow."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "query": "str — story title to search",
+            "limit": "int (optional, 10) — max hits",
+            "sources": "str (optional) — comma list: freewebnovel,novelfull,royalroad",
+        },
+    )
+    def story_search(query: str, *, limit: int = 10,
+                     sources: str = "") -> dict[str, Any]:
+        srcs = [s.strip() for s in sources.split(",") if s.strip()] or None
+        return {"query": query,
+                "hits": _reader().search(query, limit=limit, sources=srcs)}
+
+    @registry.register(
+        "story_follow",
+        description=(
+            "Follow a webnovel: give its archive URL (or just the title — "
+            "Devon searches the verified archives). Fetches metadata; "
+            "chapters are pulled on demand and cached."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "url_or_title": "str — archive URL or story title",
+            "source": "str (optional) — restrict title search to one source",
+        },
+    )
+    def story_follow(url_or_title: str, *, source: str = "") -> dict[str, Any]:
+        story = _reader().follow(url_or_title, source=source)
+        return {"followed": story.to_dict()}
+
+    @registry.register(
+        "story_unfollow",
+        description="Stop following a story (chapter cache kept by default).",
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str — the story slug",
+            "keep_cache": "bool (optional, true) — keep fetched chapters",
+        },
+    )
+    def story_unfollow(slug: str, *, keep_cache: bool = True) -> dict[str, Any]:
+        return _reader().unfollow(slug, keep_cache=keep_cache)
+
+    @registry.register(
+        "story_following",
+        description="Every followed story with reading progress.",
+        capability=Capability.FS_READ,
+    )
+    def story_following() -> dict[str, Any]:
+        return {"stories": _reader().following()}
+
+    @registry.register(
+        "story_read",
+        description=(
+            "Read a chapter of a followed story (fetches + caches when "
+            "needed). Updates reading progress. Chapter 0 = resume where "
+            "you left off."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "slug": "str — the story slug",
+            "chapter": "int (optional, 0) — chapter number, 0 = resume",
+        },
+    )
+    def story_read(slug: str, *, chapter: int = 0) -> dict[str, Any]:
+        return _reader().read(slug, chapter=chapter)
+
+    @registry.register(
+        "story_next",
+        description="Read the next chapter of a followed story.",
+        capability=Capability.NET_OUT,
+        parameters={"slug": "str — the story slug"},
+    )
+    def story_next(slug: str) -> dict[str, Any]:
+        return _reader().next(slug)
+
+    @registry.register(
+        "story_prev",
+        description="Read the previous chapter of a followed story.",
+        capability=Capability.NET_OUT,
+        parameters={"slug": "str — the story slug"},
+    )
+    def story_prev(slug: str) -> dict[str, Any]:
+        return _reader().prev(slug)
+
+    @registry.register(
+        "story_sync",
+        description=(
+            "Fetch the next few unread chapters for one followed story "
+            "(or all of them). Profile-gated: fewer, slower on termux."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "slug": "str (optional) — one story, else all followed",
+            "chapters": "int (optional, 0) — how many; 0 = profile default",
+        },
+    )
+    def story_sync(slug: str = "", *, chapters: int = 0) -> dict[str, Any]:
+        return _reader().sync(slug, chapters=chapters)
+
+    @registry.register(
+        "story_progress",
+        description=(
+            "Reading progress on a followed story. get = where you left "
+            "off; set = record chapter+offset; resume = progress plus the "
+            "chapter to read next."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "action": "str — get | set | resume",
+            "slug": "str — the story slug",
+            "chapter": "int (optional, for set)",
+            "offset": "int (optional, 0, for set)",
+        },
+    )
+    def story_progress(action: str, slug: str, *, chapter: int = 0,
+                       offset: int = 0) -> dict[str, Any]:
+        reader = _reader()
+        act = (action or "").strip().lower()
+        if act == "set":
+            return reader.set_progress(slug, chapter, offset)
+        if act == "resume":
+            return reader.resume(slug)
+        if act == "get":
+            return reader.get_progress(slug)
+        raise ValueError(f"unknown progress action {action!r}")
+
+    @registry.register(
+        "story_bookmark",
+        description=(
+            "Bookmarks on a followed story. add saves chapter+offset+label; "
+            "list shows them (one story, or all); remove deletes by id."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — add | list | remove",
+            "slug": "str (optional) — the story slug",
+            "chapter": "int (optional, for add)",
+            "offset": "int (optional, 0, for add)",
+            "label": "str (optional, for add)",
+            "id": "int (optional, for remove) — bookmark id",
+        },
+    )
+    def story_bookmark(action: str, *, slug: str = "", chapter: int = 0,
+                       offset: int = 0, label: str = "",
+                       id: int = 0) -> dict[str, Any]:
+        reader = _reader()
+        act = (action or "").strip().lower()
+        if act == "add":
+            if not slug or chapter < 1:
+                raise ValueError("bookmark add needs slug and chapter")
+            return reader.add_bookmark(slug, chapter, offset, label)
+        if act == "list":
+            return {"bookmarks": reader.list_bookmarks(slug)}
+        if act == "remove":
+            if not slug or id < 1:
+                raise ValueError("bookmark remove needs slug and id")
+            return reader.remove_bookmark(slug, id)
+        raise ValueError(f"unknown bookmark action {action!r}")
+
+    # ── story bibles + continuation ─────────────────────────────────────
+    def _bibles() -> Any:
+        from .bible import BibleBuilder
+
+        return BibleBuilder(context)
+
+    @registry.register(
+        "bible_build",
+        description=(
+            "Auto-build a story bible from a followed story's read chapters: "
+            "cast, open plot threads, world rules, voice (POV/tense/tone). "
+            "The bible steers continuations so long stories stay in "
+            "character. Re-run to digest more chapters."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "slug": "str — the followed story slug",
+            "chapters": "int (optional, 6) — how many recent chapters to digest",
+        },
+    )
+    def bible_build(slug: str, *, chapters: int = 6) -> dict[str, Any]:
+        from .continuation import StoryContinuer
+
+        bible = StoryContinuer(context).prepare(slug, chapters=chapters)
+        return {"bible": bible.to_dict(),
+                "brief": bible.brief()[:2000]}
+
+    @registry.register(
+        "bible_build_text",
+        description=(
+            "Auto-build a story bible from pasted story text (the owner "
+            "pastes what Devon should continue from)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "title": "str — the story title",
+            "text": "str — the story text so far",
+        },
+    )
+    def bible_build_text(title: str, text: str) -> dict[str, Any]:
+        from .continuation import StoryContinuer
+
+        bible = StoryContinuer(context).prepare_from_text(title, text)
+        return {"bible": bible.to_dict(),
+                "brief": bible.brief()[:2000]}
+
+    @registry.register(
+        "bible_show",
+        description="Show a story's bible: cast, threads, rules, voice.",
+        capability=Capability.FS_READ,
+        parameters={"slug": "str — the story slug"},
+    )
+    def bible_show(slug: str) -> dict[str, Any]:
+        bible = _bibles().load(slug)
+        if bible is None:
+            raise ValueError(f"no bible for {slug!r} — run bible_build first")
+        return {"bible": bible.to_dict()}
+
+    @registry.register(
+        "story_continue",
+        description=(
+            "Continue a read story in its own voice — new chapter(s) that "
+            "respect the auto-built bible (cast, open threads, world "
+            "rules). The owner's example: keep 'My Vampire System' going "
+            "past its ending. Saved under the story's continuations/."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str — the followed story slug",
+            "n": "int (optional, 1) — how many chapters to write",
+            "words": "int (optional, 1500) — target words per chapter",
+            "direction": "str (optional) — a story direction for ch.1",
+        },
+    )
+    def story_continue(slug: str, *, n: int = 1, words: int = 1500,
+                       direction: str = "") -> dict[str, Any]:
+        from .continuation import StoryContinuer
+
+        return StoryContinuer(context).continue_story(
+            slug, n=n, words=words, direction=direction)
+
+    # ── FictionWriter ───────────────────────────────────────────────────
+    def _fiction() -> Any:
+        from .fiction import FictionWriter
+
+        return FictionWriter(context)
+
+    @registry.register(
+        "fiction_start",
+        description=(
+            "Start an original story with the FictionWriter: pick a genre "
+            "(mystery, thriller, horror, sci-fi, fantasy, romance — each a "
+            "real engine with enforced mechanics, not a prompt prefix) and "
+            "a mode: 'novel' (planned arcs, an ending that lands) or "
+            "'serial' (never-ending; arcs spawn from dangling threads). "
+            "WisdomKeeper themes are woven in as texture. Writes chapter 1."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "premise": "str — what the story is about",
+            "genre": "str (optional, fantasy) — mystery | thriller | horror | sci-fi | fantasy | romance",
+            "mode": "str (optional, novel) — novel | serial",
+            "title": "str (optional)",
+            "theme": "str (optional) — wisdom theme to weave in",
+        },
+    )
+    def fiction_start(premise: str, *, genre: str = "fantasy",
+                      mode: str = "novel", title: str = "",
+                      theme: str = "") -> dict[str, Any]:
+        result = _fiction().start(premise, genre=genre, mode=mode,
+                                  title=title, theme=theme)
+        ch1 = result.pop("chapter_1", {})
+        result["chapter_1_words"] = ch1.get("words", 0)
+        result["chapter_1_path"] = ch1.get("path", "")
+        result["chapter_1_preview"] = (ch1.get("text", "") or "")[:1500]
+        return result
+
+    @registry.register(
+        "fiction_write",
+        description=(
+            "Write the next chapter of a FictionWriter story: the genre "
+            "engine briefs it (clues planted, tension curve, dread cycle, "
+            "rule checks...), the chapter is validated against the "
+            "mechanics, then the story state advances. Serial mode rolls "
+            "arcs automatically."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str — the story slug",
+            "direction": "str (optional) — an owner steer for this chapter",
+        },
+    )
+    def fiction_write(slug: str, *, direction: str = "") -> dict[str, Any]:
+        result = _fiction().write_next(slug, direction=direction)
+        preview = (result.pop("text", "") or "")[:1500]
+        result["preview"] = preview
+        return result
+
+    @registry.register(
+        "fiction_status",
+        description=(
+            "A FictionWriter story's state: chapters, arcs, open threads, "
+            "cast, current arc."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"slug": "str — the story slug"},
+    )
+    def fiction_status(slug: str) -> dict[str, Any]:
+        return _fiction().status(slug)
+
+    @registry.register(
+        "fiction_list",
+        description="Every FictionWriter story on disk.",
+        capability=Capability.FS_READ,
+    )
+    def fiction_list() -> dict[str, Any]:
+        return {"stories": _fiction().list_stories()}
+
     # ── the library: the owner's existing books ──────────────────────
     def _library() -> Any:
         from .library import Library
@@ -421,3 +751,209 @@ def register(registry: Any) -> None:
         if stars == 0:
             return {"slug": slug, "stars": lib.get_rating(slug)}
         return lib.rate(slug, stars)
+
+    # ── collaborative writing (owner + brain + characters) ──────────────
+    def _collab() -> Any:
+        from .collab import CollaborativeSession
+        return CollaborativeSession
+
+    def _characters() -> Any:
+        from ..characters.store import CharacterStore
+        return CharacterStore()
+
+    @registry.register(
+        "collab_scene",
+        description=(
+            "A character agent writes a scene from their own POV in a story — "
+            "their voice, biases, blind spots. The character remembers writing it."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str — the story",
+            "character": "str — character name (must exist in the character store)",
+            "prompt": "str — the scene prompt",
+        },
+    )
+    def collab_scene(story_slug: str, character: str, prompt: str) -> dict[str, Any]:
+        from .collab import CollaborativeSession
+        store = _characters()
+        char = store.get(character) or store.get_by_name(character)
+        if char is None:
+            return {"ok": False, "reason": f"character '{character}' not found"}
+        sess = CollaborativeSession(story_slug, context)
+        sess.cast_character(char)
+        return sess.write_scene(character, prompt)
+
+    @registry.register(
+        "collab_critique",
+        description=(
+            "Run the brutal-but-fair critic agent on a chapter draft: pacing, "
+            "voice consistency, plot mechanics, show-don't-tell. Returns score, "
+            "issues, suggestions, and a ship/revise/rewrite verdict."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "text": "str — the draft chapter text",
+            "brief": "str — what the chapter was supposed to do",
+        },
+    )
+    def collab_critique(text: str, brief: str = "") -> dict[str, Any]:
+        from .collab import CollaborativeSession
+        sess = CollaborativeSession("", context)
+        return sess.critique(text, {"summary": brief})
+
+    # ── story branches (what-if timelines) ───────────────────────────────
+    @registry.register(
+        "branch_fork",
+        description=(
+            "Fork a what-if timeline from a story chapter: test a major plot "
+            "change (a death, a betrayal, an alternate path) without touching canon."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str — the story",
+            "branch": "str — name for this timeline",
+            "from_chapter": "int — chapter to fork from",
+            "premise": "str — the what-if premise",
+        },
+    )
+    def branch_fork(story_slug: str, branch: str, from_chapter: int,
+                    premise: str) -> dict[str, Any]:
+        from .branches import StoryBranch
+        return StoryBranch(story_slug, branch).fork(from_chapter, premise)
+
+    @registry.register(
+        "branch_write",
+        description="Write a chapter in a what-if branch timeline.",
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "branch": "str",
+            "text": "str — chapter text", "title": "str (optional)",
+        },
+    )
+    def branch_write(story_slug: str, branch: str, text: str,
+                     title: str = "") -> dict[str, Any]:
+        from .branches import StoryBranch
+        return StoryBranch(story_slug, branch).add_chapter(text, title)
+
+    @registry.register(
+        "branch_list",
+        description="List all what-if timelines for a story.",
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def branch_list(story_slug: str) -> dict[str, Any]:
+        from .branches import list_branches
+        return {"branches": list_branches(story_slug)}
+
+    @registry.register(
+        "branch_merge",
+        description=(
+            "Merge a what-if branch back into canon (or abandon it). "
+            "Merging marks the timeline adopted; abandon deletes it."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "branch": "str",
+            "action": "str — merge | abandon",
+        },
+    )
+    def branch_merge(story_slug: str, branch: str,
+                     action: str = "merge") -> dict[str, Any]:
+        from .branches import StoryBranch
+        b = StoryBranch(story_slug, branch)
+        if action.strip().lower() == "abandon":
+            return b.abandon()
+        return b.merge()
+
+    # ── serialized publishing ────────────────────────────────────────────
+    @registry.register(
+        "publish_start",
+        description=(
+            "Start serializing a story: chapters drip-publish on a cadence "
+            "(daily/weekly/manual) like a webnovel. Readers can follow; "
+            "reactions feed back into story direction."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str",
+            "cadence": "str — daily | weekly | manual",
+            "title": "str (optional) — public title",
+            "announce_chat": "str (optional) — chat to announce releases in",
+        },
+    )
+    def publish_start(story_slug: str, cadence: str = "daily", title: str = "",
+                      announce_chat: str = "") -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).start(cadence, title, announce_chat)
+
+    @registry.register(
+        "publish_release",
+        description=(
+            "Release the next due chapter of a serial publication. Returns the "
+            "chapter text for delivery to followers."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={"story_slug": "str"},
+    )
+    def publish_release(story_slug: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).release()
+
+    @registry.register(
+        "publish_status",
+        description="Status of a serial publication: released/total, followers, feedback.",
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def publish_status(story_slug: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).status()
+
+    @registry.register(
+        "publish_follow",
+        description="Follow or unfollow a serial publication as a reader.",
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "reader": "str — reader id",
+            "action": "str — follow | unfollow",
+        },
+    )
+    def publish_follow(story_slug: str, reader: str,
+                       action: str = "follow") -> dict[str, Any]:
+        from .publish import SerialPublication
+        pub = SerialPublication(story_slug)
+        if action.strip().lower() == "unfollow":
+            return pub.unfollow(reader)
+        return pub.follow(reader)
+
+    @registry.register(
+        "publish_feedback",
+        description=(
+            "A reader reacts to a released chapter (like/love/hype/meh/skip + "
+            "optional comment). Aggregates into per-chapter sentiment for the author."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "story_slug": "str", "reader": "str",
+            "chapter": "int", "reaction": "str",
+            "comment": "str (optional)",
+        },
+    )
+    def publish_feedback(story_slug: str, reader: str, chapter: int,
+                         reaction: str, comment: str = "") -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).feedback(reader, chapter, reaction, comment)
+
+    @registry.register(
+        "publish_feedback_summary",
+        description=(
+            "Per-chapter reader sentiment for a serial: reaction counts and "
+            "comments, so the author sees what landed and what didn't."
+        ),
+        capability=Capability.FS_READ,
+        parameters={"story_slug": "str"},
+    )
+    def publish_feedback_summary(story_slug: str) -> dict[str, Any]:
+        from .publish import SerialPublication
+        return SerialPublication(story_slug).feedback_summary()

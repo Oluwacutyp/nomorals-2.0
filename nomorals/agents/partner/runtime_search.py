@@ -412,6 +412,113 @@ class RuntimeSearchMixin:
                 f"📖 {r.get('title', 'next chapter')}\n\n"
                 f"{(r.get('text') or '')[:5500]}")
 
+        if verb == "branch":
+            # /novel branch <slug> fork <name> <from_ch> <premise>
+            # /novel branch <slug> list
+            # /novel branch <slug> merge|abandon <name>
+            from ...books.branches import StoryBranch, list_branches
+            bits = rest.split(None, 3)
+            if len(bits) < 2:
+                return ("usage: /novel branch <slug> fork <name> <from_ch> <premise> | "
+                        "/novel branch <slug> list | /novel branch <slug> merge|abandon <name>")
+            slug, action = bits[0], bits[1].lower()
+            if action == "list":
+                branches = list_branches(slug)
+                if not branches:
+                    return f"no branches for '{slug}'"
+                return "\n".join(
+                    f"  {b['branch']} — from ch {b['forked_from']} "
+                    f"({b['chapters']} ch, {b['status']}): {b['premise']}"
+                    for b in branches)
+            if action == "fork":
+                if len(bits) < 4:
+                    return "usage: /novel branch <slug> fork <name> <from_ch> <premise>"
+                name_ch = bits[2].split(None, 1)
+                if len(name_ch) < 2 or not name_ch[1].split(None, 1)[0].isdigit():
+                    return "usage: /novel branch <slug> fork <name> <from_ch> <premise>"
+                name = name_ch[0]
+                from_ch = int(name_ch[1].split(None, 1)[0])
+                premise = name_ch[1].split(None, 1)[1] if len(name_ch[1].split(None, 1)) > 1 else bits[3]
+                r = StoryBranch(slug, name).fork(from_ch, premise)
+                if not r.get("ok"):
+                    return f"fork failed: {r.get('reason')}"
+                return (f"🌿 branched '{name}' from ch {from_ch}: {premise[:100]} — "
+                        f"write into it, merge or abandon when decided.")
+            if action in ("merge", "abandon"):
+                if len(bits) < 3:
+                    return f"usage: /novel branch <slug> {action} <name>"
+                r = StoryBranch(slug, bits[2]).merge() if action == "merge" \
+                    else StoryBranch(slug, bits[2]).abandon()
+                if not r.get("ok"):
+                    return f"{action} failed: {r.get('reason')}"
+                return f"🌿 branch '{bits[2]}' {action}ed."
+            return f"unknown branch action '{action}'"
+
+        if verb == "publish":
+            # /novel publish <slug> start [daily|weekly|manual]
+            # /novel publish <slug> release | status
+            from ...books.publish import SerialPublication
+            bits = rest.split(None, 2)
+            if len(bits) < 2:
+                return ("usage: /novel publish <slug> start [daily|weekly|manual] | "
+                        "/novel publish <slug> release | /novel publish <slug> status")
+            slug, action = bits[0], bits[1].lower()
+            pub = SerialPublication(slug)
+            if action == "start":
+                cadence = bits[2].strip().lower() if len(bits) > 2 else "daily"
+                r = pub.start(cadence)
+                if not r.get("ok"):
+                    return f"publish failed: {r.get('reason')}"
+                return (f"📰 '{slug}' serializing [{cadence}] — chapters drip on cadence. "
+                        f"/novel publish {slug} release to drop the next now.")
+            if action == "release":
+                r = pub.release()
+                if not r.get("ok"):
+                    return f"release: {r.get('reason', 'not due')}"
+                chat = self._ref_from_key(chat_key)
+                self._send_long_checked(
+                    chat.platform, chat,
+                    f"📰 {r['title']} — chapter {r['chapter']}\n\n"
+                    f"{(r['text'] or '')[:5500]}")
+                return f"released ch {r['chapter']} ({r['released_count']} total)."
+            if action == "status":
+                r = pub.status()
+                if not r.get("ok"):
+                    return f"no publication for '{slug}'"
+                return (f"📰 {slug} [{r['cadence']}/{r['status']}]: "
+                        f"{r['released']}/{r['total_chapters']} released, "
+                        f"{r['followers']} followers, {r['feedback_count']} reactions.")
+            return f"unknown publish action '{action}'"
+
+        if verb == "scene":
+            # /novel scene <slug> <character> <prompt> — character writes a scene
+            if not rest:
+                return "usage: /novel scene <slug> <character> <scene prompt>"
+            bits = rest.split(None, 2)
+            if len(bits) < 3:
+                return "usage: /novel scene <slug> <character> <scene prompt>"
+            slug, character, prompt = bits
+            try:
+                from ...characters.store import CharacterStore
+                from ...books.collab import CollaborativeSession
+                store = CharacterStore()
+                char = store.get(character) or store.get_by_name(character)
+                if char is None:
+                    return f"character '{character}' not found — /character list"
+                sess = CollaborativeSession(slug, self.context)
+                sess.cast_character(char)
+                r = sess.write_scene(character, prompt)
+                if not r.get("ok"):
+                    return f"scene failed: {r.get('reason')}"
+                chat = self._ref_from_key(chat_key)
+                return self._send_long_checked(
+                    chat.platform, chat,
+                    f"🎭 {character} writes:\n\n{(r['text'] or '')[:5500]}")
+            except Exception as exc:  # noqa: BLE001
+                return f"scene failed: {exc}"
+
         return ("usage: /novel follow <url|title> | /novel list | "
                 "/novel read <slug> [chapter] | /novel next <slug> | "
-                "/novel continue <slug> [n] | /novel write <premise> [genre]")
+                "/novel continue <slug> [n] | /novel write <premise> [genre] | "
+                "/novel branch <slug> ... | /novel publish <slug> ... | "
+                "/novel scene <slug> <character> <prompt>")
