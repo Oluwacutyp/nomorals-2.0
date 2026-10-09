@@ -208,15 +208,33 @@ def _adaptive_peaks(curve: list[float], min_rise: float = 0.25,
 
 
 def score_segments(src: str, segments: list[tuple[float, float]],
-                   *, weights: dict | None = None) -> list[ScoredSegment]:
+                   *, weights: dict | None = None,
+                   use_learned: bool = True) -> list[ScoredSegment]:
     """Score segments 0-1 with multi-modal signals.
 
     Signals are computed per-second across the whole film, then each
     segment takes the max signal value within its window (a cool moment
     anywhere in the segment counts).
+
+    When highlight_model/ has trained weights, the learned MLP scores
+    instead of the heuristic weights — same features in, learned
+    weights out. Falls back to heuristics honestly when no weights exist.
     """
     w = weights or WEIGHTS
     src = str(src)
+
+    # Learned model first (when weights exist)
+    mlp = None
+    if use_learned:
+        try:
+            from ..highlight_model.model import (
+                HighlightMLP, default_weights_path)
+            import os as _os
+            wp = default_weights_path()
+            if _os.path.exists(wp):
+                mlp = HighlightMLP(wp)
+        except Exception:
+            mlp = None
 
     # Per-second signal curves across the film
     audio = _audio_energy_curve(src)          # 10Hz
@@ -244,14 +262,31 @@ def score_segments(src: str, segments: list[tuple[float, float]],
         sig[k] = _resample(raw, n_sec) if raw else [0.0] * n_sec
 
     out: list[ScoredSegment] = []
+    # Learned scores per second (when model loaded)
+    learned_curve: list[float] | None = None
+    if mlp is not None:
+        try:
+            from ..highlight_model.features import extract_features
+            feats = extract_features(src)
+            if feats:
+                learned_curve = mlp.score(feats)
+        except Exception:
+            learned_curve = None
+
     for i, (s, e) in enumerate(segments):
         s_i, e_i = int(s), min(n_sec, int(e) + 1)
         if s_i >= n_sec:
             continue
         seg_sig = {k: max(v[s_i:e_i]) if v[s_i:e_i] else 0.0
                    for k, v in sig.items()}
-        total_w = sum(w.get(k, 0) for k in seg_sig if seg_sig[k] > 0) or 1.0
-        score = sum(seg_sig[k] * w.get(k, 0) for k in seg_sig) / sum(w.values())
+        if learned_curve:
+            lc = learned_curve[s_i:e_i] or [0.0]
+            score = max(lc)
+            # blend: learned 70%, heuristic 30% (keeps it grounded)
+            h_score = sum(seg_sig[k] * w.get(k, 0) for k in seg_sig) / sum(w.values())
+            score = 0.7 * score + 0.3 * h_score
+        else:
+            score = sum(seg_sig[k] * w.get(k, 0) for k in seg_sig) / sum(w.values())
         # Label by dominant signal
         dom = max(seg_sig, key=lambda k: seg_sig[k] * w.get(k, 0))
         label = {"audio": "emotional", "motion": "action",
