@@ -1250,6 +1250,20 @@ class PartnerRuntime(
                     except Exception as exc:  # noqa: BLE001 - optional
                         _log.warning(
                             "improvement tick job not registered: %s", exc)
+                # Mining session: daily conversation→training-data mining.
+                # Idempotent — one durable job by name. Mines new chat
+                # pairs into scored bundles for nm train; manual runs
+                # still work via /data mine.
+                try:
+                    have_mine = [j for j in self._scheduler.list_jobs()
+                                 if j.get("name") == "mining session"]
+                    if not have_mine:
+                        self._scheduler.add(
+                            "mining session", "daily", "tool",
+                            {"tool": "train_mine", "args": {}},
+                        )
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("mining session job not registered: %s", exc)
                 # Prompt 01: skill self-rewrite loop + synthesis scan jobs.
                 # ensure_improvement_schedule is idempotent by name; both
                 # jobs are no-ops while settings.improvement.mode == "off".
