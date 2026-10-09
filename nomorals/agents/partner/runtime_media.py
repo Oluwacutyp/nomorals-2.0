@@ -760,10 +760,31 @@ class RuntimeMediaMixin:
         /dj live [genre,…] → LIVE set in this chat: real-time performance,
                              reads the room, takes requests, talks
         /dj live stop  → end the live set
+        /dj mix <genre|songs…> → MIX-DROP: fetch real tracks, beatmatch +
+                             harmonically mix into ONE continuous file,
+                             drop it in chat. Then mix the next.
         """
         from ...media.dj import DJ
 
         tail = (tail or "").strip()
+        if tail.lower().startswith("mix"):
+            from ...media.dj_mixdrop import control_dj_mix
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is None:
+                return "run /dj mix from a chat — the mix drops there."
+            gateway = self.gateway
+
+            def _da(path: str, caption: str) -> None:
+                gateway.send_file(chat.platform,
+                                  f"{chat.platform}:{chat.chat_id}",
+                                  path, caption=caption[:1024])
+
+            def _dt(text: str) -> None:
+                gateway.send(chat.platform,
+                             f"{chat.platform}:{chat.chat_id}", text)
+            return control_dj_mix(tail[3:].strip(), chat_key=chat_key,
+                                  deliver_audio=_da, deliver_text=_dt,
+                                  context=self.context)
         if tail.lower().startswith("live"):
             from ...media.dj_live import control_dj_live
             chat = self._ref_from_key(chat_key) if chat_key else None
