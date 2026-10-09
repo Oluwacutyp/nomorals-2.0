@@ -154,6 +154,51 @@ class RuntimeLiveMixin:
         return ("usage: /research [run [lifestyle|tech|cyber]|status|ideas [n]|approve <id|latest>|deny <id|latest>|history [n]]\n"
                 "grounded: /research from [paths] | /research ask <question> | /research docs | /research done")
 
+    def _control_web_research(self, tail: str, *, chat_key: str = "",
+                              chat: Any = None) -> str:
+        """``/research`` — ad-hoc web research + loop management.
+
+        Bare topic (or ``run <topic>``) → one-shot swarm research on the
+        topic, brief back in chat. Loop-management verbs (status, ideas,
+        run <domain>, approve, …) delegate to the research loop handler.
+        """
+        from ..features import feature_enabled
+        if not feature_enabled(self.context, "research"):
+            return "research is off. /features research on"
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        loop_verbs = {"status", "ideas", "queue", "pending", "approve",
+                      "deny", "history", "from", "ask", "docs", "done",
+                      "clear"}
+        if verb in loop_verbs:
+            return self._control_research(tail, chat_key=chat_key)
+        if verb == "run":
+            # "run <domain>" → loop cycle; "run <free topic>" → ad-hoc.
+            from ..researcher import DOMAINS
+            if not rest or rest.lower() in DOMAINS:
+                return self._control_research(tail, chat_key=chat_key)
+            topic = rest
+        elif verb:
+            topic = (tail or "").strip()
+        else:
+            return ("research what? /research <topic> — e.g. "
+                    "/research agent coding")
+        try:
+            from ..research_digest import ResearchPipeline
+            result = ResearchPipeline.run(topic, self.context)
+        except Exception as exc:  # noqa: BLE001 - honest failure, not silence
+            return f"research failed: {type(exc).__name__}: {exc}"
+        brief = (result.get("brief") or "").strip()
+        if brief:
+            return self._send_long_checked(
+                chat.platform, chat, brief[:6000]) if chat is not None else brief
+        n_find = len((result.get("report") or {}).get("findings") or [])
+        if n_find:
+            return f"researched {topic!r}: {n_find} findings, brief empty."
+        return (f"no solid findings on {topic!r} — the swarm came back "
+                f"empty. Try rephrasing or a narrower topic.")
+
     # ── source-grounded research (per-chat document sessions) ──────────────
 
     #: mime types treated as groundable documents (besides kind == "document"

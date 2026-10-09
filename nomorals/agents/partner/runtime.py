@@ -2129,18 +2129,12 @@ class PartnerRuntime(
                 sender=getattr(message, "sender", "") if message else "",
             )
         if kind == "research":
-            # Grounded legal research — verified corpus, confidence,
-            # traceable citations, honest unknowns. Owner-only.
+            # Web research — swarm -> digest -> brief. Owner-only.
+            # (Legal research lives under /legal; /research is the web.)
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
-            from ...legal.research import control_research
-            return control_research(
-                command.tail or arg,
-                context=self.context,
-                chat=chat,
-                sender_id=getattr(message, "sender_id", "") if message else "",
-                sender=getattr(message, "sender", "") if message else "",
-            )
+            return self._control_web_research(
+                command.tail or arg or "", chat_key=chat_key, chat=chat)
         if kind == "contracts":
             # Contract portfolio — owner's private documents, owner-only.
             if message is not None and not self._is_operator(message):
@@ -2529,9 +2523,6 @@ class PartnerRuntime(
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)
-        if kind == "research":
-            return self._control_research(command.tail or arg,
-                                          chat_key=chat_key, message=message)
         if kind == "code":
             return self._control_code(command.tail, chat_key=chat_key)
         if kind == "checkpoint":

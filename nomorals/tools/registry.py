@@ -186,6 +186,7 @@ class ToolRegistry:
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
+            "wisdom",
             "workspace",
             "trading",
             # the agent bridge registers last: agent modules own the real

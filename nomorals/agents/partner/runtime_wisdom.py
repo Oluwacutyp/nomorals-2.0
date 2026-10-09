@@ -63,6 +63,8 @@ class RuntimeWisdomMixin:
             return _WISDOM_USAGE
         if verb == "status":
             return self._control_wisdom_status(keeper)
+        if verb == "seed":
+            return self._control_wisdom_seed(keeper, chat)
         if verb == "ask":
             return self._control_wisdom_ask(keeper, rest, chat)
         if verb == "practice":
@@ -72,7 +74,9 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_timeline(keeper, rest, chat)
         if verb == "compare":
             return self._control_wisdom_compare(keeper, rest, chat)
-        return f"unknown /wisdom verb {verb!r}.\n{_WISDOM_USAGE}"
+        # Unknown verb → treat the whole tail as a question (ask is the
+        # default; nobody should need to memorize verbs).
+        return self._control_wisdom_ask(keeper, (tail or "").strip(), chat)
 
     def _control_wisdom_status(self, keeper) -> str:
         try:
@@ -84,9 +88,49 @@ class RuntimeWisdomMixin:
             lines.append(f"  {trad}: {n}")
         return "\n".join(lines)
 
+    def _control_wisdom_seed(self, keeper, chat) -> str:
+        """Seed the manifest and ingest the starter library in background."""
+        try:
+            n = keeper.corpus.seed()
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ seed failed: {type(exc).__name__}: {exc}"
+        st = keeper.status()["corpus"]
+        total, ingested = st["texts"], st["ingested"]
+        if ingested >= total and total > 0:
+            return f"📚 corpus already complete: {ingested}/{total} texts ingested."
+        # Ingest in background — 47 books take a while on a slow link.
+        import threading
+
+        def _bg():
+            try:
+                from ...wisdom import ArchiveIngestor
+                ing = ArchiveIngestor(self.context)
+                for e in keeper.corpus.list():
+                    try:
+                        ing.ingest_entry(e)
+                    except Exception:  # noqa: BLE001 - one bad book, not a dead run
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_bg, daemon=True,
+                         name="wisdom-seed").start()
+        return (f"📚 seeded {n} new texts ({total} total). Ingesting the "
+                f"library in the background — /wisdom status to watch it "
+                f"fill up, then ask away.")
+
     def _control_wisdom_ask(self, keeper, query: str, chat) -> str:
         if not query:
-            return "usage: /wisdom ask <query>"
+            return "ask me anything — e.g. /wisdom when was the earth created?"
+        try:
+            st = keeper.status()["corpus"]
+        except Exception:  # noqa: BLE001
+            st = {}
+        if not st.get("ingested"):
+            return ("📚 the wisdom corpus is empty — nothing to ask yet. "
+                    "Run /wisdom seed and I'll fetch the 47-text starter "
+                    "library (public-domain scriptures, hermetic, gnostic, "
+                    "and wisdom texts), then ask again.")
         try:
             ans = keeper.ask(query, top=5)
         except Exception as exc:  # noqa: BLE001
