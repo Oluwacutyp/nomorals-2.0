@@ -83,6 +83,20 @@ from .library import MusicLibrary, read_metadata
 
 _log = get_logger(__name__)
 
+#: Error fragments that mean "this source won't serve the audio"
+#: (DRM, geo/private locks) — worth falling back to another source
+#: instead of failing outright.
+_PROTECTION_FRAGMENTS = ("drm", "protected", "not downloadable",
+                         "private", "login required", "age-gated")
+
+
+def is_protection_error(message: Any) -> bool:
+    """True when an error message indicates the source blocked the
+    download (DRM / private / login-walled) rather than a transient
+    network or dependency failure."""
+    low = str(message or "").lower()
+    return any(frag in low for frag in _PROTECTION_FRAGMENTS)
+
 __all__ = ["PlaybackEngine", "Backend", "register"]
 
 _STATE_KEY = "media.player_state"
@@ -774,13 +788,23 @@ class PlaybackEngine:
             if call is None:
                 return {"ok": False, "reason":
                         "download needs the tool registry (media_download)"}
+            dl_error: Any = None
+            out = None
             try:
                 out = call("media_download", url=url, audio_only=True)
             except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "reason": f"download failed: {exc}"}
-            if not getattr(out, "ok", False):
-                return {"ok": False, "reason":
-                        f"download failed: {getattr(out, 'error', 'unknown error')}"}
+                dl_error = exc
+            if dl_error is None and not getattr(out, "ok", False):
+                dl_error = getattr(out, "error", "unknown error")
+            if dl_error is not None:
+                err_msg = str(dl_error)
+                # SoundCloud tracks sometimes come back DRM/private-locked.
+                # Fall back to YouTube once using the known artist/title
+                # instead of failing outright.
+                if kind == "soundcloud" and is_protection_error(err_msg):
+                    return self._download_youtube_fallback(item, title,
+                                                           err_msg)
+                return {"ok": False, "reason": f"download failed: {err_msg}"}
             value = out.value if isinstance(out.value, dict) else {}
             path = str(value.get("path", ""))
             if not path or not os.path.isfile(path):
@@ -789,6 +813,37 @@ class PlaybackEngine:
             return {"ok": True, "path": path, "title": title}
         except Exception as exc:  # noqa: BLE001 - never raises
             return {"ok": False, "reason": f"download error: {exc}"}
+
+    def _download_youtube_fallback(self, item: dict[str, Any], title: str,
+                                   sc_error: str) -> dict[str, Any]:
+        """One-shot YouTube fallback after a SoundCloud protection failure.
+
+        Reuses the item's known artist/title to search YouTube and
+        downloads the top result. Never raises — returns the honest
+        failure when YouTube can't deliver either.
+        """
+        artist = str(item.get("artist", "") or "").strip()
+        query = f"{artist} {title}".strip() if artist else title.strip()
+        _log.info("soundcloud download blocked (%s); trying YouTube for %r",
+                  sc_error[:80], query)
+        try:
+            video_id = self._youtube_search_id(query)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
+                              f"and YouTube search failed: {exc}"}
+        yt_item = {"kind": "youtube",
+                   "path": self._youtube_watch_url(video_id),
+                   "title": title}
+        try:
+            path = self._youtube_audio(yt_item)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "reason": f"SoundCloud blocked the download ({sc_error[:80]}) "
+                              f"and YouTube download failed: {exc}"}
+        _log.info("youtube fallback succeeded for %r", query)
+        return {"ok": True, "path": path, "title": title,
+                "note": "via YouTube (SoundCloud was DRM-locked)"}
 
     def _add_youtube(self, target: str, title: str = "") -> list[dict[str, Any]]:
         """Enqueue a YouTube URL or search query (audio extracted at play)."""
