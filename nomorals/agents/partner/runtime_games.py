@@ -1561,11 +1561,21 @@ class RuntimeGamesMixin:
         if verb == "status":
             pending = arena.builds()
             stream = arena.stream(1)
-            loop = "loop: running" if arena.loop_running() else "loop: idle"
+            loop_running = arena.loop_running()
+            loop = "loop: running" if loop_running else "loop: idle"
             lines = [f"arena — {loop}"]
             lines.append(f"feature: {'on' if feature_enabled(self.context, 'arena') else 'off'} "
                          f"(/features arena on|off)")
             lines.append(f"knowledge rows: {self._arena_knowledge_count()}")
+            # Idle ≠ dead: when the background loop isn't running, kick off
+            # one research cycle on the laid-out path (topic bank first),
+            # in the background, with a cooldown so status spam can't
+            # stack cycles.
+            if (not loop_running and feature_enabled(self.context, "arena")
+                    and self._arena_idle_research_due(arena)):
+                chat = self._ref_from_key(chat_key)
+                lines.append("loop idle → researching the next topic now")
+                self._arena_idle_research(arena, chat)
             if pending:
                 lines.append("pending builds:")
                 for row in pending[:5]:
@@ -1784,6 +1794,43 @@ class RuntimeGamesMixin:
             return int(row.get("n", 0)) if row else 0
         except Exception:  # noqa: BLE001
             return 0
+
+    #: cooldown between idle-triggered research cycles (seconds)
+    _ARENA_IDLE_COOLDOWN = 30 * 60
+
+    def _arena_idle_research_due(self, arena) -> bool:
+        """True when an idle-triggered cycle may fire (cooldown elapsed)."""
+        import time
+        last = getattr(self, "_arena_idle_last", 0.0)
+        return (time.time() - last) >= self._ARENA_IDLE_COOLDOWN
+
+    def _arena_idle_research(self, arena, chat) -> None:
+        """Run one arena research cycle in background; notify on completion."""
+        import threading
+        import time
+
+        def _notify(text: str) -> None:
+            try:
+                self.gateway.send(chat.platform, chat, text)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _bg():
+            try:
+                result = arena.run_cycle(notify=_notify)
+            except Exception as exc:  # noqa: BLE001
+                _notify(f"arena idle research failed: {exc}")
+                return
+            if result.get("ok"):
+                _notify(f"🔬 arena researched: {result.get('topic', '?')[:80]} "
+                        f"({result.get('pages_read', 0)} pages, "
+                        f"{result.get('seconds', 0)}s)")
+            else:
+                _notify(f"arena idle research: {result.get('error', 'no result')}")
+
+        self._arena_idle_last = time.time()
+        threading.Thread(target=_bg, daemon=True,
+                         name="arena-idle-research").start()
 
     # ── trial accounts ───────────────────────────────────────────────────────
     def _control_trial(self, tail: str, chat_key: str) -> str:
