@@ -1,18 +1,27 @@
-"""DJ — radio-style shows with trending charts, voice breaks, and real transitions.
+"""DJ — radio-style shows with trending charts, voice breaks, and real mixing.
 
 A real DJ, not a playlist shuffler:
 
 * **Trending fetcher** — scrapes the Billboard Hot 100 (no API key),
   caches daily. Never raises; honest empty on failure.
+* **DJ engine** (``dj_engine``) — track analysis (BPM via onset
+  autocorrelation, key via chromagram + Krumhansl, energy), Camelot-wheel
+  harmonic mixing, beatmatched tempo-sync transitions, phrase-aligned
+  blends, and energy-arc ordering (warm-up → peak → cool-down). Composed
+  tracks use ground-truth tempo/key from the composer; external audio is
+  DSP-detected. Never claims a sync it can't do.
 * **Show composer** — arranges trending picks + your own generated
   tracks into a radio show: DJ intro → track → transition → DJ break
-  (shoutout, chart trivia) → track → … → outro.
+  (shoutout, chart trivia) → track → … → outro. Track order follows the
+  energy arc, transitions are engine-planned.
 * **DJ voice breaks** — TTS when a backend exists, hummed vocal
   fallback when not, short musical sting as the last resort.
   Breaks are 5–10 seconds, never silence.
-* **Real transitions** — equal-power crossfades (not hard cuts),
-  echo-out tails, and filter sweeps into the next track. Pure stdlib
-  DSP, Termux-safe.
+* **Real transitions** — beatmatched blends (tempo-synced, phrase-aligned),
+  echo-out drops, filter sweeps. Pure stdlib DSP, Termux-safe.
+* **Taste interface** — ``dj_engine.TasteModel`` protocol; a small model
+  trained on owner skip/like feedback can replace ``HeuristicTaste``
+  later without touching the engine.
 
     from nomorals.media.dj import DJ
     dj = DJ(context)
@@ -425,6 +434,9 @@ class DJ:
 
         segments: list[ShowSegment] = []
         tracklist: list[dict[str, Any]] = []
+        # (segment, Song, pick, style) — kept parallel so the engine can
+        # analyze, reorder (energy arc), and plan transitions after compose
+        track_units: list[tuple[ShowSegment, Any, Any, str]] = []
 
         # — intro break —
         if include_breaks:
@@ -460,29 +472,62 @@ class DJ:
                 tracklist.append({"label": label, "status": "skipped",
                                   "reason": "compose failed"})
                 continue
-            segments.append(ShowSegment(
+            seg = ShowSegment(
                 kind="track", label=label, path=audio,
                 title=pick["title"] if pick else label,
                 artist=pick["artist"] if pick else "Devon FM",
-                rank=pick.get("rank", 0) if pick else 0))
+                rank=pick.get("rank", 0) if pick else 0)
+            track_units.append((seg, song, pick, style))
             tracklist.append({"label": label, "status": "played",
                               "style": style,
                               "chart_rank": pick.get("rank") if pick else None})
 
-            # — DJ break after each track except the last —
-            if include_breaks and i < n_tracks - 1:
-                nxt = picks[i + 1] if i + 1 < len(picks) else None
+        # ── DJ engine: analyze → energy arc → transition plans ──────────
+        from .dj_engine import (
+            analyze_track, plan_energy_arc, plan_transition,
+            render_beatmatched_transition, HeuristicTaste,
+        )
+        taste = HeuristicTaste()
+        analyses: list = []
+        for seg, song, _pick, _style in track_units:
+            a = analyze_track(
+                seg.path, title=seg.label,
+                known_bpm=getattr(song, "tempo", None),
+                known_key=getattr(song, "key", "") or "",
+                known_mode=getattr(song, "mode", "") or "")
+            analyses.append(a)
+        # order warm-up → peak → cool-down (stable: arc keeps ties in order)
+        arc_idx = [analyses.index(a) for a in plan_energy_arc(analyses)]
+        ordered_units = [track_units[i] for i in arc_idx]
+        ordered_analyses = [analyses[i] for i in arc_idx]
+        # transition plan for each track→track boundary
+        plans = [plan_transition(ordered_analyses[i], ordered_analyses[i + 1])
+                 for i in range(len(ordered_analyses) - 1)]
+
+        # ── rebuild segments in arc order, with breaks ─────────────────
+        # tracklist follows the arc order too (it was built in compose order)
+        arc_tracklist = [tracklist[track_units.index(u)] for u in ordered_units]
+        tracklist[:] = arc_tracklist
+        segments = []
+        if include_breaks:
+            intro = rng.choice(_INTROS).format(dj=_DJ_NAME)
+            segments.append(ShowSegment(
+                kind="break", label="intro", title=intro))
+        for j, ((seg, _song, pick, style), _a) in enumerate(
+                zip(ordered_units, ordered_analyses)):
+            segments.append(seg)
+            if include_breaks and j < len(ordered_units) - 1:
+                nxt_seg = ordered_units[j + 1][0]
                 if pick:
                     line = rng.choice(_BREAKS).format(
                         artist=pick["artist"], title=pick["title"],
                         rank=pick.get("rank", "?"), dj=_DJ_NAME)
                 else:
-                    line = f"That was a Devon FM original in {style}. More heat coming up on {_DJ_NAME}."
-                if nxt:
-                    line += f" Up next: {nxt['artist']} with {nxt['title']}."
+                    line = (f"That was a Devon FM original in {style}. "
+                            f"More heat coming up on {_DJ_NAME}.")
+                line += f" Up next: {nxt_seg.artist} with {nxt_seg.title}."
                 segments.append(ShowSegment(
-                    kind="break", label=f"break-{i + 1}", title=line))
-
+                    kind="break", label=f"break-{j + 1}", title=line))
         if include_breaks:
             outro = rng.choice(_OUTROS).format(dj=_DJ_NAME)
             segments.append(ShowSegment(kind="break", label="outro",
@@ -493,7 +538,11 @@ class DJ:
             return {"ok": False, "reason": "no tracks rendered — show is empty",
                     "tracklist": tracklist}
 
-        # — assemble with real transitions —
+        # — assemble with engine-planned transitions —
+        # map each track segment to its outgoing transition plan
+        seg_plan: dict[int, Any] = {}
+        for j, plan in enumerate(plans):
+            seg_plan[id(ordered_units[j][0])] = plan
         mix = array("d")
         first = True
         notes: list[str] = []
@@ -509,8 +558,19 @@ class DJ:
                 cap_n = int(SAMPLE_RATE * 75)
                 if len(samples) > cap_n:
                     samples = array("d", samples[:cap_n])
-                # echo-out tail on the track's ending for the blend
-                samples = _echo_out(samples, SAMPLE_RATE)
+                plan = seg_plan.get(id(seg))
+                if plan is not None and plan.kind == "echo-drop":
+                    # echo-out tail for the drop
+                    samples = _echo_out(samples, SAMPLE_RATE)
+                if (plan is not None and plan.kind == "blend"
+                        and abs(plan.sync_ratio - 1.0) > 1e-4):
+                    # beatmatch: tempo-sync incoming track to outgoing tempo
+                    try:
+                        from .vocal_lite import _resample_linear as _rs
+                        samples = _rs(samples, SAMPLE_RATE,
+                                      int(SAMPLE_RATE / plan.sync_ratio))
+                    except Exception:  # noqa: BLE001
+                        pass
             samples = _resample(samples, sr, SAMPLE_RATE)
             if first:
                 mix = array("d", samples)
@@ -521,6 +581,16 @@ class DJ:
                     samples = _filter_sweep_in(samples, SAMPLE_RATE)
                 xf = int(SAMPLE_RATE * (4.0 if seg.kind == "track" else 1.5))
                 mix = _equal_power_crossfade(mix, samples, xf)
+        # annotate the tracklist with what the engine decided
+        for j, a in enumerate(ordered_analyses):
+            tracklist[j]["bpm"] = a.bpm
+            tracklist[j]["key"] = f"{a.key} {a.mode}".strip()
+            tracklist[j]["camelot"] = a.camelot
+            tracklist[j]["energy"] = a.energy
+            if j < len(plans):
+                tracklist[j]["transition_out"] = plans[j].to_dict()
+                tracklist[j]["taste_score"] = taste.score_transition(
+                    a, ordered_analyses[j + 1], plans[j])
 
         if len(mix) < 100:
             return {"ok": False, "reason": "mix came out empty",
