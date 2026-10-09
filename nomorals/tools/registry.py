@@ -188,6 +188,7 @@ class ToolRegistry:
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "wisdom", "social",
+            "services",  # 28 service connectors bridged to the spine
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",
