@@ -183,7 +183,7 @@ class ToolRegistry:
             "edit_loop",
             "error_scan",
             "macros", "media", "media_edit", "media_gen", "media_pipeline", "metadata",
-            "music",
+            "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
