@@ -25,8 +25,8 @@ from pathlib import Path
 #   - abliteration runs ONCE ever (reused from the dataset afterwards)
 #   - training stops itself at KAGGLE_MAX_HOURS (default 11) and pushes
 #     checkpoints back, so the next session resumes instead of restarting.
-# One-time setup on kaggle.com: create two (empty, private) datasets, e.g.
-#   Cutyp/codebeast-abliterated  and  Cutyp/codebeast-checkpoints
+# One-time setup on kaggle.com: NOTHING. The script creates both datasets
+# itself on first push (private, under your account).
 # In the notebook: add KAGGLE_USERNAME / KAGGLE_KEY to Secrets, then run:
 #   KAGGLE_SYNC=1 KAGGLE_MODEL_DS=Cutyp/codebeast-abliterated \
 #   KAGGLE_CKPT_DS=Cutyp/codebeast-checkpoints python abliterate_and_train.py
@@ -93,6 +93,10 @@ def kaggle_push():
         print(f"↑ Pushing {len(files)} files to {ds}...")
         ok, out = _kaggle(["kaggle", "datasets", "version", "-p", str(src),
                            "-m", "codebeast sync", "-q"])
+        if not ok and ("404" in out or "not found" in out.lower()):
+            print(f"  Dataset {ds} doesn't exist yet — creating it...")
+            ok, out = _kaggle(["kaggle", "datasets", "create", "-p",
+                               str(src), "-q"])
         print("✓ Pushed." if ok else f"  push failed:\n  {out[-500:]}")
 
 
