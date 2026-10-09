@@ -68,44 +68,29 @@ DJ_VOICE = ""  # resolved at talk time: catalogue default or override
 
 
 def _dj_character() -> Any:
-    """Build (or fetch) the DJ's Character record."""
+    """Fetch Vrede from the unified character bank (nomorals/characters).
+
+    One Vrede, not two: the DJ uses the bank's Vrede — the same character
+    who guests on podcasts and plays games. DJ-specific traits live in the
+    seed (seeds.py), not here. Seeds the bank on first use.
+    """
     try:
-        from ..audio.characters import Character, CharacterStore
+        from ..characters import CharacterStore
+        from ..characters.seeds import seed_bank
     except Exception:  # noqa: BLE001
         return None
     store = CharacterStore()
     try:
-        existing = store.get("dj_vrede")
+        existing = store.get_by_name("Vrede")
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None:
         return existing
-    ch = Character(
-        id="dj_vrede",
-        name=DJ_NAME,
-        voice=DJ_VOICE,
-        personality={
-            "energy": 0.92, "hype": 0.88, "warmth": 0.72,
-            "playfulness": 0.8, "confidence": 0.9,
-        },
-        speech_patterns=[
-            "short punchy sentences between tracks",
-            "calls the crowd 'family' when energy is high",
-            "names the track and the vibe before every drop",
-            "shouts out requesters by name",
-            "never repeats the same intro twice in a set",
-        ],
-        goals=[
-            "keep the room's energy climbing",
-            "make every transition feel intentional",
-            "remember who requested what and honor it",
-        ],
-    )
     try:
-        store.save(ch)
+        seed_bank(store)
+        return store.get_by_name("Vrede")
     except Exception:  # noqa: BLE001
-        pass
-    return ch
+        return None
 
 
 # ── room sensing ───────────────────────────────────────────────────────
@@ -266,9 +251,9 @@ class DJPersona:
         self.voice = voice or DJ_VOICE
         self._rng = random.Random()
         self._recent_lines: list[str] = []
-        self._llm_fn: Callable[[str, str], str] | None = None
+        self._llm_fn: Callable[[str], str] | None = None
 
-    def set_llm(self, fn: Callable[[str, str], str] | None) -> None:
+    def set_llm(self, fn: Callable[[str], str] | None) -> None:
         self._llm_fn = fn
 
     # ── talk generation ──
@@ -296,8 +281,16 @@ class DJPersona:
         return line
 
     def _talk_via_llm(self, ctx: dict[str, Any]) -> str:
+        """Speak through the bank Vrede's Character.speak().
+
+        Uses the unified character-bank Vrede — the same character who
+        guests on podcasts and plays games. Falls back to _assemble when
+        no dialogue engine is wired.
+        """
         try:
-            from ..audio.characters import talk_to
+            ch = self.character
+            if ch is None or self._llm_fn is None:
+                return ""
             q = (
                 f"You are live on air. Situation: {ctx['situation']}. "
                 f"Track: {ctx['track'] or 'n/a'} ({ctx['style'] or 'n/a'}). "
@@ -307,9 +300,9 @@ class DJPersona:
                 + "One short DJ line, in your voice, under 25 words. "
                 "Never repeat a previous line."
             )
-            res = talk_to(self.character, q, llm_fn=self._llm_fn)
-            if res.ok and res.text:
-                return res.text.strip()[:220]
+            text = ch.speak(q, self._llm_fn)
+            if text:
+                return text.strip()[:220]
         except Exception:  # noqa: BLE001
             pass
         return ""

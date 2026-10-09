@@ -115,5 +115,7 @@ def test_style_for_query():
 
 def test_dj_character_identity():
     p = live.DJPersona()
-    assert p.character is None or p.character.name == "DJ Vrede"
+    # One Vrede: the character bank's Vrede, not a separate "DJ Vrede".
+    # DJ_NAME remains the stage name for announcements.
+    assert p.character is None or p.character.name == "Vrede"
     assert live.DJ_NAME == "DJ Vrede"
