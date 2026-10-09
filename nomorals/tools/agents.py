@@ -47,6 +47,7 @@ AGENT_TOOL_MODULES = (
     "mission",
     "monitor",
     "morning_briefing",
+    "morning_pulse",
     "os.verifiers",
     "osint_graph",
     "planner",

@@ -1301,6 +1301,15 @@ class PartnerRuntime(
                     check_catchup(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("briefing job not registered: %s", exc)
+                # Morning pulse — the autonomous daily briefing with voice
+                # (daily 23:00 America/Denver = 06:00 WAT).  Idempotent by
+                # name; the pipeline is news → briefing → voice → delivery.
+                try:
+                    from ..morning_pulse import ensure_pulse_job
+                    ensure_pulse_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("morning-pulse job not registered: %s",
+                                 exc)
                 # Wave E: always-on research loop — one durable
                 # "research loop" job (every NM_RESEARCH_LOOP_HOURS,
                 # default 6h) ticking the Wave C organs (swarm -> digest
