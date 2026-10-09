@@ -35,13 +35,46 @@ from ..social.chat.base import ChatKind
 __all__ = [
     "ACTOR_OWNER",
     "ACTOR_OUTSIDER",
+    "CAPABILITY_MATRIX",
+    "PUBLIC_CATEGORIES",
+    "PRIVATE_CATEGORIES",
     "SocialGrant",
     "grant_for",
     "check_tool_call",
+    "audit_matrix",
 ]
 
 ACTOR_OWNER = "owner"
 ACTOR_OUTSIDER = "outsider"
+
+#: Tool categories and their visibility. PUBLIC categories are available to
+#: outsiders in groups (no gating). PRIVATE categories are owner-only,
+#: enforced at the call boundary in code.
+PUBLIC_CATEGORIES: frozenset[str] = frozenset({
+    "games",        # game_move, game_join, game_list, game_status, …
+    "dj_requests",  # music_request, dj_request — request songs from the DJ
+    "public_info",  # public, non-sensitive lookups (help, public tracklists)
+})
+
+PRIVATE_CATEGORIES: frozenset[str] = frozenset({
+    "admin",        # ban, pin, promote, restrict, delete, invite links, …
+    "memory",       # recall, remember, forget — the owner's memories
+    "owner_tools",  # research, wisdom, trading, connectors, system tools
+    "messaging",    # sending DMs, reading private chats
+    "characters",   # character management (creation, editing)
+    "media_create", # generating media on demand (beyond public requests)
+})
+
+#: The explicit matrix: category -> {public_in_group, public_in_dm}.
+#: Owner sees everything regardless. Auditable via audit_matrix().
+CAPABILITY_MATRIX: dict[str, dict[str, bool]] = {
+    cat: {"public_in_group": True, "public_in_dm": False}
+    for cat in PUBLIC_CATEGORIES
+}
+CAPABILITY_MATRIX.update({
+    cat: {"public_in_group": False, "public_in_dm": False}
+    for cat in PRIVATE_CATEGORIES
+})
 
 #: Tools outsiders may invoke, by chat kind. Everything else is denied
 #: at the call boundary — no prompt needed, no prompt can override.
@@ -143,3 +176,25 @@ def capabilities_for_grant(grant: SocialGrant) -> set[str]:
     if grant.may_use_tools:
         caps.add(Capability.SOCIAL_READ)
     return caps
+
+
+def audit_matrix() -> dict[str, Any]:
+    """Dump the full public/private matrix for inspection.
+
+    Returns every category, its visibility, and the concrete public
+    tool lists. Used by tests and by the owner to verify gating.
+    Pure — no I/O.
+    """
+    return {
+        "public_categories": sorted(PUBLIC_CATEGORIES),
+        "private_categories": sorted(PRIVATE_CATEGORIES),
+        "matrix": {
+            cat: dict(vis) for cat, vis in CAPABILITY_MATRIX.items()
+        },
+        "public_group_tools": sorted(PUBLIC_GROUP_TOOLS),
+        "public_dm_tools": sorted(PUBLIC_DM_TOOLS),
+        "owner": "everything (may_use_tools={'*'})",
+        "outsider_dm": "conversation only — no tools",
+        "outsider_group": "public categories only — no admin, no memory, "
+                          "no owner tools, no DMs",
+    }
