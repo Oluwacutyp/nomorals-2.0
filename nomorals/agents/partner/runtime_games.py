@@ -1798,7 +1798,7 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial start <platform>"
             return flow.start(" ".join(parts[1:]))
-        if verb == "assist":
+        if verb == "assist" or verb == "signup":
             if len(parts) < 2:
                 return "usage: /trial assist <platform> [--yes]"
             auto_yes = "--yes" in [p.lower() for p in parts]
@@ -1806,6 +1806,10 @@ class RuntimeGamesMixin:
             if not platform_parts:
                 return "usage: /trial assist <platform> [--yes]"
             return flow.assist(" ".join(platform_parts), chat_key=chat_key, auto_yes=auto_yes)
+        if verb == "confirm":
+            if len(parts) < 2:
+                return "usage: /trial confirm <token>"
+            return flow.confirm_signup(parts[1], chat_key=chat_key)
         if verb == "status":
             return flow.assist_status()
         if verb == "resume":
@@ -1842,7 +1846,7 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /trial rm <platform>"
             return flow.remove(parts[1])
-        return ("usage: /trial [list|start <p>|assist <p>|status|resume <id>|sms [country]|"
+        return ("usage: /trial [list|start <p>|assist <p>|signup <p>|confirm <token>|status|resume <id>|sms [country]|"
                 "sms code|inbox <service>|save <p> <login> <pass>|send <p>|rm <p>]")
 
     # ── sports bet analyst: /bet (analysis only — never places bets) ─────────

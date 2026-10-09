@@ -301,6 +301,124 @@ class RuntimeSystemMixin:
             return "\n".join(lines)
         if verb == "refresh":
             return self._tool_reply("proxy_refresh", chat_key)
+        if verb == "health":
+            # /proxy health — the dashboard, formatted for chat.
+            outcome = self.context.tools.call("proxy_health")
+            if not outcome.ok:
+                return f"health failed: {getattr(outcome.error, 'message', outcome.error)}"
+            v = outcome.value
+            p = v.get("pool", {})
+            lines = ["🏥 <b>proxy pool health</b>"]
+            lines.append(
+                f"  routable: <b>{p.get('routable', 0)}</b> "
+                f"(fresh 24h: {p.get('fresh_24h', 0)}, "
+                f"alive: {p.get('alive_total', 0)})")
+            if p.get("in_backoff"):
+                lines.append(f"  ⏳ in failure backoff: {p['in_backoff']}")
+            if p.get("dead"):
+                lines.append(f"  ☠ dead records: {p['dead']}")
+            by_scheme = p.get("by_scheme") or {}
+            if by_scheme:
+                lines.append("  by protocol: " + ", ".join(
+                    f"{k}={n}" for k, n in by_scheme.items()))
+            by_anon = p.get("by_anonymity") or {}
+            if by_anon:
+                lines.append("  by anonymity: " + ", ".join(
+                    f"{k}={n}" for k, n in by_anon.items()))
+            top = p.get("top_countries") or {}
+            if top:
+                lines.append("  top countries: " + ", ".join(
+                    f"{k}={n}" for k, n in list(top.items())[:8]))
+            if p.get("ng_or_eu"):
+                lines.append(f"  🇳🇬/🇪🇺 presence: {p['ng_or_eu']} proxies")
+            if p.get("avg_latency_ms"):
+                lines.append(
+                    f"  avg latency (decayed): {p['avg_latency_ms']}ms")
+            lines.append(f"  last refresh: {p.get('last_refresh', 'never')}")
+            rot = v.get("rotation", {})
+            lines.append(
+                f"  rotation: {'on (' + rot['strategy'] + ')' if rot.get('enabled') else 'off'}"
+                + (f", cooling {rot['cooling']}" if rot.get("cooling") else "")
+                + (f", direct fallbacks {rot['direct_fallbacks']}"
+                   if rot.get("direct_fallbacks") else ""))
+            lines.append(f"  domain affinity: {v.get('affinity_bindings', 0)} "
+                         f"pinned site(s)")
+            sched = v.get("schedule") or {}
+            lines.append("  auto-refresh: " + (
+                f"{sched['spec']} (active)" if sched.get("active")
+                else "off — /proxy schedule on to re-check automatically"))
+            if v.get("guidance"):
+                lines.append("")
+                lines.append("⚠ " + v["guidance"])
+            return "\n".join(lines)
+        if verb == "pick":
+            # /proxy pick [udp] [country=XX] [anon=elite] [target=url]
+            kwargs: dict[str, str] = {}
+            for tok in parts[1:]:
+                low = tok.lower()
+                if low in {"udp", "socks5"}:
+                    kwargs["needs_udp"] = "true"
+                elif low.startswith("country="):
+                    kwargs["country"] = tok.split("=", 1)[1]
+                elif low.startswith("anon="):
+                    kwargs["min_anonymity"] = tok.split("=", 1)[1]
+                elif low.startswith("target="):
+                    kwargs["target"] = tok.split("=", 1)[1]
+            outcome = self.context.tools.call("proxy_pick", **kwargs)
+            if not outcome.ok:
+                return f"pick failed: {getattr(outcome.error, 'message', outcome.error)}"
+            v = outcome.value
+            if v.get("proxy"):
+                return (f"🎯 {v['proxy']}\n  {v.get('why', '')}\n"
+                        f"  use: /proxy set {v['proxy']}")
+            return "⚠ " + v.get("note", "no proxy available")
+        if verb == "affinity":
+            # /proxy affinity [bind <domain> <url> [ttl_h] | lookup <domain>
+            #                | release <domain> | list]
+            sub = parts[1].lower() if len(parts) > 1 else "list"
+            if sub == "bind" and len(parts) >= 4:
+                return self._tool_reply(
+                    "proxy_affinity", chat_key, action="bind",
+                    domain=parts[2], proxy_url=parts[3],
+                    ttl_hours=parts[4] if len(parts) > 4 else "")
+            if sub == "lookup" and len(parts) >= 3:
+                return self._tool_reply(
+                    "proxy_affinity", chat_key, action="lookup",
+                    domain=parts[2])
+            if sub == "release" and len(parts) >= 3:
+                return self._tool_reply(
+                    "proxy_affinity", chat_key, action="release",
+                    domain=parts[2])
+            if sub == "list":
+                outcome = self.context.tools.call("proxy_affinity",
+                                                  action="list")
+                if not outcome.ok:
+                    return f"affinity failed: {getattr(outcome.error, 'message', outcome.error)}"
+                rows = outcome.value.get("bindings") or []
+                if not rows:
+                    return ("no pinned sites — /proxy affinity bind "
+                            "<domain> <proxy_url>  (or /proxy pick "
+                            "target=<url> pins automatically)")
+                lines = [f"📌 pinned sites ({len(rows)}):"]
+                for r in rows[:12]:
+                    lines.append(f"  {r['domain']} → {r['proxy_url']} "
+                                 f"({r['age_hours']}h of {r['ttl_hours']}h)")
+                return "\n".join(lines)
+            return ("usage: /proxy affinity bind <domain> <proxy_url> [ttl_h]"
+                    " | lookup <domain> | release <domain> | list")
+        if verb == "schedule":
+            # /proxy schedule on [minutes] | off — auto-refresh cadence
+            sub = parts[1].lower() if len(parts) > 1 else "status"
+            if sub in {"on", "start"}:
+                minutes = parts[2] if len(parts) > 2 else ""
+                return self._tool_reply("proxy_schedule", chat_key,
+                                        enabled="true",
+                                        every_minutes=minutes)
+            if sub in {"off", "stop"}:
+                return self._tool_reply("proxy_schedule", chat_key,
+                                        enabled="false")
+            return self._tool_reply("proxy_schedule", chat_key,
+                                    enabled="true")
         if verb == "pool":
             scheme = parts[1] if len(parts) > 1 else ""
             outcome = self.context.tools.call(
@@ -365,8 +483,10 @@ class RuntimeSystemMixin:
             return self._tool_reply("ssh_socks", chat_key,
                                     action=sub, name=parts[1] if len(parts) > 1 else "")
         return ("usage: /proxy status | list | test [url] | set <url> | clear |"
-                " scrape | refresh | pool [scheme] | file | rotate on [strategy]"
-                " | ssh start <name> <host> <user>")
+                " scrape | refresh | health | pool [scheme] | pick [udp] "
+                "[country=XX] [anon=elite] [target=url] | file | affinity "
+                "bind|lookup|release|list | rotate on [strategy] | schedule "
+                "on [min] | ssh start <name> <host> <user>")
 
     def _control_macro(self, tail: str, chat_key: str) -> str:
         parts = (tail or "").split(None, 1)

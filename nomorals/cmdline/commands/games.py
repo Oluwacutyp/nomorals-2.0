@@ -81,6 +81,15 @@ def _cmd_trial(args: argparse.Namespace, context: Any) -> int:
         print(flow.assist_status())
         return 0
 
+    if cmd == "confirm":
+        token = (getattr(args, "token", "") or "").strip()
+        if not token:
+            print("trial confirm needs a token — "
+                  "nm trial confirm <token>", file=sys.stderr)
+            return 2
+        print(flow.confirm_signup(token))
+        return 0
+
     if cmd == "resume":
         checkpoint_id = (getattr(args, "checkpoint_id", "") or "").strip()
         if not checkpoint_id:
