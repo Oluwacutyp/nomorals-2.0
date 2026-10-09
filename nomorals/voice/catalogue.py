@@ -216,6 +216,22 @@ class VoiceCatalogue:
         return engine.speak(text, voice_name=profile_name or None,
                             out_path=out_path)
 
+    def speak_as(self, text: str, voice_name: str, *,
+                 out_path: str = "") -> dict:
+        """Speak ``text`` in a named catalogue voice (one-shot).
+
+        Does not change the chat override or the global active voice.
+        Raises KeyError for unknown voice names. Returns the engine
+        result dict.
+        """
+        voice = self.voices.get((voice_name or "").strip())
+        if voice is None:
+            raise KeyError(f"unknown voice {voice_name!r}")
+        engine = UniversalTTS(backend=voice.backend,
+                              voices_dir=self.voices_dir)
+        return engine.speak(text, voice_name=voice.profile or None,
+                            out_path=out_path)
+
     # -- cloning ---------------------------------------------------------
 
     def clone(self, name: str, audio_path: str, *,
