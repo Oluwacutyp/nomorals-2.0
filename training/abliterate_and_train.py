@@ -369,6 +369,64 @@ def norm_generic(row):
 NORMALIZERS = {"sharegpt": norm_sharegpt, "ultra": norm_ultra,
                "conversations": norm_sharegpt, "generic": norm_generic}
 
+def _raw_jsonl_stream(src):
+    """Stream a dataset's raw JSONL files, bypassing its loading script.
+
+    Publisher loading scripts sometimes declare features that don't match
+    their own data (e.g. UltraData's Json(decode=True) vs actual structs).
+    The ``json`` builder infers schema from real data, so it just works.
+    Returns a streaming dataset or None.
+    """
+    from huggingface_hub import HfApi
+    repo, config = src["id"], (src.get("config") or "")
+    try:
+        files = HfApi().list_repo_files(repo, repo_type="dataset")
+    except Exception as e:
+        print(f"  ⚠ raw-JSONL fallback: can't list {repo}: {e}")
+        return None
+
+    def _norm(s):
+        return s.lower().replace("-", "_").replace(" ", "_")
+    ckey = _norm(config)
+    matches = [f for f in files
+               if f.endswith(".jsonl") and (not ckey or ckey in _norm(f))]
+    if not matches:
+        print(f"  ⚠ raw-JSONL fallback: no .jsonl files for {repo} config {config!r}")
+        return None
+    urls = [f"https://huggingface.co/datasets/{repo}/resolve/main/{f}"
+            for f in sorted(matches)]
+    print(f"  → raw-JSONL fallback: {len(urls)} files")
+    from datasets import load_dataset
+    return load_dataset("json", data_files=urls, split="train", streaming=True)
+
+
+def _load_stream(src):
+    """Load one source as an iterator, surviving broken publisher scripts.
+
+    Probes the first row immediately so schema-cast errors surface here
+    (not 30 minutes into a run), then falls back to raw JSONL streaming.
+    Returns (iterator, label).
+    """
+    from datasets import load_dataset
+    name = src["name"]
+    try:
+        ds = load_dataset(src["id"], src.get("config"),
+                          split="train", streaming=True)
+        it = iter(ds)
+        first = next(it)  # schema errors raise here, on the first batch
+        import itertools
+        return itertools.chain([first], it), name
+    except StopIteration:
+        return iter(()), name + " (empty)"
+    except Exception as e:
+        print(f"  ⚠ {name}: publisher script broken "
+              f"({type(e).__name__}: {str(e)[:150]}), trying raw JSONL...")
+        fb = _raw_jsonl_stream(src)
+        if fb is None:
+            raise RuntimeError(f"{name}: no usable stream") from e
+        return iter(fb), name + " (raw JSONL)"
+
+
 def build_dataset(tokenizer):
     """Stream 6 sources, stamp Devon persona, interleave to TARGET_ROWS."""
     from datasets import load_dataset, interleave_datasets, Dataset
@@ -391,35 +449,40 @@ def build_dataset(tokenizer):
     for src in SOURCES:
         print(f"Streaming {src['name']} ({src['id']})...")
         try:
-            ds = load_dataset(src["id"], src.get("config"),
-                              split="train", streaming=True)
+            stream, label = _load_stream(src)
         except Exception as e:
             print(f"  ⚠ Skipping {src['name']}: {e}")
             continue
         fn = NORMALIZERS.get(src["normalize"], norm_generic)
         count = 0
-        for i, row in enumerate(ds):
-            if count >= src["cap"]:
-                break
-            try:
-                turns = fn(row)
-            except Exception:
-                continue
-            if not turns:
-                continue
-            # Stamp Devon persona as system prompt (round-robin 3 variants)
-            system = DEVON_PROMPTS[prompt_cycle % 3]
-            prompt_cycle += 1
-            messages = [{"role": "system", "content": system}]
-            for role, content in turns:
-                messages.append({"role": role, "content": content[:2000]})
-            text = tokenizer.apply_chat_template(messages, tokenize=False)
-            # Filter junk
-            if len(text) < 50 or len(text) > SEQ_LEN * 4:
-                continue
-            all_rows.append({"text": text, "_src": src["name"]})
-            count += 1
-        print(f"  → {count} rows from {src['name']}")
+        try:
+            for row in stream:
+                if count >= src["cap"]:
+                    break
+                try:
+                    turns = fn(row)
+                except Exception:
+                    continue
+                if not turns:
+                    continue
+                # Stamp Devon persona as system prompt (round-robin 3 variants)
+                system = DEVON_PROMPTS[prompt_cycle % 3]
+                prompt_cycle += 1
+                messages = [{"role": "system", "content": system}]
+                for role, content in turns:
+                    messages.append({"role": role, "content": content[:2000]})
+                text = tokenizer.apply_chat_template(messages, tokenize=False)
+                # Filter junk
+                if len(text) < 50 or len(text) > SEQ_LEN * 4:
+                    continue
+                all_rows.append({"text": text, "_src": src["name"]})
+                count += 1
+        except Exception as e:
+            # Batch-level break (e.g. schema mismatch mid-stream) — keep the
+            # rows already collected, say so loudly.
+            print(f"  ⚠ {label} broke mid-stream after {count} rows: "
+                  f"{type(e).__name__}: {str(e)[:200]}")
+        print(f"  → {count} rows from {label}")
         if count == 0 and src.get("required", True):
             print()
             print("=" * 60)
