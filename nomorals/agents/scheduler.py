@@ -322,17 +322,26 @@ class Scheduler:
 
     def __init__(self, context: Any, *, gateway: Any = None,
                  tick_seconds: float = 20.0, max_concurrent: int = 2,
-                 wall_seconds: float = 300.0) -> None:
+                 wall_seconds: float = 300.0,
+                 redeliver_interval: float = 120.0) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self.notifier = Notifier(context, gateway=gateway)
         self.tick_seconds = max(5.0, float(tick_seconds))
         self.max_concurrent = max(1, int(max_concurrent))
         self.wall_seconds = float(wall_seconds)
+        #: how often the tick loop sweeps the notification redelivery
+        #: queue (throttled: one sweep per interval, not per tick).
+        self.redeliver_interval = max(15.0, float(redeliver_interval))
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running_jobs = 0
         self._lock = threading.Lock()
+        #: health bookkeeping — the numbers behind ``/schedule health``
+        self._started_at: float | None = None
+        self._last_tick_at: float | None = None
+        self._last_redeliver_at = 0.0
+        self._tick_errors = 0
 
     # ── CRUD ─────────────────────────────────────────────────────────────────
     def add(
@@ -592,10 +601,17 @@ class Scheduler:
 
     # ── execution ────────────────────────────────────────────────────────────
     def tick(self) -> list[dict[str, Any]]:
-        """Run everything due right now. Returns the outcomes (for tests too)."""
+        """Run everything due right now. Returns the outcomes (for tests too).
+
+        Also drives the notification redelivery queue (throttled to
+        ``redeliver_interval``) so a scheduled job whose delivery failed
+        keeps retrying with backoff on its own — the scheduler no longer
+        depends on the watch loop for that.
+        """
         if self.db is None:
             return []
-        now = time.time()
+        self._last_tick_at = time.time()
+        now = self._last_tick_at
         try:
             due = self.db.query(
                 "SELECT * FROM schedule_jobs WHERE enabled = 1 AND next_run IS NOT NULL "
@@ -618,11 +634,34 @@ class Scheduler:
             try:
                 results.append(self._execute(row))
             except Exception:  # noqa: BLE001 - one job must not kill the tick
+                self._tick_errors += 1
                 _log.exception("scheduler job crashed: %s", row.get("id"))
             finally:
                 with self._lock:
                     self._running_jobs -= 1
+        self._maybe_redeliver()
         return results
+
+    def _maybe_redeliver(self) -> int:
+        """Throttled sweep of the notification redelivery queue.
+
+        Runs at most once per ``redeliver_interval`` — the backoff clock
+        on each row decides what's actually attempted, so a dead channel
+        is never hammered.  Never raises.
+        """
+        now = time.time()
+        if now - self._last_redeliver_at < self.redeliver_interval:
+            return 0
+        self._last_redeliver_at = now
+        try:
+            redelivered = self.notifier.redeliver()
+        except Exception:  # noqa: BLE001 - delivery is best-effort
+            _log.debug("scheduler redeliver sweep failed", exc_info=True)
+            return 0
+        if redelivered:
+            _log.info("scheduler redelivered %d queued notification(s)",
+                      redelivered)
+        return redelivered
 
     def run_now(self, ref: str) -> dict[str, Any]:
         row = self._find(ref)
@@ -727,7 +766,8 @@ class Scheduler:
             raise ValueError("empty message payload")
         outcome = self.notifier.publish("message", text, force=True)
         if outcome.get("delivered"):
-            return f"sent: {text[:200]}"
+            channel = outcome.get("channel") or "chat"
+            return f"sent via {channel}: {text[:200]}"
         state = outcome.get("delivery_state") or "pending"
         _log.warning("scheduled message stored undelivered (%s): %r",
                      state, text[:80])
@@ -779,6 +819,7 @@ class Scheduler:
             except Exception:  # noqa: BLE001
                 _log.exception("scheduler catch-up failed")
         self._stop.clear()
+        self._started_at = time.time()
         self._thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
         self._thread.start()
         _log.info("scheduler started (tick %.0fs)", self.tick_seconds)
@@ -792,6 +833,131 @@ class Scheduler:
 
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    # ── health ───────────────────────────────────────────────────────────────
+    def health(self) -> dict[str, Any]:
+        """Scheduler + delivery health snapshot.  Never raises.
+
+        Powers ``/schedule health``: is the tick loop alive, when did it
+        last run, what fires next, what ran last, and is anything stuck
+        in the delivery queue (retryable / dead-lettered).  ``ok`` is
+        False when the loop died after start or the delivery queue is
+        backing up — the owner-visible answer to "is my scheduler alive".
+        """
+        out: dict[str, Any] = {
+            "ok": True,
+            "reasons": [],
+            "notes": [],
+            "running": False,
+            "tick_seconds": self.tick_seconds,
+            "started_at": self._started_at,
+            "last_tick_at": self._last_tick_at,
+            "last_tick_age_s": None,
+            "tick_errors": self._tick_errors,
+            "jobs": {"total": 0, "enabled": 0, "due_now": 0},
+            "next_job": None,
+            "last_job": None,
+            "delivery": {
+                "queue": {"retryable": 0, "held": 0, "dead": 0},
+                "live_owner_channels": [],
+                "termux_fallback": False,
+            },
+        }
+        try:
+            alive = self.running()
+            out["running"] = alive
+            # loop state: running | not-started (this instance never spun
+            # the thread — CLI/test contexts) | stopped (start() was
+            # called but the thread died — a real degradation).
+            out["loop_state"] = ("running" if alive
+                                 else ("stopped" if self._started_at
+                                       else "not-started"))
+            if self._last_tick_at:
+                out["last_tick_age_s"] = round(time.time() - self._last_tick_at, 1)
+            jobs = self.list_jobs()
+            now = time.time()
+            enabled = [j for j in jobs if j.get("enabled")]
+            out["jobs"] = {
+                "total": len(jobs),
+                "enabled": len(enabled),
+                "due_now": sum(1 for j in enabled
+                               if (j.get("next_run") or 0) <= now),
+            }
+            upcoming = sorted(
+                (j for j in enabled if j.get("next_run")),
+                key=lambda j: j["next_run"])
+            if upcoming:
+                nxt = upcoming[0]
+                out["next_job"] = {
+                    "name": nxt["name"],
+                    "next_run_iso": nxt.get("next_run_iso"),
+                    "in_s": max(0, round(nxt["next_run"] - now)),
+                }
+            ran = [j for j in jobs if j.get("last_run")]
+            if ran:
+                last = max(ran, key=lambda j: j["last_run"])
+                out["last_job"] = {
+                    "name": last["name"],
+                    "last_result": (last.get("last_result") or "")[:120],
+                    "ok": not str(last.get("last_result") or "")
+                            .startswith("job failed"),
+                }
+            try:
+                out["delivery"]["queue"] = self.notifier.queue_depth()
+            except Exception:  # noqa: BLE001 - queue depth is best-effort
+                pass
+            out["delivery"]["live_owner_channels"] = self._live_owner_channels()
+            try:
+                out["delivery"]["termux_fallback"] = bool(
+                    self.notifier.termux_fallback_available())
+            except Exception:  # noqa: BLE001
+                pass
+            # verdict — "stopped" degrades; "not-started" is informational
+            # (CLI/test contexts never spin the loop; the live runtime does).
+            reasons = out["reasons"]
+            if out["loop_state"] == "stopped":
+                reasons.append("tick loop died after start() — jobs only "
+                               "fire on manual /schedule run; restart the "
+                               "runtime")
+            if out["loop_state"] == "not-started":
+                out["notes"].append("tick loop not started in this process — "
+                                    "automatic firing needs the live runtime")
+            if out["delivery"]["queue"]["dead"]:
+                reasons.append(
+                    f"{out['delivery']['queue']['dead']} notification(s) "
+                    "dead-lettered (delivery retries exhausted)")
+            if (out["delivery"]["queue"]["retryable"] >= 5
+                    and not out["delivery"]["live_owner_channels"]
+                    and not out["delivery"]["termux_fallback"]):
+                reasons.append(
+                    f"{out['delivery']['queue']['retryable']} notification(s) "
+                    "stuck retrying with no live channel and no fallback")
+            out["ok"] = not reasons
+        except Exception as exc:  # noqa: BLE001 - health must never raise
+            out["ok"] = False
+            out["reasons"].append(f"health check errored: {exc}")
+        return out
+
+    def _live_owner_channels(self) -> list[str]:
+        """Owner-chat platforms running in this session right now."""
+        try:
+            gw = getattr(self.notifier, "gateway", None)
+            if gw is None:
+                return []
+            partner = getattr(getattr(self.context, "settings", None),
+                              "partner", None)
+            raw = str(getattr(partner, "owner_chats", "") or "") if partner else ""
+            status = gw.status() or {}
+            live = []
+            for key in raw.split(","):
+                plat, _, cid = key.strip().partition(":")
+                if (plat and cid
+                        and status.get(plat, {}).get("running_in_session")
+                        and plat.strip().lower() not in live):
+                    live.append(plat.strip().lower())
+            return sorted(live)
+        except Exception:  # noqa: BLE001 - best-effort
+            return []
 
     def _loop(self) -> None:
         while not self._stop.is_set():

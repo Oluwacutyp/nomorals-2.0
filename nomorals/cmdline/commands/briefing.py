@@ -38,7 +38,7 @@ def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
                     print("delivery counts (last 24h):")
                     for state_name in ("sent", "failed", "pending",
                                        "held-quiet-hours", "disabled",
-                                       "muted", "deduped"):
+                                       "muted", "deduped", "dead"):
                         n = counts.get(state_name, 0)
                         if n:
                             print(f"  {state_name}: {n}")
@@ -64,7 +64,8 @@ def _cmd_briefing(args: argparse.Namespace, context: Any) -> int:
                                 "pending": "…",
                                 "held-quiet-hours": "⏸",
                                 "disabled": "⊘",
-                                "muted": "⊘"}.get(
+                                "muted": "⊘",
+                                "dead": "✖"}.get(
                                     r.get("delivery_state"), "?")
                         print(f"  {when} [{r.get('kind')}] {mark} "
                               f"{r.get('delivery_state')} — "

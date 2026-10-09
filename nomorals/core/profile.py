@@ -23,7 +23,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["EnvironmentProfile", "detect_profile", "memory_mb", "cpu_count"]
+__all__ = ["EnvironmentProfile", "detect_profile", "memory_mb", "cpu_count",
+           "is_termux"]
 
 #: profile name → (min, target, max) VCPU envelope
 ENVELOPES: dict[str, tuple[int, int, int]] = {
@@ -120,6 +121,20 @@ def _looks_like_termux(system: str, machine: str,
     if "termux" in (getattr(sys, "prefix", "") or "").lower():
         return True
     return False
+
+
+def is_termux() -> bool:
+    """True when this process is running inside Termux on Android.
+
+    Public wrapper over :func:`_looks_like_termux` so other modules
+    (e.g. the notifier's Termux-notification fallback) don't duplicate
+    the detection heuristics.  Stdlib-only, never raises.
+    """
+    try:
+        return bool(_looks_like_termux(_platform.system(), _platform.machine(),
+                                       dict(os.environ)))
+    except Exception:  # noqa: BLE001 - detection is best-effort
+        return False
 
 
 def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,

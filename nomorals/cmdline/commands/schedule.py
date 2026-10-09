@@ -5,6 +5,7 @@ the chat command writes to): at / every / daily, with
 ``message | tool | command`` actions.
 
     nm schedule list [--json]
+    nm schedule health [--json]
     nm schedule add <name> <when> message <text...>
     nm schedule add <name> <when> tool <tool-name> [<json-args>]
     nm schedule add <name> <when> command <shell-command...>
@@ -35,6 +36,7 @@ def _scheduler(context: Any):
 
 def _usage() -> int:
     print("usage: nm schedule list [--json]\n"
+          "       nm schedule health [--json]\n"
           "       nm schedule add <name> <when> message <text...> |\n"
           "                              tool <tool-name> [<json-args>] |\n"
           "                              command <shell-command...>\n"
@@ -57,6 +59,8 @@ def _cmd_schedule(args: Any, context: Any) -> int:
     try:
         if verb in ("list", "status"):
             return _schedule_list(args, context)
+        if verb == "health":
+            return _schedule_health(args, context)
         if verb == "add":
             return _schedule_add(context, words[1:])
         if verb in ("rm", "remove"):
@@ -92,6 +96,50 @@ def _schedule_list(args: Any, context: Any) -> int:
         print(f"  [{state}] {job['name']} — {job['kind']} {job['spec']} (next: {nxt})")
         if job.get("last_result"):
             print(f"        last: {job['last_result'][:80]}")
+    return 0
+
+
+def _schedule_health(args: Any, context: Any) -> int:
+    """``nm schedule health`` — scheduler + delivery health snapshot."""
+    sched = _scheduler(context)
+    try:
+        h = sched.health()
+    except Exception as exc:  # noqa: BLE001 - health must never raise
+        print(f"scheduler health check failed: {exc}", file=sys.stderr)
+        return 1
+    if _as_json(args):
+        print(json.dumps(h, indent=2, default=str))
+        return 0
+    print("scheduler health:", "OK" if h.get("ok") else "DEGRADED")
+    loop_state = h.get("loop_state") or (
+        "running" if h.get("running") else "not-started")
+    print(f"  tick loop: {loop_state} (every {h.get('tick_seconds', '?')}s)")
+    age = h.get("last_tick_age_s")
+    print("  last tick:", f"{age}s ago" if age is not None else "never")
+    jobs = h.get("jobs") or {}
+    print(f"  jobs: {jobs.get('total', 0)} total, {jobs.get('enabled', 0)} "
+          f"enabled, {jobs.get('due_now', 0)} due now")
+    nxt = h.get("next_job")
+    if nxt:
+        print(f"  next: {nxt['name']} at {nxt.get('next_run_iso')} "
+              f"(in {nxt.get('in_s', '?')}s)")
+    last = h.get("last_job")
+    if last:
+        print(f"  last ran: {'✅' if last.get('ok') else '❌'} {last['name']} — "
+              f"{last.get('last_result', '')[:80]}")
+    d = h.get("delivery") or {}
+    q = d.get("queue") or {}
+    print(f"  delivery queue: {q.get('retryable', 0)} retrying, "
+          f"{q.get('held', 0)} held (quiet hours), "
+          f"{q.get('dead', 0)} dead-lettered")
+    live = d.get("live_owner_channels") or []
+    print("  live owner channels:", ", ".join(live) or "NONE")
+    if d.get("termux_fallback"):
+        print("  fallback: termux-notification available")
+    for reason in h.get("reasons") or []:
+        print(f"  ⚠️ {reason}")
+    for note in h.get("notes") or []:
+        print(f"  ℹ️ {note}")
     return 0
 
 
