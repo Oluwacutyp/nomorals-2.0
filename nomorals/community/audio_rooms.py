@@ -66,6 +66,7 @@ class Participant:
     name: str = ""
     muted: bool = False
     hand_raised_at: float = 0.0
+    note: str = ""  # hand-raise note ("Q about the venue") shown to hosts
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class Participant:
             "name": self.name,
             "muted": self.muted,
             "hand_raised_at": self.hand_raised_at,
+            "note": self.note,
         }
 
     @classmethod
@@ -83,6 +85,7 @@ class Participant:
             name=str(data.get("name", "") or ""),
             muted=bool(data.get("muted", False)),
             hand_raised_at=float(data.get("hand_raised_at", 0.0) or 0.0),
+            note=str(data.get("note", "") or ""),
         )
 
 
@@ -141,10 +144,16 @@ class Room:
     title: str = ""
     host_id: str = ""
     host_name: str = ""
+    cohosts: list[Participant] = field(default_factory=list)  # trusted speakers w/ host powers
     speakers: list[Participant] = field(default_factory=list)
     hand_raise_queue: list[Participant] = field(default_factory=list)
     listeners: list[Participant] = field(default_factory=list)
+    lobby: list[Participant] = field(default_factory=list)  # green-room pre-check-ins
     blocked: list[str] = field(default_factory=list)  # user_ids
+    locked: bool = False  # lock rejects new joins (sabha- pattern)
+    invite_codes: dict[str, str] = field(default_factory=dict)  # code → "speaker"|"listener"
+    reactions: dict[str, int] = field(default_factory=dict)  # emoji → count
+    agenda: str = ""  # what this room is about / running order
     reports: list[dict[str, Any]] = field(default_factory=list)
     recording: bool = False          # opt-in
     recording_visible: bool = False  # always True when recording
@@ -153,20 +162,30 @@ class Room:
     tips: list[Tip] = field(default_factory=list)
     platform: str = "telegram"       # telegram | web
     platform_ref: str = ""           # voice-chat id / web room url
-    state: str = "live"              # live | ended
+    state: str = "live"              # live | ended | scheduled
+    hand_raise_expiry: float = 1800.0  # stale hand-raises auto-expire (0 = never)
+    starts_at: float = 0.0  # scheduled start epoch; 0 = starts immediately
+    announced: bool = False  # scheduled-start reminder already queued
+    peak_headcount: int = 0  # analytics: max concurrent participants
     transcript: str = ""
     created_at: float = 0.0
     ended_at: float = 0.0
 
     # ── derived ──
 
+    def is_cohost(self, user_id: str) -> bool:
+        return any(p.user_id == (user_id or "").strip() for p in self.cohosts)
+
     def find(self, user_id: str) -> tuple[str, Participant | None]:
-        """Return (role, participant) — role in host/speaker/queue/listener/''."""
+        """Return (role, participant) — role in host/cohost/speaker/queue/listener/lobby/''."""
         uid = (user_id or "").strip()
         if not uid:
             return "", None
         if uid == self.host_id:
             return "host", Participant(user_id=self.host_id, name=self.host_name)
+        for p in self.cohosts:
+            if p.user_id == uid:
+                return "cohost", p
         for p in self.speakers:
             if p.user_id == uid:
                 return "speaker", p
@@ -176,6 +195,9 @@ class Room:
         for p in self.listeners:
             if p.user_id == uid:
                 return "listener", p
+        for p in self.lobby:
+            if p.user_id == uid:
+                return "lobby", p
         return "", None
 
     def is_blocked(self, user_id: str) -> bool:
@@ -184,6 +206,11 @@ class Room:
     def headcount(self) -> int:
         return 1 + len(self.speakers) + len(self.listeners)
 
+    def bump_peak(self) -> None:
+        h = self.headcount()
+        if h > self.peak_headcount:
+            self.peak_headcount = h
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "room_id": self.room_id,
@@ -191,10 +218,16 @@ class Room:
             "title": self.title,
             "host_id": self.host_id,
             "host_name": self.host_name,
+            "cohosts": [p.to_dict() for p in self.cohosts],
             "speakers": [p.to_dict() for p in self.speakers],
             "hand_raise_queue": [p.to_dict() for p in self.hand_raise_queue],
             "listeners": [p.to_dict() for p in self.listeners],
+            "lobby": [p.to_dict() for p in self.lobby],
             "blocked": list(self.blocked),
+            "locked": self.locked,
+            "invite_codes": dict(self.invite_codes),
+            "reactions": dict(self.reactions),
+            "agenda": self.agenda,
             "reports": list(self.reports),
             "recording": self.recording,
             "recording_visible": self.recording_visible,
@@ -204,6 +237,10 @@ class Room:
             "platform": self.platform,
             "platform_ref": self.platform_ref,
             "state": self.state,
+            "hand_raise_expiry": self.hand_raise_expiry,
+            "starts_at": self.starts_at,
+            "announced": self.announced,
+            "peak_headcount": self.peak_headcount,
             "transcript": self.transcript,
             "created_at": self.created_at,
             "ended_at": self.ended_at,
@@ -218,10 +255,16 @@ class Room:
             title=str(data.get("title", "") or ""),
             host_id=str(data.get("host_id", "") or ""),
             host_name=str(data.get("host_name", "") or ""),
+            cohosts=[Participant.from_dict(p) for p in (data.get("cohosts") or [])],
             speakers=[Participant.from_dict(p) for p in (data.get("speakers") or [])],
             hand_raise_queue=[Participant.from_dict(p) for p in (data.get("hand_raise_queue") or [])],
             listeners=[Participant.from_dict(p) for p in (data.get("listeners") or [])],
+            lobby=[Participant.from_dict(p) for p in (data.get("lobby") or [])],
             blocked=[str(u) for u in (data.get("blocked") or [])],
+            locked=bool(data.get("locked", False)),
+            invite_codes={str(k): str(v) for k, v in (data.get("invite_codes") or {}).items()},
+            reactions={str(k): int(v) for k, v in (data.get("reactions") or {}).items()},
+            agenda=str(data.get("agenda", "") or ""),
             reports=list(data.get("reports") or []),
             recording=bool(data.get("recording", False)),
             recording_visible=bool(data.get("recording_visible", False)),
@@ -231,6 +274,10 @@ class Room:
             platform=str(data.get("platform", "telegram") or "telegram"),
             platform_ref=str(data.get("platform_ref", "") or ""),
             state=str(data.get("state", "live") or "live"),
+            hand_raise_expiry=float(data.get("hand_raise_expiry", 1800.0) or 0.0),
+            starts_at=float(data.get("starts_at", 0.0) or 0.0),
+            announced=bool(data.get("announced", False)),
+            peak_headcount=int(data.get("peak_headcount", 0) or 0),
             transcript=str(data.get("transcript", "") or ""),
             created_at=float(data.get("created_at", 0.0) or 0.0),
             ended_at=float(data.get("ended_at", 0.0) or 0.0),
@@ -388,8 +435,14 @@ def _community_exists(community_id: str, group_store: Any = None) -> bool:
 
 def create_room(community_id: str, title: str, host_id: str, host_name: str,
                 *, platform: Any = None, store: RoomStore | None = None,
-                data_dir: Any = None, group_store: Any = None) -> dict[str, Any]:
-    """Create a live room in a community. Returns {"ok", "room"|"reason"}."""
+                data_dir: Any = None, group_store: Any = None,
+                starts_at: float = 0.0, agenda: str = "") -> dict[str, Any]:
+    """Create a live room in a community. Returns {"ok", "room"|"reason"}.
+
+    ``starts_at`` > now → a scheduled room (Resonate pattern): it sits in
+    ``scheduled`` state until its time arrives; ``due_starts()`` lists
+    rooms ready to go live.
+    """
     try:
         community_id = (community_id or "").strip()
         title = (title or "").strip()[:120]
@@ -400,6 +453,8 @@ def create_room(community_id: str, title: str, host_id: str, host_name: str,
         if not _community_exists(community_id, group_store=group_store):
             return {"ok": False, "reason": f"no such community: {community_id}"}
         st = store or RoomStore(data_dir=data_dir)
+        now = time.time()
+        scheduled = starts_at > now + 1
         room = Room(
             room_id="room_" + uuid.uuid4().hex[:10],
             community_id=community_id,
@@ -407,8 +462,12 @@ def create_room(community_id: str, title: str, host_id: str, host_name: str,
             host_id=host_id,
             host_name=host_name,
             platform="telegram",
-            created_at=time.time(),
+            state="scheduled" if scheduled else "live",
+            starts_at=starts_at if scheduled else 0.0,
+            agenda=(agenda or "").strip()[:500],
+            created_at=now,
         )
+        room.bump_peak()
         plat = platform if platform is not None else _default_platform()
         started = _platform_start_voice_chat(plat, room)
         if started.get("ok"):
@@ -421,6 +480,50 @@ def create_room(community_id: str, title: str, host_id: str, host_name: str,
                 "platform_note": started.get("reason", "") or started.get("note", "")}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"create failed: {exc}"[:160]}
+
+
+def go_live(room_id: str, actor_id: str,
+            store: RoomStore | None = None, data_dir: Any = None
+            ) -> dict[str, Any]:
+    """Start a scheduled room (or re-announce a live one)."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        denied = _require_host(room, actor_id)
+        if denied:
+            return denied
+        room.state = "live"
+        room.starts_at = 0.0
+        room.announced = True
+        _save(st, room)
+        return {"ok": True, "room": room}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def due_starts(now: float | None = None,
+               store: RoomStore | None = None, data_dir: Any = None
+               ) -> list[Room]:
+    """Scheduled rooms whose start time has arrived and aren't announced.
+
+    The host delivers a 'going live' ping and flips them with go_live.
+    Marks them announced so the ping fires once.
+    """
+    try:
+        now = now if now is not None else time.time()
+        st = store or RoomStore(data_dir=data_dir)
+        due: list[Room] = []
+        for room in st.list(community_id="", live_only=False):
+            if room.state == "scheduled" and not room.announced \
+                    and room.starts_at and room.starts_at <= now:
+                room.announced = True
+                _save(st, room)
+                due.append(room)
+        return due
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def get_room(room_id: str, store: RoomStore | None = None,
@@ -454,12 +557,74 @@ def join_room(room_id: str, user_id: str, name: str,
             return {"ok": False, "reason": "who are you?"}
         if room.is_blocked(uid):
             return {"ok": False, "reason": "you're blocked from this room"}
+        if room.locked:
+            return {"ok": False, "reason": "this room is locked — no new joins"}
         role, _ = room.find(uid)
         if role:
             return {"ok": True, "room": room, "role": role, "note": "already in"}
         room.listeners.append(Participant(user_id=uid, name=nm))
+        room.bump_peak()
         _save(st, room)
         return {"ok": True, "room": room, "role": "listener"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def join_with_code(code: str, user_id: str, name: str,
+                   store: RoomStore | None = None, data_dir: Any = None
+                   ) -> dict[str, Any]:
+    """Join via an invite code — speaker codes land as speakers, listener
+    codes as listeners (Telegram's speaker/listener invite-link pattern)."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        code = (code or "").strip()
+        target = None
+        for room in st.list(community_id="", live_only=False):
+            if room.state == "live" and code in room.invite_codes:
+                target = room
+                break
+        if target is None:
+            return {"ok": False, "reason": "bad or expired invite code"}
+        role = target.invite_codes.get(code, "listener")
+        uid, nm = (user_id or "").strip(), (name or user_id or "anon").strip()[:60]
+        if not uid:
+            return {"ok": False, "reason": "who are you?"}
+        if target.is_blocked(uid):
+            return {"ok": False, "reason": "you're blocked from this room"}
+        existing, _ = target.find(uid)
+        if existing:
+            return {"ok": True, "room": target, "role": existing,
+                    "note": "already in"}
+        if role == "speaker":
+            target.speakers.append(Participant(user_id=uid, name=nm))
+        else:
+            target.listeners.append(Participant(user_id=uid, name=nm))
+        target.bump_peak()
+        _save(st, target)
+        return {"ok": True, "room": target, "role": role}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def lobby_checkin(room_id: str, user_id: str, name: str,
+                  store: RoomStore | None = None, data_dir: Any = None
+                  ) -> dict[str, Any]:
+    """Green-room lobby: check in before the room goes live."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        uid, nm = (user_id or "").strip(), (name or user_id or "anon").strip()[:60]
+        if not uid:
+            return {"ok": False, "reason": "who are you?"}
+        if room.is_blocked(uid):
+            return {"ok": False, "reason": "you're blocked from this room"}
+        if not any(p.user_id == uid for p in room.lobby):
+            room.lobby.append(Participant(user_id=uid, name=nm))
+            _save(st, room)
+        return {"ok": True, "room": room,
+                "lobby_count": len(room.lobby)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": str(exc)[:120]}
 
@@ -487,9 +652,15 @@ def leave_room(room_id: str, user_id: str,
 
 
 def raise_hand(room_id: str, user_id: str, name: str,
-               store: RoomStore | None = None, data_dir: Any = None
+               store: RoomStore | None = None, data_dir: Any = None,
+               note: str = ""
                ) -> dict[str, Any]:
-    """Listener asks to speak — joins the hand-raise queue (FIFO)."""
+    """Listener asks to speak — joins the hand-raise queue (FIFO).
+
+    ``note`` is shown to the host/co-hosts for triage ("Q about the
+    venue") — Telegram shows bios for the same reason. Stale raises
+    auto-expire per ``room.hand_raise_expiry``.
+    """
     try:
         st = store or RoomStore(data_dir=data_dir)
         room = st.get(room_id or "")
@@ -502,8 +673,9 @@ def raise_hand(room_id: str, user_id: str, name: str,
             return {"ok": False, "reason": "who are you?"}
         if room.is_blocked(uid):
             return {"ok": False, "reason": "you're blocked from this room"}
+        _expire_hands(room)
         role, _ = room.find(uid)
-        if role in ("host", "speaker"):
+        if role in ("host", "cohost", "speaker"):
             return {"ok": False, "reason": "you can already speak"}
         if role == "queue":
             return {"ok": True, "room": room, "position": _queue_pos(room, uid),
@@ -511,11 +683,29 @@ def raise_hand(room_id: str, user_id: str, name: str,
         if role == "":
             room.listeners.append(Participant(user_id=uid, name=nm))
         room.hand_raise_queue.append(
-            Participant(user_id=uid, name=nm, hand_raised_at=time.time()))
+            Participant(user_id=uid, name=nm, hand_raised_at=time.time(),
+                        note=(note or "").strip()[:120]))
+        room.bump_peak()
         _save(st, room)
         return {"ok": True, "room": room, "position": _queue_pos(room, uid)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": str(exc)[:120]}
+
+
+def _expire_hands(room: Room, now: float | None = None) -> int:
+    """Drop stale hand-raises. Returns the number expired."""
+    try:
+        if not room.hand_raise_expiry:
+            return 0
+        now = now if now is not None else time.time()
+        before = len(room.hand_raise_queue)
+        room.hand_raise_queue = [
+            p for p in room.hand_raise_queue
+            if not p.hand_raised_at or (now - p.hand_raised_at) < room.hand_raise_expiry
+        ]
+        return before - len(room.hand_raise_queue)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _queue_pos(room: Room, user_id: str) -> int:
@@ -544,9 +734,11 @@ def lower_hand(room_id: str, user_id: str,
 
 
 def _require_host(room: Room, actor_id: str) -> dict[str, Any] | None:
-    if (actor_id or "").strip() != room.host_id:
-        return {"ok": False, "reason": "only the host can do that"}
-    if room.state != "live":
+    """Host or co-host required. Co-hosts are trusted speakers (Reddit Talk)."""
+    actor = (actor_id or "").strip()
+    if actor != room.host_id and not room.is_cohost(actor):
+        return {"ok": False, "reason": "only the host or a co-host can do that"}
+    if room.state not in ("live", "scheduled"):
         return {"ok": False, "reason": "room has ended"}
     return None
 
@@ -602,10 +794,229 @@ def demote_speaker(room_id: str, user_id: str, actor_id: str,
             return {"ok": False, "reason": "not a speaker"}
         room.speakers = [p for p in room.speakers if p.user_id != uid]
         room.listeners.append(Participant(user_id=uid, name=moved[0].name))
+        room.bump_peak()
         _save(st, room)
         return {"ok": True, "room": room}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": str(exc)[:120]}
+
+
+# ── co-hosts / room control ────────────────────────────────────────────────
+
+
+def add_cohost(room_id: str, user_id: str, name: str, actor_id: str,
+               store: RoomStore | None = None, data_dir: Any = None
+               ) -> dict[str, Any]:
+    """Host invites a trusted speaker as co-host (Reddit Talk pattern).
+
+    Co-hosts get host powers: promote/demote, mute, lock, record, end.
+    """
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        if (actor_id or "").strip() != room.host_id:
+            return {"ok": False, "reason": "only the host can name co-hosts"}
+        uid, nm = (user_id or "").strip(), (name or user_id or "co-host").strip()[:60]
+        if not uid:
+            return {"ok": False, "reason": "who?"}
+        if uid == room.host_id:
+            return {"ok": False, "reason": "that's the host already"}
+        if not room.is_cohost(uid):
+            room.cohosts.append(Participant(user_id=uid, name=nm))
+            _save(st, room)
+        return {"ok": True, "room": room, "cohost": nm}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def remove_cohost(room_id: str, user_id: str, actor_id: str,
+                  store: RoomStore | None = None, data_dir: Any = None
+                  ) -> dict[str, Any]:
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        if (actor_id or "").strip() != room.host_id:
+            return {"ok": False, "reason": "only the host can remove co-hosts"}
+        uid = (user_id or "").strip()
+        before = len(room.cohosts)
+        room.cohosts = [p for p in room.cohosts if p.user_id != uid]
+        _save(st, room)
+        return {"ok": True, "room": room, "removed": len(room.cohosts) != before}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def mute_all(room_id: str, actor_id: str, muted: bool = True,
+             store: RoomStore | None = None, data_dir: Any = None,
+             platform: Any = None) -> dict[str, Any]:
+    """Host/co-host mutes (or unmutes) every speaker at once."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        denied = _require_host(room, actor_id)
+        if denied:
+            return denied
+        n = 0
+        for p in room.speakers:
+            if p.muted != muted:
+                p.muted = muted
+                _platform_mute(platform, room, p.user_id, muted)
+                n += 1
+        _save(st, room)
+        return {"ok": True, "room": room,
+                "action": "muted" if muted else "unmuted", "count": n}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def lock_room(room_id: str, actor_id: str, locked: bool = True,
+              store: RoomStore | None = None, data_dir: Any = None
+              ) -> dict[str, Any]:
+    """Lock rejects all new joins (sabha- 'Lock Sabha' pattern)."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        denied = _require_host(room, actor_id)
+        if denied:
+            return denied
+        room.locked = bool(locked)
+        _save(st, room)
+        return {"ok": True, "room": room, "locked": room.locked}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def mint_invite(room_id: str, actor_id: str, role: str = "listener",
+                store: RoomStore | None = None, data_dir: Any = None
+                ) -> dict[str, Any]:
+    """Mint a speaker or listener invite code (Telegram VC 2.0 pattern).
+
+    Speaker codes let the holder join straight onto the stage.
+    """
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        denied = _require_host(room, actor_id)
+        if denied:
+            return denied
+        role = (role or "listener").lower()
+        if role not in ("speaker", "listener"):
+            return {"ok": False, "reason": "role must be speaker or listener"}
+        code = uuid.uuid4().hex[:8]
+        room.invite_codes[code] = role
+        _save(st, room)
+        return {"ok": True, "room": room, "code": code, "role": role}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def react(room_id: str, user_id: str, emoji: str,
+          store: RoomStore | None = None, data_dir: Any = None
+          ) -> dict[str, Any]:
+    """Emoji reaction to the room (Reddit Talk: react during talks)."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        if room.state != "live":
+            return {"ok": False, "reason": "room has ended"}
+        e = (emoji or "").strip()[:8]
+        if not e:
+            return {"ok": False, "reason": "which emoji?"}
+        room.reactions[e] = room.reactions.get(e, 0) + 1
+        _save(st, room)
+        return {"ok": True, "room": room, "reactions": dict(room.reactions)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def set_agenda(room_id: str, actor_id: str, text: str,
+               store: RoomStore | None = None, data_dir: Any = None
+               ) -> dict[str, Any]:
+    """Set the room's agenda / running order (rendered on the room card)."""
+    try:
+        st = store or RoomStore(data_dir=data_dir)
+        room = st.get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        denied = _require_host(room, actor_id)
+        if denied:
+            return denied
+        room.agenda = (text or "").strip()[:500]
+        _save(st, room)
+        return {"ok": True, "room": room}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def room_stats(room_id: str, store: RoomStore | None = None,
+               data_dir: Any = None) -> dict[str, Any]:
+    """Analytics card for a room: duration, peak, speakers, tips, reactions."""
+    try:
+        room = (store or RoomStore(data_dir=data_dir)).get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        end = room.ended_at or time.time()
+        duration = max(0.0, end - (room.created_at or end))
+        tips_total = sum(t.amount_kobo for t in room.tips
+                         if t.status in ("sent", "recorded"))
+        return {
+            "ok": True,
+            "room_id": room.room_id,
+            "title": room.title,
+            "state": room.state,
+            "duration_s": duration,
+            "peak_headcount": room.peak_headcount or room.headcount(),
+            "speakers": len(room.speakers) + len(room.cohosts),
+            "listeners": len(room.listeners),
+            "reactions": dict(room.reactions),
+            "tips_kobo": tips_total,
+            "tips_naira": _fmt_naira(tips_total),
+            "reports": len(room.reports),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def export_captions_vtt(room_id: str, store: RoomStore | None = None,
+                        data_dir: Any = None) -> dict[str, Any]:
+    """Export the live-caption log as WebVTT (accessibility artifact)."""
+    try:
+        room = (store or RoomStore(data_dir=data_dir)).get(room_id or "")
+        if room is None:
+            return {"ok": False, "reason": "no such room"}
+        lines = ["WEBVTT", ""]
+        step = 5.0  # captions carry no timestamps; 5s slots keep it honest
+        base = room.created_at or time.time()
+        for i, cap in enumerate(room.caption_log):
+            s, e = base + i * step, base + (i + 1) * step
+            lines.append(f"{_vtt_ts(s)} --> {_vtt_ts(e)}")
+            lines.append(cap)
+            lines.append("")
+        return {"ok": True, "vtt": "\n".join(lines),
+                "lines": len(room.caption_log)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:120]}
+
+
+def _vtt_ts(ts: float) -> str:
+    try:
+        t = time.gmtime(max(0.0, ts))
+        ms = int((ts % 1) * 1000)
+        return time.strftime("%H:%M:%S", t) + f".{ms:03d}"
+    except Exception:  # noqa: BLE001
+        return "00:00:00.000"
 
 
 # ── moderation ───────────────────────────────────────────────────────────────
@@ -878,24 +1289,46 @@ def render_room(room: Room) -> str:
     try:
         if room is None:
             return "no such room"
-        lines = [f"🎙️ {room.title or 'Room'}"]
         rec = " 🔴 REC" if room.recording and room.recording_visible else ""
-        lines[0] += f"{rec} · {room.state.upper()}"
-        lines.append(f"host: {room.host_name or room.host_id}")
+        lock = " 🔒" if room.locked else ""
+        state_glyph = {"live": "🟢 LIVE", "scheduled": "⏰ SCHEDULED",
+                       "ended": "⚫ ENDED"}.get(room.state, room.state.upper())
+        lines = [f"🎙️ **{room.title or 'Room'}**{rec}{lock}",
+                 f"   {state_glyph} · {room.headcount()} in right now"]
+        host_line = f"👑 {room.host_name or room.host_id}"
+        if room.cohosts:
+            host_line += "  ·  🤝 " + ", ".join(p.name for p in room.cohosts)
+        lines.append(f"   {host_line}")
+        if room.agenda:
+            lines.append(f"   📝 {room.agenda[:140]}")
+        if room.state == "scheduled" and room.starts_at:
+            when = time.strftime("%a %H:%M", time.localtime(room.starts_at))
+            lines.append(f"   ⏰ starts {when}")
+            if room.lobby:
+                lines.append(f"   🟢 lobby: {len(room.lobby)} waiting — "
+                             + ", ".join(p.name for p in room.lobby[:8]))
         spk = ", ".join(
             f"{p.name}{' 🔇' if p.muted else ''}" for p in room.speakers) or "—"
-        lines.append(f"speakers ({len(room.speakers)}): {spk}")
+        lines.append(f"   🎤 speakers ({len(room.speakers)}): {spk}")
         q = ", ".join(
-            f"{i}. {p.name}" for i, p in enumerate(room.hand_raise_queue, 1)) or "—"
-        lines.append(f"✋ hand-raise ({len(room.hand_raise_queue)}): {q}")
-        lines.append(f"listeners: {len(room.listeners)} · captions: "
-                     f"{'on' if room.captions else 'off'}")
+            f"{i}. {p.name}" + (f" _“{p.note}”_" if p.note else "")
+            for i, p in enumerate(room.hand_raise_queue, 1)) or "—"
+        lines.append(f"   ✋ hand-raise ({len(room.hand_raise_queue)}): {q}")
+        lines.append(f"   🎧 listeners: {len(room.listeners)} · "
+                     f"captions: {'on' if room.captions else 'off'}")
+        if room.reactions:
+            top = " ".join(f"{e}×{c}"
+                           for e, c in sorted(room.reactions.items(),
+                                              key=lambda kv: -kv[1])[:6])
+            lines.append(f"   ❤️ reactions: {top}")
         if room.tips:
             total = sum(t.amount_kobo for t in room.tips if t.status in ("sent", "recorded"))
-            lines.append(f"💸 tips: {_fmt_naira(total)} ({len(room.tips)})")
+            lines.append(f"   💸 tips: {_fmt_naira(total)} ({len(room.tips)})")
+        if room.reports:
+            lines.append(f"   ⚠️ {len(room.reports)} report(s) for the host")
         if room.state == "ended" and room.transcript:
-            lines.append(f"📝 transcript: {room.transcript[:120]}…")
-        lines.append(f"`{room.room_id}`")
+            lines.append(f"   📝 transcript: {room.transcript[:120]}…")
+        lines.append(f"   `{room.room_id}`")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
         return "room card failed to render"
@@ -904,21 +1337,40 @@ def render_room(room: Room) -> str:
 # ── chat ─────────────────────────────────────────────────────────────────────
 
 
+def _parse_room_when(text: str) -> float:
+    """Parse 'YYYY-MM-DD HH:MM' (local) → epoch. 0.0 when unparseable."""
+    m = re.fullmatch(
+        r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", (text or "").strip())
+    if not m:
+        return 0.0
+    try:
+        return time.mktime((
+            int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            int(m.group(4)), int(m.group(5)), 0, 0, 0, -1))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
 def _usage() -> str:
     return (
         "🎙️ /room — live audio rooms (community-scoped)\n"
-        "  /room create <community_id> | <title>\n"
-        "  /room list [community_id] · join <room_id> · leave <room_id>\n"
-        "  /room raise <room_id> — ask to speak (hand-raise)\n"
+        "  /room create <community_id> | <title> [| at:YYYY-MM-DD HH:MM] [| agenda:…]\n"
+        "  /room list [community_id] · join <room_id> · code <invite_code> · leave <room_id>\n"
+        "  /room lobby <room_id> — green-room check-in before go-live\n"
+        "  /room raise <room_id> [note] — ask to speak (hand-raise)\n"
         "  /room lower <room_id>\n"
         "  /room speak <room_id> <user_id> — host brings someone up\n"
         "  /room drop <room_id> <user_id> — host sends back to audience\n"
-        "  /room mute|unmute <room_id> <user_id> — host mic control\n"
+        "  /room cohost <room_id> <user_id> — trusted speaker w/ host powers\n"
+        "  /room mute|unmute <room_id> <user_id> · /room muteall <room_id>\n"
+        "  /room lock|unlock <room_id> — stop/start new joins\n"
+        "  /room invite <room_id> <speaker|listener> — mint an invite code\n"
         "  /room block <room_id> <user_id> · report <room_id> <user_id> <reason>\n"
         "  /room record <room_id> on|off — opt-in, always visible\n"
-        "  /room captions <room_id> on|off\n"
+        "  /room captions <room_id> on|off · vtt <room_id> — caption export\n"
+        "  /room agenda <room_id> <text> · react <room_id> <emoji>\n"
         "  /room tip <room_id> <user_id> <amount_naira>\n"
-        "  /room show <room_id> · /room end <room_id>"
+        "  /room stats <room_id> · /room show <room_id> · /room end <room_id> · /room golive <room_id>"
     )
 
 
@@ -950,30 +1402,87 @@ def _control_room(tail, context, chat, sender, sender_id,
     cmd, rest = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
 
     if cmd == "create":
-        bits = [b.strip() for b in rest.split("|", 1)]
-        if len(bits) < 2 or not bits[0] or not bits[1]:
+        segs = [b.strip() for b in rest.split("|")]
+        if len(segs) < 2 or not segs[0]:
+            return "usage: /room create <community_id> | <title> [| at:YYYY-MM-DD HH:MM] [| agenda:…]"
+        starts_at = 0.0
+        agenda = ""
+        title_parts: list[str] = []
+        for extra in segs[1:]:
+            low = extra.lower()
+            if low.startswith("at:"):
+                starts_at = _parse_room_when(extra[3:])
+            elif low.startswith("agenda:"):
+                agenda = extra[7:].strip()
+            else:
+                title_parts.append(extra)
+        title = " | ".join(title_parts).strip()
+        if not title:
             return "usage: /room create <community_id> | <title>"
-        res = create_room(bits[0], bits[1], who_id, who,
-                          platform=platform, store=st, group_store=group_store)
+        res = create_room(segs[0], title, who_id, who,
+                          platform=platform, store=st, group_store=group_store,
+                          starts_at=starts_at, agenda=agenda)
         if not res.get("ok"):
             return f"couldn't create the room: {res.get('reason')}"
         room = res["room"]
         note = f"\n_{res['platform_note']}_" if res.get("platform_note") else ""
-        return f"🎙️ room is live!\n{render_room(room)}{note}"
+        sched = ""
+        if room.state == "scheduled":
+            when = time.strftime("%a %H:%M", time.localtime(room.starts_at))
+            sched = f"\n⏰ scheduled for {when} — I'll ping when it's time"
+        return f"🎙️ room is live!\n{render_room(room)}{sched}{note}"
+
+    if cmd == "golive":
+        res = go_live(rest.strip(), who_id, store=st)
+        if not res.get("ok"):
+            return f"couldn't go live: {res.get('reason')}"
+        return f"🎙️ we're live!\n{render_room(res['room'])}"
 
     if cmd == "list":
         rooms = st.list(community_id=rest.strip(), live_only=True)
-        if not rooms:
+        sched = [r for r in st.list(community_id=rest.strip(), live_only=False)
+                 if r.state == "scheduled"]
+        if not rooms and not sched:
             return "no live rooms right now."
-        out = ["🎙️ live rooms:"]
-        for r in rooms[:15]:
-            rec = " 🔴" if r.recording else ""
-            out.append(f"· {r.title}{rec} — {r.headcount()} in · `{r.room_id}`")
+        out = []
+        if rooms:
+            out.append("🎙️ live rooms:")
+            for r in rooms[:15]:
+                rec = " 🔴" if r.recording else ""
+                lk = " 🔒" if r.locked else ""
+                out.append(f"· {r.title}{rec}{lk} — {r.headcount()} in · `{r.room_id}`")
+        if sched:
+            out.append("⏰ scheduled:")
+            for r in sched[:10]:
+                when = time.strftime("%a %H:%M", time.localtime(r.starts_at)) \
+                    if r.starts_at else "?"
+                out.append(f"· {r.title} — {when} · `{r.room_id}`")
         return "\n".join(out)
 
     if cmd == "show":
         room = st.get(rest.strip())
         return render_room(room) if room else "no such room"
+
+    if cmd == "stats":
+        s = room_stats(rest.strip(), store=st)
+        if not s.get("ok"):
+            return f"couldn't: {s.get('reason')}"
+        dur = int(s["duration_s"])
+        dh, dm = divmod(dur // 60, 60)
+        reac = " ".join(f"{e}×{c}" for e, c in
+                        sorted(s["reactions"].items(), key=lambda kv: -kv[1])[:5])
+        return (f"📊 **{s['title']}** — {s['state']}\n"
+                f"  ⏱️ {dh}h{dm:02d}m · 👥 peak {s['peak_headcount']} · "
+                f"🎤 {s['speakers']} speakers\n"
+                f"  💸 tips {s['tips_naira']} · ❤️ {reac or '—'} · "
+                f"⚠️ {s['reports']} reports")
+
+    if cmd == "vtt":
+        res = export_captions_vtt(rest.strip(), store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return (f"📝 WebVTT captions ({res['lines']} lines):\n"
+                f"```\n{res['vtt'][:1500]}\n```")
 
     if cmd == "join":
         res = join_room(rest.strip(), who_id, who, store=st)
@@ -981,15 +1490,91 @@ def _control_room(tail, context, chat, sender, sender_id,
             return f"couldn't join: {res.get('reason')}"
         return f"you're in as a listener 🎧\n{render_room(res['room'])}"
 
+    if cmd == "code":
+        res = join_with_code(rest.strip(), who_id, who, store=st)
+        if not res.get("ok"):
+            return f"couldn't join: {res.get('reason')}"
+        return f"you're in as a {res.get('role')} 🎉\n{render_room(res['room'])}"
+
+    if cmd == "lobby":
+        res = lobby_checkin(rest.strip(), who_id, who, store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return (f"🟢 checked into the green room ({res['lobby_count']} waiting). "
+                "the host will bring you in when it's time.")
+
     if cmd == "leave":
         res = leave_room(rest.strip(), who_id, store=st)
         return "you left the room." if res.get("ok") else f"couldn't leave: {res.get('reason')}"
 
     if cmd == "raise":
-        res = raise_hand(rest.strip(), who_id, who, store=st)
+        bits = rest.split(None, 1)
+        if not bits:
+            return "usage: /room raise <room_id> [note]"
+        res = raise_hand(bits[0], who_id, who, store=st,
+                         note=bits[1] if len(bits) > 1 else "")
         if not res.get("ok"):
             return f"couldn't raise your hand: {res.get('reason')}"
         return f"✋ hand raised — you're #{res.get('position')} in the queue"
+
+    if cmd == "react":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            return "usage: /room react <room_id> <emoji>"
+        res = react(bits[0], who_id, bits[1], store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        top = " ".join(f"{e}×{c}" for e, c in
+                       sorted(res["reactions"].items(), key=lambda kv: -kv[1])[:5])
+        return f"{bits[1]} noted! {top}"
+
+    if cmd == "agenda":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            return "usage: /room agenda <room_id> <text>"
+        res = set_agenda(bits[0], who_id, bits[1], store=st)
+        return "📝 agenda set." if res.get("ok") else f"couldn't: {res.get('reason')}"
+
+    if cmd == "cohost":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            return "usage: /room cohost <room_id> <user_id>"
+        res = add_cohost(bits[0], bits[1], bits[1], who_id, store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return f"🤝 {res.get('cohost')} is now a co-host"
+
+    if cmd == "uncohost":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            return "usage: /room uncohost <room_id> <user_id>"
+        res = remove_cohost(bits[0], bits[1], who_id, store=st)
+        return "co-host removed." if res.get("ok") else f"couldn't: {res.get('reason')}"
+
+    if cmd == "muteall":
+        bits = rest.split(None, 1)
+        on = not (len(bits) > 1 and bits[1].lower() == "off")
+        res = mute_all(bits[0] if bits else "", who_id, muted=on, store=st,
+                       platform=platform)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return f"🔇 all speakers {res.get('action')} ({res.get('count')})."
+
+    if cmd in ("lock", "unlock"):
+        res = lock_room(rest.strip(), who_id, locked=(cmd == "lock"), store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return "🔒 room locked — no new joins." if res.get("locked") else "🔓 room unlocked."
+
+    if cmd == "invite":
+        bits = rest.split(None, 1)
+        if len(bits) < 2:
+            return "usage: /room invite <room_id> <speaker|listener>"
+        res = mint_invite(bits[0], who_id, bits[1], store=st)
+        if not res.get("ok"):
+            return f"couldn't: {res.get('reason')}"
+        return (f"🎟️ {res.get('role')} invite code: `{res.get('code')}`\n"
+                f"join with: /room code {res.get('code')}")
 
     if cmd == "lower":
         res = lower_hand(rest.strip(), who_id, store=st)

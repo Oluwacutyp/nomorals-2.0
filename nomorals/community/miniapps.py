@@ -1,8 +1,31 @@
 """Group mini-apps: chat-native interactive widgets for group chats.
 
-Three working templates — ``poll``, ``expenses``, ``rsvp`` — with full
-state logic. The surface is chat text: every render ends with the exact
-``/miniapp`` command that drives the next action.
+Working templates — ``poll``, ``expenses``, ``rsvp``, ``quiz`` — with
+full state logic. The surface is chat text: every render ends with the
+exact ``/miniapp`` command that drives the next action.
+
+Telegram-Polls-2.0 / Splitwise-grade upgrades (mined 2026-10-10):
+* **Quiz mode** (Telegram Polls 2.0): ``quiz`` kind — one correct answer,
+  per-user attempts, points, streaks, and a medal scoreboard.
+* **Multiple-answer polls** (Telegram Polls 2.0): ``multi`` polls take
+  approval ballots; renders show approval bars.
+* **Poll deadlines**: ``closes_at`` + ``due_polls()``; auto-status in render.
+* **Poll comments** (Doodle's comments section): one-level discussion
+  thread under the results.
+* **Split strategies** (Splitwise strategy pattern): expenses split
+  ``equal`` (default), ``exact:<c1,c2,…>`` (cents, sum-validated — the
+  classic "vanishing remainder" bug is rejected loudly), or
+  ``percent:<p1,p2,…>`` (must sum to 100, rounding drift fixed on the
+  largest share).
+* **Edit/delete expenses** (expense-splitter): balances recompute from
+  the ledger; nothing is a special case.
+* **Categories + summaries**: ``cat:<name>`` tags; ``summary`` renders
+  per-category, per-month, and per-member contribution tables.
+* **Pairwise vs smart settlement** (real Splitwise shows both): render
+  shows raw who-owes-whom edges AND the simplified transfers.
+* **RSVP capacity + waitlist + guests**: mirrors events.py.
+* **Panels** (Hark pattern, unchanged core): ``due_refreshes()`` for the
+  host scheduler and ``digest()`` for one-line-per-panel briefings.
 
 State is group-scoped JSON (``~/.devon/community/miniapps/``), keyed by
 platform + chat id (+ thread when present). There is no web hosting:
@@ -29,7 +52,7 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger("nomorals.community.miniapps")
 
-KINDS = ("poll", "expenses", "rsvp")
+KINDS = ("poll", "expenses", "rsvp", "quiz")
 
 _DEFAULT_DIR = Path.home() / ".devon" / "community" / "miniapps"
 
@@ -58,7 +81,7 @@ class MiniApp:
     """One mini-app instance living in one group chat."""
 
     id: str
-    kind: str  # "poll" | "expenses" | "rsvp"
+    kind: str  # "poll" | "expenses" | "rsvp" | "quiz"
     group_key: str  # "platform:chat_id" (+ ":thread_id" when threaded)
     title: str
     state: dict[str, Any] = field(default_factory=dict)
@@ -153,18 +176,47 @@ def create_miniapp(kind: str, group_key: str, title: str, **params: Any) -> Mini
             raise ValueError("a poll needs at least 2 options")
         state: dict[str, Any] = {
             "options": options,
-            "votes": {},  # user_id -> option index
+            "votes": {},  # user_id -> option index (single-choice)
+            "ballots": {},  # user_id -> [option indexes] (multi/approval)
             "names": {},  # user_id -> display name
             "closed": False,
+            "multi": bool(params.get("multi", False)),
+            "closes_at": float(params.get("closes_at") or 0.0),
+            "comments": [],  # [{user, text, ts}]
         }
     elif kind == "expenses":
-        state = {"expenses": [], "settlements": []}
+        state = {"expenses": [], "settlements": [],
+                 "currency": str(params.get("currency", "") or "")}
+    elif kind == "quiz":
+        options = [str(o).strip() for o in params.get("options", []) if str(o).strip()]
+        if len(options) < 2:
+            raise ValueError("a quiz needs at least 2 options")
+        correct = params.get("correct", 0)
+        try:
+            correct = int(correct)
+        except (TypeError, ValueError):
+            correct = 0
+        if not 0 <= correct < len(options):
+            raise ValueError(f"correct must be a number 1–{len(options)}")
+        state = {
+            "options": options,
+            "correct": correct,
+            "votes": {},  # user_id -> option index (their answer)
+            "names": {},
+            "attempts": {},  # user_id -> tries
+            "scores": {},  # user_id -> points
+            "streaks": {},  # user_id -> current correct streak
+            "closed": False,
+        }
     else:  # rsvp
         state = {
             "date": str(params.get("date", "")).strip(),
             "responses": {},  # user_id -> "yes" | "no" | "maybe"
             "names": {},
             "seen": {},  # user_id -> display name (everyone who interacted)
+            "capacity": max(0, int(params.get("capacity") or 0)),
+            "waitlist": [],  # FIFO user_ids
+            "guests": {},  # user_id -> +N
         }
     return MiniApp(
         id=new_short_id(prefix=kind[:4] + "_", length=8),
@@ -174,6 +226,15 @@ def create_miniapp(kind: str, group_key: str, title: str, **params: Any) -> Mini
         state=state,
         created_ts=now,
     )
+
+
+def due_polls(store: MiniAppStore, group_key: str,
+              now: float | None = None) -> list[MiniApp]:
+    """Polls past their deadline but not closed — the host should close them."""
+    now = now if now is not None else time.time()
+    return [a for a in store.load(group_key)
+            if a.kind == "poll" and not a.state.get("closed")
+            and a.state.get("closes_at") and now >= a.state["closes_at"]]
 
 
 # ── money helpers (integer cents — no float drift) ──────────────────────────
@@ -186,10 +247,49 @@ def _parse_cents(raw: str) -> int | None:
     return int(round(float(m.group(1).replace(",", ".")) * 100))
 
 
-def _fmt_money(cents: int) -> str:
+def _fmt_money(cents: int, symbol: str = "") -> str:
     sign = "-" if cents < 0 else ""
     cents = abs(int(cents))
-    return f"{sign}{cents // 100}.{cents % 100:02d}"
+    return f"{sign}{symbol}{cents // 100}.{cents % 100:02d}"
+
+
+def _split_shares(amount: int, split_ids: list[str],
+                  mode: str, params: list[str]) -> dict[str, int] | str:
+    """Per-person shares in cents, or an error string. Strategy pattern."""
+    if mode in ("", "equal"):
+        share, rem = divmod(amount, len(split_ids))
+        return {uid: share + (1 if i < rem else 0)
+                for i, uid in enumerate(split_ids)}
+    if mode == "exact":
+        try:
+            parts = [int(round(float(p.replace(",", ".")) * 100)) for p in params]
+        except ValueError:
+            return "exact split needs amounts like split:exact:30,20,50"
+        if len(parts) != len(split_ids):
+            return (f"exact split needs {len(split_ids)} amounts "
+                    f"(one per person), got {len(parts)}")
+        if sum(parts) != amount:
+            return (f"exact amounts add up to {_fmt_money(sum(parts))} but the "
+                    f"expense is {_fmt_money(amount)} — nothing may vanish")
+        return dict(zip(split_ids, parts))
+    if mode == "percent":
+        try:
+            pcts = [float(p) for p in params]
+        except ValueError:
+            return "percent split needs numbers like split:percent:50,30,20"
+        if len(pcts) != len(split_ids):
+            return (f"percent split needs {len(split_ids)} values, "
+                    f"got {len(pcts)}")
+        if abs(sum(pcts) - 100.0) > 0.01:
+            return f"percentages must add up to 100 (got {sum(pcts):g})"
+        shares = [int(round(amount * p / 100.0)) for p in pcts]
+        drift = amount - sum(shares)
+        if drift:
+            # fix rounding drift on the largest share (deterministic rule)
+            i = max(range(len(shares)), key=lambda k: shares[k])
+            shares[i] += drift
+        return dict(zip(split_ids, shares))
+    return f"unknown split mode {mode!r} — use equal, exact:<…>, or percent:<…>"
 
 
 def _balances(state: dict[str, Any]) -> dict[str, int]:
@@ -197,20 +297,57 @@ def _balances(state: dict[str, Any]) -> dict[str, int]:
     bal: dict[str, int] = {}
     for exp in state.get("expenses", []):
         amount = int(exp.get("amount_cents", 0))
-        split = exp.get("split_among") or []
-        if not split or amount <= 0:
+        if amount <= 0:
             continue
-        share, rem = divmod(amount, len(split))
+        shares = exp.get("shares")
+        if shares:
+            split = [(str(uid), int(c)) for uid, c in shares.items()]
+        else:
+            split_among = exp.get("split_among") or []
+            if not split_among:
+                continue
+            share, rem = divmod(amount, len(split_among))
+            split = [(str(uid), share + (1 if i < rem else 0))
+                     for i, uid in enumerate(split_among)]
         payer = str(exp.get("payer", ""))
-        for i, uid in enumerate(split):
-            uid = str(uid)
-            bal[uid] = bal.get(uid, 0) - (share + (1 if i < rem else 0))
+        for uid, cents in split:
+            bal[uid] = bal.get(uid, 0) - cents
         bal[payer] = bal.get(payer, 0) + amount
     for s in state.get("settlements", []):
         amt = int(s.get("amount_cents", 0))
         bal[str(s.get("from", ""))] = bal.get(str(s.get("from", "")), 0) + amt
         bal[str(s.get("to", ""))] = bal.get(str(s.get("to", "")), 0) - amt
     return {k: v for k, v in bal.items() if v != 0}
+
+
+def _pairwise(state: dict[str, Any]) -> dict[tuple[str, str], int]:
+    """Raw who-owes-whom edges, before simplification."""
+    edges: dict[tuple[str, str], int] = {}
+    for exp in state.get("expenses", []):
+        amount = int(exp.get("amount_cents", 0))
+        if amount <= 0:
+            continue
+        shares = exp.get("shares")
+        if shares:
+            split = [(str(uid), int(c)) for uid, c in shares.items()]
+        else:
+            split_among = exp.get("split_among") or []
+            if not split_among:
+                continue
+            share, rem = divmod(amount, len(split_among))
+            split = [(str(uid), share + (1 if i < rem else 0))
+                     for i, uid in enumerate(split_among)]
+        payer = str(exp.get("payer", ""))
+        for uid, cents in split:
+            if uid == payer:
+                continue
+            key = (uid, payer)
+            edges[key] = edges.get(key, 0) + cents
+    for s in state.get("settlements", []):
+        # a settlement cancels the edge it pays down
+        key = (str(s.get("to", "")), str(s.get("from", "")))
+        edges[key] = edges.get(key, 0) - int(s.get("amount_cents", 0))
+    return {k: v for k, v in edges.items() if v > 0}
 
 
 def simplify_debts(balances: dict[str, int]) -> list[tuple[str, str, int]]:
@@ -246,12 +383,18 @@ def _pct(n: int, total: int) -> str:
     return f"{(100.0 * n / total):.0f}%" if total else "0%"
 
 
+def _bar(n: int, total: int, width: int = 10) -> str:
+    return "█" * round(width * n / total) if total else ""
+
+
 def render_miniapp(app: MiniApp) -> str:
     """Render a mini-app as chat text with the exact next-action commands."""
     if app.kind == "poll":
         return _render_poll(app)
     if app.kind == "expenses":
         return _render_expenses(app)
+    if app.kind == "quiz":
+        return _render_quiz(app)
     return _render_rsvp(app)
 
 
@@ -259,52 +402,130 @@ def _render_poll(app: MiniApp) -> str:
     st = app.state
     options: list[str] = st.get("options", [])
     votes: dict[str, int] = st.get("votes", {})
+    ballots: dict[str, list[int]] = st.get("ballots", {})
     names: dict[str, str] = st.get("names", {})
+    multi = bool(st.get("multi"))
     counts = [0] * len(options)
-    for idx in votes.values():
-        if 0 <= int(idx) < len(counts):
-            counts[int(idx)] += 1
+    if multi:
+        for bl in ballots.values():
+            for idx in set(int(i) for i in bl if 0 <= int(i) < len(counts)):
+                counts[idx] += 1
+    else:
+        for idx in votes.values():
+            if 0 <= int(idx) < len(counts):
+                counts[int(idx)] += 1
     total = sum(counts)
     status = "🔒 closed" if st.get("closed") else "🟢 open"
+    if multi:
+        status += " · multi-answer"
+    if st.get("closes_at") and not st.get("closed"):
+        left = st["closes_at"] - time.time()
+        status += (f" · closes in {int(left // 3600)}h{int(left % 3600 // 60)}m"
+                   if left > 0 else " · deadline passed")
     lines = [f"📊 *{app.title}* [{status}]", ""]
     for i, opt in enumerate(options):
-        bar = "█" * round(10 * counts[i] / total) if total else ""
-        voters = ", ".join(names[uid] for uid, v in votes.items() if int(v) == i and uid in names)
-        lines.append(f"{i + 1}. {opt} — {counts[i]} vote(s) ({_pct(counts[i], total)}) {bar}")
+        voters = ", ".join(names[uid] for uid, v in votes.items()
+                           if int(v) == i and uid in names)
+        if multi:
+            voters = ", ".join(names[uid] for uid, bl in ballots.items()
+                               if i in [int(x) for x in bl] and uid in names)
+        lines.append(f"{i + 1}. {opt} — {counts[i]} vote(s) ({_pct(counts[i], total)}) "
+                     f"{_bar(counts[i], total)}")
         if voters:
             lines.append(f"    ↳ {voters}")
     lines += ["", f"id: `{app.id}`"]
+    comments = st.get("comments", [])
+    if comments:
+        lines += ["", "💬 *Comments:*"]
+        for c in comments[-4:]:
+            lines.append(f"  {c.get('user', '?')}: {str(c.get('text', ''))[:120]}")
     if not st.get("closed"):
-        lines.append(f"Vote: /miniapp vote {app.id} <number>   •   Close: /miniapp close {app.id}")
+        vote_hint = (f"Vote (pick any): /miniapp vote {app.id} <numbers…>"
+                     if multi else f"Vote: /miniapp vote {app.id} <number>")
+        lines.append(vote_hint + f"   •   Close: /miniapp close {app.id}")
+        lines.append(f"Comment: /miniapp comment {app.id} <text>")
     return "\n".join(lines)
+
+
+def _expense_names(st: dict[str, Any]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for exp in st.get("expenses", []):
+        names.update({str(k): str(v) for k, v in (exp.get("names") or {}).items()})
+    return names
 
 
 def _render_expenses(app: MiniApp) -> str:
     st = app.state
-    names: dict[str, str] = {}
-    for exp in st.get("expenses", []):
-        names.update({str(k): str(v) for k, v in (exp.get("names") or {}).items()})
+    sym = str(st.get("currency", "") or "")
+    names = _expense_names(st)
     lines = [f"💸 *{app.title}*", ""]
     if not st.get("expenses"):
         lines.append("No expenses yet.")
     for exp in st.get("expenses", [])[-10:]:
         who = exp.get("payer_name") or str(exp.get("payer", "?"))
-        lines.append(f"• {who} paid {_fmt_money(exp.get('amount_cents', 0))} — {exp.get('what', '')}")
+        cat = f" [{exp.get('category')}]" if exp.get("category") else ""
+        mode = exp.get("split_mode", "equal")
+        mode_s = "" if mode == "equal" else f" ({mode})"
+        lines.append(f"• {who} paid {_fmt_money(exp.get('amount_cents', 0), sym)}"
+                     f" — {exp.get('what', '')}{cat}{mode_s} `{exp.get('id', '')}`")
     bal = _balances(st)
     if bal:
         lines += ["", "*Balances:*"]
         for uid, b in sorted(bal.items(), key=lambda x: -x[1]):
             nm = names.get(uid, uid)
-            lines.append(f"  {nm}: {'is owed ' if b > 0 else 'owes '}{_fmt_money(abs(b))}")
-        lines += ["", "*Settle up:*"]
+            lines.append(f"  {nm}: {'is owed ' if b > 0 else 'owes '}"
+                         f"{_fmt_money(abs(b), sym)}")
+        lines += ["", "*Settle up (fewest transfers):*"]
         for frm, to, amt in simplify_debts(bal):
-            lines.append(f"  {names.get(frm, frm)} → {names.get(to, to)}: {_fmt_money(amt)}")
+            lines.append(f"  {names.get(frm, frm)} → {names.get(to, to)}: "
+                         f"{_fmt_money(amt, sym)}")
+        edges = _pairwise(st)
+        if edges:
+            lines += ["", "*Raw debts:*"]
+            for (frm, to), amt in sorted(edges.items(), key=lambda kv: -kv[1])[:6]:
+                lines.append(f"  {names.get(frm, frm)} owes {names.get(to, to)}: "
+                             f"{_fmt_money(amt, sym)}")
     lines += [
         "",
         f"id: `{app.id}`",
-        f"Add: /miniapp expense {app.id} <amount> <what> [for name1,name2]",
-        f"Record a payment: /miniapp settle {app.id} <from> <to> <amount>",
+        f"Add: /miniapp expense {app.id} <amount> <what> [for name1,name2] "
+        "[split:equal|exact:a,b|percent:p,q] [cat:food]",
+        f"Edit: /miniapp edit {app.id} <exp_id> <amount> <what>  •  "
+        f"Delete: /miniapp del {app.id} <exp_id>",
+        f"Summary: /miniapp summary {app.id}  •  "
+        f"Payment: /miniapp settle {app.id} <from> <to> <amount>",
     ]
+    return "\n".join(lines)
+
+
+def _render_quiz(app: MiniApp) -> str:
+    st = app.state
+    options: list[str] = st.get("options", [])
+    names: dict[str, str] = st.get("names", {})
+    scores: dict[str, int] = st.get("scores", {})
+    attempts: dict[str, int] = st.get("attempts", {})
+    status = "🔒 closed" if st.get("closed") else "🟢 open"
+    lines = [f"🧠 *{app.title}* [{status}]", ""]
+    for i, opt in enumerate(options):
+        mark = ""
+        if st.get("closed") and i == st.get("correct"):
+            mark = " ✅"
+        lines.append(f"{i + 1}. {opt}{mark}")
+    if scores:
+        lines += ["", "🏆 *Scoreboard:*"]
+        medals = ["🥇", "🥈", "🥉"]
+        for rank, (uid, pts) in enumerate(
+                sorted(scores.items(), key=lambda kv: -kv[1])[:10]):
+            medal = medals[rank] if rank < 3 else f"{rank + 1}."
+            streak = st.get("streaks", {}).get(uid, 0)
+            fire = f" 🔥{streak}" if streak >= 2 else ""
+            lines.append(f"  {medal} {names.get(uid, uid)} — {pts} pt"
+                         f"{'s' if pts != 1 else ''}{fire} "
+                         f"({attempts.get(uid, 0)} tries)")
+    lines += ["", f"id: `{app.id}`"]
+    if not st.get("closed"):
+        lines.append(f"Answer: /miniapp answer {app.id} <number>   •   "
+                     f"Close: /miniapp close {app.id}")
     return "\n".join(lines)
 
 
@@ -312,17 +533,29 @@ def _render_rsvp(app: MiniApp) -> str:
     st = app.state
     responses: dict[str, str] = st.get("responses", {})
     names: dict[str, str] = st.get("names", {})
-    yes = [names.get(u, u) for u, r in responses.items() if r == "yes"]
+    guests: dict[str, int] = st.get("guests", {})
+    yes = [names.get(u, u) + (f" +{guests[u]}" if guests.get(u) else "")
+           for u, r in responses.items() if r == "yes"]
     no = [names.get(u, u) for u, r in responses.items() if r == "no"]
     maybe = [names.get(u, u) for u, r in responses.items() if r == "maybe"]
+    wl = [names.get(u, u) for u in st.get("waitlist", [])]
     date = st.get("date") or "date TBD"
-    lines = [f"📅 *{app.title}* — {date}", "",
+    cap = ""
+    if st.get("capacity"):
+        used = len(yes)
+        left = max(0, st["capacity"] - used)
+        bar = _bar(used, st["capacity"], 8)
+        cap = f"\n🎟️ {bar} {used}/{st['capacity']} seats" + \
+              (f" · {left} left" if left else " · FULL")
+    lines = [f"📅 *{app.title}* — {date}{cap}", "",
              f"✅ Yes ({len(yes)}): {', '.join(yes) or '—'}",
              f"❔ Maybe ({len(maybe)}): {', '.join(maybe) or '—'}",
-             f"❌ No ({len(no)}): {', '.join(no) or '—'}",
-             "", f"id: `{app.id}`",
-             f"RSVP: /miniapp rsvp {app.id} yes|no|maybe",
-             f"Who hasn't answered: /miniapp nudge {app.id}"]
+             f"❌ No ({len(no)}): {', '.join(no) or '—'}"]
+    if wl:
+        lines.append(f"⏳ Waitlist ({len(wl)}): {', '.join(wl)}")
+    lines += ["", f"id: `{app.id}`",
+              f"RSVP: /miniapp rsvp {app.id} yes|no|maybe [+N guests]",
+              f"Who hasn't answered: /miniapp nudge {app.id}"]
     return "\n".join(lines)
 
 
@@ -344,6 +577,8 @@ def apply_action(
             return _poll_action(app, user_id, user_name, action, args)
         if app.kind == "expenses":
             return _expense_action(app, user_id, user_name, action, args)
+        if app.kind == "quiz":
+            return _quiz_action(app, user_id, user_name, action, args)
         if app.kind == "rsvp":
             return _rsvp_action(app, user_id, user_name, action, args)
         return app, f"Unknown mini-app kind {app.kind!r}."
@@ -359,15 +594,24 @@ def _poll_action(app, user_id, user_name, action, args):
             return app, "This poll is closed — no more votes."
         if not args:
             return app, f"Usage: /miniapp vote {app.id} <option number>"
-        try:
-            idx = int(args[0]) - 1
-        except ValueError:
-            return app, f"Pick a number 1–{len(st['options'])}."
-        if not 0 <= idx < len(st["options"]):
-            return app, f"Pick a number 1–{len(st['options'])}."
+        idxs = []
+        for tok in args:
+            try:
+                i = int(tok) - 1
+            except ValueError:
+                return app, f"Pick number(s) 1–{len(st['options'])}."
+            if not 0 <= i < len(st["options"]):
+                return app, f"Pick number(s) 1–{len(st['options'])}."
+            idxs.append(i)
+        st["names"][user_id] = user_name
+        if st.get("multi"):
+            prev = st["ballots"].get(user_id, [])
+            st["ballots"][user_id] = sorted(set(idxs))
+            return app, (f"🗳️ {user_name} approves "
+                         f"{', '.join('“' + st['options'][i] + '”' for i in sorted(set(idxs)))}.")
+        idx = idxs[0]
         prev = st["votes"].get(user_id)
         st["votes"][user_id] = idx
-        st["names"][user_id] = user_name
         note = f" (changed from option {int(prev) + 1})" if prev is not None and int(prev) != idx else ""
         return app, f"🗳️ {user_name} voted for “{st['options'][idx]}”{note}."
     if action == "close":
@@ -375,11 +619,40 @@ def _poll_action(app, user_id, user_name, action, args):
             return app, "Already closed."
         st["closed"] = True
         return app, f"🔒 Poll closed by {user_name}.\n\n" + _render_poll(app)
-    return app, f"Poll actions: vote, close. Try /miniapp vote {app.id} <number>"
+    if action == "comment":
+        text = " ".join(args).strip()[:500]
+        if not text:
+            return app, f"Usage: /miniapp comment {app.id} <text>"
+        st.setdefault("comments", []).append(
+            {"user": user_name, "text": text, "ts": time.time()})
+        return app, f"💬 Comment added by {user_name}."
+    if action == "deadline":
+        if not args:
+            return app, f"Usage: /miniapp deadline {app.id} <hours>"
+        try:
+            hours = float(args[0])
+        except ValueError:
+            return app, "Hours must be a number."
+        st["closes_at"] = time.time() + hours * 3600.0
+        return app, f"⏰ Poll closes in {args[0]}h."
+    return app, (f"Poll actions: vote, close, comment, deadline. "
+                 f"Try /miniapp vote {app.id} <number>")
+
+
+def _extract_markers(rest: str) -> tuple[str, dict[str, str]]:
+    """Pull trailing `split:…` / `cat:…` markers out of expense text."""
+    markers: dict[str, str] = {}
+    for key in ("split", "cat"):
+        m = re.search(rf"\s+{key}:(\S+)\s*$", rest)
+        if m:
+            markers[key] = m.group(1)
+            rest = rest[:m.start()].rstrip()
+    return rest, markers
 
 
 def _expense_action(app, user_id, user_name, action, args):
     st = app.state
+    sym = str(st.get("currency", "") or "")
     if action == "expense":
         if len(args) < 2:
             return app, f"Usage: /miniapp expense {app.id} <amount> <what> [for name1,name2]"
@@ -388,7 +661,15 @@ def _expense_action(app, user_id, user_name, action, args):
             return app, f"Couldn't parse amount {args[0]!r} — try like 12.50."
         rest = " ".join(args[1:])
         what, _, for_part = rest.partition(" for ")
+        for_part, for_markers = _extract_markers(for_part)
+        what, what_markers = _extract_markers(what)
+        markers = {**what_markers, **for_markers}
         what = what.strip() or "expense"
+        category = markers.get("cat", "").strip()[:40]
+        split_raw = markers.get("split", "equal")
+        mode, _, split_params = split_raw.partition(":")
+        mode = mode.lower()
+        params = [p for p in split_params.split(",") if p] if split_params else []
         if for_part.strip():
             split_names = [n.strip() for n in for_part.split(",") if n.strip()]
         else:
@@ -405,6 +686,9 @@ def _expense_action(app, user_id, user_name, action, args):
             uid = known.get(nm.lower(), f"name:{nm.lower()}")
             if uid not in split_ids:
                 split_ids.append(uid)
+        shares = _split_shares(cents, split_ids, mode, params)
+        if isinstance(shares, str):
+            return app, f"⚠️ {shares}"
         names = {user_id: user_name}
         for nm in split_names:
             names[f"name:{nm.lower()}"] = nm
@@ -415,11 +699,48 @@ def _expense_action(app, user_id, user_name, action, args):
             "amount_cents": cents,
             "what": what,
             "split_among": split_ids,
+            "shares": {uid: c for uid, c in shares.items()},
+            "split_mode": mode,
+            "category": category,
             "names": names,
             "ts": time.time(),
         }
         st["expenses"].append(exp)
-        return app, f"💸 Recorded: {user_name} paid {_fmt_money(cents)} for “{what}”."
+        cat_s = f" [{category}]" if category else ""
+        return app, (f"💸 Recorded: {user_name} paid {_fmt_money(cents, sym)} "
+                     f"for “{what}”{cat_s} ({mode} split).")
+    if action == "edit":
+        if len(args) < 3:
+            return app, f"Usage: /miniapp edit {app.id} <exp_id> <amount> <what>"
+        exp_id = args[0]
+        cents = _parse_cents(args[1])
+        if cents is None or cents <= 0:
+            return app, f"Couldn't parse amount {args[1]!r}."
+        what = " ".join(args[2:]).strip()[:200] or "expense"
+        for exp in st["expenses"]:
+            if exp.get("id") == exp_id or str(exp.get("id", "")).startswith(exp_id):
+                old = exp["amount_cents"]
+                exp["amount_cents"] = cents
+                exp["what"] = what
+                # re-split with the same strategy on the new amount
+                shares = _split_shares(cents, exp.get("split_among", [exp["payer"]]),
+                                       exp.get("split_mode", "equal"), [])
+                if isinstance(shares, dict):
+                    exp["shares"] = shares
+                return app, (f"✏️ Updated: {_fmt_money(old, sym)} → "
+                             f"{_fmt_money(cents, sym)} for “{what}”. Balances recomputed.")
+        return app, f"No expense {exp_id!r} here."
+    if action == "del":
+        if not args:
+            return app, f"Usage: /miniapp del {app.id} <exp_id>"
+        exp_id = args[0]
+        before = len(st["expenses"])
+        st["expenses"] = [e for e in st["expenses"]
+                          if not (e.get("id") == exp_id
+                                  or str(e.get("id", "")).startswith(exp_id))]
+        if len(st["expenses"]) == before:
+            return app, f"No expense {exp_id!r} here."
+        return app, "🗑️ Expense deleted. Balances recomputed."
     if action == "settle":
         if len(args) < 3:
             return app, f"Usage: /miniapp settle {app.id} <from> <to> <amount>"
@@ -430,24 +751,136 @@ def _expense_action(app, user_id, user_name, action, args):
         st["settlements"].append(
             {"from": frm, "to": to, "amount_cents": cents, "ts": time.time()}
         )
-        return app, f"✅ Recorded payment: {frm} → {to} {_fmt_money(cents)}."
-    return app, f"Expense actions: expense, settle. Try /miniapp expense {app.id} 12.50 dinner"
+        return app, f"✅ Recorded payment: {frm} → {to} {_fmt_money(cents, sym)}."
+    if action == "currency":
+        sym_new = (args[0] if args else "").strip()[:4]
+        st["currency"] = sym_new
+        return app, f"💱 Currency symbol set to {sym_new or 'none'}."
+    if action == "summary":
+        return app, _expense_summary(st, sym)
+    return app, (f"Expense actions: expense, edit, del, settle, currency, summary. "
+                 f"Try /miniapp expense {app.id} 12.50 dinner")
+
+
+def _expense_summary(st: dict[str, Any], sym: str) -> str:
+    expenses = st.get("expenses", [])
+    if not expenses:
+        return "No expenses to summarize."
+    names = _expense_names(st)
+    total = sum(int(e.get("amount_cents", 0)) for e in expenses)
+    by_cat: dict[str, int] = {}
+    by_month: dict[str, int] = {}
+    by_payer: dict[str, int] = {}
+    for e in expenses:
+        amt = int(e.get("amount_cents", 0))
+        by_cat[e.get("category") or "uncategorized"] = \
+            by_cat.get(e.get("category") or "uncategorized", 0) + amt
+        by_month[time.strftime("%Y-%m", time.localtime(e.get("ts", 0)))] = \
+            by_month.get(time.strftime("%Y-%m", time.localtime(e.get("ts", 0))), 0) + amt
+        payer = names.get(str(e.get("payer", "")), str(e.get("payer", "?")))
+        by_payer[payer] = by_payer.get(payer, 0) + amt
+    lines = [f"📊 *Spending summary* — total {_fmt_money(total, sym)} "
+             f"across {len(expenses)} expenses", "",
+             "*By category:*"]
+    for cat, amt in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {cat}: {_fmt_money(amt, sym)} {_bar(amt, total)}")
+    lines.append("*By month:*")
+    for mo, amt in sorted(by_month.items()):
+        lines.append(f"  {mo}: {_fmt_money(amt, sym)}")
+    lines.append("*Paid by:*")
+    for who, amt in sorted(by_payer.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {who}: {_fmt_money(amt, sym)}")
+    return "\n".join(lines)
+
+
+def _quiz_action(app, user_id, user_name, action, args):
+    st = app.state
+    if action in ("vote", "answer"):
+        if st.get("closed"):
+            return app, "This quiz is closed."
+        if not args:
+            return app, f"Usage: /miniapp answer {app.id} <option number>"
+        try:
+            idx = int(args[0]) - 1
+        except ValueError:
+            return app, f"Pick a number 1–{len(st['options'])}."
+        if not 0 <= idx < len(st["options"]):
+            return app, f"Pick a number 1–{len(st['options'])}."
+        st["names"][user_id] = user_name
+        st["attempts"][user_id] = st.get("attempts", {}).get(user_id, 0) + 1
+        tries = st["attempts"][user_id]
+        correct = idx == st.get("correct")
+        if correct:
+            pts = 2 if tries == 1 else 1  # first-try bonus
+            st["scores"][user_id] = st.get("scores", {}).get(user_id, 0) + pts
+            st["streaks"][user_id] = st.get("streaks", {}).get(user_id, 0) + 1
+            streak = st["streaks"][user_id]
+            return app, (f"✅ Correct! +{pts} pt{'s' if pts != 1 else ''} "
+                         f"{user_name}." + (f" 🔥 {streak} in a row!" if streak >= 2 else ""))
+        st["streaks"][user_id] = 0
+        left = " (answer revealed when the quiz closes)" if not st.get("closed") else ""
+        return app, f"❌ Not quite, {user_name}.{left}"
+    if action == "close":
+        if st.get("closed"):
+            return app, "Already closed."
+        st["closed"] = True
+        return app, f"🔒 Quiz closed by {user_name}.\n\n" + _render_quiz(app)
+    if action == "scoreboard":
+        return app, _render_quiz(app)
+    return app, (f"Quiz actions: answer, scoreboard, close. "
+                 f"Try /miniapp answer {app.id} <number>")
 
 
 def _rsvp_action(app, user_id, user_name, action, args):
     st = app.state
     st.setdefault("seen", {})[user_id] = user_name
+    cap = int(st.get("capacity") or 0)
     if action in ("yes", "no", "maybe"):
+        guests = 0
+        for tok in args:
+            if tok.startswith("+") and tok[1:].isdigit():
+                guests = min(20, int(tok[1:]))
+        prev = st["responses"].get(user_id)
+        if action == "yes" and cap:
+            used = sum(1 for r in st["responses"].values() if r == "yes")
+            if prev != "yes" and used >= cap:
+                if user_id not in st.setdefault("waitlist", []):
+                    st["waitlist"].append(user_id)
+                st["names"][user_id] = user_name
+                return app, (f"⏳ Full! {user_name} is #{len(st['waitlist'])} "
+                             f"on the waitlist.")
+            if user_id in st.get("waitlist", []):
+                st["waitlist"].remove(user_id)
+        if prev == "yes" and action != "yes":
+            # a seat freed — promote the waitlist head
+            wl = st.get("waitlist", [])
+            if wl:
+                nxt = wl.pop(0)
+                st["responses"][nxt] = "yes"
+                st["names"].setdefault(nxt, nxt)
         st["responses"][user_id] = action
         st["names"][user_id] = user_name
-        return app, f"📅 {user_name} → {action.upper()} for “{app.title}”."
+        st["guests"][user_id] = guests
+        g = f" +{guests}" if guests else ""
+        return app, f"📅 {user_name} → {action.upper()}{g} for “{app.title}”."
+    if action == "capacity":
+        if not args or not args[0].isdigit():
+            return app, f"Usage: /miniapp capacity {app.id} <number> (0 = unlimited)"
+        st["capacity"] = max(0, int(args[0]))
+        return app, (f"🎟️ Capacity set to {args[0]}."
+                     if st["capacity"] else "🎟️ Capacity removed (unlimited).")
     if action == "nudge":
         responded = set(st["responses"])
         quiet = [nm for uid, nm in st["seen"].items() if uid not in responded]
-        if not quiet:
-            return app, "Everyone who's seen this has answered. 🎉"
-        return app, "Still waiting on: " + ", ".join(quiet)
-    return app, f"RSVP actions: yes, no, maybe, nudge. Try /miniapp rsvp {app.id} yes"
+        wl = st.get("waitlist", [])
+        bits = []
+        if quiet:
+            bits.append("Still waiting on: " + ", ".join(quiet))
+        if wl:
+            bits.append(f"⏳ Waitlist ({len(wl)}): " +
+                        ", ".join(st.get("names", {}).get(u, u) for u in wl))
+        return app, "\n".join(bits) if bits else "Everyone who's seen this has answered. 🎉"
+    return app, f"RSVP actions: yes, no, maybe, capacity, nudge. Try /miniapp rsvp {app.id} yes"
 
 
 # ── chat command ───────────────────────────────────────────────────────────
@@ -492,13 +925,16 @@ def control_miniapp(
         apps = store.load(gkey)
         if not apps:
             return ("No mini-apps in this group yet.\n" + _NEW_HINT)
+        # surface due polls first
+        due = due_polls(store, gkey)
         lines = ["Mini-apps in this group:"]
         for a in apps:
-            lines.append(f"• {a.kind} “{a.title}” — /miniapp show {a.id}")
+            tag = " ⏰ closes soon" if a in due else ""
+            lines.append(f"• {a.kind} “{a.title}” — /miniapp show {a.id}{tag}")
         return "\n".join(lines)
     if sub == "new":
         if len(rest) < 1:
-            return "Usage: /miniapp new <poll|expenses|rsvp> <title> [options…]\n" + _NEW_HINT
+            return "Usage: /miniapp new <poll|expenses|rsvp|quiz> <title> [options…]\n" + _NEW_HINT
         kind = rest[0].lower()
         # Title may be quoted: new poll "Best day?" Mon Tue Wed
         m = re.match(r'\s*\S+\s+"([^"]+)"\s*(.*)$', " " + " ".join(rest))
@@ -506,11 +942,29 @@ def control_miniapp(
             title, opt_str = m.group(1), m.group(2)
         else:
             title, opt_str = " ".join(rest[1:]), ""
-        options = opt_str.split()
+        tokens = opt_str.split()
+        # trailing flags: multi, correct:<n>, cap:<n>, closes:<h>
+        flags: dict[str, Any] = {}
+        opts: list[str] = []
+        for tok in tokens:
+            low = tok.lower()
+            if low == "multi":
+                flags["multi"] = True
+            elif low.startswith("correct:") and low[8:].isdigit():
+                flags["correct"] = int(low[8:]) - 1
+            elif low.startswith("cap:") and low[4:].isdigit():
+                flags["capacity"] = int(low[4:])
+            elif low.startswith("closes:"):
+                try:
+                    flags["closes_at"] = time.time() + float(low[7:]) * 3600.0
+                except ValueError:
+                    pass
+            else:
+                opts.append(tok)
         try:
-            app = create_miniapp(kind, gkey, title,
-                                 options=options,
-                                 date=" ".join(rest[1:]) if kind == "rsvp" else "")
+            app = create_miniapp(kind, gkey, title, options=opts,
+                                 date=" ".join(rest[1:]) if kind == "rsvp" else "",
+                                 **flags)
         except ValueError as exc:
             return f"Couldn't create that: {exc}\n" + _NEW_HINT
         store.put(app)
@@ -525,11 +979,15 @@ def control_miniapp(
             return "Usage: /miniapp rm <id>"
         return ("🗑️ Removed." if store.remove(gkey, rest[0])
                 else f"No mini-app {rest[0]!r} in this group.")
-    # actions: vote|close → poll · expense|settle → expenses · rsvp|nudge → rsvp
+    # actions: vote|close|comment|deadline → poll · expense|settle|edit|del|summary|currency
+    # → expenses · answer|scoreboard → quiz · rsvp|nudge|capacity → rsvp
     action_aliases = {
-        "vote": "vote", "close": "close",
-        "expense": "expense", "settle": "settle",
-        "rsvp": "rsvp", "nudge": "nudge",
+        "vote": "vote", "close": "close", "comment": "comment",
+        "deadline": "deadline",
+        "expense": "expense", "settle": "settle", "edit": "edit",
+        "del": "del", "summary": "summary", "currency": "currency",
+        "answer": "answer", "scoreboard": "scoreboard",
+        "rsvp": "rsvp", "nudge": "nudge", "capacity": "capacity",
         "yes": "yes", "no": "no", "maybe": "maybe",
     }
     if sub in action_aliases:
@@ -539,31 +997,29 @@ def control_miniapp(
         if app is None:
             return f"No mini-app {rest[0]!r} in this group."
         action = action_aliases[sub]
-        if sub in ("yes", "no", "maybe"):
-            action = sub  # /miniapp yes <id>
-            app_id, aargs = rest[0], []
-            app = store.get(gkey, app_id)
-        else:
-            aargs = rest[1:]
-        if app is None:
-            return f"No mini-app {rest[0]!r} in this group."
+        # /miniapp yes|no|maybe <id> [+N] and /miniapp <action> <id> [args…]
+        aargs = rest[1:]
         updated, reply = apply_action(app, user_id, user_name, action, aargs)
         store.put(updated)
         return reply
     return f"Unknown /miniapp subcommand {sub!r}.\n\n{_HELP}"
 
 
-_NEW_HINT = ("Create one: /miniapp new poll \"Question?\" opt1 opt2 opt3\n"
+_NEW_HINT = ("Create one: /miniapp new poll \"Question?\" opt1 opt2 opt3 [multi] [closes:24]\n"
+             "           /miniapp new quiz \"Capital?\" Lagos Abuja Kano correct:1\n"
              "           /miniapp new expenses \"Trip fund\"\n"
-             "           /miniapp new rsvp \"Game night\" 2026-10-20")
+             "           /miniapp new rsvp \"Game night\" 2026-10-20 [cap:20]")
 
-_HELP = ("/miniapp — group mini-apps (polls, shared expenses, RSVPs)\n"
-         "/miniapp new <poll|expenses|rsvp> <title> [options…]\n"
+_HELP = ("/miniapp — group mini-apps (polls, quizzes, shared expenses, RSVPs)\n"
+         "/miniapp new <poll|expenses|rsvp|quiz> <title> [options…]\n"
          "/miniapp list   •   /miniapp show <id>   •   /miniapp rm <id>\n"
-         "/miniapp vote <id> <number>   •   /miniapp close <id>\n"
-         "/miniapp expense <id> <amount> <what> [for name1,name2]\n"
+         "/miniapp vote <id> <number> [numbers…]   •   /miniapp close <id>\n"
+         "/miniapp comment <id> <text>   •   /miniapp deadline <id> <hours>\n"
+         "/miniapp answer <id> <number>   •   /miniapp scoreboard <id>\n"
+         "/miniapp expense <id> <amount> <what> [for n1,n2] [split:…] [cat:…]\n"
+         "/miniapp edit|del <id> <exp_id> …   •   /miniapp summary <id>\n"
          "/miniapp settle <id> <from> <to> <amount>\n"
-         "/miniapp rsvp <id> yes|no|maybe   •   /miniapp nudge <id>")
+         "/miniapp rsvp <id> yes|no|maybe [+N]   •   /miniapp nudge <id>   •   /miniapp capacity <id> <n>")
 
 
 # ── Panels (Hark pattern): persistent, connector-backed mini-apps ──────────
@@ -753,6 +1209,51 @@ def create_panel(
             data_source="manual",
             created_ts=time.time(),
         )
+
+
+def due_refreshes(user_key: str = "owner",
+                  store: PanelStore | None = None) -> list[Panel]:
+    """Panels whose cadence says they're stale — the host scheduler calls
+    this to know what to refresh without waking every panel."""
+    try:
+        st = store or PanelStore()
+        return [p for p in st.load(user_key) if p.needs_refresh()]
+    except Exception:  # noqa: BLE001 — never raises
+        return []
+
+
+def digest(user_key: str = "owner", *, store: PanelStore | None = None,
+           fetcher: Any = None) -> str:
+    """One-line-per-panel auto-briefing: name, freshness, headline numbers.
+
+    The scheduler can post this as a morning briefing. Never raises.
+    """
+    try:
+        st = store or PanelStore()
+        panels = st.load(user_key)
+        if not panels:
+            return "No panels yet."
+        lines = ["📊 **Panel digest:**"]
+        for p in panels:
+            if fetcher is not None and p.needs_refresh():
+                refresh_panel(p.id, user_key, fetcher=fetcher, store=st)
+                p = st.get(user_key, p.id) or p
+            flat = _flatten(p.data or {})
+            headline = ""
+            for path, value in flat.items():
+                if isinstance(value, (dict, list)) or value is None:
+                    continue
+                label = path.replace("_", " ").replace(".", " › ")
+                headline = f"{label}: {_fmt_value(value)}"
+                break
+            if (p.data or {}).get("_error"):
+                headline = f"⚠️ {str(p.data['_error'])[:80]}"
+            elif not headline:
+                headline = "no data yet"
+            lines.append(f"• **{p.name}** ({p.age_str()}) — {headline}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001 — never raises
+        return f"⚠️ digest failed: {exc}"
 
 
 # ── live refresh ───────────────────────────────────────────────────────────
@@ -964,7 +1465,7 @@ _PANEL_HELP = (
     "/panel — persistent live-data panels (Hark pattern)\n"
     "/panel new \"<name>\" <connector> [hourly|daily|weekly|manual] — create\n"
     "/panel list   •   /panel show <id>   •   /panel rm <id>\n"
-    "/panel refresh <id>   •   /panel ask <id> <question>"
+    "/panel refresh <id>   •   /panel ask <id> <question>   •   /panel digest"
 )
 
 
@@ -1005,8 +1506,12 @@ def control_panel(
                 return "No panels yet. Create one: /panel new \"<name>\" <connector>"
             lines = ["📊 Your panels:"]
             for p in panels:
-                lines.append(f"• {p.name} ({p.data_source}, {p.refresh_cadence}) — `{p.id}`")
+                stale = " ⏰ stale" if p.needs_refresh() else ""
+                lines.append(f"• {p.name} ({p.data_source}, {p.refresh_cadence}) — `{p.id}`{stale}")
             return "\n".join(lines)
+
+        if sub == "digest":
+            return digest(user_id, store=st, fetcher=fetcher)
 
         if sub in ("show", "refresh", "rm", "delete", "ask"):
             pid = rest.split(None, 1)[0] if rest else ""
