@@ -23,10 +23,12 @@ which physical core will run it.
 """
 from __future__ import annotations
 
+import collections
+import math
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from typing import Any
 
@@ -35,10 +37,15 @@ from .vcpu import KINDS, VcpuStatus, VirtualCPU
 
 __all__ = ["Workspace"]
 
-#: autoscale triggers
-_SCALE_UP_BUSY = 0.7      # fleet busy fraction that earns a new core
+#: autoscale triggers (HPA-style: proportional, deadbanded, asymmetric)
+_SCALE_UP_BUSY = 0.7      # fleet busy fraction that earns new cores
 _SCALE_DOWN_BUSY = 0.1    # fleet busy fraction that loses one
 _SCALE_DOWN_IDLE_S = 45.0  # must be near-idle this long before shrinking
+_SCALE_TOLERANCE = 0.10    # deadband: |ratio - 1| <= tol → no action
+_SCALE_UP_MAX_STEP = 2     # rate limit: at most +2 cores per decision
+_SCALE_DOWN_MAX_STEP = 1   # ... and -1 per decision (conservative shrink)
+_SCALE_UP_PRESSURE = 0.5   # queue pressure that earns new cores
+_SCALE_DOWN_PRESSURE = 0.05
 
 
 class Workspace:
@@ -80,6 +87,12 @@ class Workspace:
         self._thread: threading.Thread | None = None
         self._stop = False
         self._wake = threading.Event()
+        #: recent scale decisions, newest last (observability)
+        self._scale_history: collections.deque[dict[str, Any]] = \
+            collections.deque(maxlen=32)
+        #: (t, busy, pressure) samples for predictive scale-up
+        self._metric_history: collections.deque[tuple[float, float, float]] = \
+            collections.deque(maxlen=16)
 
         with self._lock:
             for _ in range(self.target_vcpus):
@@ -115,18 +128,21 @@ class Workspace:
         with self._lock:
             return self._vcpus.get(name)
 
-    def scale_to(self, n: int, *, drain: bool = True) -> int:
+    def scale_to(self, n: int, *, drain: bool = True,
+                 reason: str = "") -> int:
         """Resize the farm to exactly n VCPUs (clamped to the envelope)."""
         n = max(self.min_vcpus, min(int(n), self.max_vcpus))
         with self._lock:
             current = len(self._vcpus)
             now = time.time()
+            why = reason or f"scaled to {n} (requested)"
             if n > current:
                 for _ in range(n - current):
                     self._spawn("balanced")
                 self._last_scale = now
-                self.last_scale_reason = f"scaled to {n} (requested)"
+                self.last_scale_reason = why
                 self.stats["scaled_up"] += n - current
+                self._record_scale("up", n - current, why)
             elif n < current:
                 for _ in range(current - n):
                     victim = self._least_loaded()
@@ -134,17 +150,82 @@ class Workspace:
                         break
                     self._retire(victim, drain=drain)
                 self._last_scale = now
-                self.last_scale_reason = f"scaled to {n} (requested)"
+                self.last_scale_reason = why
                 self.stats["scaled_down"] += current - n
+                self._record_scale("down", current - n, why)
             return len(self._vcpus)
 
-    def scale_up(self, n: int = 1) -> int:
+    def scale_up(self, n: int = 1, *, reason: str = "") -> int:
         with self._lock:
-            return self.scale_to(len(self._vcpus) + n)
+            return self.scale_to(len(self._vcpus) + n,
+                                 reason=reason or "scale up (requested)")
 
-    def scale_down(self, n: int = 1, *, drain: bool = True) -> int:
+    def scale_down(self, n: int = 1, *, drain: bool = True,
+                   reason: str = "") -> int:
         with self._lock:
-            return self.scale_to(len(self._vcpus) - n, drain=drain)
+            return self.scale_to(len(self._vcpus) - n, drain=drain,
+                                 reason=reason or "scale down (requested)")
+
+    def _record_scale(self, direction: str, n: int, reason: str) -> None:
+        self._scale_history.append({
+            "at": time.time(), "direction": direction, "n": n,
+            "reason": reason, "vcpus": len(self._vcpus),
+        })
+        self._emit("workspace.scaled", direction=direction, n=n,
+                   reason=reason, count=len(self._vcpus))
+
+    def scale_history(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Recent scale decisions, newest last."""
+        return list(self._scale_history)[-max(1, limit):]
+
+    def kind_counts(self) -> dict[str, int]:
+        """How many VCPUs of each kind are live."""
+        counts: dict[str, int] = {}
+        with self._lock:
+            for v in self._vcpus.values():
+                counts[v.kind] = counts.get(v.kind, 0) + 1
+        return counts
+
+    def ensure_kind(self, kind: str, n: int) -> dict[str, int]:
+        """Dedicated lane: keep exactly ``n`` VCPUs of ``kind`` live.
+
+        Celery-style queue routing needs somewhere to route *to* — this
+        builds the io/cpu lanes the affinity scorer prefers.  Retires the
+        least-loaded of the kind first; never breaches the farm envelope.
+        """
+        if kind not in KINDS:
+            raise ValueError(f"unknown VCPU kind {kind!r}; expected {KINDS}")
+        n = max(0, int(n))
+        with self._lock:
+            of_kind = sorted(
+                (v for v in self._vcpus.values() if v.kind == kind),
+                key=lambda v: (v.load, v.stats["tasks_run"]))
+            if len(of_kind) < n:
+                room = self.max_vcpus - len(self._vcpus)
+                # the farm envelope wins over the lane request
+                for _ in range(min(n - len(of_kind), max(0, room))):
+                    self._spawn(kind)
+            elif len(of_kind) > n:
+                for victim in of_kind[:len(of_kind) - n]:
+                    if len(self._vcpus) <= self.min_vcpus:
+                        break
+                    self._retire(victim, drain=True)
+        return self.kind_counts()
+
+    def pause_all(self) -> int:
+        """Pause every live VCPU (queues keep accepting work)."""
+        n = 0
+        for v in self.vcpus():
+            v.pause()
+            n += 1
+        return n
+
+    def resume_all(self) -> int:
+        n = 0
+        for v in self.vcpus():
+            v.resume()
+            n += 1
+        return n
 
     def add_vcpu(self, *, kind: str = "balanced", name: str = "") -> VirtualCPU:
         """Add one core of a specific kind (outside the auto envelope)."""
@@ -203,12 +284,15 @@ class Workspace:
 
     def submit(self, fn: Callable[..., Any], *args: Any,
                affinity: str = "balanced", priority: int = 0,
-               vcpu: str = "") -> tuple[str, Future]:
+               vcpu: str = "", name: str = "",
+               timeout: float = 0.0) -> tuple[str, Future]:
         """Assign work to the best core.  Returns ``(vcpu_name, future)``.
 
         ``affinity`` = "io" | "cpu" | "balanced" hints at the kind of
         work (a dedicated io/cpu core is preferred when free);
-        ``vcpu`` pins a specific core by name (ops tooling).
+        ``vcpu`` pins a specific core by name (ops tooling);
+        ``name`` labels the task; ``timeout`` is a soft per-task limit
+        in seconds (see :meth:`VirtualCPU.submit`).
         """
         self.stats["dispatched"] += 1
         try:
@@ -221,8 +305,52 @@ class Workspace:
         except Exception as exc:  # noqa: BLE001
             self.stats["dispatch_errors"] += 1
             raise exc
-        future = target.submit(fn, *args, priority=priority)
+        future = target.submit(fn, *args, priority=priority, name=name,
+                               timeout=timeout)
         return target.name, future
+
+    def map(self, fn: Callable[..., Any], iterable: Iterable[Any], *,
+            affinity: str = "balanced", priority: int = 0,
+            timeout: float = 0.0) -> list[Future]:
+        """Submit ``fn(x)`` for every ``x``.  Returns Futures in order."""
+        futures: list[Future] = []
+        for x in iterable:
+            _, fut = self.submit(fn, x, affinity=affinity, priority=priority,
+                                 timeout=timeout,
+                                 name=getattr(fn, "__name__", "map"))
+            futures.append(fut)
+        return futures
+
+    def rebalance(self) -> int:
+        """Work-stealing pass (Tokio-style): idle cores steal half the
+        queued work of the busiest core.  Returns tasks moved.
+
+        Cheaper than scaling — the autoscaler runs this before deciding
+        to grow, so a lopsided queue doesn't buy a core it doesn't need.
+        """
+        with self._lock:
+            vcpus = list(self._vcpus.values())
+        idle = [v for v in vcpus
+                if v.status == VcpuStatus.IDLE and v.queue_depth() == 0]
+        donors = sorted(
+            (v for v in vcpus
+             if v.status in (VcpuStatus.IDLE, VcpuStatus.BUSY)
+             and v.queue_depth() > 1),
+            key=lambda v: v.queue_pressure, reverse=True)
+        if not idle or not donors:
+            return 0
+        moved = 0
+        for thief in idle:
+            if not donors:
+                break
+            donor = donors[0]
+            if donor is thief or donor.queue_depth() <= 1:
+                continue
+            moved += thief.steal_from(donor)
+            donors.sort(key=lambda v: v.queue_pressure, reverse=True)
+        if moved:
+            self._emit("workspace.rebalanced", moved=moved)
+        return moved
 
     # ── autoscaling ──────────────────────────────────────────────────────────
     def _fleet_busy(self) -> float:
@@ -233,9 +361,43 @@ class Workspace:
             return 0.0
         return sum(v.busy_fraction for v in alive) / len(alive)
 
+    def _fleet_pressure(self) -> float:
+        with self._lock:
+            alive = [v for v in self._vcpus.values()
+                     if v.status != VcpuStatus.OFFLINE]
+        if not alive:
+            return 0.0
+        return sum(v.queue_pressure for v in alive) / len(alive)
+
+    def _note_metrics(self, now: float, busy: float, pressure: float) -> None:
+        self._metric_history.append((now, busy, pressure))
+
+    def _predict_pressure(self, now: float) -> float:
+        """Linear extrapolation of queue pressure one interval ahead.
+
+        Catches a queue that's *climbing* before busy_fraction saturates —
+        the autoscaler grows on the forecast, not just the present.
+        """
+        hist = list(self._metric_history)
+        if len(hist) < 2:
+            return 0.0
+        (t0, _, p0), (t1, _, p1) = hist[0], hist[-1]
+        dt = max(1e-3, t1 - t0)
+        rate = (p1 - p0) / dt
+        if rate <= 0:
+            return p1
+        return min(1.0, p1 + rate * self.autoscale_interval)
+
     def autoscale_tick(self) -> str:
         """One growth/shrink decision.  Returns the action taken
-        ('' = no change).  Safe to call from the watch loop too."""
+        ('' = no change).  Safe to call from the watch loop too.
+
+        HPA-style: the desired size is *proportional* to load
+        (``ceil(current × signal)``), a 10% deadband stops flapping,
+        scale-up is fast and multi-core, scale-down is slow and single —
+        and a work-stealing rebalance runs first so a lopsided queue
+        doesn't buy cores it doesn't need.
+        """
         if not self._autoscale:
             return ""
         now = time.time()
@@ -243,6 +405,11 @@ class Workspace:
             return ""
         busy = self._fleet_busy()
         pressure = self._fleet_pressure()
+        self._note_metrics(now, busy, pressure)
+        # steal before scaling: free capacity hiding on idle cores
+        if pressure > 0.2:
+            self.rebalance()
+            pressure = self._fleet_pressure()
         # Profile-aware thresholds: an aggressive (low-RAM) posture earns a
         # new core only at higher load, and gives cores back earlier.
         up_busy, down_busy = _SCALE_UP_BUSY, _SCALE_DOWN_BUSY
@@ -253,37 +420,41 @@ class Workspace:
             up_busy = max(0.5, up_busy - 0.05)
         with self._lock:
             current = len(self._vcpus)
-        if busy > up_busy or pressure > 0.5:
+
+        # combined hot signal: busy ratio, queue-pressure ratio, forecast
+        forecast = self._predict_pressure(now)
+        hot = max(busy / up_busy, pressure / _SCALE_UP_PRESSURE,
+                  forecast / _SCALE_UP_PRESSURE)
+        if hot > 1.0 + _SCALE_TOLERANCE:
             if self._hot_since is None:
                 self._hot_since = now
             if now - self._hot_since >= self.autoscale_interval \
                     and current < self.max_vcpus:
-                self.scale_up(1)
+                desired = min(self.max_vcpus,
+                              max(current + 1, math.ceil(current * hot)))
+                step = min(_SCALE_UP_MAX_STEP, desired - current)
+                why = (f"autoscale: hot (busy {busy:.0%}, pressure "
+                       f"{pressure:.0%}, forecast {forecast:.0%})")
+                self.scale_up(step, reason=why)
                 self._hot_since = None
-                return f"scaled up to {len(self._vcpus)} " \
-                       f"(busy {busy:.0%})"
+                return f"scaled up +{step} → {len(self._vcpus)} ({why})"
         else:
             self._hot_since = None
-        if busy < down_busy and pressure < 0.05:
+
+        if busy < down_busy and pressure < _SCALE_DOWN_PRESSURE:
             if self._idle_since is None:
                 self._idle_since = now
             if now - self._idle_since >= _SCALE_DOWN_IDLE_S \
                     and current > self.min_vcpus:
-                self.scale_down(1)
+                idle_for = now - (self._idle_since or now)
+                why = (f"autoscale: idle {idle_for:.0f}s "
+                       f"(busy {busy:.0%})")
+                self.scale_down(_SCALE_DOWN_MAX_STEP, reason=why)
                 self._idle_since = None
-                return f"scaled down to {len(self._vcpus)} " \
-                       f"(busy {busy:.0%})"
+                return f"scaled down → {len(self._vcpus)} ({why})"
         else:
             self._idle_since = None
         return ""
-
-    def _fleet_pressure(self) -> float:
-        with self._lock:
-            alive = [v for v in self._vcpus.values()
-                     if v.status != VcpuStatus.OFFLINE]
-        if not alive:
-            return 0.0
-        return sum(v.queue_pressure for v in alive) / len(alive)
 
 
     # ── reporting ────────────────────────────────────────────────────────────
@@ -294,16 +465,20 @@ class Workspace:
                  if v["status"] != VcpuStatus.OFFLINE]
         busy = sum(v["busy_fraction"] for v in alive) / len(alive) \
             if alive else 0.0
+        queued = sum(v["queue"] for v in vcpu_rows)
         return {
             "profile": self.profile.to_dict(),
             "vcpus": len(vcpu_rows),
+            "kinds": self.kind_counts(),
             "min_vcpus": self.min_vcpus,
             "target_vcpus": self.target_vcpus,
             "max_vcpus": self.max_vcpus,
             "fleet_busy": round(busy, 3),
             "fleet_pressure": round(self._fleet_pressure(), 3),
+            "queued_total": queued,
             "autoscale": self._autoscale,
             "last_scale": self.last_scale_reason,
+            "scale_history": self.scale_history(5),
             "stats": {
                 "scaled_up": self.stats["scaled_up"],
                 "scaled_down": self.stats["scaled_down"],
@@ -320,10 +495,57 @@ class Workspace:
             states[v["status"]] = states.get(v["status"], 0) + 1
         label = " ".join(f"{n}{k[0].upper()}{k[1:]}"
                          for k, n in sorted(states.items()))
+        kinds = " ".join(f"{k}:{n}" for k, n in sorted(st["kinds"].items()))
         return (f"workspace: {st['vcpus']} vcpu(s) [{label}] "
-                f"busy {st['fleet_busy']:.0%} "
+                f"busy {st['fleet_busy']:.0%} pressure {st['fleet_pressure']:.0%} "
+                f"queued {st['queued_total']} kinds({kinds}) "
                 f"profile={st['profile']['kind']} "
                 f"envelope {st['min_vcpus']}-{st['target_vcpus']}-{st['max_vcpus']}")
+
+    @staticmethod
+    def _bar(frac: float, width: int = 10) -> str:
+        filled = int(round(min(1.0, max(0.0, frac)) * width))
+        return "█" * filled + "░" * (width - filled)
+
+    def render_status(self) -> str:
+        """God-tier farm view: one ASCII table for the CLI/chat.
+
+        Pure (returns a string, never prints) so the AI, the CLI, and
+        tests all share it.
+        """
+        st = self.status()
+        rows = st["details"]
+        lines = [
+            f"⚙ workspace farm · profile={st['profile']['kind']} · "
+            f"{st['vcpus']} vcpu(s) · busy {st['fleet_busy']:.0%} · "
+            f"pressure {st['fleet_pressure']:.0%} · queued {st['queued_total']}",
+            f"  envelope {st['min_vcpus']}-{st['target_vcpus']}-{st['max_vcpus']}"
+            f" · autoscale {'on' if st['autoscale'] else 'off'}"
+            + (f" · last: {st['last_scale']}" if st["last_scale"] else ""),
+            "┌──────────┬──────────┬────────┬──────────────┬──────┬───────┬───────┐",
+            "│ vcpu     │ kind     │ status │ load         │ busy │ queue │ tasks │",
+            "├──────────┼──────────┼────────┼──────────────┼──────┼───────┼───────┤",
+        ]
+        glyph = {"idle": "○", "busy": "●", "paused": "⏸",
+                 "offline": "✕", "error": "⚠"}
+        for v in sorted(rows, key=lambda r: r["index"]):
+            s = v["stats"]
+            tasks = s["tasks_run"] + s["tasks_failed"]
+            lines.append(
+                f"│ {v['id'][:8]:<8} │ {v['kind'][:8]:<8} │ "
+                f"{glyph.get(v['status'], '?')} {v['status'][:6]:<6} │ "
+                f"{self._bar(v['load'])} │ {v['busy_fraction']:>4.0%} │ "
+                f"{v['queue']:>3}/{v['max_queue']:<3} │ {tasks:>5} │")
+        lines.append(
+            "└──────────┴──────────┴────────┴──────────────┴──────┴───────┴───────┘")
+        hist = self.scale_history(3)
+        if hist:
+            lines.append("  scale history:")
+            for h in hist:
+                arrow = "▲" if h["direction"] == "up" else "▼"
+                lines.append(f"    {arrow} {h['direction']} {h['n']:+d} → "
+                             f"{h['vcpus']} vcpus — {h['reason'][:70]}")
+        return "\n".join(lines)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def shutdown(self, *, drain: bool = False) -> None:

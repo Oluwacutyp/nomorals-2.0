@@ -29,7 +29,9 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import mimetypes
 import os
 import re
@@ -353,10 +355,94 @@ class InboxItem:
     error: str = ""
     attempts: int = 0
     updated_at: float = field(default_factory=time.time)
+    #: triage additions: owner-set priority (sweep order), owner note,
+    #: and a content hash for duplicate detection
+    priority: int = 0
+    owner_note: str = ""
+    content_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {f.name: getattr(self, f.name)
                 for f in self.__dataclass_fields__.values()}
+
+
+@dataclass
+class InboxRule:
+    """A Hazel-style rule: conditions → intent.
+
+    Evaluated after explicit ``@directives`` but before the fallback
+    classifier, highest ``priority`` first.  Conditions are a dict; every
+    key must match::
+
+        {"ext": [".pdf", ".docx"], "size_lt": 5_000_000}  → summarize
+        {"kind": "link"}                                   → research
+        {"name_re": "invoice.*2026", "ext": ".pdf"}        → file (+room)
+
+    Supported keys: ``ext`` (str|list, with or without dot), ``kind``,
+    ``mime_contains``, ``name_contains``, ``name_re``, ``size_lt``,
+    ``size_gt``, ``room`` ("" = global inbox).  ``params`` may carry
+    ``room`` (file the item there) and ``note`` (owner annotation).
+    """
+
+    id: str
+    name: str
+    conditions: dict[str, Any] = field(default_factory=dict)
+    intent: str = "needs_input"
+    params: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    priority: int = 0
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name)
+                for f in self.__dataclass_fields__.values()}
+
+
+def rule_matches(item: InboxItem, conditions: dict[str, Any]) -> bool:
+    """True when every condition in the dict matches the item."""
+    for key, want in (conditions or {}).items():
+        if key == "ext":
+            exts = {want} if isinstance(want, str) else set(want)
+            exts = {e.lower() if e.startswith(".") else f".{e.lower()}"
+                    for e in exts}
+            if Path(item.name).suffix.lower() not in exts:
+                return False
+        elif key == "kind":
+            if item.kind != want:
+                return False
+        elif key == "mime_contains":
+            if str(want).lower() not in (item.mime or "").lower():
+                return False
+        elif key == "name_contains":
+            if str(want).lower() not in item.name.lower():
+                return False
+        elif key == "name_re":
+            if not re.search(str(want), item.name, re.I):
+                return False
+        elif key == "size_lt":
+            if not item.size_bytes < float(want):
+                return False
+        elif key == "size_gt":
+            if not item.size_bytes > float(want):
+                return False
+        elif key == "room":
+            if (item.room or "") != (want or ""):
+                return False
+        else:
+            return False  # unknown condition key never matches
+    return True
+
+
+def content_hash_of(path: str | os.PathLike[str],
+                    cap: int = 1_000_000) -> str:
+    """sha256 of the file head — cheap duplicate detection."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            h.update(fh.read(cap))
+    except OSError:
+        return ""
+    return h.hexdigest()[:32]
 
 
 @dataclass
@@ -406,11 +492,13 @@ class Inbox:
         *,
         notifier: Any = None,
         scheduler: Any = None,
-        classifier: Callable[["Inbox", InboxItem], str | None] | None = None,
+        classifier: Callable[["Inbox", InboxItem],
+                           str | tuple[str, float] | None] | None = None,
         handlers: dict[str, Callable[["Inbox", InboxItem], ActionResult]] | None = None,
         fetcher: Callable[[str], str] | None = None,
         room_provider: RoomProvider | None = None,
         vision: Callable[[bytes, str, str], dict[str, Any]] | None = None,
+        min_confidence: float = 0.5,
     ) -> None:
         self.root = Path(root).resolve()
         self.dir = self.root / "inbox"
@@ -424,6 +512,11 @@ class Inbox:
         self.db = db or Database(self.dir / "inbox.db")
         self._ensure_schema()
         self._recover_stale()  # crash recovery, once per startup
+
+        #: classifier confidence below this → needs_input (review queue).
+        #: Injected classifiers may return ``(intent, confidence)`` tuples;
+        #: plain strings count as confidence 1.0.
+        self.min_confidence = max(0.0, min(1.0, float(min_confidence)))
 
         self._notifier = notifier
         self._scheduler = scheduler
@@ -440,6 +533,12 @@ class Inbox:
         self._sweep_lock = threading.Lock()
 
     # ── schema / recovery ────────────────────────────────────────────────
+
+    def _add_column(self, table: str, column: str, ddl: str) -> None:
+        try:
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        except Exception:  # noqa: BLE001 — already there
+            pass
 
     def _ensure_schema(self) -> None:
         with self.db.transaction():
@@ -462,6 +561,22 @@ class Inbox:
                     ended_at REAL NOT NULL, outcome TEXT NOT NULL, detail TEXT DEFAULT ''
                 )
             """)
+            # Hazel-style rule engine (conditions → intent)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS inbox_rules (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    conditions_json TEXT NOT NULL DEFAULT '{}',
+                    intent TEXT NOT NULL DEFAULT 'needs_input',
+                    params_json TEXT NOT NULL DEFAULT '{}',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+            """)
+        # idempotent migrations for older inbox.db files
+        self._add_column("inbox_items", "priority", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column("inbox_items", "owner_note", "TEXT DEFAULT ''")
+        self._add_column("inbox_items", "content_hash", "TEXT DEFAULT ''")
 
     def _recover_stale(self) -> None:
         """Crash recovery: `processing` older than 30 min → `pending`, once."""
@@ -607,7 +722,21 @@ class Inbox:
             return item
 
         kind = kind_hint or self._detect_kind(dest)
-        return self._insert(dest.name, str(dest), room, kind=kind)
+        chash = content_hash_of(dest)
+        if chash:
+            dup = self.db.query_one(
+                "SELECT id, name FROM inbox_items WHERE content_hash = ?"
+                " AND content_hash != '' AND status IN"
+                " ('pending', 'processing', 'done') LIMIT 1", (chash,))
+            if dup:
+                dest.unlink(missing_ok=True)
+                return self._insert(
+                    dest.name, "", room, kind=kind, status="done",
+                    content_hash=chash,
+                    result_summary=f"duplicate of {dup['name']} ({dup['id']})"
+                                   " — dropped copy discarded")
+        return self._insert(dest.name, str(dest), room, kind=kind,
+                            content_hash=chash)
 
     def _detect_kind(self, dest: Path) -> str:
         ext = dest.suffix.lower()
@@ -625,24 +754,28 @@ class Inbox:
 
     def _insert(self, name: str, path: str, room: str | None, *,
                 kind: str = "file", status: str = "pending",
-                result_summary: str = "", error: str = "") -> InboxItem:
+                result_summary: str = "", error: str = "",
+                content_hash: str = "") -> InboxItem:
         item = InboxItem(
             id=new_short_id("inbox"), name=name, path=path, kind=kind,
             mime=mimetypes.guess_type(name)[0] or "",
             size_bytes=Path(path).stat().st_size if Path(path).exists() else 0,
             status=status, room=room, result_summary=result_summary, error=error,
+            content_hash=content_hash,
         )
         with self.db.transaction():
             self.db.execute(
                 "INSERT INTO inbox_items (id, name, path, kind, mime, size_bytes,"
                 " received_at, status, room, directive, directive_target, intent,"
-                " action_taken, result_summary, error, attempts, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " action_taken, result_summary, error, attempts, updated_at,"
+                " priority, owner_note, content_hash)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (item.id, item.name, item.path, item.kind, item.mime,
                  item.size_bytes, item.received_at, item.status, item.room,
                  item.directive, item.directive_target, item.intent,
                  item.action_taken, item.result_summary, item.error,
-                 item.attempts, item.updated_at),
+                 item.attempts, item.updated_at, item.priority,
+                 item.owner_note, item.content_hash),
             )
         return item
 
@@ -694,6 +827,131 @@ class Inbox:
                 " updated_at=? WHERE id=?", (time.time(), item_id))
         return self.get_item(item_id)
 
+    def retry_all(self, status: str = "failed") -> int:
+        """Re-queue every item in ``status``.  Returns how many."""
+        with self.db.transaction():
+            cur = self.db.execute(
+                "UPDATE inbox_items SET status='pending', error='',"
+                " updated_at=? WHERE status=?", (time.time(), status))
+        return cur.rowcount
+
+    def set_priority(self, item_id: str, priority: int) -> InboxItem:
+        """Owner-set triage priority — sweeps run higher first."""
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE inbox_items SET priority=?, updated_at=? WHERE id=?",
+                (int(priority), time.time(), item_id))
+        return self.get_item(item_id)
+
+    def annotate(self, item_id: str, note: str) -> InboxItem:
+        """Append a timestamped owner note to an item (visible on cards)."""
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        line = f"[{stamp}] {note.strip()}"
+        item = self.get_item(item_id)
+        combined = (item.owner_note + "\n" + line).strip() if item.owner_note \
+            else line
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE inbox_items SET owner_note=?, updated_at=? WHERE id=?",
+                (combined[:4000], time.time(), item_id))
+        return self.get_item(item_id)
+
+    def search(self, query: str, limit: int = 50) -> list[InboxItem]:
+        """Full-text-ish search over name / intent / summary / notes."""
+        q = f"%{(query or '').strip()}%"
+        if q == "%%":
+            return []
+        rows = self.db.query(
+            "SELECT * FROM inbox_items WHERE name LIKE ? OR intent LIKE ?"
+            " OR result_summary LIKE ? OR owner_note LIKE ?"
+            " ORDER BY received_at DESC LIMIT ?", (q, q, q, q, limit))
+        return [self._row_to_item(r) for r in rows]
+
+    def purge_done(self, older_than_days: float = 30.0) -> dict[str, int]:
+        """Delete done rows (and their files, only inside the inbox tree)
+        older than ``older_than_days``.  History is kept."""
+        cutoff = time.time() - older_than_days * 86400
+        rows = self.db.query(
+            "SELECT id, path FROM inbox_items WHERE status='done'"
+            " AND updated_at < ?", (cutoff,))
+        files, gone = 0, 0
+        inbox_root = self.dir.resolve()
+        for r in rows:
+            p = Path(r["path"] or "")
+            try:
+                if p.is_file() and p.resolve().is_relative_to(inbox_root):
+                    p.unlink()
+                    files += 1
+            except OSError:  # noqa: BLE001 — already gone is fine
+                pass
+            with self.db.transaction():
+                self.db.execute("DELETE FROM inbox_items WHERE id=?",
+                                (r["id"],))
+            gone += 1
+        return {"rows": gone, "files": files}
+
+    # ── presentation ───────────────────────────────────────────────────
+
+    def render_item(self, item: InboxItem) -> str:
+        """One pretty card for the item — chat/CLI friendly, pure."""
+        glyph = {"pending": "⏳", "processing": "⚙", "done": "✅",
+                 "needs_input": "❓", "quarantined": "⛔", "failed": "❌"}
+        when = datetime.fromtimestamp(item.received_at).strftime(
+            "%Y-%m-%d %H:%M")
+        size = (f"{item.size_bytes / 1024:.1f} KB"
+                if item.size_bytes < 1024 * 1024
+                else f"{item.size_bytes / 1024 / 1024:.1f} MB")
+        lines = [
+            f"{glyph.get(item.status, '•')} {item.name} [{item.status}]",
+            f"  intent: {item.intent or '—'} · kind: {item.kind}"
+            + (f" · room: {item.room}" if item.room else ""),
+            f"  received: {when} · size: {size}"
+            + (f" · priority: {item.priority}" if item.priority else ""),
+        ]
+        if item.directive:
+            lines.append(f"  directive: {item.directive}")
+        if item.owner_note:
+            note = item.owner_note.strip().splitlines()[-1][:120]
+            lines.append(f"  📝 {note}")
+        if item.result_summary:
+            lines.append(f"  → {redact_secrets(item.result_summary)[:160]}")
+        if item.error:
+            lines.append(f"  ⚠ {redact_secrets(item.error)[:160]}")
+        return "\n".join(lines)
+
+    def digest(self, hours: float = 24.0, limit: int = 40) -> str:
+        """Markdown-ish digest of what the inbox did in the last ``hours``
+        — feeds the morning pulse / daily review.  Pure."""
+        cutoff = time.time() - max(1.0, hours) * 3600
+        rows = self.db.query(
+            "SELECT * FROM inbox_items WHERE updated_at >= ?"
+            " AND status IN ('done', 'needs_input', 'failed', 'quarantined')"
+            " ORDER BY updated_at DESC LIMIT ?", (cutoff, limit))
+        items = [self._row_to_item(r) for r in rows]
+        if not items:
+            return "📥 inbox digest: nothing processed in the window."
+        by_intent: dict[str, list[InboxItem]] = {}
+        for it in items:
+            by_intent.setdefault(it.intent or it.status, []).append(it)
+        glyph = {"done": "✅", "needs_input": "❓", "failed": "❌",
+                 "quarantined": "⛔"}
+        lines = [f"📥 inbox digest — last {hours:g}h ({len(items)} items)", ""]
+        for intent, group in sorted(by_intent.items()):
+            lines.append(f"**{intent}** ({len(group)})")
+            for it in group[:8]:
+                g = glyph.get(it.status, "•")
+                one = (it.result_summary or it.error or "").strip()
+                one = re.sub(r"\s+", " ", one)[:110]
+                lines.append(f"  {g} {it.name} — {one or it.status}")
+            if len(group) > 8:
+                lines.append(f"  … and {len(group) - 8} more")
+            lines.append("")
+        needs = sum(1 for it in items if it.status == "needs_input")
+        if needs:
+            lines.append(f"❓ {needs} item(s) waiting on you — "
+                         f"`nm inbox list --status needs_input`")
+        return "\n".join(lines).rstrip()
+
     def release(self, item_id: str) -> InboxItem:
         """Release a quarantined item back to the inbox (explicit, logged)."""
         item = self.get_item(item_id)
@@ -729,6 +987,70 @@ class Inbox:
         sql += " ORDER BY started_at DESC LIMIT ?"
         params.append(limit)
         return self.db.query(sql, params)
+
+    # ── rules (Hazel-style: conditions → intent) ─────────────────────────
+
+    def add_rule(self, name: str, conditions: dict[str, Any], intent: str,
+                 *, params: dict[str, Any] | None = None,
+                 priority: int = 0, enabled: bool = True) -> InboxRule:
+        """Add a triage rule.  Evaluated after @directives, before the
+        fallback classifier; highest priority wins."""
+        if intent not in INTENTS and intent not in self.handlers:
+            raise ValueError(f"unknown intent {intent!r}")
+        rule = InboxRule(
+            id=new_short_id("rule"), name=name, conditions=dict(conditions),
+            intent=intent, params=dict(params or {}), enabled=enabled,
+            priority=int(priority))
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT INTO inbox_rules (id, name, conditions_json, intent,"
+                " params_json, enabled, priority, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (rule.id, rule.name, json.dumps(rule.conditions), rule.intent,
+                 json.dumps(rule.params), int(rule.enabled), rule.priority,
+                 rule.created_at))
+        log.info("inbox: rule added: %s → %s (%s)", name, intent, rule.id)
+        return rule
+
+    def _row_to_rule(self, row: dict[str, Any]) -> InboxRule:
+        return InboxRule(
+            id=row["id"], name=row["name"],
+            conditions=json.loads(row.get("conditions_json") or "{}"),
+            intent=row["intent"],
+            params=json.loads(row.get("params_json") or "{}"),
+            enabled=bool(row.get("enabled", 1)),
+            priority=int(row.get("priority") or 0),
+            created_at=float(row.get("created_at") or 0))
+
+    def list_rules(self, *, enabled_only: bool = False) -> list[InboxRule]:
+        sql = "SELECT * FROM inbox_rules"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY priority DESC, created_at ASC"
+        return [self._row_to_rule(r) for r in self.db.query(sql)]
+
+    def remove_rule(self, rule_id: str) -> bool:
+        with self.db.transaction():
+            cur = self.db.execute("DELETE FROM inbox_rules WHERE id = ?",
+                                  (rule_id,))
+        return cur.rowcount == 1
+
+    def set_rule_enabled(self, rule_id: str, enabled: bool) -> bool:
+        with self.db.transaction():
+            cur = self.db.execute(
+                "UPDATE inbox_rules SET enabled = ? WHERE id = ?",
+                (int(enabled), rule_id))
+        return cur.rowcount == 1
+
+    def _rule_for(self, item: InboxItem) -> InboxRule | None:
+        """First matching enabled rule (highest priority first)."""
+        for rule in self.list_rules(enabled_only=True):
+            try:
+                if rule_matches(item, rule.conditions):
+                    return rule
+            except Exception:  # noqa: BLE001 — a bad rule never breaks triage
+                log.warning("inbox: rule %s failed to evaluate", rule.id)
+        return None
 
     # ── classification ─────────────────────────────────────────────────
 
@@ -780,7 +1102,13 @@ class Inbox:
         return None
 
     def classify(self, item: InboxItem) -> str:
-        """Intent for an item. Explicit directives ALWAYS win (spec §2)."""
+        """Intent for an item.
+
+        Precedence: explicit @directives ALWAYS win (spec §2) → enabled
+        Hazel-style rules → injected/default classifier (confidence-gated:
+        below ``min_confidence`` the item parks in ``needs_input`` for
+        review instead of being misfiled).
+        """
         directive = self._directive_for(item)
         if directive:
             name, arg, target = directive
@@ -802,15 +1130,49 @@ class Inbox:
                         "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
                         (item.room, time.time(), item.id))
             return intent
+        rule = self._rule_for(item)
+        if rule is not None:
+            params = rule.params or {}
+            if params.get("room"):
+                item.room = sanitize_name(str(params["room"]))
+            if params.get("note"):
+                self.annotate(item.id, str(params["note"]))
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
+                    (item.room, time.time(), item.id))
+            log.info("inbox: rule %r matched %s → %s",
+                     rule.name, item.name, rule.intent)
+            return rule.intent
         custom = self._classifier(self, item)
-        if custom:
-            # fixed taxonomy for the default classifier; injected handlers
-            # may define their own intents as long as a handler exists
-            if custom in INTENTS or custom in self.handlers:
-                return custom
-            item.error = f"unknown intent {custom!r}"
+        intent, confidence = self._split_confidence(custom)
+        if intent is None:
             return "needs_input"
-        return "needs_input"
+        # fixed taxonomy for the default classifier; injected handlers
+        # may define their own intents as long as a handler exists
+        if intent not in INTENTS and intent not in self.handlers:
+            item.error = f"unknown intent {intent!r}"
+            return "needs_input"
+        if confidence < self.min_confidence:
+            item.error = (f"low confidence ({confidence:.0%}) for "
+                          f"{intent} — needs a human call")
+            return "needs_input"
+        return intent
+
+    @staticmethod
+    def _split_confidence(
+            value: str | tuple[str, float] | None) -> tuple[str | None, float]:
+        """Classifier output → (intent, confidence).  Plain strings count
+        as confidence 1.0; tuples carry the model's own confidence."""
+        if value is None:
+            return None, 0.0
+        if isinstance(value, tuple):
+            intent, conf = value
+            try:
+                return str(intent), max(0.0, min(1.0, float(conf)))
+            except (TypeError, ValueError):
+                return str(intent), 0.0
+        return str(value), 1.0
 
     # ── processing ─────────────────────────────────────────────────────
 
@@ -922,7 +1284,7 @@ class Inbox:
         try:
             pending = [self._row_to_item(r) for r in self.db.query(
                 "SELECT * FROM inbox_items WHERE status='pending'"
-                " ORDER BY received_at ASC")]
+                " ORDER BY priority DESC, received_at ASC")]
             # a note that names another pending file must run BEFORE that
             # file's default intent consumes it (e.g. `@square photo.jpg`)
             by_path = {it.path: it for it in pending}
@@ -935,7 +1297,8 @@ class Inbox:
                         d = None
                     if d and d[2] and d[2] != it.path and d[2] in by_path:
                         targeted.add(d[2])
-            pending.sort(key=lambda it: (it.path in targeted, it.received_at))
+            pending.sort(key=lambda it: (it.path in targeted, -it.priority,
+                                         it.received_at))
             lines: list[str] = []
             counts: dict[str, int] = {}
             intents: dict[str, int] = {}
@@ -1011,20 +1374,26 @@ class InboxWatcher:
 # ── deterministic fallback classifier ────────────────────────────────────────
 
 
-def _default_classify(inbox: Inbox, item: InboxItem) -> str | None:
-    """Zero-model intent mapping. Returns None when genuinely ambiguous."""
+def _default_classify(inbox: Inbox, item: InboxItem) -> tuple[str, float] | None:
+    """Zero-model intent mapping with a confidence score.
+
+    Returns ``(intent, confidence)`` — the inbox parks anything below
+    ``min_confidence`` in ``needs_input`` instead of misfiling it —
+    or None when genuinely ambiguous.
+    """
     ext = Path(item.name).suffix.lower()
     if item.kind == "link":
-        return "research"
+        return "research", 0.95
     if ext in IMAGE_EXTS:
-        return "image"  # Prompt 09: dropped images go to the vision intent
+        return "image", 0.95  # Prompt 09: dropped images go to the vision intent
     if ext in VIDEO_EXTS:
-        return "describe"  # Prompt 15: default (no directive) is probe + describe
+        return "describe", 0.9  # Prompt 15: default (no directive) is probe + describe
     if ext in AUDIO_EXTS:
-        return "transcribe"
-    if ext in TEXT_EXTS or item.kind == "note" \
-            or (item.mime or "").startswith("text/"):
-        return "summarize"
+        return "transcribe", 0.9
+    if ext in TEXT_EXTS:
+        return "summarize", 0.95
+    if item.kind == "note" or (item.mime or "").startswith("text/"):
+        return "summarize", 0.8
     return None
 
 

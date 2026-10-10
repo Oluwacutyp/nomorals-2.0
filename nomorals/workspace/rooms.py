@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -47,6 +48,41 @@ _log = get_logger(__name__)
 
 ROOM_KINDS = ("goal", "project", "ad_hoc")
 ROOM_STATUSES = ("active", "paused", "archived")
+
+#: Obsidian-style room templates: seeded plan + state per room flavor.
+#: Explicit ``create()`` args always win over the template.
+ROOM_TEMPLATES: dict[str, dict[str, Any]] = {
+    "meeting": {
+        "kind": "ad_hoc",
+        "plan": ["Attendees + agenda", "Notes", "Action items with owners",
+                 "Follow-ups scheduled"],
+        "state": {"current_step": "collect agenda"},
+    },
+    "research": {
+        "kind": "ad_hoc",
+        "plan": ["Define the question", "Gather sources", "Synthesize",
+                 "Write up findings"],
+        "state": {"current_step": "define the question", "sources": []},
+    },
+    "build": {
+        "kind": "project",
+        "plan": ["Scope + acceptance criteria", "Implement", "Test",
+                 "Ship + demo"],
+        "state": {"current_step": "scope"},
+    },
+    "goal": {
+        "kind": "goal",
+        "plan": ["Define what done looks like", "First milestone",
+                 "Weekly check-in"],
+        "state": {"current_step": "define done"},
+    },
+    "learning": {
+        "kind": "ad_hoc",
+        "plan": ["What I want to understand", "Key sources", "Notes + insights",
+                 "Teach-back summary"],
+        "state": {"current_step": "frame the question"},
+    },
+}
 
 _MAX_SLUG = 60
 _MAX_DECISIONS = 100
@@ -107,6 +143,11 @@ class Room:
         d = self.state.get("decisions") or []
         return list(d) if isinstance(d, list) else []
 
+    @property
+    def tags(self) -> list[str]:
+        t = self.state.get("tags") or []
+        return sorted({str(x) for x in t}) if isinstance(t, list) else []
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "slug": self.slug, "kind": self.kind,
@@ -116,7 +157,7 @@ class Room:
             "updated_at": self.updated_at,
             "current_step": self.current_step,
             "blockers": self.blockers, "dirty": self.dirty,
-            "decisions": self.decisions,
+            "decisions": self.decisions, "tags": self.tags,
         }
 
 
@@ -126,6 +167,7 @@ class Room:
 def _render_room_md(room: Room, links: list[str]) -> str:
     st = room.state
     linked = f"{room.kind}:{room.linked_id}" if room.linked_id else "none"
+    tags = " ".join(f"#{t}" for t in room.tags) or "none"
     decisions = room.decisions
     if decisions:
         dec_lines = "\n".join(
@@ -146,6 +188,7 @@ slug: {room.slug}
 kind: {room.kind}
 linked: {linked}
 status: {room.status}
+tags: {tags}
 created: {_iso(room.created_at)}
 last_entered: {_iso(room.last_entered_at) if room.last_entered_at else "(never)"}
 
@@ -187,7 +230,7 @@ def _parse_room_md(text: str) -> dict[str, Any]:
 def _parse_room_header(text: str) -> dict[str, str]:
     """Best-effort parse of the ROOM.md header fields (for rehydration)."""
     out: dict[str, str] = {}
-    for key in ("slug", "kind", "linked", "status", "title"):
+    for key in ("slug", "kind", "linked", "status", "title", "tags"):
         m = re.search(rf"^{key}:\s*(.+)$", text or "", re.MULTILINE)
         if m:
             out[key] = m.group(1).strip()
@@ -314,6 +357,24 @@ class RoomContext:
         self.log("room", "blockers_cleared", {})
         self._manager._write_room_md(self._room)  # noqa: SLF001
 
+    def read_log(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Tail of the room's activity log, newest last.  Pure read."""
+        entries: list[dict[str, Any]] = []
+        log_file = self._dir / "logs" / "activity.log"
+        try:
+            if not log_file.is_file():
+                return entries
+            lines = log_file.read_text(
+                encoding="utf-8").strip().split("\n")
+            for line in lines[-max(1, limit):]:
+                try:
+                    entries.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        except OSError:  # noqa: BLE001 — missing log is not an error
+            pass
+        return entries
+
     # -- persistence ---------------------------------------------------------
     def checkpoint(self, summary: str = "") -> None:
         """Persist full state NOW: clear the dirty flag, write ROOM.md+DB."""
@@ -416,12 +477,30 @@ class RoomManager:
         return p
 
     # -- create ------------------------------------------------------------------
-    def create(self, title: str, kind: str = "ad_hoc",
+    def create(self, title: str, kind: str | None = None,
                linked_id: str = "", plan: list[str] | None = None,
-               state: dict[str, Any] | None = None) -> Room:
-        """Create a room: DB row + directory layout + ROOM.md + plan.md."""
+               state: dict[str, Any] | None = None,
+               template: str = "", tags: list[str] | None = None) -> Room:
+        """Create a room: DB row + directory layout + ROOM.md + plan.md.
+
+        ``template`` seeds kind/plan/state from :data:`ROOM_TEMPLATES`
+        ("meeting" | "research" | "build" | "goal" | "learning") —
+        explicit args always win.  ``tags`` are stored in state and are
+        searchable.
+        """
+        tpl = ROOM_TEMPLATES.get((template or "").lower(), {})
+        # explicit kind wins; otherwise the template's; else ad_hoc
+        kind = kind or str(tpl.get("kind", "")) or "ad_hoc"
         if kind not in ROOM_KINDS:
             raise ValueError(f"bad room kind: {kind!r}")
+        seed_plan = list(tpl.get("plan", [])) if plan is None else plan
+        seed_state: dict[str, Any] = dict(tpl.get("state", {}))
+        seed_state.update(state or {})
+        tag_list = sorted({t.strip().lower() for t in (tags or [])
+                           if t and t.strip()})
+        if tag_list:
+            seed_state["tags"] = sorted(set(seed_state.get("tags", []))
+                                        | set(tag_list))
         base = slugify(title)
         slug = base
         with self._lock:
@@ -438,14 +517,14 @@ class RoomManager:
                 updated_at=now,
                 state={"current_step": "", "blockers": [],
                        "decisions": [], "dirty": False,
-                       **(state or {})},
+                       **seed_state},
             )
             room_dir = self.rooms_dir / slug
             for sub in ("files", "scratch", "logs", "inbox"):
                 (room_dir / sub).mkdir(parents=True, exist_ok=True)
             plan_text = "\n".join(
                 f"{i + 1}. {redact_secrets(str(s))[:400]}"
-                for i, s in enumerate(plan or [])) or "(no plan yet)"
+                for i, s in enumerate(seed_plan or [])) or "(no plan yet)"
             (room_dir / "plan.md").write_text(
                 f"# Plan: {redact_secrets(room.title)}\n\n{plan_text}\n",
                 encoding="utf-8")
@@ -561,6 +640,10 @@ class RoomManager:
         if kind not in ROOM_KINDS:
             kind = "ad_hoc"
             linked_id = ""
+        tags = [t.lstrip("#") for t in header.get("tags", "").split()
+                if t.lstrip("#") and t != "none"]
+        if tags and not state.get("tags"):
+            state["tags"] = sorted(set(tags))
         room = Room(
             id=new_short_id("room"), slug=slug, kind=kind,
             linked_id=linked_id if linked_id != "none" else "",
@@ -698,6 +781,220 @@ class RoomManager:
                     self._write_room_md(room)
             return {"linked": [slug_a, slug_b]}
 
+    # -- tags --------------------------------------------------------------------
+    def tag(self, slug: str, *tags: str) -> Room:
+        """Add tags to a room (searchable, rendered on cards)."""
+        with self._lock:
+            room = self.get(slug) or self._rehydrate_from_disk(slug)
+            if room is None:
+                raise KeyError(f"no room {slug!r}")
+            current = set(room.tags)
+            current.update(t.strip().lower() for t in tags if t.strip())
+            room.state["tags"] = sorted(current)
+            self._persist(room)
+            return room
+
+    def untag(self, slug: str, *tags: str) -> Room:
+        with self._lock:
+            room = self.get(slug) or self._rehydrate_from_disk(slug)
+            if room is None:
+                raise KeyError(f"no room {slug!r}")
+            drop = {t.strip().lower() for t in tags}
+            room.state["tags"] = [t for t in room.tags if t not in drop]
+            self._persist(room)
+            return room
+
+    # -- fork: LangGraph-style time travel --------------------------------------
+    def fork(self, slug: str, new_title: str) -> Room:
+        """Branch a room: copy its tree + state into a new room.
+
+        The experiment-time-travel primitive — try a risky direction in
+        the fork while the original stays untouched.  Provenance is
+        recorded in ``state["forked_from"]`` and the activity log.
+        """
+        with self._lock:
+            src = self.get(slug) or self._rehydrate_from_disk(slug)
+            if src is None:
+                raise KeyError(f"no room {slug!r}")
+            state = dict(src.state)
+            state["forked_from"] = src.slug
+            state["dirty"] = False
+            state.setdefault("blockers", [])
+            new = self.create(new_title, kind=src.kind,
+                              linked_id=src.linked_id, state=state,
+                              tags=list(src.tags))
+            src_dir = self.rooms_dir / src.slug
+            dst_dir = self.rooms_dir / new.slug
+            for sub in ("files", "scratch", "logs"):
+                s, d = src_dir / sub, dst_dir / sub
+                if s.is_dir():
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+            plan_src = src_dir / "plan.md"
+            if plan_src.is_file():
+                shutil.copy2(plan_src, dst_dir / "plan.md")
+            self._write_room_md(new)
+        with self.enter(new.slug) as ctx:
+            ctx.log("room", "forked", {"from": src.slug,
+                                       "title": src.title})
+        _log.info("room forked: %s → %s", slug, new.slug)
+        return new
+
+    # -- presentation -------------------------------------------------------------
+    @staticmethod
+    def _ago(ts: float) -> str:
+        if not ts:
+            return "never"
+        dt = time.time() - ts
+        if dt < 3600:
+            return f"{int(dt // 60)}m ago"
+        if dt < 86400:
+            return f"{int(dt // 3600)}h ago"
+        return f"{int(dt // 86400)}d ago"
+
+    def render_card(self, room: Room) -> str:
+        """One pretty bordered card for a room — chat/CLI friendly, pure."""
+        glyph = {"active": "●", "paused": "⏸", "archived": "✦"}
+        w = 52
+        bar = "─" * w
+        step = (room.current_step or "(no step set)")[: w - 10]
+        blockers = room.blockers
+        blk = (blockers[0][: w - 14] + f" (+{len(blockers) - 1} more)"
+               if len(blockers) > 1 else
+               (blockers[0][: w - 12] if blockers else "none"))
+        tags = (" #" + " #".join(room.tags[:4])) if room.tags else ""
+        dirty = " ⚠ unclean exit" if room.dirty else ""
+        lines = [
+            f"╭{bar}╮",
+            f"│ 🏠 {room.title[: w - 5]}{tags[: w - len(room.title) - 6]}"
+            .ljust(w + 1) + "│",
+            f"│ {glyph.get(room.status, '?')} {room.status:<8} "
+            f"{room.kind:<8} {room.slug[: w - 24]}".ljust(w + 1) + "│",
+            f"├{bar}┤",
+            f"│ step:     {step}".ljust(w + 1) + "│",
+            f"│ blockers: {blk}".ljust(w + 1) + "│",
+            f"│ decisions: {len(room.decisions):<3} entered: "
+            f"{self._ago(room.last_entered_at):<10}{dirty}".ljust(w + 1) + "│",
+            f"╰{bar}╯",
+        ]
+        return "\n".join(lines)
+
+    def brief(self, slug: str) -> str:
+        """'Where did I leave off?' — one recap page for re-entering a room.
+
+        Last step, open blockers, tail of activity, recent decisions, and
+        the suggested next move.  Pure (returns a string).
+        """
+        room = self.get(slug) or self._rehydrate_from_disk(slug)
+        if room is None:
+            raise KeyError(f"no room {slug!r}")
+        ctx = RoomContext(self, room)
+        tail = ctx.read_log(5)
+        lines = [f"# {room.title} — recap",
+                 f"_{room.slug} · {room.kind} · {room.status} · "
+                 f"last entered {self._ago(room.last_entered_at)}_",
+                 ""]
+        lines.append(f"**Current step:** {room.current_step or '(none set)'}")
+        if room.blockers:
+            lines.append("**Blockers:**")
+            lines.extend(f"- ⛔ {b}" for b in room.blockers[:5])
+        if room.dirty:
+            lines.append("- ⚠ exited uncleanly last time — "
+                         "reconciled from logs; review before continuing")
+        if tail:
+            lines.append("**Last activity:**")
+            for e in tail[-4:]:
+                at = str(e.get("at", "?"))[:16].replace("T", " ")
+                lines.append(f"- {at} · {e.get('step')}: {e.get('event')}")
+        decs = room.decisions[-3:]
+        if decs:
+            lines.append("**Recent decisions:**")
+            for d in decs:
+                lines.append(f"- {d.get('decision', '')}")
+        nxt = room.current_step or "pick a next step"
+        lines.append(f"\n**Next:** {nxt}")
+        return "\n".join(lines)
+
+    def index(self) -> Path:
+        """Write the MOC-style hub: ``rooms/INDEX.md`` listing every room
+        with status, step, and freshness.  Returns the path."""
+        rooms = self.list()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = ["# Rooms index", "", f"_updated {now} · {len(rooms)} rooms_",
+                 ""]
+        for status in ("active", "paused", "archived"):
+            group = [r for r in rooms if r.status == status]
+            if not group:
+                continue
+            glyph = {"active": "●", "paused": "⏸", "archived": "✦"}[status]
+            lines.append(f"## {glyph} {status} ({len(group)})")
+            lines.append("")
+            for r in group:
+                step = r.current_step or "—"
+                tags = (" #" + " #".join(r.tags)) if r.tags else ""
+                lines.append(
+                    f"- **[{r.title}]({r.slug}/ROOM.md)** `{r.slug}`"
+                    f" _{r.kind}_{tags} — {step[:80]}"
+                    f" _(entered {self._ago(r.last_entered_at)})_")
+                if r.blockers:
+                    lines.append(f"  - ⛔ {r.blockers[0][:100]}")
+            lines.append("")
+        dest = self.rooms_dir / "INDEX.md"
+        dest.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return dest
+
+    def review(self, days: float = 7.0) -> str:
+        """PARA-style weekly review: what's active, blocked, stale, dirty,
+        and what got decided lately.  Pure (returns a string)."""
+        rooms = self.list()
+        stale = self.stale_rooms(30.0)
+        stale_slugs = {r.slug for r in stale}
+        cutoff = time.time() - days * 86400
+        lines = [f"# Room review — last {days:g} days", ""]
+        blocked = [r for r in rooms if r.blockers and r.status == "active"]
+        if blocked:
+            lines.append(f"## ⛔ Blocked ({len(blocked)})")
+            for r in blocked:
+                lines.append(f"- **{r.title}** `{r.slug}`: "
+                             f"{r.blockers[0][:110]}")
+            lines.append("")
+        dirty = [r for r in rooms if r.dirty and r.status == "active"]
+        if dirty:
+            lines.append(f"## ⚠ Unclean exits ({len(dirty)})")
+            for r in dirty:
+                lines.append(f"- **{r.title}** `{r.slug}` — needs a look")
+            lines.append("")
+        if stale:
+            lines.append(f"## 💤 Stale — idle 30d+ ({len(stale)})")
+            for r in stale:
+                lines.append(f"- **{r.title}** `{r.slug}` — archive or "
+                             f"revive? (idle {self._ago(r.last_entered_at)})")
+            lines.append("")
+        active = [r for r in rooms
+                  if r.status == "active" and r.slug not in stale_slugs]
+        lines.append(f"## ● Active & healthy ({len(active)})")
+        for r in active:
+            step = r.current_step or "—"
+            lines.append(f"- **{r.title}** `{r.slug}` — {step[:90]}")
+        if not active:
+            lines.append("- (none)")
+        lines.append("")
+        recent: list[tuple[float, str, str]] = []
+        for r in rooms:
+            for d in r.decisions:
+                ts = d.get("ts") or 0
+                if ts and ts >= cutoff:
+                    recent.append((ts, r.slug, str(d.get("decision", ""))))
+        if recent:
+            lines.append(f"## 🧠 Decisions this week ({len(recent)})")
+            for _, slug, dec in sorted(recent, reverse=True)[:15]:
+                lines.append(f"- `{slug}`: {dec[:110]}")
+            lines.append("")
+        paused = [r for r in rooms if r.status == "paused"]
+        if paused:
+            lines.append(f"## ⏸ Paused ({len(paused)}): "
+                         + ", ".join(f"`{r.slug}`" for r in paused))
+        return "\n".join(lines).rstrip()
+
     # -- search ------------------------------------------------------------------------------
     def search(self, query: str, *, deep: bool = False,
                limit: int = 20) -> list[dict[str, Any]]:
@@ -713,7 +1010,7 @@ class RoomManager:
         for room in self.list():
             hay = "\n".join([
                 room.title, room.slug, room.current_step,
-                *room.blockers,
+                *room.blockers, *room.tags,
                 *(str(d.get("decision", "")) for d in room.decisions),
                 *(str(d.get("rationale", "")) for d in room.decisions),
             ]).lower()
