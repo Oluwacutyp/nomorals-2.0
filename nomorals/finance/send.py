@@ -42,6 +42,10 @@ __all__ = [
 #: Capability required for money movement (biometric-gated per policy).
 MONEY_CAPABILITY = "money_transfer"
 
+#: A staged-but-unconfirmed transfer expires after 15 minutes — money
+#: shouldn't sit in "awaiting biometric" limbo forever.
+STAGED_TTL_SECONDS = 15 * 60
+
 
 class RecipientStore:
     """Named transfer recipients with bank details.
@@ -98,6 +102,41 @@ class RecipientStore:
 
     def names(self) -> list[str]:
         return [r["name"] for r in self._load().values()]
+
+    def remove(self, name: str) -> bool:
+        """Delete a recipient. Returns False when unknown."""
+        key = (name or "").strip().lower()
+        data = self._load()
+        if key not in data:
+            return False
+        del data[key]
+        self._save()
+        return True
+
+    def rename(self, old_name: str, new_name: str) -> dict[str, Any] | None:
+        """Rename a recipient, keeping bank details. Returns the record."""
+        old_key = (old_name or "").strip().lower()
+        new_key = (new_name or "").strip().lower()
+        if not new_key:
+            raise ValueError("new name required")
+        data = self._load()
+        rec = data.pop(old_key, None)
+        if rec is None:
+            return None
+        rec["name"] = new_name.strip()
+        data[new_key] = rec
+        self._save()
+        return rec
+
+
+def masked_account(recipient: dict[str, Any]) -> str:
+    """'GTBank ••4521' — the anti-misdirection confirmation echo."""
+    acct = str(recipient.get("account_number", "") or "")
+    bank = str(recipient.get("bank_name", "") or "").strip()
+    prefix = f"{bank} " if bank else ""
+    if len(acct) >= 4:
+        return f"{prefix}••{acct[-4:]}"
+    return f"{prefix}••••"
 
 
 def parse_send_request(text: str) -> dict[str, Any] | None:
@@ -211,9 +250,12 @@ def send_money(
         "staged_id": staged.id,
         "amount": format_naira(kobo),
         "to": recipient["name"],
+        "to_masked": f"{recipient['name']} · {masked_account(recipient)}",
+        "expires_in": "15 min",
         "prompt": (
             f"Confirm with your fingerprint to send {format_naira(kobo)} "
-            f"to {recipient['name']}."
+            f"to {recipient['name']} "
+            f"({masked_account(recipient)})."
         ),
     }
 
@@ -248,6 +290,13 @@ def confirm_send(
         return {"ok": False, "error": f"unknown staged transfer {staged_id!r}"}
     if rec.status == "executed":
         return {"ok": False, "error": "transfer already executed"}
+    # Staged transfers expire — re-stage instead of confirming a stale one.
+    age = time.time() - (rec.ts or 0)
+    if age > STAGED_TTL_SECONDS:
+        staging.mark(staged_id, "expired")
+        _audit(ledger, rec.amount_kobo, rec.recipient, "staged_expired")
+        return {"ok": False,
+                "error": "staged transfer expired (15 min) — stage it again"}
     staging.mark(staged_id, "biometric_confirmed", biometric_token=biometric_token)
     rec.status = "biometric_confirmed"
     rec.biometric_token = biometric_token

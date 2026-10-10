@@ -20,6 +20,7 @@ import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,9 @@ __all__ = [
     "require_mandate",
     "check_mandate",
     "daily_transfer_spend",
+    "weekly_transfer_spend",
+    "monthly_transfer_spend",
+    "mandate_remaining",
     "SCOPE_ALL",
     "SCOPE_TRANSFER",
     "SCOPE_TRAVEL",
@@ -72,6 +76,8 @@ class PaymentMandate:
     credential_ref: str = ""  # vault key reference, NEVER a raw secret
     created_at: float = 0.0
     revoked_at: float | None = None
+    cap_per_week: int | None = None   # kobo — optional weekly ceiling
+    cap_per_month: int | None = None  # kobo — optional monthly ceiling
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,6 +92,33 @@ class PaymentMandate:
 
     def covers(self, scope: str) -> bool:
         return self.scope == SCOPE_ALL or self.scope == scope
+
+    def describe(self) -> str:
+        """Human-readable approval screen (MetaMask permissions pattern).
+
+        Asset, amount, duration, constraints on one screen — this is what
+        the owner reads before saying yes.
+        """
+        bits = [
+            f"{self.agent_id} may spend up to "
+            f"{format_naira(self.cap_per_txn)}/transaction",
+            f"{format_naira(self.cap_per_day)}/day",
+        ]
+        if self.cap_per_week:
+            bits.append(f"{format_naira(self.cap_per_week)}/week")
+        if self.cap_per_month:
+            bits.append(f"{format_naira(self.cap_per_month)}/month")
+        scope_txt = ("everything" if self.scope == SCOPE_ALL
+                     else f"{self.scope} only")
+        exp = datetime.fromtimestamp(self.expires_at).astimezone() \
+            .strftime("%Y-%m-%d")
+        state = ("REVOKED" if self.revoked else
+                 "EXPIRED" if self.expired else "ACTIVE")
+        return (
+            f"[{state}] {self.id}: {', '.join(bits)} on {scope_txt} "
+            f"until {exp}. "
+            f"{'Revocable anytime.' if self.revocable else 'IRREVOCABLE.'}"
+        )
 
 
 @dataclass
@@ -156,12 +189,21 @@ class MandateStore:
         agent_id: str = "devon",
         credential_ref: str = "",
         revocable: bool = True,
+        cap_per_week: int | None = None,
+        cap_per_month: int | None = None,
     ) -> PaymentMandate:
         """Create a mandate. Owner-only — the chat layer gates this."""
         if cap_per_txn <= 0 or cap_per_day <= 0:
             raise MandateError("caps must be positive (kobo)")
         if cap_per_txn > cap_per_day:
             raise MandateError("per-transaction cap cannot exceed the daily cap")
+        for label, cap in (("weekly", cap_per_week), ("monthly", cap_per_month)):
+            if cap is not None:
+                if cap <= 0:
+                    raise MandateError(f"{label} cap must be positive (kobo)")
+                if cap < cap_per_day:
+                    raise MandateError(
+                        f"{label} cap cannot be below the daily cap")
         if _looks_like_secret(credential_ref):
             raise MandateError(
                 "credential_ref must be a vault reference, never a raw secret")
@@ -177,6 +219,8 @@ class MandateStore:
             revocable=bool(revocable),
             credential_ref=(credential_ref or "").strip(),
             created_at=now,
+            cap_per_week=int(cap_per_week) if cap_per_week else None,
+            cap_per_month=int(cap_per_month) if cap_per_month else None,
         )
         self._put(mandate)
         _log.info("mandate issued: %s scope=%s cap=%s/day=%s",
@@ -246,17 +290,56 @@ class MandateStore:
         return count
 
 
-def daily_transfer_spend(ledger: Ledger, *, now: float | None = None) -> int:
-    """Kobo moved out as transfers since local midnight. Never raises."""
+def _window_transfer_spend(ledger: Ledger, since: float) -> int:
+    """Kobo moved out as transfers since ``since``. Never raises."""
     try:
-        now = now if now is not None else time.time()
-        midnight = now - (now % 86400)
-        txns = ledger.transactions(since=midnight, kind="spend",
+        txns = ledger.transactions(since=since, kind="spend",
                                    category="transfer")
         return sum(max(0, int(t.amount_kobo)) for t in txns)
     except Exception:  # noqa: BLE001 - caps must fail safe, not loud
-        _log.debug("daily transfer spend unreadable", exc_info=True)
+        _log.debug("transfer spend unreadable", exc_info=True)
         return 0
+
+
+def daily_transfer_spend(ledger: Ledger, *, now: float | None = None) -> int:
+    """Kobo moved out as transfers since local midnight. Never raises."""
+    now = now if now is not None else time.time()
+    midnight = now - (now % 86400)
+    return _window_transfer_spend(ledger, midnight)
+
+
+def weekly_transfer_spend(ledger: Ledger, *, now: float | None = None) -> int:
+    """Kobo moved out as transfers in the trailing 7 days. Never raises."""
+    now = now if now is not None else time.time()
+    return _window_transfer_spend(ledger, now - 7 * 86400)
+
+
+def monthly_transfer_spend(ledger: Ledger, *, now: float | None = None) -> int:
+    """Kobo moved out as transfers in the trailing 30 days. Never raises."""
+    now = now if now is not None else time.time()
+    return _window_transfer_spend(ledger, now - 30 * 86400)
+
+
+def mandate_remaining(m: PaymentMandate, ledger: Ledger | None = None,
+                      *, now: float | None = None) -> dict[str, int]:
+    """Per-window remaining kobo on one line — the spend-down view."""
+    now = now if now is not None else time.time()
+    out = {"per_txn": m.cap_per_txn, "daily": m.cap_per_day}
+    if ledger is not None:
+        out["daily"] = max(0, m.cap_per_day - daily_transfer_spend(
+            ledger, now=now))
+        if m.cap_per_week:
+            out["weekly"] = max(0, m.cap_per_week - weekly_transfer_spend(
+                ledger, now=now))
+        if m.cap_per_month:
+            out["monthly"] = max(0, m.cap_per_month - monthly_transfer_spend(
+                ledger, now=now))
+    else:
+        if m.cap_per_week:
+            out["weekly"] = m.cap_per_week
+        if m.cap_per_month:
+            out["monthly"] = m.cap_per_month
+    return out
 
 
 def check_mandate(
@@ -301,6 +384,27 @@ def check_mandate(
                     f"of {format_naira(m.cap_per_day)} "
                     f"({format_naira(spent)} already spent today; "
                     f"mandate {m.id})"))
+    # Weekly / monthly ceilings (OpenClawCash pattern) — daily-only caps
+    # are trivially gamed by waiting for midnight.
+    if ledger is not None:
+        if m.cap_per_week:
+            wspent = weekly_transfer_spend(ledger, now=now)
+            if wspent + amount_kobo > m.cap_per_week:
+                return MandateCheck(
+                    ok=False, mandate=m, daily_spent_kobo=spent,
+                    reason=(f"{format_naira(amount_kobo)} would exceed the "
+                            f"weekly cap of {format_naira(m.cap_per_week)} "
+                            f"({format_naira(wspent)} already spent this "
+                            f"week; mandate {m.id})"))
+        if m.cap_per_month:
+            mspent = monthly_transfer_spend(ledger, now=now)
+            if mspent + amount_kobo > m.cap_per_month:
+                return MandateCheck(
+                    ok=False, mandate=m, daily_spent_kobo=spent,
+                    reason=(f"{format_naira(amount_kobo)} would exceed the "
+                            f"monthly cap of {format_naira(m.cap_per_month)} "
+                            f"({format_naira(mspent)} already spent this "
+                            f"month; mandate {m.id})"))
     return MandateCheck(ok=True, mandate=m, daily_spent_kobo=spent,
                         daily_remaining_kobo=m.cap_per_day - spent - amount_kobo)
 
@@ -336,9 +440,12 @@ def issue_mandate(
     ttl_days: float = 30.0,
     agent_id: str = "devon",
     credential_ref: str = "",
+    cap_per_week: int | None = None,
+    cap_per_month: int | None = None,
 ) -> PaymentMandate:
     """Convenience wrapper over ``MandateStore.issue``."""
     return (store or MandateStore()).issue(
         principal=principal, scope=scope, cap_per_txn=cap_per_txn,
         cap_per_day=cap_per_day, ttl_days=ttl_days, agent_id=agent_id,
-        credential_ref=credential_ref)
+        credential_ref=credential_ref, cap_per_week=cap_per_week,
+        cap_per_month=cap_per_month)

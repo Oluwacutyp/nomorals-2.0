@@ -41,12 +41,15 @@ __all__ = [
     "add_alert",
     "evaluate_alerts",
     "ensure_alerts_job",
+    "sync_bill_alerts",
+    "render_alerts",
     "ALERTS_CRON",
     "KIND_PRICE_ABOVE",
     "KIND_PRICE_BELOW",
     "KIND_PCT_CHANGE",
     "KIND_BUDGET_PCT",
     "KIND_FX_RATE",
+    "KIND_BILL_DUE",
 ]
 
 KIND_PRICE_ABOVE = "price_above"
@@ -54,10 +57,13 @@ KIND_PRICE_BELOW = "price_below"
 KIND_PCT_CHANGE = "pct_change"
 KIND_BUDGET_PCT = "budget_pct"
 KIND_FX_RATE = "fx_rate"
+#: A detected recurring charge is due within ``threshold`` days.
+#: target = the charge's note pattern (from detect_recurring).
+KIND_BILL_DUE = "bill_due"
 
 KINDS = (
     KIND_PRICE_ABOVE, KIND_PRICE_BELOW, KIND_PCT_CHANGE,
-    KIND_BUDGET_PCT, KIND_FX_RATE,
+    KIND_BUDGET_PCT, KIND_FX_RATE, KIND_BILL_DUE,
 )
 
 #: How often the scheduler evaluates alerts.
@@ -84,6 +90,11 @@ class Alert:
     # re-arm state: a repeating alert fires again only after the
     # condition was observed clear at least once.
     was_clear: bool = True
+    # YNAB-style snooze: skip evaluation until this epoch.
+    snooze_until: float | None = None
+    # bill_due bookkeeping: the due date this alert last fired for, so a
+    # monthly bill doesn't re-fire every 15 minutes until it's paid.
+    last_due_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,7 +118,13 @@ class Alert:
         kwargs["last_fired_at"] = kwargs.get("last_fired_at")
         kwargs["fire_count"] = int(kwargs.get("fire_count") or 0)
         kwargs["was_clear"] = bool(kwargs.get("was_clear", True))
+        kwargs["snooze_until"] = kwargs.get("snooze_until")
+        kwargs["last_due_ts"] = kwargs.get("last_due_ts")
         return cls(**kwargs)
+
+    @property
+    def snoozed(self) -> bool:
+        return bool(self.snooze_until) and self.snooze_until > time.time()
 
     def describe(self) -> str:
         if self.kind == KIND_PRICE_ABOVE:
@@ -120,6 +137,9 @@ class Alert:
             return f"{self.target} budget hits {self.threshold:.0%}"
         if self.kind == KIND_FX_RATE:
             return f"{self.target}→NGN crosses {self.threshold:,.0f}"
+        if self.kind == KIND_BILL_DUE:
+            return (f"{self.target} due within {self.threshold:.0f}d "
+                    f"(recurring bill)")
         return f"{self.kind} {self.target} {self.threshold}"
 
 
@@ -189,6 +209,15 @@ class AlertStore:
         data[alert.id] = alert.to_dict()
         self._save(data)
 
+    def snooze(self, alert_id: str, days: float = 7.0) -> bool:
+        """Pause an alert without deleting it (YNAB's snooze, generalized)."""
+        a = self.get(alert_id)
+        if a is None:
+            return False
+        a.snooze_until = time.time() + float(days) * 86400
+        self.update(a)
+        return True
+
 
 def add_alert(
     kind: str,
@@ -216,6 +245,12 @@ def add_alert(
         raise ValueError("threshold must be positive")
     if kind == KIND_BUDGET_PCT and not 0 < threshold <= 5:
         raise ValueError("budget_pct threshold is a fraction (e.g. 0.8 = 80%)")
+    if kind == KIND_BILL_DUE and not 0 < threshold <= 90:
+        raise ValueError("bill_due threshold is days ahead (e.g. 3 = 3 days)")
+    if kind == KIND_BILL_DUE:
+        # Bills recur — a one-shot bill alert would die after the first
+        # cycle; default to repeating.
+        one_shot = False
     alert = Alert(
         id="alr_" + uuid.uuid4().hex[:10],
         kind=kind, target=target, threshold=threshold,
@@ -269,6 +304,7 @@ def evaluate_alerts(
     fx_fn = fx_fn or _default_fx_fn
     fired: list[dict[str, Any]] = []
     checked = 0
+    skipped_snoozed = 0
 
     # Budget usage snapshot, computed once for all budget alerts.
     budget_usage: dict[str, float] = {}
@@ -285,11 +321,27 @@ def evaluate_alerts(
         except Exception:  # noqa: BLE001
             _log.debug("budget snapshot failed", exc_info=True)
 
+    # Recurring-charge snapshot for bill_due alerts.
+    recurring: list[Any] = []
+    need_bills = any(
+        a.kind == KIND_BILL_DUE for a in store.list(enabled_only=True))
+    if need_bills:
+        try:
+            from .insights import _window, detect_recurring
+            ledger_path, _ = finance_paths(None)
+            ledger = ledger or Ledger(ledger_path)
+            recurring = detect_recurring(_window(ledger, 120, now))
+        except Exception:  # noqa: BLE001
+            _log.debug("recurring snapshot failed", exc_info=True)
+
     for alert in store.list(enabled_only=True):
+        if alert.snoozed:
+            skipped_snoozed += 1
+            continue
         checked += 1
         try:
             current, message = _check_one(
-                alert, budget_usage, price_fn, fx_fn)
+                alert, budget_usage, recurring, price_fn, fx_fn, now)
         except Exception:  # noqa: BLE001
             _log.debug("alert %s check failed", alert.id, exc_info=True)
             continue
@@ -301,6 +353,12 @@ def evaluate_alerts(
             alert.fire_count += 1
             alert.last_fired_at = now
             alert.was_clear = False
+            if alert.kind == KIND_BILL_DUE:
+                # Remember which billing cycle fired — one ping per cycle.
+                for r in recurring:
+                    if r.note_pattern.lower() == alert.target.lower():
+                        alert.last_due_ts = r.next_due_ts
+                        break
             if alert.one_shot:
                 alert.enabled = False
             store.update(alert)
@@ -315,16 +373,20 @@ def evaluate_alerts(
             alert.was_clear = True
             store.update(alert)
 
-    return {"checked": checked, "fired": len(fired), "details": fired}
+    return {"checked": checked, "fired": len(fired), "details": fired,
+            "skipped_snoozed": skipped_snoozed}
 
 
 def _check_one(
     alert: Alert,
     budget_usage: dict[str, float],
+    recurring: list[Any],
     price_fn: Callable[[str, str], dict[str, Any] | None],
     fx_fn: Callable[[str], float | None],
+    now: float,
 ) -> tuple[tuple[bool, bool] | None, str]:
     """(triggered, clear) + message, or (None, msg) when no data."""
+    from .ledger import format_naira
     k = alert.kind
     if k in (KIND_PRICE_ABOVE, KIND_PRICE_BELOW):
         q = price_fn(alert.target, alert.market)
@@ -364,7 +426,85 @@ def _check_one(
         return (hit, not hit), (
             f"{alert.target}/NGN is now {rate:,.0f} "
             f"(threshold {alert.threshold:,.0f})")
+    if k == KIND_BILL_DUE:
+        charge = next(
+            (r for r in recurring
+             if r.note_pattern.lower() == alert.target.strip().lower()
+             or alert.target.strip().lower() in r.note_pattern.lower()),
+            None)
+        if charge is None or not charge.next_due_ts:
+            return None, f"no recurring charge matching '{alert.target}'"
+        days_left = (charge.next_due_ts - now) / 86400
+        hit = 0 < days_left <= alert.threshold
+        # Clear once the due date passes (bill presumably paid) or a new
+        # cycle's due date appears — re-arms for the next cycle.
+        clear = days_left <= 0 or (
+            alert.last_due_ts is not None
+            and charge.next_due_ts != alert.last_due_ts)
+        return (hit, clear), (
+            f"🧾 {charge.note_pattern} — "
+            f"{format_naira(charge.amount_kobo)} due in "
+            f"{max(0, days_left):.0f} day(s)")
     return None, f"unknown kind {k}"
+
+
+def sync_bill_alerts(store: AlertStore | None = None,
+                     ledger: Ledger | None = None,
+                     *, days_ahead: float = 7.0,
+                     now: float | None = None) -> dict[str, int]:
+    """Auto-watch detected recurring bills (Rocket Money's core loop).
+
+    Creates/refreshes a repeating ``bill_due`` alert for every recurring
+    charge whose next due date falls within ``days_ahead``. Idempotent:
+    an alert for the same charge is reused, never duplicated. Returns
+    {"created", "refreshed", "total"}.
+    """
+    from .insights import _window, detect_recurring
+    now = time.time() if now is None else now
+    store = store or AlertStore()
+    ledger_path, _ = finance_paths(None)
+    ledger = ledger or Ledger(ledger_path)
+    recurring = detect_recurring(_window(ledger, 120, now))
+    existing = {a.target.strip().lower(): a
+                for a in store.list()
+                if a.kind == KIND_BILL_DUE}
+    created = refreshed = 0
+    for r in recurring:
+        if not (0 < (r.next_due_ts - now) / 86400 <= days_ahead):
+            continue
+        key = r.note_pattern.strip().lower()
+        if key in existing:
+            a = existing[key]
+            if a.threshold != days_ahead:
+                a.threshold = days_ahead
+                store.update(a)
+                refreshed += 1
+        else:
+            add_alert(KIND_BILL_DUE, r.note_pattern, days_ahead,
+                      note=f"auto: {r.note_pattern} "
+                           f"{r.amount_kobo // 100:,}/cycle",
+                      one_shot=False, store=store)
+            created += 1
+    return {"created": created, "refreshed": refreshed,
+            "total": len(recurring)}
+
+
+def render_alerts(alerts: list[Alert],
+                  theme: str | None = None) -> str:
+    """One readable view of the whole watchtower."""
+    from .style import current_theme
+    th = current_theme(theme)
+    if not alerts:
+        return "no alerts set — /alert add price_above BTC 90000"
+    lines = [th.paint(f"{th.alert} alerts — {len(alerts)} watching",
+                      th.bold)]
+    for a in alerts:
+        state = ("💤 snoozed" if a.snoozed else
+                 "on" if a.enabled else "off")
+        extra = f" · fired {a.fire_count}×" if a.fire_count else ""
+        lines.append(f"  {th.bullet} {a.id} [{state}] "
+                     f"{a.describe()}{extra}")
+    return "\n".join(lines)
 
 
 # ── scheduler hook (follows the digest.py pattern) ─────────────────────

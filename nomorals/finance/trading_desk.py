@@ -43,7 +43,18 @@ __all__ = [
     "DeskError",
     "TradingDesk",
     "size_position",
+    "expected_value_r",
 ]
+
+
+def expected_value_r(win_rate: float, avg_win_r: float,
+                     avg_loss_r: float) -> float:
+    """Expectancy in R: W × avg_win − (1−W) × |avg_loss|.
+
+    The single number that says whether a system has an edge
+    (Van Tharp: expectancy is what matters, not win rate).
+    """
+    return win_rate * avg_win_r - (1.0 - win_rate) * abs(avg_loss_r)
 
 
 class DeskError(Exception):
@@ -80,6 +91,14 @@ class PaperPosition:
     opened_at: float = 0.0
     contract_value: float = 0.0  # account-currency value of a 1.0 price move
                                  # per 1.0 volume — from instrument conditions
+    risk_amount: float = 0.0  # account currency risked if SL hits (for R)
+
+
+def _r_multiple(pnl: float, risk_amount: float) -> float | None:
+    """Outcome in units of initial risk. −1R = stopped, +2R = 2× risk."""
+    if risk_amount and risk_amount > 0:
+        return round(pnl / risk_amount, 2)
+    return None
 
 
 def size_position(
@@ -403,6 +422,11 @@ class TradingDesk:
             contract_value = self._contract_value(instrument)
         except DeskError:
             pass  # paper can still track in price terms
+        risk_amount = 0.0
+        if stop_loss is not None:
+            stop_dist = abs(float(entry) - float(stop_loss))
+            unit = contract_value if contract_value > 0 else 1.0
+            risk_amount = round(stop_dist * unit * float(volume), 2)
         pos = PaperPosition(
             id="px_" + uuid.uuid4().hex[:10],
             instrument=instrument.upper(), side=side, volume=float(volume),
@@ -410,6 +434,7 @@ class TradingDesk:
             stop_loss=float(stop_loss) if stop_loss is not None else None,
             take_profit=float(take_profit) if take_profit is not None else None,
             opened_at=self._now(), contract_value=contract_value,
+            risk_amount=risk_amount,
         )
         self._paper_positions[pos.id] = pos
         self._save_state()
@@ -459,14 +484,17 @@ class TradingDesk:
         if pos is None:
             raise DeskError(f"unknown paper position {position_id}")
         pnl = self._paper_pnl(pos, exit_price)
+        r_mult = _r_multiple(pnl, pos.risk_amount)
         self._save_state()
         self._journal("paper_close", position_id=position_id,
                       instrument=pos.instrument, side=pos.side,
                       volume=pos.volume, entry=pos.entry,
-                      exit_price=exit_price, pnl=round(pnl, 2), reason=reason)
+                      exit_price=exit_price, pnl=round(pnl, 2), reason=reason,
+                      risk_amount=pos.risk_amount, r_multiple=r_mult)
         return {"position_id": position_id, "instrument": pos.instrument,
                 "side": pos.side, "volume": pos.volume, "entry": pos.entry,
-                "exit": exit_price, "pnl": round(pnl, 2), "reason": reason}
+                "exit": exit_price, "pnl": round(pnl, 2), "reason": reason,
+                "r_multiple": r_mult}
 
     def paper_close(self, position_id: str, *,
                     exit_price: float | None = None) -> dict[str, Any]:
@@ -568,39 +596,231 @@ class TradingDesk:
 
     # ── reporting ─────────────────────────────────────────────────
 
-    def stats(self) -> dict[str, Any]:
-        """Per-instrument win rate + realized P&L from the journal."""
-        per: dict[str, dict[str, Any]] = {}
-        total_pnl = 0.0
-        wins = losses = 0
+    def _closed_trades(self) -> list[dict[str, Any]]:
+        """Closed trades from the journal, oldest → newest."""
+        out = []
         for rec in self.journal(limit=10000):
             if rec.get("event") not in ("paper_close", "live_close"):
                 continue
-            inst = str(rec.get("instrument", ""))
             try:
                 pnl = float(rec.get("pnl") or 0)
             except (TypeError, ValueError):
                 continue
+            r = rec.get("r_multiple")
+            try:
+                r = float(r) if r is not None else None
+            except (TypeError, ValueError):
+                r = None
+            out.append({
+                "ts": rec.get("ts", 0),
+                "instrument": str(rec.get("instrument", "")),
+                "side": str(rec.get("side", "")),
+                "pnl": pnl,
+                "r_multiple": r,
+            })
+        return out[::-1]
+
+    def equity_curve(self) -> list[float]:
+        """Cumulative P&L after each closed trade — for sparklines."""
+        curve = []
+        running = 0.0
+        for t in self._closed_trades():
+            running += t["pnl"]
+            curve.append(round(running, 2))
+        return curve
+
+    def max_drawdown(self) -> dict[str, float]:
+        """Peak-to-trough of the equity curve (Edgewonk's key number)."""
+        curve = self.equity_curve()
+        peak = trough_dd = 0.0
+        running_peak = 0.0
+        for v in curve:
+            running_peak = max(running_peak, v)
+            trough_dd = max(trough_dd, running_peak - v)
+        return {"max_drawdown": round(trough_dd, 2),
+                "peak": round(running_peak, 2)}
+
+    def portfolio_heat(self) -> dict[str, Any]:
+        """Total open risk as % of equity — Van Tharp's <6% rule.
+
+        Sums each open paper position's planned risk (stop distance ×
+        contract value × volume). Live positions contribute unrealized
+        exposure when the snapshot exposes it.
+        """
+        heat_amt = sum(p.risk_amount for p in self._paper_positions.values()
+                       if p.risk_amount > 0)
+        try:
+            eq = self.equity()
+        except DeskError:
+            eq = 0.0
+        heat_pct = (heat_amt / eq * 100) if eq > 0 else 0.0
+        return {
+            "heat_pct": round(heat_pct, 2),
+            "heat_amount": round(heat_amt, 2),
+            "equity": round(eq, 2),
+            "open_positions": len(self._paper_positions),
+            "within_limits": heat_pct < 6.0,
+        }
+
+    def kelly_fraction(self) -> dict[str, Any]:
+        """Kelly criterion from journal stats — sizing guidance.
+
+        f* = W − (1−W) / R̄. Reported raw and quarter-Kelly (the sane
+        default — full Kelly is notoriously aggressive).
+        """
+        s = self.stats()
+        wr = s["win_rate"]
+        avg_r = s["avg_r_multiple"]
+        if s["total_trades"] < 10 or avg_r <= 0:
+            return {"ok": False,
+                    "reason": "need ≥10 R-tracked trades for Kelly"}
+        kelly = wr - (1 - wr) / avg_r
+        return {
+            "ok": True,
+            "kelly_pct": round(kelly * 100, 2),
+            "quarter_kelly_pct": round(kelly * 25, 2),
+            "note": "quarter-Kelly is the sane default; full Kelly "
+                    "assumes your edge estimate is exact (it isn't)",
+        }
+
+    def stats(self) -> dict[str, Any]:
+        """Edgewonk-style analytics from the journal.
+
+        Win rate, profit factor, expectancy (R + currency), average R,
+        max drawdown, streaks, best/worst, long-vs-short — per instrument
+        and overall.
+        """
+        trades = self._closed_trades()
+        per: dict[str, dict[str, Any]] = {}
+        total_pnl = 0.0
+        wins = losses = 0
+        gross_win = gross_loss = 0.0
+        r_vals: list[float] = []
+        wins_r: list[float] = []
+        losses_r: list[float] = []
+        longs = {"trades": 0, "pnl": 0.0}
+        shorts = {"trades": 0, "pnl": 0.0}
+        best = worst = 0.0
+        cur_streak = best_streak = worst_streak = 0
+        cur_sign = 0
+
+        for t in trades:
+            pnl = t["pnl"]
+            inst = t["instrument"]
             bucket = per.setdefault(inst, {"trades": 0, "wins": 0,
-                                           "pnl": 0.0})
+                                           "pnl": 0.0, "r_sum": 0.0,
+                                           "r_n": 0})
             bucket["trades"] += 1
             bucket["pnl"] += pnl
             total_pnl += pnl
+            best = max(best, pnl)
+            worst = min(worst, pnl)
             if pnl > 0:
                 wins += 1
                 bucket["wins"] += 1
+                gross_win += pnl
+                sign = 1
             elif pnl < 0:
                 losses += 1
+                gross_loss += abs(pnl)
+                sign = -1
+            else:
+                sign = 0
+            if sign == cur_sign and sign != 0:
+                cur_streak += 1
+            else:
+                cur_streak, cur_sign = (1 if sign else 0), sign
+            if sign > 0:
+                best_streak = max(best_streak, cur_streak)
+            elif sign < 0:
+                worst_streak = max(worst_streak, -cur_streak)
+            r = t["r_multiple"]
+            if r is not None:
+                r_vals.append(r)
+                bucket["r_sum"] += r
+                bucket["r_n"] += 1
+                (wins_r if r > 0 else losses_r if r < 0 else []).append(r)
+            if t["side"] == "buy":
+                longs["trades"] += 1
+                longs["pnl"] += pnl
+            elif t["side"] == "sell":
+                shorts["trades"] += 1
+                shorts["pnl"] += pnl
+
+        n = wins + losses
+        win_rate = round(wins / n, 3) if n else 0.0
+        profit_factor = (round(gross_win / gross_loss, 2)
+                         if gross_loss > 0 else
+                         (float("inf") if gross_win > 0 else 0.0))
+        avg_r = round(sum(r_vals) / len(r_vals), 2) if r_vals else 0.0
+        expectancy_r = (round(expected_value_r(
+            win_rate,
+            sum(wins_r) / len(wins_r) if wins_r else 0.0,
+            sum(losses_r) / len(losses_r) if losses_r else 0.0), 3)
+            if r_vals else 0.0)
+        expectancy_ccy = round(total_pnl / n, 2) if n else 0.0
+
         for bucket in per.values():
             bucket["pnl"] = round(bucket["pnl"], 2)
             bucket["win_rate"] = (round(bucket["wins"] / bucket["trades"], 3)
                                   if bucket["trades"] else 0.0)
+            bucket["avg_r"] = (round(bucket["r_sum"] / bucket["r_n"], 2)
+                               if bucket["r_n"] else 0.0)
+            del bucket["r_sum"], bucket["r_n"]
+
+        dd = self.max_drawdown()
         return {
             "mode": self.mode,
-            "total_trades": wins + losses,
+            "total_trades": n,
             "wins": wins, "losses": losses,
-            "win_rate": round(wins / (wins + losses), 3) if wins + losses else 0.0,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "expectancy_r": expectancy_r,
+            "expectancy_ccy": expectancy_ccy,
+            "avg_r_multiple": avg_r,
             "realized_pnl": round(total_pnl, 2),
+            "best_trade": round(best, 2),
+            "worst_trade": round(worst, 2),
+            "max_drawdown": dd["max_drawdown"],
+            "best_win_streak": best_streak,
+            "worst_loss_streak": worst_streak,
+            "longs": {"trades": longs["trades"],
+                      "pnl": round(longs["pnl"], 2)},
+            "shorts": {"trades": shorts["trades"],
+                       "pnl": round(shorts["pnl"], 2)},
+            "r_tracked_trades": len(r_vals),
             "open_paper_positions": len(self._paper_positions),
             "per_instrument": per,
         }
+
+    def render_stats(self, theme: str | None = None) -> str:
+        """Styled performance report — the desk's dashboard line."""
+        from .style import current_theme, sparkline
+        th = current_theme(theme)
+        s = self.stats()
+        lines = [th.paint(f"📈 trading desk — {s['mode']} · "
+                          f"{s['total_trades']} closed trades", th.bold)]
+        if not s["total_trades"]:
+            return "\n".join(lines + ["  no closed trades yet."])
+        wr_color = th.good if s["win_rate"] >= 0.5 else th.warn
+        lines.append(
+            f"  win rate {th.paint(f'{s['win_rate']:.0%}', wr_color)} · "
+            f"profit factor {s['profit_factor']} · "
+            f"expectancy {s['expectancy_r']:+.2f}R "
+            f"({s['expectancy_ccy']:+.2f}/trade)")
+        lines.append(
+            f"  realized {s['realized_pnl']:+.2f} · max DD "
+            f"{s['max_drawdown']:.2f} · avg R {s['avg_r_multiple']:+.2f}")
+        lines.append(
+            f"  streaks: best {s['best_win_streak']}W / worst "
+            f"{s['worst_loss_streak']}L · longs {s['longs']['pnl']:+.2f} / "
+            f"shorts {s['shorts']['pnl']:+.2f}")
+        curve = self.equity_curve()
+        if len(curve) >= 2:
+            lines.append(f"  equity {sparkline(curve, th)}")
+        heat = self.portfolio_heat()
+        heat_txt = (f"{heat['heat_pct']:.1f}% heat"
+                    f"{'' if heat['within_limits'] else ' — OVER 6%!'}")
+        lines.append(f"  open: {heat['open_positions']} · "
+                     f"{th.paint(heat_txt, th.good if heat['within_limits'] else th.bad)}")
+        return "\n".join(lines)

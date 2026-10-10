@@ -17,12 +17,16 @@ Rules:
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .budgets import finance_paths
 from .ledger import format_naira
+from .style import current_theme, sparkline
 
 _log = get_logger("nomorals.finance")
 
@@ -31,6 +35,9 @@ __all__ = [
     "MoneyOverview",
     "collect_balances",
     "render_overview",
+    "BalanceCache",
+    "snapshot_net_worth",
+    "net_worth_series",
 ]
 
 #: Fiat → NGN conversion is only attempted for these.
@@ -304,24 +311,135 @@ def collect_balances(
     return overview
 
 
-def render_overview(ov: MoneyOverview) -> str:
+def render_overview(ov: MoneyOverview, theme: str | None = None) -> str:
     """Human-readable balance sheet."""
-    lines = ["💰 money overview — all rails"]
+    th = current_theme(theme)
+    lines = [th.paint(f"{th.money_bag} money overview — all rails", th.bold)]
     for rb in ov.rails:
         if rb.status == "not_connected":
-            lines.append(f"  • {rb.label}: not connected ({rb.detail})")
+            lines.append(f"  {th.bullet} {rb.label}: "
+                         f"{th.paint('not connected', th.dim)} ({rb.detail})")
         elif rb.status == "error":
-            lines.append(f"  • {rb.label}: error — {rb.detail}")
+            lines.append(f"  {th.bullet} {rb.label}: "
+                         f"{th.paint('error', th.bad)} — {rb.detail}")
         elif rb.amount_ngn is not None:
             conv = (f"≈ {format_naira(int(rb.amount_ngn * 100))}"
                     if rb.currency.upper() not in ("NGN", "₦") else "")
             extra = f" — {rb.detail}" if rb.detail else ""
-            lines.append(f"  • {rb.label}: {rb.amount:,.2f} {rb.currency} "
-                         f"{conv}{extra}".rstrip())
+            lines.append(f"  {th.bullet} {rb.label}: {rb.amount:,.2f} "
+                         f"{rb.currency} {conv}{extra}".rstrip())
         else:
-            lines.append(f"  • {rb.label}: {rb.amount:,.2f} {rb.currency} "
-                         f"(no NGN rate)")
-    lines.append(f"\ntotal (converted): {format_naira(int(ov.total_ngn * 100))}")
+            lines.append(f"  {th.bullet} {rb.label}: {rb.amount:,.2f} "
+                         f"{rb.currency} (no NGN rate)")
+    lines.append(f"\ntotal (converted): "
+                 f"{th.paint(format_naira(int(ov.total_ngn * 100)), th.bold)}")
     if ov.unconverted:
         lines.append(f"({len(ov.unconverted)} holding(s) without an NGN rate)")
+    return "\n".join(lines)
+
+
+def asset_mix(ov: MoneyOverview) -> dict[str, float]:
+    """NGN totals by asset class: fiat / crypto / cash-equivalent rails."""
+    mix = {"fiat": 0.0, "crypto": 0.0}
+    for rb in ov.rails:
+        if rb.status != "ok" or rb.amount_ngn is None:
+            continue
+        cur = (rb.currency or "").upper()
+        if rb.rail in ("binance", "coinbase") or cur in (
+                "BTC", "ETH", "USDT", "USDC", "BNB", "SOL"):
+            mix["crypto"] += rb.amount_ngn
+        else:
+            mix["fiat"] += rb.amount_ngn
+    return mix
+
+
+# ── caching + net-worth history ────────────────────────────────────
+
+def _net_worth_path() -> Path:
+    _, budgets_path = finance_paths(None)
+    return Path(budgets_path).parent / "net_worth.jsonl"
+
+
+class BalanceCache:
+    """TTL cache over ``collect_balances`` — no API hammering.
+
+    The first ``collect_balances`` per ``ttl`` seconds is live; repeats
+    within the window return the cached overview. Each rail is still
+    fail-soft on the live pass.
+    """
+
+    def __init__(self, ttl_seconds: float = 300.0) -> None:
+        self.ttl = float(ttl_seconds)
+        self._cached: MoneyOverview | None = None
+        self._at: float = 0.0
+
+    def get(self, vault: Any, **kwargs: Any) -> MoneyOverview:
+        now = time.time()
+        if self._cached is not None and now - self._at < self.ttl:
+            return self._cached
+        ov = collect_balances(vault, **kwargs)
+        self._cached = ov
+        self._at = now
+        return ov
+
+    def invalidate(self) -> None:
+        self._cached = None
+        self._at = 0.0
+
+
+def snapshot_net_worth(ov: MoneyOverview,
+                       path: str | Path | None = None) -> dict[str, Any]:
+    """Append today's net-worth snapshot (Copilot's trend, natively)."""
+    path = Path(path) if path else _net_worth_path()
+    rec = {
+        "ts": ov.collected_at or time.time(),
+        "total_ngn": round(ov.total_ngn, 2),
+        "connected_rails": ov.connected_rails(),
+        "mix": {k: round(v, 2) for k, v in asset_mix(ov).items()},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    return rec
+
+
+def net_worth_series(days: int = 30,
+                     path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Trailing net-worth snapshots, oldest → newest."""
+    path = Path(path) if path else _net_worth_path()
+    if not path.exists():
+        return []
+    cutoff = time.time() - days * 86400
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("ts", 0) >= cutoff:
+            out.append(rec)
+    return sorted(out, key=lambda r: r.get("ts", 0))
+
+
+def render_net_worth_trend(days: int = 30,
+                           theme: str | None = None) -> str:
+    """Sparkline trend of net worth — the view every aggregator has."""
+    th = current_theme(theme)
+    series = net_worth_series(days)
+    if len(series) < 2:
+        return "not enough net-worth history yet — run /balances a few " \
+               "times and I'll chart the trend."
+    vals = [r["total_ngn"] for r in series]
+    first, last = vals[0], vals[-1]
+    delta = last - first
+    color = th.good if delta >= 0 else th.bad
+    arrow = "▲" if delta >= 0 else "▼"
+    lines = [th.paint(f"{th.money_bag} net worth — last {days}d", th.bold)]
+    lines.append(f"  {sparkline(vals, th)}  "
+                 f"{th.paint(f'{arrow} {format_naira(int(delta * 100))}', color)}"
+                 f"  ({format_naira(int(first * 100))} → "
+                 f"{format_naira(int(last * 100))})")
     return "\n".join(lines)

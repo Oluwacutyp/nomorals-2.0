@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .ledger import CATEGORIES, Ledger, format_naira
+from .style import bar, current_theme, pct_color, status_dot
 
 _log = get_logger("nomorals.finance")
 
@@ -121,6 +122,45 @@ class BudgetStore:
         with self._lock:
             return dict(self._load().get(month, {}))
 
+    def copy_forward(self, from_month: str | None = None,
+                     to_month: str | None = None) -> dict[str, int]:
+        """Clone one month's budgets into another (Actual's Quick Budget).
+
+        Defaults: last month → this month. Returns the copied budgets.
+        """
+        now = month_key()
+        if to_month is None:
+            to_month = now
+        if from_month is None:
+            year, mon = (int(x) for x in now.split("-", 1))
+            if mon == 1:
+                from_month = f"{year - 1}-12"
+            else:
+                from_month = f"{year}-{mon - 1:02d}"
+        with self._lock:
+            data = self._load()
+            src = dict(data.get(from_month, {}))
+            if not src:
+                return {}
+            data.setdefault(to_month, {}).update(src)
+            self._save(data)
+        _log.info("budgets copied %s → %s (%d categories)",
+                  from_month, to_month, len(src))
+        return src
+
+    def delete_budget(self, category: str,
+                      month: str | None = None) -> bool:
+        """Remove one category's budget. Returns False when absent."""
+        month = month or month_key()
+        category = category.strip().lower()
+        with self._lock:
+            data = self._load()
+            if category not in data.get(month, {}):
+                return False
+            del data[month][category]
+            self._save(data)
+        return True
+
 
 def _month_bounds(month: str) -> tuple[float, float]:
     """(start_ts, end_ts) for a 'YYYY-MM' key, local time."""
@@ -173,6 +213,101 @@ def overspend_alerts(
                        "budgeted_kobo": s.budgeted_kobo})
     alerts.sort(key=lambda a: a["pct_used"], reverse=True)
     return alerts
+
+
+def budget_pace(status: BudgetStatus,
+                now: float | None = None) -> dict[str, Any]:
+    """Pace check: are you spending faster than the month is passing?
+
+    YNAB's "underfunded" idea, generalized — compares % of budget used
+    against % of month elapsed and projects the month-end landing.
+    """
+    now = time.time() if now is None else now
+    start, end = _month_bounds(status.month)
+    elapsed = max(0.0, min(1.0, (now - start) / (end - start)))
+    expected_kobo = status.budgeted_kobo * elapsed
+    projected_kobo = (status.spent_kobo / elapsed) if elapsed > 0 else 0
+    if status.budgeted_kobo <= 0:
+        verdict = "no budget"
+    elif elapsed <= 0:
+        verdict = "month not started"
+    elif status.pct_used > elapsed * 1.15:
+        verdict = "behind pace"
+    elif status.pct_used < elapsed * 0.7:
+        verdict = "ahead of pace"
+    else:
+        verdict = "on pace"
+    return {
+        "month_elapsed_pct": round(elapsed, 3),
+        "expected_spent_kobo": int(expected_kobo),
+        "projected_month_end_kobo": int(projected_kobo),
+        "verdict": verdict,
+    }
+
+
+def suggested_budgets(ledger: Ledger, months: int = 3,
+                      now: float | None = None) -> dict[str, int]:
+    """Starter budgets from history: per-category monthly average.
+
+    Actual Budget's "average" Quick Budget preset — a real answer to
+    "what should my budgets be?" instead of guessing.
+    """
+    now = time.time() if now is None else now
+    totals: dict[str, int] = {}
+    dt = datetime.fromtimestamp(now).astimezone().replace(day=1)
+    for _ in range(max(1, months)):
+        year, mon = dt.year, dt.month
+        start = datetime(year, mon, 1).astimezone().timestamp()
+        end = (datetime(year + 1, 1, 1).astimezone().timestamp()
+               if mon == 12 else
+               datetime(year, mon + 1, 1).astimezone().timestamp())
+        for t in ledger.transactions(since=start, until=min(end, now),
+                                     kind="spend"):
+            totals[t.category] = totals.get(t.category, 0) + t.amount_kobo
+        dt = dt.replace(year=year - 1, month=12) if mon == 1 else \
+            dt.replace(month=mon - 1)
+    # Round up to the nearest ₦500 — budgets should be round numbers.
+    return {cat: int(-(-total // months // 50000) * 50000)
+            for cat, total in totals.items() if total > 0}
+
+
+def fifty_thirty_twenty(income_kobo: int) -> dict[str, int]:
+    """50/30/20 starter split: needs / wants / savings from monthly income."""
+    return {
+        "needs": int(income_kobo * 0.5),
+        "wants": int(income_kobo * 0.3),
+        "savings": int(income_kobo * 0.2),
+    }
+
+
+def render_budget_grid(statuses: list[BudgetStatus], month: str,
+                       theme: str | None = None,
+                       now: float | None = None) -> str:
+    """The envelope view: progress bars, pace flags, per-day remaining."""
+    th = current_theme(theme)
+    now = time.time() if now is None else now
+    lines = [th.paint(f"{th.money_bag} budgets — {month}", th.bold)]
+    if not statuses:
+        return "\n".join(lines + ["  no budgets set — /budget set food 50k"])
+    start, end = _month_bounds(month)
+    days_left = max(0.0, (end - now) / 86400)
+    for s in statuses:
+        pace = budget_pace(s, now=now)
+        verdict = pace["verdict"]
+        vcolor = (th.bad if verdict == "behind pace"
+                  else th.good if verdict in ("ahead of pace", "on pace")
+                  else th.dim)
+        per_day = ""
+        if s.remaining_kobo > 0 and days_left > 0:
+            per_day = (f" · {format_naira(int(s.remaining_kobo / days_left))}"
+                       f"/day left")
+        lines.append(
+            f"  {status_dot(s.state, th)} {s.category}: "
+            f"{bar(s.pct_used, theme=th)} {pct_color(s.pct_used, th)} "
+            f"({format_naira(s.spent_kobo)} / "
+            f"{format_naira(s.budgeted_kobo)})"
+            f"{th.paint(f' · {verdict}', vcolor)}{per_day}")
+    return "\n".join(lines)
 
 
 def weekly_digest(

@@ -57,6 +57,24 @@ async def ensure_finance_digest_job(scheduler: Any, context: Any) -> bool:
                     f"{format_naira(worst['budgeted_kobo'])} budget "
                     f"({worst['pct_used']:.0%} used)")
 
+            # Safe-to-spend + upcoming bills ride along (Simplifi/Rocket
+            # Money gold) — the digest should answer "can I buy this?"
+            # and "what's about to hit my account?".
+            try:
+                from .insights import safe_to_spend, upcoming_bills
+                safe = safe_to_spend(ledger)
+                digest += (
+                    f"\n\n💸 safe to spend: "
+                    f"{format_naira(safe['safe_kobo'])}")
+                bills = upcoming_bills(ledger, days=14)
+                if bills:
+                    digest += "\n\n🧾 upcoming bills:"
+                    for b in bills[:8]:
+                        digest += (f"\n  • {b.note_pattern} — "
+                                   f"{format_naira(b.amount_kobo)}")
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("digest extras failed: %s", exc)
+
             try:
                 from ..agents.notifier import Notifier
 
