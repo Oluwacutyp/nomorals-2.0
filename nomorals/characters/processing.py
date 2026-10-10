@@ -16,6 +16,7 @@ from typing import Any
 from .arcs import grow_from_interaction
 from .character import Character
 from .relationships import RelationshipGraph
+from .voice import fingerprint as _voice_fingerprint
 
 __all__ = ["process_session", "SessionEvent"]
 
@@ -109,9 +110,73 @@ def process_session(events: list[SessionEvent],
             graph.decay_all()
         except Exception:
             pass
+        # 6. voice fingerprint refresh — characters stay in voice
+        try:
+            _refresh_voice(chars, events)
+        except Exception:
+            pass
     except Exception:
         pass
     return {"processed": processed}
+
+
+def _refresh_voice(chars: dict[str, Character],
+                   events: list[SessionEvent]) -> None:
+    """Update each character's voice fingerprint from session utterances.
+
+    Utterances ride on SessionEvent.note (last-3-turns join). Fingerprints
+    accumulate — they get sharper with more data, never reset.
+    """
+    by_char: dict[str, list[str]] = {}
+    for ev in events:
+        note = getattr(ev, "note", "") or ""
+        for part in note.split(" | "):
+            part = part.strip()
+            if part:
+                by_char.setdefault(ev.char_id, []).append(part)
+    for char_id, utterances in by_char.items():
+        char = chars.get(char_id)
+        if char is None or not utterances:
+            continue
+        try:
+            catchphrases = list(
+                (getattr(char, "expression", None) or {}).get(
+                    "catchphrases", ()))
+            fp = _voice_fingerprint(utterances, catchphrases)
+            old = getattr(char, "voice_fingerprint", None)
+            if isinstance(old, dict) and old.get("n_samples", 0) >= 5:
+                from collections import Counter
+                from .voice import VoiceFingerprint
+                old_fp = VoiceFingerprint.from_dict(old)
+                total = old_fp.n_samples + fp.n_samples
+                w_old = old_fp.n_samples / total
+                w_new = fp.n_samples / total
+                merged: Counter[str] = Counter()
+                for w, c in old_fp.top_words:
+                    merged[w] += int(c * w_old)
+                for w, c in fp.top_words:
+                    merged[w] += int(c * w_new)
+                char.voice_fingerprint = {
+                    "top_words": [[w, c] for w, c in merged.most_common(25)],
+                    "mean_sentence_len": (
+                        old_fp.mean_sentence_len * w_old
+                        + fp.mean_sentence_len * w_new),
+                    "sentence_len_spread": max(
+                        old_fp.sentence_len_spread, fp.sentence_len_spread),
+                    "emoji_rate": (old_fp.emoji_rate * w_old
+                                   + fp.emoji_rate * w_new),
+                    "question_rate": (old_fp.question_rate * w_old
+                                      + fp.question_rate * w_new),
+                    "exclaim_rate": (old_fp.exclaim_rate * w_old
+                                     + fp.exclaim_rate * w_new),
+                    "catchphrase_hits": (old_fp.catchphrase_hits * w_old
+                                         + fp.catchphrase_hits * w_new),
+                    "n_samples": total,
+                }
+            else:
+                char.voice_fingerprint = fp.to_dict()
+        except Exception:
+            pass
 
 
 def events_from_dialogue(char_id: str, other_id: str,

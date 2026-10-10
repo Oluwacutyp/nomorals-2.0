@@ -58,6 +58,9 @@ class Character:
     expression: dict[str, Any] = field(default_factory=dict)
     # anti_sycophancy: 0.0-1.0 — how readily they disagree / push back
     spine: float = 0.5
+    # voice_fingerprint: computed voice signature (see voice.py) — updated
+    # by the post-session processing pass, never hand-edited
+    voice_fingerprint: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.persona = {str(k): _clamp01(v)
@@ -77,6 +80,7 @@ class Character:
         self.expression = dict(self.expression or {})
         self.spine = _clamp01(self.spine if isinstance(self.spine, (int, float))
                               else 0.5)
+        self.voice_fingerprint = dict(self.voice_fingerprint or {})
 
     # ── memory ─────────────────────────────────────────────────────────
     def remember(self, text: str, salience: float = 0.5) -> None:
@@ -218,6 +222,7 @@ class Character:
             "beliefs": self.beliefs, "secrets": self.secrets,
             "core_motive": self.core_motive,
             "expression": self.expression, "spine": self.spine,
+            "voice_fingerprint": self.voice_fingerprint,
         }
 
     @classmethod
@@ -242,4 +247,5 @@ class Character:
             core_motive=str(d.get("core_motive") or ""),
             expression=dict(d.get("expression") or {}),
             spine=d.get("spine", 0.5),
+            voice_fingerprint=dict(d.get("voice_fingerprint") or {}),
         )
