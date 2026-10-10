@@ -35,6 +35,7 @@ _log = get_logger(__name__)
 __all__ = [
     "GameMaster",
     "DM_MOODS",
+    "WILD_CARDS",
     "QUEST_REQUIRED",
     "ITEM_REQUIRED",
     "ITEM_RARITIES",
@@ -46,6 +47,36 @@ __all__ = [
 #: The DM's persona moods. "neutral" is the default; the rest are set
 #: explicitly via /dm mood.
 DM_MOODS = ("neutral", "grim", "whimsical", "epic", "deadpan")
+
+#: Wild-card twist events the DM can inject mid-game to keep the table
+#: alive. Each is (id, title, description, effect_hint). The game
+#: decides how to apply the effect; the DM just announces the twist.
+WILD_CARDS: tuple[tuple[str, str, str, str], ...] = (
+    ("double_down", "Double Down",
+     "the next round pays double points",
+     "next round scores ×2"),
+    ("sudden_death", "Sudden Death",
+     "one wrong move and you're out — last one standing takes the pot",
+     "elimination on next mistake"),
+    ("traitor", "Traitor in the Midst",
+     "someone at the table is secretly playing for the house",
+     "one AI seat gets a hidden agenda"),
+    ("windfall", "Windfall",
+     "coins rain from the rafters — everyone gets a bonus",
+     "all players +50 coins"),
+    ("reversal", "Reversal of Fortune",
+     "the leaderboard flips — last place is suddenly first",
+     "invert current standings for one round"),
+    ("blind_round", "Blind Round",
+     "no hints, no help — pure instinct",
+     "disable hints for one round"),
+    ("golden_move", "Golden Move",
+     "the next brilliant play earns a legendary reward",
+     "next exceptional move gets bonus XP + title progress"),
+    ("chaos", "Chaos Reigns",
+     "the DM shuffles everything — new turn order, new targets",
+     "randomize turn order / targets"),
+)
 
 QUEST_REQUIRED = ("id", "title", "objective", "reward_xp", "reward_coins",
                   "difficulty", "theme")
@@ -306,6 +337,20 @@ class GameMaster:
             idx = self.rng.choice(choices)
             self._last_template[game_id] = idx
             return bank[idx].format(event=event)
+
+    # ── wild cards ────────────────────────────────────────────────────
+    def draw_wild_card(self, game_id: str) -> dict[str, str]:
+        """Draw a surprise twist for the table.
+
+        Returns {"id", "title", "description", "effect", "narration"}.
+        The game applies the effect; the narration is ready to send.
+        """
+        card = self.rng.choice(WILD_CARDS)
+        cid, title, desc, effect = card
+        event = f"🃏 WILD CARD: {title} — {desc}!"
+        narration = self.narrate(game_id, event)
+        return {"id": cid, "title": title, "description": desc,
+                "effect": effect, "narration": narration or event}
 
     # ── NPC dialogue ──────────────────────────────────────────────────────
     def npc_speak(self, npc: NPCProfile, situation: str) -> str:

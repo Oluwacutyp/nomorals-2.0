@@ -124,6 +124,7 @@ class GameEngine:
         self._relay_obj: Any = None  # lazy GameRelay (see relay property)
         self._matchmaker_obj: Any = None  # lazy Matchmaker (see below)
         self._dm_obj: Any = None  # lazy GameMaster (see dm property)
+        self._forge_obj: Any = None  # lazy TriviaForge (see forge property)
         self._last_game: dict[str, tuple[str, list[Player], str]] = {}
         self._register_builtins()
         self._start_scheduler()
@@ -165,6 +166,18 @@ class GameEngine:
             gm = GameMaster(NPCStore(), suggest=self._suggest)
             self._dm_obj = gm
         return gm
+
+    @property
+    def forge(self) -> Any:
+        """The trivia forge — dynamic question generation with
+        interest-profile topics and persisted anti-repeat. Created on
+        first use; shared by every trivia/quiz game."""
+        forge = self._forge_obj
+        if forge is None:
+            from .trivia_forge import TriviaForge
+            forge = TriviaForge(suggest=self._suggest, db=self.db)
+            self._forge_obj = forge
+        return forge
 
     def _drain_dm_feed(self, room: Room, game: MultiGame, out: list[str],
                        *, force: bool = False) -> None:
@@ -480,7 +493,8 @@ class GameEngine:
                 **_new_state_kwargs(
                     game, daily=daily, timed=timed,
                     difficulty=difficulty, variant=variant,
-                    mastery=mastery_idx, history=history))
+                    mastery=mastery_idx, history=history,
+                    trivia_forge=self.forge))
             # stash difficulty on the room so start/status messages can show it
             room.state["_difficulty"] = difficulty
             # provably-fair tables: open the commit-reveal table BEFORE

@@ -1363,8 +1363,14 @@ class TriviaRoyaleGame(MultiGame):
              "points (Adept mastery+).")
 
     def new_state(self, rng: random.Random, variant: str = "",
-                  mastery: int = 0) -> dict[str, Any]:
-        qs = rng.sample(list(TRIVIA), 8)
+                  mastery: int = 0, trivia_forge: Any = None) -> dict[str, Any]:
+        if trivia_forge is not None:
+            try:
+                qs = trivia_forge.deal(count=8, difficulty="normal")
+            except Exception:
+                qs = rng.sample(list(TRIVIA), 8)
+        else:
+            qs = rng.sample(list(TRIVIA), 8)
         locked = ""
         lives = 3
         if variant == "sudden":

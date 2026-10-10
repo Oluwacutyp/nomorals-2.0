@@ -1397,8 +1397,16 @@ class QuizDuelGame(MultiGame):
                      "expert": 0.99}
 
     def new_state(self, rng: random.Random,
-                  difficulty: str = "normal") -> dict[str, Any]:
-        return {"questions": rng.sample(list(TRIVIA), 20), "idx": 0,
+                  difficulty: str = "normal",
+                  trivia_forge: Any = None) -> dict[str, Any]:
+        if trivia_forge is not None:
+            try:
+                qs = trivia_forge.deal(count=20, difficulty=difficulty)
+            except Exception:
+                qs = rng.sample(list(TRIVIA), 20)
+        else:
+            qs = rng.sample(list(TRIVIA), 20)
+        return {"questions": qs, "idx": 0,
                 "points": {}, "streak": {}, "target": 5, "done": False,
                 "difficulty": normalize_difficulty(difficulty)}
 
