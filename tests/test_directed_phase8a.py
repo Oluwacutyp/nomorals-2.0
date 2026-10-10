@@ -232,3 +232,66 @@ def test_prompt_engine_uses_camera_language():
     # legacy single keywords still work
     _, movement, _ = _extract_camera("a cat sits")
     assert movement == ""
+
+
+# ── CPU lipsync visemes ──────────────────────────────────────────────
+from nomorals.media.directed import lipsync as ls
+
+
+def test_phoneme_viseme_coverage():
+    arpabet = ("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW B CH D DH "
+               "F G HH JH K L M N NG P R S SH T TH V W Y Z ZH").split()
+    for p in arpabet:
+        v = ls.phoneme_to_viseme(p)
+        assert v in ls.VISEME_SHAPES, (p, v)
+        shape = ls.mouth_shape_for_viseme(v)
+        assert len(shape) == 3
+        jaw, width, rnd = shape
+        assert 0.0 <= jaw <= 1.0 and 0.5 <= width <= 1.25 and 0.0 <= rnd <= 1.0
+    assert ls.phoneme_to_viseme("nonsense") == "sil"
+
+
+def test_g2p_common_words():
+    ph = ls.text_to_phonemes("Hello, how are you?")
+    assert ph[:4] == ["HH", "EH", "L", "OW"]
+    assert ph[-1] == "sil"  # sentence punctuation -> pause
+    vs = ls.phonemes_to_visemes(ph)
+    assert all(v in ls.VISEME_SHAPES for v in vs)
+    # unknown words still produce phonemes via rules
+    assert ls.text_to_phonemes("xylophone") != []
+
+
+def test_viseme_track_timing():
+    ph = ["HH", "EH", "L", "OW"]
+    tr = ls.viseme_track(40, ph, 2.0, 20.0)
+    assert len(tr) == 40
+    assert all(len(s) == 3 for s in tr)
+    # uniform timing: first frame ~ HH shape, last ~ OW shape
+    assert tr[0][0] < 0.2      # HH -> sil-ish closed
+    assert tr[-1][0] > 0.4     # OW -> rounded open
+    # empty phonemes -> closed track
+    tr = ls.viseme_track(8, [], 1.0, 8.0)
+    assert all(s == ls.VISEME_SHAPES["sil"] for s in tr)
+
+
+def test_acoustic_viseme_heuristic():
+    assert ls.acoustic_viseme(0.0, 0.5) == "sil"
+    assert ls.acoustic_viseme(0.05, 0.9) == "sil"
+    assert ls.acoustic_viseme(0.8, 0.2) == "AH"
+    assert ls.acoustic_viseme(0.3, 0.9) == "IY"
+
+
+def test_warp_mouth_shapes_differ():
+    rng = np.random.RandomState(0)
+    frame = rng.randint(0, 255, (120, 160, 3)).astype(np.uint8)
+    box = (60, 70, 100, 95)
+    open_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("AH"))
+    shut_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("sil"))
+    assert open_out.shape == frame.shape
+    # open jaw changes pixels below the mouth line; closed is identity
+    assert (shut_out == frame).all()
+    assert not (open_out == frame).all()
+    # rounded W is narrower than wide IY
+    w_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("W"))
+    iy_out = ls._warp_mouth(frame, box, ls.mouth_shape_for_viseme("IY"))
+    assert not (w_out == iy_out).all()
