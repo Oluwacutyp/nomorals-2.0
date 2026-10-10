@@ -57,6 +57,10 @@ __all__ = [
     "GOALS",
     "EQUIPMENT",
     "TRAINING_DISCLAIMER",
+    "MUSCLE_GROUPS",
+    "VOLUME_LANDMARKS",
+    "PersonalRecord",
+    "muscle_groups_for",
 ]
 
 TRAINING_DISCLAIMER = (
@@ -191,6 +195,76 @@ def compute_readiness(bio: BioMetrics) -> ReadinessInfo:
 
 # ── exercise science: the plan templates ─────────────────────────────────
 
+#: Muscle groups tracked for volume landmarks.
+MUSCLE_GROUPS = ("chest", "back", "shoulders", "legs", "arms", "core")
+
+#: Weekly hard-set landmarks per muscle group (RP-style MEV/MRV bands,
+#: simplified estimates): (minimum effective, maximum recoverable).
+#: Below MEV → "add volume"; above MRV → "pull back".
+VOLUME_LANDMARKS: dict[str, tuple[int, int]] = {
+    "chest": (6, 20),
+    "back": (6, 22),
+    "shoulders": (4, 18),
+    "legs": (6, 20),
+    "arms": (4, 16),
+    "core": (2, 10),
+}
+
+#: Exercise key → muscle groups it trains.
+_MUSCLE_MAP: dict[str, tuple[str, ...]] = {
+    "bench": ("chest", "shoulders", "arms"),
+    "ohp": ("shoulders", "chest", "arms"),
+    "dips": ("chest", "arms", "shoulders"),
+    "lateral": ("shoulders",),
+    "triceps": ("arms",),
+    "row": ("back", "arms"),
+    "pullup": ("back", "arms"),
+    "facepull": ("back", "shoulders"),
+    "curl": ("arms",),
+    "squat": ("legs",),
+    "rdl": ("legs", "back"),
+    "lunge": ("legs",),
+    "deadlift": ("back", "legs"),
+    "hipthrust": ("legs",),
+    "calf": ("legs",),
+    "core": ("core",),
+    "sprint": ("legs",),
+    "bike": ("legs",),
+    "burpee": ("chest", "legs", "core"),
+    "hipflow": ("core",),
+    "thoracic": ("back",),
+    "hamstring": ("legs",),
+    "shoulder": ("shoulders",),
+    "breath": (),
+    "walk": ("legs",),
+    "glute_bridge": ("legs",),
+    "plank_hold": ("core",),
+    "dead_bug": ("core",),
+    "split_squat_iso": ("legs",),
+    "wall_slide": ("shoulders", "core"),
+    "deep_squat_hold": ("legs",),
+    "banded_lateral_walk": ("legs",),
+    "cat_cow": ("back", "core"),
+    "calf_stretch": ("legs",),
+    "hip_hinge_drill": ("back", "legs"),
+    "scap_pushup": ("shoulders", "chest"),
+}
+
+
+def muscle_groups_for(key: str) -> tuple[str, ...]:
+    """Muscle groups an exercise key trains. Pure; never raises."""
+    return _MUSCLE_MAP.get((key or "").lower(), ())
+
+
+@dataclass
+class PersonalRecord:
+    """An automatic PR: heaviest load (or best bodyweight volume)."""
+    exercise_key: str
+    exercise_name: str
+    load: str
+    date: str
+    kind: str = "load"  # load | volume
+
 @dataclass
 class Exercise:
     """One movement. ``load`` is kg or \"bodyweight\"."""
@@ -202,6 +276,7 @@ class Exercise:
     intensity: str      # easy | moderate | hard
     load: str = "bodyweight"
     notes: str = ""
+    rpe_target: int | None = None  # 1-10; auto-regulated from history
 
 
 # equipment variants: key → {equipment: display name}; default is the key name
@@ -514,6 +589,17 @@ class TrainingCoach:
             self._db.execute(
                 """CREATE INDEX IF NOT EXISTS wl_date
                    ON workout_log(date)""")
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS set_feedback (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       date TEXT NOT NULL,
+                       exercise_key TEXT NOT NULL,
+                       rpe INTEGER NOT NULL,
+                       load TEXT NOT NULL DEFAULT '',
+                       created_at REAL NOT NULL)""")
+            self._db.execute(
+                """CREATE INDEX IF NOT EXISTS sf_key_date
+                   ON set_feedback(exercise_key, date)""")
             self._db.commit()
         except Exception:  # noqa: BLE001 — bad disk → in-memory behavior
             _log.warning("training: store unavailable, running ephemeral",
@@ -683,8 +769,13 @@ class TrainingCoach:
 
     def log_workout(self, workout: Workout, completed: bool,
                     rpe: int | None = None, notes: str = "",
-                    loads: dict[str, str] | None = None) -> bool:
+                    loads: dict[str, str] | None = None,
+                    set_rpes: dict[str, int] | None = None) -> bool:
         """Log a session. Progression bumps loads when RPE ≤ 7.
+
+        ``set_rpes``: per-exercise RPE ({"squat": 8}) — feeds the
+        auto-regulation loop (Juggernaut pattern): RPE ≥9 twice running
+        → hold progression; RPE ≤6 → double bump.
 
         Never prescribes around pain: pain words → forced rest guidance.
         """
@@ -694,10 +785,13 @@ class TrainingCoach:
                 notes = (notes + " [pain reported — rest; see a "
                          "professional if it persists]").strip()
             final_loads: dict[str, str] = dict(loads or {})
+            auto = self._autoregulation(workout, set_rpes or {})
             if completed and (rpe is None or rpe <= 7):
                 for ex in workout.exercises:
                     base = (loads or {}).get(ex.key, ex.load)
-                    final_loads[ex.key] = _bump_load(base)
+                    final_loads[ex.key] = _bump_load(base,
+                                                    factor=auto.get(
+                                                        ex.key, 1.0))
             elif not final_loads:
                 final_loads = {ex.key: ex.load for ex in workout.exercises}
             if self._db is not None:
@@ -708,11 +802,78 @@ class TrainingCoach:
                      1 if completed else 0,
                      int(rpe) if rpe is not None else None,
                      json.dumps(final_loads), notes, time.time()))
+                for key, erpe in (set_rpes or {}).items():
+                    try:
+                        self._db.execute(
+                            "INSERT INTO set_feedback "
+                            "(date, exercise_key, rpe, load, created_at) "
+                            "VALUES (?,?,?,?,?)",
+                            (workout.date, key, int(erpe),
+                             final_loads.get(key, ""), time.time()))
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._db.commit()
             return True
         except Exception:  # noqa: BLE001
             _log.debug("training: log failed", exc_info=True)
             return False
+
+    def _autoregulation(self, workout: Workout,
+                        set_rpes: dict[str, int]) -> dict[str, float]:
+        """Per-exercise progression factor from RPE history.
+
+        Last two logged RPEs for the key: ≥9 twice → 0.0 (hold, no
+        bump); ≤6 twice → 2.0 (double bump); else 1.0. Pure-ish;
+        never raises.
+        """
+        factors: dict[str, float] = {}
+        try:
+            if self._db is None:
+                return factors
+            for ex in workout.exercises:
+                rows = self._db.execute(
+                    "SELECT rpe FROM set_feedback "
+                    "WHERE exercise_key = ? ORDER BY date DESC LIMIT 2",
+                    (ex.key,)).fetchall()
+                # include today's just-logged values
+                hist = [int(set_rpes.get(ex.key, 0)) or None]
+                hist = [r for r in hist if r] + [int(r[0]) for r in rows]
+                hist = hist[:2]
+                if len(hist) == 2 and all(r >= 9 for r in hist):
+                    factors[ex.key] = 0.0
+                elif len(hist) == 2 and all(r <= 6 for r in hist):
+                    factors[ex.key] = 2.0
+                else:
+                    factors[ex.key] = 1.0
+        except Exception:  # noqa: BLE001
+            _log.debug("autoregulation failed", exc_info=True)
+        return factors
+
+    def progression_advice(self, exercise_key: str) -> str:
+        """Why the next bump is what it is — the auto-regulation loop
+        explained. Never raises."""
+        try:
+            if self._db is None:
+                return "no history yet — log RPEs and I'll auto-regulate."
+            rows = self._db.execute(
+                "SELECT rpe, date FROM set_feedback "
+                "WHERE exercise_key = ? ORDER BY date DESC LIMIT 3",
+                (exercise_key,)).fetchall()
+            if not rows:
+                return (f"no RPE history for {exercise_key} yet — log "
+                        f"per-exercise RPEs and I'll tune progression.")
+            rpes = [int(r[0]) for r in rows]
+            avg = sum(rpes) / len(rpes)
+            if len(rpes) >= 2 and all(r >= 9 for r in rpes[:2]):
+                return (f"{exercise_key}: last RPEs {rpes[:2]} — holding "
+                        f"the load steady until it feels like ≤8.")
+            if len(rpes) >= 2 and all(r <= 6 for r in rpes[:2]):
+                return (f"{exercise_key}: last RPEs {rpes[:2]} — that was "
+                        f"easy, bumping the load extra next time.")
+            return (f"{exercise_key}: recent RPEs {rpes} (avg {avg:.1f}) "
+                    f"— standard +2.5% progression.")
+        except Exception:  # noqa: BLE001
+            return "couldn't read progression history."
 
     def history(self, days: int = 14) -> list[dict[str, Any]]:
         try:
@@ -726,6 +887,194 @@ class TrainingCoach:
             return [dict(r) for r in rows]
         except Exception:  # noqa: BLE001
             return []
+
+    # -- volume landmarks (RP pattern) -------------------------------------
+
+    def weekly_sets(self, weeks_back: int = 0) -> dict[str, int]:
+        """Hard sets per muscle group for a calendar week.
+
+        Derived from completed workout logs via the day library
+        (kind → exercises → sets → muscle groups). Pure-ish; never
+        raises. ``weeks_back=0`` = this week.
+        """
+        out: dict[str, int] = {m: 0 for m in MUSCLE_GROUPS}
+        try:
+            if self._db is None:
+                return out
+            today = date.today()
+            monday = today - timedelta(days=today.weekday()
+                                       + 7 * weeks_back)
+            sunday = monday + timedelta(days=6)
+            rows = self._db.execute(
+                """SELECT kind, loads_json FROM workout_log
+                   WHERE date >= ? AND date <= ? AND completed = 1""",
+                (monday.isoformat(), sunday.isoformat())).fetchall()
+            for row in rows:
+                kind = row["kind"] or ""
+                try:
+                    keys = set(json.loads(row["loads_json"] or "{}"))
+                except Exception:  # noqa: BLE001
+                    keys = set()
+                lib = {k: s for k, _n, s, _r, _rest
+                       in _DAY_LIBRARY.get(kind, [])}
+                for key in keys or lib:
+                    sets = lib.get(key, 3)
+                    for muscle in muscle_groups_for(key):
+                        out[muscle] = out.get(muscle, 0) + sets
+            return out
+        except Exception:  # noqa: BLE001
+            _log.debug("weekly_sets failed", exc_info=True)
+            return out
+
+    def volume_report(self) -> str:
+        """This week's sets vs landmarks — MEV/MRV bands. Never raises."""
+        try:
+            sets = self.weekly_sets()
+            total = sum(sets.values())
+            lines = ["📊 **weekly volume** — hard sets per muscle group "
+                     "(MEV–MRV bands):"]
+            for muscle in MUSCLE_GROUPS:
+                lo, hi = VOLUME_LANDMARKS[muscle]
+                n = sets.get(muscle, 0)
+                if n < lo:
+                    flag = "🔵 add volume"
+                elif n > hi:
+                    flag = "🔴 pull back"
+                else:
+                    flag = "🟢 sweet spot"
+                bar = "█" * min(10, n) + "░" * max(0, 10 - min(10, n))
+                lines.append(f"• {muscle:9s} {bar} {n:2d} "
+                             f"(band {lo}–{hi}) {flag}")
+            lines.append(f"\ntotal: {total} hard sets this week.")
+            return guard_coaching("\n".join(lines))
+        except Exception:  # noqa: BLE001
+            return "couldn't build the volume report."
+
+    # -- automatic PR tracking (Strava pattern) ----------------------------
+
+    @staticmethod
+    def _kg(load: str) -> float | None:
+        import re
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(kg)?\s*", load or "")
+        return float(m.group(1)) if m else None
+
+    def personal_records(self) -> list[PersonalRecord]:
+        """Heaviest logged load per exercise — automatic, from history."""
+        out: list[PersonalRecord] = []
+        try:
+            if self._db is None:
+                return out
+            rows = self._db.execute(
+                """SELECT date, loads_json FROM workout_log
+                   WHERE completed = 1 ORDER BY date DESC
+                   LIMIT 500""").fetchall()
+            best: dict[str, tuple[float, str, str]] = {}
+            names: dict[str, str] = {}
+            for row in rows:
+                try:
+                    loads = json.loads(row["loads_json"] or "{}")
+                except Exception:  # noqa: BLE001
+                    continue
+                for key, load in loads.items():
+                    kg = self._kg(str(load))
+                    if kg is None:
+                        continue
+                    if key not in best or kg > best[key][0]:
+                        best[key] = (kg, str(load), row["date"])
+            # resolve display names from the day library
+            for kind, days in _DAY_LIBRARY.items():
+                for key, name, _s, _r, _rest in days:
+                    names.setdefault(key, name)
+            for key, (kg, load, d) in sorted(
+                    best.items(), key=lambda kv: -kv[1][0]):
+                out.append(PersonalRecord(
+                    exercise_key=key,
+                    exercise_name=names.get(key, key),
+                    load=load, date=d))
+            return out
+        except Exception:  # noqa: BLE001
+            _log.debug("personal_records failed", exc_info=True)
+            return out
+
+    def format_prs(self, limit: int = 10) -> str:
+        try:
+            prs = self.personal_records()[:max(1, limit)]
+            if not prs:
+                return "no PRs yet — log workouts with loads and I'll " \
+                    "track them automatically. 🏋️"
+            lines = ["🏆 **personal records** (auto-tracked):"]
+            medals = ["🥇", "🥈", "🥉"]
+            for i, pr in enumerate(prs):
+                medal = medals[i] if i < 3 else "•"
+                lines.append(f"{medal} {pr.exercise_name}: **{pr.load}** "
+                             f"({pr.date})")
+            return guard_coaching("\n".join(lines))
+        except Exception:  # noqa: BLE001
+            return "couldn't read PRs right now."
+
+    # -- deload advisory (RP pattern) --------------------------------------
+
+    def deload_advisory(self) -> str:
+        """3 weeks of rising volume + sagging readiness → suggest deload.
+
+        Never raises; returns "" when no deload is indicated.
+        """
+        try:
+            w0 = sum(self.weekly_sets(0).values())
+            w1 = sum(self.weekly_sets(1).values())
+            w2 = sum(self.weekly_sets(2).values())
+            if w2 == 0 and w1 == 0:
+                return ""
+            rising = w0 >= w1 >= w2 and w0 > 0 and (w0 - w2) >= 6
+            readiness_low = False
+            try:
+                info = self.readiness()
+                readiness_low = info.has_data and info.score < 55
+            except Exception:  # noqa: BLE001
+                pass
+            if rising and (readiness_low or w0 - w2 >= 15):
+                text = (f"📉 deload advisory: volume climbed {w2} → "
+                        f"{w1} → {w0} hard sets over 3 weeks"
+                        + (" and readiness is sagging"
+                           if readiness_low else "")
+                        + ". Next week: half volume, same movements, "
+                          "move well — then come back fresh.")
+                return guard_coaching(text)
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # -- weak-point notes (form → programming) -----------------------------
+
+    def weak_point_notes(self, analyses: list[Any] | None = None) -> str:
+        """Map form-analysis issues to programming notes.
+
+        "Upper-back flagged twice → add face pulls." Never raises.
+        """
+        try:
+            from collections import Counter
+            counts: Counter[str] = Counter()
+            for a in analyses or []:
+                for issue in getattr(a, "issues", None) or []:
+                    counts[getattr(issue, "checkpoint", "?")] += 1
+            if not counts:
+                return ""
+            suggestions = {
+                "knees": "banded lateral walks + goblet squats",
+                "depth": "deep squat holds + ankle mobility",
+                "spine": "hip hinge drills + cat-cow",
+                "elbows": "scapular push-ups",
+                "body": "plank holds",
+                "hips": "glute bridges",
+                "front_knee": "split squat holds",
+            }
+            lines = ["🎯 **weak-point notes** (from form checks):"]
+            for cp, n in counts.most_common(3):
+                fix = suggestions.get(cp, "targeted accessory work")
+                lines.append(f"• {cp} flagged {n}× → add {fix}")
+            return guard_coaching("\n".join(lines))
+        except Exception:  # noqa: BLE001
+            return ""
 
     # -- voice ------------------------------------------------------------
 
@@ -758,8 +1107,10 @@ class TrainingCoach:
                 lines.append(f"_{workout.gate_note}_")
             for i, ex in enumerate(workout.exercises, start=1):
                 load = f" @ {ex.load}" if ex.load != "bodyweight" else ""
-                lines.append(f"{i}. {ex.name} — {ex.sets}×{ex.reps}{load} "
-                             f"(rest {ex.rest_secs}s)")
+                rpe = f" (RPE {ex.rpe_target})" \
+                    if ex.rpe_target else ""
+                lines.append(f"{i}. {ex.name} — {ex.sets}×{ex.reps}{load}"
+                             f"{rpe} (rest {ex.rest_secs}s)")
             lines.append(f"\n_{TRAINING_DISCLAIMER}_")
             return guard_coaching("\n".join(lines))
         except Exception:  # noqa: BLE001
@@ -791,6 +1142,9 @@ _USAGE = (
     "/train today — today's workout, gated by your recovery\n"
     "/train readiness — recovery score from sleep + HRV + strain\n"
     "/train log [completed|skipped] [rpe 1-10] [notes] — log today's session\n"
+    "/train volume — this week's sets per muscle vs MEV/MRV bands\n"
+    "/train prs — your auto-tracked personal records\n"
+    "/train deload — check whether a deload week is due\n"
     "/train list — your plans")
 
 
@@ -823,6 +1177,17 @@ def control_train(tail: str, *,
 
         if verb == "readiness":
             return tc.readiness().format()
+
+        if verb == "volume":
+            return tc.volume_report()
+
+        if verb == "prs":
+            return tc.format_prs()
+
+        if verb == "deload":
+            advice = tc.deload_advisory()
+            return advice or ("no deload indicated right now — volume "
+                              "and recovery look sustainable. 💪")
 
         if verb == "log":
             plan = tc.latest_plan()
@@ -865,14 +1230,17 @@ def control_train(tail: str, *,
         return "training hiccup — try /train help."
 
 
-def _bump_load(load: str) -> str:
-    """Small linear progression: +2.5% on numeric kg loads."""
+def _bump_load(load: str, factor: float = 1.0) -> str:
+    """Small linear progression: +2.5% on numeric kg loads, scaled by
+    the auto-regulation factor (0.0 = hold, 2.0 = double bump)."""
     try:
         import re
+        if factor <= 0:
+            return load
         m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(kg)?\s*", load or "")
         if not m:
             return load
-        kg = float(m.group(1)) * 1.025
+        kg = float(m.group(1)) * (1 + 0.025 * factor)
         num = f"{kg:.1f}".rstrip("0").rstrip(".")
         return num + (m.group(2) or "")
     except Exception:  # noqa: BLE001

@@ -41,6 +41,9 @@ __all__ = [
     "guard_coaching",
     "parse_intent",
     "ReadinessBriefingProvider",
+    "ReadinessPoint",
+    "sleep_need",
+    "readiness_band_advice",
 ]
 
 #: Phrases that must NEVER appear in coach output. Coaching, not diagnosis.
@@ -266,12 +269,93 @@ def _session_time(sess: dict[str, Any], key: str) -> str:
 
 # ── public result types ────────────────────────────────────────────────────
 
+# WHOOP-style contributor weights: HRV carries most of the predictive
+# value; resting HR and sleep add context mainly when they diverge from
+# HRV. Missing signals drop out and renormalize (Gilbert pattern).
+_READINESS_WEIGHTS = {
+    "hrv": 0.50,
+    "sleep": 0.30,
+    "strain": 0.20,
+}
+
+#: Minimum days of HRV history before the HRV contributor carries full
+#: weight — Oura takes ~2 weeks to learn personal baselines; we require
+#: 7 and scale linearly below that (honest, not binary).
+_HRV_MIN_DAYS = 7
+
+
+def progress_bar(score: float, width: int = 12) -> str:
+    """████░░░░ 62 — tiny readiness bar. Pure; never raises."""
+    try:
+        frac = max(0.0, min(1.0, float(score) / 100.0))
+        fill = int(round(frac * width))
+        return "█" * fill + "░" * (width - fill)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def sleep_need(*, recent_avg_hours: float | None = None,
+               workouts_48h: int = 0,
+               debt_nights: int = 0) -> float:
+    """Dynamic sleep need — WHOOP pattern.
+
+    Base 8h, +repayment for recent shortfall, +strain premium for recent
+    workouts, capped 7–10h. Readiness compares last night to YOUR need,
+    not a fixed 7–9h band. Pure; never raises.
+    """
+    try:
+        need = 8.0
+        if recent_avg_hours is not None and recent_avg_hours < 8.0:
+            need += min(1.5, (8.0 - recent_avg_hours) * 0.5)
+        need += min(1.0, 0.5 * max(0, int(workouts_48h or 0)))
+        return round(max(7.0, min(10.0, need)), 1)
+    except Exception:  # noqa: BLE001
+        return 8.0
+
+
+def sleep_score_vs_need(hours: float, need: float) -> float:
+    """0–100 sleep score vs dynamic need (WHOOP duration sufficiency).
+
+    Proportional below need, full marks within half an hour of it,
+    gentle penalty for big oversleep. Pure; never raises.
+    """
+    try:
+        h, n = max(0.0, float(hours)), max(1.0, float(need))
+        if h >= n - 0.5:
+            return 100.0
+        if h < n:
+            return round(100.0 * h / n, 1)
+        return round(max(0.0, 100.0 - (h - (n + 1.0)) * 20.0), 1)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def readiness_band_advice(level: str) -> str:
+    """Coaching line per band. Coaching, not diagnosis."""
+    return {
+        "high": "green light — good day to push if you want to.",
+        "moderate": "decent shape — keep it moderate if you're "
+                    "training hard today.",
+        "low": "recovery looks low — consider a light day: easy "
+               "walk, stretch, early night.",
+        "unknown": "no recovery data yet — sync health data or log "
+                   "biometrics.",
+    }.get(level, "")
+
 @dataclass
 class Answer:
     text: str
     intent: str
     numbers: dict[str, Any] = field(default_factory=dict)
     has_data: bool = True
+
+
+@dataclass
+class ReadinessPoint:
+    """One historical readiness score (for trends)."""
+    ts: float
+    level: str
+    score: float
 
 
 @dataclass
@@ -282,6 +366,37 @@ class Readiness:
     numbers: dict[str, Any] = field(default_factory=dict)
     suggestion: str = ""
     has_data: bool = True
+    contributors: dict[str, float] = field(default_factory=dict)
+    # contributor name → 0-100 sub-score (hrv | sleep | strain)
+
+    def explain(self) -> str:
+        """Oura-style 'why': which input moved the score, by how much.
+
+        Coaching only — describes signals in your data, never a medical
+        state. Never raises.
+        """
+        try:
+            if not self.has_data or not self.contributors:
+                return "not enough data to break this down yet."
+            wsum = sum(_READINESS_WEIGHTS.get(k, 0)
+                       for k in self.contributors)
+            parts = []
+            for name in ("hrv", "sleep", "strain"):
+                if name not in self.contributors:
+                    continue
+                sub = self.contributors[name]
+                w = _READINESS_WEIGHTS.get(name, 0)
+                share = (w / wsum) if wsum else 0
+                pull = (sub - self.score) * share
+                arrow = "↑" if pull > 3 else ("↓" if pull < -3 else "→")
+                parts.append(f"{arrow} {name}: {sub:.0f}/100 "
+                             f"(weight {share:.0%})")
+            head = ("what moved your score "
+                    f"({self.score:.0f}/100) — HRV carries the most "
+                    "weight:")
+            return guard_coaching(head + "\n" + "\n".join(parts))
+        except Exception:  # noqa: BLE001
+            return "couldn't break this down right now."
 
     def format(self) -> str:
         if not self.has_data:
@@ -289,7 +404,7 @@ class Readiness:
         emoji = {"high": "🟢", "moderate": "🟡", "low": "🔴"}.get(
             self.level, "⚪")
         lines = [f"{emoji} readiness: **{self.level}** "
-                 f"({self.score:.0f}/100)"]
+                 f"({self.score:.0f}/100) {progress_bar(self.score)}"]
         for r in self.reasons:
             lines.append(f"• {r}")
         if self.suggestion:
@@ -521,6 +636,11 @@ class HealthCoach:
     def readiness(self, *, log: bool = True) -> Readiness:
         """Sleep + HRV trend + recent strain → high|moderate|low.
 
+        WHOOP-pattern scoring: HRV-dominant weights, missing signals
+        drop out and renormalize, sleep is judged against YOUR dynamic
+        sleep need (not a fixed band), and the HRV contributor scales
+        with how much baseline history exists (Oura's honesty rule).
+
         Coaching only: the score describes recovery signals in your data,
         never a medical state.
         """
@@ -531,41 +651,55 @@ class HealthCoach:
         reasons, numbers = [], {}
         parts: list[float] = []
         weights: list[float] = []
+        contributors: dict[str, float] = {}
 
-        # 1. sleep (last night) — 50%
+        # recent sleep context → dynamic need (WHOOP pattern)
+        week_sessions = self.source.sleep_sessions(
+            end - timedelta(days=7), end)
+        week_hours = [h for s in week_sessions
+                      if (h := _sleep_hours(s)) is not None]
+        recent_avg = (sum(week_hours) / len(week_hours)
+                      if week_hours else None)
+        debt_nights = sum(1 for h in week_hours if h < 7.0)
+
+        # 1. sleep (last night) — judged vs dynamic need
         sessions = self.source.sleep_sessions(end - timedelta(days=2), end)
         sessions = sorted(sessions,
                           key=lambda s: str(s.get("end_datetime") or ""))
+        need = sleep_need(recent_avg_hours=recent_avg,
+                          workouts_48h=len(
+                              self.source.workouts(
+                                  end - timedelta(days=2), end)),
+                          debt_nights=debt_nights)
+        numbers["sleep_need_hours"] = need
         if sessions:
             h = _sleep_hours(sessions[-1])
             if h is not None:
                 numbers["sleep_hours"] = round(h, 2)
-                if 7.0 <= h <= 9.0:
-                    s_score = 100.0
-                elif h < 7.0:
-                    s_score = max(0.0, 100.0 - (7.0 - h) * 30.0)
-                else:
-                    s_score = max(0.0, 100.0 - (h - 9.0) * 20.0)
+                s_score = sleep_score_vs_need(h, need)
                 parts.append(s_score)
-                weights.append(0.5)
+                weights.append(_READINESS_WEIGHTS["sleep"])
+                contributors["sleep"] = round(s_score, 1)
                 eff = _efficiency(sessions[-1])
                 eff_txt = f", efficiency {eff * 100:.0f}%" \
                     if eff is not None else ""
                 reasons.append(
                     f"sleep {_fmt_dur(h)} last night{eff_txt} "
-                    f"(target 7–9h)")
+                    f"(your need ~{_fmt_dur(need)})")
                 if eff is not None:
                     numbers["sleep_efficiency"] = round(eff, 3)
 
-        # 2. HRV trend — 30%
+        # 2. HRV trend — dominant, confidence-scaled by baseline depth
         hrv = self._hrv_series(30)
-        if len(hrv) >= 7:
-            recent = sum(hrv[-7:]) / 7
+        if len(hrv) >= 3:
+            recent = sum(hrv[-7:]) / 7 if len(hrv) >= 7 \
+                else sum(hrv) / len(hrv)
             base = sum(hrv) / len(hrv)
             numbers["hrv_7d_ms"] = round(recent, 1)
             numbers["hrv_30d_ms"] = round(base, 1)
             ratio = recent / base if base else 1.0
             numbers["hrv_ratio"] = round(ratio, 3)
+            numbers["hrv_days"] = len(hrv)
             if ratio >= 1.0:
                 h_score = 100.0
                 trend = "steady or up"
@@ -581,19 +715,26 @@ class HealthCoach:
             else:
                 h_score = 25.0
                 trend = "down a lot"
+            # Oura honesty rule: thin baseline → less weight, not zero
+            confidence = min(1.0, len(hrv) / _HRV_MIN_DAYS)
+            h_weight = _READINESS_WEIGHTS["hrv"] * confidence
             parts.append(h_score)
-            weights.append(0.3)
+            weights.append(max(h_weight, 0.05))
+            contributors["hrv"] = round(h_score, 1)
             reasons.append(
                 f"HRV 7-day avg {recent:.0f}ms vs 30-day {base:.0f}ms "
-                f"— {trend}")
+                f"— {trend}" + ("" if confidence >= 1.0
+                                else f" (baseline still learning, "
+                                     f"{len(hrv)}d)"))
 
-        # 3. recent strain — 20%
+        # 3. recent strain
         workouts = self.source.workouts(end - timedelta(days=2), end)
         n_w = len(workouts)
         numbers["workouts_48h"] = n_w
         strain = max(0.0, 100.0 - min(40.0, 20.0 * n_w))
         parts.append(strain)
-        weights.append(0.2)
+        weights.append(_READINESS_WEIGHTS["strain"])
+        contributors["strain"] = round(strain, 1)
         if n_w:
             reasons.append(f"{n_w} workout(s) in the last 48h")
         else:
@@ -605,20 +746,87 @@ class HealthCoach:
         score = sum(p * w for p, w in zip(parts, weights)) / total_w
         level = "high" if score >= 70 else ("moderate" if score >= 45
                                            else "low")
-        suggestion = {
-            "high": "green light — good day to push if you want to.",
-            "moderate": "decent shape — keep it moderate if you're "
-                        "training hard today.",
-            "low": "recovery looks low — consider a light day: easy "
-                   "walk, stretch, early night.",
-        }[level]
         r = Readiness(level=level, score=round(score, 1), reasons=reasons,
-                      numbers=numbers, suggestion=suggestion, has_data=True)
+                      numbers=numbers, suggestion=readiness_band_advice(
+                          level),
+                      has_data=True, contributors=contributors)
         if log:
             self._log_insight(
                 f"readiness check → {level} ({score:.0f}/100): "
                 + "; ".join(reasons))
+            self._record_readiness(r)
         return r
+
+    # -- readiness history -------------------------------------------------
+
+    def _history_db(self):  # sqlite3 connection or None; never raises
+        import os
+        import sqlite3
+        try:
+            p = os.path.expanduser("~/.nomorals/health/coach.db")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            db = sqlite3.connect(p)
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS readiness_log (
+                       ts REAL PRIMARY KEY, level TEXT, score REAL,
+                       numbers_json TEXT)""")
+            db.commit()
+            return db
+        except Exception:  # noqa: BLE001
+            _log.debug("coach history db unavailable", exc_info=True)
+            return None
+
+    def _record_readiness(self, r: "Readiness") -> None:
+        try:
+            import json as _json
+            db = self._history_db()
+            if db is None:
+                return
+            db.execute(
+                "INSERT OR REPLACE INTO readiness_log VALUES (?,?,?,?)",
+                (time.time(), r.level, r.score,
+                 _json.dumps(r.numbers)))
+            db.commit()
+            db.close()
+        except Exception:  # noqa: BLE001
+            _log.debug("record_readiness failed", exc_info=True)
+
+    def readiness_history(self, days: int = 30) -> list[ReadinessPoint]:
+        """Past readiness scores, oldest first. Never raises."""
+        try:
+            db = self._history_db()
+            if db is None:
+                return []
+            rows = db.execute(
+                "SELECT ts, level, score FROM readiness_log "
+                "WHERE ts >= ? ORDER BY ts ASC",
+                (time.time() - days * 86400,)).fetchall()
+            db.close()
+            return [ReadinessPoint(ts=float(r[0]), level=str(r[1]),
+                                   score=float(r[2])) for r in rows]
+        except Exception:  # noqa: BLE001
+            _log.debug("readiness_history failed", exc_info=True)
+            return []
+
+    def readiness_trend(self, days: int = 14) -> str:
+        """One-line trend card with sparkline. Never raises."""
+        try:
+            from .timeline import sparkline
+            hist = self.readiness_history(days=days)
+            if len(hist) < 2:
+                return "not enough readiness history yet — check back " \
+                    "after a few mornings."
+            scores = [p.score for p in hist]
+            first = sum(scores[:3]) / min(3, len(scores))
+            last = sum(scores[-3:]) / min(3, len(scores))
+            arrow = "↑" if last > first + 3 else (
+                "↓" if last < first - 3 else "→")
+            text = (f"📈 readiness trend ({len(hist)} checks, "
+                    f"{days}d): {arrow} {first:.0f} → {last:.0f}\n"
+                    f"`{sparkline(scores)}`")
+            return guard_coaching(text)
+        except Exception:  # noqa: BLE001
+            return "couldn't build the readiness trend."
 
     # -- weekly recap ----------------------------------------------------
 

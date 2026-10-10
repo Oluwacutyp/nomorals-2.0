@@ -46,6 +46,10 @@ __all__ = [
     "RecoveryAction",
     "DriftMonitor",
     "recovery_plan",
+    "IllnessWatch",
+    "illness_watch",
+    "projected_recovery",
+    "CHRONIC_DAYS",
 ]
 
 # ── thresholds (conservative by design; documented for tuning) ───────────────
@@ -78,6 +82,15 @@ ACTIVITY_DROP_RATIO = 0.50
 
 #: Never more than one proactive drift ping per calendar day.
 MAX_PINGS_PER_DAY = 1
+
+#: Chronic window (days) for the slow-drift check — the Oura-resilience
+#: pattern: weighted average of the last 14 days, recent days weighted
+#: more, minimum data required before any verdict.
+CHRONIC_DAYS = 14
+CHRONIC_MIN_POINTS = 5
+
+#: 14-day average sleep at or below this → chronic sleep-debt signal.
+CHRONIC_SLEEP_DEBT_H = 6.5
 
 _HOURS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b", re.I)
 
@@ -150,7 +163,7 @@ def recovery_plan(report: DriftReport) -> list[RecoveryAction]:
     """
     kinds = {s.kind for s in report.signals}
     actions: list[RecoveryAction] = []
-    if kinds & {"sleep_debt", "sleep_decline"}:
+    if kinds & {"sleep_debt", "sleep_decline", "chronic_sleep_debt"}:
         actions.append(RecoveryAction(
             kind="wind_down",
             text="🛌 wind-down block at 10pm tonight",
@@ -162,12 +175,19 @@ def recovery_plan(report: DriftReport) -> list[RecoveryAction]:
             text="⏰ earlier-bedtime nudge at 9:30pm",
             detail="A gentle ping so bedtime doesn't slip again.",
             schedules=True))
-    if kinds & {"mood_drop"}:
+    if kinds & {"mood_drop", "chronic_mood_slide"}:
         actions.append(RecoveryAction(
             kind="light_day",
             text="🌤️ tomorrow: keep it light",
             detail="I'll note it in your morning briefing — fewer heavy "
                    "blocks, room to breathe."))
+    if "chronic_sleep_debt" in kinds or "chronic_mood_slide" in kinds:
+        actions.append(RecoveryAction(
+            kind="reset_week",
+            text="🔁 a real reset week",
+            detail="Two weeks of drift is structural, not a bad weekend — "
+                   "a lighter week plus a check-in with your doctor or "
+                   "coach is the honest fix."))
     if kinds & {"hrv_decline", "activity_drop"}:
         actions.append(RecoveryAction(
             kind="rest_workout",
@@ -182,6 +202,98 @@ def recovery_plan(report: DriftReport) -> list[RecoveryAction]:
             seen.add(a.kind)
             out.append(a)
     return out
+
+
+# ── illness early-warning (WHOOP pattern) ────────────────────────────────
+# RHR elevation + HRV drop + sleep disturbance moving TOGETHER is the
+# classic "something coming on" signature. Gentle, never diagnostic.
+
+
+@dataclass
+class IllnessWatch:
+    """Early-warning: recovery signals moving together the wrong way."""
+    active: bool
+    detail: str = ""
+    signals: list[str] = field(default_factory=list)
+
+
+def illness_watch(*, hrv_ratio: float | None = None,
+                  rhr_delta_bpm: float | None = None,
+                  sleep_hours: float | None = None,
+                  baseline_sleep: float | None = None) -> IllnessWatch:
+    """Combine RHR/HRV/sleep into a gentle early-warning. Pure function.
+
+    Needs ≥2 of 3 signals to fire — a single bad night is not illness.
+    Coaching language only; every string passes guard_coaching.
+    """
+    try:
+        hits: list[str] = []
+        if (rhr_delta_bpm is not None
+                and rhr_delta_bpm >= 5):
+            hits.append(f"resting heart rate up {rhr_delta_bpm:.0f} bpm "
+                        f"vs your baseline")
+        if hrv_ratio is not None and hrv_ratio < 0.85:
+            hits.append(f"recovery signal (HRV) down "
+                        f"{(1 - hrv_ratio) * 100:.0f}% vs baseline")
+        if (sleep_hours is not None and baseline_sleep is not None
+                and sleep_hours < baseline_sleep - 1.5):
+            hits.append(f"sleep {sleep_hours:.1f}h vs your usual "
+                        f"{baseline_sleep:.1f}h")
+        elif sleep_hours is not None and sleep_hours <= 5.0:
+            hits.append(f"only {sleep_hours:.1f}h sleep")
+        if len(hits) >= 2:
+            detail = ("a few of your recovery signals are moving the "
+                      "wrong way together — " + "; ".join(hits) + ". "
+                      "Might be worth taking it easy today and seeing "
+                      "how you feel tomorrow.")
+            guard_coaching(detail)
+            return IllnessWatch(active=True, detail=detail, signals=hits)
+        return IllnessWatch(active=False)
+    except Exception:  # noqa: BLE001
+        return IllnessWatch(active=False)
+
+
+def projected_recovery(values: list[float], *,
+                       target: float | None = None) -> str:
+    """'At this slope, ~N more nights to baseline.' Honest forecast.
+
+    ``values``: oldest-first daily metric (sleep hours, HRV, mood…).
+    Returns a plain-language band, never false precision. Pure.
+    """
+    try:
+        vals = [float(v) for v in values if v is not None]
+        if len(vals) < 4:
+            return "not enough data to project recovery yet."
+        target = float(target) if target is not None else sum(
+            vals[:3]) / 3
+        recent = sum(vals[-3:]) / 3
+        if recent >= target:
+            return "you're back at baseline — nice."
+        # slope per day over the window
+        n = len(vals)
+        xs = list(range(n))
+        xbar, ybar = sum(xs) / n, sum(vals) / n
+        denom = sum((x - xbar) ** 2 for x in xs) or 1.0
+        slope = sum((x - xbar) * (y - ybar)
+                    for x, y in zip(xs, vals)) / denom
+        if slope <= 0:
+            return ("the trend is still heading the wrong way — an "
+                    "early night and a light day are the highest-"
+                    "leverage moves.")
+        gap = target - recent
+        nights = gap / slope if slope > 0 else float("inf")
+        if nights <= 1.5:
+            when = "about one more good night"
+        elif nights <= 4:
+            when = f"roughly {nights:.0f} more good nights"
+        else:
+            when = "several more good nights"
+        text = (f"at the current slope, {when} should bring this "
+                f"back to baseline.")
+        guard_coaching(text)
+        return text
+    except Exception:  # noqa: BLE001
+        return "couldn't project recovery right now."
 
 
 # ── the monitor ──────────────────────────────────────────────────────────────
@@ -200,6 +312,7 @@ class DriftMonitor:
                  community: bool = False,
                  hrv_series: Callable[[], list[tuple[float, float]]] | None = None,
                  activity_series: Callable[[], list[tuple[float, float]]] | None = None,
+                 rhr_series: Callable[[], list[tuple[float, float]]] | None = None,
                  ) -> None:
         if community:
             raise PermissionError(
@@ -209,6 +322,7 @@ class DriftMonitor:
         self.timeline = timeline
         self.hrv_series = hrv_series
         self.activity_series = activity_series
+        self.rhr_series = rhr_series
         path = Path(db_path) if db_path else (
             Path.home() / ".nomorals" / "health" / "drift.db")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +332,13 @@ class DriftMonitor:
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    day TEXT NOT NULL,
                    severity TEXT NOT NULL,
+                   ts REAL NOT NULL
+               )""")
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS drift_reports (
+                   day TEXT PRIMARY KEY,
+                   severity TEXT NOT NULL,
+                   kinds TEXT NOT NULL DEFAULT '',
                    ts REAL NOT NULL
                )""")
 
@@ -326,6 +447,9 @@ class DriftMonitor:
                     "movement is way down the last few days — about "
                     f"{(1 - avg3 / baseline) * 100:.0f}% below your norm"))
 
+        # --- chronic window (14-day, Oura-resilience-weighted) ---
+        signals.extend(self._chronic_signals(now))
+
         if not signals and not crisis:
             return None
 
@@ -338,7 +462,141 @@ class DriftMonitor:
         # guard_coaching runs inside format(); validate eagerly so a
         # report can never be constructed with banned phrasing.
         guard_coaching(" ".join(s.detail for s in signals) + report.forecast)
+        self._record_report(report, now=now)
         return report
+
+    # ── chronic (14-day) window ──────────────────────────────────────
+
+    @staticmethod
+    def _weighted_avg(pts: list[tuple[float, float]]) -> float | None:
+        """Recency-weighted average (Oura resilience pattern).
+
+        Linear weights: most recent point counts most. Needs
+        CHRONIC_MIN_POINTS before any verdict.
+        """
+        if len(pts) < CHRONIC_MIN_POINTS:
+            return None
+        pts = sorted(pts, key=lambda p: p[0])
+        total_w = sum(range(1, len(pts) + 1))
+        return sum(v * (i + 1) for i, (_, v) in enumerate(pts)) / total_w
+
+    def _chronic_signals(self, now: float) -> list[DriftSignal]:
+        """Slow-drift signals over CHRONIC_DAYS. Conservative: needs
+        CHRONIC_MIN_POINTS of data, never fires on thin history."""
+        signals: list[DriftSignal] = []
+        try:
+            sleeps = self._series("sleep", CHRONIC_DAYS, now)
+            if len(sleeps) >= CHRONIC_MIN_POINTS:
+                wavg = self._weighted_avg(sleeps)
+                if wavg is not None and wavg <= CHRONIC_SLEEP_DEBT_H:
+                    signals.append(DriftSignal(
+                        "chronic_sleep_debt",
+                        f"sleep has averaged {wavg:.1f}h over the last "
+                        f"{CHRONIC_DAYS} days — that's a slow-burning "
+                        f"debt (target 7–9h)",
+                        value=wavg))
+            moods = self._series("mood", CHRONIC_DAYS, now)
+            if len(moods) >= CHRONIC_MIN_POINTS:
+                vals = [v for _, v in moods]
+                wavg = self._weighted_avg(moods)
+                if wavg is not None and wavg <= LOW_MOOD:
+                    signals.append(DriftSignal(
+                        "chronic_mood_slide",
+                        f"mood has averaged {wavg:.1f}/5 over the last "
+                        f"{CHRONIC_DAYS} days — a slow slide worth "
+                        f"noticing"))
+        except Exception:  # noqa: BLE001
+            _log.debug("chronic signals failed", exc_info=True)
+        return signals
+
+    # ── illness early-warning ────────────────────────────────────────
+
+    def illness_watch_check(self, *, now: float | None = None
+                            ) -> IllnessWatch:
+        """RHR + HRV + sleep moving together the wrong way → gentle flag.
+
+        Needs ≥2 of 3 signals. Never diagnostic, never raises.
+        """
+        try:
+            now = now if now is not None else time.time()
+            hrv_ratio = rhr_delta = sleep_h = base_sleep = None
+            hrv = self._hrv_3day(now)
+            if hrv is not None:
+                avg3, baseline = hrv
+                hrv_ratio = avg3 / baseline if baseline else None
+            if self.rhr_series is not None:
+                try:
+                    pts = [(ts, v) for ts, v in self.rhr_series()
+                           if v is not None and v > 0]
+                    recent = [v for ts, v in pts
+                              if now - 3 * 86400 < ts <= now]
+                    base = [v for ts, v in pts
+                            if now - 10 * 86400 < ts <= now - 3 * 86400]
+                    if len(recent) >= 2 and len(base) >= 2:
+                        rhr_delta = (sum(recent) / len(recent)
+                                     - sum(base) / len(base))
+                except Exception:  # noqa: BLE001
+                    _log.debug("rhr series failed", exc_info=True)
+            sleeps = self._series("sleep", MIN_DAYS, now)
+            if len(sleeps) >= 2:
+                sleep_h = sleeps[-1][1]
+                base_sleep = sum(v for _, v in sleeps[:-1]
+                                 ) / max(1, len(sleeps) - 1)
+            return illness_watch(hrv_ratio=hrv_ratio,
+                                 rhr_delta_bpm=rhr_delta,
+                                 sleep_hours=sleep_h,
+                                 baseline_sleep=base_sleep)
+        except Exception:  # noqa: BLE001
+            _log.debug("illness_watch_check failed", exc_info=True)
+            return IllnessWatch(active=False)
+
+    # ── report history + escalation ──────────────────────────────────
+
+    def _record_report(self, report: DriftReport,
+                       *, now: float) -> None:
+        try:
+            kinds = ",".join(sorted({s.kind for s in report.signals}))
+            self._db.execute(
+                "INSERT OR REPLACE INTO drift_reports "
+                "(day, severity, kinds, ts) VALUES (?,?,?,?)",
+                (_day(now), report.severity, kinds, now))
+        except Exception:  # noqa: BLE001
+            _log.debug("record_report failed", exc_info=True)
+
+    def consecutive_act_days(self, *, now: float | None = None) -> int:
+        """How many days in a row ended 'act' (escalation input)."""
+        try:
+            now = now if now is not None else time.time()
+            rows = self._db.query(
+                "SELECT day, severity FROM drift_reports "
+                "ORDER BY day DESC LIMIT 14")
+            streak = 0
+            probe = _day(now)
+            by_day = {r["day"]: r["severity"] for r in rows}
+            while by_day.get(probe) == "act":
+                streak += 1
+                probe = time.strftime(
+                    "%Y-%m-%d",
+                    time.localtime(
+                        time.mktime(time.strptime(probe, "%Y-%m-%d"))
+                        - 86400))
+            return streak
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def escalation_note(self, *, now: float | None = None) -> str:
+        """Stronger guidance when 'act' persists 3+ days. Never raises."""
+        try:
+            n = self.consecutive_act_days(now=now)
+            if n < 3:
+                return ""
+            text = (f"this is day {n} of 'act' drift in a row. At this "
+                    f"point the kindest move is structural — talk to "
+                    f"your doctor or a coach about what's going on, "
+                    f"rather than pushing through another week.")
+            return guard_coaching(text)
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _severity(self, signals: list[DriftSignal], crisis: bool) -> str:
         kinds = {s.kind for s in signals}
@@ -483,6 +741,9 @@ class DriftMonitor:
             if plan:
                 message += ("\n\nWant me to set any of these up? " +
                             " / ".join(a.text for a in plan))
+            esc = self.escalation_note(now=now)
+            if esc:
+                message += f"\n\n{esc}"
             sender(message)
         except Exception:  # noqa: BLE001
             _log.debug("drift notify failed", exc_info=True)

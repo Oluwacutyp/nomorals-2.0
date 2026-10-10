@@ -57,6 +57,7 @@ __all__ = [
     "CHECKPOINTS",
     "FIXES",
     "GAIT_RISKS",
+    "ANGLE_RULES",
     "FormIssue",
     "FormAnalysis",
     "GaitIssue",
@@ -68,6 +69,12 @@ __all__ = [
     "augment_today_workout",
     "control_form",
     "FORM_DISCLAIMER",
+    "mediapipe_available",
+    "estimate_pose",
+    "joint_angle",
+    "analyze_form_quantitative",
+    "count_reps",
+    "form_trend",
 ]
 
 FORM_DISCLAIMER = (
@@ -82,6 +89,273 @@ _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 #: Phase-2 hook points for quantitative pose estimation (models TBD).
 ANGLE_HOOKS = ("knee_angle", "hip_angle", "spine_angle", "ankle_angle")
+
+# ── quantitative pose estimation (MediaPipe, import-guarded) ─────────────
+# The Ochy pattern: landmarks → joint angles → geometric rules. Runs on
+# CPU, no API. When mediapipe isn't installed the Seer qualitative seam
+# is the fallback — never fabricated angles.
+
+#: MediaPipe Pose landmark indices we use (33-landmark model).
+_LM = {
+    "nose": 0,
+    "left_shoulder": 11, "right_shoulder": 12,
+    "left_elbow": 13, "right_elbow": 14,
+    "left_wrist": 15, "right_wrist": 16,
+    "left_hip": 23, "right_hip": 24,
+    "left_knee": 25, "right_knee": 26,
+    "left_ankle": 27, "right_ankle": 28,
+}
+
+#: (angle hook, joint triple, min_deg, max_deg, checkpoint, description).
+#: Thresholds are coaching estimates, documented as such.
+ANGLE_RULES: dict[str, list[tuple[str, tuple[str, str, str],
+                                   float, float, str, str]]] = {
+    "squat": [
+        ("knee_angle", ("left_hip", "left_knee", "left_ankle"),
+         70.0, 135.0, "depth",
+         "knee bend at the bottom — 70–135° is a full squat"),
+        ("hip_angle", ("left_shoulder", "left_hip", "left_knee"),
+         55.0, 130.0, "depth",
+         "hip fold at the bottom — 55–130°"),
+        ("spine_angle", ("left_shoulder", "left_hip", "left_knee"),
+         0.0, 200.0, "spine",
+         "torso lean is judged qualitatively (see Seer read)"),
+    ],
+    "deadlift": [
+        ("hip_angle", ("left_shoulder", "left_hip", "left_knee"),
+         65.0, 120.0, "hips",
+         "hip hinge at the bottom — 65–120°"),
+        ("knee_angle", ("left_hip", "left_knee", "left_ankle"),
+         120.0, 175.0, "setup",
+         "near-straight knees at lockout — 120–175°"),
+    ],
+    "push-up": [
+        ("knee_angle", ("left_shoulder", "left_elbow", "left_wrist"),
+         40.0, 100.0, "elbows",
+         "elbow bend at the bottom — 40–100°"),
+        ("spine_angle", ("left_shoulder", "left_hip", "left_ankle"),
+         160.0, 195.0, "body",
+         "body line head-to-heels — 160°+ is straight"),
+    ],
+    "plank": [
+        ("spine_angle", ("left_shoulder", "left_hip", "left_ankle"),
+         160.0, 195.0, "body",
+         "body line head-to-heels — 160°+ is straight"),
+        ("hip_angle", ("left_shoulder", "left_hip", "left_knee"),
+         160.0, 195.0, "hips",
+         "hips level with shoulders and knees — 160°+"),
+    ],
+    "lunge": [
+        ("knee_angle", ("left_hip", "left_knee", "left_ankle"),
+         75.0, 120.0, "front_knee",
+         "front-knee bend at the bottom — 75–120°"),
+    ],
+}
+
+
+def mediapipe_available() -> bool:
+    """Is the quantitative pose path usable here? Pure."""
+    try:
+        import mediapipe  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def estimate_pose(image_path: str) -> dict[str, tuple[float, float, float]
+                                           ] | None:
+    """MediaPipe Pose → {landmark: (x, y, visibility)}. None on failure.
+
+    x, y are normalized 0–1; visibility 0–1. Never raises.
+    """
+    try:
+        import mediapipe as mp
+        img = _read_image_rgb(image_path)
+        if img is None:
+            return None
+        pose = mp.solutions.pose.Pose(
+            static_image_mode=True, model_complexity=1,
+            enable_segmentation=False, min_detection_confidence=0.5)
+        try:
+            res = pose.process(img)
+        finally:
+            pose.close()
+        if not res.pose_landmarks:
+            return None
+        out: dict[str, tuple[float, float, float]] = {}
+        for name, idx in _LM.items():
+            lm = res.pose_landmarks.landmark[idx]
+            out[name] = (lm.x, lm.y,
+                         getattr(lm, "visibility", 0.0) or 0.0)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("estimate_pose failed: %s", exc)
+        return None
+
+
+def _read_image_rgb(path: str):
+    """Read an image as an RGB numpy array. None on failure."""
+    try:
+        import numpy as np
+        suffix = Path(path).suffix.lower()
+        if suffix in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+            try:
+                from PIL import Image
+                with Image.open(path) as im:
+                    return np.asarray(im.convert("RGB"))
+            except Exception:  # noqa: BLE001
+                pass
+        # last resort: raw bytes won't decode reliably — be honest
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def joint_angle(a: tuple[float, float, float],
+                b: tuple[float, float, float],
+                c: tuple[float, float, float]) -> float | None:
+    """Angle at B (degrees) for points A→B→C. Pure; never raises."""
+    try:
+        import math
+        ax, ay = a[0] - b[0], a[1] - b[1]
+        cx, cy = c[0] - b[0], c[1] - b[1]
+        dot = ax * cx + ay * cy
+        na = math.hypot(ax, ay)
+        nc = math.hypot(cx, cy)
+        if na == 0 or nc == 0:
+            return None
+        cosang = max(-1.0, min(1.0, dot / (na * nc)))
+        return round(math.degrees(math.acos(cosang)), 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pose_angles(pose: dict[str, tuple[float, float, float]],
+                 exercise: str) -> dict[str, float]:
+    """Measured hook angles for one frame. Skips low-visibility joints."""
+    out: dict[str, float] = {}
+    try:
+        for hook, triple, _lo, _hi, _cp, _desc in ANGLE_RULES.get(
+                exercise, []):
+            pts = [pose.get(t) for t in triple]
+            if any(p is None or p[2] < 0.5 for p in pts):
+                continue
+            ang = joint_angle(pts[0], pts[1], pts[2])
+            if ang is not None and hook not in out:
+                out[hook] = ang
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def analyze_form_quantitative(
+        frames: list[str], exercise: str
+) -> tuple[dict[str, str], dict[str, float], int]:
+    """Frames → (flagged {checkpoint: observed-with-degrees},
+    measured {hook: degrees}, frames_with_pose).
+
+    Geometric rules over MediaPipe angles; uses the most-bent frame
+    (min knee/hip angle) as the "bottom of the rep". Never raises.
+    """
+    flagged: dict[str, str] = {}
+    measured: dict[str, float] = {}
+    n_pose = 0
+    try:
+        poses = []
+        for f in frames:
+            p = estimate_pose(f)
+            if p:
+                poses.append(p)
+        n_pose = len(poses)
+        if not poses:
+            return flagged, measured, 0
+        # most-bent frame = bottom of the rep (min knee angle)
+        def _bend(p):
+            angs = _pose_angles(p, exercise)
+            return angs.get("knee_angle", 180.0)
+        bottom = min(poses, key=_bend)
+        measured = _pose_angles(bottom, exercise)
+        for hook, triple, lo, hi, checkpoint, desc in ANGLE_RULES.get(
+                exercise, []):
+            if hook not in measured:
+                continue
+            v = measured[hook]
+            if v < lo or v > hi:
+                observed = (f"measured {hook.replace('_', ' ')} "
+                            f"{v:.0f}° at the bottom of the rep "
+                            f"(expected {lo:.0f}–{hi:.0f}°)")
+                flagged[checkpoint] = observed
+        return flagged, measured, n_pose
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("quantitative analysis failed: %s", exc)
+        return flagged, measured, n_pose
+
+
+def count_reps(frames: list[str], exercise: str,
+               angle_hook: str = "knee_angle") -> int:
+    """Count reps from joint-angle oscillation across frames.
+
+    A rep = angle dips below the mid-range then returns. Needs ≥4
+    frames with pose. Never raises; 0 when uncountable.
+    """
+    try:
+        seq: list[float] = []
+        for f in frames:
+            p = estimate_pose(f)
+            if p:
+                angs = _pose_angles(p, exercise)
+                if angle_hook in angs:
+                    seq.append(angs[angle_hook])
+        if len(seq) < 4:
+            return 0
+        lo, hi = min(seq), max(seq)
+        if hi - lo < 15:  # no real movement
+            return 0
+        mid = (lo + hi) / 2
+        reps = 0
+        below = seq[0] < mid
+        for v in seq[1:]:
+            now_below = v < mid
+            if below and not now_below:
+                reps += 1
+            below = now_below
+        return reps
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def form_trend(store: "FormStore", exercise: str,
+               limit: int = 10) -> str:
+    """Score history for an exercise — progress over time. Never raises."""
+    try:
+        from .timeline import sparkline
+        rows: list[tuple[float, float, str]] = []
+        try:
+            if store._db is None:
+                return ""
+            q = ("SELECT created_at, analysis_json FROM form_analyses "
+                 "WHERE exercise = ? ORDER BY created_at DESC LIMIT ?")
+            for r in store._db.execute(q, (exercise, limit)).fetchall():
+                import json as _json
+                d = _json.loads(r["analysis_json"])
+                rows.append((float(r["created_at"]),
+                             float(d.get("score", 0.0)),
+                             str(d.get("band", ""))))
+        except Exception:  # noqa: BLE001
+            return ""
+        if len(rows) < 2:
+            return ""
+        rows.sort(key=lambda x: x[0])
+        scores = [s for _, s, _ in rows]
+        first, last = scores[0], scores[-1]
+        arrow = "↑" if last > first + 0.05 else (
+            "↓" if last < first - 0.05 else "→")
+        text = (f"📈 {exercise} form trend ({len(rows)} checks): "
+                f"{arrow} {first:.0%} → {last:.0%}\n"
+                f"`{sparkline(scores)}`")
+        return guard_coaching(text)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 # ── movement references ──────────────────────────────────────────────────
@@ -485,14 +759,53 @@ def analyze_form(video_path: str, exercise: str, *,
                       fix=FIXES.get((exercise, cid), "slow down and "
                                     "re-check this position."))
             for cid, observed in flagged.items()]
+
+        # Quantitative pass (Phase 2, real now): MediaPipe joint angles
+        # merge with the qualitative read — measured degrees win ties.
+        measured: dict[str, float] = {}
+        n_pose = 0
+        quant_note = ""
+        if mediapipe_available():
+            q_flags, measured, n_pose = analyze_form_quantitative(
+                frames, exercise)
+            for cid, observed in q_flags.items():
+                if cid not in flagged:
+                    flagged[cid] = observed
+                    issues.append(FormIssue(
+                        checkpoint=cid,
+                        label=CHECKPOINTS[exercise][cid][0],
+                        observed=observed,
+                        fix=FIXES.get((exercise, cid), "slow down and "
+                                      "re-check this position.")))
+                else:
+                    # measured degrees sharpen the qualitative flag
+                    for iss in issues:
+                        if iss.checkpoint == cid:
+                            iss.observed = (f"{iss.observed} "
+                                            f"[measured: {observed}]")
+            reps = count_reps(frames, exercise)
+            if n_pose:
+                quant_note = (f"quantitative: pose tracked on "
+                              f"{n_pose}/{len(frames)} frames")
+                if measured:
+                    degs = ", ".join(
+                        f"{k.replace('_', ' ')} {v:.0f}°"
+                        for k, v in measured.items())
+                    quant_note += f" ({degs})"
+                if reps:
+                    quant_note += f"; ~{reps} rep(s) counted"
+                quant_note += "."
         score = len(passes) / total if total else 0.0
+        note_bits = ["qualitative read from video frames — not a lab "
+                     "measurement."]
+        if quant_note:
+            note_bits.append(quant_note)
         analysis = FormAnalysis(
             id=aid, exercise=exercise, available=True, score=score,
             band=_score_band(score), issues=issues,
             passes=[CHECKPOINTS[exercise][c][0] for c in passes],
             frames_used=len(frames),
-            note=("qualitative read from video frames — not measured "
-                  "joint angles."),
+            note=" ".join(note_bits),
             created_at=time.time())
         if store is not None:
             try:
@@ -712,6 +1025,7 @@ _USAGE = (
     "/form analyze <video-or-photo> <exercise> — form read + fixes\n"
     "/form gait <video> — running gait risk flags\n"
     "/form movements — the 5 coached movements\n"
+    "/form trend <exercise> — your form score history\n"
     "/form apply <analysis-id> — add mobility work to today's session\n"
     "coached: squat, deadlift, push-up, plank, lunge")
 
@@ -749,6 +1063,14 @@ def control_form(tail: str, *,
             if not path:
                 return "usage: /form gait <video>"
             return analyze_gait(path, vision=vision).format()
+
+        if verb == "trend":
+            exercise = rest.strip().lower().replace(" ", "_")
+            if exercise not in CHECKPOINTS:
+                return f"usage: /form trend <exercise> ({', '.join(MOVEMENTS)})"
+            trend = form_trend(store, exercise)
+            return trend or ("not enough saved checks for "
+                             f"{exercise} yet — /form analyze first.")
 
         if verb == "apply":
             analysis_id = rest.strip()

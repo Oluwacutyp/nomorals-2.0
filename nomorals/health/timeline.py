@@ -30,6 +30,11 @@ __all__ = [
     "health_db_path",
     "parse_health_note",
     "BANNED_PHRASES",
+    "VitalPoint",
+    "VitalTrend",
+    "SymptomStat",
+    "sparkline",
+    "parse_measurement",
 ]
 
 #: Valid event types.
@@ -200,6 +205,178 @@ class HealthTimeline:
                      "for medical guidance.")
         return "\n".join(lines)
 
+    # ── search ───────────────────────────────────────────────────────
+
+    def search(self, query: str, *, days: int | None = None,
+               limit: int = 50) -> list[HealthEvent]:
+        """Full-text search across event text. Never raises."""
+        try:
+            q = (query or "").strip()
+            if not q:
+                return []
+            since = time.time() - days * 86400 if days else 0.0
+            like = f"%{q}%"
+            rows = self._db.query(
+                "SELECT * FROM health_events "
+                "WHERE text LIKE ? AND ts >= ? "
+                "ORDER BY ts DESC LIMIT ?",
+                (like, since, max(1, limit)))
+            return [self._row_to_event(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            _log.debug("health timeline search failed", exc_info=True)
+            return []
+
+    # ── vitals trends (measurement events → series + sparklines) ──────
+
+    def vitals_trend(self, days: int = 30) -> list[VitalTrend]:
+        """Parse measurement events into per-metric time series.
+
+        Understands "120/80 mmHg" (BP), "72kg"/"160lbs" (weight),
+        "37.2" °C (temperature). Tracking only — no interpretation.
+        Never raises.
+        """
+        try:
+            since = time.time() - days * 86400
+            events = self.timeline(since=since, event_type="measurement",
+                                   limit=1000)
+            series: dict[str, list[VitalPoint]] = {}
+            for ev in events:
+                parsed = parse_measurement(ev.value or ev.text,
+                                           ev.unit or "")
+                for metric, val, unit in parsed:
+                    series.setdefault(metric, []).append(
+                        VitalPoint(ts=ev.ts, value=val, unit=unit,
+                                   label=ev.text))
+            trends = []
+            for metric, pts in series.items():
+                pts.sort(key=lambda p: p.ts)
+                vals = [p.value for p in pts]
+                trends.append(VitalTrend(
+                    metric=metric, unit=pts[0].unit, points=pts,
+                    latest=vals[-1], average=sum(vals) / len(vals),
+                    minimum=min(vals), maximum=max(vals)))
+            trends.sort(key=lambda t: t.metric)
+            return trends
+        except Exception:  # noqa: BLE001
+            _log.debug("vitals_trend failed", exc_info=True)
+            return []
+
+    # ── symptom stats (frequency, severity, trend) ────────────────────
+
+    def symptom_stats(self, days: int = 30) -> list[SymptomStat]:
+        """Per-symptom frequency, average severity and trend arrow.
+
+        Symptoms are grouped by their first significant word group —
+        tracking math only, never a medical read. Never raises.
+        """
+        try:
+            since = time.time() - days * 86400
+            events = self.timeline(since=since, event_type="symptom",
+                                   limit=1000)
+            groups: dict[str, list[HealthEvent]] = {}
+            for ev in events:
+                key = _symptom_key(ev.text)
+                groups.setdefault(key, []).append(ev)
+            out = []
+            for key, evs in groups.items():
+                evs.sort(key=lambda e: e.ts)
+                sevs = [e.severity for e in evs if e.severity]
+                half = max(1, len(evs) // 2)
+                first = [e.severity for e in evs[:half] if e.severity]
+                second = [e.severity for e in evs[half:] if e.severity]
+                if first and second:
+                    a1 = sum(first) / len(first)
+                    a2 = sum(second) / len(second)
+                    arrow = "↑" if a2 > a1 + 0.4 else (
+                        "↓" if a2 < a1 - 0.4 else "→")
+                else:
+                    arrow = "→"
+                out.append(SymptomStat(
+                    symptom=key, count=len(evs),
+                    avg_severity=(round(sum(sevs) / len(sevs), 1)
+                                  if sevs else None),
+                    trend=arrow,
+                    last_seen=evs[-1].ts,
+                    example=evs[-1].text))
+            out.sort(key=lambda s: (-s.count, s.symptom))
+            return out
+        except Exception:  # noqa: BLE001
+            _log.debug("symptom_stats failed", exc_info=True)
+            return []
+
+    # ── logging streak (retention) ────────────────────────────────────
+
+    def logging_streak(self, *, now: float | None = None) -> int:
+        """Consecutive days (ending today/yesterday) with ≥1 logged event."""
+        try:
+            now = now if now is not None else time.time()
+            rows = self._db.query(
+                "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') AS d "
+                "FROM health_events ORDER BY d DESC LIMIT 400")
+            days = {r["d"] for r in rows}
+            if not days:
+                return 0
+            streak = 0
+            cursor = time.localtime(now)
+            # allow today to be missing (streak counts through yesterday)
+            today = time.strftime("%Y-%m-%d", cursor)
+            probe = now if today in days else now - 86400
+            while True:
+                key = time.strftime("%Y-%m-%d", time.localtime(probe))
+                if key in days:
+                    streak += 1
+                    probe -= 86400
+                else:
+                    break
+            return streak
+        except Exception:  # noqa: BLE001
+            _log.debug("logging_streak failed", exc_info=True)
+            return 0
+
+    # ── doctor report (printable handover) ────────────────────────────
+
+    def export_report(self, days: int = 30) -> str:
+        """Markdown handover: walk in with a month of facts.
+
+        Timeline + symptom stats + vitals trends + meds. Pure record —
+        the doctor interprets, Devon doesn't. Never raises.
+        """
+        try:
+            lines = [f"# Health log — last {days} days",
+                     f"_exported {time.strftime('%Y-%m-%d %H:%M')}_", ""]
+            stats = self.symptom_stats(days=days)
+            if stats:
+                lines.append("## Symptoms")
+                for s in stats:
+                    sev = f", avg severity {s.avg_severity}/5" \
+                        if s.avg_severity is not None else ""
+                    lines.append(f"- **{s.symptom}** — {s.count}×{sev}, "
+                                 f"trend {s.trend}")
+                lines.append("")
+            trends = self.vitals_trend(days=days)
+            if trends:
+                lines.append("## Measurements")
+                for t in trends:
+                    lines.append(f"- **{t.metric}**: latest {t.latest:g} "
+                                 f"{t.unit} (avg {t.average:.1f}, range "
+                                 f"{t.minimum:g}–{t.maximum:g}) "
+                                 f"`{sparkline([p.value for p in t.points])}`")
+                lines.append("")
+            meds = self.timeline(
+                since=time.time() - days * 86400, event_type="medication",
+                limit=100)
+            if meds:
+                lines.append("## Medications (as logged)")
+                for e in meds:
+                    lines.append(f"- {e.when_str()}: {e.text}")
+                lines.append("")
+            lines.append("## Full log")
+            lines.append(self.summary(days=days))
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            _log.debug("export_report failed", exc_info=True)
+            return "couldn't build the report right now."
+
     def _row_to_event(self, row: Any) -> HealthEvent:
         import json
         get = row.get if hasattr(row, "get") else row.__getitem__
@@ -295,3 +472,126 @@ def parse_health_note(text: str) -> dict[str, Any]:
     else:
         etype = "note"
     return {"event_type": etype, "text": raw, "severity": severity}
+
+
+# ── vitals parsing + presentation helpers ────────────────────────────────
+# Tracking math only: parse what the user logged, chart it, never interpret.
+
+@dataclass
+class VitalPoint:
+    ts: float
+    value: float
+    unit: str = ""
+    label: str = ""
+
+
+@dataclass
+class VitalTrend:
+    metric: str            # "blood_pressure_systolic", "weight", ...
+    unit: str
+    points: list[VitalPoint] = field(default_factory=list)
+    latest: float = 0.0
+    average: float = 0.0
+    minimum: float = 0.0
+    maximum: float = 0.0
+
+
+@dataclass
+class SymptomStat:
+    symptom: str
+    count: int
+    avg_severity: float | None
+    trend: str             # ↑ | → | ↓ (severity direction)
+    last_seen: float = 0.0
+    example: str = ""
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values: list[float]) -> str:
+    """Tiny ASCII trend chart. Pure; never raises."""
+    try:
+        vals = [float(v) for v in values if v is not None]
+        if not vals:
+            return ""
+        if len(vals) == 1:
+            return _SPARK[3]
+        lo, hi = min(vals), max(vals)
+        if hi == lo:
+            return _SPARK[3] * len(vals)
+        return "".join(
+            _SPARK[min(7, int((v - lo) / (hi - lo) * 7))] for v in vals)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_BP_RE = _re.compile(r"(\d{2,3})\s*/\s*(\d{2,3})")
+_WEIGHT_RE = _re.compile(
+    r"(\d{2,3}(?:\.\d+)?)\s*(kg|kgs|kilo|kilogram|lbs?|pounds?)\b", _re.I)
+_TEMP_RE = _re.compile(r"(3[4-9]|4[0-2])(?:\.(\d))?\s*°?\s*[cC]?\b")
+_HR_RE = _re.compile(r"(\d{2,3})\s*(bpm|beats?\s*(?:per|/)\s*min)\b", _re.I)
+
+
+def parse_measurement(value: str, unit: str = "") -> list[tuple[str, float,
+                                                               str]]:
+    """Parse a measurement string into (metric, value, unit) triples.
+
+    Handles "120/80" BP, "72kg"/"160 lbs" weight, "37.2" temperature,
+    "62 bpm" heart rate. Returns [] when nothing parses. Pure.
+    """
+    out: list[tuple[str, float, str]] = []
+    text = f"{value or ''} {unit or ''}".strip()
+    if not text:
+        return out
+    try:
+        m = _BP_RE.search(text)
+        if m:
+            out.append(("blood_pressure_systolic", float(m.group(1)),
+                        "mmHg"))
+            out.append(("blood_pressure_diastolic", float(m.group(2)),
+                        "mmHg"))
+            return out
+        m = _WEIGHT_RE.search(text)
+        if m:
+            v, u = float(m.group(1)), m.group(2).lower()
+            if u.startswith("lb") or u.startswith("pound"):
+                out.append(("weight", round(v * 0.453592, 1), "kg"))
+            else:
+                out.append(("weight", v, "kg"))
+            return out
+        m = _HR_RE.search(text)
+        if m:
+            out.append(("heart_rate", float(m.group(1)), "bpm"))
+            return out
+        m = _TEMP_RE.search(text)
+        if m:
+            whole, frac = m.group(1), m.group(2) or "0"
+            out.append(("temperature", float(f"{whole}.{frac}"), "°C"))
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+_SYMPTOM_KEY_WORDS = _re.compile(
+    r"\b(headache|migraine|knee|back|neck|shoulder|ankle|wrist|elbow|hip|"
+    r"stomach|throat|chest|tooth|ear|eye|skin|joint|muscle|cramp|nausea|"
+    r"dizz\w*|fever|cough|sore|tired|fatigue|anxiet\w*|stress\w*|"
+    r"insomnia|sleep\w*)\b", _re.I)
+
+
+def _symptom_key(text: str) -> str:
+    """Group symptom text by its most significant word(s)."""
+    words = _SYMPTOM_KEY_WORDS.findall(text or "")
+    if words:
+        seen: list[str] = []
+        for w in words:
+            wl = w.lower()
+            if wl not in seen:
+                seen.append(wl)
+        return " ".join(seen[:2])
+    # fallback: first 4 meaningful words
+    toks = [t for t in _re.findall(r"[a-z]{3,}", (text or "").lower())
+            if t not in ("the", "and", "with", "for", "today", "this")]
+    return " ".join(toks[:4]) or "unspecified"

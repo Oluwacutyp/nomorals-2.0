@@ -25,15 +25,23 @@ __all__ = [
     "MealItem",
     "MealDraft",
     "MealLog",
+    "DayCard",
+    "NutritionStore",
     "log_meal",
     "follow_up_questions",
     "complete_meal",
     "parse_meal_answers",
     "arm_meal",
+    "arm_meal_flow",
     "pending_meal",
     "consume_meal",
+    "disarm_meal_flow",
+    "meal_flow_armed",
     "meal_intent_in_text",
     "format_draft_message",
+    "daily_totals",
+    "log_water",
+    "MACRO_TARGETS",
 ]
 
 _log = get_logger(__name__)
@@ -52,57 +60,87 @@ class FoodEntry:
     serving: str
     oily: bool = False  # hidden fats likely — triggers the oil question
     aliases: tuple[str, ...] = ()
+    # macro estimates per serving (protein, carbs, fat grams) — from
+    # standard nutrition references, always presented as ranges.
+    protein_g: tuple[float, float] = (0.0, 0.0)
+    carbs_g: tuple[float, float] = (0.0, 0.0)
+    fat_g: tuple[float, float] = (0.0, 0.0)
 
 
 NIGERIAN_FOODS: dict[str, FoodEntry] = {}
 
 def _food(name: str, low: int, high: int, serving: str, *,
-          oily: bool = False, aliases: tuple[str, ...] = ()) -> None:
+          oily: bool = False, aliases: tuple[str, ...] = (),
+          p: tuple[float, float] = (0.0, 0.0),
+          c: tuple[float, float] = (0.0, 0.0),
+          f: tuple[float, float] = (0.0, 0.0)) -> None:
     NIGERIAN_FOODS[name] = FoodEntry(name, low, high, serving,
-                                    oily=oily, aliases=aliases)
+                                     oily=oily, aliases=aliases,
+                                     protein_g=p, carbs_g=c, fat_g=f)
 
 _food("jollof rice", 450, 700, "per plate", oily=True,
-      aliases=("jollof", "party jollof"))
-_food("fried rice", 450, 700, "per plate", oily=True)
+      aliases=("jollof", "party jollof"),
+      p=(12, 18), c=(70, 95), f=(15, 25))
+_food("fried rice", 450, 700, "per plate", oily=True,
+      p=(12, 18), c=(65, 90), f=(18, 28))
 _food("white rice", 350, 550, "per plate",
-      aliases=("plain rice", "boiled rice"))
+      aliases=("plain rice", "boiled rice"),
+      p=(7, 10), c=(75, 100), f=(2, 4))
 _food("ofada rice", 400, 650, "per plate", oily=True,
-      aliases=("ofada",))
-_food("pounded yam", 350, 550, "per portion (2 wraps)", aliases=("iyan",))
-_food("fufu", 300, 500, "per portion", aliases=("akpu",))
-_food("amala", 300, 500, "per portion")
-_food("eba", 350, 550, "per portion", aliases=("garri",))
-_food("egusi soup", 300, 550, "per bowl", oily=True, aliases=("egusi",))
-_food("efo riro", 250, 450, "per serving", oily=True)
-_food("okro soup", 200, 350, "per serving", aliases=("okra soup", "okro"))
-_food("oha soup", 300, 500, "per serving", oily=True, aliases=("oha",))
+      aliases=("ofada",), p=(10, 15), c=(70, 95), f=(12, 20))
+_food("pounded yam", 350, 550, "per portion (2 wraps)",
+      aliases=("iyan",), p=(5, 8), c=(80, 110), f=(2, 5))
+_food("fufu", 300, 500, "per portion", aliases=("akpu",),
+      p=(4, 7), c=(70, 95), f=(2, 4))
+_food("amala", 300, 500, "per portion", p=(5, 8), c=(65, 90), f=(3, 6))
+_food("eba", 350, 550, "per portion", aliases=("garri",),
+      p=(4, 6), c=(85, 115), f=(2, 4))
+_food("egusi soup", 300, 550, "per bowl", oily=True, aliases=("egusi",),
+      p=(15, 25), c=(8, 15), f=(25, 40))
+_food("efo riro", 250, 450, "per serving", oily=True,
+      p=(12, 20), c=(8, 14), f=(18, 30))
+_food("okro soup", 200, 350, "per serving", aliases=("okra soup", "okro"),
+      p=(8, 14), c=(10, 18), f=(10, 18))
+_food("oha soup", 300, 500, "per serving", oily=True, aliases=("oha",),
+      p=(14, 22), c=(10, 16), f=(22, 35))
 _food("bitter leaf soup", 300, 500, "per serving", oily=True,
-      aliases=("ofe onugbu",))
-_food("pepper soup", 150, 300, "per bowl", aliases=("point and kill",))
+      aliases=("ofe onugbu",), p=(12, 20), c=(10, 16), f=(20, 32))
+_food("pepper soup", 150, 300, "per bowl", aliases=("point and kill",),
+      p=(20, 30), c=(3, 6), f=(8, 15))
 _food("beans", 300, 500, "per plate", aliases=("beans porridge", "ewa",
-      "honey beans"))
-_food("moi moi", 200, 350, "per wrap", aliases=("moin moin", "olele"))
+      "honey beans"), p=(15, 22), c=(45, 65), f=(8, 15))
+_food("moi moi", 200, 350, "per wrap", aliases=("moin moin", "olele"),
+      p=(12, 18), c=(20, 30), f=(8, 14))
 _food("dodo", 200, 350, "per serving", oily=True,
-      aliases=("fried plantain", "plantain"))
-_food("boli", 200, 300, "per serving", aliases=("roasted plantain", "bole"))
+      aliases=("fried plantain", "plantain"), p=(2, 4), c=(45, 65),
+      f=(10, 18))
+_food("boli", 200, 300, "per serving", aliases=("roasted plantain", "bole"),
+      p=(2, 3), c=(50, 70), f=(1, 3))
 _food("akara", 200, 350, "per serving (4-5 balls)", oily=True,
-      aliases=("bean cake",))
-_food("puff puff", 200, 350, "per serving (4-5 pieces)", oily=True)
-_food("suya", 250, 450, "per serving")
-_food("nkwobi", 400, 600, "per plate", oily=True)
-_food("ewedu", 100, 200, "per serving")
-_food("gbegiri", 150, 250, "per serving")
-_food("zobo", 80, 150, "per glass", aliases=("zoborodo", "hibiscus drink"))
-_food("chapman", 150, 250, "per glass")
-_food("kunu", 150, 250, "per glass", aliases=("kunu aya", "tigernut drink"))
+      aliases=("bean cake",), p=(8, 12), c=(20, 30), f=(12, 20))
+_food("puff puff", 200, 350, "per serving (4-5 pieces)", oily=True,
+      p=(3, 5), c=(35, 50), f=(10, 16))
+_food("suya", 250, 450, "per serving", p=(25, 35), c=(3, 6), f=(15, 25))
+_food("nkwobi", 400, 600, "per plate", oily=True,
+      p=(20, 30), c=(5, 10), f=(30, 45))
+_food("ewedu", 100, 200, "per serving", p=(5, 8), c=(10, 18), f=(4, 8))
+_food("gbegiri", 150, 250, "per serving", p=(8, 12), c=(18, 28), f=(5, 10))
+_food("zobo", 80, 150, "per glass", aliases=("zoborodo", "hibiscus drink"),
+      p=(0, 1), c=(20, 35), f=(0, 0))
+_food("chapman", 150, 250, "per glass", p=(0, 1), c=(35, 60), f=(0, 0))
+_food("kunu", 150, 250, "per glass", aliases=("kunu aya", "tigernut drink"),
+      p=(3, 5), c=(30, 45), f=(8, 14))
 _food("agege bread", 250, 400, "per portion",
-      aliases=("bread", "agege"))
-_food("roasted corn", 150, 250, "per cob", aliases=("corn", "roasted maize"))
+      aliases=("bread", "agege"), p=(8, 12), c=(50, 70), f=(5, 10))
+_food("roasted corn", 150, 250, "per cob", aliases=("corn", "roasted maize"),
+      p=(4, 6), c=(30, 45), f=(2, 4))
 _food("meat", 200, 400, "per serving",
       aliases=("beef", "chicken", "turkey", "goat meat", "assorted meat",
-               "chicken pieces", "turkey pieces"))
+               "chicken pieces", "turkey pieces"),
+      p=(25, 35), c=(0, 2), f=(12, 25))
 _food("fish", 150, 300, "per serving",
-      aliases=("tilapia", "croaker", "mackerel", "titus", "fried fish"))
+      aliases=("tilapia", "croaker", "mackerel", "titus", "fried fish"),
+      p=(20, 30), c=(0, 2), f=(8, 18))
 
 #: Drinks are tracked separately for the drink follow-up.
 _DRINK_NAMES = {"zobo", "chapman", "kunu", "soda", "coke", "fanta",
@@ -119,6 +157,16 @@ class MealItem:
     cal_high: int = 500
     known: bool = True   # False = not in DB, honest generic estimate
     oily: bool = False
+    protein_g: tuple[float, float] = (0.0, 0.0)
+    carbs_g: tuple[float, float] = (0.0, 0.0)
+    fat_g: tuple[float, float] = (0.0, 0.0)
+
+    @property
+    def macro_text(self) -> str:
+        p = f"{self.protein_g[0]:.0f}–{self.protein_g[1]:.0f}g protein"
+        c = f"{self.carbs_g[0]:.0f}–{self.carbs_g[1]:.0f}g carbs"
+        f = f"{self.fat_g[0]:.0f}–{self.fat_g[1]:.0f}g fat"
+        return f"{p}, {c}, {f}"
 
 
 @dataclass
@@ -147,9 +195,27 @@ class MealLog:
     def range_text(self) -> str:
         return f"approximately {self.cal_low}-{self.cal_high} cal"
 
+    @property
+    def macro_totals(self) -> dict[str, tuple[float, float]]:
+        p = [0.0, 0.0]
+        c = [0.0, 0.0]
+        f = [0.0, 0.0]
+        for i in self.items:
+            p[0] += i.protein_g[0]; p[1] += i.protein_g[1]
+            c[0] += i.carbs_g[0]; c[1] += i.carbs_g[1]
+            f[0] += i.fat_g[0]; f[1] += i.fat_g[1]
+        return {"protein": (round(p[0], 1), round(p[1], 1)),
+                "carbs": (round(c[0], 1), round(c[1], 1)),
+                "fat": (round(f[0], 1), round(f[1], 1))}
+
     def summary(self) -> str:
         names = ", ".join(i.name for i in self.items) or "meal"
         parts = [f"🍽️ logged: {names} — {self.range_text}."]
+        mt = self.macro_totals
+        parts.append(
+            f"~{mt['protein'][0]:.0f}–{mt['protein'][1]:.0f}g protein, "
+            f"{mt['carbs'][0]:.0f}–{mt['carbs'][1]:.0f}g carbs, "
+            f"{mt['fat'][0]:.0f}–{mt['fat'][1]:.0f}g fat (estimates).")
         if self.cost_kobo:
             from ..finance.ledger import format_naira
             parts.append(f"cost {format_naira(self.cost_kobo)}.")
@@ -224,12 +290,16 @@ def log_meal(photo_path: str | Any, *, seer: Any = None) -> MealDraft:
                 draft.items.append(MealItem(
                     name=entry.name, portion_hint=portion,
                     cal_low=entry.cal_low, cal_high=entry.cal_high,
-                    known=True, oily=entry.oily))
+                    known=True, oily=entry.oily,
+                    protein_g=entry.protein_g, carbs_g=entry.carbs_g,
+                    fat_g=entry.fat_g))
             else:
                 # Honest generic estimate for unknown foods — marked unknown.
                 draft.items.append(MealItem(
                     name=name, portion_hint=portion,
-                    cal_low=250, cal_high=450, known=False))
+                    cal_low=250, cal_high=450, known=False,
+                    protein_g=(8, 15), carbs_g=(30, 50),
+                    fat_g=(8, 15)))
         if not draft.items:
             draft.error = "couldn't identify any food in the photo"
     except Exception as exc:  # noqa: BLE001 — vision failures are honest
@@ -324,6 +394,9 @@ def _apply_adjustments(draft: MealDraft,
         # Invisible cooking fats: the NIH 33% lives here.
         low += 100
         high += 150
+        for i in items:
+            lo, hi = i.fat_g
+            i.fat_g = (round(lo + 11, 1), round(hi + 17, 1))
     portion = (answers.get("portion") or "medium").lower()
     if portion in ("large", "big", "huge"):
         low, high = int(low * 1.25), int(high * 1.25)
@@ -350,6 +423,7 @@ def complete_meal(draft: MealDraft, answers: dict[str, str], *,
                   cost_kobo: int | None = None,
                   timeline: Any = None,
                   ledger: Any = None,
+                  store: NutritionStore | None = None,
                   source: str = "chat") -> MealLog:
     """Apply answers, finalize the range, log to timeline (+ledger).
 
@@ -376,7 +450,13 @@ def complete_meal(draft: MealDraft, answers: dict[str, str], *,
     except Exception:  # noqa: BLE001
         _log.debug("meal timeline log failed", exc_info=True)
 
-    # 2. Optional expense pairing: "that jollof cost ₦2,500".
+    # 2. Nutrition store (daily totals, repeats, water).
+    try:
+        (store or NutritionStore()).save_meal(log)
+    except Exception:  # noqa: BLE001
+        _log.debug("meal store save failed", exc_info=True)
+
+    # 3. Optional expense pairing: "that jollof cost ₦2,500".
     if cost_kobo and cost_kobo > 0 and ledger is not None:
         try:
             txn = ledger.log(int(cost_kobo), category="food",
@@ -385,6 +465,256 @@ def complete_meal(draft: MealDraft, answers: dict[str, str], *,
         except Exception:  # noqa: BLE001
             _log.debug("meal expense log failed", exc_info=True)
     return log
+
+
+# ── persistence: meals + water ────────────────────────────────────────────
+
+#: Daily targets (general adult defaults; tracking reference, not advice).
+MACRO_TARGETS = {
+    "calories": (2000, 2500),
+    "protein_g": (70, 120),
+    "water_ml": 2500,
+}
+
+_DEFAULT_NUTRITION_DB = None  # resolved lazily (keeps import side-effect free)
+
+
+def _nutrition_db_path() -> str:
+    import os
+    base = os.environ.get("NOMORALS_HOME", os.path.expanduser("~/.nomorals"))
+    return os.path.join(base, "health", "nutrition.db")
+
+
+class NutritionStore:
+    """SQLite store: completed meals + water. Never raises."""
+
+    def __init__(self, db_path: str = "") -> None:
+        import os
+        import sqlite3
+        self._db = None
+        try:
+            p = db_path or _nutrition_db_path()
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            self._db = sqlite3.connect(p)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS meals (
+                       id TEXT PRIMARY KEY, day TEXT NOT NULL,
+                       items_json TEXT NOT NULL,
+                       cal_low INTEGER, cal_high INTEGER,
+                       protein_lo REAL, protein_hi REAL,
+                       carbs_lo REAL, carbs_hi REAL,
+                       fat_lo REAL, fat_hi REAL,
+                       created_at REAL)""")
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS water (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       day TEXT NOT NULL, ml INTEGER NOT NULL,
+                       created_at REAL)""")
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_meals_day ON meals(day)")
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_water_day ON water(day)")
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            _log.debug("nutrition store unavailable", exc_info=True)
+            self._db = None
+
+    def save_meal(self, log: MealLog, day: str = "") -> str:
+        """Persist a completed meal. Returns the meal id ("" on failure)."""
+        import json as _json
+        import uuid as _uuid
+        try:
+            if self._db is None:
+                return ""
+            day = day or time.strftime("%Y-%m-%d")
+            mt = log.macro_totals
+            mid = "meal_" + _uuid.uuid4().hex[:8]
+            self._db.execute(
+                """INSERT INTO meals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (mid, day,
+                 _json.dumps([i.__dict__ for i in log.items]),
+                 log.cal_low, log.cal_high,
+                 mt["protein"][0], mt["protein"][1],
+                 mt["carbs"][0], mt["carbs"][1],
+                 mt["fat"][0], mt["fat"][1], time.time()))
+            self._db.commit()
+            return mid
+        except Exception:  # noqa: BLE001
+            _log.debug("save_meal failed", exc_info=True)
+            return ""
+
+    def meals_on(self, day: str) -> list[dict[str, Any]]:
+        """Meals logged on a YYYY-MM-DD day. Never raises."""
+        import json as _json
+        try:
+            if self._db is None:
+                return []
+            rows = self._db.execute(
+                "SELECT * FROM meals WHERE day = ? ORDER BY created_at",
+                (day,)).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["items"] = _json.loads(d["items_json"] or "[]")
+                except Exception:  # noqa: BLE001
+                    d["items"] = []
+                out.append(d)
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def recent_meals(self, limit: int = 10) -> list[dict[str, Any]]:
+        try:
+            if self._db is None:
+                return []
+            import json as _json
+            rows = self._db.execute(
+                "SELECT * FROM meals ORDER BY created_at DESC LIMIT ?",
+                (max(1, limit),)).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["items"] = _json.loads(d["items_json"] or "[]")
+                except Exception:  # noqa: BLE001
+                    d["items"] = []
+                out.append(d)
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def log_water(self, ml: int, day: str = "") -> int:
+        """Log water intake (ml). Returns today's total ml."""
+        try:
+            if self._db is None:
+                return 0
+            day = day or time.strftime("%Y-%m-%d")
+            self._db.execute(
+                "INSERT INTO water (day, ml, created_at) VALUES (?,?,?)",
+                (day, max(0, int(ml)), time.time()))
+            self._db.commit()
+            return self.water_on(day)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def water_on(self, day: str) -> int:
+        try:
+            if self._db is None:
+                return 0
+            row = self._db.execute(
+                "SELECT SUM(ml) AS total FROM water WHERE day = ?",
+                (day,)).fetchone()
+            return int(row["total"] or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+
+@dataclass
+class DayCard:
+    """One day's nutrition: meals + water vs targets. Tracking only."""
+    day: str
+    meals: int = 0
+    cal_low: int = 0
+    cal_high: int = 0
+    protein_lo: float = 0.0
+    protein_hi: float = 0.0
+    carbs_lo: float = 0.0
+    carbs_hi: float = 0.0
+    fat_lo: float = 0.0
+    fat_hi: float = 0.0
+    water_ml: int = 0
+
+    def format(self) -> str:
+        try:
+            t = MACRO_TARGETS
+            lines = [f"🍽️ **today** — {self.meals} meal(s) logged:"]
+            lines.append(f"• calories: ~{self.cal_low}–{self.cal_high} "
+                         f"(ref {t['calories'][0]}–{t['calories'][1]})")
+            lines.append(f"• protein: ~{self.protein_lo:.0f}–"
+                         f"{self.protein_hi:.0f}g "
+                         f"(ref {t['protein_g'][0]}–{t['protein_g'][1]}g)")
+            lines.append(f"• carbs: ~{self.carbs_lo:.0f}–"
+                         f"{self.carbs_hi:.0f}g · fat: ~{self.fat_lo:.0f}–"
+                         f"{self.fat_hi:.0f}g")
+            wtarget = t["water_ml"]
+            wbar = "█" * min(10, int(self.water_ml / wtarget * 10)) + \
+                "░" * max(0, 10 - min(10, int(self.water_ml / wtarget * 10)))
+            lines.append(f"• 💧 water: {wbar} {self.water_ml}/{wtarget}ml")
+            lines.append("_tracking only — ranges are estimates, not "
+                         "nutrition advice._")
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return "couldn't build today's card."
+
+
+def daily_totals(store: NutritionStore | None = None,
+                 day: str = "") -> DayCard:
+    """Today's (or a day's) logged nutrition vs targets. Never raises."""
+    store = store or NutritionStore()
+    day = day or time.strftime("%Y-%m-%d")
+    card = DayCard(day=day)
+    try:
+        meals = store.meals_on(day)
+        card.meals = len(meals)
+        for m in meals:
+            card.cal_low += int(m.get("cal_low") or 0)
+            card.cal_high += int(m.get("cal_high") or 0)
+            card.protein_lo += float(m.get("protein_lo") or 0)
+            card.protein_hi += float(m.get("protein_hi") or 0)
+            card.carbs_lo += float(m.get("carbs_lo") or 0)
+            card.carbs_hi += float(m.get("carbs_hi") or 0)
+            card.fat_lo += float(m.get("fat_lo") or 0)
+            card.fat_hi += float(m.get("fat_hi") or 0)
+        card.water_ml = store.water_on(day)
+        return card
+    except Exception:  # noqa: BLE001
+        return card
+
+
+def log_water(ml: int, store: NutritionStore | None = None,
+              day: str = "") -> str:
+    """Log water; returns a one-line confirmation. Never raises."""
+    try:
+        store = store or NutritionStore()
+        total = store.log_water(ml, day=day or time.strftime("%Y-%m-%d"))
+        target = MACRO_TARGETS["water_ml"]
+        return (f"💧 +{ml}ml water — {total}/{target}ml today.")
+    except Exception:  # noqa: BLE001
+        return "couldn't log water right now."
+
+
+def repeat_meal(store: NutritionStore | None = None,
+                index: int = 0) -> MealDraft:
+    """'Same as last time': rebuild a MealDraft from a recent meal.
+
+    The highest-frequency real-world action — no photo needed.
+    Never raises.
+    """
+    store = store or NutritionStore()
+    draft = MealDraft(photo_path="repeat")
+    try:
+        recent = store.recent_meals(limit=10)
+        if not recent or index >= len(recent):
+            draft.error = "no recent meals to repeat yet"
+            return draft
+        for item in recent[index].get("items") or []:
+            draft.items.append(MealItem(
+                name=item.get("name", "meal"),
+                portion_hint=item.get("portion_hint", ""),
+                cal_low=int(item.get("cal_low") or 300),
+                cal_high=int(item.get("cal_high") or 500),
+                known=bool(item.get("known", True)),
+                oily=bool(item.get("oily", False)),
+                protein_g=tuple(item.get("protein_g") or (0, 0)),
+                carbs_g=tuple(item.get("carbs_g") or (0, 0)),
+                fat_g=tuple(item.get("fat_g") or (0, 0))))
+        draft.raw_description = "repeated from a previous log"
+        return draft
+    except Exception:  # noqa: BLE001
+        draft.error = "couldn't repeat that meal"
+        return draft
 
 
 # ── chat glue ───────────────────────────────────────────────────────────────

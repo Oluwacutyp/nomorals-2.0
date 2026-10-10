@@ -40,6 +40,18 @@ SQUAD_MAX = 8
 
 _STREAK_RISK_DAYS = 1  # check-in missing today → at risk
 
+#: A freeze saves a streak through one missed day (Duolingo pattern).
+#: Earned automatically per 7-day streak; max held at once.
+_FREEZE_EVERY_DAYS = 7
+_MAX_FREEZES = 3
+
+#: Recurring monthly challenge templates (Strava pattern).
+MONTHLY_TEMPLATES = (
+    ("distance", "Distance Challenge", "workout-count", 30, 20),
+    ("streak", "Streak Challenge", "streak-days", 30, 25),
+    ("strength", "Strength Challenge", "workout-count", 30, 12),
+)
+
 
 # ── dataclasses ──────────────────────────────────────────────────────
 
@@ -168,6 +180,15 @@ def _connect(db_path: str):
         """CREATE TABLE IF NOT EXISTS squads (
                id TEXT PRIMARY KEY, name TEXT, members_json TEXT,
                created_at REAL)""")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS streak_freezes (
+               member TEXT PRIMARY KEY, freezes INTEGER DEFAULT 0,
+               updated_at REAL)""")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS challenge_pbs (
+               challenge_id TEXT, member TEXT, best INTEGER,
+               achieved_at REAL,
+               PRIMARY KEY (challenge_id, member))""")
     db.commit()
     return db
 
@@ -297,6 +318,7 @@ class ChallengeStore:
                 (challenge_id, member)).fetchone()
             count = int(row["count"]) if row else 0
             self._maybe_complete(c, member, count)
+            self._note_personal_best(challenge_id, member, count)
             return count
         except Exception:  # noqa: BLE001
             _log.debug("log_workout failed", exc_info=True)
@@ -393,41 +415,7 @@ class ChallengeStore:
             return []
 
     # — streaks —
-
-    def checkin(self, member: str, *, now: float | None = None) -> int:
-        """Daily check-in. Returns the streak count. Never raises."""
-        try:
-            member = (member or "").strip()[:80]
-            if not member:
-                return 0
-            now = now if now is not None else time.time()
-            row = self._db.execute(
-                "SELECT count, last_checkin FROM streaks WHERE member = ?",
-                (member,)).fetchone()
-            today = time.strftime("%Y-%m-%d", time.localtime(now))
-            if row is None:
-                self._db.execute(
-                    "INSERT INTO streaks VALUES (?,?,?)",
-                    (member, 1, now))
-                self._db.commit()
-                return 1
-            last_day = time.strftime(
-                "%Y-%m-%d", time.localtime(float(row["last_checkin"] or 0)))
-            if last_day == today:
-                return int(row["count"])
-            # consecutive if yesterday, else reset
-            yday = time.strftime(
-                "%Y-%m-%d", time.localtime(now - 86400))
-            count = int(row["count"]) + 1 if last_day == yday else 1
-            self._db.execute(
-                "UPDATE streaks SET count = ?, last_checkin = ? "
-                "WHERE member = ?",
-                (count, now, member))
-            self._db.commit()
-            return count
-        except Exception:  # noqa: BLE001
-            _log.debug("checkin failed", exc_info=True)
-            return 0
+    # (checkin lives below with the streak-freeze mechanics)
 
     def streak(self, member: str) -> int:
         try:
@@ -464,6 +452,181 @@ class ChallengeStore:
             return ""
         except Exception:  # noqa: BLE001
             return ""
+
+    # — streak freeze (Duolingo pattern) —
+
+    def freezes(self, member: str) -> int:
+        """Freezes held. Never raises."""
+        try:
+            row = self._db.execute(
+                "SELECT freezes FROM streak_freezes WHERE member = ?",
+                ((member or "").strip()[:80],)).fetchone()
+            return int(row["freezes"]) if row else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _set_freezes(self, member: str, n: int) -> None:
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO streak_freezes VALUES (?,?,?)",
+                (member, max(0, min(_MAX_FREEZES, n)), time.time()))
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            _log.debug("set_freezes failed", exc_info=True)
+
+    def _maybe_earn_freeze(self, member: str, count: int) -> None:
+        """One freeze per 7-day streak milestone, up to the cap."""
+        try:
+            if count > 0 and count % _FREEZE_EVERY_DAYS == 0:
+                cur = self.freezes(member)
+                if cur < _MAX_FREEZES:
+                    self._set_freezes(member, cur + 1)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def checkin(self, member: str, *, now: float | None = None) -> int:
+        """Daily check-in. Returns the streak count. Never raises.
+
+        A missed day consumes a freeze first (streak pauses instead of
+        resetting); only a freezeless miss resets to 1.
+        """
+        try:
+            member = (member or "").strip()[:80]
+            if not member:
+                return 0
+            now = now if now is not None else time.time()
+            row = self._db.execute(
+                "SELECT count, last_checkin FROM streaks WHERE member = ?",
+                (member,)).fetchone()
+            today = time.strftime("%Y-%m-%d", time.localtime(now))
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO streaks VALUES (?,?,?)",
+                    (member, 1, now))
+                self._db.commit()
+                return 1
+            last_day = time.strftime(
+                "%Y-%m-%d", time.localtime(float(row["last_checkin"] or 0)))
+            if last_day == today:
+                return int(row["count"])
+            yday = time.strftime(
+                "%Y-%m-%d", time.localtime(now - 86400))
+            if last_day == yday:
+                count = int(row["count"]) + 1
+            elif self.freezes(member) > 0:
+                # freeze: streak survives the gap, paused not reset
+                self._set_freezes(member, self.freezes(member) - 1)
+                count = int(row["count"]) + 1
+            else:
+                count = 1
+            self._db.execute(
+                "UPDATE streaks SET count = ?, last_checkin = ? "
+                "WHERE member = ?",
+                (count, now, member))
+            self._db.commit()
+            self._maybe_earn_freeze(member, count)
+            return count
+        except Exception:  # noqa: BLE001
+            _log.debug("checkin failed", exc_info=True)
+            return 0
+
+    # — recurring monthly challenges (Strava pattern) —
+
+    def monthly_challenge(self, template: str = "distance", *,
+                          created_by: str = "") -> Challenge | None:
+        """Spin up this month's recurring challenge from a template.
+
+        Permanent badge per month ("October Distance Challenge").
+        Never raises.
+        """
+        try:
+            tpl = next((t for t in MONTHLY_TEMPLATES
+                        if t[0] == template), MONTHLY_TEMPLATES[0])
+            _key, label, ctype, days, target = tpl
+            month = time.strftime("%B")
+            name = f"{month} {label}"
+            c = self.create_challenge(
+                name, ctype, duration_days=days, target=target,
+                proof_method="honor", created_by=created_by or "owner")
+            if c is not None:
+                c.badge = f"monthly:{time.strftime('%Y-%m')}:{_key}"
+                try:
+                    self._db.execute(
+                        "UPDATE challenges SET badge = ? WHERE id = ?",
+                        (c.badge, c.id))
+                    self._db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
+            return c
+        except Exception:  # noqa: BLE001
+            _log.debug("monthly_challenge failed", exc_info=True)
+            return None
+
+    # — personal medals: your own PB inside a challenge —
+
+    def personal_best(self, challenge_id: str, member: str) -> int:
+        try:
+            row = self._db.execute(
+                "SELECT best FROM challenge_pbs WHERE challenge_id = ? "
+                "AND member = ?",
+                (challenge_id, (member or "").strip()[:80])).fetchone()
+            return int(row["best"]) if row else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _note_personal_best(self, challenge_id: str, member: str,
+                            count: int) -> bool:
+        """Record PB; returns True when this count is a new PB."""
+        try:
+            prev = self.personal_best(challenge_id, member)
+            if count > prev:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO challenge_pbs VALUES (?,?,?,?)",
+                    (challenge_id, member, count, time.time()))
+                self._db.commit()
+                return prev > 0  # a PB only counts once you've started
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    # — auto-progress from training logs (Strava auto-tracking) —
+
+    def sync_from_training(self, coach: Any = None,
+                           member: str = "owner") -> dict[str, int]:
+        """Count recent training-log workouts toward active workout-count
+        challenges automatically. Returns {challenge_id: new_count}.
+        Never raises.
+        """
+        synced: dict[str, int] = {}
+        try:
+            if coach is None:
+                from .training import TrainingCoach
+                coach = TrainingCoach()
+            hist = coach.history(days=30)
+            logged_dates = {h["date"] for h in hist
+                            if h.get("completed")}
+            if not logged_dates:
+                return synced
+            for c in self.list_challenges(active_only=True):
+                if c.type != "workout-count":
+                    continue
+                have = self.progress(c.id, member)[0]
+                # day-granularity: a workout logged any time on/after the
+                # challenge's start day counts
+                start_day = _date_to_days(time.strftime(
+                    "%Y-%m-%d", time.localtime(c.created_at)))
+                want = sum(
+                    1 for d in logged_dates
+                    if start_day <= _date_to_days(d)
+                    < c.ends_at / 86400)
+                for _ in range(max(0, want - have)):
+                    self.log_workout(c.id, member)
+                if want > have:
+                    synced[c.id] = want
+            return synced
+        except Exception:  # noqa: BLE001
+            _log.debug("sync_from_training failed", exc_info=True)
+            return synced
 
     # — squads (#12 community namespace) —
 
@@ -526,6 +689,14 @@ class ChallengeStore:
             return []
 
 
+def _date_to_days(d: str) -> float:
+    """YYYY-MM-DD → days since epoch. Never raises."""
+    try:
+        return time.mktime(time.strptime(d, "%Y-%m-%d")) / 86400.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 # ── chat ─────────────────────────────────────────────────────────────
 
 def _store(context) -> ChallengeStore:
@@ -540,12 +711,23 @@ def _usage() -> str:
     return (
         "🏋️ /challenge — photo-proof challenges + streaks + squads\n"
         "create <name> | <workout-count|streak-days|distance|custom> | <days> [target N]\n"
+        "monthly [distance|streak|strength] — this month's recurring challenge\n"
         "list · join <id> · log <id> (log my workout, no interrogation)\n"
         "proof <id> <photo-path> — Seer-verified workout photo\n"
-        "board <id> — leaderboard\n"
-        "streak — your streak · risk — who's at risk\n"
+        "board <id> — leaderboard with progress bars + personal bests\n"
+        "sync — auto-count training-log workouts toward active challenges\n"
+        "streak — your streak (+❄️ freezes) · risk — who's at risk\n"
         "squad create <name> | <m1,m2,m3+> · squad board <squad_id> [challenge_id]"
     )
+
+
+def _progress_bar(done: int, target: int, width: int = 10) -> str:
+    try:
+        frac = max(0.0, min(1.0, done / max(1, target)))
+        fill = int(round(frac * width))
+        return "█" * fill + "░" * (width - fill)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def control_challenge(tail: str, context=None, chat=None,
@@ -622,13 +804,45 @@ def control_challenge(tail: str, context=None, chat=None,
             board = store.leaderboard(cid)
             if not board:
                 return "no scores yet — be the first. 💪"
-            lines = [f"{i+1}. {m} — {n} {'🏆' if done else ''}"
-                     for i, (m, n, done) in enumerate(board)]
+            c = store.get(cid)
+            target = c.target if c else 0
+            lines = []
+            for i, (m, n, done) in enumerate(board):
+                pb = store.personal_best(cid, m)
+                pb_txt = f" (PB {pb} 🏅)" if pb and n >= pb and n > 0 \
+                    else ""
+                bar = _progress_bar(n, target) if target else ""
+                lines.append(f"{i+1}. {m} — {n}/{target} {bar} "
+                             f"{'🏆' if done else ''}{pb_txt}".rstrip())
             return "🏆 leaderboard:\n" + "\n".join(lines)
+
+        if action == "monthly":
+            tpl = (args.strip().split()[0].lower()
+                   if args.strip() else "distance")
+            c = store.monthly_challenge(tpl, created_by=who)
+            if c is None:
+                return "couldn't spin up the monthly challenge."
+            return (f"🗓️ {c.name} is live ({c.id})\n"
+                    f"{c.type} · {c.target} in {c.duration_days} days · "
+                    f"badge: {c.badge}\n"
+                    f"join with: /challenge join {c.id}")
+
+        if action == "sync":
+            synced = store.sync_from_training(member=who)
+            if not synced:
+                return ("nothing new to sync — log workouts with /train "
+                        "and I'll auto-count them toward active challenges.")
+            return ("🔄 synced from your training log:\n" + "\n".join(
+                f"• {cid}: {n} workouts counted"
+                for cid, n in synced.items()))
 
         if action == "streak":
             store.checkin(who)
-            return f"🔥 {who}: {store.streak(who)}-day streak."
+            n = store.streak(who)
+            fr = store.freezes(who)
+            freeze_txt = f" · ❄️ {fr} freeze{'s' if fr != 1 else ''}" \
+                if fr else ""
+            return f"🔥 {who}: {n}-day streak{freeze_txt}."
 
         if action == "risk":
             risk = store.at_risk()

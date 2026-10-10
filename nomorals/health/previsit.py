@@ -38,6 +38,10 @@ __all__ = [
     "prepare_visit",
     "summarize_visit",
     "PREVISIT_BANNED_PHRASES",
+    "clarify_questions",
+    "route_with_context",
+    "handover_report",
+    "answer_clarifications",
 ]
 
 #: Every route output carries this framing. Non-negotiable.
@@ -157,6 +161,8 @@ class Route:
     crisis_resources: tuple[str, ...] = CRISIS_RESOURCES
     disclaimer: str = NAVIGATION_DISCLAIMER
     symptoms: list[str] = field(default_factory=list)
+    confidence: str = "medium"     # low | medium | high
+    clarifications_asked: int = 0  # follow-up rounds completed
 
 
 _NEXT_STEPS = {
@@ -273,6 +279,8 @@ def format_route(route: Route) -> str:
              "urgent": "🟠", "emergency": "🔴"}.get(route.level, "⚪")
     label = route.level.replace("_", " ").upper()
     lines = [f"{emoji} route: **{label}**"]
+    if getattr(route, "confidence", ""):
+        lines.append(f"_confidence: {route.confidence}_")
     if route.reasons:
         lines.append("why:")
         for r in route.reasons:
@@ -287,6 +295,205 @@ def format_route(route: Route) -> str:
     lines.append("")
     lines.append(route.disclaimer)
     return "\n".join(lines)
+
+
+# ── clarifying questions (Ada pattern) ──────────────────────────────────
+# Online checkers ask far fewer red-flag questions than clinicians
+# (36.9% vs 71.8%, BMC 2025). This closes the gap: after the initial
+# symptoms, targeted follow-ups surface red flags the user didn't
+# volunteer — then the router re-runs. Conservative direction kept.
+
+_CLARIFY_GENERAL = (
+    "any of these with it — chest pain or pressure, trouble breathing, "
+    "or a fever? (yes/no)")
+_CLARIFY_DURATION = "how long has this been going on?"
+_CLARIFY_SEVERITY = "at its worst, how bad is it on a 1–10 scale?"
+
+_CLARIFY_BY_AREA: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\bhead(ache)?\b|\bmigraine\b", re.I),
+     "any worst-ever headache, vision changes, slurred speech, or "
+     "weakness on one side? (yes/no)"),
+    (re.compile(r"\bchest\b", re.I),
+     "any pressure or tightness in the chest, or pain spreading to "
+     "the arm, neck, or jaw? (yes/no)"),
+    (re.compile(r"\b(stomach|belly|abdomen|abdominal)\b", re.I),
+     "any sudden severe abdominal pain, or vomiting you can't keep "
+     "down? (yes/no)"),
+    (re.compile(r"\b(throat|breath|cough)\b", re.I),
+     "any trouble breathing, wheezing, or swelling of the lips or "
+     "tongue? (yes/no)"),
+    (re.compile(r"\b(back|neck|spine)\b", re.I),
+     "any numbness, weakness, or trouble with bladder/bowels? (yes/no)"),
+    (re.compile(r"\b(leg|knee|ankle|foot|arm|wrist|hand)\b", re.I),
+     "any swelling, deformity after an injury, or inability to bear "
+     "weight / move it? (yes/no)"),
+)
+
+
+def clarify_questions(symptoms: list[str],
+                      max_questions: int = 4) -> list[str]:
+    """Targeted follow-ups before routing. Pure; never raises.
+
+    Always: duration + severity + the general red-flag probe. Plus one
+    body-area probe when the symptoms name an area. Conservative by
+    design — the questions exist to catch red flags, not to diagnose.
+    """
+    try:
+        joined = " ".join(symptoms or [])
+        out = [_CLARIFY_DURATION, _CLARIFY_SEVERITY]
+        for pattern, question in _CLARIFY_BY_AREA:
+            if pattern.search(joined):
+                out.append(question)
+                break
+        out.append(_CLARIFY_GENERAL)
+        seen: list[str] = []
+        for q in out:
+            if q not in seen:
+                seen.append(q)
+        return seen[:max(1, max_questions)]
+    except Exception:  # noqa: BLE001
+        return [_CLARIFY_GENERAL]
+
+
+def answer_clarifications(symptoms: list[str],
+                          answers: dict[str, str]) -> list[str]:
+    """Merge clarification answers into the symptom list for re-routing.
+
+    A "yes" to a red-flag probe appends the probe's subject as an
+    explicit symptom so triage_route sees it. Pure; never raises.
+    """
+    try:
+        extra: list[str] = []
+        for question, answer in (answers or {}).items():
+            a = (answer or "").strip().lower()
+            if a.startswith("y") or a in ("yeah", "yep"):
+                # the probe names the red flag — carry it forward
+                m = re.search(r"any (.+?)\? \(yes/no\)", question or "")
+                if m:
+                    extra.append("reported: " + m.group(1))
+            sev = re.search(r"\b(10|[1-9])\b", a)
+            if sev and "1–10" in (question or ""):
+                extra.append(f"severity {sev.group(1)}/10 at worst")
+            dur = re.search(
+                r"(\d+\s*(?:hour|day|week|month)s?|since \w+)", a)
+            if dur and "how long" in (question or "").lower():
+                extra.append(f"duration: {dur.group(1)}")
+        return list(symptoms or []) + extra
+    except Exception:  # noqa: BLE001
+        return list(symptoms or [])
+
+
+def route_with_context(symptoms: list[str], *,
+                       timeline: Any | None = None,
+                       days: int = 30) -> Route:
+    """Route with timeline correlation: recurrent episodes route up.
+
+    3+ similar symptom logs in ``days`` → bump one level (recurrence
+    deserves eyes on it) with an explicit reason. Navigation, not
+    diagnosis. Never raises.
+    """
+    try:
+        route = triage_route(symptoms)
+        if timeline is None:
+            try:
+                timeline = HealthTimeline()
+            except Exception:  # noqa: BLE001
+                timeline = None
+        if timeline is not None:
+            try:
+                from .timeline import _symptom_key  # reuse grouping
+            except Exception:  # noqa: BLE001
+                _symptom_key = None
+            if _symptom_key is not None:
+                keys = {_symptom_key(s) for s in symptoms or []}
+                keys.discard("unspecified")
+                if keys:
+                    since = time.time() - days * 86400
+                    prior = [e for e in timeline.timeline(
+                        since=since, event_type="symptom", limit=500)
+                        if _symptom_key(e.text) in keys]
+                    if len(prior) >= 3 and route.level in (
+                            "self_care", "routine_care"):
+                        route.level = _bump_up(route.level)
+                        route.reasons.append(
+                            f"you've logged this {len(prior)}× in the "
+                            f"last {days} days — recurrence routes up")
+                        route.next_steps = list(
+                            _NEXT_STEPS[route.level])
+        route.confidence = ("high" if route.level == "emergency"
+                            else "medium")
+        return route
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("route_with_context failed: %s", exc)
+        return triage_route(symptoms)
+
+
+def handover_report(symptoms: list[str] | None = None, *,
+                    timeline: HealthTimeline | None = None,
+                    days: int = 30) -> str:
+    """Printable care-navigation handover for the doctor (Ada pattern).
+
+    Symptoms + timeline excerpt + current meds + vitals trends, one
+    page. The doctor interprets; this just hands over facts. Never
+    raises.
+    """
+    try:
+        tl = timeline
+        own = False
+        if tl is None:
+            try:
+                tl = HealthTimeline()
+                own = True
+            except Exception:  # noqa: BLE001
+                tl = None
+        try:
+            lines = ["# Care handover — for the clinician",
+                     f"_prepared {time.strftime('%Y-%m-%d %H:%M')}_", ""]
+            if symptoms:
+                lines.append("## What I'm coming in about")
+                for s in symptoms:
+                    lines.append(f"- {s}")
+                lines.append("")
+            if tl is not None:
+                stats = tl.symptom_stats(days=days)
+                if stats:
+                    lines.append("## Symptom history "
+                                 f"(last {days} days)")
+                    for st in stats[:8]:
+                        sev = (f", avg {st.avg_severity}/5"
+                               if st.avg_severity is not None else "")
+                        lines.append(f"- {st.symptom}: {st.count}×"
+                                     f"{sev}, trend {st.trend}")
+                    lines.append("")
+                trends = tl.vitals_trend(days=days)
+                if trends:
+                    lines.append("## Recent measurements")
+                    for t in trends[:6]:
+                        lines.append(f"- {t.metric}: latest {t.latest:g} "
+                                     f"{t.unit} (avg {t.average:.1f})")
+                    lines.append("")
+                meds = tl.timeline(
+                    since=time.time() - days * 86400,
+                    event_type="medication", limit=50)
+                if meds:
+                    lines.append("## Medications (as I logged them)")
+                    for e in meds:
+                        lines.append(f"- {e.when_str()}: {e.text}")
+                    lines.append("")
+            lines.append("## Questions I want to ask")
+            lines.append("- What do you think is going on, and what "
+                         "else could it be?")
+            lines.append("- What tests do I need?")
+            lines.append("- What should make me come back sooner?")
+            lines.append("")
+            lines.append("_" + NAVIGATION_DISCLAIMER + "_")
+            return "\n".join(lines)
+        finally:
+            if own and tl is not None:
+                tl.close()
+    except Exception:  # noqa: BLE001
+        _log.debug("handover_report failed", exc_info=True)
+        return "couldn't build the handover right now."
 
 
 # ── price transparency (Nigeria) ──────────────────────────────────────────
