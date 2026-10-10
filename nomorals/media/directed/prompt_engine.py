@@ -36,10 +36,62 @@ NEGATIVE_VIDEO = (
     "morphing faces, unnatural motion, plastic skin, frozen frame"
 )
 
+#: HunyuanVideo — official 1.x default negative is the empty string
+#: (guidance-distilled, true_cfg); community motion-focused fallback
+#: from the prompting experiments (see module notes).
+NEGATIVE_HUNYUAN = (
+    "low quality, blurry, distorted, artifacts, watermark, text, logo, "
+    "static camera, no motion, jerky motion, stuttering, flickering"
+)
+
+#: Mochi — T5 encoder, strong adherence; temporal artifacts are the
+#: failure mode (mined from video prompt-engineering practice).
+NEGATIVE_MOCHI = (
+    "blurry, low quality, morphing face, extra limbs, extra fingers, "
+    "flickering, warping background, distorted hands, text, watermark, "
+    "sudden scene change, deformed body, disappearing objects"
+)
+
+#: CogVideoX — negative from the official diffusers CogVideoX docs.
+NEGATIVE_COGVIDEOX = (
+    "inconsistent motion, blurry motion, worse quality, degenerate outputs, "
+    "deformed outputs, watermark, text, logo, flickering, distorted faces"
+)
+
 NEGATIVE_IMAGE = (
     "blurry, low quality, distorted, watermark, text, logo, "
     "bad anatomy, extra fingers, deformed hands"
 )
+
+#: per-backend negative defaults. SVD has no text encoder (image-to-video)
+#: and the CPU motion path takes keywords only — both get "".
+NEGATIVE_BACKENDS: dict[str, str] = {
+    "ltx": NEGATIVE_VIDEO,
+    "wan": NEGATIVE_VIDEO,
+    "hunyuanvideo": NEGATIVE_HUNYUAN,
+    "hunyuan": NEGATIVE_HUNYUAN,
+    "mochi": NEGATIVE_MOCHI,
+    "cogvideox": NEGATIVE_COGVIDEOX,
+    "cogvideo": NEGATIVE_COGVIDEOX,
+    "image": NEGATIVE_IMAGE,
+    "sd": NEGATIVE_IMAGE,
+    "svd": "",
+    "motion": "",
+}
+
+
+def negative_prompt(backend: str, extra: str = "") -> str:
+    """Per-backend negative prompt builder.
+
+    Returns the backend's curated default negative; ``extra`` appends
+    user/brain-supplied terms. SVD and the motion path take no negative
+    (no text encoder / keyword-only) and return "".
+    """
+    base = NEGATIVE_BACKENDS.get((backend or "").lower(), NEGATIVE_VIDEO)
+    extra = (extra or "").strip().rstrip(",")
+    if extra:
+        return f"{base}, {extra}" if base else extra
+    return base
 
 PHYSICAL_DETAIL_PACK = (
     "natural skin texture with visible pores, flyaway hair strands, "
@@ -84,7 +136,22 @@ LIGHTING = {
     "night": "dim blue-toned night lighting",
 }
 
-# vibe adjectives -> physical descriptors (anti vibe-coding)
+# ── shot-composition vocabulary ──────────────────────────────────
+#: composition cues extracted from plain NL and woven into renders.
+#: Style-agnostic framing primitives — no aesthetic baked in.
+COMPOSITION = {
+    "rule of thirds": "subject placed on a rule-of-thirds intersection",
+    "leading lines": "strong leading lines draw the eye toward the subject",
+    "depth layers": "layered foreground, midground and background for depth",
+    "headroom": "generous headroom above the subject",
+    "symmetry": "symmetrical composition with the subject centered",
+    "negative space": "expansive negative space around the subject",
+    "dutch angle": "dutch angle, tilted horizon for tension",
+    "frame within a frame": "a natural frame-within-the-frame around the subject",
+    "centered": "subject centered in frame",
+}
+
+#: vibe adjectives -> physical descriptors (anti vibe-coding)
 VIBE_MAP = {
     "beautiful": "symmetrical features, clear skin",
     "epic": "dramatic scale, sweeping composition",
@@ -107,10 +174,18 @@ class StructuredPrompt:
     lens: str = ""
     lighting: str = ""
     style_tags: list[str] = field(default_factory=list)
+    composition: list[str] = field(default_factory=list)  # COMPOSITION phrases
     physical_details: str = PHYSICAL_DETAIL_PACK
-    negative: str = NEGATIVE_VIDEO
+    #: explicit negative override — when empty, render() uses the
+    #: per-backend default from negative_prompt(backend)
+    negative: str = ""
     consistency: str = TEMPORAL_ANCHORS
     backend: str = "ltx"
+
+    def _composition_sentence(self) -> str:
+        if not self.composition:
+            return ""
+        return "Composition: " + "; ".join(self.composition) + "."
 
     # ── backend formatters ──────────────────────────────────────────
     def for_ltx(self) -> str:
@@ -166,13 +241,126 @@ class StructuredPrompt:
         bits.append(self.physical_details)
         return ", ".join(b for b in bits if b)
 
+    # ── new backend renderers (Phase 8C) ───────────────────────────
+
+    def for_hunyuanvideo(self) -> str:
+        """HunyuanVideo: detailed 5-aspect description — subject, action,
+        scene, camera, lighting — with explicit camera and timing
+        language ("The camera pans…", "over N seconds")."""
+        parts = [self.action_sentence.rstrip(".") + "."]
+        if self.appearance:
+            parts.append(self.appearance.rstrip(".") + ".")
+        if self.environment:
+            parts.append(self.environment.rstrip(".") + ".")
+        cam = " ".join(x for x in
+                       [self.camera_angle, self.camera_movement, self.lens]
+                       if x)
+        if cam:
+            parts.append(f"The camera: {cam}.")
+        if self.beats:
+            parts.append(
+                "The motion unfolds " + " ".join(self.beats).lower())
+        if self.lighting:
+            parts.append(self.lighting.rstrip(".") + ".")
+        comp = self._composition_sentence()
+        if comp:
+            parts.append(comp)
+        if self.style_tags:
+            parts.append("Style: " + ", ".join(self.style_tags) + ".")
+        parts.append(self.physical_details.rstrip(".") + ".")
+        parts.append(self.consistency.rstrip(".") + ".")
+        text = " ".join(parts)
+        words = text.split()
+        if len(words) > 300:
+            text = " ".join(words[:300])
+        return text
+
+    def for_mochi(self) -> str:
+        """Mochi: cinematic brief — style tags open, then a dense visual
+        description with shot, lens and lighting named explicitly
+        (Mochi's T5 encoder rewards named cinematography)."""
+        parts = []
+        if self.style_tags:
+            parts.append(", ".join(self.style_tags).capitalize() + ".")
+        desc = [self.action_sentence.rstrip(".") + "."]
+        if self.appearance:
+            desc.append(self.appearance.rstrip(".") + ".")
+        if self.environment:
+            desc.append(self.environment.rstrip(".") + ".")
+        shot = " ".join(x for x in
+                        [self.camera_angle, self.camera_movement, self.lens]
+                        if x)
+        if shot:
+            desc.append(f"{shot.capitalize()}.")
+        if self.lighting:
+            desc.append(self.lighting.rstrip(".") + ".")
+        comp = self._composition_sentence()
+        if comp:
+            desc.append(comp)
+        parts.append(" ".join(desc))
+        if self.beats:
+            parts.append(" ".join(self.beats))
+        parts.append(self.physical_details.rstrip(".") + ".")
+        parts.append(self.consistency.rstrip(".") + ".")
+        text = " ".join(parts)
+        words = text.split()
+        if len(words) > 250:
+            text = " ".join(words[:250])
+        return text
+
+    def for_cogvideox(self) -> str:
+        """CogVideoX: one long descriptive paragraph (the docs' own
+        examples are detailed prose), action-first, camera last."""
+        parts = [self.action_sentence.rstrip(".") + "."]
+        if self.appearance:
+            parts.append(self.appearance.rstrip(".") + ".")
+        if self.environment:
+            parts.append(self.environment.rstrip(".") + ".")
+        if self.beats:
+            parts.append(" ".join(self.beats))
+        if self.lighting:
+            parts.append(self.lighting.rstrip(".") + ".")
+        comp = self._composition_sentence()
+        if comp:
+            parts.append(comp)
+        cam = " ".join(x for x in
+                       [self.camera_angle, self.camera_movement, self.lens]
+                       if x)
+        if cam:
+            parts.append(f"Camera work: {cam}.")
+        if self.style_tags:
+            parts.append(", ".join(self.style_tags) + ".")
+        parts.append(self.physical_details.rstrip(".") + ".")
+        parts.append(self.consistency.rstrip(".") + ".")
+        return " ".join(parts)
+
+    def for_svd(self) -> str:
+        """Stable Video Diffusion: honest I2V — SVD has no text encoder,
+        so this renders a MOTION DIRECTIVE (what moves, how the camera
+        moves), not a scene description. Pair with a start frame."""
+        bits = [self.action_sentence.rstrip(".") + "."]
+        bits += self.beats
+        if self.camera_movement:
+            bits.append(f"Camera: {self.camera_movement}.")
+        if self.camera_angle:
+            bits.append(f"Framing: {self.camera_angle}.")
+        comp = self._composition_sentence()
+        if comp:
+            bits.append(comp)
+        return " ".join(b for b in bits if b)
+
     def render(self, backend: str | None = None) -> dict[str, str]:
         b = (backend or self.backend).lower()
         fmt = {"ltx": self.for_ltx, "wan": self.for_wan,
+               "hunyuanvideo": self.for_hunyuanvideo,
+               "hunyuan": self.for_hunyuanvideo,
+               "mochi": self.for_mochi,
+               "cogvideox": self.for_cogvideox,
+               "cogvideo": self.for_cogvideox,
+               "svd": self.for_svd,
                "motion": self.for_motion, "image": self.for_image,
                "sd": self.for_image}.get(b, self.for_ltx)
-        neg = self.negative if b in ("ltx", "wan") else NEGATIVE_IMAGE \
-            if b in ("image", "sd") else ""
+        neg = self.negative or negative_prompt(b)
         return {"prompt": fmt(), "negative_prompt": neg, "backend": b}
 
 
@@ -230,6 +418,18 @@ def _extract_lighting(text: str) -> str:
     return ""
 
 
+def _extract_composition(text: str) -> list[str]:
+    """Shot-composition vocabulary from NL: rule of thirds, leading
+    lines, depth layers, headroom, symmetry, negative space,
+    dutch angle, frame-within-a-frame, centered."""
+    t = text.lower()
+    found = []
+    for key, phrase in COMPOSITION.items():
+        if key in t and phrase not in found:
+            found.append(phrase)
+    return found
+
+
 def _extract_style(text: str) -> list[str]:
     t = text.lower()
     tags = []
@@ -275,6 +475,7 @@ def structure(plain: str, *, backend: str = "ltx",
         lens=lens,
         lighting=_extract_lighting(text),
         style_tags=_extract_style(text),
+        composition=_extract_composition(text),
         backend=backend,
     )
     return sp
