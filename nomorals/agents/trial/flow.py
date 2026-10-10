@@ -108,6 +108,17 @@ TEMP_SMS_KV_KEY = "trial.temp_sms"
 #: unknown instead of misfiring.
 _CONFIRM_GATE = None
 
+#: secret-free trial action audit log, under the trial home dir.  Every
+#: credential-touching action (assist launch/complete, save, deliver,
+#: delete, sms watch start/finish) appends one JSON line: timestamp,
+#: action, platform, outcome — never the secret itself.
+_TRIAL_AUDIT_LOG = "trial_audit.jsonl"
+
+#: kv_store key prefix where ``start`` stashes its research plan so a
+#: later ``assist`` can pick up the discovered signup URL instead of
+#: re-researching from zero.
+_PLAN_KV_PREFIX = "trial.plan."
+
 
 def _format_sms_poll_result(info: dict[str, Any], code: str,
                             timeout: float) -> str:
@@ -213,7 +224,49 @@ class TrialFlow:
         lines.append("")
         lines.append("want me to drive the signup instead? use:")
         lines.append(f"  /trial assist {platform}")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        # Stash the plan so a later /trial assist can pick up the
+        # discovered signup URL instead of re-researching from zero.
+        self._stash_plan(platform, text)
+        return text
+
+    def _stash_plan(self, platform: str, text: str) -> None:
+        """Persist a research plan for the research→execute handoff."""
+        if self.db is None:
+            return
+        try:
+            KVStore(self.db).set(
+                f"{_PLAN_KV_PREFIX}{platform.strip().lower()}",
+                {"platform": platform.strip().lower(),
+                 "plan": text, "saved_at": time.time()},
+            )
+        except Exception:  # noqa: BLE001 - stash is best-effort
+            _log.debug("trial plan stash failed for %s", platform)
+
+    def _load_plan(self, platform: str) -> dict[str, Any]:
+        if self.db is None:
+            return {}
+        try:
+            data = KVStore(self.db).get(
+                f"{_PLAN_KV_PREFIX}{platform.strip().lower()}")
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    @staticmethod
+    def _plan_signup_url(plan: dict[str, Any]) -> str:
+        """Extract a likely signup URL from a stashed research plan."""
+        import re
+
+        text = str(plan.get("plan") or "")
+        for match in re.finditer(r"https?://[^\s)\"'<>]+", text):
+            url = match.group(0).rstrip(".,;")
+            low = url.lower()
+            if any(k in low for k in ("signup", "sign-up", "register",
+                                      "join", "create-account")):
+                return url
+        return ""
 
     def assist(self, platform: str, *, chat_key: str = "", auto_yes: bool = False) -> str:
         """Browser-assisted signup via AccountCreator — actually launched.
@@ -239,17 +292,29 @@ class TrialFlow:
                 IdentityBank, render_persona_card)
         except Exception as exc:  # noqa: BLE001
             return f"account automation unavailable: {exc}"
+        # One account per service — refuse before drafting any identity.
+        existing = self._existing_account(platform)
+        if existing:
+            source, login = existing
+            self._audit("assist_refused", platform,
+                        f"already have account ({source} vault)")
+            return (
+                f"already have an account for {platform} "
+                f"({source} vault, login: {login}) — one account per "
+                "service.\n"
+                f"  /trial send {platform}   — redeliver the credentials\n"
+                f"  /trial rm {platform}     — remove it, then retry assist"
+            )
         # Owner's own identity wins when set (services tied to them).
         # Otherwise draft a disposable persona — confirmation-gated.
         identity = self._owner_identity()
         persona_id = ""
         if not identity.get("name") or not identity.get("email"):
-            bank = self._identity_bank()
-            persona = bank.get_or_mint(platform)
-            persona_id = persona.id
+            persona, gen = self._generate_disposable_identity(platform)
+            persona_id = gen["persona_id"]
             identity = {
-                "name": persona.name,
-                "email": "(temp address minted at signup)",
+                "name": gen["name"],
+                "email": gen["email"],
                 "disposable": "true",
                 "persona_id": persona_id,
             }
@@ -295,15 +360,53 @@ class TrialFlow:
                 "started. Rerun `/trial assist <platform>` for a fresh "
                 "identity draft.")
         platform = payload.get("platform", "")
+        # Re-fetch the exact persona the owner confirmed (same name the
+        # warning card showed) instead of a "(disposable persona)"
+        # placeholder.
+        _, gen = self._generate_disposable_identity(
+            platform, persona_id=payload.get("persona_id", ""))
         return self._launch_assist(
             platform,
             chat_key=chat_key or payload.get("chat_key", ""),
-            identity={"name": "(disposable persona)",
-                      "email": "(temp address minted at signup)",
+            identity={"name": gen["name"],
+                      "email": gen["email"],
                       "disposable": "true",
-                      "persona_id": payload.get("persona_id", "")},
-            persona_id=payload.get("persona_id", ""),
+                      "persona_id": gen["persona_id"]},
+            persona_id=gen["persona_id"],
         )
+
+    def _existing_account(self, platform: str) -> tuple[str, str] | None:
+        """(vault_source, login) if an account for ``platform`` exists.
+
+        Checks the trial vault (always readable) and the accounts vault
+        (when the passphrase is set — the passphrase gate in
+        ``_launch_assist`` refuses the run anyway when it isn't).  Used
+        to enforce one-account-per-service in code before a new signup
+        is launched, instead of relying on prose.
+        """
+        key = (platform or "").strip().lower()
+        if not key:
+            return None
+        try:
+            entry = self.vault.get(key)
+        except Exception:  # noqa: BLE001 - treat as unknown, keep going
+            entry = None
+        if entry is not None and not entry.get("unreadable"):
+            return ("trial", str(entry.get("login") or "?"))
+        passphrase = os.environ.get("NM_VAULT_PASSPHRASE", "")
+        if passphrase and self.db is not None:
+            try:
+                from ...accounts.vault import CredentialVault
+
+                vault = CredentialVault(self.db,
+                                        master_passphrase=passphrase)
+                for cred in vault.list_all(service=key, active_only=True):
+                    return ("accounts",
+                            str(getattr(cred, "username", "?") or "?"))
+            except Exception:  # noqa: BLE001 - absence of evidence
+                _log.debug("trial existing-account check failed for %s",
+                           key)
+        return None
 
     def _launch_assist(self, platform: str, *, chat_key: str,
                        identity: dict[str, str], persona_id: str = "",
@@ -316,6 +419,21 @@ class TrialFlow:
             return (
                 "vault is locked: set the NM_VAULT_PASSPHRASE environment "
                 "variable so I can store the new credentials, then ask me again."
+            )
+        # One account per service, enforced in code: refuse to drive a
+        # second signup when one already exists in either vault.  The
+        # owner redelivers with /trial send or removes it first.
+        existing = self._existing_account(platform)
+        if existing:
+            source, login = existing
+            self._audit("assist_refused", platform,
+                        f"already have account ({source} vault)")
+            return (
+                f"already have an account for {platform} "
+                f"({source} vault, login: {login}) — one account per "
+                "service.\n"
+                f"  /trial send {platform}   — redeliver the credentials\n"
+                f"  /trial rm {platform}     — remove it, then retry assist"
             )
         if not self._assist_sem.acquire(blocking=False):
             return (
@@ -343,6 +461,7 @@ class TrialFlow:
             daemon=True,
         )
         thread.start()
+        self._audit("assist_start", platform, f"run {run_id}")
         return (
             f"assisted signup for {platform} — started.\n"
             f"identity: {identity.get('name')} <{identity.get('email')}>\n"
@@ -494,12 +613,16 @@ class TrialFlow:
             notify=lambda t, b, aid: self._notify_owner(t, b, chat_key),
             page_factory=self._trial_page_factory,
         )
+        # Research→execute handoff: if /trial start already found the
+        # signup URL, hand it to the driver instead of guessing.
+        signup_url = self._plan_signup_url(self._load_plan(platform))
         attempt = asyncio.run(driver.adrive(
             service=platform,
             persona=persona,
             confirmed=True,
             owner_contacts=self._owner_contacts(),
             supersedes=supersedes,
+            **({"signup_url": signup_url} if signup_url else {}),
         ))
         return (
             f"✅ {attempt.service} account ready — credentials are in the "
@@ -582,6 +705,11 @@ class TrialFlow:
             self._assist_runs[run_id].update(
                 state="done" if ok else "failed", note=note)
         self._persist_assist_run(run_id)
+        if ok and "⏸️" in note:
+            outcome = "paused_for_human"
+        else:
+            outcome = "done" if ok else "failed"
+        self._audit("assist_finish", platform, f"run {run_id}: {outcome}")
         self._notify_owner(f"trial assist — {platform}", note, chat_key)
 
     # ── durable assist-run state ──────────────────────────────────────────
@@ -1176,6 +1304,29 @@ class TrialFlow:
                 lines.append(f"    code: {watch.get('code')}")
         return lines
 
+    def _audit(self, action: str, platform: str = "",
+               outcome: str = "") -> None:
+        """Append one secret-free row to the trial action audit log.
+
+        Never carries credentials, codes, or secrets — action/platform/
+        outcome only.  The log lives next to the trial vault data so a
+        later review can answer "what did the trial flow touch, when".
+        """
+        try:
+            home = self.vault.home
+            home.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": time.time(),
+                "action": action,
+                "platform": (platform or "").lower(),
+                "outcome": (outcome or "")[:200],
+            }
+            with open(home / _TRIAL_AUDIT_LOG, "a",
+                       encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except Exception:  # noqa: BLE001 - audit never breaks the action
+            _log.debug("trial action audit write failed")
+
     def _notify_owner(self, title: str, body: str, chat_key: str = "") -> None:
         """Deliver a background-run report to the owner. Never raises."""
         try:
@@ -1195,19 +1346,30 @@ class TrialFlow:
                     provider: str = "simcodes") -> str:
         """Grab a free temp number for SMS verification (``/trial sms``).
 
-        The number is stashed in kv_store so ``/trial sms code`` can poll
-        it without the owner pasting JSON around.  Free providers, no API
-        key — the number is public, so it is only good for throwaway
-        verification codes, never for anything sensitive.
+        Tries providers in cascade order (then fallback countries), so
+        one provider outage doesn't hard-fail the grab — the ``provider``
+        argument just picks which provider is tried first.  The number
+        is stashed in kv_store so ``/trial sms code`` can poll it without
+        the owner pasting JSON around.  Free providers, no API key — the
+        number is public, so it is only good for throwaway verification
+        codes, never for anything sensitive.
         """
-        from ...accounts.temp_sms import grab_number
+        from ...accounts.temp_sms import (
+            CASCADE_PROVIDERS,
+            grab_number_cascade,
+        )
 
-        info = grab_number(country=(country or "us").strip() or "us",
-                           provider=(provider or "simcodes").strip()
-                           or "simcodes")
+        preferred = (provider or "simcodes").strip() or "simcodes"
+        providers = tuple([preferred]
+                          + [p for p in CASCADE_PROVIDERS if p != preferred])
+        info = grab_number_cascade(
+            country=(country or "us").strip() or "us",
+            providers=providers,
+        )
         if info.get("status") != "ok":
             return f"❌ {info.get('notes', 'could not grab a number')}"
         self._stash_temp_number(info)
+        self._audit("temp_number", "", info.get("provider", ""))
         return (
             "📱 temp number (free, public inbox — verification codes only):\n"
             f"  number: {info['number']}\n"
@@ -1260,6 +1422,7 @@ class TrialFlow:
             daemon=True,
         )
         thread.start()
+        self._audit("sms_watch_start", "", str(number))
         return (
             f"👀 watching {number} for a verification code "
             f"(up to {timeout:.0f}s) — I'll ping you here the moment one lands."
@@ -1279,6 +1442,7 @@ class TrialFlow:
             result = (f"⚠️ the sms code watch on {number} errored: {exc}. "
                       "try again: /trial sms code")
             self._set_sms_watch_state(watch_id, "timeout", note=result)
+            self._audit("sms_watch", "", "error")
             self._notify_owner(f"sms code watch — {number}", result,
                                chat_key)
             return
@@ -1293,6 +1457,8 @@ class TrialFlow:
         self._set_sms_watch_state(
             watch_id, "done" if code else "timeout",
             code=code or "", note=result)
+        self._audit("sms_watch", "",
+                    "code received" if code else "timeout, no code")
         self._notify_owner(f"sms code watch — {number}", result,
                            chat_key)
 
@@ -1392,27 +1558,32 @@ class TrialFlow:
         except Exception:  # noqa: BLE001
             return {}
 
-    def _generate_disposable_identity(self, platform: str) -> dict[str, str]:
-        """Generate a disposable identity for trial signups.
+    def _generate_disposable_identity(
+        self, platform: str, persona_id: str = ""
+    ) -> tuple[Any, dict[str, str]]:
+        """Mint (or re-fetch) the disposable persona for a trial signup.
 
-        Delegates to the vault-side :class:`IdentityBank` — the same
-        persona is reused for the service's retries (same name on the
-        form, same username attempts, same temp email).  Uses
-        temp/disposable contacts — NEVER the owner's real details.
-        Returns dict with name, email slot, persona_id, and a flag
-        marking it as generated.
+        The single construction path for disposable identities, used by
+        :meth:`assist` and :meth:`confirm_signup`.  Delegates to the
+        vault-side :class:`IdentityBank` — the same persona is reused for
+        the service's retries (same name on the form, same username
+        attempts, same temp email).  Uses temp/disposable contacts —
+        NEVER the owner's real details.  Returns ``(persona,
+        identity_dict)`` with name, email slot, persona_id, and the
+        generated flag.
         """
-        from ...accounts.identity_bank import IdentityBank
-
         bank = self._identity_bank()
-        persona = bank.get_or_mint(platform)
-        return {
+        persona = bank.get(persona_id) if persona_id else None
+        if persona is None:
+            persona = bank.get_or_mint(platform)
+        identity = {
             "name": persona.name,
             "email": persona.email or "(temp address minted at signup)",
             "disposable": "true",
             "platform": platform,
             "persona_id": persona.id,
         }
+        return persona, identity
 
     def _identity_bank(self):
         """Vault-side identity bank (vault when the passphrase is set)."""
@@ -1490,8 +1661,12 @@ class TrialFlow:
     def save(self, platform: str, login: str, secret: str, note: str = "") -> dict:
         if not (platform and login and secret):
             raise ToolError("usage: /trial save <platform> <login> <password>")
-        self.vault.store(platform, login, secret, note)
-        return {"platform": platform.lower(), "login": login}
+        stored = self.vault.store(platform, login, secret, note)
+        overwrote = bool(stored.get("overwrote"))
+        self._audit("save", platform,
+                    "overwrote existing" if overwrote else "stored")
+        return {"platform": platform.lower(), "login": login,
+                "overwrote": overwrote}
 
     def deliver(self, platform: str, gateway: Any = None, via: str = "") -> str:
         """Send a stored credential pair to the owner on live channels.
@@ -1520,7 +1695,9 @@ class TrialFlow:
         if not sent:
             # No live channel (or dry run): hand the text back so the caller
             # can show it — the credential still exists, just undelivered.
+            self._audit("deliver", platform, "no live channel — shown inline")
             return "(no live WhatsApp/Telegram in this session — shown here)\n" + body
+        self._audit("deliver", platform, "sent on " + ",".join(sent))
         return "sent on: " + ", ".join(sent)
 
     def _delivery_targets(self, gateway: Any, via: str) -> list[tuple[str, str]]:
@@ -1577,13 +1754,75 @@ class TrialFlow:
         lines = ["stored trial accounts:"]
         for row in rows:
             when = time.strftime("%Y-%m-%d", time.localtime(row.get("saved_at", 0)))
-            lines.append(f"  {row['platform']}: {row['login']}  (saved {when})")
+            stale = ("  ⚠️ saved over 90 days ago — consider rotating"
+                     if row.get("stale") else "")
+            lines.append(f"  {row['platform']}: {row['login']}  (saved {when}){stale}")
         return "\n".join(lines)
 
     def remove(self, platform: str) -> str:
         if self.vault.delete(platform):
+            self._audit("delete", platform, "deleted")
             return f"deleted trial account for {platform.lower()}."
+        self._audit("delete", platform, "not found")
         return f"no stored trial account for {platform.lower()}."
+
+    def audit_log(self, platform: str = "", limit: int = 20) -> str:
+        """Recent secret-free trial action audit rows (``/trial audit``).
+
+        Answers "what did the trial flow touch, when" — actions and
+        platforms only, never secrets or codes.
+        """
+        home = self.vault.home
+        path = home / _TRIAL_AUDIT_LOG
+        if not path.exists():
+            return "no trial audit rows yet."
+        rows: list[dict[str, Any]] = []
+        try:
+            for line in path.read_text("utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001 - skip corrupt lines
+                    continue
+                if isinstance(row, dict) and (
+                        not platform
+                        or str(row.get("platform") or "") == platform.lower()):
+                    rows.append(row)
+        except Exception:  # noqa: BLE001 - best-effort read
+            return "could not read the trial audit log."
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        rows = rows[:max(1, limit)]
+        if not rows:
+            return "no trial audit rows yet."
+        lines = ["trial audit (newest first):"]
+        for row in rows:
+            when = time.strftime("%m-%d %H:%M",
+                                 time.localtime(row.get("ts", 0)))
+            plat = row.get("platform") or "—"
+            outcome = row.get("outcome") or ""
+            lines.append(f"  {when}  {row.get('action')}  {plat}"
+                         + (f"  ({outcome})" if outcome else ""))
+        lines.extend(self._vault_audit_lines(platform, limit))
+        return "\n".join(lines)
+
+    def _vault_audit_lines(self, platform: str, limit: int) -> list[str]:
+        """Vault-level access rows (store/get/delete/list) for the audit."""
+        try:
+            rows = self.vault.audit_trail(platform, limit=limit)
+        except Exception:  # noqa: BLE001 - best-effort
+            return []
+        if not rows:
+            return []
+        lines = ["vault access (newest first):"]
+        for row in rows:
+            when = time.strftime("%m-%d %H:%M",
+                                 time.localtime(row.get("ts", 0)))
+            plat = row.get("platform") or "—"
+            ok = "" if row.get("ok", True) else "  (not found/unreadable)"
+            lines.append(f"  {when}  {row.get('action')}  {plat}{ok}")
+        return lines
 
     def _search_engine(self) -> Any:
         from ..search.engine import SearchEngine

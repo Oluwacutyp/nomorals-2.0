@@ -74,18 +74,54 @@ class ApplierTests(unittest.TestCase):
         app = applier.draft(opp)
         self.assertEqual("drafted", app.status)
         self.assertIn("great fit", app.draft_text)
-        # explicit submit goes immediately
+        # no board submitter registered → honest "submit_attempted",
+        # never a fake "submitted".
         app2 = applier.submit(app.gig_id, explicit=True)
-        self.assertEqual("submitted", app2.status)
-        self.assertIsNotNone(app2.submitted_at)
+        self.assertEqual("submit_attempted", app2.status)
+        self.assertIsNone(app2.submitted_at)
+        self.assertIn("next_steps", app2.submission_evidence)
+
+    def test_submit_with_board_submitter(self):
+        applier = self._applier()
+        saved = dict(G.SUBMITTERS)
+        G.register_submitter(
+            "outlier.ai",
+            lambda app, draft: {"ok": True, "method": "test",
+                                "evidence": "confirmation id TEST-1"})
+        try:
+            app = applier.draft(_opp())
+            app2 = applier.submit(app.gig_id, explicit=True)
+            self.assertEqual("submitted", app2.status)
+            self.assertIsNotNone(app2.submitted_at)
+            self.assertIsNotNone(app2.follow_up_at)
+        finally:
+            G.SUBMITTERS.clear()
+            G.SUBMITTERS.update(saved)
 
     def test_status_pipeline(self):
         applier = self._applier()
-        app = applier.draft(_opp())
-        applier.set_status(app.gig_id, "interview", notes="screening call")
+        saved = dict(G.SUBMITTERS)
+        G.register_submitter(
+            "outlier.ai",
+            lambda app, draft: {"ok": True, "method": "test",
+                                "evidence": "confirmation id TEST-2"})
+        try:
+            app = applier.draft(_opp())
+            applier.submit(app.gig_id, explicit=True)
+            applier.set_status(app.gig_id, "interview", notes="screening call")
+        finally:
+            G.SUBMITTERS.clear()
+            G.SUBMITTERS.update(saved)
         got = applier.store.get(app.gig_id)
         self.assertEqual("interview", got.status)
         self.assertEqual("screening call", got.notes)
+
+    def test_invalid_transition_raises(self):
+        applier = self._applier()
+        app = applier.draft(_opp())
+        # drafted → interview skips the pipeline: rejected.
+        with self.assertRaises(ValueError):
+            applier.set_status(app.gig_id, "interview")
 
     def test_bad_status_raises(self):
         applier = self._applier()

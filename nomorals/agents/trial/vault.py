@@ -30,6 +30,16 @@ _NONCE_LEN = 16
 _TAG_LEN = 32
 _MAGIC = b"NMTRIAL1"
 
+#: a stored credential older than this is flagged ``stale`` so the owner
+#: gets a rotation nudge instead of silently trusting an ancient password.
+_STALE_AFTER_SECONDS = 90 * 24 * 3600
+
+#: secret-free access audit log, next to the data file.  Every store/get/
+#: delete/list appends one JSON line: timestamp, action, platform — never
+#: the secret itself.  Best practice: a credential nobody audits is a
+#: credential nobody can investigate.
+_AUDIT_LOG_NAME = "trial_access.jsonl"
+
 
 def _derive(master: bytes, salt: bytes) -> bytes:
     return hashlib.scrypt(master, salt=salt, n=1 << 14, r=8, p=1, dklen=32)
@@ -107,11 +117,64 @@ class TrialVault:
         tmp.write_text(json.dumps(all, indent=2), "utf-8")
         os.replace(tmp, self.data_path)
 
+    # ── secret-free access audit ───────────────────────────────────────────
+    def _audit(self, action: str, platform: str, *, ok: bool = True) -> None:
+        """Append one audit row. Never carries secrets — platform only."""
+        try:
+            self.home.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": time.time(),
+                "action": action,
+                "platform": platform,
+                "ok": ok,
+            }
+            with open(self.home / _AUDIT_LOG_NAME, "a",
+                       encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except Exception:  # noqa: BLE001 - audit never breaks the action
+            pass
+
+    def audit_trail(self, platform: str = "",
+                    limit: int = 50) -> list[dict]:
+        """Recent secret-free access rows, newest first (for review)."""
+        path = self.home / _AUDIT_LOG_NAME
+        if not path.exists():
+            return []
+        rows: list[dict] = []
+        try:
+            for line in path.read_text("utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001 - skip corrupt lines
+                    continue
+                if isinstance(row, dict) and (
+                        not platform or row.get("platform") == platform):
+                    rows.append(row)
+        except Exception:  # noqa: BLE001 - best-effort read
+            return []
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        return rows[:limit]
+
+    @staticmethod
+    def _age_fields(entry: dict) -> dict:
+        """Rotation signal: how old is this credential?"""
+        saved = float(entry.get("saved_at") or 0)
+        age = max(0.0, time.time() - saved) if saved else 0.0
+        return {
+            "age_days": round(age / 86400, 1),
+            "stale": bool(saved) and age > _STALE_AFTER_SECONDS,
+        }
+
     # ── API ──────────────────────────────────────────────────────────────────
     def store(self, platform: str, login: str, secret: str, note: str = "") -> dict:
         platform = platform.strip().lower()
         if not platform or not login or not secret:
             raise ValueError("platform, login and secret are all required")
+        all = self._read_all()
+        overwrote = platform in all
         entry = {
             "platform": platform,
             "login": login,
@@ -119,23 +182,29 @@ class TrialVault:
             "note": note,
             "saved_at": time.time(),
         }
-        all = self._read_all()
         all[platform] = entry
         self._write_all(all)
-        return {"platform": platform, "login": login}
+        self._audit("store", platform)
+        return {"platform": platform, "login": login,
+                "overwrote": overwrote}
 
     def get(self, platform: str) -> dict | None:
         platform = platform.strip().lower()
         entry = self._read_all().get(platform)
         if entry is None:
+            self._audit("get", platform, ok=False)
             return None
         try:
             secret = _open(self._master(), bytes.fromhex(entry["secret"])).decode("utf-8")
         except Exception:  # noqa: BLE001 - report, don't crash
-            return {**entry, "secret": None, "unreadable": True}
-        return {**entry, "secret": secret}
+            self._audit("get", platform, ok=False)
+            return {**entry, "secret": None, "unreadable": True,
+                    **self._age_fields(entry)}
+        self._audit("get", platform)
+        return {**entry, "secret": secret, **self._age_fields(entry)}
 
     def list(self) -> list[dict]:
+        self._audit("list", "")
         out = []
         for platform, entry in sorted(self._read_all().items()):
             masked = entry.get("login", "?")
@@ -144,6 +213,7 @@ class TrialVault:
                 "login": masked,
                 "note": entry.get("note", ""),
                 "saved_at": entry.get("saved_at", 0.0),
+                **self._age_fields(entry),
             })
         return out
 
@@ -151,9 +221,11 @@ class TrialVault:
         platform = platform.strip().lower()
         all = self._read_all()
         if platform not in all:
+            self._audit("delete", platform, ok=False)
             return False
         del all[platform]
         self._write_all(all)
+        self._audit("delete", platform)
         return True
 
     @staticmethod
