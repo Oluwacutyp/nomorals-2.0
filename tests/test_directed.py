@@ -213,6 +213,72 @@ def test_filler_frames_and_extend(tmp_path):
     assert ext.size == (96, 72) and backend == "mirror-pad"
 
 
+def test_interpolation_backend_is_honest():
+    from nomorals.media.directed import filler as f
+    label = f.interpolation_backend()
+    assert label in ("rife", "motion-compensated", "morph-blend")
+    # this machine: no rife binary/pip package installed
+    import importlib.util
+    from shutil import which
+    if not which("rife-ncnn-vulkan") and \
+            importlib.util.find_spec("rife") is None:
+        assert label != "rife"
+
+
+def test_motion_compensated_tracks_translation():
+    """A square panning left→right: the middle frame should keep ONE
+    square near the midpoint — not the two ghosts a crossfade makes."""
+    from PIL import Image, ImageDraw
+    import numpy as np
+    from nomorals.media.directed.filler import (
+        fill_frames, _motion_compensated_frames, _morph_blend_frames)
+
+    def square(x0):
+        img = Image.new("RGB", (64, 64), (0, 0, 0))
+        ImageDraw.Draw(img).rectangle([x0, 28, x0 + 8, 36], fill=(255, 255, 255))
+        return img
+
+    a, b = square(8), square(48)
+    mid = fill_frames(a, b, 1, backend="motion-compensated")[0]
+    assert mid.size == (64, 64)
+    cols = np.asarray(mid.convert("L")).sum(axis=0)
+    peak = int(np.argmax(cols))
+    # crossfade would peak at 8 or 48 (ghosts); motion-compensation
+    # lands the square near the 28px midpoint
+    assert 18 < peak < 38, f"peak column {peak} not near midpoint"
+
+    # same scene through the plain morph blend: expect the double ghost
+    ghost = _morph_blend_frames(a, b, 1)[0]
+    gcols = np.asarray(ghost.convert("L")).sum(axis=0)
+    left, right = gcols[4:20].max(), gcols[44:60].max()
+    assert left > 500 and right > 500, \
+        f"crossfade should ghost at both ends (left={left}, right={right})"
+    assert abs(left - right) < 0.35 * max(left, right), \
+        "both ghosts should be comparably bright"
+
+    # static frames degenerate gracefully (no wild warps)
+    s = square(20)
+    mid2 = _motion_compensated_frames(s, s, 2)
+    assert len(mid2) == 2
+    for fr in mid2:
+        arr = np.asarray(fr.convert("L"))
+        cols = arr.sum(axis=0)
+        peak = int(np.argmax(cols))
+        assert 16 <= peak <= 32, f"static square drifted to {peak}"
+
+
+def test_fill_frames_backend_override_falls_back():
+    """Explicit backend names route correctly; an unknown backend name
+    degrades to the morph blend instead of raising."""
+    from PIL import Image
+    from nomorals.media.directed.filler import fill_frames
+    a = Image.new("RGB", (32, 32), (10, 10, 10))
+    b = Image.new("RGB", (32, 32), (240, 240, 240))
+    assert len(fill_frames(a, b, 2, backend="morph-blend")) == 2
+    assert len(fill_frames(a, b, 2, backend="motion-compensated")) == 2
+    assert fill_frames(a, b, 0) == []
+
+
 def test_ai_edit_cpu_ops():
     from PIL import Image, ImageDraw
     from nomorals.media.directed import ai_edit as ae

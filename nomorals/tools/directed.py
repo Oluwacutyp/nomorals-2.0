@@ -243,7 +243,8 @@ def register(registry: Any) -> None:
                 return {"ok": True, "path": p, "backend": backend}
             if k == "fill_gap":
                 p = _f.fill_video_gap(video, t0, t1)
-                return {"ok": True, "path": p, "backend": "morph-bridge"}
+                return {"ok": True, "path": p,
+                        "backend": _f.interpolation_backend()}
             return {"ok": False, "error": f"unknown kind {kind!r}"}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
