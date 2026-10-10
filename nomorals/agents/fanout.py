@@ -133,6 +133,9 @@ class MapReduceResult:
     reduced: Any
     errors: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    #: Per-shard status records: {index, n_items, ok, retries, seconds}.
+    #: Powers the shard table in render_mapreduce().
+    shard_status: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _slug(text: str) -> str:
@@ -319,20 +322,59 @@ def map_reduce(
     *,
     k: int = DEFAULT_MAX_WORKERS,
     context: Any = None,
+    retries: int = 1,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> MapReduceResult:
-    """Split ``items`` across K workers, then reduce their outputs."""
+    """Split ``items`` across K workers, then reduce their outputs.
+
+    ``retries``: a failed chunk is retried that many extra times before
+    it's recorded as an error (per-shard resilience — one flaky chunk
+    no longer poisons the job). ``on_progress`` fires as shards finish:
+    ``(completed, total)``. Per-shard status lands on
+    ``result.shard_status`` for the rendered table.
+    """
     started = time.perf_counter()
     chunks = _chunks(items, max(1, k))
     outputs: list[Any] = [None] * len(chunks)
     errors: list[str] = []
+    shards: list[dict[str, Any]] = [{} for _ in chunks]
     lock = threading.Lock()
+    completed = [0]
+
+    def _emit() -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(completed[0], len(chunks))
+        except Exception:  # noqa: BLE001 — progress never breaks the job
+            pass
 
     def _one(index: int, chunk: list[Any]) -> None:
-        try:
-            outputs[index] = worker_fn(chunk, index)
-        except Exception as exc:  # noqa: BLE001 - one bad chunk ≠ failed job
+        shard_started = time.perf_counter()
+        attempts = 0
+        last_error: str = ""
+        while attempts <= max(0, int(retries)):
+            attempts += 1
+            try:
+                outputs[index] = worker_fn(chunk, index)
+                last_error = ""
+                break
+            except Exception as exc:  # noqa: BLE001 - retry, then record
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempts <= max(0, int(retries)):
+                    _log.debug("map_reduce chunk %d failed (attempt %d), "
+                               "retrying: %s", index, attempts, last_error)
+        if last_error:
             with lock:
-                errors.append(f"chunk {index}: {exc}")
+                errors.append(f"chunk {index}: {last_error}")
+        with lock:
+            shards[index] = {
+                "index": index, "n_items": len(chunk),
+                "ok": not last_error, "retries": attempts - 1,
+                "seconds": round(time.perf_counter() - shard_started, 2),
+            }
+            completed[0] += 1
+        _emit()
 
     with ThreadPoolExecutor(max_workers=min(k, len(chunks)) or 1,
                            thread_name_prefix="mapreduce") as pool:
@@ -355,7 +397,8 @@ def map_reduce(
             pass
     return MapReduceResult(n_items=len(items), n_workers=len(chunks),
                            reduced=reduced, errors=errors,
-                           seconds=time.perf_counter() - started)
+                           seconds=time.perf_counter() - started,
+                           shard_status=shards)
 
 
 def fan_out_compare(
@@ -570,3 +613,42 @@ def _chunks(items: list[Any], k: int) -> list[list[Any]]:
         return []
     size = max(1, -(-len(items) // k))  # ceil division
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+# ── presentation ──────────────────────────────────────────────────────
+
+def render_mapreduce(result: MapReduceResult) -> str:
+    """Render a map-reduce run: shard table + reduced output. Never raises."""
+    from .render import ICONS, banner, bar, kv, section, table, truncate
+
+    try:
+        shards = result.shard_status or []
+        ok = sum(1 for s in shards if s.get("ok"))
+        lines = [banner("Map-reduce", ICONS["stats"]),
+                 kv({"items": result.n_items, "workers": result.n_workers,
+                     "shards ok": f"{ok}/{len(shards)}" if shards else "—",
+                     "errors": len(result.errors),
+                     "time": f"{result.seconds:.1f}s"}.items())]
+        if shards:
+            lines.append("")
+            lines.append(bar(ok / len(shards)))
+            rows = [[f"{'✅' if s.get('ok') else '❌'} {s.get('index')}",
+                     s.get("n_items", 0),
+                     s.get("retries", 0),
+                     f"{s.get('seconds', 0)}s"]
+                    for s in sorted(shards, key=lambda s: s.get("index", 0))]
+            lines.append("")
+            lines.append(table(["shard", "items", "retries", "time"], rows))
+        if result.errors:
+            lines.append("")
+            lines.append(section("Errors",
+                                 "\n".join(f"❌ {truncate(e, 120)}"
+                                           for e in result.errors[:8]),
+                                 ICONS["warn"]))
+        lines.append("")
+        lines.append(section("Reduced",
+                             truncate(str(result.reduced), 600),
+                             ICONS["star"]))
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — rendering never breaks callers
+        return f"map-reduce ({result.n_items} items, render failed)"

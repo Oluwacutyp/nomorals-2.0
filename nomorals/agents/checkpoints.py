@@ -171,6 +171,7 @@ class Checkpoint:
             "id": self.id,
             "when": when,
             "label": self.label or "—",
+            "capture": "code+convo" if self.code_captured else "convo-only",
             "head": self.head_hash[:12] if self.head_hash else "—",
             "scope": f"{len(self.scope_files)} tracked file(s) changed",
             "untracked": f"{len(self.untracked_files)} captured"

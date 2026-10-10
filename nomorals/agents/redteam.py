@@ -728,6 +728,12 @@ _RECOMMENDATIONS = {
                   "gate path",
 }
 
+#: Fallback when the finding's category isn't in the table — a report
+#: with no recommendation is a log, not a fix list.
+_GENERIC_RECOMMENDATION = (
+    "triage the finding, add a regression probe for it to the suite, "
+    "and re-run to confirm the fix")
+
 
 def render_report(report: RedTeamReport) -> str:
     """Render a RedTeamReport as actionable markdown. Never raises."""
@@ -759,9 +765,9 @@ def render_report(report: RedTeamReport) -> str:
             recs = []
             for f in failed:
                 rec = _RECOMMENDATIONS.get(
-                    _scenario_category(f.scenario_id), None)
-                if rec:
-                    recs.append(f"**{f.scenario_id}**: {rec}")
+                    _scenario_category(f.scenario_id),
+                    _GENERIC_RECOMMENDATION)
+                recs.append(f"**{f.scenario_id}**: {rec}")
             if recs:
                 lines.append("")
                 lines.append(section("Recommendations", bullets(recs),

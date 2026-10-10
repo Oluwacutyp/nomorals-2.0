@@ -444,8 +444,9 @@ class Notifier:
         outcome = DeliveryOutcome()
         if self.gateway is None:
             return outcome
-        text = f"🔔 {title}" + (f"\n{body}" if body else "")
-        text = text[:3900]
+        from .render import banner, truncate
+        text = banner(title, "🔔") + (f"\n{body}" if body else "")
+        text = truncate(text, 3900)
         partner = getattr(self.settings, "partner", None) if self.settings else None
         raw = getattr(partner, "owner_chats", "") or ""
         status: dict[str, Any] = {}

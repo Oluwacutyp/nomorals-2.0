@@ -553,7 +553,7 @@ class TaskRouter:
                        f"{len(self._feedback.get(profile.name, []))} outcomes"
                        if profile.name in self._feedback else "")
             bits = (f"picked **{profile.name}** for {task_type}/{objective}"
-                    + (f" (drivers: {drivers})" if drivers else "")
+                    + (f" (drivers: {drivers})" if drivers else ""))
             return truncate(bits + learned, 400)
         except Exception:  # noqa: BLE001
             return f"picked {getattr(profile, 'name', '?')}"

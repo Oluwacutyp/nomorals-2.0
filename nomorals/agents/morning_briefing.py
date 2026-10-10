@@ -85,11 +85,14 @@ class BriefingSection:
     lines: list[str] = field(default_factory=list)
 
     def render_text(self) -> str:
-        head = f"— {self.title} —"
+        from .render import banner, bullets, truncate
+
+        head = banner(self.title)
         # items are pre-clipped to the adaptive section budget by the
         # composer; no fixed [:N] slice here
-        body = self.lines or [f"• {i.get('title', '')}" for i in self.items]
-        return "\n".join([head, *body])
+        body = self.lines or [truncate(str(i.get("title", "")), 160)
+                              for i in self.items]
+        return head + "\n" + bullets(body) if body else head
 
     def render_items(self) -> list[dict[str, Any]]:
         return self.items
@@ -114,15 +117,18 @@ class Briefing:
                     else 0)
 
     def render_text(self) -> str:
-        parts = [f"☀️ Morning briefing — {self.date}"
-                 + (" (late — Devon was down at briefing time)"
-                    if self.late else "")]
+        from .render import banner, truncate
+
+        parts = [banner(
+            f"Morning briefing — {self.date}"
+            + (" (late — Devon was down at briefing time)" if self.late
+               else ""), "☀️")]
         for s in self.sections:
             parts.append("")
             parts.append(s.render_text())
         if self.truncated_note:
             parts.append("")
-            parts.append(self.truncated_note)
+            parts.append(f"_…{truncate(self.truncated_note, 200)}_")
         return "\n".join(parts)
 
     def to_dict(self) -> dict[str, Any]:

@@ -105,6 +105,7 @@ _log = get_logger(__name__)
 __all__ = [
     "Scheduler",
     "parse_schedule_spec",
+    "parse_relative",
     "HEAVY_WEIGHT_THRESHOLD",
     "MISSED_FIRE_POLICIES",
     "OVERLAP_POLICIES",
@@ -216,11 +217,18 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
     ``daily`` (detail = "HH:MM" or "HH:MM <tz>") |
     ``cron`` (detail = cron expression string) |
     ``rrule`` (detail = RRULE string, e.g. ``FREQ=WEEKLY;BYDAY=MO``)
+
+    Natural relative forms ("in 20 minutes", "in 2 hours") parse to
+    ``("at", now + seconds)`` — the "alert me in X minutes" phrasing the
+    router must recognize as a scheduler request.
     """
     s = (spec or "").strip()
     if not s:
         raise ValueError("empty schedule spec")
     lowered = s.lower()
+
+    if lowered.startswith("in "):
+        return "at", time.time() + parse_relative(s)
 
     if lowered.startswith("at "):
         ts = _parse_timestamp(s[3:].strip())
@@ -253,6 +261,36 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
         return "rrule", _parse_rrule_spec(s)
     ts = _parse_timestamp(s)
     return "at", ts
+
+
+# ── natural relative times ──────────────────────────────────────────────
+# "in 20 minutes", "in 3 hours", "in 45 seconds", "in 2 days",
+# "in a minute", "in an hour" → seconds. This is the phrasing users
+# actually say ("alert me in 20 minutes") and the standing gap where the
+# phone bot didn't recognize it as a scheduler request.
+
+_RELATIVE_RE = re.compile(
+    r"^in\s+(?:(\d+(?:\.\d+)?)\s*|an?\s+)"
+    r"(second|minute|hour|day|week)s?\b", re.IGNORECASE)
+
+_RELATIVE_UNIT_S = {
+    "second": 1.0, "minute": 60.0, "hour": 3600.0,
+    "day": 86400.0, "week": 604800.0,
+}
+
+
+def parse_relative(text: str) -> float:
+    """Parse "in N <unit>" → seconds from now. Raises ValueError if not."""
+    s = (text or "").strip()
+    m = _RELATIVE_RE.match(s)
+    if not m:
+        raise ValueError(f"not a relative time: {text!r}")
+    amount = float(m.group(1)) if m.group(1) is not None else 1.0
+    unit = m.group(2).lower()
+    seconds = amount * _RELATIVE_UNIT_S[unit]
+    if seconds <= 0:
+        raise ValueError(f"non-positive relative time: {text!r}")
+    return seconds
 
 
 def _parse_timestamp(text: str) -> float:

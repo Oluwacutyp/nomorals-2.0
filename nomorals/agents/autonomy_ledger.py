@@ -26,7 +26,8 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 
-__all__ = ["AutonomyLedger", "record_ledger", "ledger_failure_rate"]
+__all__ = ["AutonomyLedger", "record_ledger", "ledger_failure_rate",
+           "render_digest"]
 
 _log = get_logger(__name__)
 
@@ -237,6 +238,56 @@ class AutonomyLedger:
             _log.debug("autonomy_ledger purge failed", exc_info=True)
             return 0
 
+    # ── presentation ─────────────────────────────────────────────────
+    def render_digest(self, *, window_hours: float = 24.0) -> str:
+        """The "while you were away" digest: what the system did on its own.
+
+        Per-system runs/failures/cost, the notable failures with their
+        lessons, and one honest line when nothing happened. Built for the
+        morning pulse. Never raises.
+        """
+        from .render import ICONS, banner, kv, section, table, truncate
+
+        try:
+            data = self.summary(window_hours=window_hours)
+            totals = data.get("totals", {})
+            systems = data.get("systems", {})
+            lines = [banner(
+                f"Autonomy digest — last {window_hours:g}h", ICONS["stats"])]
+            if not systems:
+                lines.append("_Nothing ran on its own in this window._")
+                return "\n".join(lines)
+            lines.append(kv({
+                "runs": totals.get("runs", 0),
+                "failures": totals.get("failures", 0),
+                "cost": (f"{totals.get('cost_seconds', 0):.0f}s / "
+                         f"{totals.get('cost_tokens', 0)} tokens"),
+            }.items()))
+            rows = []
+            for name, s in sorted(systems.items()):
+                icon = (ICONS["fail"] if s["failures"]
+                        else ICONS["ok"])
+                rows.append([f"{icon} {name}", s["runs"], s["failures"],
+                             f"{s['cost_seconds']:.0f}s"])
+            lines.append("")
+            lines.append(table(["system", "runs", "failures", "cost"], rows))
+            bad = self.recent(limit=5, ok=False,
+                              since_hours=window_hours)
+            if bad:
+                lines.append("")
+                notes = []
+                for e in bad:
+                    note = f"**{e['system']}** — {truncate(e['summary'], 90)}"
+                    if e.get("learned"):
+                        note += f" _(learned: {truncate(e['learned'], 90)})_"
+                    notes.append(note)
+                lines.append(section("Failures worth knowing",
+                                     "\n".join(f"• {n}" for n in notes),
+                                     ICONS["warn"]))
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001 — rendering never breaks callers
+            return "autonomy digest (render failed)"
+
 
     def failure_rate(self, system: str,
                        *, window_hours: float = 24.0) -> dict[str, Any]:
@@ -329,3 +380,15 @@ def record_ledger(
     except Exception:  # noqa: BLE001 - ledger is always best-effort
         _log.debug("record_ledger failed", exc_info=True)
         return ""
+
+
+def render_digest(db_or_context: Any, *, window_hours: float = 24.0) -> str:
+    """One-call digest render from any subsystem. Never raises."""
+    try:
+        db = getattr(db_or_context, "db", None)
+        if db is None:
+            db = db_or_context
+        return AutonomyLedger(db).render_digest(window_hours=window_hours)
+    except Exception:  # noqa: BLE001 - ledger is always best-effort
+        _log.debug("render_digest failed", exc_info=True)
+        return "autonomy digest (unavailable)"

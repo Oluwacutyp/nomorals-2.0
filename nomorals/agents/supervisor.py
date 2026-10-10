@@ -57,7 +57,7 @@ class RestartPolicy:
         """True when restarts within the window hit the intensity limit."""
         window = max(1.0, float(self.window_seconds))
         recent = [t for t in restart_times if now - t <= window]
-        return len(recent) >= max(1, int(self.max_restarts))
+        return len(recent) >= max(0, int(self.max_restarts))
 
 
 @dataclass

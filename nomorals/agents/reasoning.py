@@ -117,6 +117,26 @@ class ReasoningResult:
         }
 
 
+def _confidence(value: Any, default: float = 0.5) -> float:
+    """Parse a 0..1 confidence from model output. Never raises.
+
+    Accepts "0.8", "80%", "high"-ish junk falls back to ``default``.
+    (This helper was referenced by four call sites but never defined —
+    every CONFIDENCE: parse path was a latent NameError.)
+    """
+    try:
+        text = str(value).strip().rstrip("%")
+        v = float(text)
+        if v > 1.0 and v <= 100.0:
+            v /= 100.0
+        return max(0.0, min(1.0, v))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, min(1.0, float(default)))
+        except (TypeError, ValueError):
+            return 0.5
+
+
 def trace_text(result: ReasoningResult) -> str:
     """Render a result for a human: the work, then the answer.
 
