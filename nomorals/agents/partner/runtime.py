@@ -2200,12 +2200,24 @@ class PartnerRuntime(
             return "sent." if result.ok else f"send failed: {result.error}"
 
         if kind == "proposals":
+            # Allow /proposals approve <id> and /proposals deny <id> as natural subcommands
+            parts = (arg or "").strip().split(None, 1)
+            if parts and parts[0] in ("approve", "deny"):
+                sub_id = parts[1] if len(parts) > 1 else ""
+                if not sub_id:
+                    return f"usage: /proposals {parts[0]} <proposal_id>"
+                result = self.approve(sub_id) if parts[0] == "approve" else self.deny(sub_id)
+                if result.get("ok"):
+                    return f"{parts[0]}d {sub_id} → {result.get('status', 'done')}"
+                err = result.get("error") or "no reason given"
+                return f"{parts[0]} failed: {err}"
             rows = self.proposals()
             if not rows:
                 return "no pending proposals."
             lines = [f"pending proposals ({len(rows)}):"]
             for row in rows[:10]:
                 lines.append(f"  {row['id']} [{row['kind']}→{row['platform']}:{row['chat_id']}] {str(row['content'])[:70]}")
+            lines.append("tip: /proposals approve <id> or /approve <id>")
             return "\n".join(lines)
 
         if kind == "approve":
