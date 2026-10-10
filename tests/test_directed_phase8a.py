@@ -133,3 +133,102 @@ def test_fingertip_move_compiles_and_lands():
     track, notes = ms.compile_score(score, n_frames=20)
     assert any("beyond reach" in n for n in notes)
     assert np.isfinite(track.frames).all()
+
+
+# ── camera pack + camera language ────────────────────────────────────
+from PIL import Image as _PILImage
+
+from nomorals.media.directed import camera as cam
+
+
+def _test_frames(n=8, w=160, h=120):
+    rng = np.random.RandomState(0)
+    base = _PILImage.fromarray(
+        rng.randint(0, 255, (h, w, 3)).astype(np.uint8))
+    return [base.copy() for _ in range(n)]
+
+
+def test_new_looks_registered_and_stable():
+    for look in ("drone", "bodycam", "webcam", "vintage_film",
+                 "anamorphic", "gimbal"):
+        assert look in cam.LOOKS, look
+        assert look in cam.LOOK_INFO, look
+    frames = _test_frames()
+    for look in ("drone", "bodycam", "webcam", "vintage_film",
+                 "anamorphic", "gimbal"):
+        out = cam.apply_look(frames, look, fps=24, seed=3)
+        assert len(out) == len(frames)
+        assert all(f.size == frames[0].size for f in out)
+        a = np.array(out[0])
+        assert a.dtype == np.uint8 and a.shape == (120, 160, 3)
+
+
+def test_new_looks_deterministic():
+    frames = _test_frames()
+    a1 = np.array(cam.apply_look(frames, "vintage_film", seed=5)[3])
+    a2 = np.array(cam.apply_look(frames, "vintage_film", seed=5)[3])
+    assert (a1 == a2).all()
+
+
+def test_anamorphic_flare_fires():
+    bright = _PILImage.new("RGB", (160, 120), (10, 10, 10))
+    from PIL import ImageDraw as _ID
+    _ID.Draw(bright).ellipse([70, 50, 90, 70], fill=(255, 255, 255))
+    fl = np.array(cam.anamorphic_look(bright)).astype(float)
+    assert fl[:, :, 2].max() > 60  # blue streak off the highlight
+
+
+def test_bodycam_bob_in_path():
+    path = cam.camera_path(48, 24.0, "bodycam", seed=1, W=320, H=240)
+    # step bounce: vertical range well above the noise floor of tripod
+    still = cam.camera_path(48, 24.0, "tripod", seed=1, W=320, H=240)
+    assert path[:, 1].ptp() > still[:, 1].ptp() + 2.0
+
+
+def test_parse_camera_language():
+    p = cam.parse_camera_language("dolly in slowly")
+    assert [(m.verb, m.direction, m.speed) for m in p.moves] == [
+        ("dolly", "in", "slow")]
+    p = cam.parse_camera_language("orbit left, then crane up")
+    assert [(m.verb, m.direction) for m in p.moves] == [
+        ("orbit", "left"), ("crane", "up")]
+    assert p.describe() == "orbit left, then crane up"
+    p = cam.parse_camera_language("push in and tilt up quickly")
+    assert [(m.verb, m.direction, m.speed) for m in p.moves] == [
+        ("dolly", "in", "normal"), ("tilt", "up", "fast")]
+    # no camera language -> empty, never raises
+    p = cam.parse_camera_language("a woman waves and smiles")
+    assert p.empty and p.describe() == ""
+    p = cam.parse_camera_language("")
+    assert p.empty
+
+
+def test_camera_program_path_continuous():
+    prog = cam.parse_camera_language("dolly in, then orbit left")
+    path = cam.camera_program_path(prog, 40, 24.0, 320, 240)
+    assert path.shape == (40, 4)
+    assert path[0, 3] == 1.0
+    assert path[-1, 3] > 1.1          # dolly in ends zoomed in
+    assert np.abs(np.diff(path[:, 0])).max() < 20   # no jumps at handoff
+    assert np.abs(np.diff(path[:, 3])).max() < 0.1
+
+
+def test_apply_camera_program_roundtrip():
+    frames = _test_frames(n=12)
+    out = cam.apply_camera_program(
+        frames, cam.parse_camera_language("crane up then pan right"), fps=24)
+    assert len(out) == 12 and all(f.size == (160, 120) for f in out)
+    # empty program -> passthrough
+    out2 = cam.apply_camera_program(
+        frames, cam.parse_camera_language("nothing camera-ish"))
+    assert all(np.array(a).tobytes() == np.array(b).tobytes()
+               for a, b in zip(frames, out2))
+
+
+def test_prompt_engine_uses_camera_language():
+    from nomorals.media.directed.prompt_engine import _extract_camera
+    _, movement, _ = _extract_camera("dolly in slowly, then orbit left")
+    assert movement == "slow dolly in, then orbit left"
+    # legacy single keywords still work
+    _, movement, _ = _extract_camera("a cat sits")
+    assert movement == ""

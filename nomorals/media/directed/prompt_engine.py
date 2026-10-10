@@ -394,12 +394,19 @@ def _extract_camera(text: str) -> tuple[str, str, str]:
         if key.replace("_", " ") in t or key in t:
             angle = val
             break
-    for key, val in CAMERA_MOVEMENTS.items():
-        if key in t:
-            movement = val
-            break
-    if "selfie" in t and not movement:
-        movement = CAMERA_MOVEMENTS["selfie"]
+    # camera language first: it handles compounds the keyword table can't
+    # ("dolly in slowly, then orbit left" -> "slow dolly in, then orbit left")
+    from .camera import parse_camera_language
+    prog = parse_camera_language(t)
+    if not prog.empty:
+        movement = prog.describe()
+    else:
+        for key, val in CAMERA_MOVEMENTS.items():
+            if key in t:
+                movement = val
+                break
+        if "selfie" in t and not movement:
+            movement = CAMERA_MOVEMENTS["selfie"]
     m = re.search(r"(\d+)\s?mm", t)
     if m:
         lens = f"shot on {m.group(1)}mm lens"
