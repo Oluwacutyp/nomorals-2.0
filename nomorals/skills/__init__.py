@@ -13,13 +13,18 @@ strategies and playbooks as texts.  One remembers *how*; this one
 
 from __future__ import annotations
 
-from .bench import BENCH_RUNS_DDL, SkillBench
-from .manifest import (ManifestError, SkillManifest, WiringError,
-                       resolve_expression, validate_schema)
+from .bench import (BENCH_RUNS_DDL, BENCH_STEPS_DDL, SkillBench,
+                    format_score, sparkline)
+from .manifest import (RESERVED_NAMES, NAME_RE, SEMVER_RE, TYPE_NAMES,
+                       ManifestError, SkillManifest, WiringError,
+                       diff_manifests, parse_wiring_root,
+                       resolve_expression, sanitize_description,
+                       validate_schema)
 from .registry import SKILL_PACKAGES_DDL, InstalledSkill, SkillRegistry
 from .repair import (REPAIR_TICKETS_DDL, RepairTicket, RepairTicketStore,
-                     build_ticket, suggest_fix)
-from .runner import SkillResult, SkillRunner, StepResult
+                     build_ticket, format_ticket, suggest_fix)
+from .runner import (DRY_RUN_SKIPPED, SkillResult, SkillRunner, StepResult,
+                     format_result)
 
 __all__ = [
     "SkillManifest",
@@ -27,17 +32,30 @@ __all__ = [
     "WiringError",
     "validate_schema",
     "resolve_expression",
+    "parse_wiring_root",
+    "sanitize_description",
+    "diff_manifests",
+    "SEMVER_RE",
+    "NAME_RE",
+    "TYPE_NAMES",
+    "RESERVED_NAMES",
     "SkillRegistry",
     "InstalledSkill",
     "SKILL_PACKAGES_DDL",
     "SkillRunner",
     "SkillResult",
     "StepResult",
+    "format_result",
+    "DRY_RUN_SKIPPED",
     "SkillBench",
     "BENCH_RUNS_DDL",
+    "BENCH_STEPS_DDL",
+    "format_score",
+    "sparkline",
     "RepairTicket",
     "RepairTicketStore",
     "build_ticket",
     "suggest_fix",
+    "format_ticket",
     "REPAIR_TICKETS_DDL",
 ]
