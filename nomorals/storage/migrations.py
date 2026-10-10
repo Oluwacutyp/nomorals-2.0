@@ -1435,6 +1435,76 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_attempted
 """
 
 
+_V85_SCHEDULER_DEEP = """
+-- Scheduler deep upgrades (Phase 2 Section 5): per-job execution policies
+-- as data, not hardcoded behavior; a durable run-history table; and the
+-- unified autonomy ledger (what ran, why, what it cost, what it learned).
+--
+-- schedule_jobs additions:
+--   missed_fire_policy: what to do when a firing was missed while down or
+--     stalled — 'fire_now' (coalesce and run once), 'skip' (drop the missed
+--     firing), 'next_only' (reschedule without running).
+--   overlap_policy: what to do when the job is due but its previous run is
+--     still executing — 'concurrent' (run anyway), 'skip' (drop this
+--     firing), 'queue' (leave for the next tick).
+--   backoff / backoff_max_s / backoff_jitter: the retry-delay strategy —
+--     'constant' | 'linear' | 'exponential' (default), capped at
+--     backoff_max_s, with +/- backoff_jitter fractional jitter.
+--   run_timeout_s: per-job wall-clock cap for one execution (0 = the
+--     scheduler's default wall_seconds).  Enforced for real now.
+--   depends_policy: how a multi-job depends_on list gates firing —
+--     'all_ok' | 'any_ok' | 'latest_ok'.
+--   heavy / weight: resource-pressure gating — heavy jobs defer (never
+--     drop) while the injected resource advisor reports pressure.
+ALTER TABLE schedule_jobs ADD COLUMN missed_fire_policy TEXT NOT NULL DEFAULT 'fire_now';
+ALTER TABLE schedule_jobs ADD COLUMN overlap_policy TEXT NOT NULL DEFAULT 'concurrent';
+ALTER TABLE schedule_jobs ADD COLUMN backoff TEXT NOT NULL DEFAULT 'exponential';
+ALTER TABLE schedule_jobs ADD COLUMN backoff_max_s REAL NOT NULL DEFAULT 3600;
+ALTER TABLE schedule_jobs ADD COLUMN backoff_jitter REAL NOT NULL DEFAULT 0.25;
+ALTER TABLE schedule_jobs ADD COLUMN run_timeout_s REAL NOT NULL DEFAULT 0;
+ALTER TABLE schedule_jobs ADD COLUMN depends_policy TEXT NOT NULL DEFAULT 'all_ok';
+ALTER TABLE schedule_jobs ADD COLUMN heavy INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE schedule_jobs ADD COLUMN weight REAL NOT NULL DEFAULT 0;
+-- schedule_runs: every job execution lands exactly one row — the durable
+-- answer to "what ran, when, how long, did it work".  trigger_source is
+-- one of tick|catchup|manual|retry.
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    finished_at REAL NOT NULL DEFAULT 0,
+    seconds REAL NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1,
+    result TEXT NOT NULL DEFAULT '',
+    retry_attempt INTEGER NOT NULL DEFAULT 0,
+    trigger_source TEXT NOT NULL DEFAULT 'tick'
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_job
+    ON schedule_runs(job_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_started
+    ON schedule_runs(started_at);
+-- autonomy_ledger: the unified cross-system journal.  Every autonomous
+-- subsystem (scheduler, missions, triggers, cognitive loop, morning
+-- pulse, partner autonomy) records what ran, why, what it cost
+-- (wall seconds + model tokens), whether it worked, and what it learned.
+CREATE TABLE IF NOT EXISTS autonomy_ledger (
+    id TEXT PRIMARY KEY,
+    ts REAL NOT NULL,
+    system TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    ref_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    cost_seconds REAL NOT NULL DEFAULT 0,
+    cost_tokens INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1,
+    learned TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_ts ON autonomy_ledger(ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_system ON autonomy_ledger(system, ts);
+"""
+
+
 _V82_MEMORY_TRUST_COLUMNS = """
 -- Trust provenance for memory records (hardens mem-false-fact,
 -- mem-pref-override, mem-cross-session): `trust` is "trusted" (direct
@@ -2935,6 +3005,25 @@ def _apply_research_loop_g2(db: object) -> None:
     )
 
 
+def _apply_kv_store_ttl(db: object) -> None:
+    """TTL support for the key/value layer (``KVStore``).
+
+    Adds a nullable ``expires_at`` (unix seconds) column: NULL means immortal,
+    which keeps every row written before this migration — and every legacy
+    raw-SQL writer — reading exactly as before. The index serves both the
+    lazy-expiry read filter and the ``delete_expired()`` sweeper.
+
+    Guarded: a no-op when the column already exists (dev builds that hand-
+    applied it), following the wave-50 column-guard precedent.
+    """
+    cols = {r["name"] for r in db.query("PRAGMA table_info(kv_store)")}  # type: ignore[attr-defined]
+    if "expires_at" not in cols:
+        db.execute("ALTER TABLE kv_store ADD COLUMN expires_at REAL")  # type: ignore[attr-defined]
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE INDEX IF NOT EXISTS idx_kv_store_expires ON kv_store(expires_at)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "core_state", sql=_V1),
     Migration(2, "agents_tasks_missions", sql=_V2),
@@ -3039,6 +3128,10 @@ MIGRATIONS: tuple[Migration, ...] = (
               sql=_V83_NOTIFICATION_DELIVERY_RETRY),
     Migration(84, "notification_deliveries",
               sql=_V84_NOTIFICATION_DELIVERIES),
+    Migration(85, "scheduler_deep",
+              sql=_V85_SCHEDULER_DEEP),
+    Migration(86, "kv_store_ttl",
+              fn=_apply_kv_store_ttl),
 )
 
 
