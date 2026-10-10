@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..storage.kv import KVStore
 from .notifier import Notifier
 
 __all__ = ["CognitiveLoop", "ModelBudget", "autonomy_enabled",
@@ -50,13 +51,7 @@ def set_autonomy_enabled(context: Any, enabled: bool) -> bool:
         db = getattr(context, "db", None)
         if db is None:
             return False
-        db.execute(
-            "INSERT INTO kv_store (key, value, kind, updated_at) "
-            "VALUES (?, ?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at",
-            (_OVERRIDE_KEY, json.dumps({"enabled": bool(enabled)}),
-             time.time()),
-        )
+        KVStore(db).set(_OVERRIDE_KEY, {"enabled": bool(enabled)})
         # also flip the in-process settings so the current run picks it up
         try:
             from dataclasses import replace
@@ -73,15 +68,12 @@ def set_autonomy_enabled(context: Any, enabled: bool) -> bool:
 def _kv_override(context: Any) -> bool | None:
     """The durable on/off flag, or None when never set."""
     try:
-        import json
         db = getattr(context, "db", None)
         if db is None:
             return None
-        row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                           (_OVERRIDE_KEY,))
-        if not row:
+        data = KVStore(db).get(_OVERRIDE_KEY)
+        if not data:
             return None
-        data = json.loads(row.get("value") or "null")
         return bool(data.get("enabled")) if isinstance(data, dict) else None
     except Exception:  # noqa: BLE001
         return None
@@ -145,9 +137,7 @@ class ModelBudget:
         automatically at local midnight)."""
         today = self._today()
         try:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key=?", (self._KEY,))
-            data = json.loads(row.get("value") or "{}") if row else {}
+            data = KVStore(self.context.db).get(self._KEY, default={})
         except Exception:  # noqa: BLE001
             data = {}
         if not isinstance(data, dict) or data.get("date") != today:
@@ -156,11 +146,7 @@ class ModelBudget:
 
     def _save(self, data: dict[str, Any]) -> None:
         try:
-            self.context.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?,?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-                "value = excluded.value, updated_at = excluded.updated_at",
-                (self._KEY, json.dumps(data), time.time()))
+            KVStore(self.context.db).set(self._KEY, data)
         except Exception as exc:  # noqa: BLE001
             _log.debug("budget ledger write failed: %s", exc)
 
@@ -212,20 +198,14 @@ class ModelBudget:
 
     def _reservations_raw(self) -> list[dict[str, Any]]:
         try:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key=?", (self._RES_KEY,))
-            data = json.loads(row.get("value") or "[]") if row else []
+            data = KVStore(self.context.db).get(self._RES_KEY, default=[])
         except Exception:  # noqa: BLE001
             data = []
         return data if isinstance(data, list) else []
 
     def _save_reservations(self, rows: list[dict[str, Any]]) -> None:
         try:
-            self.context.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?,?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-                "value = excluded.value, updated_at = excluded.updated_at",
-                (self._RES_KEY, json.dumps(rows), time.time()))
+            KVStore(self.context.db).set(self._RES_KEY, rows)
         except Exception as exc:  # noqa: BLE001
             _log.debug("reservation ledger write failed: %s", exc)
 
@@ -523,13 +503,8 @@ class CognitiveLoop:
         if not getattr(self.settings.autonomy, "adaptive_cadence", True):
             return base
         try:
-            import json as _json
-
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store "
-                "WHERE key='autonomy.adaptive_interval'")
-            if row:
-                data = _json.loads(row.get("value") or "null")
+            data = KVStore(self.context.db).get("autonomy.adaptive_interval")
+            if data:
                 val = float((data or {}).get("interval_hours", base))
                 return min(48.0, max(0.25, val))
         except Exception:  # noqa: BLE001
@@ -635,13 +610,9 @@ class CognitiveLoop:
             if budget_throttled and isinstance(summary.get("budget"), dict):
                 summary["budget"]["throttled"] = True
 
-            self.context.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?, ?, 'json', ?) ON CONFLICT(key) DO UPDATE SET "
-                "value = excluded.value, updated_at = excluded.updated_at",
-                ("autonomy.adaptive_interval",
-                 _json.dumps({"interval_hours": hours, "ts": time.time()}),
-                 time.time()))
+            KVStore(self.context.db).set(
+                "autonomy.adaptive_interval",
+                {"interval_hours": hours, "ts": time.time()})
             scheduler = getattr(self.context, "extras", {}).get("scheduler")
             if scheduler is not None and hasattr(scheduler, "set_interval"):
                 try:
