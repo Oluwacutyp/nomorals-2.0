@@ -265,6 +265,15 @@ class AutonomyAgent:
         #: adaptive send threshold: successes make her slightly bolder,
         #: failures and denials make her more cautious.  Bounded.
         self._threshold = 0.5
+        #: per-strategy win/loss counters — the learning memory.  "wins"
+        #: counts proposals that led somewhere (sent + owner reply);
+        #: "proposed"/"sent"/"denied" are raw counters.
+        self.strategy_stats: dict[str, dict[str, int]] = {
+            s.name: {"proposed": 0, "sent": 0, "wins": 0, "denied": 0}
+            for s in self._strategies
+        }
+        #: proposal id → strategy name, for outcome feedback.
+        self._strategy_by_proposal: dict[str, str] = {}
 
         self.mood: MoodEngine = brain.mood
         self.persona: Persona = brain.persona
@@ -361,7 +370,15 @@ class AutonomyAgent:
             proposals: list[Proposal] = []
             for strategy in self._strategies:
                 try:
-                    proposals.extend(strategy.evaluate(self, ctx) or [])
+                    new = strategy.evaluate(self, ctx) or []
+                    if new:
+                        # Custom/plugged strategies are welcome — their
+                        # counters are created on first sight.
+                        self.strategy_stats.setdefault(
+                            strategy.name,
+                            {"proposed": 0, "sent": 0, "wins": 0,
+                             "denied": 0})["proposed"] += len(new)
+                    proposals.extend(new)
                 except Exception:  # noqa: BLE001 - one bad strategy never kills the tick
                     _log.exception("autonomy strategy %s failed", strategy.name)
             eligible = [p for p in proposals
@@ -383,7 +400,8 @@ class AutonomyAgent:
                 self.stats["skipped"] += 1
                 return {"decision": "draft failed",
                         "strategy": best.strategy}
-            result = self._emit(best.kind, best.chat, content, best.reason, now)
+            result = self._emit(best.kind, best.chat, content, best.reason,
+                                now, strategy=best.strategy)
             if result.get("ok"):
                 if best.kind == "dm":
                     self._day.dm_sent += 1
@@ -391,6 +409,10 @@ class AutonomyAgent:
                 else:
                     self._day.group_sent += 1
                 self._day.last_chat_ts[best.chat.key] = now
+                self.strategy_stats.setdefault(
+                    best.strategy,
+                    {"proposed": 0, "sent": 0, "wins": 0,
+                     "denied": 0})["sent"] += 1
                 self._adapt_threshold(success=True)
             else:
                 # held for approval (suggest mode) is not a failure — only
@@ -425,6 +447,74 @@ class AutonomyAgent:
             self._threshold = max(0.3, self._threshold * 0.98)
         else:
             self._threshold = min(0.9, self._threshold + 0.05)
+
+    # ── outcome feedback ─────────────────────────────────────────────────────
+    def note_outcome(self, proposal_id: str,
+                     outcome: str) -> dict[str, Any]:
+        """Record what happened *after* a proactive send.
+
+        ``outcome``: ``"replied"`` (owner answered the DM — the strongest
+        positive signal), ``"ignored"`` (sent, no reply within a day), or
+        ``"denied"`` (owner rejected a pending proposal). Learning from
+        outcomes, not just sends, is what makes the threshold honest:
+        a sent message nobody answers should not make her bolder.
+        """
+        outcome = (outcome or "").strip().lower()
+        if outcome not in {"replied", "ignored", "denied"}:
+            return {"ok": False, "error": "outcome must be "
+                    "replied|ignored|denied"}
+        with self._lock:
+            strategy = self._strategy_by_proposal.get(proposal_id, "")
+            stats = self.strategy_stats.get(strategy) if strategy else None
+            if outcome == "replied":
+                # A reply means the outreach landed: bolder, and the
+                # strategy that produced it gets the win.
+                self._threshold = max(0.3, self._threshold * 0.95)
+                if stats is not None:
+                    stats["wins"] += 1
+                learned = "owner replied to proactive outreach"
+            elif outcome == "denied":
+                self._threshold = min(0.9, self._threshold + 0.05)
+                if stats is not None:
+                    stats["denied"] += 1
+                learned = "owner denied the proposal"
+            else:  # ignored
+                # Silence after a send: slightly more cautious, not a
+                # punishment — half the failure step.
+                self._threshold = min(0.9, self._threshold + 0.025)
+                learned = "proactive send went unanswered"
+            self._ledger("outcome", proposal_id,
+                         f"outcome={outcome} for proposal {proposal_id}",
+                         learned=learned,
+                         metadata={"outcome": outcome,
+                                   "strategy": strategy,
+                                   "threshold": round(self._threshold, 3)})
+            return {"ok": True, "outcome": outcome,
+                    "strategy": strategy,
+                    "threshold": round(self._threshold, 3)}
+
+    def on_owner_reply(self, chat_key: str) -> dict[str, Any]:
+        """The owner replied in a chat — credit the most recent proactive
+        DM proposal there as ``replied``.
+
+        The runtime's inbound message path should call this (cheap, never
+        raises) so the agent learns which outreach actually lands.
+        """
+        try:
+            row = self.context.db.query_one(
+                """SELECT id FROM proactive_log
+                   WHERE kind = 'dm' AND status = 'sent'
+                     AND (platform || ':' || chat_id) = ?
+                   ORDER BY acted_at DESC LIMIT 1""",
+                (chat_key,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("on_owner_reply lookup failed: %s", exc)
+            return {"ok": False, "error": "lookup failed"}
+        if row is None:
+            return {"ok": True, "noted": False,
+                    "note": "no proactive DM to credit in this chat"}
+        return {**self.note_outcome(row["id"], "replied"), "noted": True}
 
     def _dm_reason(self, chat: ChatRef, now: float) -> str | None:
         row = self.context.db.query_one("SELECT last_active FROM chats WHERE id = ?", (chat.key,))
@@ -498,13 +588,16 @@ class AutonomyAgent:
         return parts[0] if parts else ""
 
     # ── emitting with the approval flow ─────────────────────────────────────
-    def _emit(self, kind: str, chat: ChatRef, content: str, reason: str, now: float) -> dict[str, Any]:
+    def _emit(self, kind: str, chat: ChatRef, content: str, reason: str,
+              now: float, strategy: str = "") -> dict[str, Any]:
         proposal_id = ulid_now()
         self.stats["proposals"] += 1
         self._record(proposal_id, kind, chat, content, reason, "pending", now)
+        self._strategy_by_proposal[proposal_id] = strategy
         self._ledger("proposal", proposal_id,
                      f"[{kind}] {reason}: {content[:120]}",
-                     metadata={"chat": chat.key, "reason": reason})
+                     metadata={"chat": chat.key, "reason": reason,
+                               "strategy": strategy})
         if self.mode != "auto":
             _log.info("proposal %s [%s] %s: %s", proposal_id, kind, chat.key, content[:80])
             return {"ok": False, "proposal": proposal_id, "status": "pending",
@@ -594,12 +687,19 @@ class AutonomyAgent:
         )
         # a denial is feedback: she gets more cautious about proposing
         self._threshold = min(0.9, self._threshold + 0.05)
+        strategy = self._strategy_by_proposal.get(proposal_id, "")
+        if strategy in self.strategy_stats:
+            self.strategy_stats[strategy]["denied"] += 1
         return {"ok": True, "status": "denied"}
 
     def status(self) -> dict[str, Any]:
-        pending = self.context.db.scalar(
-            "SELECT COUNT(*) FROM proactive_log WHERE status = 'pending'", default=0
-        )
+        try:
+            pending = self.context.db.scalar(
+                "SELECT COUNT(*) FROM proactive_log WHERE status = 'pending'",
+                default=0,
+            )
+        except Exception:  # noqa: BLE001 - status must never raise
+            pending = 0
         return {
             "mode": self.mode,
             "running": self._thread is not None and self._thread.is_alive(),
@@ -608,5 +708,7 @@ class AutonomyAgent:
             "stats": dict(self.stats),
             "threshold": round(self._threshold, 3),
             "strategies": [s.name for s in self._strategies],
+            "strategy_stats": {k: dict(v)
+                               for k, v in self.strategy_stats.items()},
             "group_moods": sorted(self.group_moods),
         }

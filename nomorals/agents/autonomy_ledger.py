@@ -10,7 +10,8 @@ Every writer here is best-effort: a broken ledger must never break the
 system it observes.  All failures are swallowed into the module logger.
 
 Systems: ``scheduler`` | ``mission`` | ``trigger`` | ``cognition`` |
-``pulse`` | ``autonomy`` (partner proactive) | ``watcher``.
+``pulse`` | ``autonomy`` (partner proactive) | ``watcher`` | ``idle`` |
+``presence`` | ``weakness`` | ``improvement``.
 
 Kinds are free-form but conventional: ``run``, ``step``, ``tick``,
 ``fire``, ``terminal``, ``deferred``, ``skipped``, ``escalated``.
@@ -25,13 +26,14 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 
-__all__ = ["AutonomyLedger", "record_ledger"]
+__all__ = ["AutonomyLedger", "record_ledger", "ledger_failure_rate"]
 
 _log = get_logger(__name__)
 
 _LEDGER_SYSTEMS = frozenset(
     {"scheduler", "mission", "trigger", "cognition", "pulse",
-     "autonomy", "watcher", "other"}
+     "autonomy", "watcher", "idle", "presence", "weakness",
+     "improvement", "other"}
 )
 
 
@@ -236,6 +238,44 @@ class AutonomyLedger:
             return 0
 
 
+    def failure_rate(self, system: str,
+                       *, window_hours: float = 24.0) -> dict[str, Any]:
+        """Failure telemetry for one system over the window.
+
+        This is the machine-readable feed that weakness detection consumes:
+        a system whose failure rate spikes gets a weakness case opened
+        automatically. Never raises.
+        """
+        cutoff = time.time() - max(0.0, float(window_hours)) * 3600
+        out = {"system": system, "runs": 0, "failures": 0,
+               "failure_rate": 0.0, "window_hours": window_hours,
+               "cost_seconds": 0.0, "cost_tokens": 0}
+        try:
+            row = self.db.query_one(
+                """SELECT COUNT(*) AS runs,
+                          SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures,
+                          COALESCE(SUM(cost_seconds), 0) AS cost_seconds,
+                          COALESCE(SUM(cost_tokens), 0) AS cost_tokens
+                   FROM autonomy_ledger
+                   WHERE system = ? AND ts >= ?""",
+                (system.strip().lower(), cutoff),
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug("autonomy_ledger failure_rate failed", exc_info=True)
+            return out
+        if row:
+            runs = int(row["runs"] or 0)
+            failures = int(row["failures"] or 0)
+            out.update({
+                "runs": runs,
+                "failures": failures,
+                "failure_rate": round(failures / runs, 4) if runs else 0.0,
+                "cost_seconds": round(float(row["cost_seconds"] or 0.0), 1),
+                "cost_tokens": int(row["cost_tokens"] or 0),
+            })
+        return out
+
+
 def _json(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -246,6 +286,26 @@ def _json(raw: Any) -> dict[str, Any]:
         except (ValueError, TypeError):
             return {}
     return {}
+
+
+def ledger_failure_rate(
+    db_or_context: Any,
+    system: str,
+    *,
+    window_hours: float = 24.0,
+) -> dict[str, Any]:
+    """One-call failure telemetry for a system. Never raises."""
+    try:
+        db = getattr(db_or_context, "db", None)
+        if db is None:
+            db = db_or_context
+        return AutonomyLedger(db).failure_rate(
+            system, window_hours=window_hours)
+    except Exception:  # noqa: BLE001
+        _log.debug("ledger_failure_rate failed", exc_info=True)
+        return {"system": system, "runs": 0, "failures": 0,
+                "failure_rate": 0.0, "window_hours": window_hours,
+                "cost_seconds": 0.0, "cost_tokens": 0}
 
 
 def record_ledger(

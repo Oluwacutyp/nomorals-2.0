@@ -26,6 +26,7 @@ from __future__ import annotations
 
 __all__ = [
     "idle",
+    "coordinator",
     "weakness",
     "patterns",
     "presence",

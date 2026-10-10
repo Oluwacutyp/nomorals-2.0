@@ -14,14 +14,16 @@ Design:
 * When activity resumes, emits ``system.active`` so organs stand down.
 * State persists in SQLite so restarts don't lose the idle clock.
 
-This replaces the old pattern where idle work only happened when
-someone checked ``/arena status`` — the system now knows it's idle
-on its own.
+Critical wiring rule: the monitor and every ``note_activity`` caller
+must read and write the **same database file**. :func:`workspace_db`
+resolves the canonical DB path for a workspace directory; both the
+monitor and the call sites use it. (A past bug had the monitor opening
+its own ``autonomy.db`` while writers wrote to the main DB — the idle
+chain silently never fired.)
 """
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -38,9 +40,28 @@ DEFAULT_IDLE_SECONDS = 900  # 15 minutes
 #: How often the monitor checks (seconds).
 CHECK_INTERVAL = 60
 
+#: Canonical DB filename inside a workspace directory.
+WORKSPACE_DB_NAME = "nomorals.db"
 
-def _db_path(workspace_dir: str | Path) -> Path:
-    return Path(workspace_dir) / "autonomy.db"
+
+def workspace_db(workspace_dir: str | Path) -> Any:
+    """Open the canonical workspace database for autonomy state.
+
+    ``workspace_dir`` may be a directory (the DB file is
+    ``<dir>/nomorals.db``) or a direct path to a DB file. Every autonomy
+    component — idle monitor, activity hooks, coordinator, presence,
+    weakness — must use this, so they share one state store. This is the
+    seam other modules should import instead of constructing their own
+    ``Database(workspace_dir)``.
+    """
+    from ..storage.db import Database
+
+    p = Path(workspace_dir)
+    if p.is_dir() or not p.suffix:
+        db_path = p / WORKSPACE_DB_NAME
+    else:
+        db_path = p
+    return Database(str(db_path))
 
 
 def ensure_schema(db: Any) -> None:
@@ -82,6 +103,23 @@ def last_activity_ts(db: Any) -> float:
     return float(row[0]) if row else 0.0
 
 
+def idle_state(db: Any) -> dict[str, Any]:
+    """Current idle bookkeeping: last activity, idle flag, last emit."""
+    ensure_schema(db)
+    row = db.execute(
+        "SELECT last_activity_ts, last_idle_emit_ts, idle_state "
+        "FROM autonomy_activity WHERE id = 1"
+    ).fetchone()
+    now = time.time()
+    last = float(row[0]) if row and row[0] else 0.0
+    return {
+        "last_activity_ts": last,
+        "idle_seconds": max(0.0, now - last) if last > 0 else 0.0,
+        "idle": bool(row[2]) if row else False,
+        "last_idle_emit_ts": float(row[1]) if row and row[1] else 0.0,
+    }
+
+
 class IdleMonitor:
     """Background idle detector. Emits ``system.idle`` / ``system.active``.
 
@@ -105,11 +143,10 @@ class IdleMonitor:
         self._thread: threading.Thread | None = None
         self._was_idle = False
 
-    def _db(self) -> sqlite3.Connection:
+    def _db(self) -> Any:
+        # MUST be the same store the note_activity call sites write to.
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(str(_db_path(self.workspace_dir)))
-        ensure_schema(db)
-        return db
+        return workspace_db(self.workspace_dir)
 
     def check_once(self) -> str:
         """Single idle check. Returns 'idle', 'active', or 'unchanged'."""
@@ -127,7 +164,10 @@ class IdleMonitor:
                     "last_idle_emit_ts = ? WHERE id = 1",
                     (now,),
                 )
-                db.commit()
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
                 _log.info("system idle for %.0fs — emitting system.idle",
                           idle_for)
                 try:
@@ -150,7 +190,10 @@ class IdleMonitor:
                 db.execute(
                     "UPDATE autonomy_activity SET idle_state = 0 WHERE id = 1"
                 )
-                db.commit()
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
                 _log.info("system active again — emitting system.active")
                 try:
                     global_bus.publish(Event(
@@ -170,7 +213,10 @@ class IdleMonitor:
 
             return "unchanged"
         finally:
-            db.close()
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def start(self) -> "IdleMonitor":
         if self._thread and self._thread.is_alive():

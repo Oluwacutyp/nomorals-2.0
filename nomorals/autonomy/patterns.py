@@ -215,6 +215,68 @@ def rising_interests(db: Any, limit: int = 5) -> list[dict[str, Any]]:
     return rising[:limit]
 
 
+# ── hygiene ──────────────────────────────────────────────────────────
+
+#: Days after which a never-reinforced routine cell is dropped.
+ROUTINE_RETENTION_DAYS = 180
+#: Days after which a stale pattern row is dropped.
+PATTERN_RETENTION_DAYS = 180
+
+
+def prune(db: Any, ts: float | None = None) -> dict[str, Any]:
+    """Bounded-growth maintenance for the model tables.
+
+    Drops interests decayed below the visibility floor, routine cells
+    untouched for ``ROUTINE_RETENTION_DAYS``, and stale pattern rows.
+    Called once per idle cycle — the tables stay small on a bot that
+    runs for months. Never raises.
+    """
+    report: dict[str, Any] = {
+        "interests_dropped": 0, "cells_dropped": 0, "patterns_dropped": 0}
+    try:
+        ensure_schema(db)
+        now = ts if ts is not None else time.time()
+        # Interests: decayed score below the current_interests floor.
+        rows = db.execute(
+            "SELECT topic, score, last_seen FROM interests").fetchall()
+        stale_topics = []
+        for topic, score, last_seen in rows:
+            age_days = max(0.0, (now - float(last_seen or 0)) / 86400.0)
+            decayed = float(score or 0) * math.exp(
+                -age_days * math.log(2) / INTEREST_HALF_LIFE_DAYS)
+            if decayed <= 0.1 and age_days > 30:
+                stale_topics.append(topic)
+        for topic in stale_topics:
+            db.execute("DELETE FROM interests WHERE topic = ?", (topic,))
+        report["interests_dropped"] = len(stale_topics)
+
+        # Routine cells: we don't store last_seen per cell, so bound by
+        # total row count instead — keep the hottest cells.
+        cell_count = db.execute(
+            "SELECT COUNT(*) FROM routine_activity").fetchone()[0]
+        if cell_count and cell_count > 24 * 7 * 4:  # > ~4 weeks of cells
+            db.execute(
+                "DELETE FROM routine_activity WHERE (hour, dow) NOT IN ("
+                "SELECT hour, dow FROM routine_activity "
+                "ORDER BY count DESC LIMIT ?)",
+                (24 * 7 * 4,))
+            report["cells_dropped"] = cell_count - 24 * 7 * 4
+
+        # Patterns: drop rows unseen for the retention window.
+        cutoff = now - PATTERN_RETENTION_DAYS * 86400
+        cur = db.execute(
+            "DELETE FROM patterns WHERE last_seen < ?", (cutoff,))
+        report["patterns_dropped"] = cur.rowcount or 0
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("pattern prune failed: %s", exc, exc_info=True)
+        report["error"] = str(exc)[:200]
+    return report
+
+
 # ── patterns ─────────────────────────────────────────────────────────
 
 def record_sequence(db: Any, trigger_sig: str, action_sig: str,
