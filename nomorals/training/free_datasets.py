@@ -38,8 +38,72 @@ __all__ = [
     "FREE_DATASET_CATALOG",
     "catalog",
     "lookup",
+    "search",
+    "recommend",
     "fetch_dataset",
 ]
+
+
+#: Task → catalog names, in preference order.  The recommendation engine
+#: behind ``nm data catalog --for <task>``.
+_TASK_RECOMMENDATIONS: dict[str, list[str]] = {
+    "agent": ["ultra-agent", "swe-bench-verified", "oasst1", "lmsys-chat-1m"],
+    "tool-use": ["ultra-agent", "swe-bench-verified"],
+    "code": ["swe-bench-verified", "ultra-agent", "open-hermes-25"],
+    "chat": ["lmsys-chat-1m", "oasst1", "open-hermes-25", "alpaca"],
+    "multilingual": ["oasst1", "lmsys-chat-1m"],
+    "yoruba": ["yoruba-mono", "oasst1"],
+    "instruction": ["alpaca", "open-hermes-25", "oasst1"],
+    "preference": ["hh-rlhf", "ultra-feedback"],
+    "dpo": ["hh-rlhf", "ultra-feedback"],
+    "math": ["openmath", "open-hermes-25"],
+    "pretrain": ["fineweb", "open-hermes-25"],
+    "style": ["dolphin-2.9", "lmsys-chat-1m"],
+}
+
+
+def search(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Full-text search over the catalog (name, id, kind, use, license).
+
+    Ranks name/id matches above body matches.  Case-insensitive.
+    """
+    terms = [t for t in re.findall(r"\w+", (query or "").lower()) if t]
+    if not terms:
+        return []
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for entry in FREE_DATASET_CATALOG:
+        name_id = f"{entry.get('name', '')} {entry.get('id', '')}".lower()
+        body = f"{entry.get('kind', '')} {entry.get('use', '')} {entry.get('license', '')}".lower()
+        score = 0
+        for term in terms:
+            if term in name_id:
+                score += 3
+            elif term in body:
+                score += 1
+        if score:
+            scored.append((score, dict(entry)))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in scored[: max(1, limit)]]
+
+
+def recommend(task: str, *, limit: int = 5) -> list[dict[str, Any]]:
+    """Curated dataset picks for a task ("agent", "yoruba", "code", ...).
+
+    Falls back to catalog search when the task has no curated list, so an
+    unknown task still gets *something* relevant instead of nothing.
+    """
+    key = (task or "").strip().lower().replace("_", "-")
+    names = _TASK_RECOMMENDATIONS.get(key, [])
+    out: list[dict[str, Any]] = []
+    for name in names:
+        entry = lookup(name)
+        if entry:
+            out.append(entry)
+        if len(out) >= limit:
+            break
+    if not out:
+        out = search(task, limit=limit)
+    return out[: max(1, limit)]
 
 _HF_BASE_DEFAULT = "https://huggingface.co"
 _SERVER_BASE_DEFAULT = "https://datasets-server.huggingface.co"

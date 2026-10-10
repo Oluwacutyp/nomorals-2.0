@@ -27,7 +27,12 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.repository import Repository
 
-__all__ = ["Turn", "Example", "Dataset", "DatasetRegistry", "to_chatml", "read_jsonl", "write_jsonl"]
+__all__ = [
+    "Turn", "Example", "Dataset", "DatasetRegistry", "to_chatml",
+    "to_alpaca", "to_sharegpt", "decode_example",
+    "read_jsonl", "write_jsonl", "write_format_bundles",
+    "file_checksum", "example_stats", "corpus_stats",
+]
 
 _log = get_logger(__name__)
 
@@ -445,6 +450,93 @@ def to_sharegpt(example: Any) -> Any:
     return {"conversation": conversation}
 
 
-def write_format_bundles(examples: list[dict[str, Any]], output_dir: str) -> dict[str, int]:
-    """Stub: write examples in multiple formats to output_dir."""
-    return {"alpaca": len(examples), "sharegpt": len(examples)}
+def write_format_bundles(
+    base: str | os.PathLike[str],
+    examples: Iterable[Any],
+    *,
+    formats: Sequence[str] = ("internal", "alpaca", "sharegpt", "chatml"),
+) -> dict[str, int]:
+    """Write the four fine-tune bundles ``<base>.<ext>`` for one corpus.
+
+    ``base`` is the output stem (e.g. ``out/conversations``); ``examples``
+    may be :class:`Example` objects or any shape ``to_alpaca``/``to_sharegpt``
+    accept.  Returns ``{format: rows_written}`` — the same counts callers
+    put in their manifests.
+    """
+    materialized = list(examples)
+    stem = Path(str(base)).expanduser()
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    if "internal" in formats:
+        counts["internal"] = write_jsonl(
+            stem.with_suffix(".jsonl"),
+            (e.to_dict() if isinstance(e, Example) else e for e in materialized),
+        )
+    if "alpaca" in formats:
+        rows = to_alpaca(materialized)
+        target = stem.with_name(stem.name + ".alpaca.json")
+        target.write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+        counts["alpaca"] = len(rows)
+    if "sharegpt" in formats:
+        rows = to_sharegpt(materialized)
+        target = stem.with_name(stem.name + ".sharegpt.json")
+        target.write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+        counts["sharegpt"] = len(rows)
+    if "chatml" in formats:
+        target = stem.with_name(stem.name + ".chatml.jsonl")
+        n = 0
+        with target.open("w", encoding="utf-8") as handle:
+            for example in materialized:
+                text = example.to_chatml(add_generation_prompt=True) \
+                    if isinstance(example, Example) else str(example)
+                handle.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                n += 1
+        counts["chatml"] = n
+    return counts
+
+
+def example_stats(example: Example) -> dict[str, Any]:
+    """Shape stats for one example: turns, chars, and per-role breakdown."""
+    by_role: dict[str, int] = {}
+    chars = 0
+    for turn in example.turns:
+        by_role[turn.role] = by_role.get(turn.role, 0) + len(turn.content)
+        chars += len(turn.content)
+    return {
+        "turns": len(example.turns),
+        "chars": chars,
+        "by_role": by_role,
+        "weight": example.weight,
+        "source": example.source,
+    }
+
+
+def corpus_stats(examples: Iterable[Any], *, sample: int = 2000) -> dict[str, Any]:
+    """Distribution stats over a corpus (capped sample — cheap on 500K rows).
+
+    Feeds ``max_seq_len`` honestly: median/p95 chars per row tell you what
+    sequence length actually fits the data instead of guessing 512.
+    """
+    char_counts: list[int] = []
+    turn_counts: list[int] = []
+    total = 0
+    for index, example in enumerate(examples):
+        if index >= sample:
+            break
+        total += 1
+        stats = example_stats(example) if isinstance(example, Example) else {"chars": len(str(example)), "turns": 0}
+        char_counts.append(stats["chars"])
+        turn_counts.append(stats["turns"])
+    if not char_counts:
+        return {"rows": 0, "sampled": 0}
+    char_counts.sort()
+    def pct(p: float) -> int:
+        return char_counts[min(len(char_counts) - 1, int(p * len(char_counts)))]
+    return {
+        "rows": total,
+        "sampled": len(char_counts),
+        "chars_median": pct(0.50),
+        "chars_p95": pct(0.95),
+        "chars_max": char_counts[-1],
+        "turns_median": sorted(turn_counts)[len(turn_counts) // 2],
+    }

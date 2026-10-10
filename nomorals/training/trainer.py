@@ -30,14 +30,23 @@ from ..core.logging_setup import get_logger
 from .dataset import Example
 from .tokenize import BPETokenizer
 
-__all__ = ["TrainConfig", "TrainMetrics", "NativeTrainer", "TrainedModel"]
+__all__ = [
+    "TrainConfig", "TrainMetrics", "NativeTrainer", "TrainedModel",
+    "clip_grads", "global_grad_norm", "lr_factor",
+]
 
 _log = get_logger(__name__)
 
 
 @dataclass
 class TrainConfig:
-    """Hyperparameters. Deliberately small defaults: this runs on a phone."""
+    """Hyperparameters. Deliberately small defaults: this runs on a phone.
+
+    The optimizer/schedule fields are the mined upgrades: AdamW with
+    decoupled weight decay and a warmup+cosine schedule are what every real
+    training loop uses instead of fixed-decay SGD, and both are cheap in
+    pure Python.
+    """
 
     hidden_size: int = 64
     context_window: int = 16
@@ -48,6 +57,16 @@ class TrainConfig:
     seed: int = 1234
     log_every: int = 50
     max_examples: int = 0
+    # ── mined upgrades ──
+    optimizer: str = "adamw"            # "sgd" | "adamw"
+    lr_schedule: str = "warmup_cosine"  # "constant" | "cosine" | "warmup_cosine"
+    warmup_steps: int = 0               # 0 = auto (10% of total steps)
+    grad_clip: float = 1.0              # global-norm clip; 0 = off
+    early_stopping_patience: int = 0    # epochs w/o eval gain before stopping; 0 = off
+    keep_best: bool = True              # restore best-eval weights at the end
+    beta1: float = 0.9
+    beta2: float = 0.999
+    adam_eps: float = 1e-8
 
     def validate(self) -> None:
         if self.hidden_size < 1:
@@ -56,6 +75,12 @@ class TrainConfig:
             raise ValidationError("learning_rate must be positive", field="learning_rate")
         if self.epochs < 1:
             raise ValidationError("epochs must be at least 1", field="epochs")
+        if self.optimizer not in {"sgd", "adamw"}:
+            raise ValidationError(f"unknown optimizer {self.optimizer!r}", field="optimizer")
+        if self.lr_schedule not in {"constant", "cosine", "warmup_cosine"}:
+            raise ValidationError(f"unknown lr_schedule {self.lr_schedule!r}", field="lr_schedule")
+        if self.grad_clip < 0:
+            raise ValidationError("grad_clip must be >= 0", field="grad_clip")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +88,10 @@ class TrainConfig:
             "learning_rate": self.learning_rate, "epochs": self.epochs,
             "batch_size": self.batch_size, "l2": self.l2, "seed": self.seed,
             "log_every": self.log_every, "max_examples": self.max_examples,
+            "optimizer": self.optimizer, "lr_schedule": self.lr_schedule,
+            "warmup_steps": self.warmup_steps, "grad_clip": self.grad_clip,
+            "early_stopping_patience": self.early_stopping_patience,
+            "keep_best": self.keep_best,
         }
 
 
@@ -80,6 +109,11 @@ class TrainMetrics:
     examples: int = 0
     tokens: int = 0
     backend: str = "native"
+    best_epoch: int = 0
+    stopped_early: bool = False
+    tokens_per_sec: float = 0.0
+    optimizer: str = ""
+    lr_final: float = 0.0
 
     @property
     def perplexity(self) -> float:
@@ -105,6 +139,9 @@ class TrainMetrics:
             "steps": self.steps, "epochs": round(self.epochs, 3),
             "seconds": round(self.seconds, 2), "examples": self.examples,
             "tokens": self.tokens, "backend": self.backend,
+            "best_epoch": self.best_epoch, "stopped_early": self.stopped_early,
+            "tokens_per_sec": round(self.tokens_per_sec, 1),
+            "optimizer": self.optimizer, "lr_final": self.lr_final,
             "train_loss_history": [round(v, 5) for v in self.train_loss_history[-20:]],
             "eval_loss_history": [round(v, 5) for v in self.eval_loss_history[-20:]],
         }
@@ -159,6 +196,173 @@ class TrainedModel:
             output_bias=weights["output_bias"],
             metrics=TrainMetrics(), tokenizer_path=data.get("tokenizer_path", ""),
         )
+
+    def generate(
+        self,
+        tokenizer: Any,
+        prompt: str,
+        *,
+        max_new_tokens: int = 64,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        seed: int = 0,
+    ) -> str:
+        """Sample a continuation for ``prompt`` (temperature + top-k).
+
+        This is what makes the artifact *usable*: the golden battery in
+        :mod:`nomorals.training.evaluate` can grade a native model
+        end-to-end, and ``nm train --quick`` can show you what the demo
+        model actually learned.  A tiny MLP is not a chatbot — expect
+        babble on small corpora — but the path is real.
+        """
+        probe = NativeTrainer.__new__(NativeTrainer)
+        probe.config = self.config
+        rng = random.Random(seed)
+        ids = list(tokenizer.encode(prompt))
+        hidden = len(self.hidden_bias)
+        for _ in range(max_new_tokens):
+            context = probe._context_vector(ids, self.input_weights, hidden)
+            _, _, log_probs = probe._forward(
+                context, self.hidden_weights, self.hidden_bias,
+                self.output_weights, self.output_bias,
+            )
+            logits = [lp for lp in log_probs]  # log-softmax; argmax/sampling same order
+            if temperature <= 0:
+                nxt = max(range(len(logits)), key=logits.__getitem__)
+            else:
+                scaled = [v / temperature for v in logits]
+                if top_k > 0:
+                    order = sorted(range(len(scaled)), key=scaled.__getitem__, reverse=True)
+                    keep = set(order[:top_k])
+                    scaled = [v if i in keep else float("-inf") for i, v in enumerate(scaled)]
+                maximum = max(scaled)
+                exps = [math.exp(min(50.0, v - maximum)) for v in scaled]
+                total = sum(exps) or 1.0
+                pick = rng.random() * total
+                nxt, acc = 0, 0.0
+                for i, e in enumerate(exps):
+                    acc += e
+                    if acc >= pick:
+                        nxt = i
+                        break
+            ids.append(nxt)
+            if len(ids) > self.config.context_window + max_new_tokens + 64:
+                ids = ids[-(self.config.context_window + max_new_tokens):]
+        return tokenizer.decode(ids)
+
+
+def _zeros_like(struct: Any) -> Any:
+    """A zero nested list with the same shape as a weight matrix or vector."""
+    if struct and isinstance(struct[0], list):
+        return [[0.0] * len(row) for row in struct]
+    return [0.0] * len(struct)
+
+
+def _squared_sum(struct: Any) -> float:
+    if struct and isinstance(struct[0], list):
+        return sum(v * v for row in struct for v in row)
+    return sum(v * v for v in struct)
+
+
+def global_grad_norm(grads: dict[str, Any]) -> float:
+    """L2 norm over every gradient tensor.  Public: useful for diagnostics."""
+    return math.sqrt(sum(_squared_sum(g) for g in grads.values()))
+
+
+def clip_grads(grads: dict[str, Any], max_norm: float) -> float:
+    """Scale gradients in place so their global norm is at most ``max_norm``.
+
+    Returns the pre-clip norm.  The cheapest anti-explosion insurance a
+    training loop can buy; real trainers never skip it.
+    """
+    norm = global_grad_norm(grads)
+    if norm > max_norm > 0:
+        scale = max_norm / (norm + 1e-12)
+        for grad in grads.values():
+            if grad and isinstance(grad[0], list):
+                for row in grad:
+                    for j in range(len(row)):
+                        row[j] *= scale
+            else:
+                for j in range(len(grad)):
+                    grad[j] *= scale
+    return norm
+
+
+def lr_factor(step: int, total_steps: int, warmup_steps: int, schedule: str) -> float:
+    """LR multiplier for ``schedule`` at ``step`` (0-based).
+
+    ``warmup_cosine``: linear warmup then cosine decay to 0 — the standard
+    recipe (HF's ``get_cosine_schedule_with_warmup``).  ``cosine`` skips the
+    warmup; ``constant`` is 1.0 everywhere.
+    """
+    if schedule == "constant" or total_steps <= 1:
+        return 1.0
+    if warmup_steps > 0 and step < warmup_steps:
+        return (step + 1) / warmup_steps
+    span = max(1, total_steps - warmup_steps)
+    progress = min(1.0, max(0.0, (step - warmup_steps) / span))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+class _AdamW:
+    """AdamW in pure Python: per-parameter first/second moments, decoupled
+    weight decay, bias correction.  ~25 lines; converges meaningfully better
+    than fixed-decay SGD on the same step budget."""
+
+    def __init__(self, beta1: float = 0.9, beta2: float = 0.999, eps: float = 1e-8) -> None:
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.t = 0
+        self.m: dict[str, Any] = {}
+        self.v: dict[str, Any] = {}
+
+    def step(
+        self,
+        params: dict[str, Any],
+        grads: dict[str, Any],
+        lr: float,
+        weight_decay: float,
+    ) -> None:
+        self.t += 1
+        bias1 = 1.0 - self.beta1 ** self.t
+        bias2 = 1.0 - self.beta2 ** self.t
+        for name, param in params.items():
+            grad = grads[name]
+            m = self.m.setdefault(name, _zeros_like(param))
+            v = self.v.setdefault(name, _zeros_like(param))
+            if param and isinstance(param[0], list):
+                for i in range(len(param)):
+                    prow, grow, mrow, vrow = param[i], grad[i], m[i], v[i]
+                    for j in range(len(prow)):
+                        g = grow[j]
+                        mj = mrow[j] = self.beta1 * mrow[j] + (1.0 - self.beta1) * g
+                        vj = vrow[j] = self.beta2 * vrow[j] + (1.0 - self.beta2) * g * g
+                        update = (mj / bias1) / (math.sqrt(vj / bias2) + self.eps)
+                        prow[j] -= lr * (update + weight_decay * prow[j])
+            else:
+                for j in range(len(param)):
+                    g = grad[j]
+                    mj = m[j] = self.beta1 * m[j] + (1.0 - self.beta1) * g
+                    vj = v[j] = self.beta2 * v[j] + (1.0 - self.beta2) * g * g
+                    update = (mj / bias1) / (math.sqrt(vj / bias2) + self.eps)
+                    param[j] -= lr * (update + weight_decay * param[j])
+
+
+def _sgd_step(
+    params: dict[str, Any], grads: dict[str, Any], lr: float, weight_decay: float
+) -> None:
+    """Plain SGD with decoupled weight decay (the AdamW-style kind)."""
+    for name, param in params.items():
+        grad = grads[name]
+        if param and isinstance(param[0], list):
+            _axpy(param, grad, -lr, weight_decay * lr)
+        else:
+            _add(param, grad, -lr)
+            if weight_decay:
+                for j in range(len(param)):
+                    param[j] -= lr * weight_decay * param[j]
 
 
 class NativeTrainer:
@@ -241,18 +445,44 @@ class NativeTrainer:
         output_weights = [[0.0] * vocab for _ in range(hidden)]
         output_bias = [0.0] * vocab
 
+        # The C++ kernel applies its own SGD step, so it only carries runs
+        # that actually use SGD.  An AdamW run silently degrading to the
+        # kernel's SGD would train a different optimizer than configured —
+        # fall back to pure Python instead, and say so.
+        use_cpp = config.optimizer == "sgd" and self._cpp_kernel()
+        if not use_cpp and config.optimizer != "sgd" and self._cpp_kernel():
+            _log.info("optimizer=%s: C++ kernel does SGD only — using pure Python",
+                      config.optimizer)
         buffers = None
-        if self._cpp_kernel():
+        if use_cpp:
             try:
                 buffers = _pack_weights(embedding, hidden_weights, hidden_bias,
                                         output_weights, output_bias)
             except Exception:  # noqa: BLE001 — fall back rather than fail the run
                 buffers = None
 
-        metrics = TrainMetrics(examples=len(samples), backend="native")
+        params = {
+            "embedding": embedding, "hidden_w": hidden_weights,
+            "hidden_b": hidden_bias, "out_w": output_weights,
+            "out_b": output_bias,
+        }
+        optimizer = _AdamW(config.beta1, config.beta2, config.adam_eps) \
+            if config.optimizer == "adamw" else None
+
+        metrics = TrainMetrics(examples=len(samples),
+                               backend="native-cpp" if buffers is not None else "native",
+                               optimizer=config.optimizer)
         started = time.perf_counter()
         batches = max(1, len(samples) // max(1, config.batch_size))
         step = 0
+        total_steps = config.epochs * max(1, (len(samples) + max(1, config.batch_size) - 1)
+                                          // max(1, config.batch_size))
+        warmup = config.warmup_steps
+        if not warmup and config.lr_schedule == "warmup_cosine":
+            warmup = max(1, total_steps // 10)
+        best_snapshot: dict[str, Any] | None = None
+        bad_epochs = 0
+        lr = config.learning_rate
 
         for epoch in range(config.epochs):
             if self._cancelled:
@@ -264,21 +494,27 @@ class NativeTrainer:
                 if self._cancelled:
                     break
                 batch = samples[batch_start : batch_start + config.batch_size]
-                lr = config.learning_rate / (1.0 + 0.01 * step)
+                lr = config.learning_rate * lr_factor(step, total_steps, warmup,
+                                                      config.lr_schedule)
                 if buffers is not None:
                     loss, count, _ = self._cpp_batch(
                         batch, buffers, context=context, lr=lr, l2=config.l2 * lr)
                 else:
-                    loss, grad_embed, grad_hidden_w, grad_hidden_b, grad_out_w, grad_out_b, count = (
-                        self._batch_gradients(
-                            batch, embedding, hidden_weights, hidden_bias, output_weights, output_bias
-                        )
-                    )
-                    _axpy(embedding, grad_embed, -lr, config.l2 * lr)
-                    _axpy(hidden_weights, grad_hidden_w, -lr, config.l2 * lr)
-                    _axpy(output_weights, grad_out_w, -lr, config.l2 * lr)
-                    _add(hidden_bias, grad_hidden_b, -lr)
-                    _add(output_bias, grad_out_b, -lr)
+                    (loss, grad_embed, grad_hidden_w, grad_hidden_b,
+                     grad_out_w, grad_out_b, count) = self._batch_gradients(
+                        batch, embedding, hidden_weights, hidden_bias,
+                        output_weights, output_bias)
+                    grads = {
+                        "embedding": grad_embed, "hidden_w": grad_hidden_w,
+                        "hidden_b": grad_hidden_b, "out_w": grad_out_w,
+                        "out_b": grad_out_b,
+                    }
+                    if config.grad_clip > 0:
+                        clip_grads(grads, config.grad_clip)
+                    if optimizer is not None:
+                        optimizer.step(params, grads, lr, config.l2)
+                    else:
+                        _sgd_step(params, grads, lr, config.l2)
                 running += loss
                 tokens += count
                 step += 1
@@ -293,18 +529,39 @@ class NativeTrainer:
             metrics.final_loss = average
             metrics.tokens += tokens
             metrics.epochs = epoch + 1
-            _log.info("epoch %d train_loss=%.4f", epoch + 1, average)
+            _log.info("epoch %d train_loss=%.4f lr=%.6f", epoch + 1, average, lr)
 
             if eval_samples:
                 eval_loss = self.evaluate(
                     eval_samples, embedding, hidden_weights, hidden_bias, output_weights, output_bias
                 )
                 metrics.eval_loss_history.append(eval_loss)
-                metrics.best_eval_loss = min(metrics.best_eval_loss, eval_loss)
-                _log.info("epoch %d eval_loss=%.4f", epoch + 1, eval_loss)
+                improved = eval_loss < metrics.best_eval_loss - 1e-4
+                if improved:
+                    metrics.best_eval_loss = eval_loss
+                    metrics.best_epoch = epoch + 1
+                    bad_epochs = 0
+                    if config.keep_best:
+                        best_snapshot = _snapshot_params(params)
+                else:
+                    bad_epochs += 1
+                _log.info("epoch %d eval_loss=%.4f%s", epoch + 1, eval_loss,
+                          " (best)" if improved else "")
+                if config.early_stopping_patience and bad_epochs >= config.early_stopping_patience:
+                    _log.info("early stopping: no eval gain for %d epoch(s)", bad_epochs)
+                    metrics.stopped_early = True
+                    break
+
+        if best_snapshot is not None and config.keep_best and eval_samples:
+            # End on the best weights, not the last ones — the HF Trainer
+            # `load_best_model_at_end` behavior.
+            _restore_params(params, best_snapshot)
+            _log.info("restored best-eval weights (epoch %d)", metrics.best_epoch)
 
         metrics.steps = step
         metrics.seconds = time.perf_counter() - started
+        metrics.tokens_per_sec = metrics.tokens / max(1e-9, metrics.seconds)
+        metrics.lr_final = lr
         if not eval_samples:
             # Without a held-out set the train loss is the only signal. Say so
             # rather than reporting a number that looks like validation.
@@ -485,6 +742,28 @@ class NativeTrainer:
 
 def _scale(matrix: list[list[float]], divisor: float) -> list[list[float]]:
     return [[v / divisor for v in row] for row in matrix]
+
+
+def _snapshot_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Deep copy of the live weight lists (for best-checkpoint restore)."""
+    out: dict[str, Any] = {}
+    for name, struct in params.items():
+        if struct and isinstance(struct[0], list):
+            out[name] = [row[:] for row in struct]
+        else:
+            out[name] = struct[:]
+    return out
+
+
+def _restore_params(params: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """Write a snapshot back into the live weight lists, in place."""
+    for name, struct in params.items():
+        saved = snapshot[name]
+        if struct and isinstance(struct[0], list):
+            for row, saved_row in zip(struct, saved):
+                row[:] = saved_row
+        else:
+            struct[:] = saved
 
 
 def _pack_weights(embedding, hidden_weights, hidden_bias, output_weights,

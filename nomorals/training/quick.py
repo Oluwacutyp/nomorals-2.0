@@ -25,6 +25,7 @@ from typing import Any, Sequence
 
 from ..core.ids import new_id
 from .dataset import Example, Turn
+from .style import Theme, card, format_seconds, sparkline
 from .tokenize import BPETokenizer
 from .trainer import NativeTrainer, TrainConfig
 
@@ -42,6 +43,8 @@ class QuickResult:
     artifact_dir: str = ""
     backend: str = "pure-python"
     note: str = ""
+    sample: str = ""
+    sample_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,7 +57,37 @@ class QuickResult:
             "artifact_dir": self.artifact_dir,
             "backend": self.backend,
             "note": self.note,
+            "sample": self.sample,
+            "sample_prompt": self.sample_prompt,
         }
+
+    def render(self, theme: Theme | None = None) -> str:
+        """The one-command demo deserves a one-glance summary: what ran,
+        what it learned (before → after loss + sparkline), and — the part
+        the old demo never had — what the trained model actually *says*."""
+        theme = theme or Theme()
+        if not self.ok:
+            return card(theme, "quick training", [
+                ("status", theme.bad("FAILED")),
+                ("note", self.note),
+            ])
+        drop = self.loss_before - self.loss_after
+        rows = [
+            ("status", theme.ok("OK")),
+            ("examples", str(self.dataset.get("examples", "?"))),
+            ("loss", f"{self.loss_before:.4f} → {theme.ok(f'{self.loss_after:.4f}')}"
+                     f"  (Δ {drop:+.4f})"),
+            ("backend", self.backend),
+            ("time", format_seconds(self.seconds)),
+            ("artifact", theme.dim(self.artifact_dir)),
+        ]
+        sample = (self.sample or "").strip().replace("\n", " ")
+        if sample:
+            rows.append(("says", sample[:120]))
+        return card(
+            theme, "quick training", rows,
+            footer="loss is held-out NLL — lower means it actually learned",
+        )
 
 
 def _examples_from_pair(user: str, assistant: str) -> Example | None:
@@ -163,9 +196,6 @@ def run_quick_training(context: Any, *,
                          epochs=epochs, batch_size=8, learning_rate=0.05,
                          seed=1234)
     trainer = NativeTrainer(tok, config)
-    use_cpp = trainer._cpp_kernel() if hasattr(trainer, "_cpp_kernel") \
-        else False
-    backend = "native-cpp" if use_cpp else "pure-python"
 
     def _loss(trainer_: NativeTrainer, sample_texts: Sequence[str],
               weights: tuple) -> float:
@@ -191,6 +221,9 @@ def run_quick_training(context: Any, *,
     # 4. the real run
     model, metrics = trainer.fit(train_examples, eval_examples)
     after_s = time.perf_counter() - t0
+    # the trainer reports the path it actually used (the C++ kernel only
+    # carries SGD — an AdamW run honestly reports pure-python)
+    backend = "native-cpp" if metrics.backend == "native-cpp" else "pure-python"
 
     # 4. artifact
     out_root = Path(context.settings.resolve(
@@ -224,6 +257,22 @@ def run_quick_training(context: Any, *,
 
     after = metrics.best_eval_loss if metrics.best_eval_loss != float("inf") \
         else metrics.final_loss
+
+    # 5. let it speak: a sample continuation from the trained weights, so
+    # the demo shows what the model learned instead of only reporting a
+    # number.  (A tiny MLP babbles — the path is what matters.)
+    sample_prompt = train_examples[0].prompt if train_examples else "Hello"
+    try:
+        sample = model.generate(
+            tok, sample_prompt, max_new_tokens=48, temperature=0.8,
+            top_k=40, seed=7,
+        )
+        # show only the continuation, not the echoed prompt
+        continuation = sample[len(sample_prompt):].strip()
+        sample_text = continuation or sample.strip()
+    except Exception:  # noqa: BLE001 — sampling must never fail the demo
+        sample_text = ""
+
     return QuickResult(
         ok=True,
         dataset={
@@ -239,4 +288,6 @@ def run_quick_training(context: Any, *,
         seconds=after_s,
         artifact_dir=str(artifact),
         backend=backend,
+        sample=sample_text,
+        sample_prompt=sample_prompt,
     )

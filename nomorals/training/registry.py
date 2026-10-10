@@ -24,7 +24,7 @@ from ..core.logging_setup import get_logger
 from ..llm.registry import ModelRegistry
 from ..storage.repository import Repository
 
-__all__ = ["TrainingRun", "TrainingRegistry"]
+__all__ = ["TrainingRun", "TrainingRegistry", "RunStatus", "PROMOTION_STAGES"]
 
 _log = get_logger(__name__)
 
@@ -36,8 +36,18 @@ class RunStatus:
     FAILED = "failed"
     PROMOTED = "promoted"
     REJECTED = "rejected"
+    # ── staged rollout + approval (mined from MLflow/champion-challenger
+    # practice): a model can serve at 0% (shadow) or partial (canary)
+    # traffic before full promotion, and promotion can require a human.
+    SHADOW = "shadow"
+    CANARY = "canary"
+    AWAITING_APPROVAL = "awaiting_approval"
 
     TERMINAL = frozenset({DONE, FAILED, PROMOTED, REJECTED})
+
+
+#: Valid promotion stages for :meth:`TrainingRegistry.promote`.
+PROMOTION_STAGES = ("shadow", "canary", "full")
 
 
 @dataclass
@@ -185,11 +195,43 @@ class TrainingRegistry:
         _log.warning("training run %s failed: %s", run.name, error[:200])
         return self.save(run)
 
-    def evaluate(self, run: TrainingRun, *, metric: str = "score", tolerance: float = 0.0) -> bool:
-        """Record the metrics on the model and ask the gate whether it wins."""
+    def _model_score(self, model_name: str, metric: str) -> float | None:
+        """The recorded ``metric`` for a registered model, or None."""
+        if not model_name:
+            return None
+        record = self.models.by_name(model_name)
+        if record is None:
+            return None
+        scores = getattr(record, "eval_scores", None) or {}
+        if isinstance(scores, str):
+            try:
+                scores = json.loads(scores or "{}")
+            except (json.JSONDecodeError, TypeError):
+                scores = {}
+        value = scores.get(metric) if isinstance(scores, dict) else None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def evaluate(
+        self,
+        run: TrainingRun,
+        *,
+        metric: str = "score",
+        tolerance: float = 0.0,
+        min_gain: float = 0.0,
+    ) -> bool:
+        """Record the metrics on the model and ask the gate whether it wins.
+
+        ``min_gain`` is the champion-challenger margin: the challenger must
+        beat the champion by at least this much, so a +0.0001 noise win
+        never promotes.  The full comparison (scores, margin, champion
+        name) is stored on ``run.metadata["gate"]`` for the audit trail.
+        """
         scores = {k: v for k, v in run.metrics.items() if isinstance(v, (int, float))}
         if not scores:
             raise ValidationError("run has no numeric metrics to evaluate", field="metrics")
+        champion = self.models.active()
+        champion_name = champion.name if champion else ""
+        champion_score = self._model_score(champion_name, metric)
         self.models.register(
             run.output_model,
             kind="finetune",
@@ -198,12 +240,96 @@ class TrainingRegistry:
             metadata={"training_run": run.id, "backend": run.backend},
         )
         self.models.record_eval(run.output_model, scores)
-        passed = self.models.beats_incumbent(run.output_model, metric, tolerance=tolerance)
+        beats = self.models.beats_incumbent(run.output_model, metric, tolerance=tolerance)
+        challenger_score = self._model_score(run.output_model, metric)
+        margin: float | None = None
+        if challenger_score is not None and champion_score is not None:
+            margin = challenger_score - champion_score
+        passed = beats and (margin is None or margin >= min_gain)
         run.gate_passed = passed
-        return self.save(run).gate_passed is True
+        run.metadata = {
+            **run.metadata,
+            "gate": {
+                "metric": metric, "tolerance": tolerance, "min_gain": min_gain,
+                "challenger": run.output_model, "challenger_score": challenger_score,
+                "champion": champion_name or None, "champion_score": champion_score,
+                "margin": margin, "beats_incumbent": beats,
+                "evaluated_at": time.time(),
+            },
+        }
+        self.save(run)
+        _log.info(
+            "gate %s for run %s (margin=%s, min_gain=%s)",
+            "PASSED" if passed else "FAILED", run.name, margin, min_gain,
+        )
+        return passed
 
-    def promote(self, run: TrainingRun, *, force: bool = False) -> bool:
-        """Activate the trained model. Refuses unless the gate passed."""
+    def gate_report(self, run: TrainingRun) -> dict[str, Any]:
+        """The gate evidence shaped for ``style.render_gate_report``."""
+        gate = run.metadata.get("gate") or {}
+        return {
+            "challenger": gate.get("challenger") or run.output_model,
+            "champion": gate.get("champion"),
+            "challenger_score": gate.get("challenger_score") or 0.0,
+            "champion_score": gate.get("champion_score"),
+            "margin": gate.get("margin") or 0.0,
+            "min_gain": gate.get("min_gain") or 0.0,
+            "passed": bool(run.gate_passed),
+            "reasons": [
+                f"metric={gate.get('metric', 'score')}",
+                f"beats_incumbent={gate.get('beats_incumbent')}",
+            ],
+        }
+
+    def compare(
+        self,
+        challenger: str,
+        champion: str = "",
+        *,
+        metric: str = "score",
+    ) -> dict[str, Any]:
+        """Head-to-head: challenger vs. champion on one metric.
+
+        ``champion`` defaults to the active model.  Returns scores, margin,
+        and a recommendation — the artifact a human (or the agent) reads
+        before approving a promotion.
+        """
+        champion = champion or (self.models.active().name if self.models.active() else "")
+        challenger_score = self._model_score(challenger, metric)
+        champion_score = self._model_score(champion, metric)
+        margin = (challenger_score - champion_score
+                  if challenger_score is not None and champion_score is not None
+                  else None)
+        if margin is None:
+            recommendation = "cannot compare — missing scores"
+        elif margin > 0:
+            recommendation = f"promote: challenger wins by {margin:.6f}"
+        elif margin == 0:
+            recommendation = "tie: no reason to promote"
+        else:
+            recommendation = f"reject: challenger loses by {-margin:.6f}"
+        return {
+            "metric": metric, "challenger": challenger, "champion": champion or None,
+            "challenger_score": challenger_score, "champion_score": champion_score,
+            "margin": margin, "recommendation": recommendation,
+        }
+
+    def promote(
+        self, run: TrainingRun, *, force: bool = False, stage: str = "full"
+    ) -> bool:
+        """Promote the trained model through ``stage``.
+
+        Stages (the progressive-rollout ladder): ``shadow`` (registered,
+        serves 0% traffic — observation only), ``canary`` (partial traffic),
+        ``full`` (activated — the old behavior).  Refuses unless the gate
+        passed, unless ``force=True`` (recorded).  The displaced model is
+        recorded so :meth:`demote` can roll back to it.
+        """
+        if stage not in PROMOTION_STAGES:
+            raise ValidationError(
+                f"unknown promotion stage {stage!r} (valid: {', '.join(PROMOTION_STAGES)})",
+                field="stage",
+            )
         if run.gate_passed is None:
             raise ValidationError(
                 f"run {run.name} was never evaluated; call evaluate() first", field="gate_passed"
@@ -216,13 +342,157 @@ class TrainingRegistry:
                 run.name, run.metrics.get("score"),
             )
             return False
-        self.models.activate(run.output_model)
-        run.status = RunStatus.PROMOTED
+        previous = self.models.active()
+        previous_name = previous.name if previous and previous.name != run.output_model else ""
+        if stage == "full":
+            self.models.activate(run.output_model)
+            run.status = RunStatus.PROMOTED
+        else:
+            # shadow/canary: the model is registered and marked, but the
+            # champion keeps serving until a full promotion.
+            run.status = RunStatus.SHADOW if stage == "shadow" else RunStatus.CANARY
+            run.metadata = {**run.metadata, "stage": stage, "staged_at": time.time()}
+            _log.info("run %s staged as %s (champion keeps serving)", run.name, stage)
+        run.metadata = {
+            **run.metadata,
+            "promoted_over": previous_name or None,
+            "promotion_stage": stage,
+        }
         if force and not run.gate_passed:
             # A human overrode the gate. That belongs in the record.
             run.metadata = {**run.metadata, "forced_promotion": True, "forced_at": time.time()}
             _log.warning("run %s force-promoted despite failing the gate", run.name)
-        return self.save(run).status == RunStatus.PROMOTED
+        return self.save(run).status in {RunStatus.PROMOTED, RunStatus.SHADOW, RunStatus.CANARY}
+
+    def demote(self, run: TrainingRun, *, reason: str = "") -> bool:
+        """Roll back a promotion: reactivate the model this run displaced.
+
+        The run keeps its evaluation history; its status returns to DONE
+        with a demotion record, so the audit trail shows the full
+        promote → demote arc instead of a deletion.
+        """
+        previous = run.metadata.get("promoted_over")
+        if run.status not in {RunStatus.PROMOTED, RunStatus.SHADOW, RunStatus.CANARY}:
+            raise ValidationError(
+                f"run {run.name} is not promoted (status={run.status}); nothing to demote",
+                field="status",
+            )
+        if previous:
+            try:
+                self.models.activate(previous)
+            except Exception as exc:  # noqa: BLE001 — the old artifact may be gone
+                _log.warning("demote: could not reactivate %s: %s", previous, exc)
+        run.status = RunStatus.DONE
+        run.metadata = {
+            **run.metadata,
+            "demoted": True, "demoted_at": time.time(),
+            "demote_reason": reason, "restored_model": previous,
+        }
+        _log.warning("run %s demoted%s", run.name, f": {reason}" if reason else "")
+        return self.save(run).status == RunStatus.DONE
+
+    # ── approval flow ─────────────────────────────────────────────────────
+
+    def request_approval(self, run: TrainingRun, *, approver: str = "") -> TrainingRun:
+        """Park a gated run for human approval before promotion."""
+        if run.gate_passed is None:
+            raise ValidationError(
+                f"run {run.name} was never evaluated; call evaluate() first", field="gate_passed"
+            )
+        run.status = RunStatus.AWAITING_APPROVAL
+        run.metadata = {
+            **run.metadata,
+            "approval": {"requested_at": time.time(), "approver": approver,
+                         "decision": None},
+        }
+        return self.save(run)
+
+    def approve(self, run: TrainingRun, *, approver: str = "") -> TrainingRun:
+        """Human approval: the run may now be promoted."""
+        if run.status != RunStatus.AWAITING_APPROVAL:
+            raise ValidationError(
+                f"run {run.name} is not awaiting approval (status={run.status})",
+                field="status",
+            )
+        run.status = RunStatus.DONE
+        approval = dict(run.metadata.get("approval") or {})
+        approval.update({"decision": "approved", "decided_at": time.time(),
+                         "approver": approver or approval.get("approver", "")})
+        run.metadata = {**run.metadata, "approval": approval}
+        return self.save(run)
+
+    def reject_approval(self, run: TrainingRun, *, reason: str = "") -> TrainingRun:
+        """Human rejection: the run is dead, with the reason on record."""
+        if run.status != RunStatus.AWAITING_APPROVAL:
+            raise ValidationError(
+                f"run {run.name} is not awaiting approval (status={run.status})",
+                field="status",
+            )
+        run.status = RunStatus.REJECTED
+        approval = dict(run.metadata.get("approval") or {})
+        approval.update({"decision": "rejected", "decided_at": time.time(),
+                         "reason": reason})
+        run.metadata = {**run.metadata, "approval": approval}
+        return self.save(run)
+
+    def model_card(self, run: TrainingRun) -> str:
+        """A model card for the run: lineage, metrics, gate history.
+
+        The standard attached document for a promotion decision — what the
+        model is, what trained it, how it scored, and who overrode what.
+        """
+        gate = run.metadata.get("gate") or {}
+        approval = run.metadata.get("approval") or {}
+        lines = [
+            f"# Model card: {run.output_model or run.name}",
+            "",
+            f"- **run**: {run.name} (`{run.id}`)",
+            f"- **status**: {run.status}",
+            f"- **base model**: {run.base_model or '—'}",
+            f"- **dataset**: {run.dataset_id or '—'}",
+            f"- **backend**: {run.backend}",
+            f"- **output**: {run.output_path or '—'}",
+            f"- **created**: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(run.created_at))}",
+            "",
+            "## Training config",
+            "",
+            "```json",
+            json.dumps(run.config, indent=2, ensure_ascii=False)[:2000],
+            "```",
+            "",
+            "## Metrics",
+            "",
+        ]
+        for key, value in run.metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                lines.append(f"- **{key}**: {value}")
+        lines += ["", "## Promotion gate", ""]
+        if gate:
+            lines += [
+                f"- **metric**: {gate.get('metric')}",
+                f"- **challenger score**: {gate.get('challenger_score')}",
+                f"- **champion**: {gate.get('champion') or 'none'} "
+                f"({gate.get('champion_score')})",
+                f"- **margin**: {gate.get('margin')} (min_gain={gate.get('min_gain')})",
+                f"- **verdict**: {'PASS' if run.gate_passed else 'FAIL'}",
+            ]
+        else:
+            lines.append("- not evaluated")
+        if run.metadata.get("forced_promotion"):
+            lines.append("- ⚠️ **force-promoted despite failing the gate**")
+        if approval:
+            lines.append(f"- **approval**: {approval.get('decision')} "
+                         f"by {approval.get('approver') or '—'}")
+        if run.metadata.get("demoted"):
+            lines.append(f"- **demoted**: {run.metadata.get('demote_reason') or 'no reason given'}")
+        if run.error:
+            lines += ["", "## Error", "", f"```\n{run.error[:1000]}\n```"]
+        lines += ["", "## Limitations", "",
+                  "- Scores are from the pipeline's own eval; they are a "
+                  "regression signal, not a capability benchmark.",
+                  "- A promoted model is the best *measured* option, not a "
+                  "guaranteed improvement on every prompt."]
+        return "\n".join(lines)
 
     def list(self, *, status: str = "", limit: int = 50) -> list[TrainingRun]:
         # Not repo.find(limit=...): that becomes `WHERE "limit" = 50` and returns

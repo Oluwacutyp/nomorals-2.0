@@ -27,7 +27,7 @@ from ...core.logging_setup import get_logger
 from ..dataset import Example
 from .base import BackendResult
 
-__all__ = ["UnslothBackend", "dataset_from_examples", "guess_template"]
+__all__ = ["UnslothBackend", "dataset_from_examples", "guess_template", "dry_run"]
 
 _log = get_logger(__name__)
 
@@ -166,7 +166,7 @@ class UnslothBackend:
 
         use_bf16 = _wants_bf16()
         train_cfg_cls = _sft_config_class()
-        train_cfg = train_cfg_cls(
+        train_cfg_kwargs: dict[str, Any] = dict(
             output_dir=str(out / "runs"),
             per_device_train_batch_size=int(getattr(s, "batch_size", 4) or 4),
             gradient_accumulation_steps=int(getattr(s, "gradient_accumulation", 4) or 4),
@@ -183,13 +183,23 @@ class UnslothBackend:
             max_seq_length=max_seq_length,
             remove_unused_columns=False,
         )
+        # NEFTune: free instruction-following gain (Jain et al.).  Probed
+        # like the liger flag — an old trl/transformers raises TypeError on
+        # an unknown kwarg, so never assume it.
+        train_cfg_kwargs.update(_neftune_kwargs(train_cfg_cls))
+        # assistant_only_loss: loss on assistant turns only — the model
+        # learns to write answers, not to predict user turns.  Probed the
+        # same way; silently skipped on old trl.
+        train_cfg_kwargs.update(_assistant_only_kwargs(train_cfg_cls))
+        train_cfg = train_cfg_cls(**train_cfg_kwargs)
         trainer = SFTTrainer(
             model=model,
             tokenizer=tokenizer,
             train_dataset=dataset,
             dataset_text_field="text",
             max_seq_length=max_seq_length,
-            packing=False,
+            # packing: short rows waste most of each window on padding.
+            packing=True,
             args=train_cfg,
         )
         trainer.add_callback(_LossProbe(trainer))
@@ -285,6 +295,74 @@ def _sft_config_class() -> Any:
         from transformers import TrainingArguments
 
         return TrainingArguments
+
+
+def _accepts_kwarg(config_cls: Any, name: str) -> bool:
+    """Does this config class accept ``name``?  Old trl/transformers raise
+    TypeError on unknown kwargs — probe, never assume."""
+    try:
+        import inspect
+
+        return name in inspect.signature(config_cls.__init__).parameters
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _neftune_kwargs(config_cls: Any) -> dict[str, Any]:
+    if _accepts_kwarg(config_cls, "neftune_noise_alpha"):
+        return {"neftune_noise_alpha": 5}
+    return {}
+
+
+def _assistant_only_kwargs(config_cls: Any) -> dict[str, Any]:
+    if _accepts_kwarg(config_cls, "assistant_only_loss"):
+        return {"assistant_only_loss": True}
+    return {}
+
+
+def dry_run(
+    base_model: str = "",
+    settings: Any = None,
+    *,
+    train_rows: int = 0,
+) -> dict[str, Any]:
+    """Validate a run's configuration WITHOUT training.
+
+    Catches the mistakes that burn a Colab session: empty dataset, missing
+    base model id, unavailable backend, absurd hyperparameters.  Returns
+    ``{"ok", "checks": [...], "warnings": [...]}`` — every check names
+    what it verified.
+    """
+    from . import get_backend
+
+    checks: list[dict[str, str]] = []
+    warnings: list[str] = []
+
+    def _check(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": "yes" if ok else "no",
+                       "detail": detail})
+
+    backend = get_backend("unsloth")
+    available, reason = backend.available()
+    _check("backend available", available, reason)
+    base = base_model or str(getattr(settings, "base_model", "") or "")
+    _check("base model set", bool(base), base or "no base_model given")
+    _check("training rows", train_rows > 0,
+           f"{train_rows} rows" if train_rows else "empty training set")
+    s = settings or _Defaults()
+    lr = float(getattr(s, "learning_rate", 2e-5) or 2e-5)
+    _check("learning rate sane", 1e-6 <= lr <= 1e-2, f"lr={lr}")
+    seq = int(getattr(s, "max_seq_len", 2048) or 2048)
+    _check("sequence length sane", 256 <= seq <= 8192, f"seq={seq}")
+    r = int(getattr(s, "lora_r", 16) or 16)
+    alpha = int(getattr(s, "lora_alpha", 32) or 32)
+    _check("lora alpha ≈ 2× rank", alpha == 2 * r,
+           f"r={r} alpha={alpha}" + ("" if alpha == 2 * r
+                                     else " (recipe says alpha ≈ 2× rank)"))
+    if not available:
+        warnings.append(f"backend not available here: {reason}")
+    ok = all(c["ok"] == "yes" for c in checks)
+    return {"ok": ok, "checks": checks, "warnings": warnings}
 
 
 def _exp(x: float) -> float:

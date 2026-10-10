@@ -35,6 +35,8 @@ __all__ = [
     "checkpoint_step",
     "validate_checkpoint",
     "pick_checkpoint",
+    "prune_checkpoints",
+    "checkpoint_manifest",
     "report",
     "EMBEDDED_PICKER",
 ]
@@ -154,6 +156,75 @@ def pick_checkpoint(out_dir: str | Path,
         out["note"] = (f"checkpoint-{best[0]} already reached MAX_STEPS="
                        f"{max_step} — the run is DONE, do not resume")
     return out
+
+
+def prune_checkpoints(out_dir: str | Path, *, keep: int = 3) -> dict[str, Any]:
+    """Retention for free-tier disks: keep the ``keep`` newest VALID
+    checkpoints, delete older valid ones, and always delete corrupted
+    corpses (a half-written checkpoint is never resumed, so keeping it
+    only wastes disk and confuses the picker).
+
+    Returns ``{"kept": [...], "deleted": [...], "corpses": [...],
+    "bytes_freed": n}``.  Never deletes the newest valid checkpoint,
+    even when ``keep`` is 0.
+    """
+    import shutil
+
+    root = Path(out_dir)
+    result: dict[str, Any] = {"kept": [], "deleted": [],
+                              "corpses": [], "bytes_freed": 0}
+    if not root.is_dir():
+        return result
+    entries: list[tuple[int, Path]] = []
+    for p in root.iterdir():
+        step = checkpoint_step(p)
+        if step > 0 and p.is_dir():
+            entries.append((step, p))
+    entries.sort(key=lambda t: t[0])
+    valid = [p for _, p in entries if validate_checkpoint(p)[0]]
+    corpses = [p for _, p in entries if not validate_checkpoint(p)[0]]
+
+    def _size(p: Path) -> int:
+        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+    for p in corpses:
+        result["bytes_freed"] += _size(p)
+        shutil.rmtree(p, ignore_errors=True)
+        result["corpses"].append(p.name)
+    # Always keep at least the newest valid checkpoint.
+    keep = max(1, keep)
+    for p in valid[:-keep]:
+        result["bytes_freed"] += _size(p)
+        shutil.rmtree(p, ignore_errors=True)
+        result["deleted"].append(p.name)
+    result["kept"] = [p.name for p in valid[-keep:]]
+    return result
+
+
+def checkpoint_manifest(path: str | Path) -> dict[str, Any]:
+    """Integrity manifest for one checkpoint: sizes + sha256 of every
+    payload file, so a later load can prove the artifact did not rot."""
+    import hashlib
+
+    p = Path(path)
+    ok, reason = validate_checkpoint(p)
+    files: list[dict[str, Any]] = []
+    if p.is_dir():
+        for f in sorted(p.iterdir()):
+            if not f.is_file():
+                continue
+            digest = hashlib.sha256()
+            with f.open("rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(block)
+            files.append({"name": f.name, "bytes": f.stat().st_size,
+                          "sha256": digest.hexdigest()})
+    return {
+        "dir": p.name, "step": checkpoint_step(p),
+        "valid": ok, "reason": reason,
+        "files": files,
+        "total_bytes": sum(f["bytes"] for f in files),
+    }
 
 
 def report(out_dir: str | Path,

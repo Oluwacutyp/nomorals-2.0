@@ -20,7 +20,63 @@ __all__ = [
     "RetrainPolicy",
     "RetrainTriggerPolicy",
     "policy_status",
+    "psi",
+    "drift_band",
 ]
+
+
+def psi(
+    reference: Sequence[float],
+    current: Sequence[float],
+    *,
+    bins: int = 10,
+) -> float:
+    """Population Stability Index between two samples — the standard
+    data-drift number (Evidently/Alibi Detect practice: PSI ≥ 0.2 means
+    the distribution moved enough to investigate).
+
+    Pure stdlib: quantile bins from the reference, Laplace-smoothed
+    proportions, ``Σ (cur − ref) · ln(cur / ref)``.  Returns ``inf`` when
+    the reference is empty.
+    """
+    ref = [float(v) for v in reference if math.isfinite(float(v))]
+    cur = [float(v) for v in current if math.isfinite(float(v))]
+    if not ref or not cur or bins < 2:
+        return float("inf") if not ref else 0.0
+    ordered = sorted(ref)
+    edges = [ordered[min(len(ordered) - 1, int(i * len(ordered) / bins))]
+             for i in range(bins + 1)]
+    edges[-1] = float("inf")
+    ref_counts = [0] * bins
+    cur_counts = [0] * bins
+    for value in ref:
+        for b in range(bins):
+            if edges[b] <= value < edges[b + 1]:
+                ref_counts[b] += 1
+                break
+    for value in cur:
+        for b in range(bins):
+            if edges[b] <= value < edges[b + 1]:
+                cur_counts[b] += 1
+                break
+    total = 0.0
+    for r, c in zip(ref_counts, cur_counts):
+        # Laplace smoothing: an empty bin must not zero the log term.
+        rp = (r + 0.5) / (len(ref) + 0.5 * bins)
+        cp = (c + 0.5) / (len(cur) + 0.5 * bins)
+        total += (cp - rp) * math.log(cp / rp)
+    return total
+
+
+def drift_band(score: float) -> str:
+    """Two-tier reading of a PSI score: the MLOps warn/critical split."""
+    if not math.isfinite(score):
+        return "unknown"
+    if score >= 0.25:
+        return "critical"
+    if score >= 0.1:
+        return "warning"
+    return "stable"
 
 
 @dataclass(frozen=True)
@@ -33,6 +89,8 @@ class PolicyDecision:
     elapsed_seconds: float = 0.0
     reflection_scores: tuple[float, ...] = ()
     data_available: bool = True
+    drift_score: float | None = None
+    response: str = ""  #: what the drift evidence recommends: retrain|expand|investigate|""
 
     @property
     def trigger(self) -> bool:
@@ -54,6 +112,12 @@ class PolicyDecision:
             ),
             "reflection_scores": list(self.reflection_scores),
             "data_available": self.data_available,
+            "drift_score": (
+                None if self.drift_score is None or not math.isfinite(self.drift_score)
+                else round(self.drift_score, 4)
+            ),
+            "drift_band": drift_band(self.drift_score) if self.drift_score is not None else "unknown",
+            "response": self.response,
         }
 
 
@@ -71,6 +135,10 @@ class RetrainingPolicy:
     reflection_window: int = 5
     reflection_decline: float = 0.10
     cooldown_seconds: float = 0.0
+    # Distribution-drift trigger (PSI over reflection scores / eval losses):
+    # 0.2 is the Evidently-standard "the distribution moved" line.
+    drift_threshold: float = 0.2
+    drift_bins: int = 10
     # Compatibility/configuration aliases.
     growth_threshold: int | None = None
     min_new_examples: int | None = None
@@ -95,6 +163,8 @@ class RetrainingPolicy:
         self.reflection_window = max(2, int(self.reflection_window))
         self.reflection_decline = max(0.0, float(self.reflection_decline))
         self.cooldown_seconds = max(0.0, float(self.cooldown_seconds))
+        self.drift_threshold = max(0.0, float(self.drift_threshold))
+        self.drift_bins = max(2, int(self.drift_bins))
 
     def decide(
         self,
@@ -105,8 +175,17 @@ class RetrainingPolicy:
         now: float | None = None,
         reflection_scores: Iterable[float] = (),
         data_available: bool | None = None,
+        drift_reference: Iterable[float] = (),
+        drift_current: Iterable[float] = (),
+        drift_score: float | None = None,
     ) -> PolicyDecision:
-        """Return a reasoned decision without touching the database."""
+        """Return a reasoned decision without touching the database.
+
+        ``drift_reference``/``drift_current`` are two samples of the same
+        signal (e.g. reflection scores before/after) — their PSI is the
+        distribution-drift trigger.  Pass a precomputed ``drift_score``
+        instead when the caller already has one.
+        """
         current = time.time() if now is None else float(now)
         if elapsed_seconds is None:
             elapsed = float("inf") if last_run_at is None else max(0.0, current - float(last_run_at))
@@ -120,12 +199,37 @@ class RetrainingPolicy:
         interval = elapsed >= self.interval_seconds
         trend = self._declining(scores)
 
+        if drift_score is None:
+            reference = tuple(float(v) for v in drift_reference)
+            present = tuple(float(v) for v in drift_current)
+            drift_score = psi(reference, present, bins=self.drift_bins) \
+                if reference and present else None
+        drifted = drift_score is not None and math.isfinite(drift_score) \
+            and drift_score >= self.drift_threshold
+
         if growth:
             reasons.append("dataset growth threshold reached")
         if interval:
             reasons.append("retraining interval elapsed")
         if trend:
             reasons.append("reflection scores trending down")
+        if drifted:
+            assert drift_score is not None
+            reasons.append(
+                f"distribution drift detected (PSI={drift_score:.3f}, "
+                f"band={drift_band(drift_score)})")
+
+        # The drift evidence recommends a RESPONSE, not just a boolean —
+        # drift alone triggers an investigation; drift + declining scores
+        # recommends retraining; drift + growth recommends dataset expansion.
+        response = ""
+        if drifted:
+            if trend:
+                response = "retrain"
+            elif growth:
+                response = "expand"
+            else:
+                response = "investigate"
 
         # Cooldown applies to all automatic reasons.  A caller can still inspect
         # the reasons to explain why a run was deferred.
@@ -145,6 +249,8 @@ class RetrainingPolicy:
             elapsed_seconds=elapsed,
             reflection_scores=scores,
             data_available=has_data,
+            drift_score=drift_score,
+            response=response,
         )
 
     def should_retrain(self, **kwargs: Any) -> bool:

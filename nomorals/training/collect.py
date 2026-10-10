@@ -14,6 +14,7 @@ information is still subject to the normal review/quality-filter step.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -43,39 +44,151 @@ __all__ = [
     "mine_conversations",
     "scrub_pii",
     "scrub_example",
+    "scrub_report",
+    "presidio_available",
+    "trigram_overlap",
 ]
+
+
+def presidio_available() -> bool:
+    """Is Microsoft Presidio importable here (the NER-grade scrub path)?"""
+    try:
+        import presidio_analyzer  # noqa: F401
+        import presidio_anonymizer  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 _log = get_logger(__name__)
 
 # Order matters: a bearer/API token may contain punctuation that also resembles a
 # phone number.  These expressions deliberately err on the side of redaction.
-_PII_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1[REDACTED_TOKEN]"),
-    (re.compile(r"(?i)\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b"), "[REDACTED_TOKEN]"),
-    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
-    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
-    (re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I), "[REDACTED_EMAIL]"),
-    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[REDACTED_IP]"),
+# Each entry is (entity_name, pattern, replacement).
+_PII_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("bearer", re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1[REDACTED_TOKEN]"),
+    ("api_key", re.compile(r"(?i)\b(?:sk|rk|pk|ghp|gho|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b"), "[REDACTED_TOKEN]"),
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
+    # A leading + means a phone number, not a card — the phone pattern
+    # below owns those (without this guard "+2348012345678" scrubs as a
+    # card and leaves the + dangling).
+    ("card", re.compile(r"(?<!\+)\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
+    ("email", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I), "[REDACTED_EMAIL]"),
+    ("ip", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[REDACTED_IP]"),
+    # Nigerian national identifiers: NIN and BVN are both 11 digits.  The
+    # keyword-anchored form is high-precision; the bare 11-digit form errs
+    # toward redaction (it also catches un-prefixed 080 mobile numbers).
+    ("national_id", re.compile(r"(?i)\b(?:nin|bvn|national[\s_]?id)[\s:=\-]*\d{11}\b"), "[REDACTED_NIN]"),
+    ("national_id", re.compile(r"(?<!\d)\d{11}(?!\d)"), "[REDACTED_NIN]"),
+    # Nigerian 10-digit bank account numbers.
+    ("bank_account", re.compile(r"(?i)\b(?:account[\s_]?(?:no|number)?)[\s:=\-]*\d{10}\b"), "[REDACTED_ACCOUNT]"),
     # Require separators or a leading country code, but do not mistake an
     # ISO/calendar date for a telephone number.
-    (re.compile(r"(?<!\w)(?!(?:\d{4}[-/]\d{1,2}[-/]\d{1,2})(?!\w))\+?\d[\d(). -]{8,}\d(?!\w)"), "[REDACTED_PHONE]"),
+    ("phone", re.compile(r"(?<!\w)(?!(?:\d{4}[-/]\d{1,2}[-/]\d{1,2})(?!\w))\+?\d[\d(). -]{8,}\d(?!\w)"), "[REDACTED_PHONE]"),
 )
 
 
-def scrub_pii(text: str) -> str:
-    """Replace common directly identifying values with stable placeholders."""
+def _hash_placeholder(entity: str, value: str) -> str:
+    """Deterministic pseudonym: the same raw value always maps to the same
+    placeholder, so rows stay joinable without ever storing the value."""
+    digest = hashlib.sha256(f"{entity}:{value}".encode("utf-8")).hexdigest()[:10]
+    return f"[HASH_{entity.upper()}_{digest}]"
+
+
+def scrub_pii(
+    text: str,
+    *,
+    allow: Sequence[str] = (),
+    mode: str = "replace",
+    engine: str = "auto",
+) -> str:
+    """Replace directly identifying values with stable placeholders.
+
+    ``allow`` — literal tokens that survive redaction (e.g. the owner's
+    public handle); ``mode="hash"`` emits deterministic pseudonyms instead
+    of flat placeholders, so the same value stays joinable across rows;
+    ``engine="presidio"`` uses Microsoft Presidio's analyzer+anonymizer
+    when importable (NER catches PERSON names the regexes cannot) and
+    falls back to the regexes otherwise.
+    """
     value = str(text or "")
-    for pattern, replacement in _PII_PATTERNS:
-        value = pattern.sub(replacement, value)
+    if engine in {"presidio", "auto"}:
+        presidio_hit = _presidio_scrub(value, allow=allow, mode=mode)
+        if presidio_hit is not None:
+            return presidio_hit
+        if engine == "presidio":
+            raise RuntimeError("presidio requested but presidio_analyzer is not installed")
+    for entity, pattern, replacement in _PII_PATTERNS:
+        if mode == "hash":
+            value = pattern.sub(lambda m: _hash_placeholder(entity, m.group(0)), value)
+        else:
+            value = pattern.sub(replacement, value)
+    if allow:
+        # restore allow-listed literals (they were redacted above if they
+        # happened to match a pattern — e.g. an email-shaped handle)
+        for token in allow:
+            token = str(token)
+            if token:
+                value = value.replace(token, token)
     return value
 
 
-def scrub_example(example: Example) -> Example:
+def _presidio_scrub(text: str, *, allow: Sequence[str], mode: str) -> str | None:
+    """Presidio pass.  Returns None when Presidio is not importable so the
+    caller falls back to the regexes — never a hard dependency."""
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_anonymizer import AnonymizerEngine
+    except ImportError:
+        return None
+    try:
+        analyzer = AnalyzerEngine()
+        results = analyzer.analyze(
+            text=text, language="en",
+            entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD",
+                      "IBAN_CODE", "IP_ADDRESS", "US_SSN", "NRP"],
+        )
+        anonymizer = AnonymizerEngine()
+        if allow:
+            results = [r for r in results
+                       if text[r.start:r.end] not in set(allow)]
+        if mode == "hash":
+            from presidio_anonymizer.entities import OperatorConfig
+            operators = {r.entity_type: OperatorConfig("hash") for r in results}
+            return anonymizer.anonymize(
+                text=text, analyzer_results=results,
+                operators=operators).text
+        return anonymizer.anonymize(text=text, analyzer_results=results).text
+    except Exception:  # noqa: BLE001 — a broken Presidio install is not a crash
+        _log.debug("presidio scrub failed, falling back to regexes")
+        return None
+
+
+def scrub_report(text: str) -> dict[str, int]:
+    """Per-entity redaction counts for a text — the audit trail.
+
+    Reports *how many* of each entity were found, never the values (the
+    raw value must never be logged or persisted, per the module docstring).
+    """
+    value = str(text or "")
+    return {
+        entity: len(pattern.findall(value))
+        for entity, pattern, _ in _PII_PATTERNS
+    }
+
+
+def scrub_example(
+    example: Example,
+    *,
+    allow: Sequence[str] = (),
+    mode: str = "replace",
+    engine: str = "auto",
+) -> Example:
     """Return a scrubbed copy, preserving the example's source and weight."""
     return Example(
-        turns=[Turn(t.role, scrub_pii(t.content)) for t in example.turns],
+        turns=[Turn(t.role, scrub_pii(t.content, allow=allow, mode=mode, engine=engine))
+               for t in example.turns],
         weight=example.weight,
-        source=scrub_pii(example.source),
+        source=scrub_pii(example.source, allow=allow, mode=mode, engine=engine),
     )
 
 
@@ -538,6 +651,20 @@ _CODE_HINT = re.compile(r"(```|\bdef \b|\bimport \b|SELECT |npm |git )")
 _QUESTION = re.compile(r"\?")
 
 
+def trigram_overlap(left: str, right: str) -> float:
+    """Jaccard overlap of word trigram sets — the Self-Instruct diversity
+    filter in cheap form.  A new instruction is only kept when its overlap
+    with every kept instruction is below ~0.7; without this, mined corpora
+    mode-collapse into variations of the same handful of questions."""
+    def trigrams(text: str) -> set[str]:
+        words = re.findall(r"\w+", text.lower())
+        return {" ".join(words[i:i + 3]) for i in range(max(0, len(words) - 2))}
+    left_t, right_t = trigrams(left), trigrams(right)
+    if not left_t or not right_t:
+        return 0.0
+    return len(left_t & right_t) / len(left_t | right_t)
+
+
 def _quality_score(user_text: str, answer_text: str) -> float:
     """Heuristic 0..1: how much this pair teaches a fine-tune.
 
@@ -610,11 +737,29 @@ class ConversationMiner:
         return [turns for turns in grouped.values() if len(turns) >= 2]
 
     # ── mining ──────────────────────────────────────────────────────────────
-    def mine(self, *, since: float = 0.0, min_score: float = 0.3,
-             limit: int = 400) -> dict[str, Any]:
-        """Pair, scrub, dedupe, score.  Returns examples + stats."""
+    def mine(
+        self,
+        *,
+        since: float = 0.0,
+        min_score: float = 0.3,
+        limit: int = 400,
+        diversity_overlap: float = 0.7,
+        judge: Any = None,
+        judge_weight: float = 0.4,
+    ) -> dict[str, Any]:
+        """Pair, scrub, dedupe, score.  Returns examples + stats.
+
+        ``diversity_overlap`` — the Self-Instruct filter: a pair is dropped
+        when its trigram overlap with an already-kept user turn exceeds
+        this (default 0.7), so the corpus cannot mode-collapse into forty
+        variations of one question.  ``judge`` — an optional
+        ``(user, answer) -> float`` in [0, 1] (the AlpaGasus/DEITA hook:
+        an LLM judge scoring pair quality); it blends with the heuristic
+        at ``judge_weight``.
+        """
         stats = {"conversations": 0, "pairs_seen": 0, "noise_dropped": 0,
-                 "duplicates": 0, "below_score": 0, "kept": 0}
+                 "duplicates": 0, "below_score": 0, "kept": 0,
+                 "diversity_dropped": 0, "judge_scored": 0}
         raw_pairs: list[tuple[str, str, str]] = []
         for turns in self.conversations(since=since):
             stats["conversations"] += 1
@@ -640,11 +785,24 @@ class ConversationMiner:
             raw_pairs = raw_pairs[-limit:]
 
         seen: list[int] = []
+        kept_users: list[str] = []
         scored: list[tuple[float, Example, str]] = []
         for user_text, answer, source in raw_pairs:
             score = _quality_score(user_text, answer)
+            if judge is not None:
+                try:
+                    judge_score = max(0.0, min(1.0, float(judge(user_text, answer))))
+                    stats["judge_scored"] += 1
+                    score = round((1.0 - judge_weight) * score
+                                  + judge_weight * judge_score, 3)
+                except Exception:  # noqa: BLE001 — a judge failure keeps the heuristic
+                    pass
             if score < min_score:
                 stats["below_score"] += 1
+                continue
+            if any(trigram_overlap(user_text, kept) > diversity_overlap
+                   for kept in kept_users):
+                stats["diversity_dropped"] += 1
                 continue
             example = Example(
                 turns=[Turn("user", user_text), Turn("assistant", answer)],
@@ -657,6 +815,7 @@ class ConversationMiner:
                 stats["duplicates"] += 1
                 continue
             seen.append(fingerprint)
+            kept_users.append(user_text)
             scored.append((score, example, user_text))
         scored.sort(key=lambda item: item[0], reverse=True)
         stats["kept"] = len(scored)
@@ -666,10 +825,14 @@ class ConversationMiner:
 
     def export(self, *, output_dir: str | Path, name: str = "",
                since: float = 0.0, min_score: float = 0.3,
-               limit: int = 400, register: bool = True) -> dict[str, Any]:
+               limit: int = 400, register: bool = True,
+               diversity_overlap: float = 0.7,
+               judge: Any = None, judge_weight: float = 0.4) -> dict[str, Any]:
         """Mine and write the four-format bundle + manifest; register the
         internal JSONL in the dataset registry when ``register`` is set."""
-        result = self.mine(since=since, min_score=min_score, limit=limit)
+        result = self.mine(since=since, min_score=min_score, limit=limit,
+                           diversity_overlap=diversity_overlap,
+                           judge=judge, judge_weight=judge_weight)
         examples = result["examples"]
         out_dir = Path(output_dir).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -728,11 +891,15 @@ def mine_conversations(
     limit: int = 400,
     register: bool = True,
     simhash_threshold: int = 3,
+    diversity_overlap: float = 0.7,
+    judge: Any = None,
+    judge_weight: float = 0.4,
 ) -> dict[str, Any]:
     """Functional entry point for the conversation→training pipeline."""
     return ConversationMiner(db, simhash_threshold=simhash_threshold).export(
         output_dir=output_dir, name=name, since=since, min_score=min_score,
-        limit=limit, register=register)
+        limit=limit, register=register, diversity_overlap=diversity_overlap,
+        judge=judge, judge_weight=judge_weight)
 
 
 def _example_simhash(example: Example) -> int:

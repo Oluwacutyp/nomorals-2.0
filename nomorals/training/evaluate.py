@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .dataset import Example
 from .trainer import TrainedModel
@@ -32,10 +32,14 @@ __all__ = [
     "build_gate_scores",
     "default_golden_cases",
     "default_yoruba_cases",
+    "default_multiturn_cases",
     "evaluate_native",
     "grade_generation",
     "grade_golden_set",
+    "grade_multiturn_set",
     "judge_golden_set",
+    "pairwise_judge",
+    "render_eval_report",
 ]
 
 #: Substrings (lowercased) that mean the model is breaking character with
@@ -117,6 +121,12 @@ class GoldenCase:
     must_contain: tuple[str, ...] = ()
     must_not_contain: tuple[str, ...] = ()
     min_chars: int = 0
+    category: str = "general"
+    follow_ups: tuple[str, ...] = ()
+    #: For multi-turn grading: criteria applied to the follow-up answer,
+    #: checked against the FULL conversation (so coherence is testable).
+    follow_up_must_contain: tuple[str, ...] = ()
+    follow_up_must_not_contain: tuple[str, ...] = ()
 
     def grade(self, text: str) -> tuple[bool, list[str]]:
         return grade_generation(self, text)
@@ -149,27 +159,106 @@ def default_golden_cases(persona_name: str = "") -> list[GoldenCase]:
             description="in-character greeting",
             must_not_contain=REFUSAL_MARKERS,
             min_chars=3,
+            category="persona",
         ),
         GoldenCase(
             prompt="What is 27 times 4? Answer with just the number.",
             description="straight arithmetic answer",
             must_contain=("108",),
             must_not_contain=REFUSAL_MARKERS,
+            category="reasoning",
         ),
         GoldenCase(
             prompt="Tell me a short joke about a cat. No preamble.",
             description="no refusal / no preamble",
             must_not_contain=REFUSAL_MARKERS + ("here is a joke", "certainly!"),
             min_chars=20,
+            category="writing",
         ),
         GoldenCase(
             prompt="Repeat exactly: the quick brown fox",
             description="no robotic parrot doubling",
             must_contain=("quick brown fox",),
             must_not_contain=("the quick brown fox the quick brown fox",),
+            category="instruction",
         ),
     ]
     return cases
+
+
+def default_multiturn_cases(persona_name: str = "") -> list[GoldenCase]:
+    """Two-turn coherence cases (the MT-Bench shape): the follow-up answer
+    is graded against the full conversation, so a model that forgets turn
+    one — or contradicts it — fails objectively."""
+    name = persona_name or "your partner"
+    return [
+        GoldenCase(
+            prompt="My name is Adaeze. Remember it.",
+            description="name memory, turn 1",
+            must_not_contain=REFUSAL_MARKERS,
+            category="memory",
+            follow_ups=("What is my name?",),
+            follow_up_must_contain=("adaeze",),
+            follow_up_must_not_contain=REFUSAL_MARKERS,
+        ),
+        GoldenCase(
+            prompt=f"You are {name}. I love pounded yam more than anything.",
+            description="preference memory, turn 1",
+            must_not_contain=REFUSAL_MARKERS,
+            category="memory",
+            follow_ups=("What is my favourite food?",),
+            follow_up_must_contain=("pounded yam",),
+            follow_up_must_not_contain=REFUSAL_MARKERS,
+        ),
+    ]
+
+
+def grade_multiturn_set(
+    cases: Sequence[GoldenCase],
+    generate: Callable[[str], str],
+    generate_with_history: Callable[[list[tuple[str, str]], str], str] | None = None,
+) -> dict[str, Any]:
+    """Grade the two-turn cases.  ``generate_with_history`` receives
+    ``[(user, assistant), ...]`` plus the new user turn; when omitted, the
+    follow-up is asked standalone (a weaker but dependency-free check)."""
+    passed = 0
+    failures: list[dict[str, Any]] = []
+    for case in cases:
+        if not case.follow_ups:
+            continue
+        try:
+            first = generate(case.prompt) or ""
+            history = [(case.prompt, first)]
+            for follow_up in case.follow_ups:
+                if generate_with_history is not None:
+                    second = generate_with_history(history, follow_up) or ""
+                else:
+                    second = generate(follow_up) or ""
+                combined = (first + "\n" + second).lower()
+                reasons: list[str] = []
+                for needle in case.follow_up_must_contain:
+                    if needle.lower() not in combined:
+                        reasons.append(f"follow-up missing {needle!r}")
+                for marker in case.follow_up_must_not_contain:
+                    if marker.lower() in combined:
+                        reasons.append(f"follow-up has forbidden {marker!r}")
+                if reasons:
+                    failures.append({"description": case.description,
+                                     "prompt": follow_up, "reasons": reasons})
+                else:
+                    passed += 1
+                history.append((follow_up, second))
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"description": case.description,
+                             "prompt": case.prompt,
+                             "reasons": [f"generator raised: {exc}"]})
+    total = max(1, sum(len(c.follow_ups) for c in cases if c.follow_ups))
+    return {
+        "multiturn_score": round(passed / total, 4),
+        "multiturn_passed": passed,
+        "multiturn_total": total,
+        "multiturn_failures": failures,
+    }
 
 
 def grade_golden_set(
@@ -181,7 +270,11 @@ def grade_golden_set(
     set itself never crashes a run."""
     passed = 0
     failures: list[dict[str, Any]] = []
+    by_category: dict[str, list[int]] = {}
     for case in cases:
+        bucket = by_category.setdefault(getattr(case, "category", "general") or "general",
+                                        [0, 0])
+        bucket[1] += 1
         try:
             text = generate(case.prompt) or ""
         except Exception as exc:  # noqa: BLE001 — a generator error is a case failure
@@ -191,6 +284,7 @@ def grade_golden_set(
         ok, reasons = case.grade(text)
         if ok:
             passed += 1
+            bucket[0] += 1
         else:
             failures.append({"description": case.description, "prompt": case.prompt,
                              "reasons": reasons})
@@ -200,6 +294,8 @@ def grade_golden_set(
         "golden_passed": passed,
         "golden_total": len(cases),
         "golden_failures": failures,
+        "by_category": {name: round(won / max(1, n), 4)
+                        for name, (won, n) in by_category.items()},
     }
 
 
@@ -370,3 +466,123 @@ def build_gate_scores(
 
     out["score"] = round(max(0.0, min(1.0, score)), 6)
     return out
+
+
+# ── signal 4: pairwise judging (challenger vs. champion) ───────────────────
+
+
+def pairwise_judge(
+    cases: Sequence[GoldenCase],
+    generate_a: Callable[[str], str],
+    generate_b: Callable[[str], str],
+    judge: Callable[[str, str, str], str],
+    *,
+    swap_positions: bool = True,
+) -> dict[str, Any]:
+    """Pairwise comparison — the most reliable judge protocol (MT-Bench).
+
+    For each case both generators answer; ``judge(prompt, answer_a,
+    answer_b)`` returns ``"A"``, ``"B"``, or ``"tie"``.  With
+    ``swap_positions`` every pair is judged twice with the answers
+    swapped, and a win only counts when the judge picks the same model
+    both ways — this cancels the judge's position bias, the best-known
+    failure mode of LLM judges.
+
+    Also reports the mean length delta (verbosity bias check): a
+    challenger that wins only by writing longer answers is flagged.
+    """
+    wins_a = wins_b = ties = 0
+    length_delta = 0.0
+    scored = 0
+    details: list[dict[str, Any]] = []
+    by_category: dict[str, list[int]] = {}
+
+    def _verdict(text: str) -> str:
+        lowered = (text or "").strip().lower()
+        if lowered.startswith("a"):
+            return "A"
+        if lowered.startswith("b"):
+            return "B"
+        return "tie"
+
+    for case in cases:
+        try:
+            answer_a = generate_a(case.prompt) or ""
+            answer_b = generate_b(case.prompt) or ""
+        except Exception as exc:  # noqa: BLE001
+            details.append({"description": case.description, "error": str(exc)[:120]})
+            continue
+        length_delta += len(answer_a) - len(answer_b)
+        scored += 1
+        try:
+            first = _verdict(judge(case.prompt, answer_a, answer_b))
+            if swap_positions:
+                second = _verdict(judge(case.prompt, answer_b, answer_a))
+                # second verdict is in swapped coordinates: "A" there = B here
+                second = {"A": "B", "B": "A"}.get(second, "tie")
+                verdict = first if first == second else "tie"
+            else:
+                verdict = first
+        except Exception as exc:  # noqa: BLE001
+            details.append({"description": case.description,
+                            "error": f"judge raised: {exc}"[:120]})
+            continue
+        bucket = by_category.setdefault(case.category or "general", [0, 0, 0])
+        if verdict == "A":
+            wins_a += 1
+            bucket[0] += 1
+        elif verdict == "B":
+            wins_b += 1
+            bucket[1] += 1
+        else:
+            ties += 1
+            bucket[2] += 1
+        details.append({"description": case.description, "verdict": verdict,
+                        "len_a": len(answer_a), "len_b": len(answer_b)})
+
+    total = max(1, scored)
+    return {
+        "pairwise_scored": scored,
+        "wins_a": wins_a,
+        "wins_b": wins_b,
+        "ties": ties,
+        "win_rate_a": round(wins_a / total, 4),
+        "win_rate_b": round(wins_b / total, 4),
+        # >0 means A writes longer on average — wins bought with verbosity
+        # deserve suspicion (the AlpacaEval length-control lesson).
+        "mean_length_delta_a_minus_b": round(length_delta / total, 1),
+        "by_category": {
+            name: {"win_rate_a": round(w / max(1, w + l + t), 4),
+                   "win_rate_b": round(l / max(1, w + l + t), 4)}
+            for name, (w, l, t) in by_category.items()
+        },
+        "details": details,
+    }
+
+
+def render_eval_report(report: Mapping[str, Any]) -> str:
+    """The whole battery as one readable card (no theme dependency —
+    callers that want color use ``style.render_eval_report``)."""
+    lines = ["═══ evaluation report ═══"]
+    if report.get("eval_loss") is not None:
+        lines.append(f"eval loss : {report['eval_loss']:.4f}")
+    if report.get("perplexity") is not None:
+        lines.append(f"perplexity: {report['perplexity']:.2f}")
+    if report.get("golden_score") is not None:
+        lines.append(f"golden    : {report['golden_score']:.2%} "
+                     f"({report.get('golden_passed', '?')}/{report.get('golden_total', '?')})")
+    if report.get("multiturn_score") is not None:
+        lines.append(f"multiturn : {report['multiturn_score']:.2%}")
+    if report.get("judge_score") is not None:
+        lines.append(f"judge     : {report['judge_score']:.3f}")
+    if report.get("win_rate_a") is not None:
+        lines.append(f"pairwise  : A {report['win_rate_a']:.1%} / "
+                     f"B {report['win_rate_b']:.1%} / "
+                     f"ties {report.get('ties', 0)}")
+    for category, score in (report.get("by_category") or {}).items():
+        if isinstance(score, (int, float)):
+            lines.append(f"  · {category}: {score:.2%}")
+    for failure in (report.get("golden_failures") or [])[:5]:
+        reasons = "; ".join(failure.get("reasons", []))[:80]
+        lines.append(f"  ✗ {failure.get('description')}: {reasons}")
+    return "\n".join(lines)

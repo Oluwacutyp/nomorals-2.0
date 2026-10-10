@@ -20,7 +20,11 @@ from typing import Any, Iterable, Sequence
 from ..core.logging_setup import get_logger
 from .dataset import Example
 
-__all__ = ["CleanStats", "clean_text", "simhash", "dedupe", "quality_filter", "split"]
+__all__ = [
+    "CleanStats", "clean_text", "simhash", "hamming", "dedupe",
+    "quality_filter", "refined_quality_signals", "check_leakage", "split",
+    "prepare",
+]
 
 _log = get_logger(__name__)
 
@@ -60,19 +64,70 @@ def hamming(left: int, right: int) -> int:
     return bin(left ^ right).count("1")
 
 
-def dedupe(examples: Sequence[Example], *, threshold: int = 3) -> list[Example]:
-    """Drop near-duplicates. ``threshold`` is max differing bits out of 64."""
+def _example_text(example: Example) -> str:
+    return clean_text(example.prompt + "\n" + example.completion)
+
+
+def dedupe(
+    examples: Sequence[Example],
+    *,
+    threshold: int = 3,
+    exact_first: bool = True,
+) -> list[Example]:
+    """Drop duplicates: exact matches first (cheap), then near-duplicates.
+
+    The RedPajama pipeline order — a byte-identical row is the most common
+    duplicate in real corpora and a sha256 pre-pass is O(n) versus the
+    O(n²) simhash scan, so exact-first is both faster and stricter.
+    ``threshold`` is max differing bits out of 64 for the fuzzy pass.
+    """
+    exact_dropped = 0
+    candidates = list(examples)
+    if exact_first:
+        seen_exact: set[str] = set()
+        unique: list[Example] = []
+        for example in candidates:
+            digest = hashlib.sha256(_example_text(example).encode("utf-8")).hexdigest()
+            if digest in seen_exact:
+                exact_dropped += 1
+                continue
+            seen_exact.add(digest)
+            unique.append(example)
+        candidates = unique
     kept: list[Example] = []
     seen: list[int] = []
-    for example in examples:
-        text = example.prompt + "\n" + example.completion
-        fingerprint = simhash(clean_text(text))
+    for example in candidates:
+        fingerprint = simhash(_example_text(example))
         if any(hamming(fingerprint, other) <= threshold for other in seen):
             continue
         seen.append(fingerprint)
         kept.append(example)
-    _log.info("deduped %d -> %d examples", len(examples), len(kept))
+    _log.info("deduped %d -> %d examples (%d exact, %d fuzzy dropped)",
+              len(examples), len(kept), exact_dropped,
+              len(candidates) - len(kept))
     return kept
+
+
+def refined_quality_signals(text: str) -> dict[str, float]:
+    """RefinedWeb/C4-style quality signals for one text.
+
+    Returns the raw signals (callers decide thresholds): alphabetic ratio,
+    terminal-punctuation presence, symbol-to-word ratio, mean line length,
+    and word count.  Degenerate crawl rows fail these long before a human
+    would notice.
+    """
+    words = re.findall(r"\w+", text.lower())
+    chars = len(text)
+    alpha = sum(1 for ch in text if ch.isalpha())
+    lines = [line for line in text.split("\n") if line.strip()]
+    symbols = sum(1 for ch in text if not ch.isalnum() and not ch.isspace())
+    return {
+        "alpha_ratio": alpha / max(1, chars),
+        "word_count": float(len(words)),
+        "symbol_ratio": symbols / max(1, len(words)),
+        "mean_line_len": sum(len(line) for line in lines) / max(1, len(lines)),
+        "ends_with_terminal": 1.0 if text.rstrip().endswith((".", "?", "!")) else 0.0,
+    }
 
 
 def quality_filter(
@@ -82,8 +137,15 @@ def quality_filter(
     min_completion_chars: int = 4,
     max_chars: int = 32_000,
     max_repetition: float = 0.55,
+    strict: bool = False,
 ) -> list[Example]:
-    """Drop examples that would teach the model nothing, or teach it to repeat."""
+    """Drop examples that would teach the model nothing, or teach it to repeat.
+
+    ``strict=True`` adds the RefinedWeb-style signals: the completion must
+    be mostly alphabetic, end with terminal punctuation, and not be
+    symbol-dense.  Strict mode is for web-mined rows; the default stays
+    lenient for curated/chat rows.
+    """
     kept: list[Example] = []
     for example in examples:
         prompt = clean_text(example.prompt)
@@ -94,9 +156,43 @@ def quality_filter(
             continue
         if _repetition_ratio(completion) > max_repetition:
             continue
+        if strict:
+            signals = refined_quality_signals(completion)
+            if signals["alpha_ratio"] < 0.5:
+                continue
+            if signals["symbol_ratio"] > 0.4:
+                continue
+            if signals["ends_with_terminal"] < 1.0 and signals["word_count"] > 12:
+                continue
         kept.append(example)
-    _log.info("quality filter kept %d/%d", len(kept), len(examples))
+    _log.info("quality filter kept %d/%d (strict=%s)", len(kept), len(examples), strict)
     return kept
+
+
+def check_leakage(
+    train: Sequence[Example],
+    evaluation: Sequence[Example],
+    *,
+    threshold: int = 3,
+) -> dict[str, Any]:
+    """Find eval rows that near-duplicate a train row (SlimPajama lesson).
+
+    A split drawn *after* dedupe can still leak when the dedupe ran per-file;
+    eval must be deduplicated against train GLOBALLY.  Returns the count and
+    the offending eval indices — the caller decides whether to drop them.
+    """
+    train_prints = [simhash(_example_text(e)) for e in train]
+    leaked: list[int] = []
+    for index, example in enumerate(evaluation):
+        fingerprint = simhash(_example_text(example))
+        if any(hamming(fingerprint, prior) <= threshold for prior in train_prints):
+            leaked.append(index)
+    return {
+        "eval_rows": len(evaluation),
+        "leaked": len(leaked),
+        "leaked_indices": leaked,
+        "leak_rate": round(len(leaked) / max(1, len(evaluation)), 4),
+    }
 
 
 def _repetition_ratio(text: str) -> float:

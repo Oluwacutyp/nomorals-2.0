@@ -46,6 +46,7 @@ __all__ = [
     "write_colab_script", "write_colab_notebook",
     "generate_persona_samples", "load_persona", "COLAB_BASE_MODELS",
     "DEFAULT_COLAB_BASE", "DEFAULT_COLAB_SOURCES", "DEFAULT_TARGET_ROWS",
+    "QLORA_RECIPE", "qlora_recipe", "EVOLVE_OPERATIONS", "render_mix_summary",
 ]
 
 #: The default persona — the owner's FULL CODE BEAST persona, verbatim
@@ -132,6 +133,61 @@ DEFAULT_TARGET_ROWS = 500_000
 #: noise. 'nm data mix' lifts a smaller --rows to this floor for fetched,
 #: manifest-complete sources (clamped to what the sources actually hold).
 NOTEBOOK_MIN_TARGET_ROWS = 100
+
+#: The vetted QLoRA recipe — consensus from the QLoRA ablations, the
+#: 50-config community benchmark corpus, and the trl docs (mined
+#: 2026-10-10; see TRAINING_SWEEP_MINING.md §8):
+#:
+#: * rank 16–32, **alpha ≈ 2× rank** (not r/4 — that under-scales updates);
+#: * LR ~2e-4 with 10% warmup + cosine decay;
+#: * all-linear target modules (attention-only leaves quality on the table);
+#: * **NEFTune** (``neftune_noise_alpha=5``) — the free instruction-following
+#:   gain (up to +25% on MT-Bench in the paper's ablations);
+#: * **packing** — short rows waste most of a 512-token window otherwise;
+#: * **assistant-only loss** — never train the model to predict user turns.
+QLORA_RECIPE: dict[str, Any] = {
+    "lora_r": 32,
+    "lora_alpha": 64,  # alpha ≈ 2× rank
+    "lora_dropout": 0.05,
+    "learning_rate": 2e-4,
+    "warmup_ratio": 0.1,
+    "lr_scheduler": "cosine",
+    "neftune_noise_alpha": 5,
+    "packing": True,
+    "assistant_only_loss": True,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
+                       "gate_proj", "up_proj", "down_proj"],
+    "bnb": {
+        "load_in_4bit": True,
+        "bnb_4bit_quant_type": "nf4",
+        "bnb_4bit_use_double_quant": True,
+        "bnb_4bit_compute_dtype": "bfloat16",
+    },
+}
+
+
+def qlora_recipe(**overrides: Any) -> dict[str, Any]:
+    """A copy of :data:`QLORA_RECIPE` with ``overrides`` applied.
+
+    The single source of truth for "what hyperparameters should this
+    finetune use" — the generated Colab artifacts and the unsloth
+    backend both follow it, so the recipe only ever needs tuning once.
+    """
+    recipe = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+              for k, v in QLORA_RECIPE.items()}
+    recipe.update(overrides)
+    return recipe
+
+
+#: The five Evol-Instruct operations (WizardLM): rewriting an instruction
+#: to be harder beats generating fresh easy ones for data quality.
+EVOLVE_OPERATIONS: dict[str, str] = {
+    "constraints": "Rewrite the instruction, adding one new constraint or requirement.",
+    "deepen": "Rewrite the instruction, making it more specific and demanding.",
+    "concretize": "Rewrite the instruction, replacing abstract concepts with concrete, specific ones.",
+    "reasoning": "Rewrite the instruction so answering it requires explicit multi-step reasoning.",
+    "breadth": "Create a new instruction in the same domain but on a different aspect.",
+}
 
 #: The default data recipe — the 500K class (wave 69e).  Every id and
 #: row count verified live against HuggingFace on 2026-09-12:
@@ -415,6 +471,30 @@ def build_persona_mix(
     return manifest
 
 
+def render_mix_summary(manifest: dict[str, Any], *, color: bool | None = None) -> str:
+    """The persona-mix manifest as a human-readable card.
+
+    The manifest JSON is machine-shaped; this is what the operator reads:
+    rows in/out, per-source contribution, and where the bundles landed.
+    """
+    from .style import Theme, card
+
+    theme = Theme(color=color)
+    per_source = manifest.get("per_source") or {}
+    rows = [
+        ("rows", f"{manifest.get('rows', 0):,} / target {manifest.get('target_rows', 0):,}"),
+        ("gathered", f"{manifest.get('gathered', 0):,}"),
+        ("filtered", f"{manifest.get('filtered', 0):,}"),
+        ("deduped", f"{manifest.get('deduped', 0):,}"),
+        ("persona chars", str(manifest.get("persona_chars", 0))),
+    ]
+    for name, info in per_source.items():
+        rows.append((f"  {name}", f"{info.get('rows', 0):,} rows"))
+    outputs = manifest.get("outputs") or {}
+    footer = str(outputs.get("messages_jsonl", ""))
+    return card(theme, "persona mix", rows, footer=footer)
+
+
 # ── Colab training script ───────────────────────────────────────────────────
 
 
@@ -537,6 +617,9 @@ trainer = SFTTrainer(
     data_collator=None,
     tokenizer=tok,
     max_seq_length=SEQ_LEN,
+    # packing: rows are ~390 tokens, so 2-3 of them fill each 512-token
+    # window instead of wasting most of it on padding.
+    packing=True,
     peft_config=peft,
     args=SFTConfig(
         **_LIGER_SFT_EXTRA,
@@ -545,6 +628,15 @@ trainer = SFTTrainer(
         gradient_accumulation_steps=GRAD_ACCUM,
         num_train_epochs=EPOCHS,
         learning_rate=LR,
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        # NEFTune: noisy embeddings during training — the free
+        # instruction-following gain (Jain et al.; up to +25% MT-Bench
+        # in the paper's ablations).  Disabled automatically after train.
+        neftune_noise_alpha=5,
+        # assistant-only loss: the model learns to WRITE answers, not to
+        # predict user turns (which would teach it to imitate the user).
+        assistant_only_loss=True,
         bf16=torch.cuda.is_bf16_supported(),
         save_steps=SAVE_STEPS,
         logging_steps=10,
@@ -1069,12 +1161,17 @@ trainer = SFTTrainer(
     train_dataset=dataset,
     dataset_text_field="text",
     max_seq_length=SEQ_LEN,
-    packing=False,
+    # packing: ~390-token rows would waste most of each 512-token window
+    # on padding otherwise — packing roughly doubles tokens per step.
+    packing=True,
     args=TrainingArguments(
         per_device_train_batch_size=BATCH,
         gradient_accumulation_steps=GRAD_ACCUM,
         warmup_ratio=0.1,
         learning_rate=2e-4,
+        # NEFTune: noisy embeddings during training — the free
+        # instruction-following gain (Jain et al.).  Auto-disabled after.
+        neftune_noise_alpha=5,
         num_train_epochs=EPOCHS,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
@@ -1655,6 +1752,45 @@ _TOPIC_SEEDS: list[str] = [
 ]
 
 
+def _chat_once(brain: Any, system: str, prompt: str) -> str:
+    """One best-effort chat call; returns the text or "" on any failure."""
+    from ..llm.base import Message, SamplingParams
+
+    try:
+        response = brain.chat(
+            [Message.system(system), Message.user(prompt)],
+            SamplingParams(temperature=0.9, max_tokens=1600), task_kind="judge")
+    except Exception as exc:  # noqa: BLE001 — generation is best-effort
+        _log.debug("persona sample call failed: %s", exc)
+        return ""
+    if not getattr(response, "ok", False):
+        return ""
+    return (getattr(response, "text", "") or "").strip()
+
+
+def _extract_pairs_json(text: str) -> list[dict[str, str]]:
+    """Pull the ``{"pairs": [...]}`` payload out of a model reply."""
+    start = text.find("{")
+    if start < 0:
+        return []
+    depth = 0
+    for j in range(start, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(text[start:j + 1])
+                except (ValueError, TypeError):
+                    return []
+                if isinstance(data, dict):
+                    return [p for p in data.get("pairs") or []
+                            if isinstance(p, dict)]
+                return []
+    return []
+
+
 def generate_persona_samples(
     router: Any,
     persona: str,
@@ -1664,14 +1800,24 @@ def generate_persona_samples(
     per_call: int = 5,
     out_path: str | Path = "",
     seeds: list[str] | None = None,
+    evolve: bool = False,
+    evolve_rounds: int = 2,
 ) -> dict[str, Any]:
     """Self-distill persona dialogues in a target language.
 
-    The active model (whatever the router points at — usually the best
-    cloud brain) writes ``n`` persona-voice Q&A pairs in ``language``;
-    each is stored as a messages-format row with the persona system
-    turn, ready to be mixed in as a source.  One call produces
-    ``per_call`` pairs (strict JSON), so 200 samples ≈ 40 calls.
+    The active model (whatever ``router`` points at — usually the best
+    cloud brain; a ``Brain`` works, or anything with a ``.chat`` method)
+    writes ``n`` persona-voice Q&A pairs in ``language``; each is stored
+    as a messages-format row with the persona system turn, ready to be
+    mixed in as a source.  One call produces ``per_call`` pairs (strict
+    JSON), so 200 samples ≈ 40 calls.
+
+    ``evolve=True`` runs the Evol-Instruct pass afterwards: each seed
+    question is rewritten ``evolve_rounds`` times with the five
+    complexity operations (add constraints, deepen, concretize, force
+    reasoning steps, breadth) and re-answered in the persona voice.
+    Evolved rows teach harder behavior than fresh easy ones — that is
+    the whole point of WizardLM's method.
 
     Returns ``{"ok", "rows", "path", "calls"}``.  Degrades to 0 rows
     (never raises) when the model can't produce valid JSON.
@@ -1681,8 +1827,19 @@ def generate_persona_samples(
     if not topic_pool:
         return {"ok": False, "rows": 0, "path": "", "calls": 0,
                 "error": "no topics"}
-    from ..llm.base import Message, SamplingParams
+    brain = router if hasattr(router, "chat") else brain_for(router)
 
+    def _row(question: str, answer: str, source: str) -> dict[str, Any]:
+        return {
+            "messages": [
+                {"role": "system", "content": persona},
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": answer},
+            ],
+            "source": source,
+        }
+
+    source_tag = f"generated-{language.lower().split()[0]}"
     out_path = Path(out_path).expanduser() if out_path else \
         Path("persona-samples.jsonl")
     rows: list[dict[str, Any]] = []
@@ -1695,9 +1852,9 @@ def generate_persona_samples(
                   for k in range(per_call)]
         call_no += 1
         prompt = (
-            f"You write training data for a persona. Persona:\\n{persona}\\n\\n"
+            f"You write training data for a persona. Persona:\n{persona}\n\n"
             f"For EACH of these topics: "
-            f"{', '.join(topics)}\\n"
+            f"{', '.join(topics)}\n"
             "write ONE user question in ENGLISH and ONE reply in "
             f"{language} (mixed {language}+English is fine, the way real "
             "Nigerians code-switch), IN THE PERSONA VOICE. Be emotional "
@@ -1705,53 +1862,55 @@ def generate_persona_samples(
             '{"pairs": [{"question": "...", "answer": "..."}, ...]} '
             f"with exactly {len(topics)} pairs."
         )
-        try:
-            response = brain_for(self.context).chat(
-                [Message.system("You produce strict JSON training data."),
-                 Message.user(prompt)],
-                SamplingParams(temperature=0.9, max_tokens=1600), task_kind="judge")
-        except Exception as exc:  # noqa: BLE001 — generation is best-effort
-            _log.debug("persona sample call failed: %s", exc)
-            break
+        text = _chat_once(brain, "You produce strict JSON training data.", prompt)
         calls += 1
-        text = (getattr(response, "text", "") or "").strip()
-        if not getattr(response, "ok", False):
+        if not text:
             break
-        data = None
-        start = text.find("{")
-        if start >= 0:
-            depth = 0
-            for j in range(start, len(text)):
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            data = json.loads(text[start:j + 1])
-                        except (ValueError, TypeError):
-                            data = None
-                        break
-        if not isinstance(data, dict):
-            continue
-        for pair in data.get("pairs") or []:
+        for pair in _extract_pairs_json(text):
             q = str(pair.get("question") or "").strip()
             a = str(pair.get("answer") or "").strip()
             if not q or not a:
                 continue
-            rows.append({
-                "messages": [
-                    {"role": "system", "content": persona},
-                    {"role": "user", "content": q},
-                    {"role": "assistant", "content": a},
-                ],
-                "source": f"generated-{language.lower().split()[0]}",
-            })
+            rows.append(_row(q, a, source_tag))
             if len(rows) >= n:
                 break
+
+    # ── Evol-Instruct pass: harder questions, same persona voice ──────────
+    evolved = 0
+    if evolve and rows:
+        ops = list(EVOLVE_OPERATIONS.items())
+        for base in list(rows):
+            question = base["messages"][1]["content"]
+            for _ in range(evolve_rounds):
+                op_name, op_prompt = ops[rng.randrange(len(ops))]
+                prompt = (
+                    f"You write training data for a persona. Persona:\n{persona}\n\n"
+                    f"{op_prompt}\n\nOriginal question: {question}\n\n"
+                    f"Then answer the rewritten question in {language} "
+                    "(mixed English is fine), IN THE PERSONA VOICE. "
+                    "Reply with ONLY JSON of the form "
+                    '{"pairs": [{"question": "<rewritten>", '
+                    '"answer": "<persona-voice answer>"}]}.'
+                )
+                text = _chat_once(brain, "You produce strict JSON training data.",
+                                  prompt)
+                calls += 1
+                if not text:
+                    break
+                pairs = _extract_pairs_json(text)
+                if not pairs:
+                    continue
+                q = str(pairs[0].get("question") or "").strip()
+                a = str(pairs[0].get("answer") or "").strip()
+                if not q or not a or q == question:
+                    continue
+                rows.append(_row(q, a, f"{source_tag}-evolved-{op_name}"))
+                evolved += 1
+                question = q  # evolve the evolution — compounding difficulty
     rng.shuffle(rows)
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         write_jsonl(out_path, rows)
     return {"ok": len(rows) > 0, "rows": len(rows),
-            "path": str(out_path) if out_path else "", "calls": calls}
+            "path": str(out_path) if out_path else "", "calls": calls,
+            "evolved": evolved}

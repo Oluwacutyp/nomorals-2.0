@@ -22,7 +22,10 @@ from ..compat import load_optional
 from ..core.errors import ParseError, ValidationError
 from ..core.logging_setup import get_logger
 
-__all__ = ["BPETokenizer", "HFTokenizer", "build_tokenizer", "SPECIAL_TOKENS"]
+__all__ = [
+    "BPETokenizer", "HFTokenizer", "build_tokenizer", "SPECIAL_TOKENS",
+    "encode_batch", "tokenizer_corpus_stats",
+]
 
 _log = get_logger(__name__)
 
@@ -286,3 +289,46 @@ def build_tokenizer(model: str = "", *, prefer: str = "auto") -> Any:
     if prefer == "hf":
         raise ValidationError("transformers is not available or the model did not load")
     return BPETokenizer()
+
+
+def encode_batch(
+    tokenizer: Any, texts: Iterable[str], *, add_specials: bool = False
+) -> list[list[int]]:
+    """Encode many texts with one call — the batch path tokenizers are
+    expected to offer (HF's ``__call__`` takes lists; the BPE never did)."""
+    return [tokenizer.encode(text, add_specials=add_specials) for text in texts]
+
+
+def tokenizer_corpus_stats(
+    tokenizer: Any, texts: Iterable[str], *, sample: int = 2000
+) -> dict[str, Any]:
+    """Token-length distribution over a corpus (capped sample).
+
+    This is what sizes ``max_seq_len`` honestly: the p95 token count tells
+    you what sequence length fits the data instead of guessing 512.  Also
+    reports the compression ratio (chars per token) as a tokenizer-quality
+    sniff test — byte-level BPE on chat text should land around 3-5.
+    """
+    lengths: list[int] = []
+    chars = 0
+    total = 0
+    for index, text in enumerate(texts):
+        if index >= sample:
+            break
+        total += 1
+        ids = tokenizer.encode(text)
+        lengths.append(len(ids))
+        chars += len(text)
+    if not lengths:
+        return {"rows": 0, "sampled": 0}
+    lengths.sort()
+    tokens = sum(lengths)
+    return {
+        "rows": total,
+        "sampled": len(lengths),
+        "tokens_total": tokens,
+        "tokens_median": lengths[len(lengths) // 2],
+        "tokens_p95": lengths[min(len(lengths) - 1, int(0.95 * len(lengths)))],
+        "tokens_max": lengths[-1],
+        "chars_per_token": round(chars / max(1, tokens), 2),
+    }
