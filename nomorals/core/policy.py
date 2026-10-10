@@ -27,9 +27,9 @@ import hashlib
 import re
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .logging_setup import get_logger
 
@@ -38,19 +38,25 @@ _log = get_logger(__name__)
 __all__ = [
     "AUDIT_BIOMETRIC",
     "AUDIT_DENY",
+    "AUDIT_GRANT",
     "AUDIT_OBSERVE",
     "AUDIT_PROPOSE",
+    "AUDIT_REVOKE",
     "GRADIENT_ACT_SILENT",
     "GRADIENT_ACT_WITH_APPROVAL",
     "GRADIENT_OBSERVE",
     "GRADIENT_PROPOSE",
     "Capability",
     "CapabilitySet",
+    "MemoryPolicyStore",
     "PermissionGradient",
     "Policy",
     "PolicyDecision",
+    "PolicyStore",
+    "TimedGrant",
     "approve_with_biometric",
     "is_explicit_instruction",
+    "narrow_grant",
 ]
 
 
@@ -288,6 +294,8 @@ AUDIT_CONFIRM = "confirm"
 AUDIT_BIOMETRIC = "biometric"
 AUDIT_OBSERVE = "observe"
 AUDIT_PROPOSE = "propose"
+AUDIT_GRANT = "grant"
+AUDIT_REVOKE = "revoke"
 
 
 #: Permission-gradient levels (Dots pattern: read-only-proactive →
@@ -350,6 +358,12 @@ class _Rule:
     effect: str  # allow | deny | confirm | biometric
     note: str = ""
     priority: int = 0
+    # Optional condition evaluated against the check's ``context`` dict.
+    # The rule only applies when ``when(context)`` is truthy; a condition
+    # that raises fails CLOSED (the check is denied). Context is no longer
+    # just audit metadata — it is how rules get resource-bound, e.g.
+    # ``allow("fs.write", when=lambda ctx: ctx["path"].startswith(ws))``.
+    when: Callable[[dict[str, Any]], bool] | None = None
 
 
 class Policy:
@@ -361,8 +375,14 @@ class Policy:
          (biometric rules additionally require the token to be minted through
          the fingerprint prompt)
       3. explicit ``allow`` rules
-      4. the actor's :class:`CapabilitySet`
+      4. the actor's :class:`CapabilitySet` (or :class:`TimedGrant`)
       5. default deny
+
+    Rules may carry a ``when`` condition evaluated against the check's
+    ``context`` — the rule only applies when the condition holds, which is
+    how rules get resource-bound (e.g. ``fs.write`` allowed only under the
+    workspace directory). A condition that raises fails closed: the check
+    is denied.
     """
 
     def __init__(
@@ -403,19 +423,53 @@ class Policy:
         }
 
     # -- rule management -----------------------------------------------------
-    def allow(self, capability: str, *, note: str = "", priority: int = 10) -> Policy:
-        return self._add(_Rule(capability, "allow", note, priority))
+    def allow(self, capability: str, *, note: str = "", priority: int = 10,
+              when: Callable[[dict[str, Any]], bool] | None = None) -> Policy:
+        """Allow ``capability``; with ``when``, only when the condition holds
+        for the check's context (resource-bound allow).
 
-    def deny(self, capability: str, *, note: str = "", priority: int = 100) -> Policy:
-        return self._add(_Rule(capability, "deny", note, priority))
+        Resource-binding pattern — allow ``fs.write`` ONLY under the
+        workspace directory::
 
-    def confirm(self, capability: str, *, note: str = "", priority: int = 50) -> Policy:
-        return self._add(_Rule(capability, "confirm", note, priority))
+            policy.deny("fs.write", note="writes stay in the workspace")
+            policy.allow("fs.write", priority=200, note="workspace writes",
+                         when=lambda ctx: str(ctx.get("path", "")).startswith(ws))
 
-    def biometric(self, capability: str, *, note: str = "", priority: int = 60) -> Policy:
+        The conditional allow outranks the deny (priority); when its
+        condition is false the deny fires and the write is refused.
+        """
+        return self._add(_Rule(capability, "allow", note, priority, when))
+
+    def deny(self, capability: str, *, note: str = "", priority: int = 100,
+             when: Callable[[dict[str, Any]], bool] | None = None) -> Policy:
+        """Deny ``capability``; with ``when``, only when the condition holds
+        for the check's context."""
+        return self._add(_Rule(capability, "deny", note, priority, when))
+
+    def confirm(self, capability: str, *, note: str = "", priority: int = 50,
+                when: Callable[[dict[str, Any]], bool] | None = None) -> Policy:
+        return self._add(_Rule(capability, "confirm", note, priority, when))
+
+    def biometric(self, capability: str, *, note: str = "", priority: int = 60,
+                  when: Callable[[dict[str, Any]], bool] | None = None) -> Policy:
         """Gate on fingerprint approval: the confirmation token for this
         capability must be minted through :func:`approve_with_biometric`."""
-        return self._add(_Rule(capability, "biometric", note, priority))
+        return self._add(_Rule(capability, "biometric", note, priority, when))
+
+    def list_rules(self) -> list[dict[str, Any]]:
+        """Introspection: every rule with its effect, priority, and whether
+        it carries a condition. Powers ``nm policy rules``."""
+        with self._lock:
+            return [
+                {
+                    "capability": r.capability,
+                    "effect": r.effect,
+                    "note": r.note,
+                    "priority": r.priority,
+                    "conditional": r.when is not None,
+                }
+                for r in self._rules
+            ]
 
     def _add(self, rule: _Rule) -> Policy:
         with self._lock:
@@ -471,7 +525,9 @@ class Policy:
         Mirrors :meth:`check`'s rule evaluation without recording an audit
         entry: the first matching rule decides (``biometric`` → True,
         ``deny`` → False since the action is refused outright); otherwise
-        the :attr:`Capability.BIOMETRIC` set applies. Never raises.
+        the :attr:`Capability.BIOMETRIC` set applies. Conditional rules are
+        invisible here (no context to evaluate them against) — the real
+        :meth:`check` with context is authoritative. Never raises.
         """
         try:
             with self._lock:
@@ -541,6 +597,30 @@ class Policy:
             for rule in self._rules:
                 if not fnmatch.fnmatchcase(capability, rule.capability):
                     continue
+                if rule.when is not None:
+                    try:
+                        holds = bool(rule.when(ctx))
+                    except Exception:  # noqa: BLE001 - a broken condition fails CLOSED
+                        _log.warning(
+                            "policy rule condition raised for %s; denying",
+                            rule.capability, exc_info=True)
+                        holds = False
+                        broken = True
+                    else:
+                        broken = False
+                    if broken:
+                        decision = PolicyDecision(
+                            allowed=False,
+                            reason=(f"policy rule condition failed for "
+                                    f"{rule.capability!r}; failing closed"),
+                            capability=capability,
+                            actor=actor,
+                            explicit_override=explicit_override,
+                        )
+                        self._record(AUDIT_DENY, decision, ctx)
+                        return decision
+                    if not holds:
+                        continue  # condition false: rule does not apply
                 if rule.effect == "deny":
                     decision = PolicyDecision(
                         allowed=False,
@@ -749,6 +829,200 @@ class Policy:
             return preset
         return preset.intersect(self.default_grant)
 
+    # -- timed grants ----------------------------------------------------------
+    def issue_grant(
+        self,
+        *patterns: str,
+        ttl_s: float,
+        actor: str = "",
+        note: str = "",
+    ) -> "TimedGrant":
+        """Mint a time-bounded capability grant.
+
+        The grant is usable as ``grant=`` in :meth:`check` anywhere a
+        :class:`CapabilitySet` goes. It stops granting the moment it expires
+        or is revoked — a stale capability can never be reused. Issuance is
+        audit-recorded.
+        """
+        grant = TimedGrant(*patterns, ttl_s=ttl_s, actor=actor, note=note,
+                           clock=self._clock)
+        decision = PolicyDecision(
+            allowed=True,
+            reason=note or f"timed grant issued ({ttl_s:g}s)",
+            capability=",".join(patterns),
+            actor=actor,
+        )
+        self._record(AUDIT_GRANT, decision,
+                     {"grant_id": grant.grant_id, "ttl_s": ttl_s})
+        return grant
+
+    def revoke_grant(self, grant: "TimedGrant", *, actor: str = "",
+                     note: str = "") -> None:
+        """Revoke a timed grant immediately. Never raises."""
+        try:
+            grant.revoke()
+            decision = PolicyDecision(
+                allowed=True,
+                reason=note or "grant revoked",
+                capability=",".join(sorted(grant.patterns)),
+                actor=actor,
+            )
+            self._record(AUDIT_REVOKE, decision, {"grant_id": grant.grant_id})
+        except Exception:  # noqa: BLE001 - revocation never raises
+            _log.debug("revoke_grant failed", exc_info=True)
+
+    def child_grant(self, parent: CapabilitySet | "TimedGrant",
+                    role: str) -> CapabilitySet | "TimedGrant":
+        """Derive a sub-agent's grant: ``role preset ∩ parent grant``.
+
+        Nobody grants what they do not hold — the child can never be wider
+        than its parent, so privilege narrows down the agent tree by
+        construction, never by call-site discipline.
+        """
+        return narrow_grant(parent, role)
+
+
+class TimedGrant:
+    """A time-bounded, revocable capability grant.
+
+    Drop-in for :class:`CapabilitySet` as the ``grant=`` argument to
+    :meth:`Policy.check`. ``grants()`` returns False once the TTL lapses or
+    :meth:`revoke` is called. Thread-safe.
+    """
+
+    def __init__(self, *patterns: str, ttl_s: float, grant_id: str = "",
+                 actor: str = "", note: str = "",
+                 clock: Any = None) -> None:
+        if ttl_s <= 0:
+            raise ValueError("ttl_s must be > 0")
+        from .ids import new_short_id
+
+        self.patterns: frozenset[str] = frozenset(patterns)
+        self.ttl_s = float(ttl_s)
+        self.grant_id = grant_id or new_short_id("grt_")
+        self.actor = actor
+        self.note = note
+        self._clock = clock or _DefaultClock()
+        self._issued_at = self._clock.now()
+        self._revoked = False
+        self._lock = threading.Lock()
+
+    @property
+    def expires_at(self) -> float:
+        return self._issued_at + self.ttl_s
+
+    @property
+    def expired(self) -> bool:
+        return self._clock.now() >= self.expires_at
+
+    @property
+    def revoked(self) -> bool:
+        with self._lock:
+            return self._revoked
+
+    def remaining_s(self) -> float:
+        return max(0.0, self.expires_at - self._clock.now())
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+
+    def grants(self, capability: str) -> bool:
+        if self.expired or self.revoked:
+            return False
+        return CapabilitySet(self.patterns).grants(capability)
+
+    def __contains__(self, capability: str) -> bool:
+        return self.grants(capability)
+
+    def __len__(self) -> int:
+        return len(self.patterns)
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            revoked = self._revoked
+        return {
+            "grant_id": self.grant_id,
+            "patterns": sorted(self.patterns),
+            "actor": self.actor,
+            "note": self.note,
+            "ttl_s": self.ttl_s,
+            "expires_at": self.expires_at,
+            "remaining_s": round(self.remaining_s(), 3),
+            "expired": self.expired,
+            "revoked": revoked,
+        }
+
+
+def narrow_grant(parent: CapabilitySet | TimedGrant,
+                 role: str) -> CapabilitySet | TimedGrant:
+    """Derive a sub-agent's grant from its parent's grant and its role.
+
+    ``role_preset ∩ parent`` — nobody grants what they do not hold. A timed
+    parent yields a timed child carrying the parent's *remaining* TTL, so a
+    child can never outlive the grant that created it. Unknown roles raise
+    :exc:`KeyError` via :meth:`CapabilitySet.role`.
+    """
+    preset = CapabilitySet.role(role)
+    if isinstance(parent, TimedGrant):
+        narrowed = preset.intersect(CapabilitySet(parent.patterns))
+        return TimedGrant(
+            *narrowed.patterns,
+            ttl_s=max(1.0, parent.remaining_s()),
+            actor=parent.actor,
+            note=f"narrowed from {parent.grant_id} for role {role!r}",
+        )
+    return preset.intersect(CapabilitySet(parent.patterns))
+
+
+class PolicyStore(Protocol):
+    """Persistence for permission-gradient proposals.
+
+    The in-memory default (:class:`MemoryPolicyStore`) keeps today's
+    behavior; plug a DB-backed implementation and pending proposals survive
+    a process restart instead of dying with it. All methods must be
+    thread-safe and never raise into the caller — the gradient treats store
+    failures as "proposal not found".
+    """
+
+    def save_proposal(self, proposal: Mapping[str, Any]) -> None: ...
+    def get_proposal(self, proposal_id: str) -> dict[str, Any] | None: ...
+    def pending_proposals(self) -> list[dict[str, Any]]: ...
+    def update_proposal(self, proposal_id: str,
+                        updates: Mapping[str, Any]) -> bool: ...
+
+
+class MemoryPolicyStore:
+    """In-memory :class:`PolicyStore`. The default; proposals live as long as
+    the process does."""
+
+    def __init__(self) -> None:
+        self._proposals: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    def save_proposal(self, proposal: Mapping[str, Any]) -> None:
+        with self._lock:
+            self._proposals[str(proposal["proposal_id"])] = dict(proposal)
+
+    def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            proposal = self._proposals.get(proposal_id)
+            return dict(proposal) if proposal else None
+
+    def pending_proposals(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(p) for p in self._proposals.values()
+                    if p.get("status") == "pending"]
+
+    def update_proposal(self, proposal_id: str,
+                        updates: Mapping[str, Any]) -> bool:
+        with self._lock:
+            proposal = self._proposals.get(proposal_id)
+            if proposal is None:
+                return False
+            proposal.update(dict(updates))
+            return True
+
 
 def approve_with_biometric(
     policy: Policy,
@@ -892,16 +1166,22 @@ class PermissionGradient:
     still apply, and biometric (fingerprint) approval remains mandatory.
     """
 
-    def __init__(self, policy: Policy | None = None) -> None:
+    def __init__(self, policy: Policy | None = None,
+                 store: PolicyStore | None = None) -> None:
         self.policy = policy if policy is not None else Policy()
-        self._proposals: dict[str, dict[str, Any]] = {}
+        # Proposals persist through the store: the default keeps them
+        # in-memory; a DB-backed store lets pending owner approvals survive
+        # a process restart.
+        self.store: PolicyStore = store if store is not None else MemoryPolicyStore()
         self._lock = threading.RLock()
 
     def level_for(self, capability: str) -> str | None:
         """Gradient level for ``capability``.
 
         Returns one of the ``GRADIENT_*`` constants, or None when a deny
-        rule refuses the capability outright. Never raises (fail closed).
+        rule refuses the capability outright. Conditional rules are skipped
+        (no context here); :meth:`check` with context is authoritative.
+        Never raises (fail closed).
         """
         try:
             with self.policy._lock:
@@ -1028,28 +1308,20 @@ class PermissionGradient:
             "context": dict(context or {}),
         }
         try:
-            with self._lock:
-                self._proposals[proposal_id] = proposal
+            self.store.save_proposal(proposal)
         except Exception:  # noqa: BLE001 - never raises
             pass
         return dict(proposal)
 
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         try:
-            with self._lock:
-                proposal = self._proposals.get(proposal_id)
-                return dict(proposal) if proposal else None
+            return self.store.get_proposal(proposal_id)
         except Exception:  # noqa: BLE001 - never raises
             return None
 
     def pending_proposals(self) -> list[dict[str, Any]]:
         try:
-            with self._lock:
-                return [
-                    dict(p)
-                    for p in self._proposals.values()
-                    if p.get("status") == "pending"
-                ]
+            return self.store.pending_proposals()
         except Exception:  # noqa: BLE001 - never raises
             return []
 
@@ -1061,17 +1333,15 @@ class PermissionGradient:
         None for unknown/already-resolved proposals. Never raises.
         """
         try:
-            with self._lock:
-                proposal = self._proposals.get(proposal_id)
-                if proposal is None or proposal.get("status") != "pending":
-                    return None
-                proposal["status"] = "approved"
-                capability = proposal.get("capability", "")
+            proposal = self.store.get_proposal(proposal_id)
+            if proposal is None or proposal.get("status") != "pending":
+                return None
+            capability = proposal.get("capability", "")
             if not capability:
                 return None
             token = self.policy.issue_confirmation(capability)
-            with self._lock:
-                proposal["token_issued"] = True
+            self.store.update_proposal(proposal_id, {"status": "approved",
+                                                     "token_issued": True})
             return token
         except Exception:  # noqa: BLE001 - never raises
             return None
@@ -1079,13 +1349,12 @@ class PermissionGradient:
     def reject_proposal(self, proposal_id: str, *, note: str = "") -> bool:
         """Owner rejects a proposal. Never raises."""
         try:
-            with self._lock:
-                proposal = self._proposals.get(proposal_id)
-                if proposal is None or proposal.get("status") != "pending":
-                    return False
-                proposal["status"] = "rejected"
-                if note:
-                    proposal["reject_note"] = note
-                return True
+            proposal = self.store.get_proposal(proposal_id)
+            if proposal is None or proposal.get("status") != "pending":
+                return False
+            updates: dict[str, Any] = {"status": "rejected"}
+            if note:
+                updates["reject_note"] = note
+            return bool(self.store.update_proposal(proposal_id, updates))
         except Exception:  # noqa: BLE001 - never raises
             return False
