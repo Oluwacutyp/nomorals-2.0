@@ -24,6 +24,7 @@ from typing import Any, Callable
 from ...core.errors import ToolError
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
+from ...storage.kv import KVStore
 from .vault import TrialVault
 
 _log = get_logger(__name__)
@@ -1299,11 +1300,7 @@ class TrialFlow:
         if self.db is None:
             return
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at)"
-                " VALUES (?, ?, 'json', ?)",
-                (TEMP_SMS_KV_KEY, json.dumps(info), time.time()),
-            )
+            KVStore(self.db).set(TEMP_SMS_KV_KEY, info)
         except Exception:  # noqa: BLE001 - stash is best-effort
             _log.debug("temp number stash failed")
 
@@ -1311,13 +1308,8 @@ class TrialFlow:
         if self.db is None:
             return {}
         try:
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (TEMP_SMS_KV_KEY,),
-            )
-            if row and row.get("value"):
-                data = json.loads(row["value"])
-                return data if isinstance(data, dict) else {}
+            data = KVStore(self.db).get(TEMP_SMS_KV_KEY)
+            return data if isinstance(data, dict) else {}
         except Exception:  # noqa: BLE001
             pass
         return {}
@@ -1393,14 +1385,10 @@ class TrialFlow:
             db = self.db
             if db is None:
                 return {}
-            row = db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (AccountCreator.IDENTITY_KV_KEY,),
-            )
-            if not row or not row.get("value"):
+            data = KVStore(db).get(AccountCreator.IDENTITY_KV_KEY)
+            if not data:
                 return {}
-            import json
-            return json.loads(row["value"])
+            return data
         except Exception:  # noqa: BLE001
             return {}
 

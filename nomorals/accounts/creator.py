@@ -56,6 +56,7 @@ from ..core.errors import NoMoralsError, NotFound
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
+from ..storage.kv import KVStore
 from .vault import Credential, CredentialVault
 
 __all__ = [
@@ -509,11 +510,7 @@ class AccountCreator:
         if self.db is None:
             return
         try:
-            import json
-            self.db.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value, kind, updated_at) VALUES (?, ?, 'json', ?)",
-                (self.IDENTITY_KV_KEY, json.dumps(identity), __import__("time").time()),
-            )
+            KVStore(self.db).set(self.IDENTITY_KV_KEY, identity)
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             _log.warning("could not persist owner identity: %s", exc)
 
@@ -526,12 +523,8 @@ class AccountCreator:
         if self.db is None:
             return None
         try:
-            import json
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?", (self.IDENTITY_KV_KEY,)
-            )
-            if row and row.get("value"):
-                data = json.loads(row["value"])
+            data = KVStore(self.db).get(self.IDENTITY_KV_KEY)
+            if data:
                 if isinstance(data, dict) and (data.get("name") or data.get("email")):
                     out = {}
                     if data.get("name"):
