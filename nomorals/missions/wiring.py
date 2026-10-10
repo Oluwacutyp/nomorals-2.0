@@ -47,6 +47,7 @@ __all__ = [
     "wired_runner",
     "set_acceptance",
     "mission_acceptance",
+    "preview_mission",
 ]
 
 
@@ -101,3 +102,15 @@ def set_acceptance(store: MissionStore, mission_id: str,
 def mission_acceptance(mission: Mission) -> dict[str, Any] | None:
     """The mission's persisted acceptance criteria, if any."""
     return mission.acceptance
+
+
+def preview_mission(context: Any, goal: str, *, name: str = "",
+                    max_steps: int = 8, **kwargs: Any) -> dict[str, Any]:
+    """Plan a mission without executing it — the ``/mission preview`` UX.
+
+    Builds the wired runner (os state machine attached, like production)
+    and returns :meth:`MissionRunner.dry_run`: the rendered dependency
+    plan plus policy warnings. Nothing is persisted, nothing runs.
+    """
+    runner = wired_runner(context, **kwargs)
+    return runner.dry_run(goal, name=name, max_steps=max_steps)

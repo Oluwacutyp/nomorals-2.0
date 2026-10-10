@@ -26,6 +26,7 @@ Two consequences worth stating:
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import random
 import threading
@@ -48,16 +49,31 @@ from .mission import (
     MissionStore,
     mission_liveness,
 )
-from .idempotency import IdempotencyStore, dedupe, step_idempotency_key
+from .idempotency import (
+    IdempotencyStore,
+    dedupe,
+    idempotency_key,
+    step_idempotency_key,
+)
 from .progress import (
     STALL_AFTER_FAILURES,
     MissionMilestones,
     StallCode,
     clear_stall,
     record_stall,
+    render_result_card,
 )
 
-__all__ = ["StepOutcome", "MissionResult", "MissionRunner"]
+__all__ = [
+    "StepOutcome",
+    "MissionResult",
+    "MissionRunner",
+    "render_plan_text",
+    "ERROR_TRANSIENT",
+    "ERROR_RATE_LIMIT",
+    "ERROR_SERVER",
+    "ERROR_PERMANENT",
+]
 
 _log = get_logger(__name__)
 
@@ -97,6 +113,22 @@ def _step_policy(step: Any) -> dict[str, Any]:
       mission — and the retry policy — can move on. The abandoned agent
       thread keeps running as a daemon; this is stated in the outcome,
       never hidden.
+    * ``schedule_timeout_s`` (float, default 0 = none): how long a step may
+      wait for an execution slot before it fails ("queued too long").
+      Temporal's schedule-to-start timeout. Matters when ``max_parallel``
+      batches queue steps; sequential runs rarely hit it.
+    * ``needs_approval`` (bool, default False): a human-in-the-loop gate.
+      When the step is reached the run *pauses* (mission → PAUSED, stall
+      ``blocked_on_approval``) and waits for
+      ``MissionRunner.approve(mission_id, approved)`` — the Temporal-signal
+      pattern for approval workflows. The approval decision is persisted,
+      so a crash while paused loses nothing.
+    * ``compensate`` (str, default ""): how to undo this step if a *later*
+      step fails — the orchestrated-saga pattern. On terminal failure the
+      runner runs each completed step's compensation in reverse order.
+      Compensations must be idempotent (they run under idempotency keys
+      when a store is attached); a failed compensation is recorded, never
+      fatal to teardown.
     """
     payload = getattr(step, "payload", None) or {}
     if not isinstance(payload, dict):
@@ -126,6 +158,12 @@ def _step_policy(step: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         timeout_s = 0.0
     timeout_s = max(0.0, timeout_s)
+    try:
+        schedule_timeout_s = float(payload.get("schedule_timeout_s") or 0.0)
+    except (TypeError, ValueError):
+        schedule_timeout_s = 0.0
+    schedule_timeout_s = max(0.0, schedule_timeout_s)
+    compensate = str(payload.get("compensate") or "").strip()
     return {
         "optional": bool(payload.get("optional")),
         "on_failure": on_failure,
@@ -133,6 +171,9 @@ def _step_policy(step: Any) -> dict[str, Any]:
         "retry_backoff_s": backoff,
         "retry_on": retry_on,
         "timeout_s": timeout_s,
+        "schedule_timeout_s": schedule_timeout_s,
+        "needs_approval": bool(payload.get("needs_approval")),
+        "compensate": compensate,
     }
 
 
@@ -147,11 +188,49 @@ _TRANSIENT_MARKERS = (
     "econnreset", "econnrefused", "socket timeout", "broken pipe",
     "service unavailable", "overloaded", "try again",
 )
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "ratelimited", "429", "too many requests",
+    "quota exceeded", "slow down",
+)
+_SERVER_ERROR_MARKERS = (
+    "500", "502", "503", "504", "internal error", "bad gateway",
+    "service unavailable", "overloaded",
+)
 _NONRETRYABLE_PREFIXES = ("ValidationError:",)
+
+#: Error classes (adaptive-retry practice: rate_limit gets gentler,
+#: longer backoff than a plain transient blip).
+ERROR_TRANSIENT = "transient"
+ERROR_RATE_LIMIT = "rate_limit"
+ERROR_SERVER = "server_error"
+ERROR_PERMANENT = "permanent"
+
+
+def _classify_error(detail: str) -> str:
+    """Classify a step failure: transient | rate_limit | server_error |
+    permanent. Never raises."""
+    text = str(detail or "")
+    for prefix in _NONRETRYABLE_PREFIXES:
+        if text.startswith(prefix):
+            return ERROR_PERMANENT
+    lowered = text.lower()
+    if any(m in lowered for m in _RATE_LIMIT_MARKERS):
+        return ERROR_RATE_LIMIT
+    if any(m in lowered for m in _SERVER_ERROR_MARKERS):
+        return ERROR_SERVER
+    if any(m in lowered for m in _TRANSIENT_MARKERS):
+        return ERROR_TRANSIENT
+    return ERROR_PERMANENT
 
 
 def _retryable(detail: str, policy: dict[str, Any]) -> bool:
-    """True when a failed attempt may be retried under ``policy``."""
+    """True when a failed attempt may be retried under ``policy``.
+
+    ``"any"`` retries every failure except explicit non-retryable ones
+    (the ``ValidationError:`` prefix — bad arguments fail identically
+    every time). ``"transient"`` (default) retries only classified
+    transient / rate-limit / server-error failures.
+    """
     mode = policy.get("retry_on", "transient")
     if mode == "none":
         return False
@@ -161,15 +240,76 @@ def _retryable(detail: str, policy: dict[str, Any]) -> bool:
             return False
     if mode == "any":
         return True
-    lowered = text.lower()
-    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
+    error_class = _classify_error(detail)
+    return error_class in {ERROR_TRANSIENT, ERROR_RATE_LIMIT, ERROR_SERVER}
 
 
-def _backoff_delay(policy: dict[str, Any], attempt_no: int) -> float:
-    """Jittered exponential backoff: ``base * 2**(n-1)``, full jitter."""
+_RETRY_AFTER_RE = None
+
+
+def _retry_after_seconds(detail: str) -> float:
+    """Parse a server-asked delay from the error text.
+
+    Production SDKs honor ``Retry-After`` instead of computing backoff —
+    the server knows when it will recover. Matches ``retry-after: 12``,
+    ``retry after 12s``, ``retry in 30 seconds``. Returns 0.0 when the
+    text carries no usable hint. Never raises.
+    """
+    import re
+
+    global _RETRY_AFTER_RE
+    if _RETRY_AFTER_RE is None:
+        _RETRY_AFTER_RE = re.compile(
+            r"retry[\s\-]*after[\s:]+(\d+(?:\.\d+)?)\s*"
+            r"(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?)?",
+            re.IGNORECASE,
+        )
+    try:
+        match = _RETRY_AFTER_RE.search(str(detail or ""))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if not match:
+        return 0.0
+    try:
+        value = float(match.group(1))
+    except (TypeError, ValueError):
+        return 0.0
+    unit = (match.group(2) or "s").lower()
+    if unit.startswith("m"):
+        value *= 60.0
+    return max(0.0, min(600.0, value))
+
+
+def _backoff_delay(policy: dict[str, Any], attempt_no: int,
+                   error_class: str = ERROR_TRANSIENT) -> float:
+    """Full-jitter exponential backoff (AWS Architecture Blog canonical
+    form): ``sleep = random_between(0, min(cap, base * 2 ** attempt))``.
+
+    ``rate_limit`` errors get a 3x multiplier — hammering a throttled
+    provider on the standard curve is how you turn a 429 into a ban.
+    Capped at 300s. ``retry_after_s`` in the policy overrides the computed
+    delay (server-asked wait wins).
+    """
+    override = float(policy.get("retry_after_s") or 0.0)
+    if override > 0:
+        return min(600.0, override)
     base = max(0.0, float(policy.get("retry_backoff_s") or 0.0))
-    delay = base * (2.0 ** max(0, attempt_no - 1))
-    return min(300.0, delay * random.uniform(0.5, 1.5))
+    if error_class == ERROR_RATE_LIMIT:
+        base *= 3.0
+    cap = min(300.0, base * (2.0 ** max(0, attempt_no - 1)))
+    return random.uniform(0.0, cap)
+
+
+def _policy_for_retry(detail: str, policy: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``policy`` with the parsed Retry-After / error class
+    folded in, for one backoff computation."""
+    retry_after = _retry_after_seconds(detail)
+    error_class = _classify_error(detail)
+    merged = dict(policy)
+    if retry_after > 0:
+        merged["retry_after_s"] = retry_after
+    merged["_error_class"] = error_class
+    return merged
 
 
 def _topo_levels(steps: list[Any]) -> list[list[Any]]:
@@ -216,6 +356,52 @@ def _topo_levels(steps: list[Any]) -> list[list[Any]]:
         for deps in remaining.values():
             deps -= done
     return levels
+
+
+def render_plan_text(levels: list[list[Any]], *,
+                     warnings: list[str] | None = None) -> str:
+    """ASCII dependency tree of plan levels with per-step policies.
+
+    The dry-run / preview face of a plan: which steps run in parallel,
+    what each depends on, and which policies ride along — before anything
+    executes.
+    """
+    if not levels:
+        return "(empty plan)"
+    lines = ["plan:"]
+    for index, level in enumerate(levels):
+        lines.append(
+            f"  level {index} — "
+            + ("parallel" if len(level) > 1 else "sequential"))
+        for step in level:
+            name = str(getattr(step, "name", "") or "step")
+            role = str(getattr(step, "role", "") or "")
+            policy = _step_policy(step)
+            flags: list[str] = []
+            if policy["optional"]:
+                flags.append("optional")
+            if policy["on_failure"] == ON_FAILURE_CONTINUE:
+                flags.append("on-failure=continue")
+            if policy["retries"]:
+                flags.append(f"retries={policy['retries']}")
+            if policy["timeout_s"]:
+                flags.append(f"timeout={policy['timeout_s']:.0f}s")
+            if policy["schedule_timeout_s"]:
+                flags.append(f"queue-timeout={policy['schedule_timeout_s']:.0f}s")
+            if policy["needs_approval"]:
+                flags.append("needs-approval ⏸")
+            if policy["compensate"]:
+                flags.append("compensate ↩")
+            deps = [str(d) for d in (getattr(step, "depends_on", None) or [])]
+            bits = f" [{role}]" if role else ""
+            if deps:
+                bits += f" ← {', '.join(deps)}"
+            if flags:
+                bits += f" ({'; '.join(flags)})"
+            lines.append(f"    • {name}{bits}")
+    for warning in warnings or []:
+        lines.append(f"  ⚠️ {warning}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -287,6 +473,10 @@ class MissionResult:
     @property
     def ok(self) -> bool:
         return self.status == MissionStatus.DONE
+
+    def summary_card(self) -> str:
+        """One-glance boxed card of the terminal result (see progress)."""
+        return render_result_card(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -381,15 +571,45 @@ class MissionRunner:
 
     # ── milestones & stalls ──────────────────────────────────────────────
 
-    def _heartbeat(self, mission: Mission) -> None:
+    def _heartbeat(self, mission: Mission, *,
+                   progress: Any = None) -> None:
         """Liveness marker for ``MissionStore.reconcile``.
 
         Written when a run starts and after every step. A mission that
         still says "running" with a stale heartbeat and a gone pid is a
         dead runner, not a live mission — reconcile() flips it to failed
         with an explicit reason instead of reporting "running" forever.
+
+        ``progress`` (Temporal-style heartbeat payload) lets a long step
+        report *what* it is doing ("4/10 files") instead of just proving
+        it is alive — the watchdog and chat see progress, not a pulse.
         """
-        mission.state["heartbeat"] = {"pid": os.getpid(), "at": time.time()}
+        hb: dict[str, Any] = {"pid": os.getpid(), "at": time.time()}
+        current = mission.state.get("current_step") or ""
+        if current:
+            hb["step"] = current
+        if progress is not None:
+            hb["progress"] = progress
+        mission.state["heartbeat"] = hb
+
+    def heartbeat_progress(self, mission_id: str, payload: Any) -> bool:
+        """Attach a progress payload to a mission's heartbeat.
+
+        For long steps to report what they're doing between checkpoints.
+        Best-effort: returns False when the mission is unknown or the save
+        fails — progress telemetry never breaks a run.
+        """
+        try:
+            mission = self.store.get(mission_id)  # raises NotFound when unknown
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            self._heartbeat(mission, progress=payload)
+            self.store.save(mission)
+            return True
+        except Exception:  # noqa: BLE001
+            _log.debug("heartbeat progress write failed", exc_info=True)
+            return False
 
     def _report(self, method: str, *args: Any, **kwargs: Any) -> None:
         """Fire a milestone event. Telemetry: never breaks a run."""
@@ -520,6 +740,135 @@ class MissionRunner:
             self.store.save(mission)
         return cleared
 
+    # ── approval gates (human-in-the-loop) ──────────────────────────────
+    #
+    # A step with ``needs_approval`` in its policy pauses the run instead
+    # of executing: the mission goes PAUSED with a ``blocked_on_approval``
+    # stall and a ``state["pending_approval"]`` record, and waits for
+    # ``approve()`` — the Temporal-signal pattern for approval workflows.
+    # The decision is persisted in ``state["approvals"]``, so a crash while
+    # paused loses nothing and resume re-checks the gate.
+
+    def _check_approval(self, mission: Mission, step: Any) -> bool:
+        """True when the step may execute now."""
+        if not _step_policy(step).get("needs_approval"):
+            return True
+        approvals = mission.state.get("approvals") or {}
+        decision = approvals.get(step.name)
+        return (isinstance(decision, dict)
+                and bool(decision.get("approved")))
+
+    def _pause_for_approval(
+        self,
+        mission: Mission,
+        step: Any,
+        st: _RunState,
+        started: float,
+        resumed_from: str,
+    ) -> MissionResult:
+        """Park the run at an approval gate. Persists everything the
+        approval decision needs; the mission stays PAUSED (resumable)
+        until :meth:`approve` resolves it."""
+        step_name = str(getattr(step, "name", "") or "step")
+        mission.state["pending_approval"] = {
+            "step": step_name,
+            "goal": str(getattr(step, "goal", "") or ""),
+            "role": str(getattr(step, "role", "") or ""),
+            "at": time.time(),
+        }
+        mission.status = MissionStatus.PAUSED
+        changed = record_stall(
+            mission,
+            StallCode.BLOCKED_ON_APPROVAL,
+            f"waiting on owner approval to run step {step_name!r}",
+            step=step_name,
+        )
+        self._heartbeat(mission)
+        self.store.save(mission)
+        self.store.checkpoint(mission, label=f"paused:approval:{step_name}")
+        if changed:
+            self._report("on_stalled", mission)
+        self._ledger(
+            "paused", mission,
+            f"paused for approval on step {step_name}",
+            ok=True, metadata={"step": step_name})
+        self._emit_bus("mission.approval.requested", {
+            "mission_id": mission.id, "mission_name": mission.name,
+            "step": step_name,
+            "goal": str(getattr(step, "goal", "") or "")[:200],
+        })
+        _log.info("mission %s paused for approval on step %s",
+                  mission.id, step_name)
+        return MissionResult(
+            mission_id=mission.id,
+            status=MissionStatus.PAUSED,
+            iterations=mission.iterations,
+            steps=st.steps,
+            resumed_from=resumed_from,
+            seconds=self._clock() - started,
+            error=f"awaiting approval for step {step_name!r}",
+        )
+
+    def approve(self, mission_id: str, approved: bool = True,
+                note: str = "") -> dict[str, Any]:
+        """Resolve a pending approval gate (the signal half of the gate).
+
+        Records the decision in ``state["approvals"]`` and clears the
+        stall. An approved mission resumes immediately in this call; a
+        rejected one fails with the note. Raises :class:`NotFound` for an
+        unknown mission and :class:`ValidationError` when nothing is
+        pending — approving twice is a caller bug, not a silent no-op.
+        """
+        mission = self.store.get(mission_id)  # raises NotFound when unknown
+        pending = mission.state.get("pending_approval") or {}
+        step_name = str(pending.get("step") or "")
+        if mission.status != MissionStatus.PAUSED or not step_name:
+            raise ValidationError(
+                f"mission {mission_id} has no pending approval",
+                field="mission_id",
+            )
+        approvals = mission.state.setdefault("approvals", {})
+        approvals[step_name] = {
+            "approved": bool(approved),
+            "at": time.time(),
+            "note": note or "",
+        }
+        mission.state.pop("pending_approval", None)
+        clear_stall(mission)
+        self.store.save(mission)
+        self._ledger(
+            "approval", mission,
+            f"approval {'granted' if approved else 'denied'} for step "
+            f"{step_name}: {(note or '')[:120]}",
+            ok=approved, metadata={"step": step_name, "note": note or ""})
+        self._emit_bus("mission.approval.resolved", {
+            "mission_id": mission.id, "step": step_name,
+            "approved": bool(approved), "note": (note or "")[:200],
+        })
+        if not approved:
+            mission.status = MissionStatus.FAILED
+            mission.state["last_error"] = (
+                f"approval denied for step {step_name!r}: "
+                f"{note or 'no reason given'}")
+            self.store.save(mission)
+            self._report("on_terminal", mission, MissionStatus.FAILED,
+                         error=mission.state["last_error"])
+            return {"mission_id": mission_id, "approved": False,
+                    "status": MissionStatus.FAILED}
+        _log.info("mission %s approval granted for step %s — resuming",
+                  mission.id, step_name)
+        result = self.run(mission)
+        return {"mission_id": mission_id, "approved": True,
+                "status": result.status, "result": result.to_dict()}
+
+    def deny(self, mission_id: str, note: str = "") -> dict[str, Any]:
+        """Reject a pending approval gate (``approve(..., approved=False)``)."""
+        return self.approve(mission_id, approved=False, note=note)
+
+    def pending_approval(self, mission_id: str) -> dict[str, Any] | None:
+        """The pending approval record, or None when nothing is pending."""
+        return self.store.get(mission_id).state.get("pending_approval")
+
     def _apply_step_result(
         self, mission: Mission, outcome: StepOutcome, step_name: str
     ) -> bool:
@@ -610,6 +959,57 @@ class MissionRunner:
         return self.run(updated if updated is not None else mission,
                         max_iterations=max_iterations, reflect=reflect)
 
+    def dry_run(self, goal: str, *, name: str = "",
+                max_steps: int = 8) -> dict[str, Any]:
+        """Plan without executing — the Inngest-dev-server experience.
+
+        Builds the plan through the orchestrator, validates the
+        dependency graph, and returns the rendered plan plus policy
+        warnings. Nothing is persisted, nothing runs, no budget is
+        touched. Powers ``/mission preview``.
+        """
+        orchestrator = self._new_orchestrator(max_steps)
+        plan = orchestrator.plan(goal)
+        plan_error = getattr(plan, "plan_error", "") or ""
+        steps = list(getattr(plan, "steps", None) or [])
+        warnings: list[str] = []
+        if plan_error:
+            warnings.append(f"planner degraded: {plan_error[:160]}")
+        levels: list[list[Any]] = []
+        if steps:
+            try:
+                levels = _topo_levels(steps)
+            except ValidationError as exc:
+                warnings.append(f"plan invalid: {exc}")
+        for step in steps:
+            step_name = str(getattr(step, "name", "") or "step")
+            policy = _step_policy(step)
+            if policy["retries"] and self.idempotency is None:
+                warnings.append(
+                    f"step {step_name!r}: retries without an idempotency "
+                    "store — a crash between side effects and checkpoint "
+                    "can duplicate them")
+            if policy["needs_approval"]:
+                warnings.append(
+                    f"step {step_name!r}: needs-approval — the run will "
+                    "pause here for owner approval")
+            if not policy["timeout_s"] and not policy["schedule_timeout_s"]:
+                warnings.append(
+                    f"step {step_name!r}: no timeout set — a hung agent "
+                    "holds the mission open")
+        text = (render_plan_text(levels, warnings=warnings) if levels
+                else "(no steps planned)")
+        return {
+            "goal": goal,
+            "name": name or goal[:60],
+            "step_count": len(steps),
+            "levels": [[str(getattr(s, "name", "")) for s in level]
+                       for level in levels],
+            "warnings": warnings,
+            "plan_error": plan_error,
+            "text": text,
+        }
+
     def run(
         self,
         mission: Mission,
@@ -659,6 +1059,14 @@ class MissionRunner:
                     return self._finish(mission, MissionStatus.CANCELLED,
                                         st.steps, started, resumed_from,
                                         error="cancelled")
+                if action == "paused":
+                    gate = next(
+                        (s for s in level
+                         if not self._check_approval(mission, s)),
+                        level[0] if level else None,
+                    )
+                    return self._pause_for_approval(
+                        mission, gate, st, started, resumed_from)
                 if action == "replanned":
                     # same restart protocol as the sequential path: the
                     # outer loop's `level_idx += 1` lands on level 0 and
@@ -701,6 +1109,12 @@ class MissionRunner:
                     self._record_blocked(mission, step, dep_failed, st)
                     continue
 
+                # human-in-the-loop gate: the run pauses here until
+                # approve() records a decision (Temporal-signal pattern).
+                if not self._check_approval(mission, step):
+                    return self._pause_for_approval(
+                        mission, step, st, started, resumed_from)
+                mission.state["current_step"] = step.name
                 outcome = self._execute_step(mission, step)
                 # ── failure: degraded / continue / fail-fast ──────────
                 verdict = self._settle_outcome(
@@ -892,8 +1306,9 @@ class MissionRunner:
         outcomes are not settled into this run's ledger.
 
         Returns ``"continue"`` (next level), ``"stop"`` (``st.failure`` is
-        set — break out), ``"cancelled"``, or ``"replanned"`` (fresh graph
-        on ``st.replanned_levels``).
+        set — break out), ``"cancelled"``, ``"paused"`` (an approval gate
+        fired — the caller resolves it via ``_pause_for_approval``), or
+        ``"replanned"`` (fresh graph on ``st.replanned_levels``).
         """
         for step in level:
             if self._cancel:
@@ -910,6 +1325,10 @@ class MissionRunner:
         while pending:
             if self._cancel:
                 return "cancelled"
+            # an approval gate anywhere in the pending set pauses the
+            # whole run — the gate is found by the caller via _check_approval
+            if any(not self._check_approval(mission, s) for s in pending):
+                return "paused"
             if mission.budget_exhausted:
                 st.failure = "budget exhausted"
                 self._record_budget_stall(mission)
@@ -935,14 +1354,25 @@ class MissionRunner:
                        max_parallel: int) -> list[tuple[Any, StepOutcome]]:
         """Execute one wave of independent steps; return ``(step, outcome)``
         pairs in plan order. A worker that raises becomes a failed outcome —
-        a thread must never take the batch down with it."""
+        a thread must never take the batch down with it.
+
+        Queue wait (Temporal's schedule-to-start) is measured per step:
+        ``done_at - enqueued_at - outcome.seconds`` approximates how long
+        the step waited for a worker slot. When the step's
+        ``schedule_timeout_s`` policy is set and the wait exceeds it, the
+        outcome becomes a failure ("queued too long") instead of silently
+        absorbing the delay — a wedged worker pool must surface, not hide.
+        """
         results: dict[str, tuple[Any, StepOutcome]] = {}
+        enqueued_at: dict[str, float] = {}
         with ThreadPoolExecutor(
             max_workers=min(max_parallel, len(batch)),
             thread_name_prefix=f"mission-{mission.id[:8]}",
         ) as pool:
-            futures = {pool.submit(self._execute_step, mission, step): step
-                       for step in batch}
+            futures = {}
+            for step in batch:
+                enqueued_at[step.name] = self._clock()
+                futures[pool.submit(self._execute_step, mission, step)] = step
             waiting = list(futures)
             while waiting:
                 for future in list(waiting):
@@ -950,6 +1380,7 @@ class MissionRunner:
                         continue
                     waiting.remove(future)
                     step = futures[future]
+                    done_at = self._clock()
                     try:
                         outcome = future.result()
                     except BaseException as exc:  # noqa: BLE001 - a thread must not kill the batch
@@ -958,11 +1389,32 @@ class MissionRunner:
                         outcome = StepOutcome(
                             step=step.name, ok=False,
                             detail=f"{type(exc).__name__}: {exc}")
+                    queued_s = max(
+                        0.0, done_at - enqueued_at.get(step.name, done_at)
+                        - max(0.0, outcome.seconds))
+                    outcome.payload["_queued_s"] = round(queued_s, 3)
+                    outcome = self._enforce_schedule_timeout(
+                        step, outcome, queued_s)
                     results[step.name] = (step, outcome)
                 if waiting:
                     time.sleep(0.05)
         # Plan order: deterministic settle order regardless of finish order.
         return [results[s.name] for s in batch if s.name in results]
+
+    @staticmethod
+    def _enforce_schedule_timeout(step: Any, outcome: StepOutcome,
+                                  queued_s: float) -> StepOutcome:
+        """Fail a step that waited longer than its ``schedule_timeout_s``."""
+        limit = _step_policy(step).get("schedule_timeout_s") or 0.0
+        if limit > 0 and outcome.ok and queued_s > limit:
+            return StepOutcome(
+                step=outcome.step, ok=False,
+                detail=(f"step waited {queued_s:.1f}s for an execution slot "
+                        f"(schedule_timeout_s={limit:.0f}s) — queued too long"),
+                seconds=outcome.seconds, tokens=outcome.tokens,
+                payload={**outcome.payload, "schedule_timeout": True},
+            )
+        return outcome
 
     def _settle_step(self, mission: Mission, step: Any, outcome: StepOutcome,
                      index: int, *, track_failure: bool = True) -> None:
@@ -1322,11 +1774,14 @@ class MissionRunner:
                 break
             if not _retryable(outcome.detail, policy):
                 break
-            delay = _backoff_delay(policy, attempt_no)
-            _log.info("mission %s step %s attempt %d failed (%s); "
+            retry_policy = _policy_for_retry(outcome.detail, policy)
+            delay = _backoff_delay(retry_policy, attempt_no,
+                                   retry_policy["_error_class"])
+            _log.info("mission %s step %s attempt %d failed (%s; class=%s); "
                       "retrying in %.1fs",
                       mission.id, step.name, attempt_no,
-                      (outcome.detail or "")[:120], delay)
+                      (outcome.detail or "")[:120],
+                      retry_policy["_error_class"], delay)
             slept_from = self._clock()
             cancelled_mid_wait = not self._sleep_cancel_aware(delay)
             backoff_wait_s += self._clock() - slept_from
@@ -1366,6 +1821,13 @@ class MissionRunner:
             owner=f"mission:{mission.id}",
             succeeded=lambda value: bool(
                 value.get("ok")) if isinstance(value, dict) else True,
+            # the Stripe 422 rule: replaying a stored outcome is only safe
+            # when the step is the same operation — a fingerprint mismatch
+            # fails fast instead of replaying a stale outcome.
+            fingerprint={"step": step.name,
+                         "goal": str(getattr(step, "goal", "") or ""),
+                         "role": str(getattr(step, "role", "") or "")},
+            label="mission_step",
         )
         if not isinstance(result.value, dict):
             _log.error("idempotency record for step %s of mission %s is not "
@@ -1491,6 +1953,135 @@ class MissionRunner:
             )
         return outcome
 
+    # ── saga compensation ──────────────────────────────────────────────
+    #
+    # When a multi-step mission fails partway, stopping is not enough —
+    # the completed steps' side effects dangle. The orchestrated-saga
+    # pattern runs each completed step's compensating action in reverse
+    # order (refund, release, cancel). Rules, mined from the best saga
+    # implementations:
+    # - forward recovery (retry/replan) comes first; compensation is the
+    #   last resort, on terminal failure only — never on cancel;
+    # - compensations must be idempotent: they run under idempotency keys
+    #   when a store is attached, and already-compensated steps are
+    #   skipped via ``state["compensations"]``;
+    # - a failed compensation is recorded and reported, never fatal to
+    #   teardown.
+
+    def compensate(self, mission_id: str) -> list[dict[str, Any]]:
+        """Manually trigger compensation for a mission's completed steps.
+
+        Operator re-run of the saga undo path (e.g. after fixing a broken
+        compensation). Already-compensated steps are skipped.
+        """
+        mission = self.store.get(mission_id)  # raises NotFound when unknown
+        steps = [StepOutcome(step=name, ok=True)
+                 for name in (mission.state.get("completed_steps") or [])]
+        return self._compensate(mission, steps)
+
+    def _compensate(self, mission: Mission,
+                    steps: list[StepOutcome]) -> list[dict[str, Any]]:
+        """Run compensations for completed steps, newest first.
+
+        Returns the full ``state["compensations"]`` log. Steps without a
+        ``compensate`` policy are skipped silently — compensation is
+        opt-in per step, declared where the side effect is defined.
+        """
+        plan = {s.name: s for s in
+                _rehydrate_plan(mission.goal, mission.state.get("plan") or [])}
+        seen = {s.step for s in steps}
+        completed = [s.step for s in steps if s.ok]
+        # steps completed in an earlier run (resume-then-fail) are not in
+        # this run's outcomes — undo them too, after this run's steps.
+        for name in (mission.state.get("completed_steps") or []):
+            if name not in seen:
+                completed.append(name)
+        already = {c.get("step") for c in
+                   (mission.state.get("compensations") or [])}
+        log = list(mission.state.get("compensations") or [])
+        for name in reversed(completed):
+            if name in already:
+                continue
+            step = plan.get(name)
+            instruction = _step_policy(step).get("compensate") if step is not None else ""
+            if not instruction:
+                continue
+            entry = self._run_compensation(mission, name, step, instruction)
+            log.append(entry)
+            already.add(name)
+            mission.state["compensations"] = log
+            self.store.save(mission)
+        return log
+
+    def _run_compensation(self, mission: Mission, step_name: str,
+                          step: Any, instruction: str) -> dict[str, Any]:
+        """Execute one step's compensation. Never raises."""
+        started = self._clock()
+        outputs = (mission.state.get("outputs") or {}).get(step_name) or {}
+        prompt = (
+            "You are undoing a completed mission step (saga compensation).\n"
+            f"Mission: {mission.name} — {mission.goal[:200]}\n"
+            f"Step {step_name!r} did: {str(getattr(step, 'goal', '') or '')[:300]}\n"
+            "Its recorded outputs: "
+            f"{json.dumps(outputs, ensure_ascii=False, default=str)[:1000]}\n"
+            f"Compensation instruction: {instruction}\n"
+            "Undo the step's effects as completely as possible. Be careful "
+            "and idempotent: if the effects are already undone, do nothing "
+            "and say so.")
+
+        def _run() -> dict[str, Any]:
+            from ..agents.roles import build_agent
+
+            agent = build_agent(
+                "execution",
+                name=f"{mission.id[:8]}-undo-{step_name[:16]}",
+                context=self.context)
+            result = agent.run(prompt)
+            output = result.output
+            text = (json.dumps(output, ensure_ascii=False, default=str)
+                    if isinstance(output, dict) else str(output or ""))
+            return {"ok": bool(result.ok),
+                    "detail": (result.error or text[:300])}
+
+        outcome: dict[str, Any] = {"ok": False, "detail": "not run"}
+        try:
+            if self.idempotency is not None:
+                key = idempotency_key(
+                    "mission_compensation",
+                    {"step": step_name, "instruction": instruction},
+                    scope=mission.id)
+                res = dedupe(self.idempotency, key, _run,
+                             owner=f"mission:{mission.id}",
+                             label="compensation")
+                if isinstance(res.value, dict):
+                    outcome = res.value
+                else:
+                    outcome = {"ok": False,
+                               "detail": "compensation record unreadable"}
+            else:
+                outcome = _run()
+        except Exception as exc:  # noqa: BLE001 - a failed undo is a record
+            outcome = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        entry = {
+            "step": step_name,
+            "ok": bool(outcome.get("ok")),
+            "detail": str(outcome.get("detail") or "")[:500],
+            "at": time.time(),
+            "seconds": round(max(0.0, self._clock() - started), 3),
+        }
+        self._ledger(
+            "compensated", mission,
+            f"compensation for step {step_name}: "
+            f"{'ok' if entry['ok'] else 'FAILED'} — {entry['detail'][:120]}",
+            cost_seconds=entry["seconds"], ok=entry["ok"],
+            metadata={"step": step_name})
+        self._emit_bus("mission.step.compensated", {
+            "mission_id": mission.id, "mission_name": mission.name,
+            "step": step_name, "ok": entry["ok"]})
+        _log.info("mission %s compensated step %s: %s",
+                  mission.id, step_name, "ok" if entry["ok"] else "FAILED")
+        return entry
+
     def _finish(
         self,
         mission: Mission,
@@ -1520,6 +2111,13 @@ class MissionRunner:
                                           f"finished: {status}")
             if updated is not None:
                 mission = updated
+
+        if status == MissionStatus.FAILED:
+            # Orchestrated saga: undo completed steps in reverse order.
+            # Runs before reflection so the reflection can note what was
+            # compensated. Never on CANCELLED — a cancel is operator
+            # intent, not a failure to clean up after.
+            self._compensate(mission, steps)
 
         if reflect and status in {MissionStatus.DONE, MissionStatus.FAILED}:
             score, lessons = self._reflect(mission, steps, status)
@@ -1737,7 +2335,8 @@ def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             policy = {k: payload[k] for k in (
                 "optional", "on_failure", "retries", "retry_backoff_s",
-                "retry_on", "timeout_s") if k in payload}
+                "retry_on", "timeout_s", "schedule_timeout_s",
+                "needs_approval", "compensate") if k in payload}
             if policy:
                 entry["policy"] = policy
         entries.append(entry)

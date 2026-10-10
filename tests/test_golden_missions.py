@@ -45,11 +45,12 @@ def benchmark_rows(db, model_id):
 
 
 class TestGoldenMissions(unittest.TestCase):
-    def test_registry_has_three_missions(self):
+    def test_registry_has_five_missions(self):
         missions = list_golden_missions()
         self.assertEqual(
             {m["key"] for m in missions},
-            {"research_write_verify", "build_test_fix", "audit_remediate_rescan"},
+            {"research_write_verify", "build_test_fix", "audit_remediate_rescan",
+             "crash_no_dup", "saga_undo"},
         )
         for m in missions:
             self.assertTrue(m["steps"], m["key"])

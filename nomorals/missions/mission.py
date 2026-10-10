@@ -29,6 +29,7 @@ from ..storage.repository import Repository
 from .progress import (
     clear_stall as _clear_stall_entry,
     estimate_eta,
+    eta_breakdown,
     fmt_duration,
     real_plan_steps,
     record_stall as _record_stall_entry,
@@ -43,6 +44,8 @@ __all__ = [
     "ACCEPTANCE_STATE_KEY",
     "normalize_acceptance",
     "mission_liveness",
+    "MISSION_TEMPLATES",
+    "list_mission_templates",
 ]
 
 _log = get_logger(__name__)
@@ -185,7 +188,12 @@ class MissionStatus:
 
 @dataclass
 class Mission:
-    """A long-running goal with a budget and resumable state."""
+    """A long-running goal with a budget and resumable state.
+
+    ``priority`` / ``tags`` / ``parent_id`` ride inside the ``metadata``
+    JSON column (zero-migration): ``to_row`` merges them in, ``from_row``
+    pops them back out, so the persisted shape never changes.
+    """
 
     goal: str
     name: str = ""
@@ -202,11 +210,23 @@ class Mission:
     updated_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: scheduling priority — higher runs first in priority-aware listings.
+    priority: int = 0
+    #: free-form labels ("nightly", "research", "trading", ...).
+    tags: list[str] = field(default_factory=list)
+    #: id of the parent mission when this is a sub-mission.
+    parent_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.goal or not self.goal.strip():
             raise ValidationError("a mission needs a goal", field="goal")
         self.name = self.name or self.goal[:60]
+        try:
+            self.priority = int(self.priority or 0)
+        except (TypeError, ValueError):
+            self.priority = 0
+        self.tags = [str(t) for t in (self.tags or []) if str(t or "").strip()]
+        self.parent_id = str(self.parent_id or "")
 
     @property
     def terminal(self) -> bool:
@@ -238,6 +258,12 @@ class Mission:
         self.spent_tokens += max(0, tokens)
 
     def to_row(self) -> dict[str, Any]:
+        # priority/tags/parent_id persist inside the metadata JSON column —
+        # no storage migration needed for the new fields.
+        metadata = dict(self.metadata or {})
+        metadata["priority"] = int(self.priority or 0)
+        metadata["tags"] = list(self.tags or [])
+        metadata["parent_id"] = str(self.parent_id or "")
         return {
             "id": self.id,
             "name": self.name,
@@ -253,11 +279,23 @@ class Mission:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
-            "metadata": self.metadata,
+            "metadata": metadata,
         }
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Mission":
+        metadata = _json(row.get("metadata"), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        else:
+            metadata = dict(metadata)
+        priority = metadata.pop("priority", 0)
+        tags = metadata.pop("tags", [])
+        parent_id = metadata.pop("parent_id", "")
+        try:
+            priority = int(priority or 0)
+        except (TypeError, ValueError):
+            priority = 0
         return cls(
             id=row["id"],
             name=row.get("name") or "",
@@ -273,11 +311,26 @@ class Mission:
             created_at=float(row.get("created_at") or 0.0),
             updated_at=float(row.get("updated_at") or 0.0),
             finished_at=None if row.get("finished_at") is None else float(row["finished_at"]),
-            metadata=_json(row.get("metadata"), {}),
+            metadata=metadata,
+            priority=priority,
+            tags=list(tags) if isinstance(tags, (list, tuple)) else [],
+            parent_id=str(parent_id or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {**self.to_row(), "terminal": self.terminal, "budget_exhausted": self.budget_exhausted}
+        return {**self.to_row(), "terminal": self.terminal,
+                "budget_exhausted": self.budget_exhausted}
+
+    @property
+    def is_child(self) -> bool:
+        """True when this mission was spawned by a parent mission."""
+        return bool(self.parent_id)
+
+    def summary_card(self) -> str:
+        """One-glance boxed card for chat/terminal (see progress)."""
+        from .progress import render_mission_card
+
+        return render_mission_card(self)
 
 
 @dataclass
@@ -323,6 +376,86 @@ def _json(raw: Any, default: Any) -> Any:
         return default
 
 
+#: Canned mission shapes. Each template ships a name, default tags, and a
+#: plan skeleton — a list of step dicts in the persisted plan shape
+#: (``name`` / ``goal`` / ``role`` / ``kind`` / ``depends_on`` / ``policy``).
+#: The shapes mirror the golden drills, so a templated mission exercises a
+#: known-good pattern instead of an ad-hoc plan. ``create_from_template``
+#: materializes one into ``state["plan"]`` so the runner executes it
+#: without calling the planner.
+MISSION_TEMPLATES: dict[str, dict[str, Any]] = {
+    "research_write_verify": {
+        "name": "Research → write → verify",
+        "tags": ["research"],
+        "steps": [
+            {"name": "collect", "goal": "gather facts and sources",
+             "role": "research", "kind": "io", "depends_on": [],
+             "policy": {"retries": 2, "retry_on": "transient"}},
+            {"name": "draft", "goal": "write the deliverable from the collected facts",
+             "role": "execution", "kind": "io", "depends_on": ["collect"],
+             "policy": {"retries": 1}},
+            {"name": "verify", "goal": "verify the deliverable covers every collected fact",
+             "role": "critic", "kind": "io", "depends_on": ["draft"],
+             "policy": {"on_failure": "fail_fast"}},
+        ],
+    },
+    "build_test_fix": {
+        "name": "Build → test → fix",
+        "tags": ["build"],
+        "steps": [
+            {"name": "scaffold", "goal": "write the code under construction",
+             "role": "execution", "kind": "io", "depends_on": [],
+             "policy": {"retries": 1}},
+            {"name": "test", "goal": "run the test suite and report failures",
+             "role": "execution", "kind": "cpu", "depends_on": ["scaffold"],
+             "policy": {"retries": 1, "retry_on": "transient",
+                        "timeout_s": 600}},
+            {"name": "fix", "goal": "fix failing tests until green",
+             "role": "execution", "kind": "io", "depends_on": ["test"],
+             "policy": {"on_failure": "fail_fast"}},
+        ],
+    },
+    "audit_remediate_rescan": {
+        "name": "Audit → remediate → re-scan",
+        "tags": ["audit"],
+        "steps": [
+            {"name": "audit", "goal": "scan the target and list every issue found",
+             "role": "research", "kind": "io", "depends_on": [],
+             "policy": {"retries": 1}},
+            {"name": "remediate", "goal": "fix every issue the audit found",
+             "role": "execution", "kind": "io", "depends_on": ["audit"],
+             "policy": {"retries": 2}},
+            {"name": "rescan", "goal": "re-scan and prove zero issues remain",
+             "role": "critic", "kind": "io", "depends_on": ["remediate"],
+             "policy": {"on_failure": "fail_fast"}},
+        ],
+    },
+    "monitor_watch": {
+        "name": "Watch → report",
+        "tags": ["monitor"],
+        "steps": [
+            {"name": "watch", "goal": "observe the target and collect observations",
+             "role": "research", "kind": "async", "depends_on": [],
+             "policy": {"retries": 3, "retry_on": "transient",
+                        "retry_backoff_s": 30, "timeout_s": 3600}},
+            {"name": "report", "goal": "summarize the observations into a report",
+             "role": "execution", "kind": "io", "depends_on": ["watch"],
+             "policy": {}},
+        ],
+    },
+}
+
+
+def list_mission_templates() -> list[dict[str, Any]]:
+    """Template catalog: key, name, tags, step names."""
+    return [
+        {"key": key, "name": spec.get("name", key),
+         "tags": list(spec.get("tags") or []),
+         "steps": [s.get("name", "") for s in spec.get("steps", [])]}
+        for key, spec in MISSION_TEMPLATES.items()
+    ]
+
+
 class MissionStore:
     """Persistence for missions and their checkpoints."""
 
@@ -356,6 +489,9 @@ class MissionStore:
         state: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         acceptance: dict[str, Any] | Any | None = None,
+        priority: int = 0,
+        tags: list[str] | None = None,
+        parent_id: str = "",
     ) -> Mission:
         """Create + persist a mission.
 
@@ -375,8 +511,114 @@ class MissionStore:
                 budget_tokens=budget_tokens,
                 state=state,
                 metadata=metadata or {},
+                priority=priority,
+                tags=tags or [],
+                parent_id=parent_id,
             )
         )
+
+    def create_from_template(
+        self,
+        template_key: str,
+        goal: str,
+        **kwargs: Any,
+    ) -> Mission:
+        """Materialize a canned mission shape (see ``MISSION_TEMPLATES``).
+
+        The template's plan skeleton is written straight into
+        ``state["plan"]`` in the persisted shape, so the runner executes it
+        without consulting the planner. Raises :class:`ValidationError`
+        for an unknown template key.
+        """
+        spec = MISSION_TEMPLATES.get(template_key)
+        if spec is None:
+            raise ValidationError(
+                f"unknown mission template {template_key!r} — one of: "
+                f"{sorted(MISSION_TEMPLATES)}",
+                field="template",
+            )
+        state = dict(kwargs.pop("state", None) or {})
+        plan = []
+        for entry in spec.get("steps", []):
+            step = {
+                "name": entry.get("name", "step"),
+                "goal": entry.get("goal", ""),
+                "role": entry.get("role", "execution"),
+                "kind": entry.get("kind", "io"),
+                "depends_on": list(entry.get("depends_on") or []),
+            }
+            if entry.get("policy"):
+                step["policy"] = dict(entry["policy"])
+            plan.append(step)
+        state["plan"] = plan
+        tags = list(kwargs.pop("tags", None) or []) or list(spec.get("tags") or [])
+        name = kwargs.pop("name", "") or spec.get("name", template_key)
+        mission = self.create_new(
+            goal, name=name, state=state, tags=tags, **kwargs)
+        mission.state["template"] = template_key
+        return self.save(mission)
+
+    def spawn_child(self, parent_id: str, goal: str, **kwargs: Any) -> Mission:
+        """Create a sub-mission under ``parent_id`` (Temporal child-workflow
+        style). The child inherits the parent's tags (plus ``"child"``)
+        and gets its own fresh budget; ``children()`` / ``descendants()``
+        walk the tree. Raises :class:`NotFound` for an unknown parent and
+        :class:`ValidationError` when the parent is terminal.
+        """
+        parent = self.get(parent_id)  # raises NotFound when unknown
+        if parent.terminal:
+            raise ValidationError(
+                f"mission {parent_id} is {parent.status}: "
+                "a terminal mission cannot spawn children")
+        tags = list(kwargs.pop("tags", None) or []) or list(parent.tags)
+        if "child" not in tags:
+            tags.append("child")
+        return self.create_new(goal, parent_id=parent.id, tags=tags, **kwargs)
+
+    def children(self, mission_id: str) -> list[Mission]:
+        """Direct sub-missions of ``mission_id``."""
+        self.get(mission_id)  # raises NotFound when unknown
+        try:
+            rows = self.db.query(
+                "SELECT * FROM missions ORDER BY updated_at DESC")
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for r in rows:
+            try:
+                mission = Mission.from_row(dict(r))
+            except Exception:  # noqa: BLE001 - a bad row is not our problem
+                continue
+            if mission.parent_id == mission_id:
+                out.append(mission)
+        return out
+
+    def descendants(self, mission_id: str) -> list[Mission]:
+        """All sub-missions transitively (breadth-first)."""
+        seen: set[str] = set()
+        out: list[Mission] = []
+        queue = [mission_id]
+        while queue:
+            current = queue.pop(0)
+            for child in self.children(current):
+                if child.id in seen:
+                    continue
+                seen.add(child.id)
+                out.append(child)
+                queue.append(child.id)
+        return out
+
+    def tree(self, mission_id: str) -> dict[str, Any]:
+        """The mission plus its whole sub-mission tree as nested dicts."""
+        root = self.get(mission_id)  # raises NotFound when unknown
+
+        def _node(mission: Mission) -> dict[str, Any]:
+            return {
+                "mission": mission.to_dict(),
+                "children": [_node(c) for c in self.children(mission.id)],
+            }
+
+        return _node(root)
 
     def get(self, mission_id: str) -> Mission:
         row = self.missions.get(mission_id)
@@ -428,12 +670,16 @@ class MissionStore:
         and the Devon agent's progress report.
         """
         mission = self.get(mission_id)  # raises NotFound when unknown
-        eta_seconds, eta_note = estimate_eta(mission)
+        eta_seconds, eta_note = estimate_eta(mission, self.db)
         return {
             "mission": mission.to_dict(),
             "progress": self.progress(mission_id),
             "eta_seconds": eta_seconds,
             "eta_note": eta_note,
+            # structured ETA: method ("ema" | "run-average" | "history" |
+            # "none"), per-step rate, remaining count — powers the card
+            # renderer and any consumer that wants more than a number.
+            "eta_breakdown": eta_breakdown(mission, self.db),
             "stall": mission.state.get("stall"),
             # real step executions per step (idempotency replays don't
             # count) — powers "/mission status" retry visibility.
@@ -551,7 +797,19 @@ class MissionStore:
         status: str = "",
         active_only: bool = False,
         limit: int = 50,
+        tag: str = "",
+        min_priority: int | None = None,
+        search: str = "",
+        order: str = "updated",
     ) -> list[Mission]:
+        """List missions, newest first.
+
+        ``tag`` / ``min_priority`` / ``search`` filter in Python over the
+        metadata JSON (zero-migration: no SQL JSON operators needed).
+        ``search`` matches name + goal case-insensitively. ``order`` is
+        ``"updated"`` (default) or ``"priority"`` (priority desc, then
+        updated desc).
+        """
         if active_only:
             placeholders = ",".join("?" for _ in MissionStatus.TERMINAL)
             rows = self.db.query(
@@ -568,7 +826,118 @@ class MissionStore:
             rows = self.db.query(
                 "SELECT * FROM missions ORDER BY updated_at DESC LIMIT ?", (limit,)
             )
-        return [Mission.from_row(dict(r)) for r in rows]
+        missions = []
+        for r in rows:
+            try:
+                missions.append(Mission.from_row(dict(r)))
+            except Exception:  # noqa: BLE001 - a bad row is not our problem
+                continue
+        tag = (tag or "").strip().lower()
+        needle = (search or "").strip().lower()
+        if tag:
+            missions = [m for m in missions
+                        if any(t.lower() == tag for t in m.tags)]
+        if min_priority is not None:
+            try:
+                floor = int(min_priority)
+            except (TypeError, ValueError):
+                floor = 0
+            missions = [m for m in missions if m.priority >= floor]
+        if needle:
+            missions = [m for m in missions
+                        if needle in (m.name or "").lower()
+                        or needle in (m.goal or "").lower()]
+        if order == "priority":
+            missions.sort(key=lambda m: (-m.priority, -(m.updated_at or 0.0)))
+        return missions[: max(0, limit)]
+
+    def search(self, query: str, *, status: str = "",
+               limit: int = 50) -> list[Mission]:
+        """Full-text-ish search over mission name + goal."""
+        if not (query or "").strip():
+            raise ValidationError("search needs a query", field="query")
+        return self.list(status=status, search=query, limit=limit)
+
+    def bulk_set_status(
+        self,
+        mission_ids: list[str],
+        status: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Flip many missions at once. Returns ``{"updated", "skipped"}``
+        where skipped maps id → reason. One bad id never aborts the batch.
+        """
+        if status not in MissionStatus.ALL:
+            raise ValidationError(f"unknown mission status {status!r}")
+        updated: list[str] = []
+        skipped: dict[str, str] = {}
+        for mission_id in mission_ids:
+            try:
+                mission = self.get(mission_id)  # raises NotFound when unknown
+            except NotFound:
+                skipped[mission_id] = "not found"
+                continue
+            if mission.terminal and status not in MissionStatus.TERMINAL:
+                skipped[mission_id] = (
+                    f"terminal ({mission.status}): cannot reactivate")
+                continue
+            mission.status = status
+            if note:
+                mission.state["status_note"] = note
+            self.save(mission)
+            updated.append(mission_id)
+        return {"updated": updated, "skipped": skipped,
+                "updated_count": len(updated)}
+
+    def bulk_cancel(self, *, status: str = "", tag: str = "") -> dict[str, Any]:
+        """Cancel every live mission (optionally filtered)."""
+        live = [m for m in self.list(status=status, tag=tag, limit=10000)
+                if not m.terminal]
+        return self.bulk_set_status(
+            [m.id for m in live], MissionStatus.CANCELLED,
+            note="bulk cancel")
+
+    def archive(self, older_than_seconds: float = 30 * 86400) -> dict[str, Any]:
+        """Delete terminal missions (and their checkpoints + reflections)
+        finished longer than ``older_than_seconds`` ago.
+
+        Retention hygiene: a personal agent that never forgets a finished
+        mission grows its DB forever. Returns counts per deleted table.
+        Never touches live missions.
+        """
+        cutoff = time.time() - max(0.0, float(older_than_seconds))
+        rows = self.db.query(
+            "SELECT id, finished_at, updated_at FROM missions WHERE status IN "
+            "('done', 'failed', 'cancelled')")
+        doomed = [
+            str(r["id"]) for r in rows
+            if float(r["finished_at"] or r["updated_at"] or 0.0) < cutoff
+        ]
+        deleted = {"missions": 0, "checkpoints": 0, "reflections": 0}
+        for mission_id in doomed:
+            try:
+                with self.db.transaction():
+                    cp = self.db.execute(
+                        "DELETE FROM mission_checkpoints WHERE mission_id = ?",
+                        (mission_id,))
+                    deleted["checkpoints"] += int(cp.rowcount or 0)
+                    try:
+                        rf = self.db.execute(
+                            "DELETE FROM reflections WHERE mission_id = ?",
+                            (mission_id,))
+                        deleted["reflections"] += int(rf.rowcount or 0)
+                    except Exception:  # noqa: BLE001 - table may not exist yet
+                        pass
+                    ms = self.db.execute(
+                        "DELETE FROM missions WHERE id = ?", (mission_id,))
+                    deleted["missions"] += int(ms.rowcount or 0)
+            except Exception:  # noqa: BLE001 - one bad id never aborts the batch
+                _log.warning("archive failed for mission %s", mission_id,
+                             exc_info=True)
+        _log.info("archived %d missions (%d checkpoints, %d reflections)",
+                  deleted["missions"], deleted["checkpoints"],
+                  deleted["reflections"])
+        return deleted
 
     def resumable(self) -> list[Mission]:
         """Missions that were interrupted: running or paused, never terminal."""

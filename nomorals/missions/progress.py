@@ -53,12 +53,21 @@ __all__ = [
     "StallCode",
     "clear_stall",
     "estimate_eta",
+    "eta_breakdown",
     "fmt_duration",
     "MissionMilestones",
     "MissionWatchers",
     "real_plan_steps",
+    "box_lines",
     "record_stall",
+    "render_mission_card",
+    "render_mission_table",
+    "render_progress_bar",
+    "render_result_card",
+    "render_sparkline",
+    "render_status_card",
     "render_status_text",
+    "STATUS_STYLES",
 ]
 
 _log = get_logger(__name__)
@@ -187,7 +196,113 @@ def fmt_duration(seconds: float | None) -> str:
     return f"{hours}h {minutes}m" if minutes else f"{hours}h"
 
 
-def estimate_eta(mission: Any) -> tuple[float | None, str]:
+#: EMA smoothing factor for the per-step rate (gmailarchiver's
+#: ProgressTracker practice: α=0.3 reacts to recent steps without spike
+#: whiplash from one slow outlier).
+ETA_EMA_ALPHA = 0.3
+
+
+def _historical_step_rate(db: Any) -> tuple[float | None, int]:
+    """Average wall-seconds per step across recently finished missions.
+
+    Used as an honest prior when the current mission has no step timing
+    yet. Returns ``(seconds_per_step, mission_count)``; ``(None, 0)``
+    when there is no history. Never raises — no db, no history.
+    """
+    if db is None:
+        return None, 0
+    try:
+        row = db.query_one(
+            "SELECT AVG(spent_wall / NULLIF(iterations, 0)) AS avg_s,"
+            " COUNT(*) AS n FROM missions"
+            " WHERE status = 'done' AND iterations > 0 AND spent_wall > 0"
+            " AND COALESCE(finished_at, updated_at, 0) > ?",
+            (time.time() - 30 * 86400,),
+        )
+    except Exception:  # noqa: BLE001 - history is a nice-to-have
+        return None, 0
+    if row is None:
+        return None, 0
+    try:
+        avg = float(row["avg_s"]) if row["avg_s"] is not None else None
+        count = int(row["n"] or 0)
+    except (TypeError, ValueError, KeyError):
+        return None, 0
+    if not avg or avg <= 0 or count <= 0:
+        return None, 0
+    return avg, count
+
+
+def eta_breakdown(mission: Any, db: Any = None) -> dict[str, Any]:
+    """Structured ETA: method, per-step rate, and the honest note.
+
+    Method is one of ``"ema"`` (exponential moving average over this
+    mission's measured step durations), ``"run-average"`` (whole-run
+    average fallback), ``"history"`` (prior from recently finished
+    missions — no timing on this mission yet), or ``"none"``.
+    """
+    steps = real_plan_steps(mission.state.get("plan"))
+    if not steps:
+        return {"eta_seconds": None, "note": "no plan stored yet",
+                "method": "none", "per_step_s": None, "remaining": 0}
+    completed = set(mission.state.get("completed_steps") or [])
+    done = sum(1 for s in steps if _step_name(s) in completed)
+    remaining = len(steps) - done
+    if remaining <= 0:
+        return {"eta_seconds": 0.0, "note": "all steps complete",
+                "method": "ema", "per_step_s": 0.0, "remaining": 0}
+    durations = (mission.state or {}).get("step_durations") or {}
+    series: list[float] = []
+    if isinstance(durations, dict):
+        # trailing window (insertion-ordered: last entries = most recent
+        # steps), so one ancient outlier cannot yank the ETA — then an
+        # exponential moving average inside the window, so recent steps
+        # weigh most without spike whiplash from a single slow step.
+        for value in list(durations.values())[-5:]:
+            try:
+                seconds = float(value)
+            except (TypeError, ValueError):
+                continue
+            if seconds >= 0:
+                series.append(seconds)
+    per_step: float | None = None
+    method = "none"
+    note = ""
+    if series:
+        ema = series[0]
+        for value in series[1:]:
+            ema = ETA_EMA_ALPHA * value + (1.0 - ETA_EMA_ALPHA) * ema
+        per_step = ema
+        method = "ema"
+        note = (f"based on the last {len(series)} step(s), "
+                f"EMA-smoothed (α={ETA_EMA_ALPHA})")
+    elif done > 0 and (mission.spent_wall or 0) > 0:
+        per_step = mission.spent_wall / done
+        method = "run-average"
+    else:
+        hist_rate, hist_n = _historical_step_rate(db)
+        if hist_rate is not None:
+            per_step = hist_rate
+            method = "history"
+            note = (f"no timing on this mission yet — based on {hist_n} "
+                    f"recently finished mission(s)")
+        else:
+            return {"eta_seconds": None, "note": "no step timing yet",
+                    "method": "none", "per_step_s": None,
+                    "remaining": remaining}
+    assert per_step is not None
+    eta = per_step * remaining
+    budget_wall = float(mission.budget_wall or 0.0)
+    if budget_wall:
+        wall_left = max(0.0, budget_wall - mission.spent_wall)
+        if wall_left < eta:
+            note = (f"{note}; " if note else "") + \
+                f"wall budget runs out first (~{fmt_duration(wall_left)} left)"
+    return {"eta_seconds": eta, "note": note, "method": method,
+            "per_step_s": round(per_step, 2), "remaining": remaining}
+
+
+def estimate_eta(mission: Any, db: Any = None) -> tuple[float | None, str]:
     """Honest ETA from measured per-step wall time.
 
     Returns ``(seconds, note)``. ``seconds`` is ``None`` when there is not
@@ -195,55 +310,186 @@ def estimate_eta(mission: Any) -> tuple[float | None, str]:
     "no plan stored") instead of inventing a number. When the wall budget
     would run out first, the note says so explicitly.
 
-    The rate comes from a trailing window (the last up to 5 completed
-    steps' measured durations, recorded by the runner) — recent steps
-    predict the near future better than a whole-run average on a
-    heterogeneous plan. Falls back to the whole-run average when no
-    per-step timing exists yet.
+    The rate is an exponential moving average (α=0.3) over this mission's
+    measured step durations — recent steps predict the near future better
+    than a whole-run average on a heterogeneous plan, and the EMA keeps
+    one slow outlier from yanking the number. Falls back to the whole-run
+    average, then to the historical per-step rate of recently finished
+    missions (marked as such so it never masquerades as measured data).
     """
-    steps = real_plan_steps(mission.state.get("plan"))
-    if not steps:
-        return None, "no plan stored yet"
-    completed = set(mission.state.get("completed_steps") or [])
-    done = sum(1 for s in steps if _step_name(s) in completed)
-    remaining = len(steps) - done
-    if remaining <= 0:
-        return 0.0, "all steps complete"
-    durations = (mission.state or {}).get("step_durations") or {}
-    recent: list[float] = []
-    if isinstance(durations, dict):
-        for value in list(durations.values())[-5:]:
-            try:
-                recent.append(float(value))
-            except (TypeError, ValueError):
-                continue
-    if recent:
-        per_step = sum(recent) / len(recent)
-        eta = per_step * remaining
-        note = f"based on the last {len(recent)} step(s)"
-    elif done > 0 and (mission.spent_wall or 0) > 0:
-        per_step = mission.spent_wall / done
-        eta = per_step * remaining
-        note = ""
-    else:
-        return None, "no step timing yet"
-    budget_wall = float(mission.budget_wall or 0.0)
-    if budget_wall:
-        wall_left = max(0.0, budget_wall - mission.spent_wall)
-        if wall_left < eta:
-            note = (f"{note}; " if note else "") + \
-                f"wall budget runs out first (~{fmt_duration(wall_left)} left)"
-    return eta, note
+    info = eta_breakdown(mission, db)
+    return info["eta_seconds"], info["note"]
 
 
 # ── chat rendering ───────────────────────────────────────────────────────────
 
-def render_status_text(detail: dict[str, Any]) -> str:
+#: Styles for :func:`render_status_text`.
+STATUS_STYLES = ("full", "compact", "card", "plain")
+
+
+def render_progress_bar(percent: float, width: int = 20,
+                        *, ascii_only: bool = False) -> str:
+    """``62.0`` -> ``████████████░░░░░░░░ 62%`` (tqdm-style, one glance).
+
+    ``ascii_only`` swaps the unicode blocks for ``#``/``-`` (dumb
+    terminals, logs). Never raises; clamps out-of-range input.
+    """
+    try:
+        pct = max(0.0, min(100.0, float(percent)))
+    except (TypeError, ValueError):
+        pct = 0.0
+    width = max(4, min(60, int(width or 20)))
+    filled = int(round(pct / 100.0 * width))
+    if ascii_only:
+        bar = "#" * filled + "-" * (width - filled)
+    else:
+        bar = "█" * filled + "░" * (width - filled)
+    return f"{bar} {pct:.0f}%"
+
+
+def render_sparkline(values: list[float] | tuple[float, ...],
+                     *, width: int = 0) -> str:
+    """Tiny bar chart of a value series: per-step durations at a glance.
+
+    ``[1, 2, 8, 4]`` -> ``▁▂█▄``. Empty input -> ``""``.
+    """
+    glyphs = "▁▂▃▄▅▆▇█"
+    try:
+        series = [float(v) for v in (values or [])]
+    except (TypeError, ValueError):
+        return ""
+    if not series:
+        return ""
+    if width and len(series) > width:
+        # downsample: keep the shape, drop the noise
+        stride = len(series) / width
+        series = [series[int(i * stride)] for i in range(width)]
+    lo, hi = min(series), max(series)
+    span = hi - lo
+    if span <= 0:
+        return glyphs[3] * len(series)
+    return "".join(
+        glyphs[min(len(glyphs) - 1, int((v - lo) / span * (len(glyphs) - 1)))]
+        for v in series)
+
+
+def _box_lines(title: str, lines: list[str], *, width: int = 62) -> list[str]:
+    """Wrap lines in a unicode box. Pure presentation, no logic."""
+    width = max(20, min(100, width))
+    inner = width - 4
+    out = [f"┌─ {title[:inner]} " + "─" * max(0, inner - len(title) - 1) + "┐"]
+    for line in lines:
+        for chunk in [line[i:i + inner] for i in range(0, max(1, len(line)), inner)] or [""]:
+            out.append(f"│ {chunk.ljust(inner)} │")
+    out.append("└" + "─" * (width - 2) + "┘")
+    return out
+
+
+#: Public alias for the boxed-card wrapper (used by golden reports and
+#: other renderers that want the same card chrome).
+box_lines = _box_lines
+
+
+_STATUS_GLYPH = {
+    "pending": "⏳", "running": "⚙️", "paused": "⏸️",
+    "done": "✅", "failed": "❌", "cancelled": "🚫",
+}
+
+
+def _status_line(detail: dict[str, Any], *, plain: bool = False) -> str:
+    m = detail.get("mission") or {}
+    p = detail.get("progress") or {}
+    status = str(m.get("status") or "?")
+    if plain:
+        head = f"{m.get('name') or 'mission'} [{status}]"
+    else:
+        head = f"{_STATUS_GLYPH.get(status, '🎯')} {m.get('name') or 'mission'} [{status}]"
+    pct = float(p.get("percent") or 0.0)
+    line = (f"{head} — {p.get('steps_done', 0)}/{p.get('total_steps', 0)} "
+            f"steps ({pct:.0f}%)")
+    if p.get("current_step"):
+        line += f" · now: {p['current_step']}"
+    return line
+
+
+def _eta_line(detail: dict[str, Any]) -> str:
+    eta = detail.get("eta_seconds")
+    note = str(detail.get("eta_note") or "")
+    if eta is None:
+        return f"eta: unknown" + (f" — {note}" if note else "")
+    return f"eta: ~{fmt_duration(eta)}" + (f" ({note})" if note else "")
+
+
+def _spend_line(detail: dict[str, Any]) -> str:
+    m = detail.get("mission") or {}
+    spent = (f"spent: {float(m.get('spent_wall') or 0.0):.0f}s wall, "
+             f"{int(m.get('spent_tokens') or 0)} tokens")
+    budget_wall = float(m.get("budget_wall") or 0.0)
+    budget_tokens = int(m.get("budget_tokens") or 0)
+    if budget_wall or budget_tokens:
+        spent += (f" (budget: {fmt_duration(budget_wall) if budget_wall else '∞'} / "
+                  f"{budget_tokens if budget_tokens else '∞'} tokens)")
+    return spent + f" · {int(m.get('iterations') or 0)} iteration(s)"
+
+
+def _stall_lines(detail: dict[str, Any], *, indent: str = "") -> list[str]:
+    stall = detail.get("stall")
+    if not stall:
+        return []
+    code = stall.get("code")
+    label = StallCode.LABELS.get(code, code)
+    line = f"{indent}⚠️ stalled [{code}]: {label} — {stall.get('message')}"
+    if stall.get("step"):
+        line += f" (step: {stall['step']})"
+    since = stall.get("since")
+    if since:
+        line += f" [since {time.strftime('%H:%M', time.localtime(since))}]"
+    lines = [line]
+    hint = StallCode.UNBLOCK_HINTS.get(code)
+    if hint:
+        lines.append(f"{indent}   → unblocks: {hint}")
+    return lines
+
+
+def render_status_text(detail: dict[str, Any], *, style: str = "full") -> str:
     """One chat-visible block: % complete, current step, ETA, stall reason.
 
     Takes the dict from ``MissionStore.detail``. Every line is real,
     persisted state — nothing is guessed.
+
+    Styles: ``"full"`` (the historical multi-line block, byte-identical
+    default), ``"compact"`` (one line), ``"card"`` (boxed card),
+    ``"plain"`` (no emoji — logs, dumb terminals).
     """
+    if style not in STATUS_STYLES:
+        raise ValueError(f"unknown status style {style!r} — one of: {STATUS_STYLES}")
+    if style == "compact":
+        parts = [_status_line(detail), _eta_line(detail), _spend_line(detail)]
+        stall = detail.get("stall") or {}
+        if stall:
+            code = stall.get("code")
+            parts.append(f"stalled [{code}]: {stall.get('message')}")
+        elif (detail.get("progress") or {}).get("last_error"):
+            parts.append(f"last error: {str((detail['progress']['last_error'])[:120])}")
+        return " · ".join(p for p in parts if p)
+    if style == "card":
+        return render_status_card(detail)
+    if style == "plain":
+        lines = [_status_line(detail, plain=True)]
+        m = detail.get("mission") or {}
+        goal = str(m.get("goal") or "")
+        if goal:
+            lines.append(f"goal: {goal[:160]}")
+        p = detail.get("progress") or {}
+        lines.append(f"progress: {p.get('steps_done', 0)}/{p.get('total_steps', 0)} "
+                     f"({float(p.get('percent') or 0.0):.0f}%)")
+        lines.append(_eta_line(detail))
+        lines.append(_spend_line(detail))
+        lines.extend(_stall_lines(detail))
+        if p.get("last_error"):
+            lines.append(f"last error: {str(p['last_error'])[:160]}")
+        return "\n".join(ln for ln in lines if ln)
+    # "full": the historical rendering, unchanged.
     m = detail.get("mission") or {}
     p = detail.get("progress") or {}
     stall = detail.get("stall")
@@ -259,37 +505,148 @@ def render_status_text(detail: dict[str, Any]) -> str:
     if p.get("current_step"):
         progress_line += f" — current: {p['current_step']}"
     lines.append(progress_line)
-    eta = detail.get("eta_seconds")
-    eta_note = str(detail.get("eta_note") or "")
-    if eta is None:
-        lines.append(f"eta: unknown" + (f" — {eta_note}" if eta_note else ""))
-    else:
-        lines.append(f"eta: ~{fmt_duration(eta)}" + (f" ({eta_note})" if eta_note else ""))
-    spent = f"spent: {float(m.get('spent_wall') or 0.0):.0f}s wall, {int(m.get('spent_tokens') or 0)} tokens"
-    budget_wall = float(m.get("budget_wall") or 0.0)
-    budget_tokens = int(m.get("budget_tokens") or 0)
-    if budget_wall or budget_tokens:
-        spent += f" (budget: {fmt_duration(budget_wall) if budget_wall else '∞'} / {budget_tokens if budget_tokens else '∞'} tokens)"
-    lines.append(spent + f" — {int(m.get('iterations') or 0)} iteration(s)")
-    if stall:
-        code = stall.get("code")
-        label = StallCode.LABELS.get(code, code)
-        stall_line = f"⚠️ stalled [{code}]: {label} — {stall.get('message')}"
-        if stall.get("step"):
-            stall_line += f" (step: {stall['step']})"
-        since = stall.get("since")
-        if since:
-            stall_line += f" [since {time.strftime('%H:%M', time.localtime(since))}]"
-        lines.append(stall_line)
-        hint = StallCode.UNBLOCK_HINTS.get(code)
-        if hint:
-            lines.append(f"   → unblocks: {hint}")
-    elif str(m.get("status") or "") in {"running", "paused", "pending"} \
+    lines.append(_eta_line(detail))
+    lines.append(_spend_line(detail))
+    lines.extend(_stall_lines(detail))
+    if not stall and str(m.get("status") or "") in {"running", "paused", "pending"} \
             and not p.get("last_error"):
         lines.append("state: making progress")
     if p.get("last_error"):
         lines.append(f"last error: {str(p['last_error'])[:160]}")
     return "\n".join(ln for ln in lines if ln)
+
+
+def render_status_card(detail: dict[str, Any], *, width: int = 62) -> str:
+    """Boxed one-glance mission card: header, bars, ETA, stall, attempts."""
+    m = detail.get("mission") or {}
+    p = detail.get("progress") or {}
+    status = str(m.get("status") or "?")
+    title = f"{_STATUS_GLYPH.get(status, '🎯')} {m.get('name') or 'mission'} [{status}]"
+    pct = float(p.get("percent") or 0.0)
+    lines = [f"progress  {render_progress_bar(pct, width=24)}"
+             f"  {p.get('steps_done', 0)}/{p.get('total_steps', 0)} steps"]
+    if p.get("current_step"):
+        lines.append(f"now       {p['current_step'][:44]}")
+    lines.append(_eta_line(detail))
+    # budget burn bar
+    budget_wall = float(m.get("budget_wall") or 0.0)
+    if budget_wall:
+        burn = 100.0 * float(m.get("spent_wall") or 0.0) / budget_wall
+        lines.append(f"budget    {render_progress_bar(burn, width=24)}"
+                     f"  {fmt_duration(float(m.get('spent_wall') or 0.0))}"
+                     f"/{fmt_duration(budget_wall)} wall")
+    else:
+        lines.append(_spend_line(detail))
+    attempts = detail.get("attempts") or {}
+    if attempts:
+        retried = {k: v for k, v in attempts.items() if int(v or 0) > 1}
+        if retried:
+            lines.append("retries   " + ", ".join(
+                f"{k}×{v}" for k, v in sorted(retried.items())[:6]))
+    durations = ((detail.get("mission") or {}).get("state") or {}).get("step_durations")
+    spark = render_sparkline(list((durations or {}).values()))
+    if spark:
+        lines.append(f"step pace {spark}")
+    lines.extend(_stall_lines(detail))
+    if p.get("last_error"):
+        lines.append(f"last error: {str(p['last_error'])[:120]}")
+    return "\n".join(_box_lines(title, lines, width=width))
+
+
+def render_mission_card(mission: Any, *, width: int = 62) -> str:
+    """Boxed card from a Mission object (no store round-trip needed)."""
+    state = mission.state or {}
+    plan = real_plan_steps(state.get("plan"))
+    completed = set(state.get("completed_steps") or [])
+    total = len(plan)
+    done = (sum(1 for s in plan if _step_name(s) in completed) if total
+            else len(completed))
+    pct = (100.0 * done / total) if total else 0.0
+    status = str(getattr(mission, "status", "?"))
+    title = (f"{_STATUS_GLYPH.get(status, '🎯')} "
+             f"{getattr(mission, 'name', '') or 'mission'} [{status}]")
+    lines = [f"goal      {str(getattr(mission, 'goal', ''))[:52]}"]
+    lines.append(f"progress  {render_progress_bar(pct, width=24)}"
+                 f"  {done}/{total} steps")
+    eta, note = estimate_eta(mission)
+    lines.append(f"eta: {'~' + fmt_duration(eta) if eta is not None else 'unknown'}"
+                 + (f" ({note})" if note else ""))
+    priority = int(getattr(mission, "priority", 0) or 0)
+    tags = getattr(mission, "tags", []) or []
+    meta_bits = []
+    if priority:
+        meta_bits.append(f"priority {priority}")
+    if tags:
+        meta_bits.append("tags: " + ", ".join(tags[:5]))
+    if getattr(mission, "parent_id", ""):
+        meta_bits.append(f"child of {mission.parent_id[:8]}")
+    if meta_bits:
+        lines.append(" · ".join(meta_bits))
+    stall = state.get("stall")
+    if stall:
+        code = stall.get("code")
+        lines.append(f"⚠️ stalled [{code}]: {stall.get('message')}")
+    return "\n".join(_box_lines(title, lines, width=width))
+
+
+def render_mission_table(missions: list[Any], *, width: int = 0) -> str:
+    """Aligned one-line-per-mission table for ``/mission list``."""
+    if not missions:
+        return "(no missions)"
+    rows: list[tuple[str, str, str, str, str]] = []
+    for mission in missions:
+        mid = str(getattr(mission, "id", ""))[:8]
+        name = str(getattr(mission, "name", "") or "mission")[:30]
+        status = str(getattr(mission, "status", "?"))
+        glyph = _STATUS_GLYPH.get(status, "·")
+        state = getattr(mission, "state", None) or {}
+        plan = real_plan_steps(state.get("plan"))
+        completed = set(state.get("completed_steps") or [])
+        total = len(plan)
+        done = (sum(1 for s in plan if _step_name(s) in completed) if total
+                else len(completed))
+        pct = (100.0 * done / total) if total else 0.0
+        bar = render_progress_bar(pct, width=12)
+        eta, _ = estimate_eta(mission)
+        eta_s = f"~{fmt_duration(eta)}" if eta is not None else "—"
+        prio = int(getattr(mission, "priority", 0) or 0)
+        rows.append((mid, name, f"{glyph} {status}", bar, eta_s, f"p{prio}"))
+    header = ("ID", "NAME", "STATUS", "PROGRESS", "ETA", "PRI")
+    widths = [max(len(r[i]) for r in rows + [header]) for i in range(6)]
+    fmt_row = lambda r: "  ".join(c.ljust(widths[i]) for i, c in enumerate(r))
+    out = [fmt_row(header), "  ".join("─" * w for w in widths)]
+    out.extend(fmt_row(r) for r in rows)
+    return "\n".join(out)
+
+
+def render_result_card(result: dict[str, Any], *, width: int = 62) -> str:
+    """Terminal MissionResult card: status, steps table, cost, lessons."""
+    status = str(result.get("status") or "?")
+    ok = bool(result.get("ok"))
+    title = (f"{'✅' if ok else '❌'} mission {status}: "
+             f"{result.get('mission_id', '')[:8]}")
+    steps = result.get("steps") or []
+    done = sum(1 for s in steps if (s.get("ok") if isinstance(s, dict) else False))
+    lines = [f"steps     {render_progress_bar(100.0 * done / max(1, len(steps)), width=24)}"
+             f"  {done}/{len(steps)} ok"]
+    for s in steps[:12]:
+        if not isinstance(s, dict):
+            continue
+        glyph = "✓" if s.get("ok") else "✗"
+        sec = float(s.get("seconds") or 0.0)
+        lines.append(f"  {glyph} {str(s.get('step'))[:34].ljust(34)} {sec:7.1f}s")
+    if len(steps) > 12:
+        lines.append(f"  … and {len(steps) - 12} more")
+    lines.append(f"took      {fmt_duration(result.get('seconds'))} wall · "
+                 f"{result.get('iterations', 0)} iterations")
+    if result.get("resumed_from"):
+        lines.append(f"resumed   from {result['resumed_from']}")
+    lessons = result.get("lessons") or []
+    for lesson in lessons[:4]:
+        lines.append(f"lesson    {str(lesson)[:52]}")
+    if result.get("error"):
+        lines.append(f"error     {str(result['error'])[:52]}")
+    return "\n".join(_box_lines(title, lines, width=width))
 
 
 # ── milestone pushes ─────────────────────────────────────────────────────────
@@ -375,6 +732,12 @@ class MissionMilestones:
     MILESTONE_LOG_KEY = "milestones"
     LOG_LIMIT = 30
 
+    #: What gets pushed. ``"all"`` (historical: started/step/stalled/
+    #: terminal), ``"milestones"`` (started/stalled/terminal — no per-step
+    #: progress notes), ``"terminal"`` (only the final verdict). Long
+    #: missions stay quiet until they matter.
+    NOTIFY_LEVELS = ("all", "milestones", "terminal")
+
     def __init__(
         self,
         context: Any,
@@ -383,6 +746,7 @@ class MissionMilestones:
         clock: Callable[[], float] | None = None,
         step_cooldown_seconds: float = 600.0,
         watch_store: "MissionWatchers | None" = None,
+        notify_level: str = "all",
     ) -> None:
         self.context = context
         if store is None:
@@ -393,11 +757,43 @@ class MissionMilestones:
         self._clock = clock or time.time
         self.step_cooldown = max(0.0, float(step_cooldown_seconds))
         self._notifier = Notifier(context)
+        self.notify_level = (notify_level or "all").strip().lower()
+        if self.notify_level not in self.NOTIFY_LEVELS:
+            self.notify_level = "all"
         # Chat-key subscriptions fanned out on top of the Notifier publish.
         # Default: backed by the context db (silent no-op when db is None).
         if watch_store is None:
             watch_store = MissionWatchers(getattr(context, "db", None))
         self.watch_store = watch_store
+
+    def set_notify_level(self, level: str) -> str:
+        """Change the push verbosity. Returns the effective level."""
+        level = (level or "").strip().lower()
+        if level not in self.NOTIFY_LEVELS:
+            raise ValueError(f"unknown notify level {level!r} — one of: "
+                             f"{self.NOTIFY_LEVELS}")
+        self.notify_level = level
+        return level
+
+    def digest(self, mission: Any, *, limit: int = 10) -> str:
+        """Collapse the persisted milestone log into one digest block.
+
+        For ``notify_level="milestones"`` owners: what happened, when —
+        without the per-step noise. Reads ``mission.state["milestones"]``
+        (written by ``_mark``), so it survives restarts.
+        """
+        log = mission.state.get(self.MILESTONE_LOG_KEY) or []
+        entries = [e for e in log if isinstance(e, dict)][-max(1, limit):]
+        if not entries:
+            return f"no milestones yet for {getattr(mission, 'name', 'mission')}"
+        lines = [f"📰 digest: {getattr(mission, 'name', 'mission')} "
+                 f"({len(log)} milestone(s))"]
+        for entry in entries:
+            at = entry.get("at")
+            when = time.strftime("%H:%M", time.localtime(at)) if at else "??:??"
+            lines.append(f"  {when}  {entry.get('event', '?')} — "
+                         f"{str(entry.get('title') or '')[:80]}")
+        return "\n".join(lines)
 
     # ── events ───────────────────────────────────────────────────────────────
 
@@ -445,6 +841,8 @@ class MissionMilestones:
     def on_started(self, mission: Any) -> dict[str, Any]:
         """Push once when a mission starts running. Resume-safe."""
         try:
+            if self.notify_level == "terminal":
+                return {"suppressed": "notify-level", "event": "started"}
             if self._marked(mission, "started"):
                 return {"suppressed": "already-notified", "event": "started"}
             title = f"mission started: {mission.name}"
@@ -465,8 +863,14 @@ class MissionMilestones:
             return {"suppressed": "error", "event": "started"}
 
     def on_step(self, mission: Any, outcome: Any) -> dict[str, Any]:
-        """Cooldown-gated progress push for a completed step."""
+        """Cooldown-gated progress push for a completed step.
+
+        Suppressed entirely unless ``notify_level == "all"`` — digest
+        mode owners get started/stalled/terminal only.
+        """
         try:
+            if self.notify_level != "all":
+                return {"suppressed": "notify-level", "event": "step"}
             return self._on_step(mission, outcome)
         except Exception as exc:  # noqa: BLE001 - telemetry never breaks a run
             _log.debug("mission milestone step failed: %s", exc)
@@ -504,6 +908,8 @@ class MissionMilestones:
     def on_stalled(self, mission: Any) -> dict[str, Any]:
         """Push immediately when a *new* stall reason is recorded."""
         try:
+            if self.notify_level == "terminal":
+                return {"suppressed": "notify-level", "event": "stalled"}
             stall = mission.state.get(_STALL_KEY) or {}
             if not stall:
                 return {"suppressed": "no-stall", "event": "stalled"}

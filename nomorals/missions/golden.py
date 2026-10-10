@@ -43,14 +43,22 @@ __all__ = [
     "GoldenMission",
     "GoldenResult",
     "GoldenRunner",
+    "CompensateFn",
     "GOLDEN_MISSIONS",
+    "GOLDEN_BASELINES",
     "list_golden_missions",
+    "normalize_output",
+    "check_regression",
+    "render_golden_report",
 ]
 
 _log = get_logger(__name__)
 
 VerifyFn = Callable[[dict[str, Any]], "tuple[bool, str]"]
 RepairFn = Callable[[dict[str, Any], "GoldenContext"], dict[str, Any]]
+#: Saga compensation for a golden step: undo the step's effects.
+#: Receives the step's output and the context, returns a note dict.
+CompensateFn = Callable[[dict[str, Any], "GoldenContext"], dict[str, Any]]
 
 
 @dataclass
@@ -64,12 +72,13 @@ class GoldenContext:
 
 @dataclass
 class GoldenStep:
-    """One plan step: execute, verify, and optionally repair."""
+    """One plan step: execute, verify, optionally repair, optionally undo."""
 
     name: str
     run: Callable[[GoldenContext], dict[str, Any]]
     verify: VerifyFn
     repair: RepairFn | None = None
+    compensate: CompensateFn | None = None
     doc: str = ""
 
 
@@ -96,6 +105,9 @@ class GoldenResult:
     seconds: float = 0.0
     benchmark_row: int = 0
     error: str = ""
+    #: saga compensations, newest-first (empty when the mission succeeded
+    #: or no step declared a compensation).
+    compensations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +119,7 @@ class GoldenResult:
             "seconds": round(self.seconds, 3),
             "benchmark_row": self.benchmark_row,
             "error": self.error,
+            "compensations": self.compensations,
         }
 
 
@@ -389,8 +402,96 @@ def _audit_mission() -> GoldenMission:
     )
 
 
+# ── mission 4: crash → resume without duplicate side effects ──────────────
+
+def _mark_side_effect(ctx: GoldenContext) -> dict[str, Any]:
+    # The append is the "side effect": if resume re-executed this step,
+    # the log would hold two lines and the drill would fail.
+    log = ctx.workdir / "side_effects.log"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(f"marked at {time.time():.3f}\n")
+    lines = log.read_text(encoding="utf-8").strip().splitlines()
+    return {"marks": len(lines)}
+
+
+def _crash_mission() -> GoldenMission:
+    return GoldenMission(
+        key="crash_no_dup",
+        name="Crash → resume without duplicate side effects",
+        goal="prove a killed mission resumes without re-executing "
+             "completed steps",
+        doc="The drill harness kills the runner after the first step and "
+            "resumes it: the side-effect log must hold exactly one line. "
+            "Exercises kill → PAUSED → resume, the at-least-once contract, "
+            "and the completed-step skip.",
+        steps=[
+            GoldenStep("mark", _mark_side_effect,
+                       lambda o: (True, f"{o['marks']} mark(s)")
+                       if o.get("marks") == 1 else (False, "mark missing"),
+                       doc="append one line to the side-effect log"),
+            GoldenStep("finish", lambda ctx: {"done": True},
+                       lambda o: (True, "finished")
+                       if o.get("done") else (False, "not done"),
+                       doc="trivial second step after the kill point"),
+        ],
+    )
+
+
+# ── mission 5: saga — a failed step undoes the earlier ones ─────────────────
+
+def _make_file(name: str) -> Callable[[GoldenContext], dict[str, Any]]:
+    def _run(ctx: GoldenContext) -> dict[str, Any]:
+        path = ctx.workdir / name
+        path.write_text(f"created by {name}\n", encoding="utf-8")
+        return {"file": str(path)}
+    return _run
+
+
+def _remove_file(name: str) -> CompensateFn:
+    def _compensate(output: dict[str, Any],
+                    ctx: GoldenContext) -> dict[str, Any]:
+        path = ctx.workdir / name
+        # idempotent undo: already-gone is success, not an error.
+        removed = False
+        if path.exists():
+            path.unlink()
+            removed = True
+        return {"note": f"{name} removed" if removed else f"{name} already gone",
+                "removed": removed}
+    return _compensate
+
+
+def _saga_mission() -> GoldenMission:
+    return GoldenMission(
+        key="saga_undo",
+        name="Saga → undo on failure",
+        goal="prove a failed step triggers reverse-order compensation",
+        doc="Steps create files with compensations that delete them; the "
+            "last step always fails, so the runner must undo create_b then "
+            "create_a (newest first). Exercises the orchestrated-saga path.",
+        steps=[
+            GoldenStep("create_a", _make_file("a.txt"),
+                       lambda o: (True, "a.txt created")
+                       if Path(o.get("file", "")).exists()
+                       else (False, "a.txt missing"),
+                       compensate=_remove_file("a.txt"),
+                       doc="create a.txt; compensation deletes it"),
+            GoldenStep("create_b", _make_file("b.txt"),
+                       lambda o: (True, "b.txt created")
+                       if Path(o.get("file", "")).exists()
+                       else (False, "b.txt missing"),
+                       compensate=_remove_file("b.txt"),
+                       doc="create b.txt; compensation deletes it"),
+            GoldenStep("boom", lambda ctx: {"exploded": True},
+                       lambda o: (False, "boom always fails"),
+                       doc="deterministic failure that triggers the saga"),
+        ],
+    )
+
+
 def _build_registry() -> dict[str, GoldenMission]:
-    missions = [_research_mission(), _build_mission(), _audit_mission()]
+    missions = [_research_mission(), _build_mission(), _audit_mission(),
+                _crash_mission(), _saga_mission()]
     return {m.key: m for m in missions}
 
 
@@ -508,8 +609,35 @@ class GoldenRunner:
                 break
 
         final = MissionStatus.DONE if not failure else MissionStatus.FAILED
+        compensations: list[dict[str, Any]] = []
+        if failure:
+            # orchestrated saga: undo completed steps newest-first.
+            # Compensations are idempotent by contract (already-gone is
+            # success); a failed undo is recorded, never fatal.
+            for step_name in reversed(completed):
+                gstep = next(
+                    (s for s in mission_def.steps if s.name == step_name),
+                    None)
+                if gstep is None or gstep.compensate is None:
+                    continue
+                try:
+                    cout = gstep.compensate(
+                        outputs.get(step_name) or {}, ctx) or {}
+                    compensations.append({
+                        "step": step_name, "ok": True,
+                        "detail": str(cout.get("note") or "undone")})
+                    _log.info("golden %s compensated step %s",
+                              mission.id, step_name)
+                except Exception as exc:  # noqa: BLE001
+                    compensations.append({
+                        "step": step_name, "ok": False,
+                        "detail": f"{type(exc).__name__}: {exc}"})
+            if compensations:
+                golden["compensations"] = compensations
+                self.store.save(mission)
         return self._finish(mission, mission_def, final, completed,
-                           step_reports, started, error=failure)
+                           step_reports, started, error=failure,
+                           compensations=compensations)
 
     def _execute_step(
         self,
@@ -566,6 +694,7 @@ class GoldenRunner:
         started: float,
         *,
         error: str = "",
+        compensations: list[dict[str, Any]] | None = None,
     ) -> GoldenResult:
         seconds = time.time() - started
         mission.status = status
@@ -597,6 +726,7 @@ class GoldenRunner:
             seconds=seconds,
             benchmark_row=row_id,
             error=error,
+            compensations=list(compensations or []),
         )
 
     def _result(self, mission: Mission, key: str,
@@ -607,3 +737,102 @@ class GoldenRunner:
             steps=[{"step": name, "ok": True, "detail": "already complete",
                     "seconds": 0.0, "repaired": False} for name in completed],
         )
+
+
+# ── golden discipline: normalization, regression gate, reports ──────────────
+#
+# Golden-test discipline, mined from the best practice: deterministic
+# assertions on version-controlled fixtures, volatile fields normalized
+# away before comparison, and CI gated on pass-rate *regression* — not on
+# perfection.
+
+#: Volatile output keys: dropped by normalize_output before any golden
+#: comparison (timestamps, pids, timings, tmp paths are never stable).
+_VOLATILE_KEYS = frozenset({
+    "seconds", "pid", "workdir", "tmpdir", "duration", "elapsed",
+    "at", "started_at", "finished_at", "created_at",
+})
+_VOLATILE_SUFFIXES = ("_at", "_time", "_ts", "_ms", "_us", "_pid", "_path")
+
+
+def normalize_output(output: Any) -> Any:
+    """Recursively drop volatile fields from a step output.
+
+    Timestamps, pids, durations and tmp paths make golden comparisons
+    flaky; they are evidence of *when*, not *what*. What remains is the
+    deterministic substance a golden assertion should check.
+    """
+    if isinstance(output, dict):
+        return {
+            key: normalize_output(value)
+            for key, value in output.items()
+            if key not in _VOLATILE_KEYS
+            and not str(key).endswith(_VOLATILE_SUFFIXES)
+        }
+    if isinstance(output, (list, tuple)):
+        return [normalize_output(v) for v in output]
+    return output
+
+
+#: Committed pass-rate baselines per drill. Raising a baseline is a
+#: reviewed commit; dropping below one fails the gate.
+GOLDEN_BASELINES: dict[str, dict[str, float]] = {
+    "research_write_verify": {"pass_rate": 1.0},
+    "build_test_fix": {"pass_rate": 1.0},
+    "audit_remediate_rescan": {"pass_rate": 1.0},
+    "crash_no_dup": {"pass_rate": 1.0},
+    "saga_undo": {"pass_rate": 1.0},
+}
+
+
+def check_regression(results: list[GoldenResult]) -> dict[str, dict[str, Any]]:
+    """CI gate: fail when a drill's pass rate drops below its baseline.
+
+    Takes golden results (usually one run per drill) and returns, per
+    drill key, ``{"runs", "passed", "pass_rate", "baseline",
+    "regression"}``. Gate on ``regression`` — the discipline is "never
+    get worse", not "be perfect on day one".
+    """
+    by_key: dict[str, list[GoldenResult]] = {}
+    for result in results:
+        by_key.setdefault(result.key, []).append(result)
+    report: dict[str, dict[str, Any]] = {}
+    for key, runs in by_key.items():
+        passed = sum(1 for r in runs if r.ok)
+        rate = passed / len(runs) if runs else 0.0
+        baseline = float(GOLDEN_BASELINES.get(key, {}).get("pass_rate", 1.0))
+        report[key] = {
+            "runs": len(runs),
+            "passed": passed,
+            "pass_rate": round(rate, 4),
+            "baseline": baseline,
+            "regression": rate < baseline,
+        }
+    return report
+
+
+def render_golden_report(result: GoldenResult, *, width: int = 62) -> str:
+    """One boxed card per golden run: steps, repairs, compensations."""
+    from .progress import box_lines, fmt_duration
+
+    title = (f"🥇 golden:{result.key} — "
+             f"{'✅ DONE' if result.ok else '❌ ' + result.status}")
+    lines = [f"mission {result.mission_id[:8]} · "
+             f"{fmt_duration(result.seconds)} wall"]
+    for step in result.steps:
+        glyph = "✓" if step.get("ok") else "✗"
+        repaired = " (repaired)" if step.get("repaired") else ""
+        lines.append(
+            f"  {glyph} {step.get('step')}{repaired} — "
+            f"{str(step.get('detail') or '')[:60]}")
+    for comp in result.compensations:
+        if comp.get("ok"):
+            lines.append(f"  ↩ {comp.get('step')}: undone")
+        else:
+            lines.append(f"  ↩ {comp.get('step')}: UNDO FAILED — "
+                         f"{str(comp.get('detail') or '')[:40]}")
+    if result.benchmark_row:
+        lines.append(f"benchmark row #{result.benchmark_row}")
+    if result.error:
+        lines.append(f"error: {result.error[:80]}")
+    return "\n".join(box_lines(title, lines, width=width))

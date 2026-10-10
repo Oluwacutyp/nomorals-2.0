@@ -183,13 +183,13 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertFalse(_retryable("connection reset", {"retry_on": "none"}))
 
     def test_backoff_delay_bounds(self):
+        # canonical full jitter: uniform(0, min(cap, base * 2**(n-1)))
         policy = {"retry_backoff_s": 2.0}
         for attempt in (1, 2, 3):
+            hi = 2.0 * (2.0 ** (attempt - 1))
             for _ in range(50):
                 delay = _backoff_delay(policy, attempt)
-                lo = 2.0 * (2.0 ** (attempt - 1)) * 0.5
-                hi = 2.0 * (2.0 ** (attempt - 1)) * 1.5
-                self.assertGreaterEqual(delay, lo)
+                self.assertGreaterEqual(delay, 0.0)
                 self.assertLessEqual(delay, hi)
         self.assertLessEqual(_backoff_delay({"retry_backoff_s": 1000.0}, 10),
                              300.0)
