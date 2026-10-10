@@ -39,8 +39,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from ...llm.brain import brain_for
 from ..search.engine import SearchEngine
 from ...core.ids import new_short_id
+from ...storage.kv import KVStore
 from . import activity
 from .topics import sample_topic, surprise_topic
 
@@ -179,12 +181,12 @@ class Arena:
         if self.settings is not None:
             max_files = max(1, min(int(getattr(self.settings.arena, "max_build_files", 3)), 8))
         try:
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [
                     Message(role="system", content=self._BUILD_SYSTEM.format(n=max_files)),
                     Message(role="user", content=f"Topic: {topic}\n\nResearch digest:\n{digest[:4000]}"),
                 ]
-            )
+            , task_kind="chat")
         except Exception:  # noqa: BLE001
             return None
         text = (getattr(response, "text", "") or "").strip()
@@ -404,11 +406,8 @@ class Arena:
         if self.db is None:
             return None
         try:
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key = 'arena.interval_hours'"
-            )
-            if row:
-                return float(json.loads(row["value"]).get("hours", 0.0)) or None
+            data = KVStore(self.db).get("arena.interval_hours", default={})
+            return float(data.get("hours", 0.0)) or None
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -416,14 +415,7 @@ class Arena:
     def set_interval(self, hours: float) -> bool:
         hours = max(0.05, min(float(hours), 24.0))
         try:
-            with self.db.transaction():
-                self.db.execute(
-                    """INSERT INTO kv_store (key, value, kind, updated_at)
-                       VALUES (?, ?, 'json', ?)
-                       ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                          updated_at = excluded.updated_at""",
-                    ("arena.interval_hours", json.dumps({"hours": hours}), time.time()),
-                )
+            KVStore(self.db).set("arena.interval_hours", {"hours": hours})
         except Exception:  # noqa: BLE001
             return False
         return True
@@ -433,12 +425,9 @@ class Arena:
         if self.db is None:
             return []
         try:
-            row = self.db.query_one(
-                "SELECT value FROM kv_store WHERE key = 'arena.custom_topics'"
-            )
-            if row:
-                data = json.loads(row["value"]).get("topics", [])
-                return [str(t) for t in data if str(t).strip()]
+            data = KVStore(self.db).get("arena.custom_topics", default={})
+            data = data.get("topics", [])
+            return [str(t) for t in data if str(t).strip()]
         except Exception:  # noqa: BLE001
             pass
         return []
@@ -452,14 +441,7 @@ class Arena:
             return f"already in the topic bank: {text}"
         topics.append(text)
         try:
-            with self.db.transaction():
-                self.db.execute(
-                    """INSERT INTO kv_store (key, value, kind, updated_at)
-                       VALUES (?, ?, 'json', ?)
-                       ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                          updated_at = excluded.updated_at""",
-                    ("arena.custom_topics", json.dumps({"topics": topics}), time.time()),
-                )
+            KVStore(self.db).set("arena.custom_topics", {"topics": topics})
         except Exception:  # noqa: BLE001
             return "could not store the topic (db busy?)"
         return f"topic bank now has {len(topics)} custom topic(s). the loop may pick it up."

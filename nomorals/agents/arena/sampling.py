@@ -28,6 +28,7 @@ from typing import Any
 from . import activity
 from . import scoring
 from . import topics
+from ...storage.kv import KVStore
 
 __all__ = [
     "sample_challenge",
@@ -102,14 +103,7 @@ def _persist_state(db: Any, state: dict[str, Any]) -> bool:
     if db is None:
         return False
     try:
-        with db.transaction():
-            db.execute(
-                """INSERT INTO kv_store (key, value, kind, updated_at)
-                   VALUES (?, ?, 'json', ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                  updated_at = excluded.updated_at""",
-                (STATE_KEY, json.dumps(state), time.time()),
-            )
+        KVStore(db).set(STATE_KEY, state)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -120,11 +114,8 @@ def sampling_state(db: Any) -> dict[str, Any]:
     if db is None:
         return {}
     try:
-        row = db.query_one(
-            "SELECT value FROM kv_store WHERE key = ?", (STATE_KEY,))
-        if row:
-            data = json.loads(row["value"])
-            return data if isinstance(data, dict) else {}
+        data = KVStore(db).get(STATE_KEY)
+        return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001
         pass
     return {}

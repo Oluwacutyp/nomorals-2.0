@@ -42,6 +42,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...storage.kv import KVStore
+
 __all__ = [
     "CATEGORIES",
     "DEFAULT_ANTI_REPEAT",
@@ -490,11 +492,9 @@ def _recent_categories(db: Any, n: int = 3) -> list[str]:
     if db is None:
         return []
     try:
-        row = db.query_one(
-            "SELECT value FROM kv_store WHERE key = 'arena.recent_categories'")
-        if row:
-            data = json.loads(row["value"]).get("cats", [])
-            return [str(c) for c in data[:n] if str(c)]
+        data = KVStore(db).get("arena.recent_categories", default={})
+        data = data.get("cats", [])
+        return [str(c) for c in data[:n] if str(c)]
     except Exception:  # noqa: BLE001
         pass
     return []
@@ -506,15 +506,7 @@ def _record_category(db: Any, category: str) -> None:
     try:
         cats = [category] + [c for c in _recent_categories(db, 9)
                              if c != category]
-        with db.transaction():
-            db.execute(
-                """INSERT INTO kv_store (key, value, kind, updated_at)
-                   VALUES (?, ?, 'json', ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                  updated_at = excluded.updated_at""",
-                ("arena.recent_categories", json.dumps({"cats": cats[:10]}),
-                 time.time()),
-            )
+        KVStore(db).set("arena.recent_categories", {"cats": cats[:10]})
     except Exception:  # noqa: BLE001
         pass
 
@@ -526,11 +518,8 @@ def anti_repeat_window(db: Any = None,
     """Effective anti-repeat window: kv override → default. 0 disables."""
     if db is not None:
         try:
-            row = db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (_ANTI_REPEAT_WINDOW_KEY,))
-            if row:
-                return max(0, min(int(json.loads(row["value"]).get("window", default)),
+            data = KVStore(db).get(_ANTI_REPEAT_WINDOW_KEY, default={})
+            return max(0, min(int(data.get("window", default)),
                                   10000))
         except Exception:  # noqa: BLE001
             pass
@@ -542,15 +531,8 @@ def set_anti_repeat_window(db: Any, n: int) -> bool:
     if db is None:
         return False
     try:
-        with db.transaction():
-            db.execute(
-                """INSERT INTO kv_store (key, value, kind, updated_at)
-                   VALUES (?, ?, 'json', ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                  updated_at = excluded.updated_at""",
-                (_ANTI_REPEAT_WINDOW_KEY, json.dumps({"window": max(0, int(n))}),
-                 time.time()),
-            )
+        KVStore(db).set(_ANTI_REPEAT_WINDOW_KEY,
+                        {"window": max(0, int(n))})
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -563,11 +545,9 @@ def recent_topics(db: Any, n: int | None = None) -> list[str]:
     if n is None:
         n = anti_repeat_window(db)
     try:
-        row = db.query_one(
-            "SELECT value FROM kv_store WHERE key = ?", (_RECENT_TOPICS_KEY,))
-        if row:
-            data = json.loads(row["value"]).get("topics", [])
-            return [str(t) for t in data[:max(0, int(n))] if str(t)]
+        data = KVStore(db).get(_RECENT_TOPICS_KEY, default={})
+        data = data.get("topics", [])
+        return [str(t) for t in data[:max(0, int(n))] if str(t)]
     except Exception:  # noqa: BLE001
         pass
     return []
@@ -579,15 +559,7 @@ def _record_topic(db: Any, topic: str, window: int) -> None:
     try:
         topics = [topic] + [t for t in recent_topics(db, window - 1)
                             if t != topic]
-        with db.transaction():
-            db.execute(
-                """INSERT INTO kv_store (key, value, kind, updated_at)
-                   VALUES (?, ?, 'json', ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                                  updated_at = excluded.updated_at""",
-                (_RECENT_TOPICS_KEY, json.dumps({"topics": topics[:window]}),
-                 time.time()),
-            )
+        KVStore(db).set(_RECENT_TOPICS_KEY, {"topics": topics[:window]})
     except Exception:  # noqa: BLE001
         pass
 
@@ -598,9 +570,7 @@ def clear_recent_topics(db: Any) -> int:
         return 0
     cleared = len(recent_topics(db, 10000))
     try:
-        with db.transaction():
-            db.execute("DELETE FROM kv_store WHERE key = ?",
-                       (_RECENT_TOPICS_KEY,))
+        KVStore(db).delete(_RECENT_TOPICS_KEY)
     except Exception:  # noqa: BLE001
         pass
     return cleared

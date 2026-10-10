@@ -21,6 +21,8 @@ import re
 import time
 from typing import Any
 
+from ...storage.kv import KVStore
+
 __all__ = [
     "CATEGORY_KEYWORDS",
     "interest_profile",
@@ -251,12 +253,9 @@ def interest_profile(db: Any = None,
             pass
         # 2. custom topics — explicit owner interest.
         try:
-            row = db.query_one(
-                "SELECT value FROM kv_store WHERE key = 'arena.custom_topics'")
-            if row:
-                import json
-
-                topics = json.loads(row["value"]).get("topics", [])
+            data = KVStore(db).get("arena.custom_topics")
+            if data:
+                topics = data.get("topics", [])
                 for t in topics[:50]:
                     _bump(scores, match_category(str(t)), 1.0)
         except Exception:  # noqa: BLE001
