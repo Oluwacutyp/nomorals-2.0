@@ -187,6 +187,21 @@ class IdempotencyStore:
             "by_status": by_status,
         }
 
+    def purge(self, older_than_seconds: float = 7 * 86400) -> int:
+        """Delete settled records older than the cutoff.
+
+        Only ``completed``/``failed`` records go — a ``running`` key is
+        never deleted, because dropping it could let a duplicate execution
+        through while the first is still in flight. Returns the number of
+        rows deleted.
+        """
+        cutoff = time.time() - max(0.0, float(older_than_seconds))
+        cursor = self.db.execute(
+            "DELETE FROM idempotency_keys WHERE status != ? AND updated_at < ?",
+            (RUNNING, cutoff),
+        )
+        return int(cursor.rowcount or 0)
+
 
 # ── in-process claim tracking ────────────────────────────────────────────────
 #

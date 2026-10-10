@@ -33,6 +33,7 @@ import importlib
 from typing import Any
 
 from ..core.errors import ValidationError
+from .idempotency import IdempotencyStore
 from .mission import (
     ACCEPTANCE_STATE_KEY,
     Mission,
@@ -59,7 +60,17 @@ def wired_runner(context: Any, *,
     :class:`MissionRunner` (``idempotency=``, ``milestones=``,
     ``artifact_store=``, ...). Raises like the raw constructor on bad
     arguments — wiring is not a place to swallow errors.
+
+    Idempotency is on by default: unless the caller passes
+    ``idempotency=`` explicitly (including an explicit ``None`` to opt
+    out), a store backed by the context db is attached, so a step that
+    already completed is never re-executed on the resume/retry path —
+    the crash window between a step's side effects and its checkpoint
+    cannot duplicate them.
     """
+    if "idempotency" not in kwargs:
+        db = getattr(context, "db", None)
+        kwargs["idempotency"] = IdempotencyStore(db) if db is not None else None
     runner = MissionRunner(context, store=store, **kwargs)
     mission_state = importlib.import_module("nomorals.os.mission_state")
     mission_state.attach_runner(runner, runner.store)

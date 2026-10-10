@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import importlib
 import os
+import random
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,6 +80,23 @@ def _step_policy(step: Any) -> dict[str, Any]:
       try replanning) or ``"continue"`` (record the failure and keep
       going; the mission still ends FAILED, but later steps get a
       chance).
+    * ``retries`` (int, default 0): how many *extra* attempts a failed
+      step gets before the failure policy engages. Retries only fire for
+      retryable errors (see ``retry_on``); attempts are counted in
+      ``mission.state["step_attempts"]`` so a resumed mission keeps its
+      retry budget. Capped at 10.
+    * ``retry_backoff_s`` (float): base backoff between attempts;
+      the actual delay is ``base * 2**(attempt-1)`` with full jitter,
+      capped at 300s. Defaults to 2.0s when ``retries`` is set.
+    * ``retry_on``: ``"transient"`` (default — retry only errors that
+      look transient: timeouts, 429/5xx, connection resets),
+      ``"any"`` (retry every failure except explicit non-retryable
+      ones), or ``"none"`` (never retry; same as ``retries: 0``).
+    * ``timeout_s`` (float, default 0 = none): hard per-step deadline.
+      A step that overruns is recorded as failed ("timed out") so the
+      mission — and the retry policy — can move on. The abandoned agent
+      thread keeps running as a daemon; this is stated in the outcome,
+      never hidden.
     """
     payload = getattr(step, "payload", None) or {}
     if not isinstance(payload, dict):
@@ -85,10 +104,72 @@ def _step_policy(step: Any) -> dict[str, Any]:
     on_failure = str(payload.get("on_failure") or ON_FAILURE_FAIL_FAST).strip().lower()
     if on_failure not in {ON_FAILURE_FAIL_FAST, ON_FAILURE_CONTINUE}:
         on_failure = ON_FAILURE_FAIL_FAST
+    retry_on = str(payload.get("retry_on") or "transient").strip().lower()
+    if retry_on not in {"transient", "any", "none"}:
+        retry_on = "transient"
+    try:
+        retries = int(payload.get("retries") or 0)
+    except (TypeError, ValueError):
+        retries = 0
+    retries = max(0, min(10, retries))
+    if retry_on == "none":
+        retries = 0
+    try:
+        backoff = float(payload.get("retry_backoff_s") or 0.0)
+    except (TypeError, ValueError):
+        backoff = 0.0
+    backoff = max(0.0, min(300.0, backoff))
+    if retries and backoff <= 0.0:
+        backoff = 2.0
+    try:
+        timeout_s = float(payload.get("timeout_s") or 0.0)
+    except (TypeError, ValueError):
+        timeout_s = 0.0
+    timeout_s = max(0.0, timeout_s)
     return {
         "optional": bool(payload.get("optional")),
         "on_failure": on_failure,
+        "retries": retries,
+        "retry_backoff_s": backoff,
+        "retry_on": retry_on,
+        "timeout_s": timeout_s,
     }
+
+
+#: Error-text markers that classify a step failure as transient (worth a
+#: retry). A ``ValidationError``-prefixed detail is never retried: bad
+#: arguments fail the same way every time.
+_TRANSIENT_MARKERS = (
+    "timeout", "timed out", "deadline exceeded", "rate limit",
+    "ratelimited", "429", "502", "503", "504", "temporarily",
+    "temporary failure", "connection reset", "connection refused",
+    "connection aborted", "network unreachable", "network is unreachable",
+    "econnreset", "econnrefused", "socket timeout", "broken pipe",
+    "service unavailable", "overloaded", "try again",
+)
+_NONRETRYABLE_PREFIXES = ("ValidationError:",)
+
+
+def _retryable(detail: str, policy: dict[str, Any]) -> bool:
+    """True when a failed attempt may be retried under ``policy``."""
+    mode = policy.get("retry_on", "transient")
+    if mode == "none":
+        return False
+    text = str(detail or "")
+    for prefix in _NONRETRYABLE_PREFIXES:
+        if text.startswith(prefix):
+            return False
+    if mode == "any":
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
+
+
+def _backoff_delay(policy: dict[str, Any], attempt_no: int) -> float:
+    """Jittered exponential backoff: ``base * 2**(n-1)``, full jitter."""
+    base = max(0.0, float(policy.get("retry_backoff_s") or 0.0))
+    delay = base * (2.0 ** max(0, attempt_no - 1))
+    return min(300.0, delay * random.uniform(0.5, 1.5))
 
 
 def _topo_levels(steps: list[Any]) -> list[list[Any]]:
@@ -135,6 +216,21 @@ def _topo_levels(steps: list[Any]) -> list[list[Any]]:
         for deps in remaining.values():
             deps -= done
     return levels
+
+
+@dataclass
+class _RunState:
+    """Mutable per-run bookkeeping shared by the sequential and parallel
+    level drivers. ``failure`` non-empty means the run is dying;
+    ``replanned_levels`` carries the fresh graph after a replan."""
+
+    completed: set[str] = field(default_factory=set)
+    failed: set[str] = field(default_factory=set)
+    steps: list["StepOutcome"] = field(default_factory=list)
+    soft_failures: list[str] = field(default_factory=list)
+    failure: str = ""
+    step_index: int = 0
+    replanned_levels: list[list[Any]] | None = None
 
 
 @dataclass
@@ -235,6 +331,10 @@ class MissionRunner:
         self.on_step = on_step
         self._clock = clock
         self._cancel = False
+        # Guards shared mutable mission state when steps execute on worker
+        # threads (``max_parallel > 1``). The settle phase stays single-
+        # threaded; only attempt counting crosses the thread boundary.
+        self._exec_lock = threading.Lock()
         # Factory for the planner/executor orchestrator.  Production uses
         # MasterOrchestrator; tests inject a stub so replanning is
         # deterministic.  None = build the real one lazily per use.
@@ -519,7 +619,6 @@ class MissionRunner:
     ) -> MissionResult:
         """Run (or resume) a mission to a terminal state."""
         started = self._clock()
-        steps: list[StepOutcome] = []
 
         resumed_from = self._resume(mission)
         if mission.terminal:
@@ -546,33 +645,50 @@ class MissionRunner:
         # honors its graph instead of running flat in plan order.  A cycle
         # or dangling dependency fails fast here — never mid-run.
         levels = _topo_levels(plan_steps)
-        completed: set[str] = set(mission.state.get("completed_steps") or [])
-        failed: set[str] = set()
-        failure: str = ""
-        soft_failures: list[str] = []
-        step_index = 0
+        st = _RunState(completed=set(mission.state.get("completed_steps") or []))
+        max_parallel = self._max_parallel(mission)
 
         level_idx = 0
         while level_idx < len(levels):
             level = levels[level_idx]
+            if max_parallel > 1:
+                action = self._run_level_parallel(
+                    mission, level, st, plan_steps,
+                    max_parallel=max_parallel, max_iterations=max_iterations)
+                if action == "cancelled":
+                    return self._finish(mission, MissionStatus.CANCELLED,
+                                        st.steps, started, resumed_from,
+                                        error="cancelled")
+                if action == "replanned":
+                    # same restart protocol as the sequential path: the
+                    # outer loop's `level_idx += 1` lands on level 0 and
+                    # completed steps skip fast.
+                    levels = st.replanned_levels or []
+                    st.replanned_levels = None
+                    level_idx = -1
+                    plan_steps = [s for lvl in levels for s in lvl]
+                elif action == "stop":
+                    break
+                level_idx += 1
+                continue
             stop_levels = False
             for step in level:
                 if self._cancel:
-                    return self._finish(mission, MissionStatus.CANCELLED, steps, started,
+                    return self._finish(mission, MissionStatus.CANCELLED, st.steps, started,
                                         resumed_from, error="cancelled")
                 if mission.iterations >= max_iterations:
-                    failure = f"iteration limit {max_iterations} reached"
+                    st.failure = f"iteration limit {max_iterations} reached"
                     stop_levels = True
                     break
                 if mission.budget_exhausted:
-                    failure = "budget exhausted"
+                    st.failure = "budget exhausted"
                     self._record_budget_stall(mission)
                     stop_levels = True
                     break
-                if step.name in completed:
+                if step.name in st.completed:
                     _log.debug("mission %s skipping completed step %s", mission.id, step.name)
                     continue
-                if step.name in failed:
+                if step.name in st.failed:
                     # a step that failed in THIS run already got its verdict
                     # (fail_fast / replan) — the fresh graph covers recovery;
                     # re-executing it would double-charge iterations.
@@ -580,75 +696,29 @@ class MissionRunner:
                                mission.id, step.name)
                     continue
                 # a failed dependency blocks its dependents: they never run
-                dep_failed = [d for d in (step.depends_on or []) if d in failed]
+                dep_failed = [d for d in (step.depends_on or []) if d in st.failed]
                 if dep_failed:
-                    outcome = StepOutcome(
-                        step=step.name, ok=False,
-                        detail=(f"blocked: not executed — dependenc"
-                                f"{'y' if len(dep_failed) == 1 else 'ies'} "
-                                f"{', '.join(sorted(dep_failed))} failed"),
-                    )
-                    steps.append(outcome)
-                    failed.add(step.name)
-                    self._settle_step(mission, step, outcome, step_index,
-                                      track_failure=False)
-                    step_index += 1
+                    self._record_blocked(mission, step, dep_failed, st)
                     continue
 
                 outcome = self._execute_step(mission, step)
-                steps.append(outcome)
-                mission.iterations += 1
-                mission.charge(wall=outcome.seconds, tokens=outcome.tokens)
-                step_index += 1
-                policy = _step_policy(step)
-
-                if outcome.ok:
-                    completed.add(step.name)
-                    mission.state["completed_steps"] = sorted(completed)
-                    mission.state.setdefault("outputs", {})[step.name] = outcome.payload
-                    self._settle_step(mission, step, outcome, step_index)
-                    continue
-
                 # ── failure: degraded / continue / fail-fast ──────────
-                failed.add(step.name)
-                step_failure = outcome.detail or f"step {step.name} failed"
-                mission.state["last_error"] = step_failure
-                if policy["optional"]:
-                    # degraded mode: the step failed, but the mission was
-                    # designed to survive it — record and carry on.
-                    outcome.payload["degraded"] = True
-                    self._ledger(
-                        "step", mission,
-                        f"step {step.name} failed but is optional — degraded, continuing",
-                        cost_seconds=outcome.seconds, cost_tokens=outcome.tokens,
-                        ok=True, learned=step_failure[:200],
-                        metadata={"step": step.name, "degraded": True})
-                    self._settle_step(mission, step, outcome, step_index,
-                                      track_failure=False)
-                    continue
-                self._settle_step(mission, step, outcome, step_index)
-                if policy["on_failure"] == ON_FAILURE_CONTINUE:
-                    soft_failures.append(f"{step.name}: {step_failure[:120]}")
-                    continue
-                # fail_fast: try to replan the remaining work before dying
-                failure = step_failure
-                replanned = self._maybe_replan(
-                    mission, plan_steps, step.name, step_failure,
-                    completed, failed)
-                if replanned is not None:
+                verdict = self._settle_outcome(
+                    mission, step, outcome, st, plan_steps=plan_steps)
+                if verdict == "replanned":
                     _log.info("mission %s continuing on replanned graph",
                               mission.id)
-                    failure = ""  # the replan takes over; the failure is history
-                    levels = replanned
+                    levels = st.replanned_levels or []
+                    st.replanned_levels = None
                     # restart the level scan on the fresh graph: the outer
                     # loop's `level_idx += 1` below lands this on level 0
-                    # (completed steps skip fast).  Only `break`s out of the
-                    # step loop — the failure stands only when no replan.
+                    # (completed steps skip fast).
                     level_idx = -1
-                    plan_steps = [s for lvl in replanned for s in lvl]
+                    plan_steps = [s for lvl in levels for s in lvl]
                     break
-                stop_levels = True
-                break
+                if verdict == "fail":
+                    stop_levels = True
+                    break
             if stop_levels:
                 break
             level_idx += 1
@@ -656,6 +726,12 @@ class MissionRunner:
         # observability: when the mission dies, the steps that never ran
         # get a verdict instead of vanishing — transitively blocked by a
         # failed dependency, or simply not reached.
+        failure = st.failure
+        steps = st.steps
+        completed = st.completed
+        failed = st.failed
+        soft_failures = st.soft_failures
+        step_index = st.step_index
         if failure:
             seen_steps = {s.step for s in steps}
             blocked: set[str] = set()
@@ -702,6 +778,191 @@ class MissionRunner:
         final = MissionStatus.DONE if not failure else MissionStatus.FAILED
         return self._finish(mission, final, steps, started, resumed_from,
                             error=failure, reflect=reflect)
+
+    def _max_parallel(self, mission: Mission) -> int:
+        """Bounded intra-level parallelism, from ``metadata["max_parallel"]``.
+
+        Default 1: the historical strictly-sequential path. Above 1, the
+        independent steps of one dependency level run on a thread pool
+        (levels stay the synchronization barrier). Clamped to 1..8.
+        Opt-in because agents share ``self.context`` — parallel steps must
+        be thread-safe.
+        """
+        try:
+            n = int((mission.metadata or {}).get("max_parallel") or 1)
+        except (TypeError, ValueError):
+            n = 1
+        return max(1, min(8, n))
+
+    def _record_blocked(self, mission: Mission, step: Any,
+                        dep_failed: list[str], st: _RunState) -> None:
+        """A step whose dependency failed never runs: record the verdict."""
+        outcome = StepOutcome(
+            step=step.name, ok=False,
+            detail=(f"blocked: not executed — dependenc"
+                    f"{'y' if len(dep_failed) == 1 else 'ies'} "
+                    f"{', '.join(sorted(dep_failed))} failed"),
+        )
+        st.steps.append(outcome)
+        st.failed.add(step.name)
+        self._settle_step(mission, step, outcome, st.step_index,
+                          track_failure=False)
+        st.step_index += 1
+
+    def _settle_outcome(self, mission: Mission, step: Any,
+                        outcome: StepOutcome, st: _RunState, *,
+                        plan_steps: list[Any]) -> str:
+        """Apply one finished step outcome: degraded / continue / fail-fast.
+
+        Returns ``"continue"`` (keep going), ``"fail"`` (stop the run —
+        ``st.failure`` is set), or ``"replanned"`` (a fresh graph is on
+        ``st.replanned_levels`` and ``st.failure`` was cleared; the caller
+        restarts its level scan). Shared by the sequential and parallel
+        level drivers so the policy ladder behaves identically in both.
+        """
+        st.steps.append(outcome)
+        mission.iterations += 1
+        mission.charge(wall=outcome.seconds, tokens=outcome.tokens)
+        st.step_index += 1
+        policy = _step_policy(step)
+
+        if outcome.ok:
+            st.completed.add(step.name)
+            mission.state["completed_steps"] = sorted(st.completed)
+            mission.state.setdefault("outputs", {})[step.name] = outcome.payload
+            self._settle_step(mission, step, outcome, st.step_index)
+            return "continue"
+
+        # ── failure: degraded / continue / fail-fast ──────────
+        st.failed.add(step.name)
+        step_failure = outcome.detail or f"step {step.name} failed"
+        mission.state["last_error"] = step_failure
+        if policy["optional"]:
+            # degraded mode: the step failed, but the mission was designed
+            # to survive it — record and carry on.
+            outcome.payload["degraded"] = True
+            self._ledger(
+                "step", mission,
+                f"step {step.name} failed but is optional — degraded, continuing",
+                cost_seconds=outcome.seconds, cost_tokens=outcome.tokens,
+                ok=True, learned=step_failure[:200],
+                metadata={"step": step.name, "degraded": True})
+            self._settle_step(mission, step, outcome, st.step_index,
+                              track_failure=False)
+            return "continue"
+        self._settle_step(mission, step, outcome, st.step_index)
+        if policy["on_failure"] == ON_FAILURE_CONTINUE:
+            st.soft_failures.append(f"{step.name}: {step_failure[:120]}")
+            return "continue"
+        # fail_fast: try to replan the remaining work before dying
+        st.failure = step_failure
+        replanned = self._maybe_replan(
+            mission, plan_steps, step.name, step_failure,
+            st.completed, st.failed)
+        if replanned is not None:
+            st.failure = ""  # the replan takes over; the failure is history
+            st.replanned_levels = replanned
+            return "replanned"
+        return "fail"
+
+    def _run_level_parallel(
+        self,
+        mission: Mission,
+        level: list[Any],
+        st: _RunState,
+        plan_steps: list[Any],
+        *,
+        max_parallel: int,
+        max_iterations: int,
+    ) -> str:
+        """Run one dependency level with bounded parallelism.
+
+        Steps whose dependencies failed are recorded blocked (never run).
+        The runnable steps execute on a thread pool in waves; outcomes are
+        settled single-threaded in plan order through
+        :meth:`_settle_outcome`, so the degraded/continue/fail-fast policy
+        ladder and stall tracking behave exactly like the sequential path.
+        Levels remain the barrier: a level's outcomes are all settled
+        before the next level starts.
+
+        If a fail-fast failure replans mid-batch, the batch is abandoned at
+        that point — like the sequential path abandoning the rest of the
+        level. Steps that already executed keep their idempotency records
+        (a re-driven step replays instead of re-executing), but their
+        outcomes are not settled into this run's ledger.
+
+        Returns ``"continue"`` (next level), ``"stop"`` (``st.failure`` is
+        set — break out), ``"cancelled"``, or ``"replanned"`` (fresh graph
+        on ``st.replanned_levels``).
+        """
+        for step in level:
+            if self._cancel:
+                return "cancelled"
+            if step.name in st.completed or step.name in st.failed:
+                continue
+            dep_failed = [d for d in (step.depends_on or [])
+                          if d in st.failed]
+            if dep_failed:
+                self._record_blocked(mission, step, dep_failed, st)
+
+        pending = [s for s in level
+                   if s.name not in st.completed and s.name not in st.failed]
+        while pending:
+            if self._cancel:
+                return "cancelled"
+            if mission.budget_exhausted:
+                st.failure = "budget exhausted"
+                self._record_budget_stall(mission)
+                return "stop"
+            slots = max_iterations - mission.iterations
+            if slots <= 0:
+                st.failure = f"iteration limit {max_iterations} reached"
+                return "stop"
+            batch, pending = pending[:slots], pending[slots:]
+            for step, outcome in self._execute_batch(mission, batch,
+                                                     max_parallel):
+                verdict = self._settle_outcome(
+                    mission, step, outcome, st, plan_steps=plan_steps)
+                if verdict == "fail":
+                    return "stop"
+                if verdict == "replanned":
+                    _log.info("mission %s continuing on replanned graph",
+                              mission.id)
+                    return "replanned"
+        return "continue"
+
+    def _execute_batch(self, mission: Mission, batch: list[Any],
+                       max_parallel: int) -> list[tuple[Any, StepOutcome]]:
+        """Execute one wave of independent steps; return ``(step, outcome)``
+        pairs in plan order. A worker that raises becomes a failed outcome —
+        a thread must never take the batch down with it."""
+        results: dict[str, tuple[Any, StepOutcome]] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(max_parallel, len(batch)),
+            thread_name_prefix=f"mission-{mission.id[:8]}",
+        ) as pool:
+            futures = {pool.submit(self._execute_step, mission, step): step
+                       for step in batch}
+            waiting = list(futures)
+            while waiting:
+                for future in list(waiting):
+                    if not future.done():
+                        continue
+                    waiting.remove(future)
+                    step = futures[future]
+                    try:
+                        outcome = future.result()
+                    except BaseException as exc:  # noqa: BLE001 - a thread must not kill the batch
+                        _log.warning("mission %s step %s raised in worker: %s",
+                                     mission.id, step.name, exc)
+                        outcome = StepOutcome(
+                            step=step.name, ok=False,
+                            detail=f"{type(exc).__name__}: {exc}")
+                    results[step.name] = (step, outcome)
+                if waiting:
+                    time.sleep(0.05)
+        # Plan order: deterministic settle order regardless of finish order.
+        return [results[s.name] for s in batch if s.name in results]
 
     def _settle_step(self, mission: Mission, step: Any, outcome: StepOutcome,
                      index: int, *, track_failure: bool = True) -> None:
@@ -847,7 +1108,11 @@ class MissionRunner:
         return self.run(self.store.get(mission_id), max_iterations=max_iterations, reflect=reflect)
 
     def resume_all(self, *, max_iterations: int = 8) -> list[MissionResult]:
-        """Continue every interrupted mission. Called on startup."""
+        """Continue every interrupted mission. Called on startup.
+
+        One bad row must not abort the whole batch: unexpected errors are
+        logged per mission and the rest still resume.
+        """
         results = []
         for mission in self.store.resumable():
             _log.info("resuming interrupted mission %s", mission.id)
@@ -855,6 +1120,9 @@ class MissionRunner:
                 results.append(self.run(mission, max_iterations=max_iterations))
             except NoMoralsError as exc:
                 _log.error("could not resume mission %s: %s", mission.id, classify(exc).message)
+            except Exception as exc:  # noqa: BLE001 - one bad row must not kill the batch
+                _log.error("could not resume mission %s: %s: %s",
+                           mission.id, type(exc).__name__, exc)
         return results
 
     # ── watchdog ─────────────────────────────────────────────────────────────
@@ -1017,18 +1285,79 @@ class MissionRunner:
     def _execute_step(self, mission: Mission, step: Any) -> StepOutcome:
         """Run one plan step through the orchestrator's agent for that role.
 
-        With an idempotency store attached, the execution goes through
+        Honors the step's retry policy (``retries`` / ``retry_backoff_s`` /
+        ``retry_on`` from :func:`_step_policy`): a failed attempt retries
+        while attempts remain, the error is retryable, the mission isn't
+        cancelled and the budget isn't exhausted. Backoff is exponential
+        with full jitter and sleeps cooperatively (cancel-aware).
+
+        With an idempotency store attached, each attempt goes through
         :func:`dedupe`: a step whose key already completed returns its
         stored outcome (no duplicate side effects on the retry path), while
-        a step that failed may retry.
+        a step that failed may retry. Real executions are counted in
+        ``state["step_attempts"]`` — idempotency replays are not attempts.
+        """
+        policy = _step_policy(step)
+        if not policy["timeout_s"]:
+            # mission-level default when the step sets none
+            try:
+                policy["timeout_s"] = max(0.0, float(
+                    (mission.metadata or {}).get("step_timeout_s") or 0.0))
+            except (TypeError, ValueError):
+                policy["timeout_s"] = 0.0
+        max_attempts = 1 + policy["retries"]
+        outcome: StepOutcome | None = None
+        attempts = 0
+        backoff_wait_s = 0.0
+        for attempt_no in range(1, max_attempts + 1):
+            outcome, executed = self._attempt_once(mission, step, policy)
+            if executed:
+                attempts = self._note_attempt(mission, step.name)
+                self._record_step_duration(mission, step.name, outcome.seconds)
+            if outcome.ok:
+                break
+            if attempt_no >= max_attempts:
+                break
+            if self._cancel or mission.budget_exhausted:
+                break
+            if not _retryable(outcome.detail, policy):
+                break
+            delay = _backoff_delay(policy, attempt_no)
+            _log.info("mission %s step %s attempt %d failed (%s); "
+                      "retrying in %.1fs",
+                      mission.id, step.name, attempt_no,
+                      (outcome.detail or "")[:120], delay)
+            slept_from = self._clock()
+            cancelled_mid_wait = not self._sleep_cancel_aware(delay)
+            backoff_wait_s += self._clock() - slept_from
+            if cancelled_mid_wait:
+                outcome.detail += " [retry backoff interrupted by cancel]"
+                break
+        assert outcome is not None  # max_attempts >= 1 always
+        if backoff_wait_s > 0:
+            # The mission really spent this wall time waiting to retry —
+            # charge it so the wall budget stays honest.
+            outcome.seconds += backoff_wait_s
+        if attempts > 1:
+            # honest attempt count on the outcome (persisted with it)
+            outcome.payload["_attempts"] = attempts
+        return outcome
+
+    def _attempt_once(self, mission: Mission, step: Any,
+                      policy: dict[str, Any]) -> tuple[StepOutcome, bool]:
+        """One execution of the step. Returns ``(outcome, executed)``.
+
+        With an idempotency store, a completed key replays its stored
+        outcome (``executed=False``); without one the step always runs.
         """
         started = self._clock()
         if self.idempotency is None:
-            return self._run_step_agent(mission, step, started)
+            return self._run_step_agent(mission, step, started, policy), True
         key = step_idempotency_key(mission.id, step)
 
         def attempt() -> dict[str, Any]:
-            return self._run_step_agent(mission, step, started).to_dict()
+            return self._run_step_agent(mission, step, started,
+                                        policy).to_dict()
 
         result = dedupe(
             self.idempotency,
@@ -1042,12 +1371,51 @@ class MissionRunner:
             _log.error("idempotency record for step %s of mission %s is not "
                        "a dict; re-running without the stored outcome",
                        step.name, mission.id)
-            return self._run_step_agent(mission, step, started)
-        return StepOutcome.from_dict(result.value)
+            return self._run_step_agent(mission, step, started, policy), True
+        return StepOutcome.from_dict(result.value), result.executed
+
+    def _note_attempt(self, mission: Mission, step_name: str) -> int:
+        """Count a real step execution. Thread-safe; returns the new count."""
+        with self._exec_lock:
+            attempts = mission.state.setdefault("step_attempts", {})
+            attempts[step_name] = int(attempts.get(step_name) or 0) + 1
+            return attempts[step_name]
+
+    def _record_step_duration(self, mission: Mission, step_name: str,
+                              seconds: float) -> None:
+        """Per-step wall time for the trailing-window ETA. Thread-safe,
+        insertion-ordered (last entries = most recent steps), bounded."""
+        with self._exec_lock:
+            try:
+                durations = mission.state.setdefault("step_durations", {})
+                durations[step_name] = round(max(0.0, seconds), 3)
+                while len(durations) > 64:
+                    durations.pop(next(iter(durations)))
+            except Exception:  # noqa: BLE001 - timing telemetry never breaks a run
+                _log.debug("step duration record failed", exc_info=True)
+
+    def _sleep_cancel_aware(self, seconds: float) -> bool:
+        """Sleep in small slices. Returns False when cancelled mid-sleep."""
+        deadline = self._clock() + max(0.0, seconds)
+        while not self._cancel:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return True
+            time.sleep(min(0.25, remaining))
+        return False
 
     def _run_step_agent(self, mission: Mission, step: Any,
-                        started: float) -> StepOutcome:
-        """The actual agent invocation for one step (always executes)."""
+                        started: float,
+                        policy: dict[str, Any] | None = None) -> StepOutcome:
+        """The actual agent invocation for one step (always executes).
+
+        ``policy`` is optional (older monkeypatches pass three args); when
+        it carries ``timeout_s`` the step runs under a hard deadline.
+        """
+        timeout_s = (policy or {}).get("timeout_s") or 0.0
+        if timeout_s > 0:
+            return self._run_step_agent_timed(mission, step, started,
+                                              timeout_s)
         self._advise_resources(mission)
         from ..agents.roles import build_agent
 
@@ -1071,6 +1439,57 @@ class MissionRunner:
             tokens=int(result.tokens or 0),
             payload={k: v for k, v in list(output.items())[:20]},
         )
+
+    def _run_step_agent_timed(self, mission: Mission, step: Any,
+                              started: float, timeout_s: float) -> StepOutcome:
+        """Run one step under a hard deadline.
+
+        The agent runs on a daemon thread; ``join(timeout_s)`` decides.
+        An overrun is recorded as a *failed* outcome (retryable, honest
+        about what happened) so the mission and the retry policy move on.
+        The abandoned thread keeps running as a daemon — Python cannot
+        safely kill a thread, and the outcome says so instead of hiding it.
+        """
+        box: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                box["outcome"] = self._run_step_agent(
+                    mission, step, started, {"timeout_s": 0.0})
+            except BaseException as exc:  # noqa: BLE001 - never lose the thread
+                box["error"] = exc
+
+        thread = threading.Thread(
+            target=_target, daemon=True,
+            name=f"mission-step-{mission.id[:8]}-{step.name[:24]}")
+        thread.start()
+        thread.join(timeout_s)
+        if thread.is_alive():
+            _log.warning("mission %s step %s timed out after %.0fs "
+                         "(agent thread abandoned)",
+                         mission.id, step.name, timeout_s)
+            return StepOutcome(
+                step=step.name, ok=False,
+                detail=(f"step timed out after {timeout_s:.0f}s — the agent "
+                        "thread was abandoned and keeps running as a daemon; "
+                        "the mission moves on"),
+                seconds=self._clock() - started,
+            )
+        if "error" in box:
+            exc = box["error"]
+            return StepOutcome(
+                step=step.name, ok=False,
+                detail=f"{type(exc).__name__}: {exc}",
+                seconds=self._clock() - started,
+            )
+        outcome = box.get("outcome")
+        if outcome is None:
+            return StepOutcome(
+                step=step.name, ok=False,
+                detail="step thread ended with no outcome",
+                seconds=self._clock() - started,
+            )
+        return outcome
 
     def _finish(
         self,
@@ -1313,10 +1732,12 @@ def _serialize_plan(plan: Any, *, plan_error: str = "") -> list[dict[str, Any]]:
             "depends_on": list(s.depends_on),
         }
         # step execution policies ride along in the payload so a resumed
-        # mission honors the same degraded/continue/fail-fast behavior
+        # mission honors the same degraded/continue/fail-fast/retry/timeout
+        # behavior it was planned with
         if isinstance(payload, dict):
-            policy = {k: payload[k] for k in ("optional", "on_failure")
-                      if k in payload}
+            policy = {k: payload[k] for k in (
+                "optional", "on_failure", "retries", "retry_backoff_s",
+                "retry_on", "timeout_s") if k in payload}
             if policy:
                 entry["policy"] = policy
         entries.append(entry)

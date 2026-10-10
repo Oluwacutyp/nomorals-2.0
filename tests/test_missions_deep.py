@@ -88,7 +88,9 @@ class TopoLevelsTests(unittest.TestCase):
 class StepPolicyTests(unittest.TestCase):
     def test_defaults(self):
         p = _step_policy(_step("a"))
-        self.assertEqual(p, {"optional": False, "on_failure": "fail_fast"})
+        self.assertEqual(p, {"optional": False, "on_failure": "fail_fast",
+                             "retries": 0, "retry_backoff_s": 0.0,
+                             "retry_on": "transient", "timeout_s": 0.0})
 
     def test_optional_and_continue(self):
         p = _step_policy(_step("a", optional=True, on_failure="continue"))

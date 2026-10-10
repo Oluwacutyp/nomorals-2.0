@@ -259,7 +259,7 @@ class RunnerIdempotencyTests(unittest.TestCase):
         runner = self._runner(idempotency=self.idem)
         calls = []
 
-        def fake_run(mission, step, started):
+        def fake_run(mission, step, started, policy=None):
             calls.append(step.name)
             return StepOutcome(step=step.name, ok=True,
                                payload={"data": "fetched"})
@@ -279,7 +279,7 @@ class RunnerIdempotencyTests(unittest.TestCase):
         runner = self._runner(idempotency=self.idem)
         calls = []
 
-        def fake_run(mission, step, started):
+        def fake_run(mission, step, started, policy=None):
             calls.append(step.name)
             ok = len(calls) > 1
             return StepOutcome(step=step.name, ok=ok,
@@ -296,7 +296,7 @@ class RunnerIdempotencyTests(unittest.TestCase):
     def test_distinct_missions_do_not_share_step_keys(self):
         runner = self._runner(idempotency=self.idem)
         calls = []
-        runner._run_step_agent = lambda m, s, t: calls.append(
+        runner._run_step_agent = lambda m, s, t, policy=None: calls.append(
             (m.id, s.name)) or StepOutcome(step=s.name, ok=True)
         m1 = self.missions.create_new("first")
         m2 = self.missions.create_new("second")
@@ -308,7 +308,7 @@ class RunnerIdempotencyTests(unittest.TestCase):
         runner = self._runner()  # default: idempotency=None
         self.assertIsNone(runner.idempotency)
         calls = []
-        runner._run_step_agent = lambda m, s, t: calls.append(1) or StepOutcome(
+        runner._run_step_agent = lambda m, s, t, policy=None: calls.append(1) or StepOutcome(
             step=s.name, ok=True)
         mission = self.missions.create_new("do the thing")
         runner._execute_step(mission, _fake_step())

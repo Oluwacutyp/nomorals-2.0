@@ -521,13 +521,14 @@ class GoldenRunner:
         """Execute → verify → (repair → re-verify). Returns a step report."""
         started = time.time()
         repaired = False
+        attempts = 1
         try:
             output = step.run(ctx) or {}
         except Exception as exc:  # noqa: BLE001 - a step failure is a result
             return {"step": step.name, "ok": False,
                     "detail": f"{type(exc).__name__}: {exc}",
                     "seconds": round(time.time() - started, 3),
-                    "repaired": False}
+                    "repaired": False, "attempts": attempts}
         try:
             ok, detail = step.verify(output)
         except Exception as exc:  # noqa: BLE001
@@ -539,6 +540,7 @@ class GoldenRunner:
             try:
                 output = step.repair(output, ctx) or {}
                 repaired = True
+                attempts = 2
                 ok, detail = step.verify(output)
                 detail = f"repaired; {detail}"
             except Exception as exc:  # noqa: BLE001
@@ -552,7 +554,7 @@ class GoldenRunner:
             outputs[step.name] = {"_unserialisable": True}
         return {"step": step.name, "ok": bool(ok), "detail": detail,
                 "seconds": round(time.time() - started, 3),
-                "repaired": repaired}
+                "repaired": repaired, "attempts": attempts}
 
     def _finish(
         self,

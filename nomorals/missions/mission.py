@@ -435,6 +435,9 @@ class MissionStore:
             "eta_seconds": eta_seconds,
             "eta_note": eta_note,
             "stall": mission.state.get("stall"),
+            # real step executions per step (idempotency replays don't
+            # count) — powers "/mission status" retry visibility.
+            "attempts": dict(mission.state.get("step_attempts") or {}),
             "recent_checkpoints": [
                 c.to_row() for c in self.checkpoint_history(mission_id, limit=5)
             ],

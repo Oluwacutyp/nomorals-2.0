@@ -194,6 +194,12 @@ def estimate_eta(mission: Any) -> tuple[float | None, str]:
     enough measured data — the note then says *why* ("no step timing yet",
     "no plan stored") instead of inventing a number. When the wall budget
     would run out first, the note says so explicitly.
+
+    The rate comes from a trailing window (the last up to 5 completed
+    steps' measured durations, recorded by the runner) — recent steps
+    predict the near future better than a whole-run average on a
+    heterogeneous plan. Falls back to the whole-run average when no
+    per-step timing exists yet.
     """
     steps = real_plan_steps(mission.state.get("plan"))
     if not steps:
@@ -203,16 +209,30 @@ def estimate_eta(mission: Any) -> tuple[float | None, str]:
     remaining = len(steps) - done
     if remaining <= 0:
         return 0.0, "all steps complete"
-    if done <= 0 or mission.spent_wall <= 0:
+    durations = (mission.state or {}).get("step_durations") or {}
+    recent: list[float] = []
+    if isinstance(durations, dict):
+        for value in list(durations.values())[-5:]:
+            try:
+                recent.append(float(value))
+            except (TypeError, ValueError):
+                continue
+    if recent:
+        per_step = sum(recent) / len(recent)
+        eta = per_step * remaining
+        note = f"based on the last {len(recent)} step(s)"
+    elif done > 0 and (mission.spent_wall or 0) > 0:
+        per_step = mission.spent_wall / done
+        eta = per_step * remaining
+        note = ""
+    else:
         return None, "no step timing yet"
-    per_step = mission.spent_wall / done
-    eta = per_step * remaining
-    note = ""
     budget_wall = float(mission.budget_wall or 0.0)
     if budget_wall:
         wall_left = max(0.0, budget_wall - mission.spent_wall)
         if wall_left < eta:
-            note = f"wall budget runs out first (~{fmt_duration(wall_left)} left)"
+            note = (f"{note}; " if note else "") + \
+                f"wall budget runs out first (~{fmt_duration(wall_left)} left)"
     return eta, note
 
 
