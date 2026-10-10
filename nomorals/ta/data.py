@@ -54,6 +54,11 @@ __all__ = [
     "split_embargo",
     "multi_timeframe",
     "resample",
+    # ── sweep additions ──
+    "quality_report",
+    "detect_outliers",
+    "bar_gaps",
+    "align_frames",
 ]
 
 
@@ -133,3 +138,102 @@ def multi_timeframe(df: _pd.DataFrame, rules=("4h", "1D")) -> dict:
 def resample(df: _pd.DataFrame, rule: str) -> _pd.DataFrame:
     """Resample bars to a higher timeframe (e.g. '4h', '1D')."""
     return resample_ohlcv(df, rule)
+
+
+# ── sweep additions: data integrity reporting ────────────────────────────
+# Practitioner rule mined from the exchange adapters: never silently
+# repair data — report what was found, then clean.
+
+def bar_gaps(df: _pd.DataFrame) -> list[dict]:
+    """Locate time gaps: where the bar spacing jumps beyond 1.5× median."""
+    df = ensure_ohlcv(df)
+    if not isinstance(df.index, _pd.DatetimeIndex) or len(df) < 3:
+        return []
+    diffs = df.index.to_series().diff().dropna()
+    med = diffs.median()
+    if med.total_seconds() <= 0:
+        return []
+    gaps = []
+    for ts, d in diffs.items():
+        if d > med * 1.5:
+            missing = int(round(d / med)) - 1
+            gaps.append({"at": ts, "gap": str(d), "missing_bars": missing})
+    return gaps
+
+
+def detect_outliers(df: _pd.DataFrame, k: float = 8.0) -> _pd.DataFrame:
+    """Bars whose log return exceeds ``k``× rolling std — bad ticks.
+
+    Returns the offending bars (not a mask) so the caller can inspect.
+    """
+    df = ensure_ohlcv(df)
+    c = df["close"].astype(float)
+    lr = _np.log(c / c.shift(1)).fillna(0.0)
+    sd = lr.rolling(100, min_periods=20).std().bfill()
+    flag = lr.abs() > float(k) * (sd + 1e-12)
+    return df[flag.fillna(False)]
+
+
+def quality_report(df: _pd.DataFrame) -> dict:
+    """Full integrity report: gaps, outliers, stale bars, duplicates.
+
+    Call before ``clean_ohlcv`` — it tells you what the cleaner is about
+    to paper over.
+    """
+    raw = df
+    df = ensure_ohlcv(df)
+    gaps = bar_gaps(df)
+    outliers = detect_outliers(df)
+    stale = df[(df["high"] == df["low"]) & (df["volume"] == 0)]
+    dupes = int(raw.index.duplicated().sum()) if hasattr(
+        raw.index, "duplicated") else 0
+    inversions = int(((df["high"] < df["low"])).sum())
+    neg_vol = int((df["volume"] < 0).sum())
+    n = len(df)
+    score = 100.0
+    gap_missing = sum(g["missing_bars"] for g in gaps)
+    score -= min(45.0, len(gaps) * 3.0 + gap_missing / max(1, n) * 60.0)
+    score -= min(25.0, len(outliers) * 5.0)
+    score -= min(20.0, len(stale) / max(1, n) * 100.0)
+    score -= min(15.0, dupes * 2.0)
+    return {
+        "bars": n,
+        "start": str(df.index[0]),
+        "end": str(df.index[-1]),
+        "gaps": gaps[:10],
+        "n_gaps": len(gaps),
+        "outliers": [str(t) for t in outliers.index[:10]],
+        "n_outliers": len(outliers),
+        "n_stale_bars": int(len(stale)),
+        "n_duplicates": dupes,
+        "n_inversions": inversions,
+        "n_negative_volume": neg_vol,
+        "quality_score": round(max(0.0, score), 1),
+        "verdict": ("CLEAN" if score >= 90 else
+                    "USABLE" if score >= 70 else
+                    "DEGRADED" if score >= 40 else "TRASH"),
+    }
+
+
+def align_frames(frames: dict[str, _pd.DataFrame],
+                 how: str = "inner") -> dict[str, _pd.DataFrame]:
+    """Align multiple symbol frames onto a common index.
+
+    ``how``: "inner" (default — only shared bars) or "outer" (union,
+    forward-filled). Every frame is validated first.
+    """
+    cleaned = {k: ensure_ohlcv(v) for k, v in frames.items()}
+    if not cleaned:
+        return {}
+    idx = None
+    for v in cleaned.values():
+        idx = v.index if idx is None else (
+            idx.intersection(v.index) if how == "inner"
+            else idx.union(v.index))
+    out = {}
+    for k, v in cleaned.items():
+        vv = v.reindex(idx)
+        if how == "outer":
+            vv = vv.ffill()
+        out[k] = vv.dropna(subset=["close"])
+    return out

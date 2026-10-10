@@ -44,7 +44,11 @@ def _require_pandas() -> None:
 
 
 
-__all__ = ["RiskManager", "position_size", "PROFILES"]
+__all__ = ["RiskManager", "position_size", "PROFILES",
+           # ── sweep additions ──
+           "Position", "PositionTracker", "risk_parity_weights",
+           "correlation_adjusted_fraction", "chandelier_exit", "optimal_f",
+           "kelly_drawdown_shrink", "portfolio_heat"]
 
 #: Named risk profiles for the FinancialExpert (default|aggressive|conservative).
 #: ``min_agreement`` is calibrated for the 4-strategy committee, where the
@@ -226,3 +230,245 @@ def position_size(equity: float, entry: float, atr: float,
     sizing["stops"] = rm.stop_levels(1 if side >= 0 else -1, entry, atr)
     sizing["profile"] = (profile or "default").strip().lower()
     return sizing
+
+
+# ── sweep additions: live position management + portfolio sizing ─────────
+
+class Position:
+    """One open position with its full risk plan attached."""
+
+    def __init__(self, symbol: str, side: int, entry: float, shares: float,
+                 stop: float, atr: float, target_1: float | None = None,
+                 target_2: float | None = None, time_stop_bars: int = 0,
+                 breakeven_trigger: float | None = None):
+        self.symbol = symbol
+        self.side = 1 if side >= 0 else -1
+        self.entry = float(entry)
+        self.shares = float(shares)
+        self.stop = float(stop)
+        self.initial_stop = float(stop)
+        self.atr = max(1e-9, float(atr))
+        self.target_1 = target_1
+        self.target_2 = target_2
+        self.time_stop_bars = int(time_stop_bars)
+        self.breakeven_trigger = breakeven_trigger
+        self.bars_held = 0
+        self.moved_to_breakeven = False
+        self.partials_taken = 0
+        self.highest = float(entry)   # highest favorable excursion (long)
+        self.lowest = float(entry)
+
+    @property
+    def notional(self) -> float:
+        return self.shares * self.entry
+
+    @property
+    def risk(self) -> float:
+        """Dollars at risk if the current stop fills."""
+        return self.shares * abs(self.entry - self.stop)
+
+    def unrealized(self, price: float) -> float:
+        return self.side * self.shares * (float(price) - self.entry)
+
+    def as_dict(self) -> dict:
+        return {
+            "symbol": self.symbol, "side": self.side, "entry": self.entry,
+            "shares": self.shares, "stop": self.stop,
+            "initial_stop": self.initial_stop, "target_1": self.target_1,
+            "target_2": self.target_2, "bars_held": self.bars_held,
+            "risk": self.risk,
+            "moved_to_breakeven": self.moved_to_breakeven,
+        }
+
+
+class PositionTracker:
+    """Live position state machine: breakeven, trailing, time stops.
+
+    The missing half of the old risk module — it had sizing and static
+    stop ladders but nothing that *managed* a position bar by bar.
+    ``update(bar)`` returns events: ``breakeven``, ``trailing``,
+    ``time_stop``, ``stop_hit``, ``target_1``/``target_2``.
+    """
+
+    def __init__(self, trailing_atr_mult: float = 2.0):
+        self.positions: dict[str, Position] = {}
+        self.trailing_atr_mult = float(trailing_atr_mult)
+        self.events: list[dict] = []
+
+    def open(self, position: Position) -> None:
+        self.positions[position.symbol] = position
+
+    def close(self, symbol: str) -> Position | None:
+        return self.positions.pop(symbol, None)
+
+    def update(self, symbol: str, bar: dict) -> list[dict]:
+        """Advance one bar: ``{"high","low","close","atr"}``. Returns events."""
+        p = self.positions.get(symbol)
+        if p is None:
+            return []
+        h, l, c = float(bar["high"]), float(bar["low"]), float(bar["close"])
+        atr_v = max(1e-9, float(bar.get("atr", p.atr)))
+        p.bars_held += 1
+        p.highest = max(p.highest, h)
+        p.lowest = min(p.lowest, l)
+        events: list[dict] = []
+
+        def _ev(kind: str, **kw):
+            ev = {"symbol": symbol, "kind": kind, "price": c, **kw}
+            events.append(ev)
+            self.events.append(ev)
+
+        if p.side > 0:
+            if p.breakeven_trigger and not p.moved_to_breakeven \
+                    and h >= p.breakeven_trigger:
+                p.stop = max(p.stop, p.entry)
+                p.moved_to_breakeven = True
+                _ev("breakeven", stop=p.stop)
+            new_stop = max(p.stop, p.highest - self.trailing_atr_mult * atr_v)
+            if new_stop > p.stop + 1e-12:
+                p.stop = new_stop
+                _ev("trailing", stop=p.stop)
+            if l <= p.stop:
+                _ev("stop_hit", stop=p.stop)
+            if p.target_1 and h >= p.target_1 and p.partials_taken == 0:
+                p.partials_taken = 1
+                _ev("target_1", target=p.target_1)
+            if p.target_2 and h >= p.target_2 and p.partials_taken == 1:
+                p.partials_taken = 2
+                _ev("target_2", target=p.target_2)
+        else:
+            if p.breakeven_trigger and not p.moved_to_breakeven \
+                    and l <= p.breakeven_trigger:
+                p.stop = min(p.stop, p.entry)
+                p.moved_to_breakeven = True
+                _ev("breakeven", stop=p.stop)
+            new_stop = min(p.stop, p.lowest + self.trailing_atr_mult * atr_v)
+            if new_stop < p.stop - 1e-12:
+                p.stop = new_stop
+                _ev("trailing", stop=p.stop)
+            if h >= p.stop:
+                _ev("stop_hit", stop=p.stop)
+            if p.target_1 and l <= p.target_1 and p.partials_taken == 0:
+                p.partials_taken = 1
+                _ev("target_1", target=p.target_1)
+            if p.target_2 and l <= p.target_2 and p.partials_taken == 1:
+                p.partials_taken = 2
+                _ev("target_2", target=p.target_2)
+        if p.time_stop_bars and p.bars_held >= p.time_stop_bars:
+            _ev("time_stop", bars=p.bars_held)
+        return events
+
+    def heat(self, equity: float) -> dict:
+        """Portfolio heat: gross/net exposure + total dollars at risk."""
+        return portfolio_heat(list(self.positions.values()), equity)
+
+
+def portfolio_heat(positions: list, equity: float) -> dict:
+    """Gross/net notional, count, and summed stop-risk across positions."""
+    gross = float(sum(abs(p.notional if isinstance(p, Position)
+                          else p.get("notional", 0.0)) for p in positions))
+    net = float(sum((p.side if isinstance(p, Position)
+                     else (1 if p.get("side", 1) > 0 else -1))
+                    * (p.notional if isinstance(p, Position)
+                       else abs(p.get("notional", 0.0)))
+                    for p in positions))
+    at_risk = float(sum(p.risk if isinstance(p, Position) else 0.0
+                        for p in positions))
+    eq = max(1e-12, float(equity))
+    return {
+        "gross": gross, "net": net, "count": len(positions),
+        "at_risk": at_risk,
+        "gross_pct": gross / eq * 100.0,
+        "at_risk_pct": at_risk / eq * 100.0,
+    }
+
+
+def risk_parity_weights(volatilities: dict[str, float]) -> dict[str, float]:
+    """Inverse-volatility weights — each position contributes equal risk."""
+    vols = {k: max(1e-9, float(v)) for k, v in volatilities.items()}
+    inv = {k: 1.0 / v for k, v in vols.items()}
+    tot = sum(inv.values()) or 1.0
+    return {k: v / tot for k, v in inv.items()}
+
+
+def correlation_adjusted_fraction(base_fraction: float,
+                                  avg_correlation: float,
+                                  max_corr: float = 0.7) -> float:
+    """Shrink size when the new trade correlates with the book.
+
+    At ``avg_correlation >= max_corr`` the trade adds no diversification —
+    size halves; at zero correlation it passes through untouched.
+    """
+    c = _np.clip(abs(float(avg_correlation)), 0.0, 1.0)
+    m = _np.clip(float(max_corr), 0.05, 1.0)
+    shrink = 1.0 - 0.5 * _np.clip(c / m, 0.0, 1.0)
+    return float(base_fraction * shrink)
+
+
+def chandelier_exit(df, side: int, period: int = 22,
+                    mult: float = 3.0) -> _pd.Series:
+    """Chandelier exit (Chuck LeBeau): highest high − k·ATR trailing stop.
+
+    Hangs the stop from the extreme — tighter than a fixed-ATR stop in
+    trends, and it never moves against the position by construction.
+    """
+    from .math import atr as _atr_fn
+    from .math import ensure_ohlcv as _ensure
+
+    df = _ensure(df)
+    a = _atr_fn(df, 14)
+    if side >= 0:
+        raw = df["high"].astype(float).rolling(
+            max(2, int(period)), min_periods=1).max() - float(mult) * a
+    else:
+        raw = df["low"].astype(float).rolling(
+            max(2, int(period)), min_periods=1).min() + float(mult) * a
+    # Ratchet: longs only rise, shorts only fall.
+    out = raw.copy()
+    vals = raw.to_numpy()
+    res = _np.empty(len(vals))
+    res[0] = vals[0]
+    if side >= 0:
+        for i in range(1, len(vals)):
+            res[i] = max(vals[i], res[i - 1])
+    else:
+        for i in range(1, len(vals)):
+            res[i] = min(vals[i], res[i - 1])
+    return _pd.Series(res, index=df.index, name="chandelier").bfill()
+
+
+def optimal_f(trades: list[float]) -> dict:
+    """Vince's optimal f: the fraction maximizing geometric growth.
+
+    Returns ``f`` (fraction of equity to risk), the ``biggest_loss`` it
+    was normalized against, and the geometric mean at that f.
+    """
+    t = _np.asarray(list(trades), dtype=float)
+    if len(t) < 5:
+        return {"f": 0.0, "biggest_loss": 0.0, "geo_mean": 0.0,
+                "note": "need >= 5 trades"}
+    biggest_loss = abs(float(t.min()))
+    if biggest_loss <= 1e-12:
+        return {"f": 0.0, "biggest_loss": 0.0, "geo_mean": 0.0,
+                "note": "no losing trades"}
+    hpr = t / biggest_loss  # holding-period returns in loss units
+    best_f, best_g = 0.01, -_np.inf
+    for f in _np.linspace(0.01, 1.0, 100):
+        ghpr = _np.prod(1.0 + f * hpr) ** (1.0 / len(hpr))
+        if ghpr > best_g:
+            best_g, best_f = ghpr, f
+    return {"f": float(best_f), "biggest_loss": biggest_loss,
+            "geo_mean": float(best_g)}
+
+
+def kelly_drawdown_shrink(kelly_f: float, current_dd: float,
+                          max_dd: float) -> float:
+    """Shrink Kelly as drawdown deepens — the tradable version of Kelly.
+
+    Full Kelly at zero drawdown, linearly to zero at ``max_dd``. The old
+    code had a fixed quarter-Kelly; this breathes with the equity curve.
+    """
+    dd = abs(min(0.0, float(current_dd)))
+    cap = abs(float(max_dd)) or 0.15
+    shrink = _np.clip(1.0 - dd / cap, 0.0, 1.0)
+    return float(max(0.0, float(kelly_f)) * shrink)

@@ -46,16 +46,19 @@ from ..core.logging_setup import get_logger
 from .data import clean_ohlcv
 from .math import atr, ensure_ohlcv
 from .meta import MetaGate, labeled_matrix, sklearn_available
-from .regime import RegimeDetector
-from .risk import PROFILES, RiskManager
-from .signals import fuse_all
+from .regime import RegimeDetector, regime_playbook
+from .risk import PROFILES, RiskManager, position_size
+from .signals import explain_vote, fuse_all, vote_quality
 from .strategies import (STRATEGIES, list_strategies, rank_strategies,
                          run_zoo)
 
 _log = get_logger(__name__)
 
 __all__ = ["analyze", "committee_position", "PROFILES",
-           "regime_kind_weights", "regime_vote_alignment"]
+           "regime_kind_weights", "regime_vote_alignment",
+           # ── sweep additions: presentation + trade plans + MTF ──
+           "render_report", "trade_plan", "analyze_mtf",
+           "explain_committee"]
 
 
 def regime_kind_weights(regime: dict) -> dict:
@@ -243,4 +246,229 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
         "bars": len(df), "enter_threshold": enter_thr,
         "strategies": list(frames),
         # NOTE: stop_distance_pct is a percent number (1.03 == 1.03%).
+        # Sweep additions (kept private-ish; render via render_report):
+        "_frames": frames,
+        "_blend": blend,
+        "_kind_weights": regime_kind_weights(regime),
     }
+
+
+# ── sweep additions ──────────────────────────────────────────────────────
+
+def explain_committee(result: dict, top: int = 8) -> _pd.DataFrame:
+    """Per-strategy contribution table from an ``analyze()`` result."""
+    frames = result.get("_frames") or {}
+    blend = result.get("_blend")
+    if not frames or blend is None or blend.empty:
+        return _pd.DataFrame()
+    table = explain_vote(frames, blend,
+                         kind_weights=result.get("_kind_weights"),
+                         lookup=_STRATEGY_KIND_LOOKUP)
+    return table.head(max(1, int(top)))
+
+
+def trade_plan(df: _pd.DataFrame, profile: str = "default",
+               equity: float = 100_000.0,
+               strategies: list[str] | None = None) -> dict:
+    """One dict with everything needed to place the trade.
+
+    Entry, side, size (shares + fraction), ATR stop ladder, dollar risk,
+    invalidation (regime flip level), and the committee's reasoning.
+    """
+    res = analyze(df, profile=profile, strategies=strategies)
+    side = int(_np.sign(res["position_now"])) or int(_np.sign(
+        res["bias"])) or 0
+    entry = res["entry"]
+    atr_v = res["atr"]
+    sizing = position_size(equity, entry, atr_v, profile=profile, side=side)
+    risk_dollars = (sizing["fraction"] * equity
+                    * res["stop_distance_pct"] / 100.0)
+    playbook = regime_playbook().get(res["regime_label"], {})
+    return {
+        "side": side,
+        "side_name": "LONG" if side > 0 else "SHORT" if side < 0 else "FLAT",
+        "entry": entry,
+        "shares": sizing["shares"],
+        "size_fraction": sizing["fraction"],
+        "notional": sizing["notional"],
+        "stops": sizing["stops"],
+        "stop_distance_pct": res["stop_distance_pct"],
+        "risk_dollars": float(risk_dollars),
+        "risk_pct_equity": float(risk_dollars / max(equity, 1e-12) * 100.0),
+        "approved": res["approved"],
+        "approval_method": res["approval_method"],
+        "regime": res["regime_label"],
+        "bias": res["bias"],
+        "agreement": res["agreement"],
+        "playbook": playbook,
+        "profile": sizing["profile"],
+    }
+
+
+def analyze_mtf(df: _pd.DataFrame, rules: tuple = ("4h", "1D"),
+                profile: str = "default",
+                strategies: list[str] | None = None) -> dict:
+    """Multi-timeframe analysis: higher TF gives permission, base gives timing.
+
+    Elder's Triple Screen, natively: the base timeframe is analyzed as
+    usual, and each higher timeframe contributes its regime. If a higher
+    TF regime opposes the base bias, the bias is discounted (not vetoed
+    outright — the higher TF is slower, not smarter).
+    """
+    from .data import multi_timeframe
+
+    base = analyze(df, profile=profile, strategies=strategies)
+    mtf = multi_timeframe(df, rules=rules)
+    detector = RegimeDetector()
+    tf_regimes = {}
+    for rule, frame in mtf.items():
+        if rule == "base" or len(frame) < 30:
+            continue
+        try:
+            tf_regimes[rule] = detector.current(frame)["label"]
+        except Exception as e:
+            _log.debug("mtf regime for %s failed: %s", rule, e)
+            continue
+    bias = base["bias"]
+    base_label = base["regime_label"]
+    discounts = []
+    for rule, label in tf_regimes.items():
+        opposed = ((label == "TREND_UP" and bias < 0)
+                   or (label == "TREND_DOWN" and bias > 0)
+                   or (label == "PANIC" and bias != 0))
+        if opposed:
+            discounts.append(rule)
+    discount = 0.5 ** len(discounts)
+    base["tf_regimes"] = tf_regimes
+    base["tf_discounts"] = discounts
+    base["bias_mtf"] = round(bias * discount, 4)
+    base["position_now_mtf"] = base["position_now"] * discount
+    base["mtf_aligned"] = not discounts
+    return base
+
+
+def _meter(x: float, width: int = 21) -> str:
+    """Unicode bias meter: ──────●────── style, ● marks the value."""
+    x = max(-1.0, min(1.0, float(x)))
+    pos = int(round((x + 1.0) / 2.0 * (width - 1)))
+    bar = ["─"] * width
+    bar[width // 2] = "┼"
+    bar[pos] = "●"
+    return "".join(bar)
+
+
+def _bias_word(bias: float) -> str:
+    a = abs(bias)
+    if a < 0.05:
+        return "NEUTRAL"
+    word = "BULLISH" if bias > 0 else "BEARISH"
+    strength = "slightly " if a < 0.25 else "" if a < 0.6 else "strongly "
+    return f"{strength}{word}".upper()
+
+
+def render_report(result: dict, theme: str = "rich",
+                  symbol: str = "") -> str:
+    """The committee briefing, made to be read in chat.
+
+    Regime banner, unicode bias meter, per-strategy contribution table,
+    trade-plan box, risk readout. ``theme``: "rich" (box-drawing) or
+    "plain" (ASCII). Numbers are rounded for humans; the raw dict keeps
+    full precision.
+    """
+    rich = theme != "plain"
+    H, V = ("═", "║") if rich else ("=", "|")
+    top = "╔" + H * 64 + "╗" if rich else "+" + "=" * 64 + "+"
+    mid = "╠" + H * 64 + "╣" if rich else "+" + "=" * 64 + "+"
+    bot = "╚" + H * 64 + "╝" if rich else "+" + "=" * 64 + "+"
+
+    def row(label: str, val: str) -> str:
+        return f"{V} {label:<30} {val:>30} {V}"
+
+    title = f"DEVON TA BRIEFING{f' — {symbol}' if symbol else ''}"
+    L = [top, row(title[:60], f"{result.get('bars', 0)} bars")]
+    L.append(mid)
+
+    # ── regime banner ──
+    reg = result.get("regime", {})
+    L.append(row("REGIME", result.get("regime_label", "?")))
+    L.append(row("P(trend) / P(range)",
+                 f"{reg.get('p_trend', 0):.0%} / {reg.get('p_range', 0):.0%}"))
+    L.append(row("P(squeeze) / P(panic)",
+                 f"{reg.get('p_squeeze', 0):.0%} / {reg.get('p_panic', 0):.0%}"))
+    pb = regime_playbook().get(result.get("regime_label", ""), {})
+    if pb:
+        note = pb.get("note", "")
+        L.append(row("Playbook",
+                     f"favor {', '.join(pb.get('favor', []))}"[:30]))
+        # Wrap the note across full-width lines instead of truncating.
+        words, line = note.split(), ""
+        for w_ in words:
+            if len(line) + len(w_) + 1 > 60:
+                L.append(f"{V} {line:<62} {V}")
+                line = w_
+            else:
+                line = (line + " " + w_).strip()
+        if line:
+            L.append(f"{V} {line:<62} {V}")
+    L.append(mid)
+
+    # ── bias meter ──
+    bias = result.get("bias", 0.0)
+    L.append(row("COMMITTEE BIAS", _bias_word(bias)))
+    L.append(row(" ", _meter(bias)))
+    L.append(row("Vote / agreement",
+                 f"{bias:+.3f} / {result.get('agreement', 0):.0%}"))
+    L.append(row("Position now",
+                 f"{result.get('position_now', 0):+.0f}  "
+                 f"(enter ≥ {result.get('enter_threshold', 0):.2f})"))
+    appr = "APPROVED" if result.get("approved") else "NOT APPROVED"
+    L.append(row("Signal", f"{appr} [{result.get('approval_method')}]"))
+    if "bias_mtf" in result:
+        L.append(row("MTF bias",
+                     f"{result['bias_mtf']:+.3f} "
+                     f"{'(aligned)' if result.get('mtf_aligned') else '(discounted: ' + ','.join(result.get('tf_discounts', [])) + ')'}"))
+    L.append(mid)
+
+    # ── committee table ──
+    L.append(row("TOP CONTRIBUTORS", "signal × weight → vote"))
+    table = explain_committee(result, top=6)
+    if not table.empty:
+        for name, r in table.iterrows():
+            arrow = "▲" if r["signal"] > 0 else "▼" if r["signal"] < 0 else "·"
+            if not rich:
+                arrow = "^" if r["signal"] > 0 else "v" if r["signal"] < 0 else "-"
+            L.append(row(f" {arrow} {name}"[:30],
+                         f"{r['signal']:+.0f}  conf {r['confidence']:.2f}  "
+                         f"w {r['contribution']:+.3f}"[:30]))
+    else:
+        L.append(row(" (no active strategies)", ""))
+    L.append(mid)
+
+    # ── trade plan box ──
+    stops = result.get("stops", {}) or {}
+    side = int(_np.sign(result.get("position_now", 0))) or int(
+        _np.sign(bias)) or 1
+    side_name = "LONG" if side > 0 else "SHORT"
+    approved = bool(result.get("approved"))
+    plan_head = (f"{side_name} @ {result.get('entry', 0):,.4g}"
+                 if approved else f"{side_name} @ {result.get('entry', 0):,.4g} "
+                 "(if approved)")
+    L.append(row("TRADE PLAN", plan_head[:30]))
+    if stops:
+        L.append(row("Stop", f"{stops.get('stop', 0):,.4g}"))
+        L.append(row("Breakeven trigger",
+                     f"{stops.get('breakeven_trigger', 0):,.4g}"))
+        L.append(row("Targets",
+                     f"{stops.get('target_1', 0):,.4g} / "
+                     f"{stops.get('target_2', 0):,.4g}"))
+    L.append(row("Size (fraction)", f"{result.get('size_fraction', 0):.1%}"))
+    L.append(row("Stop distance", f"{result.get('stop_distance_pct', 0):.2f}%"))
+    L.append(row("ATR", f"{result.get('atr', 0):,.4g} "
+                        f"({result.get('atr_pct', 0) * 100:.2f}%)"))
+    ranked = result.get("ranked")
+    if ranked is not None and len(ranked):
+        best = ranked.index[0]
+        L.append(row("Best strategy (in-sample)",
+                     f"{best} [{ranked.iloc[0]['sharpe']:+.2f}]"[:30]))
+    L.append(bot)
+    return "\n".join(L)

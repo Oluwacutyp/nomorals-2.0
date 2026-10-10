@@ -25,7 +25,11 @@ from __future__ import annotations
 import logging
 
 from .indicators import adx as _adx
-from .indicators import bollinger, donchian, ichimoku, macd as _macd
+from .indicators import (bollinger, connors_rsi, donchian, heikin_ashi,
+                         ichimoku, keltner)
+from .indicators import macd as _macd
+from .indicators import stoch_rsi as _stoch_rsi
+from .indicators import supertrend as _supertrend
 
 
 # ── lazy optional deps ──────────────────────────────────────────────────
@@ -61,7 +65,7 @@ def _require_pandas() -> None:
 
 
 from .indicators import psar, rsi as _rsi, vwap
-from .math import atr, ema, ensure_ohlcv, rolling_zscore, sharpe
+from .math import atr, ema, ensure_ohlcv, rolling_zscore, sharpe, sma
 
 
 _log = logging.getLogger(__name__)
@@ -77,12 +81,21 @@ __all__ = [
     "RsiDivergence",
     "BollingerSqueeze",
     "SarReversal",
+    # ── sweep additions ──
+    "SupertrendTrend",
+    "KeltnerBreakout",
+    "MacdCross",
+    "ConnorsRsi2",
+    "StochCross",
+    "HeikinAshiTrend",
+    "PatternConfluence",
     "STRATEGIES",
     "list_strategies",
     "get_strategy",
     "run_zoo",
     "quick_score",
     "rank_strategies",
+    "optimize_params",
 ]
 
 
@@ -512,6 +525,311 @@ class SarReversal(BaseStrategy):
         return _frame(signal, confidence, gate, df.index)
 
 
+class SupertrendTrend(BaseStrategy):
+    """Ride the Supertrend line: long above, short below.
+
+    The retail-standard ATR trailing system (Olivier Seban). Signal flips
+    only when price closes through the line — no whipsaw on wicks.
+    Confidence scales with ATR-normalized distance from the line; the
+    gate throttles when ADX says there is no trend to ride.
+    """
+
+    name = "SupertrendTrend"
+    kind = "trend"
+    default_params = {"period": 10, "mult": 3.0, "adx_period": 14,
+                      "adx_min": 15.0}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        p = self.params
+        st = _supertrend(df, int(p["period"]), float(p["mult"]))
+        signal = st["direction"].to_numpy(dtype=float)
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        line = st["line"].to_numpy(dtype=float)
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        confidence = _np.clip(_np.abs(px - line) / (2.0 * a), 0.0, 1.0)
+        adx_v = _adx(df, int(p["adx_period"]))["adx"].to_numpy(dtype=float)
+        gate = _np.clip(adx_v / float(p["adx_min"]), 0.0, 1.0)
+        return _frame(signal, confidence, gate, df.index)
+
+
+class KeltnerBreakout(BaseStrategy):
+    """Keltner channel breakouts with volume confirmation.
+
+    Enters on a close outside the channel, exits on a midline cross.
+    The gate requires volume above its rolling median — breakouts on
+    thin volume are the ones that fail.
+    """
+
+    name = "KeltnerBreakout"
+    kind = "breakout"
+    default_params = {"period": 20, "atr_period": 10, "mult": 2.0,
+                      "vol_window": 20}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        p = self.params
+        kc = keltner(df, int(p["period"]), int(p["atr_period"]),
+                     float(p["mult"]))
+        px = df["close"].astype(float).to_numpy(dtype=float)
+        upper = kc["upper"].to_numpy(dtype=float)
+        lower = kc["lower"].to_numpy(dtype=float)
+        mid = kc["mid"].to_numpy(dtype=float)
+        signal = _np.zeros(len(df))
+        state = 0.0
+        for i in range(len(df)):
+            if state == 0.0:
+                if px[i] > upper[i]:
+                    state = 1.0
+                elif px[i] < lower[i]:
+                    state = -1.0
+            elif state > 0 and px[i] < mid[i]:
+                state = 0.0
+            elif state < 0 and px[i] > mid[i]:
+                state = 0.0
+            signal[i] = state
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        pen = _np.where(signal > 0, (px - mid) / a,
+                       _np.where(signal < 0, (mid - px) / a, 0.0))
+        confidence = _np.clip(_np.abs(pen) / 1.0, 0.15, 1.0) \
+            * (_np.abs(signal) > 0)
+        vol = df["volume"].astype(float)
+        vol_med = vol.rolling(int(p["vol_window"]),
+                             min_periods=5).median().bfill()
+        gate = _np.clip((vol / (vol_med + 1e-12)).to_numpy(dtype=float)
+                        / 1.5, 0.0, 1.0)
+        return _frame(signal, confidence, gate, df.index)
+
+
+class MacdCross(BaseStrategy):
+    """Classic MACD line/signal cross with histogram momentum filter.
+
+    Long on bullish cross while the histogram confirms momentum; short
+    on the mirror. Holds the position until the opposite cross — the
+    textbook system, with confidence from cross strength.
+    """
+
+    name = "MacdCross"
+    kind = "momentum"
+    default_params = {"fast": 12, "slow": 26, "signal": 9}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        p = self.params
+        m = _macd(df, int(p["fast"]), int(p["slow"]), int(p["signal"]))
+        line = m["macd"].to_numpy(dtype=float)
+        sigl = m["signal"].to_numpy(dtype=float)
+        hist = m["hist"].to_numpy(dtype=float)
+        cross_up = (line > sigl) & (_np.roll(line, 1) <= _np.roll(sigl, 1))
+        cross_dn = (line < sigl) & (_np.roll(line, 1) >= _np.roll(sigl, 1))
+        cross_up[0] = cross_dn[0] = False
+        signal = _np.zeros(len(df))
+        state = 0.0
+        for i in range(len(df)):
+            if cross_up[i]:
+                state = 1.0
+            elif cross_dn[i]:
+                state = -1.0
+            signal[i] = state
+        hist_vol = _pd.Series(_np.abs(hist)).rolling(
+            50, min_periods=10).mean().bfill().fillna(1e-9
+                                                     ).to_numpy(dtype=float)
+        confidence = _np.clip(_np.abs(hist) / (hist_vol + 1e-12), 0.0, 1.0) \
+            * (_np.abs(signal) > 0)
+        gate = _np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
+class ConnorsRsi2(BaseStrategy):
+    """Connors RSI(2)-style washed-out fade (Larry Connors).
+
+    Buys when Connors RSI < ``oversold`` (default 10 — the classic
+    washed-out print), exits when it recovers above ``exit``. Above the
+    200-day SMA only for longs (the Connors trend filter); shorts are
+    the mirror below it. Sparse by design.
+    """
+
+    name = "ConnorsRsi2"
+    kind = "meanrev"
+    default_params = {"oversold": 10.0, "overbought": 90.0, "exit": 50.0,
+                      "trend_ma": 200}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        p = self.params
+        crsi = connors_rsi(df).to_numpy(dtype=float)
+        px = df["close"].astype(float)
+        trend = sma(px, int(p["trend_ma"])).to_numpy(dtype=float)
+        pxv = px.to_numpy(dtype=float)
+        os_, ob, ex = float(p["oversold"]), float(p["overbought"]), float(
+            p["exit"])
+        signal = _np.zeros(len(df))
+        state = 0.0
+        for i in range(len(df)):
+            if state == 0.0:
+                if crsi[i] < os_ and pxv[i] > trend[i]:
+                    state = 1.0
+                elif crsi[i] > ob and pxv[i] < trend[i]:
+                    state = -1.0
+            elif state > 0 and crsi[i] > ex:
+                state = 0.0
+            elif state < 0 and crsi[i] < 100.0 - ex:
+                state = 0.0
+            signal[i] = state
+        confidence = _np.clip(_np.where(
+            signal > 0, (os_ - crsi) / os_, (crsi - ob) / (100.0 - ob)),
+            0.0, 1.0) * (_np.abs(signal) > 0)
+        gate = _np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
+class StochCross(BaseStrategy):
+    """Stochastic %K/%D cross in extreme zones.
+
+    Long on %K crossing up through %D while both are oversold (<20);
+    short on the mirror above 80. Mid-range crosses are chop — ignored.
+    """
+
+    name = "StochCross"
+    kind = "momentum"
+    default_params = {"k": 14, "d": 3, "oversold": 20.0, "overbought": 80.0}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        p = self.params
+        sr = _stoch_rsi(df, k=int(p["k"]), d=int(p["d"]))
+        k = sr["stochrsi_k"].to_numpy(dtype=float)
+        d = sr["stochrsi_d"].to_numpy(dtype=float)
+        os_, ob = float(p["oversold"]), float(p["overbought"])
+        cross_up = (k > d) & (_np.roll(k, 1) <= _np.roll(d, 1)) & (k < os_)
+        cross_dn = (k < d) & (_np.roll(k, 1) >= _np.roll(d, 1)) & (k > ob)
+        cross_up[0] = cross_dn[0] = False
+        signal = _np.zeros(len(df))
+        state = 0.0
+        for i in range(len(df)):
+            if cross_up[i]:
+                state = 1.0
+            elif cross_dn[i]:
+                state = -1.0
+            elif state > 0 and k[i] > 80:
+                state = 0.0
+            elif state < 0 and k[i] < 20:
+                state = 0.0
+            signal[i] = state
+        confidence = _np.clip(_np.where(
+            signal > 0, (os_ - k) / os_, (k - ob) / (100.0 - ob)),
+            0.2, 1.0) * (_np.abs(signal) > 0)
+        gate = _np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
+class HeikinAshiTrend(BaseStrategy):
+    """Trend-following on Heikin-Ashi candles.
+
+    HA candles filter wick noise: long while HA candles are bullish
+    without lower wicks (strong trend), exit on the first bearish HA
+    candle. The gate requires consecutive same-color HA candles —
+    single-candle flips are noise.
+    """
+
+    name = "HeikinAshiTrend"
+    kind = "trend"
+    default_params = {"min_run": 2}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        ha = heikin_ashi(df)
+        o = ha["open"].to_numpy(dtype=float)
+        c = ha["close"].to_numpy(dtype=float)
+        h = ha["high"].to_numpy(dtype=float)
+        l = ha["low"].to_numpy(dtype=float)
+        bull = c > o
+        no_lower_wick = (o - l) <= 0.1 * _np.maximum(h - l, 1e-9)
+        no_upper_wick = (h - c) <= 0.1 * _np.maximum(h - l, 1e-9)
+        strong_bull = bull & no_lower_wick
+        strong_bear = (~bull) & no_upper_wick
+        signal = _np.where(strong_bull, 1.0, _np.where(strong_bear, -1.0, 0.0))
+        run = _np.zeros(len(df))
+        cnt = 0
+        for i in range(len(df)):
+            cnt = cnt + 1 if signal[i] != 0 and (
+                i == 0 or signal[i] == signal[i - 1]) else (
+                1 if signal[i] != 0 else 0)
+            run[i] = cnt
+        gate = _np.clip(run / float(max(1, int(self.params["min_run"]))),
+                        0.0, 1.0)
+        a = atr(df, 14).to_numpy(dtype=float) + 1e-9
+        confidence = _np.clip(_np.abs(c - o) / a, 0.0, 1.0) \
+            * (_np.abs(signal) > 0)
+        return _frame(signal, confidence, gate, df.index)
+
+
+class PatternConfluence(BaseStrategy):
+    """Candlestick patterns, but only with confluence (the honest version).
+
+    Uses ``patterns.pattern_score`` filtered by trend context: a signal
+    fires when the reliability-weighted pattern confluence exceeds
+    ``min_score`` AND aligns with the EMA trend. Naked patterns are
+    noise — this is the version with edge.
+    """
+
+    name = "PatternConfluence"
+    kind = "confluence"
+    default_params = {"min_score": 0.35, "hold": 3}
+
+    def generate_signals(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        from .patterns import detect_all, with_trend_context
+
+        df = ensure_ohlcv(df)
+        if len(df) < 10:
+            return _frame(_np.zeros(len(df)), _np.zeros(len(df)),
+                          _np.ones(len(df)), df.index)
+        from .patterns import PATTERN_TIERS
+
+        p = self.params
+        sig = detect_all(df)
+        ctx = with_trend_context(df, sig)
+        tier_w = {"high": 1.0, "medium": 0.6, "low": 0.3}
+        w = _np.array([tier_w[PATTERN_TIERS.get(c, "low")]
+                       for c in ctx.columns])
+        vals = ctx.to_numpy(dtype=float)
+        weighted = vals * w
+        mass = _np.abs(weighted).sum(axis=1)
+        score = (weighted.sum(axis=1) / (mass + 1e-12)
+                 * _np.clip(mass, 0, 1))
+        score = _np.nan_to_num(score)
+        raw = _np.where(score >= float(p["min_score"]), 1.0,
+                       _np.where(score <= -float(p["min_score"]), -1.0, 0.0))
+        hold = max(1, int(p["hold"]))
+        signal = _np.zeros(len(df))
+        confidence = _np.zeros(len(df))
+        for i in range(len(df)):
+            if raw[i] != 0.0:
+                end = min(len(df), i + hold)
+                signal[i:end] = raw[i]
+                confidence[i:end] = min(1.0, abs(float(score[i])))
+        gate = _np.ones(len(df))
+        return _frame(signal, confidence, gate, df.index)
+
+
 STRATEGIES: dict[str, type[BaseStrategy]] = {
     "trend_follow": TrendFollow,
     "mean_reversion": MeanReversion,
@@ -522,6 +840,13 @@ STRATEGIES: dict[str, type[BaseStrategy]] = {
     "rsi_divergence": RsiDivergence,
     "bollinger_squeeze": BollingerSqueeze,
     "sar_reversal": SarReversal,
+    "supertrend": SupertrendTrend,
+    "keltner_breakout": KeltnerBreakout,
+    "macd_cross": MacdCross,
+    "connors_rsi2": ConnorsRsi2,
+    "stoch_cross": StochCross,
+    "heikin_ashi_trend": HeikinAshiTrend,
+    "pattern_confluence": PatternConfluence,
 }
 
 
@@ -612,3 +937,48 @@ def rank_strategies(frames: dict[str, _pd.DataFrame], close: _pd.Series,
         return df
     df["score"] = df["sharpe"] - 2.0 * df["turnover"]
     return df.sort_values("score", ascending=False)
+
+
+def optimize_params(name: str, df: _pd.DataFrame, grid: dict,
+                    metric: str = "sharpe", fee_bps: float = 5.0) -> _pd.DataFrame:
+    """TuneTA-lite: grid-search a strategy's params on the vector engine.
+
+    ``grid`` maps param names to lists of values; every combination is
+    run through the fast vector backtester and ranked by ``metric``
+    (``sharpe`` | ``total_return`` | ``calmar`` | ``profit_factor``...).
+    Returns a DataFrame with one row per combination, best first —
+    plus ``n_trials`` so the caller can feed it to ``deflated_sharpe``.
+    """
+    from itertools import product
+
+    from .backtest import VectorBacktester
+
+    df = ensure_ohlcv(df)
+    keys = list(grid)
+    combos = list(product(*[grid[k] for k in keys]))
+    bt = VectorBacktester(fee_bps=fee_bps)
+    rows = []
+    for combo in combos:
+        params = dict(zip(keys, combo))
+        try:
+            strat = get_strategy(name, **params)
+            frame = strat.generate_signals(df)
+            pos = _pd.Series(_np.sign(frame["signal"].to_numpy(dtype=float)),
+                             index=df.index)
+            res = bt.run(df, pos)
+            row = {"n_trials": len(combos)}
+            row.update({k: v for k, v in params.items()})
+            row.update({
+                "sharpe": res["sharpe"], "total_return": res["total_return"],
+                "max_dd": res["max_dd"], "turnover": res["turnover"],
+            })
+            rows.append(row)
+        except Exception as e:
+            _log.debug("optimize %s %s failed: %s", name, params, e)
+            continue
+    if not rows:
+        return _pd.DataFrame()
+    out = _pd.DataFrame(rows)
+    if metric in out.columns:
+        out = out.sort_values(metric, ascending=False)
+    return out.reset_index(drop=True)

@@ -46,7 +46,9 @@ def _require_pandas() -> None:
 
 
 
-__all__ = ["LABELS", "CODES", "RegimeDetector"]
+__all__ = ["LABELS", "CODES", "RegimeDetector", "HMMRegimeDetector",
+           "transition_matrix", "expected_durations", "persistence_score",
+           "regime_playbook"]
 
 LABELS = ("TREND_UP", "TREND_DOWN", "RANGE", "SQUEEZE", "PANIC")
 CODES = {name: i for i, name in enumerate(LABELS)}
@@ -200,4 +202,187 @@ class RegimeDetector:
             "squeeze_to_expansion": prev == "SQUEEZE"
             and now in ("TREND_UP", "TREND_DOWN", "PANIC"),
             "panic_onset": now == "PANIC" and prev != "PANIC",
+        }
+
+
+# ── sweep additions: HMM detector, transition analytics, playbook ───────
+
+def transition_matrix(labels) -> _pd.DataFrame:
+    """Empirical P(next | current) over a label series."""
+    lab = _pd.Series(labels).reset_index(drop=True)
+    states = sorted(lab.unique())
+    mat = _pd.DataFrame(0.0, index=states, columns=states)
+    for a, b in zip(lab.iloc[:-1], lab.iloc[1:]):
+        mat.loc[a, b] += 1.0
+    return mat.div(mat.sum(axis=1).replace(0, 1), axis=0).fillna(0.0)
+
+
+def expected_durations(labels) -> dict:
+    """Mean bars spent per visit, per regime (from the transition matrix)."""
+    mat = transition_matrix(labels)
+    out = {}
+    for s in mat.index:
+        p_stay = float(mat.loc[s, s])
+        out[str(s)] = float(1.0 / (1.0 - p_stay)) if p_stay < 1.0 else float(
+            (labels == s).sum())
+    return out
+
+
+def persistence_score(labels) -> float:
+    """Fraction of bars where the regime did not change (stability)."""
+    lab = _pd.Series(labels).reset_index(drop=True)
+    if len(lab) < 2:
+        return 1.0
+    return float((lab.iloc[1:].to_numpy() == lab.iloc[:-1].to_numpy()).mean())
+
+
+def regime_playbook() -> dict:
+    """Regime → action table: favored/avoided strategy kinds + exposure.
+
+    The actionability the detector was missing. Grounded in the standard
+    practitioner mapping (trend systems in trends, fades in ranges,
+    breakouts out of squeezes, risk-off in panic).
+    """
+    return {
+        "TREND_UP": {
+            "favor": ["trend", "momentum", "breakout"],
+            "avoid": ["meanrev", "reversal"],
+            "exposure_mult": 1.0,
+            "note": "Ride with the trend; fade counter-trend signals.",
+        },
+        "TREND_DOWN": {
+            "favor": ["trend", "momentum", "breakout"],
+            "avoid": ["meanrev", "reversal"],
+            "exposure_mult": 1.0,
+            "note": "Ride with the trend; fade counter-trend signals.",
+        },
+        "RANGE": {
+            "favor": ["meanrev", "reversal", "confluence"],
+            "avoid": ["trend", "breakout"],
+            "exposure_mult": 0.8,
+            "note": "Fade extremes; trend systems chop here.",
+        },
+        "SQUEEZE": {
+            "favor": ["breakout", "squeeze", "confluence"],
+            "avoid": ["meanrev"],
+            "exposure_mult": 0.6,
+            "note": "Energy compressing — size for the expansion, not the chop.",
+        },
+        "PANIC": {
+            "favor": ["confluence"],
+            "avoid": ["trend", "momentum", "breakout", "meanrev"],
+            "exposure_mult": 0.3,
+            "note": "Risk-off: correlations go to 1, systems break. Small or flat.",
+        },
+    }
+
+
+def hmm_available() -> bool:
+    try:
+        import hmmlearn  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class HMMRegimeDetector:
+    """4-state Gaussian HMM regime detector (vol × trend decomposition).
+
+    Mined from the hmmlearn-based market-regime repos: states are learned
+    from (log returns, rolling vol, momentum) via Baum-Welch and decoded
+    with Viterbi, then mapped onto interpretable labels:
+
+    - low vol + uptrend   → TREND_UP
+    - low vol + downtrend → TREND_DOWN
+    - high vol            → PANIC (down) / TREND_UP volatile (up)
+    - near-zero drift     → RANGE / SQUEEZE by volatility level
+
+    Requires ``hmmlearn`` (optional); without it, ``fit`` falls back to
+    the rule-based :class:`RegimeDetector` and reports ``method="rule"``.
+    """
+
+    def __init__(self, n_states: int = 4, window: int = 20,
+                 n_iter: int = 100, random_state: int = 42):
+        self.n_states = max(2, int(n_states))
+        self.window = max(5, int(window))
+        self.n_iter = max(10, int(n_iter))
+        self.random_state = int(random_state)
+        self.model = None
+        self.state_labels: dict[int, str] = {}
+
+    def _features(self, df: _pd.DataFrame) -> _np.ndarray:
+        df = ensure_ohlcv(df)
+        c = df["close"].astype(float)
+        lr = _np.log(c / c.shift(1)).fillna(0.0)
+        vol = lr.rolling(self.window, min_periods=5).std().bfill().fillna(1e-9)
+        mom = lr.rolling(self.window, min_periods=5).mean().bfill().fillna(0.0)
+        X = _np.column_stack([lr.to_numpy(), vol.to_numpy(), mom.to_numpy()])
+        mu = X.mean(axis=0)
+        sd = X.std(axis=0) + 1e-12
+        return (X - mu) / sd
+
+    def _map_states(self, X: _np.ndarray, states: _np.ndarray) -> dict:
+        mapping = {}
+        for s in range(self.n_states):
+            mask = states == s
+            if mask.sum() == 0:
+                mapping[s] = "RANGE"
+                continue
+            m_ret = float(X[mask, 0].mean())
+            m_vol = float(X[mask, 1].mean())
+            m_mom = float(X[mask, 2].mean())
+            if m_vol > 0.75:
+                mapping[s] = "PANIC" if m_mom <= 0 else "TREND_UP"
+            elif abs(m_mom) > 0.35 or abs(m_ret) > 0.25:
+                mapping[s] = "TREND_UP" if m_mom >= 0 else "TREND_DOWN"
+            elif m_vol < -0.5:
+                mapping[s] = "SQUEEZE"
+            else:
+                mapping[s] = "RANGE"
+        return mapping
+
+    def fit(self, df: _pd.DataFrame) -> _pd.DataFrame:
+        """State label per bar + ``method`` used ('hmm' or 'rule')."""
+        df = ensure_ohlcv(df)
+        if not hmm_available():
+            frame = RegimeDetector().fit(df)
+            frame["method"] = "rule"
+            return frame[["label", "method"]]
+        from hmmlearn.hmm import GaussianHMM
+
+        X = self._features(df)
+        try:
+            self.model = GaussianHMM(
+                n_components=self.n_states, covariance_type="diag",
+                n_iter=self.n_iter, random_state=self.random_state)
+            states = self.model.fit_predict(X)
+        except Exception:
+            frame = RegimeDetector().fit(df)
+            frame["method"] = "rule"
+            return frame[["label", "method"]]
+        self.state_labels = self._map_states(X, states)
+        labels = [self.state_labels[int(s)] for s in states]
+        # Viterbi flicker: 3-bar hysteresis, same as the rule detector.
+        lab = _np.array([CODES[l] for l in labels])
+        for i in range(1, len(lab)):
+            if lab[i] != lab[i - 1]:
+                j = i
+                while j < len(lab) and lab[j] == lab[i]:
+                    j += 1
+                if j - i < 3:
+                    lab[i:j] = lab[i - 1]
+        labels = [LABELS[int(c)] for c in lab]
+        out = _pd.DataFrame({"label": labels,
+                             "state": [int(s) for s in states],
+                             "method": "hmm"}, index=df.index)
+        return out
+
+    def current(self, df: _pd.DataFrame) -> dict:
+        frame = self.fit(df)
+        last = frame.iloc[-1]
+        return {
+            "label": str(last["label"]),
+            "method": str(last["method"]),
+            "persistence": persistence_score(frame["label"]),
+            "expected_durations": expected_durations(frame["label"]),
         }

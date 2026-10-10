@@ -57,9 +57,13 @@ __all__ = [
     "fetch_ohlcv",
     "fetch_binance",
     "fetch_coinbase",
+    # ── sweep additions: keyless public feeds + cache ──
+    "fetch_kraken",
+    "fetch_bybit",
+    "cache_clear",
 ]
 
-SOURCES = ("binance", "coinbase")
+SOURCES = ("binance", "coinbase", "kraken", "bybit")
 
 _BINANCE_INTERVALS = (
     "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
@@ -209,13 +213,13 @@ def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
 
 def fetch_ohlcv(source: str, symbol: str, interval: str = "1h",
                 limit: int = 200, *, vault=None, http=None,
-                connector=None) -> _pd.DataFrame:
-    """OHLCV from any supported connector source.
+                connector=None, cache_ttl: int = 300) -> _pd.DataFrame:
+    """OHLCV from any supported source.
 
-    ``source`` is one of ``SOURCES`` (``"binance"`` | ``"coinbase"``);
-    ``symbol`` is the venue's format (``"BTCUSDT"`` / ``"BTC-USD"`` —
-    the common forms are normalized). Raises ``ValueError`` on unknown
-    sources and fails fast when the connector is not connected.
+    ``source`` is one of ``SOURCES``. ``binance``/``coinbase`` go through
+    the connector layer; ``kraken``/``bybit`` use keyless public endpoints
+    (stdlib urllib — no credentials, no connector). Results are cached on
+    disk for ``cache_ttl`` seconds (0 disables).
     """
     src = (source or "").strip().lower()
     if src == "binance":
@@ -224,6 +228,190 @@ def fetch_ohlcv(source: str, symbol: str, interval: str = "1h",
     if src == "coinbase":
         return fetch_coinbase(symbol, interval, limit, vault=vault,
                               http=http, connector=connector)
+    if src == "kraken":
+        return _cached("kraken", symbol, interval, limit, cache_ttl,
+                       fetch_kraken, symbol, interval, limit)
+    if src == "bybit":
+        return _cached("bybit", symbol, interval, limit, cache_ttl,
+                       fetch_bybit, symbol, interval, limit)
     raise ValueError(
         f"unknown OHLCV source {source!r}; supported: "
         f"{', '.join(SOURCES)}")
+
+
+# ── keyless public feeds + disk cache ────────────────────────────────────
+
+def _cache_dir() -> "os.PathLike":
+    import os
+
+    d = os.path.join(os.path.expanduser("~"), ".cache", "devon", "ta_feeds")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cache_key(source: str, symbol: str, interval: str, limit: int) -> str:
+    import hashlib
+
+    raw = f"{source}|{symbol}|{interval}|{limit}".encode()
+    return hashlib.sha256(raw).hexdigest() + ".pkl"
+
+
+def _cache_get(key: str, ttl: int):
+    import os
+    import pickle
+
+    if ttl <= 0:
+        return None
+    path = os.path.join(_cache_dir(), key)
+    try:
+        if not os.path.exists(path):
+            return None
+        if time.time() - os.path.getmtime(path) > ttl:
+            return None
+        with open(path, "rb") as fh:
+            df = pickle.load(fh)
+        _log.debug("feed cache hit: %s", key)
+        return ensure_ohlcv(df)
+    except Exception as e:
+        _log.debug("feed cache miss (%s): %s", key, e)
+        return None
+
+
+def _cache_set(key: str, df: _pd.DataFrame) -> None:
+    import os
+    import pickle
+
+    try:
+        with open(os.path.join(_cache_dir(), key), "wb") as fh:
+            pickle.dump(df, fh, protocol=4)
+    except Exception as e:
+        _log.debug("feed cache write failed: %s", e)
+
+
+def _cached(source, symbol, interval, limit, ttl, fn, *args):
+    key = _cache_key(source, symbol, interval, limit)
+    hit = _cache_get(key, ttl)
+    if hit is not None:
+        return hit
+    df = fn(*args)
+    _cache_set(key, df)
+    return df
+
+
+def cache_clear() -> int:
+    """Drop all cached feed frames. Returns files removed."""
+    import os
+
+    d = _cache_dir()
+    n = 0
+    for f in os.listdir(d):
+        try:
+            os.remove(os.path.join(d, f))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _http_get_json(url: str, params: dict, timeout: int = 15) -> dict:
+    import json
+    import urllib.parse
+    import urllib.request
+
+    full = url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(full, headers={"User-Agent": "devon-ta/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+_KRAKEN_INTERVALS = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+                     "4h": 240, "1d": 1440, "1w": 10080}
+
+def _kraken_pair(symbol: str) -> str:
+    """Normalize to Kraken's pair format.
+
+    Fiat quotes use the X/Z convention (BTC/USD → ``XXBTZUSD``);
+    stablecoin quotes use the modern altname (BTC/USDT → ``XBTUSDT``).
+    """
+    s = (symbol or "").strip().upper().replace("-", "").replace("/", "")
+    for quote in ("USDT", "USDC", "USD", "EUR"):
+        if s.endswith(quote) and len(s) > len(quote):
+            base = s[:-len(quote)]
+            if quote in ("USD", "EUR"):
+                b = {"BTC": "XXBT", "ETH": "XETH"}.get(base, base)
+                return b + "Z" + quote
+            b = {"BTC": "XBT"}.get(base, base)
+            return b + quote
+    return s
+
+
+def fetch_kraken(symbol: str, interval: str = "1h",
+                 limit: int = 200) -> _pd.DataFrame:
+    """Kraken public OHLC — no key needed (stdlib urllib only).
+
+    ``symbol`` like ``"BTCUSDT"`` / ``"BTC-USD"`` is normalized to
+    Kraken's pair format. Returns up to 720 candles per call.
+    """
+    iv = (interval or "").strip()
+    if iv not in _KRAKEN_INTERVALS:
+        raise ValueError(
+            f"unsupported kraken interval {interval!r}; choose from "
+            f"{', '.join(_KRAKEN_INTERVALS)}")
+    pair = _kraken_pair(symbol)
+    data = _http_get_json("https://api.kraken.com/0/public/OHLC",
+                          {"pair": pair, "interval": _KRAKEN_INTERVALS[iv]})
+    if data.get("error"):
+        raise RuntimeError(f"kraken error for {pair}: {data['error']}")
+    result = data.get("result") or {}
+    rows = None
+    for k, v in result.items():
+        if k != "last" and isinstance(v, list):
+            rows = v
+            break
+    if not rows:
+        raise RuntimeError(f"kraken returned no candles for {pair}")
+    rows = rows[-max(1, min(int(limit), 720)):]
+    df = _pd.DataFrame([
+        {"open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+         "close": float(r[4]), "volume": float(r[6])}
+        for r in rows
+    ], index=_pd.to_datetime([r[0] for r in rows], unit="s", utc=True))
+    return ensure_ohlcv(df)
+
+
+_BYBIT_INTERVALS = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
+                    "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
+
+
+def fetch_bybit(symbol: str, interval: str = "1h",
+                limit: int = 200) -> _pd.DataFrame:
+    """Bybit public klines (v5) — no key needed (stdlib urllib only).
+
+    ``symbol`` like ``"BTCUSDT"``; ``category`` is spot by default.
+    """
+    iv = (interval or "").strip()
+    if iv not in _BYBIT_INTERVALS:
+        raise ValueError(
+            f"unsupported bybit interval {interval!r}; choose from "
+            f"{', '.join(_BYBIT_INTERVALS)}")
+    sym = (symbol or "").strip().upper().replace("-", "").replace("/", "")
+    if not sym:
+        raise ValueError("symbol is required (e.g. 'BTCUSDT')")
+    data = _http_get_json(
+        "https://api.bybit.com/v5/market/kline",
+        {"category": "spot", "symbol": sym,
+         "interval": _BYBIT_INTERVALS[iv],
+         "limit": max(1, min(int(limit), 1000))})
+    if str(data.get("retCode")) != "0":
+        raise RuntimeError(
+            f"bybit error for {sym}: {data.get('retMsg')}")
+    rows = (data.get("result") or {}).get("list") or []
+    if not rows:
+        raise RuntimeError(f"bybit returned no klines for {sym}")
+    rows = sorted(rows, key=lambda r: int(r[0]))
+    df = _pd.DataFrame([
+        {"open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+         "close": float(r[4]), "volume": float(r[5])}
+        for r in rows
+    ], index=_pd.to_datetime([int(r[0]) for r in rows], unit="ms", utc=True))
+    return ensure_ohlcv(df)

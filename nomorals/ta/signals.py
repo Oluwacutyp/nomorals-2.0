@@ -13,7 +13,7 @@ doesn't flicker.
 from __future__ import annotations
 
 
-from .math import softmax
+from .math import effective_n, softmax
 
 
 # ── lazy optional deps ──────────────────────────────────────────────────
@@ -59,6 +59,13 @@ __all__ = [
     "hysteresis_position",
     "disagreement_filter",
     "fuse_all",
+    # ── sweep additions ──
+    "strategy_correlation",
+    "fuse_diversified",
+    "fuse_stacked",
+    "explain_vote",
+    "vote_quality",
+    "min_hold_position",
 ]
 
 KINDS = ("trend", "meanrev", "breakout", "momentum", "squeeze", "reversal",
@@ -210,3 +217,185 @@ def fuse_all(frames: dict, kind_weights: dict | None = None,
     pos = pos * mask
     return {"blend": blend, "position": pos.rename("position"),
             "enter_threshold": enter, "n_strategies": len(frames)}
+
+
+# ── sweep additions: diversification, stacking, explanation ──────────────
+
+def strategy_correlation(frames: dict) -> _pd.DataFrame:
+    """Pairwise correlation of confidence-weighted strategy votes.
+
+    Correlated strategies double-count the same bet — this matrix is the
+    input to the diversification penalty.
+    """
+    if not frames:
+        return _pd.DataFrame()
+    names = list(frames)
+    votes = _np.column_stack([
+        _np.sign(frames[n]["signal"].to_numpy(dtype=float))
+        * frames[n]["confidence"].to_numpy(dtype=float)
+        for n in names
+    ])
+    with _np.errstate(invalid="ignore", divide="ignore"):
+        corr = _np.corrcoef(votes, rowvar=False)
+    corr = _np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+    _np.fill_diagonal(corr, 1.0)
+    return _pd.DataFrame(corr, index=names, columns=names)
+
+
+def fuse_diversified(frames: dict, kind_weights: dict | None = None,
+                     lookup: dict | None = None,
+                     scores: dict | None = None,
+                     div_strength: float = 1.0) -> _pd.DataFrame:
+    """Vote penalized by strategy correlation (risk-parity over strategies).
+
+    Each strategy's weight is multiplied by ``1 / (1 + mean|corr|)`` —
+    a committee of clones collapses toward one vote, while genuinely
+    independent strategies keep their weight. ``div_strength`` scales the
+    penalty (0 = plain weighted vote).
+    """
+    if not frames:
+        return _pd.DataFrame(columns=["vote", "agreement", "n"])
+    corr = strategy_correlation(frames)
+    names = list(frames)
+    div = {}
+    for n in names:
+        others = [c for c in names if c != n]
+        mean_corr = float(_np.abs(
+            corr.loc[n, others]).mean()) if others else 0.0
+        div[n] = 1.0 / (1.0 + float(div_strength) * mean_corr)
+    # Fold the diversification factor into per-strategy scores.
+    adj_scores = {n: float((scores or {}).get(n, 0.0))
+                  + _np.log(max(div[n], 1e-9)) for n in names}
+    return fuse_weighted(frames, kind_weights, lookup, adj_scores)
+
+
+def fuse_stacked(frames: dict, close: _pd.Series, horizon: int = 5,
+                 kind_weights: dict | None = None,
+                 lookup: dict | None = None) -> _pd.DataFrame:
+    """Logistic stacking over strategy votes (sklearn-optional).
+
+    Trains P(next-``horizon``-bar return > 0 | committee votes) with a
+    TimeSeriesSplit; the vote becomes the stacked probability recentered
+    to [-1, 1]. Falls back to ``fuse_weighted`` when sklearn is missing
+    or the fit fails — never a hard dependency.
+    """
+    try:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+    except ImportError:
+        return fuse_weighted(frames, kind_weights, lookup)
+    if not frames:
+        return _pd.DataFrame(columns=["vote", "agreement", "n"])
+    names = list(frames)
+    idx = frames[names[0]].index
+    X = _np.column_stack([
+        _np.sign(frames[n]["signal"].to_numpy(dtype=float))
+        * frames[n]["confidence"].to_numpy(dtype=float)
+        * frames[n]["gate"].to_numpy(dtype=float)
+        for n in names
+    ])
+    fwd = (close.reindex(idx).astype(float).shift(-horizon)
+           / (close.reindex(idx).astype(float) + 1e-12) - 1.0)
+    y = (fwd.fillna(0.0).to_numpy() > 0).astype(int)
+    usable = _np.arange(len(idx)) < len(idx) - horizon
+    if usable.sum() < 50 or len(_np.unique(y[usable])) < 2:
+        return fuse_weighted(frames, kind_weights, lookup)
+    try:
+        clf = make_pipeline(StandardScaler(),
+                            LogisticRegression(max_iter=500, C=1.0))
+        # Fit on the first 70% (time-ordered), predict the rest OOF-style.
+        cut = int(usable.sum() * 0.7)
+        order = _np.where(usable)[0]
+        clf.fit(X[order[:cut]], y[order[:cut]])
+        proba = _np.full(len(idx), 0.5)
+        proba[order[cut:]] = clf.predict_proba(X[order[cut:]])[:, 1]
+        proba[:order[cut][0] if len(order[cut]) else 0] = 0.5
+    except Exception:
+        return fuse_weighted(frames, kind_weights, lookup)
+    vote = _pd.Series(2.0 * proba - 1.0, index=idx, name="vote")
+    base = fuse_weighted(frames, kind_weights, lookup)
+    out = base.copy()
+    out["vote"] = vote
+    out["stack_proba"] = proba
+    return out
+
+
+def explain_vote(frames: dict, blend: _pd.DataFrame,
+                 kind_weights: dict | None = None,
+                 lookup: dict | None = None,
+                 at: int = -1) -> _pd.DataFrame:
+    """Per-strategy contribution table at bar ``at`` — the committee, shown.
+
+    Columns: signal, confidence, gate, kind, weight, contribution
+    (weight × signed vote, i.e. how much this strategy moved the needle).
+    Sorted by |contribution|, best first.
+    """
+    if not frames or blend.empty:
+        return _pd.DataFrame()
+    kw = adaptive_kind_weights(
+        None if kind_weights is None else {k: 0.0 for k in KINDS})
+    if kind_weights:
+        tot = sum(max(0.0, float(v)) for v in kind_weights.values()) or 1.0
+        kw = {k: max(0.0, float(kind_weights.get(k, 1.0))) / tot * len(KINDS)
+              for k in KINDS}
+    rows = []
+    for n, s in frames.items():
+        sig = float(_np.sign(s["signal"].iloc[at]))
+        conf = float(s["confidence"].iloc[at])
+        gate = float(s["gate"].iloc[at])
+        w = conf * gate * kw.get(kind_of(n, lookup), 1.0)
+        rows.append({"strategy": n, "kind": kind_of(n, lookup),
+                     "signal": sig, "confidence": round(conf, 3),
+                     "gate": round(gate, 3),
+                     "weight": round(w, 4),
+                     "contribution": round(sig * w, 4)})
+    df = _pd.DataFrame(rows).set_index("strategy")
+    return df.reindex(
+        df["contribution"].abs().sort_values(ascending=False).index)
+
+
+def vote_quality(blend: _pd.DataFrame) -> dict:
+    """How much is this vote worth? Agreement, concentration, breadth."""
+    if blend.empty:
+        return {"agreement": 0.0, "effective_n": 0.0, "hhi": 0.0}
+    agr = blend["agreement"].to_numpy(dtype=float)
+    vote = blend["vote"].to_numpy(dtype=float)
+    mag = _np.abs(vote)
+    tot = mag.sum()
+    if tot <= 1e-12:
+        hhi, eff = 0.0, 0.0
+    else:
+        p = mag / tot
+        hhi = float((p ** 2).sum())
+        eff = float(1.0 / (hhi + 1e-12))
+    return {
+        "agreement": float(agr[-1]),
+        "mean_agreement": float(agr.mean()),
+        "effective_n": eff,          # independent bets in the vote mass
+        "hhi": hhi,                 # concentration (1 = one bar decides)
+        "vote_now": float(vote[-1]),
+    }
+
+
+def min_hold_position(position: _pd.Series,
+                      min_bars: int = 3) -> _pd.Series:
+    """Enforce a minimum holding period — kills churn from flicker.
+
+    A new position must survive ``min_bars`` before it may flip or exit.
+    """
+    v = _np.asarray(position, dtype=float)
+    out = _np.zeros(len(v))
+    state = 0.0
+    held = 0
+    for i in range(len(v)):
+        want = v[i]
+        if want != state:
+            if held >= min_bars or state == 0.0:
+                state, held = want, 0
+            # else: hold the current state — the flip was noise
+        else:
+            held += 1
+        out[i] = state
+    return _pd.Series(out, index=position.index, name="position")
