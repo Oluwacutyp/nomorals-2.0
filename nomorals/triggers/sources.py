@@ -15,6 +15,12 @@ Each source knows how to decide "did it fire?" for one evaluation:
 * ``message`` — evaluated by ``TriggerEngine.on_message`` (regex + optional
   chat/sender filters).
 * ``webhook`` — evaluated by ``TriggerEngine.fire_webhook``.
+* ``entity_state`` — evaluated by ``TriggerEngine.on_entity_state``
+  (Home Assistant state_changed).
+* ``bus`` — evaluated by ``TriggerEngine.on_bus_event``: any event on
+  the shared event bus (glob topic + data subset match).  This is the
+  cross-system wiring — a finished scheduler job, a mission terminal
+  state, or another trigger's fire can wake a trigger.
 """
 
 from __future__ import annotations
@@ -156,6 +162,42 @@ def match_message(trigger: Any, text: str, chat_key: str,
         return False, {"reason": "no_match"}
     return True, {"pattern": cond["pattern"], "chat": chat_key,
                   "matched": m.group(0)[:200]}
+
+
+def match_bus(trigger: Any, event: Any) -> tuple[bool, dict[str, Any]]:
+    """Check one bus event against a bus-source trigger.
+
+    ``event`` is a ``core.events.Event`` (or a duck-typed object with
+    ``topic``/``data``/``source``).  The condition's ``topic`` glob must
+    match, ``source`` (when set) must equal the event source, and every
+    ``match`` key/value must be present and equal in ``event.data``.
+    """
+    import fnmatch as _fnmatch
+
+    cond = trigger.condition
+    topic = str(getattr(event, "topic", "") or "")
+    if not _fnmatch.fnmatchcase(topic, str(cond.get("topic") or "")):
+        return False, {"reason": "topic_mismatch", "topic": topic}
+    want_source = cond.get("source")
+    event_source = str(getattr(event, "source", "") or "")
+    if want_source and want_source != event_source:
+        return False, {"reason": "source_mismatch", "source": event_source}
+    data = getattr(event, "data", None) or {}
+    if not isinstance(data, dict):
+        data = {}
+    want_match = cond.get("match") or {}
+    for key, expected in want_match.items():
+        if data.get(key) != expected:
+            return False, {"reason": "data_mismatch", "key": key,
+                           "topic": topic}
+    evidence = {"topic": topic, "source": event_source,
+                "event_id": str(getattr(event, "event_id", "") or "")}
+    # carry a compact projection of the event data for the action/history
+    try:
+        evidence["data"] = {str(k): v for k, v in list(data.items())[:12]}
+    except Exception:  # noqa: BLE001 - evidence is best-effort
+        pass
+    return True, evidence
 
 
 def match_entity_state(trigger: Any, entity_id: str,

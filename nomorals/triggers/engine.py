@@ -13,6 +13,11 @@ Design notes:
   anything else that wants to feed messages in.
 * **Webhook sources are event-driven** via :meth:`fire_webhook`, served
   by ``triggers.webhook.register_trigger_routes`` on the API server.
+* **Bus sources are event-driven** via :meth:`attach_bus`: any event on
+  the shared event bus (scheduler job finished, mission terminal,
+  another trigger fired, …) is matched against ``bus``-source triggers.
+  This is the cross-system wiring — systems wake each other through the
+  bus instead of hoping.
 * Resilience: one trigger's failing action is logged with the trigger
   id and recorded — it never kills the engine or other triggers.
   Disabled triggers never fire; the check happens at fire time, so a
@@ -38,6 +43,7 @@ from .models import (
     OUTCOME_FIRED,
     OUTCOME_NO_MATCH,
     OUTCOME_SKIPPED,
+    SOURCE_BUS,
     SOURCE_ENTITY_STATE,
     SOURCE_FILE,
     SOURCE_MESSAGE,
@@ -53,6 +59,7 @@ from .sources import (
     SCHEDULER_ACTION,
     evaluate_file,
     evaluate_price,
+    match_bus,
     match_entity_state,
     match_message,
     schedule_plan,
@@ -126,9 +133,93 @@ class TriggerEngine:
         self._clock = clock
         #: per-trigger source memory (file baselines, last prices)
         self._source_state: dict[str, dict[str, Any]] = {}
+        #: bus attachment (attach_bus): the bus object + subscription id
+        self._bus: Any = None
+        self._bus_sub_id: str | None = None
+        #: re-entrancy guard: a trigger firing publishes trigger.fired on
+        #: the bus, which can legitimately chain into another bus trigger —
+        #: cap the nesting so a cyclic chain degrades instead of recursing
+        #: forever.
+        self._bus_depth = 0
         self._running = False
         self._poll_thread: threading.Thread | None = None
         _log.info("TriggerEngine initialized")
+
+    # ── event-bus source (cross-system triggering) ───────────────────────
+
+    def attach_bus(self, bus: Any = None) -> str:
+        """Subscribe to the shared event bus so ``bus``-source triggers
+        fire on matching events.
+
+        This is what makes the bus real instead of telemetry-only: a
+        ``scheduler.job.finished`` event can start a mission, a
+        ``mission.terminal`` event can notify, a ``trigger.fired`` event
+        can chain another trigger.  The subscription is synchronous — the
+        match-and-fire runs on the publisher's thread — so handlers stay
+        on the engine's own fast, isolated ``_fire`` path.  Returns the
+        subscription id.  Idempotent: attaching twice reuses the first.
+        """
+        if self._bus_sub_id is not None:
+            return self._bus_sub_id
+        if bus is None:
+            from ..core.events import global_bus
+
+            bus = global_bus
+        self._bus = bus
+        self._bus_sub_id = bus.subscribe("*", self.on_bus_event, sync=True)
+        _log.info("TriggerEngine attached to event bus (sub %s)",
+                  self._bus_sub_id)
+        return self._bus_sub_id
+
+    def detach_bus(self) -> None:
+        """Remove the bus subscription.  Never raises."""
+        try:
+            if self._bus is not None and self._bus_sub_id is not None:
+                self._bus.unsubscribe(self._bus_sub_id)
+        except Exception:  # noqa: BLE001
+            _log.debug("trigger bus detach failed", exc_info=True)
+        finally:
+            self._bus = None
+            self._bus_sub_id = None
+
+    def on_bus_event(self, event: Any) -> list[str]:
+        """Feed one bus event to every enabled bus-source trigger.
+
+        Mirrors :meth:`on_message`: per-trigger isolation, history for
+        every outcome, never raises.  Chain depth is capped
+        (:attr:`_bus_depth`) so cyclic trigger chains degrade loudly
+        instead of recursing.
+        """
+        fired: list[str] = []
+        if self._bus_depth >= 8:
+            _log.warning("trigger bus chain depth exceeded — dropping event %s",
+                         getattr(event, "topic", "?"))
+            return fired
+        self._bus_depth += 1
+        try:
+            for trigger in self.store.list(enabled_only=True,
+                                           source=SOURCE_BUS):
+                try:
+                    hit, evidence = match_bus(trigger, event)
+                except Exception as exc:  # noqa: BLE001 - per-trigger isolation
+                    _log.exception("trigger %s bus match failed", trigger.id)
+                    self.store.record(
+                        trigger.id, OUTCOME_ERROR, {"source": "bus"},
+                        error=f"{type(exc).__name__}: {exc}")
+                    continue
+                if hit:
+                    result = self._fire(
+                        trigger, {"source": "bus", **evidence})
+                    if result["fired"]:
+                        fired.append(trigger.id)
+                else:
+                    self.store.record(
+                        trigger.id, OUTCOME_NO_MATCH,
+                        {"source": "bus",
+                         "topic": getattr(event, "topic", ""), **evidence})
+        finally:
+            self._bus_depth -= 1
+        return fired
 
     # ── scheduler ────────────────────────────────────────────────────────
 
@@ -206,6 +297,7 @@ class TriggerEngine:
     def stop(self) -> None:
         """Stop the poll thread and the scheduler worker."""
         self._running = False
+        self.detach_bus()
         if self._scheduler is not None:
             try:
                 self._scheduler.stop()
@@ -490,6 +582,9 @@ class TriggerEngine:
                            trigger.id, trigger.name, trigger.action)
             self.store.record(trigger.id, OUTCOME_ERROR, dict(evidence),
                               error=f"{type(exc).__name__}: {exc}")
+            self._ledger("error", trigger,
+                         f"{trigger.name} action {trigger.action} failed",
+                         ok=False, learned=f"{type(exc).__name__}: {exc}"[:200])
             return {"fired": False, "outcome": OUTCOME_ERROR,
                     "error": f"{type(exc).__name__}: {exc}"}
         self.store.record(trigger.id, OUTCOME_FIRED,
@@ -498,6 +593,11 @@ class TriggerEngine:
                           fired=True)
         _log.info("trigger %s (%s) fired action %s",
                   trigger.id, trigger.name, trigger.action)
+        self._ledger("fired", trigger,
+                     f"{trigger.name} fired action {trigger.action}",
+                     metadata={"evidence": {k: v for k, v in evidence.items()
+                                            if isinstance(v, (str, int, float,
+                                                              bool))}})
         _emit("trigger.fired", {
             "trigger_id": trigger.id,
             "name": trigger.name,
@@ -505,6 +605,24 @@ class TriggerEngine:
             "evidence": dict(evidence),
         })
         return {"fired": True, "outcome": OUTCOME_FIRED, "result": result}
+
+    # ── autonomy ledger ──────────────────────────────────────────────────
+    def _ledger(self, kind: str, trigger: Trigger, summary: str, *,
+                ok: bool = True, learned: str = "",
+                metadata: dict[str, Any] | None = None) -> None:
+        """Journal a trigger event into the unified autonomy ledger
+        (best-effort).  The ledger answers "what has the automation been
+        doing" across scheduler, missions, triggers, and the pulse."""
+        try:
+            from ..agents.autonomy_ledger import record_ledger
+
+            record_ledger(self.db, "trigger", kind, trigger.id, summary,
+                          ok=ok, learned=learned,
+                          metadata={"trigger": trigger.name,
+                                    "source": trigger.source,
+                                    **(metadata or {})})
+        except Exception:  # noqa: BLE001 - ledger never breaks firing
+            _log.debug("trigger ledger write failed", exc_info=True)
 
 
 def _jsonable(value: Any) -> Any:

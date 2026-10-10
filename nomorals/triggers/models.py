@@ -28,9 +28,10 @@ SOURCE_PRICE = "price"
 SOURCE_MESSAGE = "message"
 SOURCE_WEBHOOK = "webhook"
 SOURCE_ENTITY_STATE = "entity_state"
+SOURCE_BUS = "bus"
 SOURCES = frozenset(
     {SOURCE_SCHEDULE, SOURCE_FILE, SOURCE_PRICE, SOURCE_MESSAGE,
-     SOURCE_WEBHOOK, SOURCE_ENTITY_STATE}
+     SOURCE_WEBHOOK, SOURCE_ENTITY_STATE, SOURCE_BUS}
 )
 
 #: actions a trigger can take
@@ -346,6 +347,38 @@ def _validate_action_params(action: str,
     return params
 
 
+def _validate_bus(condition: dict[str, Any]) -> dict[str, Any]:
+    """Validate a bus-source condition.
+
+    ``topic`` (required): a glob the event topic must match, e.g.
+    ``"scheduler.job.finished"`` or ``"mission.*"``.  ``match`` (optional):
+    a dict of ``event.data`` key/value pairs that must all be present and
+    equal (subset match).  ``source`` (optional): the event's source
+    module must equal it.
+    """
+    import fnmatch as _fnmatch
+
+    topic = str(condition.get("topic") or "").strip()
+    if not topic:
+        raise TriggerError("bus condition needs 'topic' (a glob, e.g. "
+                           "'scheduler.job.finished' or 'mission.*')")
+    # fail fast on a glob that can never match anything sane
+    try:
+        _fnmatch.fnmatchcase("", topic)
+    except Exception as exc:  # noqa: BLE001 - defensive; fnmatch rarely raises
+        raise TriggerError(f"bad bus topic glob {topic!r}: {exc}")
+    out: dict[str, Any] = {"topic": topic}
+    match = condition.get("match")
+    if match is not None:
+        if not isinstance(match, dict):
+            raise TriggerError("bus condition 'match' must be an object")
+        out["match"] = {str(k): v for k, v in match.items()}
+    source = str(condition.get("source") or "").strip()
+    if source:
+        out["source"] = source
+    return out
+
+
 def _validate_entity_state(condition: dict[str, Any]) -> dict[str, Any]:
     """Validate an entity_state (Home Assistant state_changed) condition.
 
@@ -401,6 +434,8 @@ def validate_definition(
         condition = _validate_webhook(condition)
     elif source == SOURCE_ENTITY_STATE:
         condition = _validate_entity_state(condition)
+    elif source == SOURCE_BUS:
+        condition = _validate_bus(condition)
     params = _validate_action_params(action, action_params)
     try:
         cooldown = float(cooldown_s or 0.0)
