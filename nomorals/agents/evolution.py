@@ -56,9 +56,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..llm.brain import brain_for
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
@@ -439,31 +441,18 @@ class EvolutionAgent:
         # persist a bounded time series
         try:
             if db is not None:
-                row = db.query_one(
-                    "SELECT value FROM kv_store WHERE key=?",
-                    (self._METRICS_KEY,))
-                series: list[dict[str, Any]] = []
-                if row:
-                    try:
-                        series = json.loads(row["value"])
-                    except ValueError:
-                        series = []
+                kv = KVStore(db)
+                series: list[dict[str, Any]] = kv.get(self._METRICS_KEY, default=[])
                 series.append(snapshot)
                 series = series[-200:]
-                db.execute(
-                    "INSERT INTO kv_store (key, value, updated_at) "
-                    "VALUES (?,?,?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-                    "updated_at=excluded.updated_at",
-                    (self._METRICS_KEY, json.dumps(series), time.time()))
+                kv.set(self._METRICS_KEY, series)
         except Exception:  # noqa: BLE001 - telemetry must never break a run
             pass
         # last benchmark score if one was stored
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                               (self._BENCHMARK_KEY,))
-            if row:
-                snapshot["benchmark"] = float(row["value"])
+            val = KVStore(db).get_raw(self._BENCHMARK_KEY)
+            if val:
+                snapshot["benchmark"] = float(val)
         except Exception:  # noqa: BLE001
             pass
         return snapshot
@@ -474,11 +463,8 @@ class EvolutionAgent:
         if db is None:
             return []
         try:
-            row = db.query_one("SELECT value FROM kv_store WHERE key=?",
-                               (self._METRICS_KEY,))
-            if not row:
-                return []
-            return json.loads(row["value"])[-max(1, limit):]
+            data = KVStore(db).get(self._METRICS_KEY, default=[])
+            return data[-max(1, limit):]
         except Exception:  # noqa: BLE001
             return []
 
@@ -595,12 +581,9 @@ class EvolutionAgent:
                              "(use it — avoid re-treading reverted paths, "
                              "respect the measured state):\n" + outcome_ctx)
         if research_id:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (f"evolution.research.{research_id}",))
-            if row:
+            report = KVStore(self.context.db).get(f"evolution.research.{research_id}")
+            if report:
                 try:
-                    report = json.loads(row["value"])
                     context_pack += (
                         "\nResearch report on this topic:\n"
                         + json.dumps({
@@ -673,10 +656,10 @@ class EvolutionAgent:
         user = (f"Repository layout:\n{layout}\n"
                 f"{context_pack}\n\nOwner instruction: {instruction}")
         try:
-            response = router.chat(
+            response = brain_for(self.context).chat(
                 [Message.system(system), Message.user(user)],
                 SamplingParams(temperature=0.0, max_tokens=3000),
-            )
+            task_kind="judge")
         except Exception as exc:  # noqa: BLE001 - planning must never crash chat
             _log.warning("evolver LLM call failed: %s", exc)
             return [], ""
@@ -914,10 +897,10 @@ class EvolutionAgent:
                 + ("\n".join(history) if history else "(none yet)")
             )
             try:
-                response = router.chat(
+                response = brain_for(self.context).chat(
                     [Message.system(system), Message.user(user)],
                     SamplingParams(temperature=0.2, max_tokens=4000),
-                )
+                task_kind="judge")
                 text = getattr(response, "text", "") \
                     if getattr(response, "ok", False) else ""
                 if text:
@@ -949,15 +932,9 @@ class EvolutionAgent:
                 "for the analysis half")
         # store for audit + later plan seeding
         try:
-            db = self.context.db
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                "updated_at = excluded.updated_at",
-                (f"evolution.research.{int(time.time() * 1000)}",
-                 json.dumps(report, default=str), time.time()),
-            )
+            KVStore(self.context.db).set_raw(
+                f"evolution.research.{int(time.time() * 1000)}",
+                json.dumps(report, default=str), "json")
         except Exception as exc:  # noqa: BLE001
             _log.warning("could not persist research report: %s", exc)
         return report
@@ -1122,11 +1099,9 @@ class EvolutionAgent:
         if db is None:
             return None
         try:
-            row = db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (self._BENCHMARK_KEY,))
-            if row:
-                return float(row["value"])
+            val = KVStore(db).get(self._BENCHMARK_KEY)
+            if val is not None:
+                return float(val)
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -1136,12 +1111,7 @@ class EvolutionAgent:
         if db is None:
             return
         try:
-            db.execute(
-                "INSERT OR REPLACE INTO kv_store "
-                "(key, value, kind, updated_at) VALUES (?, ?, 'json', ?)",
-                (self._BENCHMARK_KEY, json.dumps(round(float(score), 4)),
-                 time.time()),
-            )
+            KVStore(db).set(self._BENCHMARK_KEY, round(float(score), 4))
         except Exception:  # noqa: BLE001
             _log.debug("benchmark baseline save failed", exc_info=True)
 
@@ -1459,9 +1429,7 @@ class EvolutionAgent:
         """Owner-queued improvement goals (consumed by autopilot)."""
         action = (action or "list").strip().lower()
         try:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key = 'evolution.queue'")
-            goals = json.loads(row["value"]) if row else []
+            goals = KVStore(self.context.db).get("evolution.queue", default=[])
             if not isinstance(goals, list):
                 goals = []
         except Exception:  # noqa: BLE001
@@ -1476,12 +1444,7 @@ class EvolutionAgent:
         elif action == "pop":
             goals = goals[1:]
         try:
-            self.context.db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES ('evolution.queue', ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                "updated_at = excluded.updated_at",
-                (json.dumps(goals), time.time()))
+            KVStore(self.context.db).set("evolution.queue", goals)
         except Exception as exc:  # noqa: BLE001
             _log.warning("could not persist evolution queue: %s", exc)
         return goals
@@ -1602,29 +1565,22 @@ class EvolutionAgent:
     # ── storage ─────────────────────────────────────────────────────────────
     def _save(self, proposal: EvolutionProposal) -> None:
         try:
-            db = self.context.db
-            db.execute(
-                "INSERT INTO kv_store (key, value, kind, updated_at) "
-                "VALUES (?, ?, 'json', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-                "updated_at = excluded.updated_at",
-                (f"evolution.{proposal.id}",
-                 json.dumps(proposal.to_dict(), default=str), time.time()),
+            KVStore(self.context.db).set_raw(
+                f"evolution.{proposal.id}",
+                json.dumps(proposal.to_dict(), default=str), "json",
             )
         except Exception as exc:  # noqa: BLE001 - audit persistence is best-effort
             _log.warning("could not persist evolution proposal: %s", exc)
 
     def _load(self, proposal_id: str) -> EvolutionProposal | None:
         try:
-            row = self.context.db.query_one(
-                "SELECT value FROM kv_store WHERE key = ?",
-                (f"evolution.{proposal_id}",))
+            data = KVStore(self.context.db).get(f"evolution.{proposal_id}")
         except Exception:  # noqa: BLE001
             return None
-        if not row:
+        if not data:
             return None
         try:
-            return EvolutionProposal.from_dict(json.loads(row["value"]))
+            return EvolutionProposal.from_dict(data)
         except (ValueError, TypeError):
             return None
 
@@ -1633,15 +1589,15 @@ class EvolutionAgent:
         # evolution.* keys (metrics, queue, research) never crowd a
         # proposal out of the limit window
         try:
-            rows = self.context.db.query(
-                "SELECT value FROM kv_store WHERE key LIKE 'evolution.evo-%' "
-                "ORDER BY updated_at DESC LIMIT ?", (limit,))
+            # Keys are evo-<timestamp_ms>, so key order == time order.
+            # Scan is ASC; reverse for most-recent-first.
+            pairs = KVStore(self.context.db).scan("evolution.evo-", limit=limit)
+            pairs = list(reversed(pairs))
         except Exception:  # noqa: BLE001
             return []
         out: list[EvolutionProposal] = []
-        for row in rows:
+        for _key, data in pairs:
             try:
-                data = json.loads(row["value"])
                 if not isinstance(data, dict):
                     continue
                 out.append(EvolutionProposal.from_dict(data))
