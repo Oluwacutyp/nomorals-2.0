@@ -41,7 +41,10 @@ from enum import Enum
 from typing import Any, Callable, Optional, TypeVar
 
 from ..core.logging_setup import get_logger
+from .budgets import BudgetManager
+from .degradation import LadderManager
 from .errors import NoMoralsError
+from .incidents import IncidentJournal
 
 __all__ = [
     "ErrorIntelligence",
@@ -295,11 +298,53 @@ class ErrorKnowledgeBase:
 
 
 class ErrorIntelligence:
-    """Intelligent error analysis and root cause detection."""
-    
-    def __init__(self) -> None:
+    """Intelligent error analysis and root cause detection.
+
+    God-tier upgrade: this is now the facade for the full resilience
+    system —
+    - ``analyze()`` — classify + explain (original behavior, now also
+      remembers the incident and checks for known fixes / chronic patterns)
+    - ``heal()`` — a SelfHealingExecutor for a subsystem: analyze →
+      recover → verify → record
+    - ``journal`` — the incident memory (structural signatures, verified fixes)
+    - ``budgets`` — per-subsystem SRE error budgets with burn-rate alerts
+    - ``ladders`` — degradation ladders with honesty clauses + auto-recovery
+    """
+
+    def __init__(self, *, journal_path: str = ":memory:") -> None:
         self.knowledge_base = ErrorKnowledgeBase()
+        self.journal = IncidentJournal(journal_path)
+        self.budgets = BudgetManager(journal=self.journal)
+        self.ladders = LadderManager()
         _log.info("Error Intelligence System initialized")
+
+    def heal(self, subsystem: str, **kwargs: Any) -> "SelfHealingExecutor":
+        """Get a self-healing executor for a subsystem.
+
+        ``from error_intelligence import ErrorIntelligence;``
+        ``ei.heal("telegram").execute(lambda: send(...), context={...})``
+        """
+        # Local import: selfheal imports this module for types.
+        from .selfheal import SelfHealingExecutor
+        return SelfHealingExecutor(subsystem, journal=self.journal,
+                                   intelligence=self, **kwargs)
+
+    def check_budgets(self) -> list[dict[str, Any]]:
+        """Evaluate every subsystem's error budget. Returns fired alerts."""
+        return [a.to_dict() for a in self.budgets.check_all()]
+
+    def degraded_subsystems(self) -> list[str]:
+        """Subsystems currently running below full capability."""
+        return self.ladders.degraded_subsystems()
+
+    def system_health(self) -> dict[str, Any]:
+        """One snapshot: budgets, ladders, top failing signatures."""
+        return {
+            "budgets": self.budgets.status_all(),
+            "ladders": self.ladders.status_all(),
+            "degraded": self.degraded_subsystems(),
+            "top_failing_24h": self.journal.top_failing(86400, limit=10),
+        }
     
     def analyze(
         self,
@@ -368,7 +413,35 @@ class ErrorIntelligence:
         
         # Log the analysis
         self._log_analysis(analysis)
-        
+
+        # Remember: record the incident, check memory for known fixes and
+        # chronic patterns. Analysis without memory is amnesia.
+        subsystem = (context.get("subsystem") or
+                     context.get("service") or "")
+        try:
+            incident = self.journal.record_incident(
+                exception, subsystem=subsystem,
+                category=category.value, severity=severity.value,
+                context=context)
+            analysis.related_errors = [
+                f"{i.exc_type} @ {i.location}"
+                for i in self.journal.find_similar(exception, subsystem,
+                                                  limit=3)]
+            known = self.journal.known_fix(exception, subsystem)
+            if known:
+                analysis.suggested_fix = (
+                    f"Known fix ({known['strategy']}, verified"
+                    f" {known['successes']}x): {known['detail']}"
+                    f" — {analysis.suggested_fix}")
+            if self.journal.is_chronic(exception, subsystem):
+                analysis.suggested_fix = (
+                    "CHRONIC pattern — this keeps recurring. Fix the root"
+                    " cause, not the symptom. " + analysis.suggested_fix)
+                _log.warning("chronic error pattern: %s in %s",
+                             type(exception).__name__, subsystem or "?")
+        except Exception:  # noqa: BLE001 - memory must never break analysis
+            _log.debug("incident journal write failed", exc_info=True)
+
         return analysis
     
     def _classify_by_type(self, exception: Exception) -> ErrorCategory:
