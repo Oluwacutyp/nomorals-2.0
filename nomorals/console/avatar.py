@@ -17,16 +17,6 @@ from __future__ import annotations
 
 from .palette import BOLD, BRIGHT_CYAN, BRIGHT_YELLOW, CYAN, DIM, paint
 
-__all__ = [
-    "NINJA_HEIGHT",
-    "NINJA_MINI_HEIGHT",
-    "NINJA_MINI_WIDTH",
-    "NINJA_WIDTH",
-    "ninja_mini_lines",
-    "render_ninja",
-    "render_ninja_mini",
-]
-
 _HOOD = BRIGHT_CYAN   # electric-blue hood edge
 _FACE = CYAN          # shadowed face opening
 _EYE = BRIGHT_YELLOW + BOLD  # the one amber eye
@@ -99,3 +89,119 @@ def render_ninja(*, color: bool | None = None) -> str:
 def render_ninja_mini(*, color: bool | None = None) -> str:
     """Compact 7-row hooded ninja for the watch-mode header."""
     return _render(_MINI, color=color)
+
+
+# ── extra avatar styles (ascii-art density idioms) ─────────────────────────
+# The owner's chosen mini/full art above is never redesigned. These are
+# additional densities for different surfaces: braille micro-avatar,
+# pixel-shaded, and a wide cinematic figure.
+
+_BRAILLE: list[list[tuple[str, str]]] = [
+    [(r"  ⣿⣿⣿⣿  ", _HOOD)],
+    [(r" ⣿⣿⣿⣿⣿⣿ ", _HOOD)],
+    [(r"⣿⣿⣿⣿⣿⣿⣿⣿", _HOOD)],
+    [(r"⣿⣿", _FACE), (r"⣿⣿", _EYE), (r"⣿⣿", _FACE)],
+    [(r" ⣿⣿⣿⣿⣿⣿ ", _FACE)],
+    [(r"  ⣿⣿⣿⣿  ", _CLOAK)],
+    [(r" ⣿⣿⣿⣿⣿⣿ ", _CLOAK)],
+]
+
+_PIXEL: list[list[tuple[str, str]]] = [
+    [(r"     ▓▓     ", _HOOD)],
+    [(r"    ▓▓▓▓    ", _HOOD)],
+    [(r"   ▓▓▒▒▓▓   ", _HOOD)],
+    [(r"  ▓▓ ", _FACE), ("◉", _EYE), (r" ▓▓  ", _FACE)],
+    [(r"   ▓▓▒▒▓▓   ", _FACE)],
+    [(r"    ▓▓▓▓    ", _FACE)],
+    [(r"   ▒▓▓▓▓▒   ", _CLOAK)],
+]
+
+_WIDE: list[list[tuple[str, str]]] = [
+    [(r"              /    \              ", _HOOD)],
+    [(r"             /      \             ", _HOOD)],
+    [(r"            /   __   \            ", _HOOD)],
+    [(r"           /   /  \   \           ", _HOOD)],
+    [(r"          /   |    |   \          ", _HOOD)],
+    [(r"         |    |    |    |         ", _FACE)],
+    [(r"         |    | ", _FACE), ("◉", _EYE), (r"  |    |         ", _FACE)],
+    [(r"         |    |    |    |         ", _FACE)],
+    [(r"          \   |    |   /          ", _FACE)],
+    [(r"           \  |    |  /           ", _FACE)],
+    [(r"            \ |    | /            ", _CLOAK)],
+    [(r"             ||    ||             ", _CLOAK)],
+    [(r"            /||    ||\            ", _CLOAK)],
+    [(r"           / ||    || \           ", _CLOAK)],
+    [(r"          |  ||    ||  |          ", _CLOAK)],
+]
+
+_AVATARS: dict[str, list[list[tuple[str, str]]]] = {
+    "mini": _MINI,
+    "full": _FULL,
+    "braille": _BRAILLE,
+    "pixel": _PIXEL,
+    "wide": _WIDE,
+}
+
+#: All avatar styles, in display order.
+AVATAR_STYLES = ("mini", "full", "braille", "pixel", "wide")
+
+
+def list_avatar_styles() -> list[str]:
+    """Names of all avatar styles."""
+    return list(AVATAR_STYLES)
+
+
+def avatar_size(style: str = "mini") -> tuple[int, int]:
+    """(width, height) of an avatar style in display cells."""
+    lines = _AVATARS.get((style or "mini").lower(), _MINI)
+    w = max(sum(len(text) for text, _ in line) for line in lines)
+    return w, len(lines)
+
+
+def render_avatar(
+    style: str = "mini",
+    *,
+    color: bool | None = None,
+    frame: bool = False,
+) -> str:
+    """Render the ninja avatar in ``style`` (see :func:`list_avatar_styles`).
+
+    ``frame=True`` draws a rounded box around it. The ``mini`` and
+    ``full`` styles are the owner's chosen art, rendered exactly.
+    """
+    lines = _AVATARS.get((style or "mini").lower(), _MINI)
+    out = _render(lines, color=color)
+    if frame:
+        from .palette import BOX_ROUNDED, DIM, paint, visible_width
+
+        b = BOX_ROUNDED
+        raw = out.split("\n")
+        w = max((visible_width(ln) for ln in raw), default=0)
+        top = b["tl"] + b["h"] * (w + 2) + b["tr"]
+        bot = b["bl"] + b["h"] * (w + 2) + b["br"]
+        framed = [paint(top, DIM, color=color)]
+        for ln in raw:
+            pad = " " * max(0, w - visible_width(ln))
+            framed.append(
+                paint(b["v"] + " ", DIM, color=color)
+                + ln + pad
+                + paint(" " + b["v"], DIM, color=color)
+            )
+        framed.append(paint(bot, DIM, color=color))
+        out = "\n".join(framed)
+    return out
+
+
+__all__ = [
+    "NINJA_HEIGHT",
+    "NINJA_MINI_HEIGHT",
+    "NINJA_MINI_WIDTH",
+    "NINJA_WIDTH",
+    "AVATAR_STYLES",
+    "list_avatar_styles",
+    "avatar_size",
+    "ninja_mini_lines",
+    "render_avatar",
+    "render_ninja",
+    "render_ninja_mini",
+]

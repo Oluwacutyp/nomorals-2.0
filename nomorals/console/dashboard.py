@@ -43,9 +43,21 @@ from .palette import (
     strip_ansi,
 )
 from .themes import Theme, get_theme
-from .widgets import sparkline
+from .widgets import gauge, panel, sparkline, table
 
 _WIDTH = 58
+
+
+def _resolve_width(width: int | None) -> int:
+    """Responsive width: explicit > terminal > default (TUI idiom)."""
+    if width:
+        return max(40, int(width))
+    try:
+        import shutil
+
+        return max(40, shutil.get_terminal_size((80, 24)).columns - 2)
+    except Exception:  # noqa: BLE001
+        return _WIDTH
 
 
 def _fmt_uptime(seconds: float) -> str:
@@ -77,14 +89,14 @@ def _bar(label: str, value: str, value_color: str = BRIGHT_WHITE) -> str:
     return f"  {label_p} {paint(value, value_color)}"
 
 
-def _rule(title: str) -> str:
+def _rule(title: str, width: int = _WIDTH) -> str:
     t = paint(f" {title} ", TITLE + BOLD)
-    fill = "─" * max(2, _WIDTH - len(strip_ansi(t)) - 2)
+    fill = "─" * max(2, width - len(strip_ansi(t)) - 2)
     return f"{paint('┌', SUBTLE)}{t}{paint(fill, SUBTLE)}{paint('┐', SUBTLE)}"
 
 
-def _end() -> str:
-    return paint("└" + "─" * (_WIDTH - 2) + "┘", SUBTLE)
+def _end(width: int = _WIDTH) -> str:
+    return paint("└" + "─" * (width - 2) + "┘", SUBTLE)
 
 
 def render_dashboard(
@@ -93,19 +105,22 @@ def render_dashboard(
     color: bool | None = None,
     theme: Theme | None = None,
     bare: bool = False,
+    width: int | None = None,
 ) -> str:
     """Render the full dashboard for ``snap``.
 
     With ``bare=True`` the outer frame (rule/end borders and hints) is
     skipped — the watch screen draws its own pane borders around it.
+    ``width`` overrides the responsive terminal-derived width.
     """
     snap = snap or {}
     theme = theme or get_theme((snap.get("theme") or None))
+    w = _resolve_width(width)
     t = lambda s, role: paint(s, theme.get(role, ""), color=color)  # noqa: E731
     lines: list[str] = []
     if not bare:
         lines.append("")
-        lines.append(_rule("DEVON · live status"))
+        lines.append(_rule("DEVON · live status", w))
 
     # ── system ──
     uptime = _fmt_uptime(float(snap.get("uptime_s", 0) or 0))
@@ -189,7 +204,7 @@ def render_dashboard(
         lines.append(_bar("players", f"{players} game profiles{extra}", BRIGHT_WHITE))
 
     if not bare:
-        lines.append(_end())
+        lines.append(_end(w))
         lines.append(paint("  type 'dashboard --watch' for live mode · 'help' for commands", DIM))
         lines.append("")
     out = "\n".join(lines)
@@ -242,6 +257,12 @@ def render_view(
         return render_llm_view(snap, color=color, theme=theme, bare=bare)
     if view == "debug":
         return render_debug_view(snap, color=color, theme=theme, bare=bare)
+    if view == "adapters":
+        return render_adapters_view(snap, color=color, theme=theme, bare=bare)
+    if view == "health":
+        return render_health_view(snap, color=color, theme=theme, bare=bare)
+    if view == "top":
+        return render_top_view(snap, color=color, theme=theme, bare=bare)
     return render_dashboard(snap, color=color, theme=theme, bare=bare)
 
 
@@ -555,6 +576,203 @@ def render_debug_view(
         lines.append(_end())
     out = "\n".join(lines)
     return strip_ansi(out) if color is False else out
+
+
+def render_adapters_view(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+    bare: bool = False,
+    width: int | None = None,
+) -> str:
+    """Adapter drill-down (lazydocker detail-pane idiom): per-adapter table.
+
+    Traffic share rendered as btop-style gauges, so the busiest adapter
+    is visible at a glance instead of read from numbers.
+    """
+    snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    w = _resolve_width(width)
+    lines: list[str] = []
+    if not bare:
+        lines.append("")
+        lines.append(_rule("adapters · detail", w))
+
+    adapters = snap.get("adapters") or {}
+    if not adapters:
+        lines.append(f"  {paint('(no adapters configured)', DIM, color=color)}")
+    else:
+        total_in = sum(
+            (a or {}).get("received", 0) if isinstance((a or {}).get("received"), (int, float)) else 0
+            for a in adapters.values()
+        ) or 1
+        rows = []
+        for name in sorted(adapters):
+            info = adapters[name] or {}
+            running = bool(info.get("running"))
+            recv = info.get("received", "—")
+            sent = info.get("sent", "—")
+            share = (
+                float(info.get("received", 0)) / total_in
+                if isinstance(info.get("received"), (int, float)) else 0.0
+            )
+            rows.append([
+                f'{"●" if running else "○"} {name}',
+                str(recv),
+                str(sent),
+                gauge(share, width=10, color=color),
+            ])
+        lines.extend(
+            f"  {ln}" for ln in table(
+                ["adapter", "in", "out", "share of inbound"],
+                rows, color=color, max_width=w - 4,
+            )
+        )
+    if not bare:
+        lines.append(_end(w))
+    out = "\n".join(lines)
+    return strip_ansi(out) if color is False else out
+
+
+def render_health_view(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+    bare: bool = False,
+    width: int | None = None,
+) -> str:
+    """System health (btop widget-grid idiom): errors, log rate, slow ops.
+
+    Fed by :class:`nomorals.console.debug.DebugHub` — install it (the
+    watch screen does this automatically) for live numbers.
+    """
+    from .debug import DebugHub
+    from .widgets import barchart, columns_chart
+
+    snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    w = _resolve_width(width)
+    lines: list[str] = []
+    if not bare:
+        lines.append("")
+        lines.append(_rule("health · system", w))
+
+    stats = DebugHub.stats()
+    traffic = snap.get("traffic") or {}
+    msgs = traffic.get("errors", 0)
+    total = max(1, int(traffic.get("messages", 0) or 0))
+    err_ratio = min(1.0, (stats["errors"] + int(msgs or 0)) / max(1, stats["captured"] + total))
+
+    lines.append(f"  {paint('error ratio', CYAN, color=color)}")
+    lines.append(f"  {gauge(err_ratio, width=min(30, w - 20), color=color, warn_at=0.05, crit_at=0.2)}")
+    lines.append("")
+    lines.append(
+        f"  {paint('log rate', CYAN, color=color)}  "
+        f"{paint(f'{stats['log_rate_s']:.2f}/s', BRIGHT_WHITE, color=color)}  "
+        f"{paint('telemetry', CYAN, color=color)}  "
+        f"{paint(str(stats['captured']), BRIGHT_WHITE, color=color)} logs · "
+        f"{paint(str(stats['exceptions']), WARN if stats['exceptions'] else SUBTLE, color=color)} exceptions"
+    )
+
+    # Log-volume histogram as vertical columns (lnav histogram idiom).
+    hist = DebugHub.histogram(n=24, bucket_s=60)
+    err_series = hist["series"]["ERROR"]
+    if any(err_series):
+        lines.append("")
+        lines.append(f"  {paint('errors / minute (last 24m)', CYAN, color=color)}")
+        lines.extend(
+            f"  {ln}" for ln in columns_chart(err_series, height=4, color=color, bar_color=WARN)
+        )
+
+    slow = DebugHub.slow_ops()[:5]
+    if slow:
+        lines.append("")
+        lines.append(f"  {paint('slowest ops', CYAN, color=color)}")
+        lines.extend(
+            barchart([(str(e["name"])[:28], float(e["duration_s"])) for e in slow],
+                     color=color, bar_color=WARN, width=12)
+        )
+    if not bare:
+        lines.append(_end(w))
+    out = "\n".join(lines)
+    return strip_ansi(out) if color is False else out
+
+
+def render_top_view(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+    bare: bool = False,
+    width: int | None = None,
+) -> str:
+    """``top`` for the bot (htop idiom): adapters by traffic, noisiest loggers."""
+    from .debug import DebugHub
+    from .widgets import barchart
+
+    snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    w = _resolve_width(width)
+    lines: list[str] = []
+    if not bare:
+        lines.append("")
+        lines.append(_rule("top · activity", w))
+
+    adapters = snap.get("adapters") or {}
+    traffic_rows = []
+    for name in sorted(adapters):
+        info = adapters[name] or {}
+        recv = info.get("received", 0)
+        sent = info.get("sent", 0)
+        if isinstance(recv, (int, float)) and isinstance(sent, (int, float)):
+            traffic_rows.append((name, float(recv + sent)))
+    traffic_rows.sort(key=lambda kv: kv[1], reverse=True)
+    lines.append(f"  {paint('adapters by traffic', CYAN, color=color)}")
+    if traffic_rows:
+        lines.extend(barchart(traffic_rows[:8], color=color, width=14))
+    else:
+        lines.append(f"    {paint('(no traffic yet)', DIM, color=color)}")
+
+    top = DebugHub.top_loggers(8)
+    lines.append("")
+    lines.append(f"  {paint('noisiest loggers', CYAN, color=color)}")
+    if top:
+        lines.extend(
+            barchart([(name, float(cnt)) for name, cnt in top], color=color,
+                     bar_color=MAGENTA, width=14)
+        )
+    else:
+        lines.append(f"    {paint('(telemetry not installed — open watch mode)', DIM, color=color)}")
+    if not bare:
+        lines.append(_end(w))
+    out = "\n".join(lines)
+    return strip_ansi(out) if color is False else out
+
+
+def render_summary(
+    snap: dict[str, Any] | None,
+    *,
+    color: bool | None = None,
+    theme: Theme | None = None,
+) -> str:
+    """Compact card for ``export``: one panel with the key numbers."""
+    snap = snap or {}
+    theme = theme or get_theme((snap.get("theme") or None))
+    uptime = _fmt_uptime(float(snap.get("uptime_s", 0) or 0))
+    adapters = snap.get("adapters") or {}
+    up = sum(1 for a in adapters.values() if (a or {}).get("running"))
+    traffic = snap.get("traffic") or {}
+    llm = snap.get("llm") or {}
+    body = [
+        f"uptime    {uptime}",
+        f"adapters  {up}/{len(adapters)} running",
+        f"messages  {traffic.get('messages', '—')} in · {traffic.get('replies', '—')} out",
+        f"errors    {traffic.get('errors', 0)}",
+        f"brain     {llm.get('active') or '—'}",
+    ]
+    return "\n".join(panel(body, title="devon · summary", color=color))
 
 
 def render_statusbar(

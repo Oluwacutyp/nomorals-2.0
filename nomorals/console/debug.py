@@ -34,6 +34,8 @@ _LOG_CAPACITY = 200
 _LLM_CAPACITY = 40
 #: Keep the K slowest operations.
 _SLOW_KEEP = 10
+#: Keep the K most recent exceptions (with tracebacks).
+_EXC_CAPACITY = 20
 #: Log-derived slow ops below this are noise (the timed() context records all).
 _SLOW_MIN_S = 0.5
 
@@ -61,6 +63,7 @@ class DebugHub:
     _logger_counts: dict[str, int] = {}
     _llm: deque[dict[str, Any]] = deque(maxlen=_LLM_CAPACITY)
     _slow: list[dict[str, Any]] = []  # top-K slowest, sorted desc
+    _exceptions: deque[dict[str, Any]] = deque(maxlen=_EXC_CAPACITY)
     _started_ts = time.time()
 
     # ── lifecycle ──
@@ -101,6 +104,7 @@ class DebugHub:
             cls._logger_counts.clear()
             cls._llm.clear()
             cls._slow.clear()
+            cls._exceptions.clear()
             cls._started_ts = time.time()
 
     @classmethod
@@ -124,7 +128,63 @@ class DebugHub:
             )
             short = record.name.split(".")[-1][:24] or "?"
             cls._logger_counts[short] = cls._logger_counts.get(short, 0) + 1
+        if record.exc_info and record.exc_info[0] is not None:
+            cls._record_exception(record)
         cls._maybe_slow_from_log(msg, record.created)
+
+    @classmethod
+    def _record_exception(cls, record: logging.LogRecord) -> None:
+        """Capture a formatted traceback (lnav shows tracebacks inline)."""
+        try:
+            import traceback
+
+            exc_text = "".join(
+                traceback.format_exception(*record.exc_info)  # type: ignore[arg-type]
+            )
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001
+            msg = str(record.msg)
+        with cls._lock:
+            cls._exceptions.append(
+                {
+                    "ts": record.created,
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": str(msg)[:200],
+                    "traceback": exc_text[-4000:],
+                }
+            )
+
+    @classmethod
+    def record_exception(
+        cls,
+        exc: BaseException,
+        *,
+        logger_name: str = "",
+        message: str = "",
+    ) -> None:
+        """Record an exception explicitly (for caught-and-logged errors)."""
+        try:
+            import traceback
+
+            exc_text = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+        except Exception:  # noqa: BLE001
+            exc_text = f"{type(exc).__name__}: {exc}"
+        with cls._lock:
+            cls._exceptions.append(
+                {
+                    "ts": time.time(),
+                    "level": "ERROR",
+                    "logger": str(logger_name or "?"),
+                    "message": str(message or f"{type(exc).__name__}: {exc}")[:200],
+                    "traceback": exc_text[-4000:],
+                }
+            )
 
     @classmethod
     def _maybe_slow_from_log(cls, msg: str, ts: float) -> None:
@@ -234,10 +294,107 @@ class DebugHub:
     # ── reads (for the debug view) ──
 
     @classmethod
-    def recent(cls, n: int = 20) -> list[tuple[float, str, str, str]]:
-        """Last ``n`` log records: (ts, level, logger, message)."""
+    def recent(
+        cls,
+        n: int = 20,
+        *,
+        level: str | None = None,
+        logger: str | None = None,
+        pattern: str | None = None,
+    ) -> list[tuple[float, str, str, str]]:
+        """Last ``n`` log records: (ts, level, logger, message).
+
+        Optional lnav-style filters: ``level`` (exact, e.g. ``"ERROR"``),
+        ``logger`` (substring match), ``pattern`` (regex over the message).
+        """
+        levels = {level.upper()} if level else None
+        rx = None
+        if pattern:
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                rx = None
         with cls._lock:
-            return list(cls._records)[-max(0, n):]
+            recs = list(cls._records)
+        out: list[tuple[float, str, str, str]] = []
+        for ts, lvl, name, msg in reversed(recs):
+            if levels and lvl.upper() not in levels:
+                continue
+            if logger and logger.lower() not in name.lower():
+                continue
+            if rx and not rx.search(msg):
+                continue
+            out.append((ts, lvl, name, msg))
+            if len(out) >= max(0, n):
+                break
+        return list(reversed(out))
+
+    @classmethod
+    def search(cls, pattern: str, n: int = 50) -> list[tuple[float, str, str, str]]:
+        """Regex search over buffered records, newest first (lnav ``/``)."""
+        try:
+            rx = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            return []
+        with cls._lock:
+            recs = list(cls._records)
+        out = [
+            (ts, lvl, name, msg)
+            for ts, lvl, name, msg in reversed(recs)
+            if rx.search(msg) or rx.search(name)
+        ]
+        return out[: max(0, n)]
+
+    @classmethod
+    def exceptions(cls, n: int = 5) -> list[dict[str, Any]]:
+        """Most recent captured tracebacks, newest first."""
+        with cls._lock:
+            return [dict(e) for e in reversed(list(cls._exceptions))][: max(0, n)]
+
+    @classmethod
+    def errors_since(cls, ts: float) -> int:
+        """Count of ERROR/CRITICAL records at/after ``ts`` (jump-to-error)."""
+        with cls._lock:
+            return sum(
+                1
+                for rts, lvl, _n, _m in cls._records
+                if rts >= ts and lvl in ("ERROR", "CRITICAL")
+            )
+
+    @classmethod
+    def log_rate(cls, window_s: float = 300.0) -> float:
+        """Messages per second over the trailing ``window_s`` (lnav rate)."""
+        cutoff = time.time() - max(1.0, window_s)
+        with cls._lock:
+            n = sum(1 for rts, _l, _n, _m in cls._records if rts >= cutoff)
+        return n / max(1.0, window_s)
+
+    @classmethod
+    def histogram(
+        cls, n: int = 24, bucket_s: float = 60.0
+    ) -> dict[str, Any]:
+        """Per-bucket log volume, newest bucket last (lnav histogram).
+
+        Returns ``{"buckets": [start_ts, …], "series": {level: [counts]}}``
+        for the levels ERROR, WARNING, INFO, DEBUG.
+        """
+        now = time.time()
+        bucket_s = max(1.0, bucket_s)
+        n = max(1, min(120, n))
+        starts = [now - bucket_s * (n - i) for i in range(n)]
+        levels = ("ERROR", "WARNING", "INFO", "DEBUG")
+        series: dict[str, list[int]] = {lv: [0] * n for lv in levels}
+        with cls._lock:
+            recs = list(cls._records)
+        lo = starts[0]
+        for rts, lvl, _name, _msg in recs:
+            if rts < lo:
+                continue
+            idx = min(n - 1, int((rts - lo) // bucket_s))
+            key = "ERROR" if lvl == "CRITICAL" else lvl
+            if key in series:
+                series[key][idx] += 1
+        return {"buckets": starts, "series": series, "bucket_s": bucket_s}
 
     @classmethod
     def level_counts(cls) -> dict[str, int]:
@@ -268,11 +425,15 @@ class DebugHub:
         """Summary for the debug view header."""
         with cls._lock:
             counts = dict(cls._level_counts)
-            return {
+            snap = {
                 "captured": len(cls._records),
                 "errors": counts.get("ERROR", 0) + counts.get("CRITICAL", 0),
                 "warnings": counts.get("WARNING", 0),
                 "llm_calls": len(cls._llm),
                 "slow_ops": len(cls._slow),
+                "exceptions": len(cls._exceptions),
                 "uptime_s": time.time() - cls._started_ts,
             }
+        # Outside the lock: log_rate() takes it itself (Lock isn't reentrant).
+        snap["log_rate_s"] = cls.log_rate()
+        return snap

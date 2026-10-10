@@ -31,6 +31,7 @@ from .palette import (
     SUBTLE,
     TITLE,
     WARN,
+    _BLOCK_FRACS,
     paint,
     strip_ansi,
     supports_color,
@@ -63,25 +64,446 @@ _HOME = "\033[H"
 _CLEAR_BELOW = "\033[J"
 
 
-def sparkline(values: Iterable[float], *, width: int = 24, color: bool | None = None) -> str:
-    """Tiny inline bar chart, e.g. ``▁▂▄▇█``. Empty input renders dim dashes."""
+def sparkline(
+    values: Iterable[float],
+    *,
+    width: int = 24,
+    color: bool | None = None,
+    min_label: bool = False,
+    baseline: bool = False,
+    warn_at: float | None = None,
+    crit_at: float | None = None,
+) -> str:
+    """Tiny inline bar chart, e.g. ``▁▂▄▇█``. Empty input renders dim dashes.
+
+    ``min_label=True`` appends ``min/max`` values. ``baseline=True``
+    normalizes against the data's min (flat lines stay flat, like
+    terminal-charts' ±1% floor). ``warn_at``/``crit_at`` paint values at
+    or above the thresholds amber/magenta instead of cyan.
+    """
     vals = [max(0.0, float(v)) for v in values]
     if not vals:
         return paint("─" * width, DIM, color=color)
+    lo = min(vals)
     peak = max(vals) or 1.0
+    span = (peak - lo) if baseline and peak > lo else peak
+    span = span or 1.0
     n = len(_SPARK_CHARS) - 1
-    chars = [_SPARK_CHARS[min(n, int(v / peak * n))] for v in vals]
+    chars = [
+        _SPARK_CHARS[min(n, int((v - (lo if baseline else 0.0)) / span * n))]
+        for v in vals
+    ]
     # Resample to width.
     if len(chars) > width:
         step = len(chars) / width
         chars = [chars[int(i * step)] for i in range(width)]
     elif len(chars) < width:
         chars = chars + [_SPARK_CHARS[0]] * (width - len(chars))
-    return paint("".join(chars), CYAN, color=color)
+    # Per-char threshold coloring.
+    if warn_at is not None or crit_at is not None:
+        sample = vals[:width] + [0.0] * max(0, width - len(vals))
+        parts = []
+        for ch, v in zip(chars, sample):
+            if crit_at is not None and v >= crit_at:
+                parts.append(paint(ch, WARN + BOLD, color=color))
+            elif warn_at is not None and v >= warn_at:
+                parts.append(paint(ch, WARN, color=color))
+            else:
+                parts.append(paint(ch, CYAN, color=color))
+        body = "".join(parts)
+    else:
+        body = paint("".join(chars), CYAN, color=color)
+    if min_label:
+        body += paint(f" {lo:g}/{peak:g}", DIM, color=color)
+    return body
+
+
+def gauge(
+    value: float,
+    *,
+    width: int = 18,
+    color: bool | None = None,
+    bar_color: str = GREEN,
+    warn_at: float = 0.75,
+    crit_at: float = 0.9,
+    label: str = "",
+) -> str:
+    """btop-style meter with 1/8-cell sub-precision: ``████▍░░░░ 62%``.
+
+    ``value`` is 0..1 (clamped). Colors shift to amber/magenta past the
+    thresholds — severity by color AND the number, never color alone.
+    """
+    frac = max(0.0, min(1.0, float(value)))
+    cells = frac * width
+    full = int(cells)
+    part = int(round((cells - full) * 8))
+    if part == 8:
+        full += 1
+        part = 0
+    bar = "█" * full
+    if full < width:
+        bar += _BLOCK_FRACS[part] if part else "░"
+        bar += "░" * (width - full - 1)
+    if frac >= crit_at:
+        bc = MAGENTA + BOLD
+    elif frac >= warn_at:
+        bc = WARN
+    else:
+        bc = bar_color
+    pct = f"{frac * 100:5.1f}%"
+    head = f"{paint(label + ' ', CYAN, color=color)}" if label else ""
+    return (
+        f"{head}{paint(bar, bc, color=color)} "
+        f"{paint(pct, BOLD if frac >= warn_at else SUBTLE, color=color)}"
+    )
+
+
+def columns_chart(
+    values: Iterable[float],
+    *,
+    height: int = 6,
+    width: int | None = None,
+    color: bool | None = None,
+    bar_color: str = CYAN,
+    labels: list[str] | None = None,
+) -> list[str]:
+    """Vertical bar chart (chartli ``columns`` idiom), one string per row.
+
+    Returns ``height`` rows plus an optional label row.
+    """
+    vals = [max(0.0, float(v)) for v in values]
+    if not vals:
+        return [paint("(no data)", DIM, color=color)]
+    if width is not None and len(vals) > width:
+        step = len(vals) / width
+        vals = [vals[int(i * step)] for i in range(width)]
+    peak = max(vals) or 1.0
+    cols = [min(height, int(round(v / peak * height))) for v in vals]
+    rows: list[str] = []
+    for row in range(height, 0, -1):
+        line = "".join(
+            paint("█", bar_color, color=color)
+            if c >= row
+            else " "
+            for c in cols
+        )
+        rows.append(line)
+    if labels:
+        lab = "".join(
+            (str(labels[i])[:1] if i < len(labels) else " ") for i in range(len(vals))
+        )
+        rows.append(paint(lab, DIM, color=color))
+    return rows
+
+
+def braille_chart(
+    values: Iterable[float],
+    *,
+    width: int = 36,
+    height: int = 5,
+    color: bool | None = None,
+    line_color: str = CYAN,
+    min_label: bool = True,
+) -> list[str]:
+    """Braille line chart (terminal-charts idiom): 2×4 dots per cell.
+
+    Consecutive points are joined vertically so it reads as a line;
+    the scale fits the data with headroom so a flat day looks flat.
+    """
+    vals = [float(v) for v in values]
+    if not vals:
+        return [paint("(no data)", DIM, color=color)]
+    # Resample: average when too many points, interpolate when too few.
+    steps = width * 2
+    if len(vals) > steps:
+        chunk = len(vals) / steps
+        vals = [
+            sum(vals[int(i * chunk): int((i + 1) * chunk)]) / max(1, int((i + 1) * chunk) - int(i * chunk))
+            for i in range(steps)
+        ]
+    elif len(vals) < steps:
+        out: list[float] = []
+        for i in range(steps):
+            pos = i / max(1, steps - 1) * (len(vals) - 1)
+            lo_i = int(pos)
+            hi_i = min(len(vals) - 1, lo_i + 1)
+            f = pos - lo_i
+            out.append(vals[lo_i] * (1 - f) + vals[hi_i] * f)
+        vals = out
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1.0
+    pad = span * 0.15
+    lo -= pad
+    span += 2 * pad
+    rows = height  # braille rows; each holds 4 dot-rows
+    dot_rows = rows * 4
+
+    def level(v: float) -> int:
+        return max(0, min(dot_rows - 1, int((v - lo) / span * dot_rows)))
+
+    lvls = [level(v) for v in vals]
+    # Braille dot map: dots 1-8 → bit positions.
+    lines: list[str] = []
+    for r in range(rows):
+        chars: list[str] = []
+        for cx in range(width):
+            pair = lvls[cx * 2: cx * 2 + 2]
+            # Join consecutive points vertically (line, not dots).
+            if len(pair) == 2:
+                lo_l, hi_l = min(pair), max(pair)
+            else:
+                lo_l = hi_l = pair[0] if pair else 0
+            dots = 0
+            for dx, lvl in enumerate(pair):
+                for dr in range(4):
+                    dot_row = r * 4 + dr  # 0 = top
+                    if lo_l <= (dot_rows - 1 - dot_row) <= hi_l or lvl == (dot_rows - 1 - dot_row):
+                        bit = [0, 3, 1, 4, 2, 5, 6, 7][dx * 4 + dr]
+                        dots |= 1 << bit
+            # Also fill the vertical span between the pair (line join).
+            for dr in range(4):
+                dot_row = r * 4 + dr
+                lvl_here = dot_rows - 1 - dot_row
+                if lo_l < lvl_here < hi_l:
+                    bit = [0, 3, 1, 4, 2, 5, 6, 7][dr]
+                    dots |= 1 << bit
+            chars.append(chr(0x2800 + dots))
+        lines.append(paint("".join(chars), line_color, color=color))
+    if min_label:
+        lines.append(
+            paint(f"min {min(vals):g} · max {max(vals):g}", DIM, color=color)
+        )
+    return lines
+
+
+def heatmap(
+    rows: list[list[float]],
+    *,
+    color: bool | None = None,
+    ramp: str = " ░▒▓█",
+    labels: list[str] | None = None,
+) -> list[str]:
+    """Density heatmap (chartli ``heatmap`` idiom): one row per series."""
+    if not rows or not any(rows):
+        return [paint("(no data)", DIM, color=color)]
+    flat = [v for row in rows for v in row]
+    lo, hi = min(flat), max(flat)
+    span = (hi - lo) or 1.0
+    n = len(ramp) - 1
+    out: list[str] = []
+    for i, row in enumerate(rows):
+        cells = "".join(ramp[min(n, int((v - lo) / span * n))] for v in row)
+        prefix = f"{paint(str(labels[i])[:10], SUBTLE, color=color)} " if labels and i < len(labels) else ""
+        out.append(prefix + paint(cells, CYAN, color=color))
+    return out
+
+
+def rule_caption(label: str, width: int = 58, *, color: bool | None = None) -> str:
+    """Inline panel caption (btop idiom): ``┤ label ├────`` (exactly ``width``)."""
+    label = f" {label} "
+    fill = max(2, width - len(label) - 2)
+    return (
+        paint("┤", SUBTLE, color=color)
+        + paint(label, TITLE + BOLD, color=color)
+        + paint("├" + "─" * fill, SUBTLE, color=color)
+    )
+
+
+def table(
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    color: bool | None = None,
+    box: str = "rounded",
+    header_color: str = CYAN,
+    max_width: int | None = None,
+) -> list[str]:
+    """Rich-Table-style box table, stdlib-only.
+
+    ``box`` is ``rounded`` | ``single`` | ``double`` | ``heavy``.
+    Column widths fit the content; rows are truncated to ``max_width``.
+    """
+    from .palette import (
+        BOX_DOUBLE, BOX_HEAVY, BOX_ROUNDED, BOX_SINGLE, pad_visible,
+    )
+
+    glyphs = {"rounded": BOX_ROUNDED, "single": BOX_SINGLE,
+              "double": BOX_DOUBLE, "heavy": BOX_HEAVY}.get(box, BOX_ROUNDED)
+    str_rows = [[str(c) for c in r] for r in rows]
+    widths = [visible_width(h) for h in headers]
+    for r in str_rows:
+        for i, cell in enumerate(r):
+            if i < len(widths):
+                widths[i] = max(widths[i], visible_width(cell))
+    if max_width is not None:
+        total = sum(widths) + 3 * len(widths) + 1
+        if total > max_width:  # shrink widest columns first
+            budget = max_width - 3 * len(widths) - 1
+            while sum(widths) > budget and max(widths) > 4:
+                i = widths.index(max(widths))
+                widths[i] -= 1
+
+    def border(left: str, mid: str, right: str, fill: str) -> str:
+        return paint(
+            left + mid.join(fill * (w + 2) for w in widths) + right,
+            SUBTLE, color=color,
+        )
+
+    lines = [border(glyphs["tl"], glyphs["tt"], glyphs["tr"], glyphs["h"])]
+    head = (
+        paint(glyphs["v"], SUBTLE, color=color)
+        + "".join(
+            " " + paint(pad_visible(h, w), header_color + BOLD, color=color) + " "
+            + paint(glyphs["v"], SUBTLE, color=color)
+            for h, w in zip(headers, widths)
+        )
+    )
+    lines.append(head)
+    lines.append(border(glyphs["lt"], glyphs["cross"], glyphs["rt"], glyphs["h"]))
+    for r in str_rows:
+        cells = "".join(
+            " " + pad_visible(r[i] if i < len(r) else "", w) + " "
+            + paint(glyphs["v"], SUBTLE, color=color)
+            for i, w in enumerate(widths)
+        )
+        lines.append(paint(glyphs["v"], SUBTLE, color=color) + cells)
+    lines.append(border(glyphs["bl"], glyphs["bt"], glyphs["br"], glyphs["h"]))
+    return lines
+
+
+def panel(
+    body: str | list[str],
+    title: str = "",
+    *,
+    width: int | None = None,
+    color: bool | None = None,
+    box: str = "rounded",
+    border_color: str = SUBTLE,
+) -> list[str]:
+    """Rich-Panel-style titled box, stdlib-only."""
+    from .palette import (
+        BOX_DOUBLE, BOX_HEAVY, BOX_ROUNDED, BOX_SINGLE,
+        truncate_visible, visible_width,
+    )
+
+    glyphs = {"rounded": BOX_ROUNDED, "single": BOX_SINGLE,
+              "double": BOX_DOUBLE, "heavy": BOX_HEAVY}.get(box, BOX_ROUNDED)
+    lines_in = body.split("\n") if isinstance(body, str) else list(body)
+    w = width or max((visible_width(strip_ansi(ln)) for ln in lines_in), default=0)
+    w = max(4, w)
+    out = []
+    if title:
+        cap = f" {title} "
+        fill = max(0, w - len(cap))
+        out.append(
+            paint(glyphs["tl"] + glyphs["h"], border_color, color=color)
+            + paint(cap, TITLE + BOLD, color=color)
+            + paint(glyphs["h"] * fill + glyphs["tr"], border_color, color=color)
+        )
+    else:
+        out.append(paint(glyphs["tl"] + glyphs["h"] * (w + 2) + glyphs["tr"],
+                         border_color, color=color))
+    for ln in lines_in:
+        ln = truncate_visible(ln, w)
+        pad = " " * max(0, w - visible_width(ln))
+        out.append(
+            paint(glyphs["v"] + " ", border_color, color=color)
+            + ln + pad
+            + paint(" " + glyphs["v"], border_color, color=color)
+        )
+    out.append(paint(glyphs["bl"] + glyphs["h"] * (w + 2) + glyphs["br"],
+                     border_color, color=color))
+    return out
+
+
+class Spinner:
+    """Animated status spinner (Rich ``console.status`` idiom).
+
+    Usage::
+
+        with Spinner("thinking…"):
+            do_work()
+    """
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        color: bool | None = None,
+        out: Any = None,
+        interval: float = 0.08,
+    ) -> None:
+        self.text = text
+        self.color = supports_color() if color is None else color
+        self.out = out or sys.stderr
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _spin(self) -> None:
+        i = 0
+        while not self._stop.wait(self.interval):
+            frame = self.FRAMES[i % len(self.FRAMES)]
+            line = f"\r{paint(frame, CYAN, color=self.color)} {paint(self.text, SUBTLE, color=self.color)}"
+            try:
+                self.out.write(line)
+                self.out.flush()
+            except Exception:  # noqa: BLE001 - best effort
+                break
+            i += 1
+
+    def __enter__(self) -> "Spinner":
+        if self.color:
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+        else:
+            self.out.write(f"{self.text}…\n")
+            self.out.flush()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        try:
+            self.out.write("\r" + " " * (len(strip_ansi(self.text)) + 4) + "\r")
+            self.out.flush()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+
+def status(text: str = "", **kw: Any) -> Spinner:
+    """``with status("working…"):`` — the Rich ``console.status`` idiom."""
+    return Spinner(text, **kw)
+
+
+def _fmt_num(n: float) -> str:
+    """tqdm-style unit scaling: 1500 → ``1.5k``, 2.3e6 → ``2.3M``."""
+    n = float(n)
+    for unit in ("", "k", "M", "G", "T"):
+        if abs(n) < 1000 or unit == "T":
+            if unit:
+                return f"{n:.1f}{unit}"
+            return f"{n:.0f}" if n == int(n) else f"{n:.1f}"
+        n /= 1000
+    return f"{n:.1f}T"
 
 
 class ProgressBar:
-    """Thread-safe progress bar with ETA. Pure ANSI, Termux-safe.
+    """Thread-safe progress bar with smoothed ETA. Pure ANSI, Termux-safe.
+
+    tqdm-grade behavior, stdlib-only:
+
+    - EMA-smoothed rate → stable ETA (no jitter from bursty updates)
+    - unit scaling (``1.5k``, ``2.3M``) via ``unit`` / ``unit_scale``
+    - adaptive width (fills the terminal) with 1/8-cell sub-precision fill
+    - update throttling (``min_interval``) so fast loops don't flood the tty
+    - ``bar_format`` template with ``{desc} {bar} {pct} {eta} {rate} {n}/{total}``
+    - postfix stats dict (``set_postfix(loss=0.02)``)
+    - indeterminate (spinner) mode when ``total`` is None
+    - usable as a context manager and as ``ProgressBar.track(iterable)``
 
     Usage::
 
@@ -91,60 +513,202 @@ class ProgressBar:
         bar.done()
     """
 
+    #: Spinner frames for indeterminate mode (console.status idiom).
+    SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
     def __init__(
         self,
         label: str,
-        total: float,
+        total: float | None,
         *,
         width: int | None = None,
         color: bool | None = None,
         out: Any = None,
         show_eta: bool = True,
+        unit: str = "",
+        unit_scale: bool = False,
+        min_interval: float = 0.1,
+        bar_format: str | None = None,
+        postfix: dict[str, Any] | None = None,
     ) -> None:
         self.label = label
-        self.total = max(1e-9, float(total))
-        self.width = width or min(40, max(20, (shutil.get_terminal_size((80, 24)).columns - 40)))
+        self.total = None if total is None else max(1e-9, float(total))
+        self.width = width  # resolved lazily (adaptive) in _render
         self.color = supports_color() if color is None else color
         self.out = out or sys.stderr
         self.show_eta = show_eta
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.min_interval = max(0.0, float(min_interval))
+        self.bar_format = (
+            bar_format
+            or "{desc} {bar} {pct} {n}/{total} [{elapsed}<{eta}, {rate}{unit}/s]{postfix}"
+        )
+        self._postfix: dict[str, Any] = dict(postfix or {})
         self._lock = threading.Lock()
         self._done = False
         self._start = time.monotonic()
+        self._last_draw = 0.0
         self._last_len = 0
+        self._n = 0.0
+        self._rate = 0.0  # EMA-smoothed items/sec
+        self._spin_i = 0
 
-    def _render(self, done: float) -> str:
-        frac = min(1.0, max(0.0, done / self.total))
-        filled = int(self.width * frac)
-        bar = "█" * filled + "░" * (self.width - filled)
-        pct = f"{frac * 100:5.1f}%"
-        elapsed = time.monotonic() - self._start
-        eta = ""
-        if self.show_eta and frac > 0.01 and frac < 1.0:
-            remain = elapsed / frac * (1 - frac)
-            eta = f" eta {remain:4.0f}s"
-        line = f"{paint(self.label, CYAN, color=self.color)} [{paint(bar, GREEN, color=self.color)}] {paint(pct, BOLD, color=self.color)}{paint(eta, DIM, color=self.color)}"
-        return line
+    # ── public API ──
 
-    def update(self, done: float) -> None:
+    def set_postfix(self, **kw: Any) -> None:
+        """Attach ``key=value`` stats shown after the bar (tqdm idiom)."""
+        with self._lock:
+            self._postfix.update(kw)
+
+    def update(self, done: float, n: float = 1) -> None:  # noqa: ARG002 - kept for tqdm parity
+        """Set absolute progress to ``done`` (throttled redraw)."""
         with self._lock:
             if self._done:
                 return
-            line = self._render(done)
-            # Erase previous line, write new one.
-            pad = " " * max(0, self._last_len - len(strip_ansi(line)))
-            self.out.write(f"\r{line}{pad}")
-            self.out.flush()
-            self._last_len = len(strip_ansi(line))
+            now = time.monotonic()
+            # EMA rate from the delta since the last update.
+            dt = now - self._last_draw if self._last_draw else max(1e-6, now - self._start)
+            if dt > 0:
+                inst = max(0.0, float(done) - self._n) / dt
+                self._rate = inst if self._rate == 0 else 0.3 * inst + 0.7 * self._rate
+            self._n = max(0.0, float(done))
+            if now - self._last_draw < self.min_interval and not self._finished():
+                return
+            self._draw_locked(now)
+
+    def advance(self, n: float = 1) -> None:
+        """Advance progress by ``n`` (tqdm ``update(n)`` idiom)."""
+        # No lock here: update() takes it (Lock is not reentrant).
+        self.update(self._n + n)
 
     def done(self, suffix: str = "done") -> None:
         with self._lock:
             if self._done:
                 return
             self._done = True
-            line = self._render(self.total)
+            line = self._render(self.total if self.total else self._n,
+                                time.monotonic())
             pad = " " * max(0, self._last_len - len(strip_ansi(line)))
             self.out.write(f"\r{line}{pad} {paint(suffix, GREEN, color=self.color)}\n")
             self.out.flush()
+
+    def __enter__(self) -> "ProgressBar":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if not self._done:
+            self.done()
+
+    @classmethod
+    def track(
+        cls,
+        iterable: Iterable[Any],
+        label: str = "",
+        total: float | None = None,
+        **kw: Any,
+    ) -> Iterable[Any]:
+        """Wrap an iterable with a progress bar (tqdm idiom)."""
+        items = list(iterable) if total is None else iterable
+        n_total = total if total is not None else (
+            len(items) if hasattr(items, "__len__") else None
+        )
+        bar = cls(label or "working", n_total, **kw)
+        try:
+            for i, item in enumerate(items, 1):
+                yield item
+                bar.update(i)
+        finally:
+            bar.done()
+
+    # ── internals ──
+
+    def _finished(self) -> bool:
+        return self.total is not None and self._n >= self.total
+
+    def _draw_locked(self, now: float) -> None:
+        line = self._render(self._n, now)
+        pad = " " * max(0, self._last_len - len(strip_ansi(line)))
+        self.out.write(f"\r{line}{pad}")
+        self.out.flush()
+        self._last_len = len(strip_ansi(line))
+        self._last_draw = now
+
+    def _fmt_n(self, n: float) -> str:
+        if self.unit_scale:
+            return f"{_fmt_num(n)}{self.unit}"
+        if n == int(n):
+            return f"{int(n)}{self.unit}"
+        return f"{n:.1f}{self.unit}"
+
+    def _render(self, done: float, now: float) -> str:
+        c = self.color
+        elapsed = now - self._start
+        width = self.width or min(40, max(20, (shutil.get_terminal_size((80, 24)).columns - 40)))
+
+        if self.total is None:
+            # Indeterminate: bouncing spinner + elapsed + rate.
+            self._spin_i += 1
+            frame = self.SPINNER_FRAMES[self._spin_i % len(self.SPINNER_FRAMES)]
+            rate = f"{self._fmt_rate()}" if self._rate else "—"
+            line = (
+                f"{paint(self.label, CYAN, color=c)} "
+                f"{paint(frame, GREEN, color=c)} "
+                f"{paint(self._fmt_n(done), BOLD, color=c)} "
+                f"{paint(f'[{elapsed:4.0f}s, {rate}{self.unit}/s]', DIM, color=c)}"
+            )
+            return line + self._render_postfix(c)
+
+        frac = min(1.0, max(0.0, done / self.total))
+        # 1/8-cell sub-precision fill (btop meter idiom).
+        cells = frac * width
+        full = int(cells)
+        part = int(round((cells - full) * 8))
+        if part == 8:
+            full += 1
+            part = 0
+        bar = "█" * full
+        if full < width:
+            bar += _BLOCK_FRACS[part] if part else "░"
+            bar += "░" * (width - full - 1)
+        pct = f"{frac * 100:5.1f}%"
+        eta = "—"
+        if self.show_eta and frac > 0.005 and frac < 1.0 and self._rate > 0:
+            remain = (self.total - done) / self._rate
+            eta = f"{remain:4.0f}s"
+
+        def _p(text: str, code: str) -> str:
+            return paint(text, code, color=c)
+
+        fields = {
+            "desc": _p(self.label, CYAN),
+            "bar": _p(bar, GREEN),
+            "pct": _p(pct, BOLD),
+            "elapsed": f"{elapsed:4.0f}s",
+            "eta": eta,
+            "rate": self._fmt_rate(),
+            "unit": self.unit,
+            "n": self._fmt_n(done),
+            "total": self._fmt_n(self.total),
+            "postfix": self._render_postfix(c),
+        }
+        try:
+            return self.bar_format.format(**fields)
+        except (KeyError, IndexError, ValueError):
+            return f"{fields['desc']} [{fields['bar']}] {fields['pct']}"
+
+    def _fmt_rate(self) -> str:
+        if self._rate <= 0:
+            return "—"
+        if self.unit_scale:
+            return _fmt_num(self._rate)
+        return f"{self._rate:.1f}"
+
+    def _render_postfix(self, c: bool | None) -> str:
+        if not self._postfix:
+            return ""
+        inner = ", ".join(f"{k}={v}" for k, v in self._postfix.items())
+        return " " + paint(f"[{inner}]", DIM, color=c)
 
 
 class LiveScreen:
@@ -243,13 +807,24 @@ __all__ = [
     "MessageEvent",
     "MessageFeed",
     "WatchHub",
+    "Spinner",
     "AVATAR",
     "sparkline",
     "barchart",
+    "gauge",
+    "columns_chart",
+    "braille_chart",
+    "heatmap",
+    "table",
+    "panel",
+    "rule_caption",
+    "status",
     "gradient_text",
     "format_message_card",
     "format_feed_line",
     "PLATFORM_ICONS",
+    "WATCH_VIEWS",
+    "WATCH_VIEW_KEYS",
 ]
 
 
@@ -307,6 +882,36 @@ class MessageFeed:
         with self._lock:
             return list(self._events[-max(0, n):])
 
+    def search(self, pattern: str, n: int = 50) -> list[MessageEvent]:
+        """Regex search over buffered events, newest first (k9s ``/`` idiom)."""
+        import re
+
+        try:
+            rx = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            return []
+        with self._lock:
+            hits = [
+                e for e in reversed(self._events)
+                if rx.search(e.text or "") or rx.search(e.sender or "")
+                or rx.search(e.chat_title or "")
+            ]
+        return hits[: max(0, n)]
+
+    def by_platform(self, platform: str, n: int = 50) -> list[MessageEvent]:
+        """Newest-first events for one platform."""
+        want = (platform or "").lower()
+        with self._lock:
+            hits = [e for e in reversed(self._events)
+                    if (e.platform or "").lower() == want]
+        return hits[: max(0, n)]
+
+    def clear(self) -> None:
+        """Drop all buffered events and reset the unread counter."""
+        with self._lock:
+            self._events.clear()
+            self._unread = 0
+
     @property
     def unread(self) -> int:
         with self._lock:
@@ -352,6 +957,23 @@ class WatchHub:
     @classmethod
     def feed(cls) -> MessageFeed:
         return cls._feed
+
+    @classmethod
+    def stats(cls) -> dict[str, Any]:
+        """Feed stats for the watch header."""
+        feed = cls._feed
+        with feed._lock:  # noqa: SLF001 - same-module coordination
+            plats: dict[str, int] = {}
+            for e in feed._events:
+                plats[(e.platform or "?").lower()] = (
+                    plats.get((e.platform or "?").lower(), 0) + 1
+                )
+            return {
+                "active": cls._active,
+                "buffered": len(feed._events),
+                "unread": feed._unread,
+                "platforms": plats,
+            }
 
 
 def format_feed_line(event: MessageEvent, *, color: bool | None = None) -> str:
@@ -672,6 +1294,12 @@ WATCH_VIEW_KEYS = {
 #: Hotkey shown in the header tabs, per view.
 _VIEW_HOTKEY = {"status": "1", "games": "2", "jobs": "3", "brain": "4",
                 "debug": "d"}
+#: Extra drill-down views: no single-key hotkey (the 5-view contract is
+#: pinned by tests), reachable via `:view <name>` and render_view().
+WATCH_EXTRA_VIEWS = ("adapters", "health", "top")
+
+#: Colon-commands available in GodScreen command mode (k9s ``:`` idiom).
+_GOD_CMDS = ("theme", "view", "interval", "clear", "quit", "help")
 
 #: Miniature ninja avatar for the header — the terminal can't show the
 #: owner's real ninja avatar, so this stands in next to the DEVON title.
@@ -725,6 +1353,13 @@ class GodScreen:
         self._stdin_ok = bool(
             getattr(sys.stdin, "isatty", lambda: False)()
         )
+        # k9s-style interaction state
+        self._help = False            # "?" overlay
+        self._cmd_buf: str | None = None   # ":" command mode buffer
+        self._filter_buf: str | None = None  # "/" feed-filter buffer
+        self._feed_filter = ""        # active regex filter on the feed
+        self._feed_offset = 0         # j/k scrollback offset (0 = live tail)
+        self._notice = ""             # one-frame notice line (command results)
 
     # ── public ──
 
@@ -793,17 +1428,225 @@ class GodScreen:
             except KeyboardInterrupt:
                 return False
             return not self._stop
+        # Help overlay: any key dismisses (q/Esc still quit).
+        if self._help:
+            key = keys.get(self.interval * 4)
+            if key is None:
+                return not self._stop
+            self._help = False
+            if key in ("q", "esc", "\x03"):
+                return False
+            return not self._stop
+        # Command / filter mode: mini line editor until Enter/Esc.
+        if self._cmd_buf is not None or self._filter_buf is not None:
+            return self._read_line_mode(keys)
         try:
             key = keys.get(self.interval)
         except KeyboardInterrupt:
             return False
         if key is None:  # timeout → refresh
             return not self._stop
+        return self._handle_nav_key(key)
+
+    def _handle_nav_key(self, key: str) -> bool:
+        """Top-level watch-mode keys. False = quit requested."""
         if key in ("q", "esc", "\x03"):
             return False
         if key in WATCH_VIEW_KEYS:
             self._view = WATCH_VIEW_KEYS[key]
+            self._feed_offset = 0
+            return not self._stop
+        if key == "?":
+            self._help = True
+            return not self._stop
+        if key == ":":
+            self._cmd_buf = ""
+            return not self._stop
+        if key == "/":
+            self._filter_buf = ""
+            return not self._stop
+        if key == "t":  # cycle theme live
+            self._cycle_theme()
+            return not self._stop
+        if key in ("+", "="):
+            self.interval = min(10.0, self.interval + 0.5)
+            self._notice = f"refresh every {self.interval:.1f}s"
+            return not self._stop
+        if key in ("-", "_"):
+            self.interval = max(0.5, self.interval - 0.5)
+            self._notice = f"refresh every {self.interval:.1f}s"
+            return not self._stop
+        if key == "j":  # feed scrollback: older
+            self._feed_offset += 3
+            return not self._stop
+        if key == "k":  # feed scrollback: newer
+            self._feed_offset = max(0, self._feed_offset - 3)
+            return not self._stop
+        if key == "G":  # jump back to live tail
+            self._feed_offset = 0
+            return not self._stop
         return not self._stop
+
+    def _read_line_mode(self, keys: "_KeyReader") -> bool:
+        """One tick of the ``:``/``/`` mini line editor."""
+        is_cmd = self._cmd_buf is not None
+        try:
+            key = keys.get(0.2)
+        except KeyboardInterrupt:
+            self._cmd_buf = self._filter_buf = None
+            return not self._stop
+        if key is None:
+            return not self._stop  # keep rendering the prompt row
+        buf = self._cmd_buf if is_cmd else self._filter_buf
+        assert buf is not None
+        if key in ("\r", "\n"):
+            if is_cmd:
+                self._run_god_command(buf.strip())
+                self._cmd_buf = None
+            else:
+                self._feed_filter = buf.strip()
+                self._feed_offset = 0
+                self._filter_buf = None
+                if self._feed_filter:
+                    self._notice = f"feed filter: /{self._feed_filter}/"
+            return not self._stop
+        if key == "esc":
+            self._cmd_buf = self._filter_buf = None
+            return not self._stop
+        if key in ("\x7f", "\x08"):  # backspace
+            buf = buf[:-1]
+        elif len(key) == 1 and key.isprintable():
+            buf += key
+        if is_cmd:
+            self._cmd_buf = buf
+        else:
+            self._filter_buf = buf
+        return not self._stop
+
+    def _run_god_command(self, cmd: str) -> bool:
+        """Execute a ``:`` command. Returns False when it requests quit."""
+        parts = cmd.split()
+        if not parts:
+            return True
+        name, args = parts[0].lower(), parts[1:]
+        if name in ("q", "quit", "exit"):
+            self._stop = True
+            return False
+        if name == "view" and args:
+            want = args[0].lower()
+            if want in WATCH_VIEWS + WATCH_EXTRA_VIEWS:
+                self._view = want
+                self._feed_offset = 0
+                self._notice = f"view → {want}"
+            else:
+                self._notice = f"unknown view '{want}'"
+            return True
+        if name == "theme":
+            if args:
+                self._set_theme(args[0].lower())
+            else:
+                from .themes import theme_name as _tn
+                self._notice = f"theme: {_tn()}"
+            return True
+        if name == "interval" and args:
+            try:
+                self.interval = max(0.5, min(10.0, float(args[0])))
+                self._notice = f"refresh every {self.interval:.1f}s"
+            except ValueError:
+                self._notice = "interval: need a number"
+            return True
+        if name == "clear":
+            WatchHub.feed().clear()
+            self._feed_filter = ""
+            self._feed_offset = 0
+            self._notice = "feed cleared"
+            return True
+        if name == "help":
+            self._help = True
+            return True
+        self._notice = f"unknown :{name} — try :help"
+        return True
+
+    def _cycle_theme(self) -> None:
+        """Cycle NM_CONSOLE_THEME to the next theme (``t`` key)."""
+        import os
+
+        from .themes import list_themes, theme_name as _tn
+
+        names = list_themes()
+        try:
+            nxt = names[(names.index(_tn()) + 1) % len(names)]
+        except ValueError:
+            nxt = names[0]
+        os.environ["NM_CONSOLE_THEME"] = nxt
+        self._notice = f"theme → {nxt}"
+
+    def _set_theme(self, name: str) -> None:
+        import os
+
+        from .themes import list_themes
+
+        if name in list_themes():
+            os.environ["NM_CONSOLE_THEME"] = name
+            self._notice = f"theme → {name}"
+        else:
+            self._notice = f"unknown theme '{name}'"
+
+    def _filtered_feed(self, feed: "MessageFeed") -> list["MessageEvent"]:
+        """Feed events with the active ``/`` regex filter applied."""
+        if not self._feed_filter:
+            return feed.recent(500)
+        return list(reversed(feed.search(self._feed_filter, n=500)))
+
+    def _render_help_overlay(
+        self, lines: list[str], width: int, height: int, c: bool | None,
+        _t: Any,
+    ) -> list[str]:
+        """``?`` key overlay: every key, grouped (htop discoverability)."""
+        from .palette import BOX_ROUNDED
+
+        b = BOX_ROUNDED
+        body = [
+            ("views", "1 status · 2 games · 3 jobs · 4 brain · d debug "
+                      "(extra: :view adapters|health|top)"),
+            ("command", ": opens command mode — theme <name> · view <name> · "
+                       "interval <secs> · clear · quit · help"),
+            ("filter", "/ filters the message feed (regex) · Esc clears"),
+            ("scroll", "j / k scroll feed · G back to live tail"),
+            ("tweak", "t cycle theme · + / − refresh interval"),
+            ("quit", "q / Esc / Ctrl-C"),
+        ]
+        w = min(64, width - 4)
+        box: list[str] = []
+        top = b["tl"] + b["h"] * (w + 2) + b["tr"]
+        box.append(paint(top, STEALTH_CYAN, color=c))
+        title = "⌨ keys"
+        box.append(
+            paint(b["v"] + " ", STEALTH_CYAN, color=c)
+            + paint(title, STEALTH_CYAN + BOLD, color=c)
+            + " " * max(0, w - len(title))
+            + paint(" " + b["v"], STEALTH_CYAN, color=c)
+        )
+        for label, desc in body:
+            row = f"{paint(label, WARN, color=c)}  {paint(desc, STEALTH_TEXT, color=c)}"
+            row_w = len(label) + 2 + len(desc)
+            box.append(
+                paint(b["v"] + " ", STEALTH_CYAN, color=c)
+                + row + " " * max(0, w - row_w)
+                + paint(" " + b["v"], STEALTH_CYAN, color=c)
+            )
+        box.append(paint(b["bl"] + b["h"] * (w + 2) + b["br"],
+                         STEALTH_CYAN, color=c))
+        box.append(paint("  any key dismisses", DIM, color=c))
+        # Overlay the box over the middle of the content region,
+        # keeping header + footer pinned.
+        head, foot = lines[:1], lines[-1:]
+        mid_h = max(1, height - len(head) - len(foot) - len(box))
+        pad_top = mid_h // 2
+        mid = [""] * pad_top + [_t("  " + ln) for ln in box]
+        while len(mid) < height - len(head) - len(foot):
+            mid.append("")
+        return head + mid[: height - len(head) - len(foot)] + foot
 
     def _snap(self) -> dict[str, Any]:
         try:
@@ -1005,6 +1848,14 @@ class GodScreen:
         unread = feed.unread
         feed.mark_read()
 
+        # A prompt/notice row renders below the content only when active;
+        # reserve its row so the frame stays pinned to the terminal height.
+        prompt_rows = 1 if (
+            self._cmd_buf is not None
+            or self._filter_buf is not None
+            or self._notice
+        ) else 0
+
         if self._view == "status":
             # ── rows 1-2: traffic + scheduler (the ONE status block) ──
             if width < 60:
@@ -1013,27 +1864,36 @@ class GodScreen:
                 lines.append(_t(self._traffic_line(snap)))
             lines.append(_t(self._scheduler_line(snap)))
             # ── separator ──
+            sep_label = "messages"
+            if self._feed_filter:
+                sep_label += "  /%s/" % self._feed_filter
+            if self._feed_offset:
+                sep_label += "  \u2195 -%d" % self._feed_offset
             sep_left = (paint("\u251c\u2500 ", STEALTH_CYAN, color=c)
-                        + paint("messages", STEALTH_CYAN + BOLD, color=c) + " ")
+                        + paint(sep_label, STEALTH_CYAN + BOLD, color=c) + " ")
             lines.append(_t(self._fill_rule(sep_left, "", width)))
-            # ── feed takes the rest ──
-            feed_h = max(3, height - len(lines) - 1)  # minus footer
-            events = feed.recent(feed_h)
+            # ── feed takes the rest (filter + scrollback aware) ──
+            feed_h = max(3, height - len(lines) - 1 - prompt_rows)  # minus footer
+            events = self._filtered_feed(feed)
+            if self._feed_offset:
+                events = events[: max(0, len(events) - self._feed_offset)]
             shown = events[-feed_h:] if events else []
             for ev in shown:
                 lines.append(_t(self._feed_line(ev)))
             for _ in range(feed_h - len(shown) - (0 if shown else 1)):
                 lines.append(_t(paint("\u2502", SUBTLE, color=c)))
             if not shown:
+                hint = ("(no matches \u2014 Esc clears the filter)"
+                        if self._feed_filter else
+                        "(quiet \u2014 new messages appear here)")
                 lines.append(_t(paint("\u2502 ", STEALTH_CYAN, color=c)
-                                + paint("(quiet \u2014 new messages appear here)",
-                                        DIM, color=c)))
+                                + paint(hint, DIM, color=c)))
         else:
             # ── other views: label + content, no status duplication ──
             sep_left = (paint("\u251c\u2500 ", STEALTH_CYAN, color=c)
                         + paint(self._view, STEALTH_CYAN + BOLD, color=c) + " ")
             lines.append(_t(self._fill_rule(sep_left, "", width)))
-            content_h = max(3, height - len(lines) - 1)  # minus footer
+            content_h = max(3, height - len(lines) - 1 - prompt_rows)  # minus footer
             view_text = _d.render_view(snap, self._view, color=c, bare=True)
             view_lines = view_text.splitlines()[:content_h]
             for ln in view_lines:
@@ -1041,10 +1901,33 @@ class GodScreen:
             for _ in range(content_h - len(view_lines)):
                 lines.append(_t(paint("\u2502", SUBTLE, color=c)))
 
-        # ── footer (1 row, pinned) ──
+        # ── help overlay replaces the content region ──
+        if self._help:
+            lines = self._render_help_overlay(lines, width, height, c, _t)
+
+        # ── command / filter prompt row ──
+        if self._cmd_buf is not None:
+            prompt = (paint(":", STEALTH_CYAN + BOLD, color=c)
+                      + paint(self._cmd_buf, BRIGHT_WHITE, color=c)
+                      + paint("\u2588", STEALTH_CYAN, color=c))
+            lines.append(_t(prompt))
+        elif self._filter_buf is not None:
+            prompt = (paint("/", WARN + BOLD, color=c)
+                      + paint(self._filter_buf, BRIGHT_WHITE, color=c)
+                      + paint("\u2588", WARN, color=c))
+            lines.append(_t(prompt))
+        elif self._notice:
+            lines.append(_t(paint("\u2502 ", STEALTH_CYAN, color=c)
+                            + paint(self._notice, WARN, color=c)))
+            self._notice = ""
+
+        # ── footer (1 row, pinned; htop's permanent key bar idiom) ──
+        # Short on purpose: the full key list lives in the "?" overlay.
+        # (The footer must keep "q quit" visible on 80-col terminals.)
         foot_left = (paint("\u2514\u2500 ", STEALTH_CYAN, color=c)
                      + paint("1 status \u00b7 2 games \u00b7 3 jobs \u00b7 4 brain \u00b7 "
-                             "d debug \u00b7 q quit", DIM, color=c))
+                             "d debug \u00b7 : cmd \u00b7 q quit",
+                             DIM, color=c))
         foot_right = ""
         if unread:
             foot_right += " " + paint(f"\U0001f4ec {unread} new",
