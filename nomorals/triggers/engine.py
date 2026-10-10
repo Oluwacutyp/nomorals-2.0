@@ -6,18 +6,27 @@ Design notes:
   :class:`nomorals.scheduler.scheduler.Scheduler` as real cron/one-time
   jobs whose action is ``__trigger_fire__``; the engine registers that
   action handler.  Reuse, not a parallel scheduler.
-* **File/price sources are polled** by the engine's own thread (or by
+* **File/price/url sources are polled** by the engine's own thread (or by
   calling :meth:`tick` directly — tests and simple deployments do this).
+  A trigger may set ``poll_s`` to override the engine's poll interval.
 * **Message sources are event-driven**: :meth:`on_message` is called by
   the partner runtime's dispatch path (one hook call, no fork) and by
   anything else that wants to feed messages in.
 * **Webhook sources are event-driven** via :meth:`fire_webhook`, served
   by ``triggers.webhook.register_trigger_routes`` on the API server.
+  Schemes: plain shared secret, GitHub-style HMAC-SHA256, or
+  Stripe-style ``t=…,v1=…`` with timestamp tolerance + idempotency-key
+  replay dedup.
 * **Bus sources are event-driven** via :meth:`attach_bus`: any event on
   the shared event bus (scheduler job finished, mission terminal,
   another trigger fired, …) is matched against ``bus``-source triggers.
   This is the cross-system wiring — systems wake each other through the
   bus instead of hoping.
+* **Conditions** (HA-style gates: ``time_window`` / ``rate`` / ``evidence``)
+  are evaluated after a source match and before the action; a failing
+  gate records ``skipped`` with the reason — never a silent drop.
+* **Modes**: ``parallel`` (default), ``single`` (skip while a run is in
+  flight), ``queued`` (serialize runs).
 * Resilience: one trigger's failing action is logged with the trigger
   id and recorded — it never kills the engine or other triggers.
   Disabled triggers never fire; the check happens at fire time, so a
@@ -29,6 +38,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import threading
 import time
@@ -39,26 +49,40 @@ from ..core.events import Event, global_bus
 from ..storage.db import Database
 from . import actions as _actions
 from .models import (
+    ACTION_MESSAGE,
+    CONDITION_EVIDENCE,
+    CONDITION_RATE,
+    CONDITION_TIME_WINDOW,
+    MODE_QUEUED,
+    MODE_SINGLE,
     OUTCOME_ERROR,
     OUTCOME_FIRED,
     OUTCOME_NO_MATCH,
     OUTCOME_SKIPPED,
+    SKIP_ALREADY_RUNNING,
+    SKIP_CONDITION,
+    SKIP_COOLDOWN,
+    SKIP_DISABLED,
     SOURCE_BUS,
     SOURCE_ENTITY_STATE,
     SOURCE_FILE,
     SOURCE_MESSAGE,
     SOURCE_PRICE,
     SOURCE_SCHEDULE,
+    SOURCE_URL,
     SOURCE_WEBHOOK,
+    WEBHOOK_SCHEME_GITHUB,
+    WEBHOOK_SCHEME_STRIPE,
     Trigger,
     TriggerError,
     new_trigger_id,
-    validate_definition,
+    validate_trigger_spec,
 )
 from .sources import (
     SCHEDULER_ACTION,
     evaluate_file,
     evaluate_price,
+    evaluate_url,
     match_bus,
     match_entity_state,
     match_message,
@@ -67,6 +91,66 @@ from .sources import (
 from .store import TriggerStore
 
 _log = get_logger(__name__)
+
+
+def verify_webhook_signature(secret: str, scheme: str, *,
+                             signature: str = "",
+                             timestamp: str | int | float | None = None,
+                             body: bytes = b"",
+                             tolerance_s: float = 300,
+                             now: float | None = None) -> None:
+    """Verify an HMAC webhook signature (GitHub / Stripe parity).
+
+    * ``github`` — ``signature`` is ``sha256=<hex(hmac_sha256(body))>``
+      (``X-Hub-Signature-256`` style).
+    * ``stripe`` — ``signature`` is ``t=<ts>,v1=<hex>`` where the hex is
+      ``hmac_sha256(f"{ts}.{body}")``; the timestamp must be within
+      ``tolerance_s`` of now (replay protection).
+
+    Raises :class:`TriggerError` on any failure — missing signature,
+    bad HMAC, or stale timestamp.  Uses :func:`hmac.compare_digest`
+    (constant-time).
+
+    Note: the API server route passes the parsed JSON body re-encoded;
+    true raw-byte verification needs the raw request bytes — see
+    ``triggers.webhook``.  For Devon's own webhooks the sender and this
+    verifier must use the same canonical bytes.
+    """
+    import time as _time
+
+    now = now if now is not None else _time.time()
+    signature = str(signature or "")
+    if scheme == WEBHOOK_SCHEME_GITHUB:
+        if not signature:
+            raise TriggerError("missing webhook signature")
+        expected = "sha256=" + hmac.new(
+            secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise TriggerError("bad webhook signature")
+        return
+    if scheme == WEBHOOK_SCHEME_STRIPE:
+        parts: dict[str, str] = {}
+        for piece in signature.split(","):
+            if "=" in piece:
+                k, v = piece.split("=", 1)
+                parts[k.strip()] = v.strip()
+        ts_raw = parts.get("t") or (str(timestamp)
+                                    if timestamp is not None else "")
+        v1 = parts.get("v1") or signature
+        try:
+            ts = float(ts_raw)
+        except (TypeError, ValueError):
+            raise TriggerError("bad webhook timestamp")
+        if abs(now - ts) > tolerance_s:
+            raise TriggerError(
+                f"webhook timestamp outside tolerance ({tolerance_s:g}s)")
+        signed = f"{ts_raw}.".encode() + body
+        expected = hmac.new(secret.encode(), signed,
+                            hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, v1):
+            raise TriggerError("bad webhook signature")
+        return
+    raise TriggerError(f"unknown webhook scheme {scheme!r}")
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -82,7 +166,7 @@ def _emit(topic: str, data: dict[str, Any]) -> None:
 #: partner runtime's message hook.
 ENGINE_KEY = "trigger_engine"
 
-_POLL_SOURCES = (SOURCE_FILE, SOURCE_PRICE)
+_POLL_SOURCES = (SOURCE_FILE, SOURCE_PRICE, SOURCE_URL)
 
 
 def _await(coro: Any) -> Any:
@@ -131,8 +215,15 @@ class TriggerEngine:
         self.start_mission = start_mission
         self.poll_interval = max(1.0, float(poll_interval))
         self._clock = clock
-        #: per-trigger source memory (file baselines, last prices)
+        #: per-trigger source memory (file baselines, last prices, url digests)
         self._source_state: dict[str, dict[str, Any]] = {}
+        #: per-trigger run locks for mode=single/queued
+        self._run_locks: dict[str, threading.Lock] = {}
+        #: evidence of the fire currently executing (read by actions for
+        #: {{evidence}} template rendering)
+        self._current_evidence: dict[str, Any] = {}
+        #: per-trigger last poll time (backs per-trigger poll_s overrides)
+        self._last_poll: dict[str, float] = {}
         #: bus attachment (attach_bus): the bus object + subscription id
         self._bus: Any = None
         self._bus_sub_id: str | None = None
@@ -248,19 +339,38 @@ class TriggerEngine:
                 "DELETE FROM scheduled_tasks WHERE task_id = ?", (job_id,))
 
     def _wire_schedule(self, trigger: Trigger) -> None:
-        """Wire a schedule trigger into the existing scheduler."""
+        """Wire a schedule trigger into the existing scheduler.
+
+        The trigger's schedule options (``misfire`` / ``stale_after_s`` /
+        ``overlap`` / ``timezone``) map straight onto the scheduler's own
+        missed-fire and overlap policies — reuse, not a parallel
+        scheduler.
+        """
         sch = self._ensure_scheduler()
         sch.register_action(SCHEDULER_ACTION, self._on_scheduler_fire)
         job_id = self._job_id(trigger.id)
         self._clear_scheduler_job(job_id)
         kind, plan = schedule_plan(trigger.condition)
+        cond = trigger.condition
         params = {"trigger_id": trigger.id}
+        missed_fire_policy = cond.get("misfire", "fire_now")
+        stale_after_s = float(cond.get("stale_after_s") or 86400)
+        overlap_policy = cond.get("overlap", "skip")
+        tz = cond.get("timezone") or None
         if kind == "cron":
             _await(sch.schedule_cron(
-                job_id, plan["cron_expr"], SCHEDULER_ACTION, params))
+                job_id, plan["cron_expr"], SCHEDULER_ACTION, params,
+                missed_fire_policy=missed_fire_policy,
+                stale_after_s=stale_after_s,
+                overlap_policy=overlap_policy,
+                tz=tz))
         else:
             _await(sch.schedule_once(
-                job_id, plan["run_at"], SCHEDULER_ACTION, params))
+                job_id, plan["run_at"], SCHEDULER_ACTION, params,
+                missed_fire_policy=missed_fire_policy,
+                stale_after_s=stale_after_s,
+                overlap_policy=overlap_policy,
+                tz=tz))
         _log.info("wired schedule trigger %s (%s %s)",
                   trigger.id, kind, plan)
 
@@ -330,16 +440,27 @@ class TriggerEngine:
         *,
         cooldown_s: float = 0.0,
         enabled: bool = True,
+        conditions: list[dict[str, Any]] | None = None,
+        mode: str = "parallel",
+        poll_s: float = 0.0,
     ) -> Trigger:
-        """Validate (fail fast), persist, and wire a new trigger."""
+        """Validate (fail fast), persist, and wire a new trigger.
+
+        ``conditions`` are HA-style gates evaluated after a source match
+        (``time_window`` / ``rate`` / ``evidence``); ``mode`` is
+        ``parallel`` | ``single`` | ``queued``; ``poll_s`` overrides the
+        engine poll interval for this trigger's source.
+        """
         if not str(name or "").strip():
             raise TriggerError("trigger needs a name")
-        condition, params, cooldown = validate_definition(
-            source, condition, action, action_params, cooldown_s=cooldown_s)
+        spec = validate_trigger_spec(
+            source, condition, action, action_params, cooldown_s=cooldown_s,
+            conditions=conditions, mode=mode, poll_s=poll_s)
         trigger = Trigger(
             id=new_trigger_id(), name=str(name).strip(), enabled=enabled,
-            source=source, condition=condition, action=action,
-            action_params=params, cooldown_s=cooldown)
+            source=source, condition=spec.condition, action=action,
+            action_params=spec.params, cooldown_s=spec.cooldown,
+            conditions=spec.conditions, mode=spec.mode, poll_s=spec.poll_s)
         self.store.save(trigger)
         if enabled and source == SOURCE_SCHEDULE:
             try:
@@ -355,8 +476,37 @@ class TriggerEngine:
             "source": trigger.source,
             "action": trigger.action,
             "enabled": trigger.enabled,
+            "mode": trigger.mode,
+            "conditions": [c.get("type") for c in trigger.conditions],
         })
         return trigger
+
+    def add_from_template(self, template_name: str,
+                          params: dict[str, Any] | None = None,
+                          **overrides: Any) -> Trigger:
+        """Create a trigger from a built-in template (blueprint).
+
+        ``params`` fills the template's ``{inputs}``; ``overrides`` set
+        any trigger field (``enabled``, ``mode``, ``conditions`` …).
+        """
+        from .templates import render_template
+
+        spec = render_template(template_name, params)
+        name = str(overrides.pop("name", None) or spec.get("name")
+                   or template_name)
+        return self.add(
+            name,
+            str(spec.get("source") or "schedule"),
+            dict(spec.get("condition") or {}),
+            str(spec.get("action") or "notify"),
+            dict(spec.get("action_params") or {}),
+            cooldown_s=float(spec.get("cooldown_s") or 0.0),
+            enabled=bool(overrides.pop("enabled", True)),
+            conditions=overrides.pop("conditions", None),
+            mode=str(overrides.pop("mode", "parallel")),
+            poll_s=float(overrides.pop("poll_s",
+                                       spec.get("poll_s") or 0.0)),
+        )
 
     def remove(self, trigger_id: str) -> bool:
         trigger = self.store.get(trigger_id)
@@ -406,15 +556,34 @@ class TriggerEngine:
 
     # ── evaluation: poll sources ──────────────────────────────────────────
 
+    def _poll_due(self, trigger: Trigger, now: float) -> bool:
+        """Per-trigger poll cadence override.  Only applies when the
+        trigger sets ``poll_s`` explicitly — otherwise every tick
+        evaluates (legacy behavior).  Not-due triggers are skipped
+        silently (not an evaluation — nothing to record)."""
+        if not trigger.poll_s:
+            return True
+        last = self._last_poll.get(trigger.id)
+        if last is not None and now - last < trigger.poll_s:
+            return False
+        self._last_poll[trigger.id] = now
+        return True
+
     def tick(self) -> dict[str, int]:
-        """Evaluate every enabled file/price trigger once."""
-        summary = {"evaluated": 0, "fired": 0, "errors": 0}
+        """Evaluate every enabled file/price/url trigger once."""
+        summary = {"evaluated": 0, "fired": 0, "errors": 0, "not_due": 0}
+        now = self._clock()
         for trigger in self.store.list(enabled_only=True):
             if trigger.source == SOURCE_FILE:
                 fn = evaluate_file
             elif trigger.source == SOURCE_PRICE:
                 fn = evaluate_price
+            elif trigger.source == SOURCE_URL:
+                fn = evaluate_url
             else:
+                continue
+            if not self._poll_due(trigger, now):
+                summary["not_due"] += 1
                 continue
             summary["evaluated"] += 1
             state = self._source_state.setdefault(trigger.id, {})
@@ -440,8 +609,14 @@ class TriggerEngine:
                     {"source": trigger.source, **evidence})
         try:
             self.store.purge_old()
+            self.store.digest_purge()
         except Exception:  # noqa: BLE001 - purge is housekeeping, never fatal
             _log.exception("trigger history purge failed")
+        try:
+            flushed = self.flush_digests()
+            summary["digests_flushed"] = flushed["sent"]
+        except Exception:  # noqa: BLE001 - flush is housekeeping, never fatal
+            _log.exception("trigger digest flush failed")
         return summary
 
     # ── evaluation: message source ─────────────────────────────────────────
@@ -516,9 +691,23 @@ class TriggerEngine:
 
     def fire_webhook(self, trigger_id: str, *,
                      payload: dict[str, Any] | None = None,
-                     secret: str | None = None) -> dict[str, Any]:
+                     secret: str | None = None,
+                     signature: str = "",
+                     timestamp: str | int | float | None = None,
+                     event_id: str = "",
+                     raw_body: bytes = b"") -> dict[str, Any]:
         """Fire a webhook trigger.  Fail fast on unknown id, wrong source,
-        bad secret, or a disabled trigger — never silently drop."""
+        bad auth, replayed event id, or a disabled trigger — never
+        silently drop.
+
+        Auth schemes (set on the trigger condition): ``plain`` compares
+        ``secret``; ``github`` / ``stripe`` verify an HMAC signature over
+        the body (Stripe additionally enforces a timestamp tolerance).
+        ``event_id`` is an idempotency key — a repeat inside the TTL is
+        rejected as a replay (Stripe webhook_events parity).
+        """
+        import json as _json
+
         trigger = self.store.get(trigger_id)
         if trigger is None:
             raise TriggerError(f"unknown trigger {trigger_id!r}")
@@ -526,13 +715,34 @@ class TriggerEngine:
             raise TriggerError(
                 f"trigger {trigger_id!r} is not a webhook trigger "
                 f"(source={trigger.source!r})")
-        expected = trigger.condition.get("secret")
-        if expected and not hmac.compare_digest(secret or "", expected):
-            raise TriggerError("bad webhook secret")
+        cond = trigger.condition
+        scheme = cond.get("scheme") or "plain"
+        if scheme == "plain":
+            expected = cond.get("secret")
+            if expected and not hmac.compare_digest(secret or "", expected):
+                raise TriggerError("bad webhook secret")
+        else:
+            body = raw_body or _json.dumps(
+                payload or {}, sort_keys=True,
+                separators=(",", ":")).encode()
+            verify_webhook_signature(
+                str(cond.get("secret") or ""), scheme,
+                signature=signature or str(secret or ""),
+                timestamp=timestamp, body=body,
+                tolerance_s=float(cond.get("tolerance_s") or 300))
+        event_id = str(event_id or "")
+        if event_id and self.store.seen_webhook_event(trigger_id, event_id):
+            raise TriggerError(
+                f"duplicate webhook event {event_id!r} (replay dedup)")
+        if event_id:
+            # note AFTER auth passes, so bad signatures can't pollute the
+            # dedup table and lock out a later legitimate retry
+            self.store.note_webhook_event(trigger_id, event_id)
         if not trigger.enabled:
             raise TriggerError(f"trigger {trigger_id!r} is disabled")
         return self._fire(trigger, {"source": "webhook",
-                                    "payload": dict(payload or {})})
+                                    "payload": dict(payload or {}),
+                                    "event_id": event_id})
 
     def manual_fire(self, trigger_id: str) -> dict[str, Any]:
         """Fire a trigger on demand (``nm trigger run``)."""
@@ -542,6 +752,87 @@ class TriggerEngine:
         if not trigger.enabled:
             raise TriggerError(f"trigger {trigger_id!r} is disabled")
         return self._fire(trigger, {"source": "manual"})
+
+    def next_run(self, trigger_id: str) -> float | None:
+        """Next scheduled fire (epoch) for a schedule trigger; None when
+        not a schedule trigger or nothing upcoming."""
+        trigger = self.store.get(trigger_id)
+        if trigger is None or trigger.source != SOURCE_SCHEDULE:
+            return None
+        cond = trigger.condition
+        if "once" in cond:
+            ts = float(cond["once"])
+            return ts if ts > self._clock() else None
+        from ..scheduler.scheduler import CronParser
+
+        try:
+            return CronParser.next_run(str(cond["cron"]),
+                                       after=self._clock())
+        except Exception:  # noqa: BLE001 - never break status views
+            _log.debug("next_run failed for %s", trigger_id, exc_info=True)
+            return None
+
+    def status(self, trigger_id: str) -> dict[str, Any]:
+        """Full status snapshot: definition + next run + digest backlog +
+        outcome stats.  Powers the rich status view."""
+        trigger = self.store.get(trigger_id)
+        if trigger is None:
+            raise TriggerError(f"unknown trigger {trigger_id!r}")
+        out = trigger.to_dict()
+        out["next_run"] = self.next_run(trigger_id)
+        out["digest_pending"] = len(self.store.digest_pending(trigger_id))
+        lock = self._run_locks.get(trigger_id)
+        out["running"] = bool(lock is not None and lock.locked())
+        out["stats"] = self.store.stats(trigger_id)
+        return out
+
+    def flush_digests(self, *, force: bool = False) -> dict[str, int]:
+        """Send one combined message per trigger with a due digest buffer.
+
+        A buffer flushes when its oldest line is older than
+        ``digest_every_s`` or it reached ``digest_max`` lines (Huginn
+        digest-agent parity).  Never raises for a broken send path — the
+        lines stay buffered and the error is recorded.
+        """
+        summary = {"triggers": 0, "sent": 0, "errors": 0}
+        now = self._clock()
+        for trigger in self.store.list(enabled_only=True):
+            pending = self.store.digest_pending(trigger.id)
+            if not pending:
+                continue
+            params = trigger.action_params
+            every = float(params.get("digest_every_s") or 3600)
+            max_n = int(params.get("digest_max") or 25)
+            oldest = self.store.digest_oldest(trigger.id) or now
+            if not force and len(pending) < max_n and now - oldest < every:
+                continue
+            summary["triggers"] += 1
+            title, body = _actions.format_digest(trigger, pending)
+            try:
+                if trigger.action == ACTION_MESSAGE:
+                    sender = self.send_message
+                    if sender is None:
+                        raise TriggerError(
+                            "digest flush needs send_message bound")
+                    sender(str(trigger.action_params.get("chat") or ""),
+                           f"{title}\n{body}")
+                else:  # notify (owner channel) for everything else
+                    fn = self.notify_fn or _actions.default_notify
+                    fn(trigger, title, body, self)
+                taken = self.store.digest_take(trigger.id)
+                self.store.record(
+                    trigger.id, OUTCOME_FIRED,
+                    {"source": "digest", "lines": len(taken)}, fired=True)
+                summary["sent"] += 1
+                _log.info("trigger %s flushed digest (%d lines)",
+                          trigger.id, len(taken))
+            except Exception as exc:  # noqa: BLE001 - lines stay buffered
+                _log.exception("trigger %s digest flush failed", trigger.id)
+                self.store.record(
+                    trigger.id, OUTCOME_ERROR, {"source": "digest"},
+                    error=f"{type(exc).__name__}: {exc}")
+                summary["errors"] += 1
+        return summary
 
     # ── firing ─────────────────────────────────────────────────────────────
 
@@ -553,40 +844,114 @@ class TriggerEngine:
             return {"fired": False, "outcome": "unknown_trigger"}
         return self._fire(trigger, evidence)
 
+    def check_conditions(self, trigger: Trigger,
+                         evidence: dict[str, Any],
+                         now: float | None = None) -> tuple[bool, str]:
+        """Evaluate HA-style gates after a source match, before the action.
+
+        Returns ``(True, "")`` when every gate passes, else ``(False,
+        reason)``.  Never raises — a broken gate fails closed (skip).
+        """
+        now = now if now is not None else self._clock()
+        try:
+            for cond in trigger.conditions or []:
+                ctype = cond.get("type")
+                if ctype == CONDITION_TIME_WINDOW:
+                    hhmm = time.strftime("%H:%M", time.localtime(now))
+                    after, before = cond["after"], cond["before"]
+                    if after <= before:
+                        inside = after <= hhmm < before
+                    else:  # spans midnight
+                        inside = hhmm >= after or hhmm < before
+                    if not inside:
+                        return False, (
+                            f"time_window {after}–{before} "
+                            f"(now {hhmm})")
+                elif ctype == CONDITION_RATE:
+                    window_start = now - float(cond["window_s"])
+                    n = self.store.count_outcome(
+                        trigger.id, OUTCOME_FIRED, window_start)
+                    if n >= int(cond["max"]):
+                        return False, (
+                            f"rate {n}/{cond['max']} per "
+                            f"{float(cond['window_s']):g}s")
+                elif ctype == CONDITION_EVIDENCE:
+                    want = cond.get("match") or {}
+                    for key, expected in want.items():
+                        if evidence.get(key) != expected:
+                            return False, (
+                                f"evidence mismatch on {key!r}")
+        except Exception as exc:  # noqa: BLE001 - gates fail closed
+            _log.warning("trigger %s condition check failed: %s",
+                         trigger.id, exc)
+            return False, f"condition error: {exc}"
+        return True, ""
+
     def _fire(self, trigger: Trigger,
               evidence: dict[str, Any]) -> dict[str, Any]:
-        """Fire one trigger: checks, action, history.  Never raises for
-        action failures — they are logged (with the trigger id) and
+        """Fire one trigger: checks, gates, action, history.  Never raises
+        for action failures — they are logged (with the trigger id) and
         recorded; other triggers are unaffected."""
         now = self._clock()
         if not trigger.enabled:
             self.store.record(trigger.id, OUTCOME_SKIPPED,
-                              {"reason": "disabled", **evidence})
+                              {"reason": SKIP_DISABLED, **evidence})
             _log.info("trigger %s skipped (disabled)", trigger.id)
             return {"fired": False, "outcome": OUTCOME_SKIPPED,
-                    "reason": "disabled"}
+                    "reason": SKIP_DISABLED}
         if (trigger.cooldown_s > 0 and trigger.last_fired
                 and now - trigger.last_fired < trigger.cooldown_s):
             self.store.record(trigger.id, OUTCOME_SKIPPED,
-                              {"reason": "cooldown",
+                              {"reason": SKIP_COOLDOWN,
                                "cooldown_s": trigger.cooldown_s, **evidence})
             return {"fired": False, "outcome": OUTCOME_SKIPPED,
-                    "reason": "cooldown"}
+                    "reason": SKIP_COOLDOWN}
+        gate_ok, gate_reason = self.check_conditions(trigger, evidence, now)
+        if not gate_ok:
+            self.store.record(trigger.id, OUTCOME_SKIPPED,
+                              {"reason": SKIP_CONDITION,
+                               "condition": gate_reason, **evidence})
+            _log.info("trigger %s skipped (condition: %s)",
+                      trigger.id, gate_reason)
+            return {"fired": False, "outcome": OUTCOME_SKIPPED,
+                    "reason": SKIP_CONDITION, "detail": gate_reason}
         handler = _actions.ACTION_HANDLERS.get(trigger.action)
         if handler is None:  # pragma: no cover - validated at add time
             raise TriggerError(f"unknown action {trigger.action!r}")
+        # concurrency mode: single skips while in flight, queued serializes
+        lock = self._run_locks.setdefault(trigger.id, threading.Lock())
+        holding = False
+        if trigger.mode == MODE_SINGLE:
+            if not lock.acquire(blocking=False):
+                self.store.record(
+                    trigger.id, OUTCOME_SKIPPED,
+                    {"reason": SKIP_ALREADY_RUNNING, **evidence})
+                return {"fired": False, "outcome": OUTCOME_SKIPPED,
+                        "reason": SKIP_ALREADY_RUNNING}
+            holding = True
+        elif trigger.mode == MODE_QUEUED:
+            lock.acquire()
+            holding = True
+        prev_evidence = self._current_evidence
+        self._current_evidence = dict(evidence)
         try:
-            result = handler(trigger, self)
-        except Exception as exc:  # noqa: BLE001 - engine resilience
-            _log.exception("trigger %s (%s) action %s failed",
-                           trigger.id, trigger.name, trigger.action)
-            self.store.record(trigger.id, OUTCOME_ERROR, dict(evidence),
-                              error=f"{type(exc).__name__}: {exc}")
-            self._ledger("error", trigger,
-                         f"{trigger.name} action {trigger.action} failed",
-                         ok=False, learned=f"{type(exc).__name__}: {exc}"[:200])
-            return {"fired": False, "outcome": OUTCOME_ERROR,
-                    "error": f"{type(exc).__name__}: {exc}"}
+            try:
+                result = handler(trigger, self)
+            except Exception as exc:  # noqa: BLE001 - engine resilience
+                _log.exception("trigger %s (%s) action %s failed",
+                               trigger.id, trigger.name, trigger.action)
+                self.store.record(trigger.id, OUTCOME_ERROR, dict(evidence),
+                                  error=f"{type(exc).__name__}: {exc}")
+                self._ledger("error", trigger,
+                             f"{trigger.name} action {trigger.action} failed",
+                             ok=False,
+                             learned=f"{type(exc).__name__}: {exc}"[:200])
+                return {"fired": False, "outcome": OUTCOME_ERROR,
+                        "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            self._current_evidence = prev_evidence
+            if holding:
+                lock.release()
         self.store.record(trigger.id, OUTCOME_FIRED,
                           {"evidence": dict(evidence),
                            "result": _jsonable(result)},

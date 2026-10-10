@@ -21,11 +21,18 @@ Each source knows how to decide "did it fire?" for one evaluation:
   the shared event bus (glob topic + data subset match).  This is the
   cross-system wiring — a finished scheduler job, a mission terminal
   state, or another trigger's fire can wake a trigger.
+* ``url`` — changedetection.io-style website watch: fetch, extract,
+  hash-baseline; fires when the extracted content changes (optionally
+  only when it matches ``regex``).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json as _json
+import re as _re
+import urllib.request as _urlreq
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +41,9 @@ from ..core.logging_setup import get_logger
 from ..integrations import market_data
 
 _log = get_logger(__name__)
+
+#: cap on fetched bytes for url watches (stdlib fetch, no renderer)
+URL_MAX_BYTES = 2 * 1024 * 1024
 
 #: action name the engine registers on the scheduler for schedule triggers
 SCHEDULER_ACTION = "__trigger_fire__"
@@ -147,9 +157,11 @@ def evaluate_price(
 
 def match_message(trigger: Any, text: str, chat_key: str,
                   sender: str = "") -> tuple[bool, dict[str, Any]]:
-    """Check one inbound message against a message-source trigger."""
-    import re as _re
+    """Check one inbound message against a message-source trigger.
 
+    Supports an ``exclude`` negative pattern (match must NOT hit it) and
+    ``case_insensitive`` matching.
+    """
     cond = trigger.condition
     want_chat = cond.get("chat")
     if want_chat and want_chat != chat_key:
@@ -157,9 +169,13 @@ def match_message(trigger: Any, text: str, chat_key: str,
     want_sender = cond.get("sender")
     if want_sender and want_sender != sender:
         return False, {"reason": "sender_mismatch", "sender": sender}
-    m = _re.search(cond["pattern"], text or "")
+    flags = _re.IGNORECASE if cond.get("case_insensitive") else 0
+    m = _re.search(cond["pattern"], text or "", flags)
     if not m:
         return False, {"reason": "no_match"}
+    exclude = cond.get("exclude")
+    if exclude and _re.search(exclude, text or "", flags):
+        return False, {"reason": "excluded"}
     return True, {"pattern": cond["pattern"], "chat": chat_key,
                   "matched": m.group(0)[:200]}
 
@@ -229,3 +245,145 @@ def match_entity_state(trigger: Any, entity_id: str,
         return False, {"reason": "from_mismatch", "old_state": old_state}
     return True, {"entity_id": entity_id, "old_state": old_state,
                   "new_state": new_state}
+
+
+# ── url source: website change watching ──────────────────────────────
+
+_TAG_RE = _re.compile(r"<[^>]+>")
+_WS_RE = _re.compile(r"\s+")
+
+
+def _strip_html(text: str) -> str:
+    """Best-effort visible-text extraction (no JS rendering)."""
+    text = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+    text = _TAG_RE.sub(" ", text)
+    text = _WS_RE.sub(" ", text).strip()
+    return text
+
+
+def _jsonpath_extract(data: Any, path: str) -> Any:
+    """Minimal JSONPath: ``$.a.b[0].c`` — dict keys and list indices."""
+    if not path.startswith("$"):
+        raise ValueError(f"bad jsonpath {path!r}")
+    node: Any = data
+    for part in path[1:].split("."):
+        if not part:
+            continue
+        m = _re.fullmatch(r"([^\[\]]+)?((?:\[\d+\])*)", part)
+        if not m:
+            raise ValueError(f"bad jsonpath segment {part!r}")
+        key, indices = m.group(1), m.group(2)
+        if key and isinstance(node, dict):
+            node = node.get(key)
+        elif key:
+            return None
+        for idx in _re.findall(r"\[(\d+)\]", indices or ""):
+            if isinstance(node, (list, tuple)) and int(idx) < len(node):
+                node = node[int(idx)]
+            else:
+                return None
+    return node
+
+
+def _fetch_url(url: str, timeout_s: float) -> tuple[bytes, str]:
+    """Fetch a URL with stdlib.  Returns (body, content_type)."""
+    req = _urlreq.Request(
+        url,
+        headers={
+            "User-Agent": "DevonTriggerWatch/1.0 (+https://github.com/Oluwacutyp/nomorals-2.0)",
+            "Accept": "text/html,application/json,text/*;q=0.9,*/*;q=0.8",
+        },
+    )
+    with _urlreq.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 - owner-configured URL
+        ctype = resp.headers.get("Content-Type", "")
+        chunks: list[bytes] = []
+        remaining = URL_MAX_BYTES
+        while remaining > 0:
+            chunk = resp.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), ctype
+
+
+def evaluate_url(
+    trigger: Any, state: dict[str, Any]
+) -> tuple[bool, dict[str, Any]]:
+    """Poll a URL for content change.  ``state`` is the engine-held
+    per-trigger memory (``digest``); mutated in place.
+
+    First sight establishes the baseline and never fires (same semantics
+    as ``evaluate_file``).  ``regex`` gates firing to matching content;
+    ``ignore`` is stripped before hashing; ``jsonpath`` extracts a slice
+    of JSON responses; ``text_only`` strips HTML.
+    """
+    cond = trigger.condition
+    url = cond["url"]
+    timeout_s = float(cond.get("timeout_s") or 20)
+    try:
+        raw, ctype = _fetch_url(url, timeout_s)
+    except Exception as exc:  # noqa: BLE001 - fetch failures are no_match
+        _log.warning("url watch %s fetch failed: %s", url, exc)
+        return False, {"url": url, "event": "fetch_failed",
+                       "note": f"{type(exc).__name__}: {exc}"[:200]}
+    text = raw.decode("utf-8", errors="replace")
+    if cond.get("jsonpath"):
+        try:
+            data = _json.loads(text)
+        except ValueError:
+            return False, {"url": url, "event": "bad_json",
+                           "note": "jsonpath set but body is not JSON"}
+        extracted = _jsonpath_extract(data, cond["jsonpath"])
+        text = "" if extracted is None else (
+            extracted if isinstance(extracted, str)
+            else _json.dumps(extracted, sort_keys=True))
+    elif cond.get("text_only") or "html" in ctype.lower():
+        text = _strip_html(text)
+    ignore = cond.get("ignore")
+    if ignore:
+        text = _re.sub(ignore, "", text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    prev: str | None = state.get("digest")
+    state["digest"] = digest
+    state["size"] = len(text)
+    evidence = {"url": url, "size": len(text),
+                "digest": digest[:12],
+                "snippet": text[:300]}
+    if prev is None:
+        return False, {**evidence, "event": "baseline",
+                       "note": "baseline established"}
+    if prev == digest:
+        return False, {**evidence, "event": "unchanged"}
+    regex = cond.get("regex")
+    if regex and not _re.search(regex, text):
+        return False, {**evidence, "event": "changed_no_regex",
+                       "note": "content changed but did not match regex"}
+    evidence["event"] = "changed"
+    evidence["old_digest"] = prev[:12]
+    evidence["new_digest"] = digest[:12]
+    return True, evidence
+
+
+# ── CloudEvents 1.0 envelope ─────────────────────────────────────────
+
+def to_cloudevent(event: Any) -> dict[str, Any]:
+    """Project a bus event onto a CloudEvents 1.0 envelope.
+
+    ``id`` + ``source`` double as the consumer idempotency key (the
+    spec's own dedup contract); ``type`` is the event topic,
+    ``subject`` the event's subject/entity when present.
+    """
+    import uuid as _uuid
+
+    data = getattr(event, "data", None)
+    return {
+        "specversion": "1.0",
+        "id": str(getattr(event, "event_id", "") or _uuid.uuid4().hex),
+        "source": str(getattr(event, "source", "") or "devon"),
+        "type": str(getattr(event, "topic", "") or "devon.event"),
+        "time": datetime.now(timezone.utc).isoformat(),
+        "subject": str(getattr(event, "subject", "") or ""),
+        "datacontenttype": "application/json",
+        "data": data if isinstance(data, dict) else {"value": data},
+    }

@@ -73,8 +73,10 @@ __all__ = [
     "get_matcher",
     "check_search",
     "check_all",
+    "deliver_digests",
     "ensure_schedule",
     "format_match",
+    "format_digest",
     "format_search",
     "parse_watch",
     "control_watch",
@@ -115,15 +117,26 @@ class SavedSearch:
     last_run: float = 0.0
     match_count: int = 0
     active: bool = True
+    #: epoch until which the watch is snoozed (0 = not snoozed)
+    snooze_until: float = 0.0
+    #: "HH:MM" local time — queue matches and push one combined digest at
+    #: this hour instead of instant pushes ("" = instant)
+    digest_at: str = ""
 
     @property
     def expired(self) -> bool:
         return bool(self.expires_at) and time.time() >= self.expires_at
 
+    @property
+    def snoozed(self) -> bool:
+        return bool(self.snooze_until) and time.time() < self.snooze_until
+
     def due(self, now: float | None = None) -> bool:
-        """Active, unexpired, and the cadence interval has elapsed."""
+        """Active, unexpired, not snoozed, and cadence elapsed."""
         now = now if now is not None else time.time()
         if not self.active or (self.expires_at and now >= self.expires_at):
+            return False
+        if self.snooze_until and now < self.snooze_until:
             return False
         return (now - (self.last_run or 0)) >= max(60, self.cadence_s)
 
@@ -161,12 +174,35 @@ class SavedSearchStore:
                        id TEXT PRIMARY KEY, domain TEXT, query TEXT,
                        filters_json TEXT, cadence_s INTEGER,
                        ttl_days INTEGER, created_at REAL, expires_at REAL,
-                       last_run REAL, match_count INTEGER, active INTEGER)""")
+                       last_run REAL, match_count INTEGER, active INTEGER,
+                       snooze_until REAL DEFAULT 0,
+                       digest_at TEXT DEFAULT '')""")
+            # migrate older DBs that lack the new columns
+            cols = {r[1] for r in self._db.execute(
+                "PRAGMA table_info(saved_searches)").fetchall()}
+            if "snooze_until" not in cols:
+                self._db.execute(
+                    "ALTER TABLE saved_searches ADD COLUMN "
+                    "snooze_until REAL DEFAULT 0")
+            if "digest_at" not in cols:
+                self._db.execute(
+                    "ALTER TABLE saved_searches ADD COLUMN "
+                    "digest_at TEXT DEFAULT ''")
             self._db.execute(
                 """CREATE TABLE IF NOT EXISTS seen_matches (
                        search_id TEXT, dedup_key TEXT,
                        found_at REAL,
                        PRIMARY KEY (search_id, dedup_key))""")
+            # digest queue: matches held for digest_at batching
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS pending_digest (
+                       seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                       search_id TEXT, queued_at REAL,
+                       title TEXT, price_kobo INTEGER, area TEXT,
+                       address TEXT, beds TEXT, url TEXT)""")
+            self._db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_pending_digest_search
+                   ON pending_digest(search_id, seq)""")
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB is an empty store
             _log.warning("saved_search: db unavailable, running empty",
@@ -200,10 +236,15 @@ class SavedSearchStore:
                 return s
             import json as _json
             self._db.execute(
-                "INSERT INTO saved_searches VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO saved_searches
+                   (id, domain, query, filters_json, cadence_s, ttl_days,
+                    created_at, expires_at, last_run, match_count, active,
+                    snooze_until, digest_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (s.id, s.domain, s.query, _json.dumps(s.filters),
                  s.cadence_s, s.ttl_days, s.created_at, s.expires_at,
-                 s.last_run, s.match_count, 1))
+                 s.last_run, s.match_count, 1, s.snooze_until,
+                 s.digest_at))
             self._db.commit()
             return s
         except Exception:  # noqa: BLE001
@@ -309,6 +350,105 @@ class SavedSearchStore:
         except Exception:  # noqa: BLE001
             _log.debug("saved_search mark_seen failed", exc_info=True)
 
+    # — snooze + digest —
+
+    def snooze(self, search_id: str, hours: float,
+               now: float | None = None) -> bool:
+        """Snooze a watch for ``hours`` (Jiji pattern). True when it existed."""
+        try:
+            if self._db is None:
+                return False
+            now = now if now is not None else time.time()
+            cur = self._db.execute(
+                "UPDATE saved_searches SET snooze_until = ? WHERE id = ?",
+                (now + max(0.0, float(hours)) * 3600, search_id))
+            self._db.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def unsnooze(self, search_id: str) -> bool:
+        try:
+            if self._db is None:
+                return False
+            cur = self._db.execute(
+                "UPDATE saved_searches SET snooze_until = 0 WHERE id = ?",
+                (search_id,))
+            self._db.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def set_digest_at(self, search_id: str, digest_at: str) -> bool:
+        """Set digest mode: ``"HH:MM"`` queues matches for one daily push;
+        ``""`` restores instant pushes. True when the search existed."""
+        try:
+            if self._db is None:
+                return False
+            digest_at = (digest_at or "").strip()
+            if digest_at and not re.fullmatch(r"\d{1,2}:\d{2}", digest_at):
+                return False
+            if digest_at:
+                hh, mm = (int(x) for x in digest_at.split(":"))
+                if hh > 23 or mm > 59:
+                    return False
+                digest_at = f"{hh:02d}:{mm:02d}"
+            cur = self._db.execute(
+                "UPDATE saved_searches SET digest_at = ? WHERE id = ?",
+                (digest_at, search_id))
+            self._db.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def queue_digest(self, m: Match) -> None:
+        """Hold one match for the digest_at batch."""
+        try:
+            if self._db is None:
+                return
+            self._db.execute(
+                "INSERT INTO pending_digest (search_id, queued_at, title, "
+                "price_kobo, area, address, beds, url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (m.search_id, m.found_at or time.time(), m.title,
+                 m.price_kobo, m.area, m.address, m.beds, m.url))
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            _log.debug("saved_search queue_digest failed", exc_info=True)
+
+    def pending_digest_count(self, search_id: str) -> int:
+        try:
+            if self._db is None:
+                return 0
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM pending_digest WHERE search_id = ?",
+                (search_id,)).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def take_digest(self, search_id: str) -> list[Match]:
+        """Atomically take (and clear) queued digest matches."""
+        try:
+            if self._db is None:
+                return []
+            rows = self._db.execute(
+                "SELECT * FROM pending_digest WHERE search_id = ? "
+                "ORDER BY seq ASC", (search_id,)).fetchall()
+            out = [Match(
+                search_id=r["search_id"], title=r["title"] or "",
+                price_kobo=int(r["price_kobo"] or 0), area=r["area"] or "",
+                address=r["address"] or "", beds=r["beds"] or "",
+                url=r["url"] or "", found_at=float(r["queued_at"] or 0))
+                for r in rows]
+            self._db.execute(
+                "DELETE FROM pending_digest WHERE search_id = ?",
+                (search_id,))
+            self._db.commit()
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
 
 def _canon_domain(domain: str) -> str | None:
     d = (domain or "").strip().lower()
@@ -323,6 +463,12 @@ def _row_to_search(row: sqlite3.Row) -> SavedSearch:
         filters = _json.loads(row["filters_json"] or "{}")
     except Exception:  # noqa: BLE001
         filters = {}
+    def _col(name: str, default: Any = "") -> Any:
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return default
+
     return SavedSearch(
         id=row["id"], domain=row["domain"] or "property",
         query=row["query"] or "", filters=filters,
@@ -332,7 +478,9 @@ def _row_to_search(row: sqlite3.Row) -> SavedSearch:
         expires_at=float(row["expires_at"] or 0),
         last_run=float(row["last_run"] or 0),
         match_count=int(row["match_count"] or 0),
-        active=bool(row["active"]))
+        active=bool(row["active"]),
+        snooze_until=float(_col("snooze_until", 0) or 0),
+        digest_at=str(_col("digest_at", "") or ""))
 
 
 # ── matcher registry ────────────────────────────────────────────────
@@ -482,7 +630,9 @@ def check_all(store: SavedSearchStore, *,
     """Host entry point: purge expired, run due searches, push matches.
 
     ``sender(text)`` is the owner-DM push seam (mirrors #71's watcher
-    seam).  Never raises.
+    seam).  Searches with ``digest_at`` set queue their matches instead
+    of pushing instantly — call :func:`deliver_digests` to flush.  Never
+    raises.
     """
     now = now if now is not None else time.time()
     found: list[Match] = []
@@ -497,6 +647,9 @@ def check_all(store: SavedSearchStore, *,
                 or get_matcher(search.domain)
             for m in check_search(store, search, matcher=matcher, now=now):
                 found.append(m)
+                if search.digest_at:
+                    store.queue_digest(m)
+                    continue
                 if sender is not None:
                     try:
                         sender(format_match(m))
@@ -507,6 +660,44 @@ def check_all(store: SavedSearchStore, *,
     except Exception:  # noqa: BLE001
         _log.debug("saved_search check_all failed", exc_info=True)
         return found
+
+
+def _digest_due(search: SavedSearch, now: float) -> bool:
+    """Local time has passed today's digest_at and something is queued."""
+    if not search.digest_at:
+        return False
+    hh, mm = (int(x) for x in search.digest_at.split(":"))
+    lt = time.localtime(now)
+    return (lt.tm_hour, lt.tm_min) >= (hh, mm)
+
+
+def deliver_digests(store: SavedSearchStore, *,
+                    sender: Callable[[str], Any] | None = None,
+                    now: float | None = None) -> int:
+    """Push one combined message per digest-mode search whose digest hour
+    has passed.  Returns the number of digests sent.  Never raises."""
+    now = now if now is not None else time.time()
+    sent = 0
+    try:
+        for search in store.list(active_only=True):
+            if not _digest_due(search, now):
+                continue
+            items = store.take_digest(search.id)
+            if not items:
+                continue
+            text = format_digest(search, items)
+            if sender is not None:
+                try:
+                    sender(text)
+                except Exception:  # noqa: BLE001
+                    _log.warning("saved_search digest send failed",
+                                 exc_info=True)
+                    continue
+            sent += 1
+        return sent
+    except Exception:  # noqa: BLE001
+        _log.debug("saved_search deliver_digests failed", exc_info=True)
+        return sent
 
 
 def ensure_schedule(scheduler: Any) -> bool:
@@ -584,6 +775,29 @@ def format_match(m: Match) -> str:
     return line
 
 
+def format_digest(s: SavedSearch, items: list[Match]) -> str:
+    """One combined owner-DM message for a batch of queued matches."""
+    head = f"📦 Watch digest: {len(items)} new match(es)"
+    f = s.filters
+    bits = [s.domain]
+    if f.get("beds"):
+        bits.append(f"{f['beds']}bed")
+    if f.get("area"):
+        bits.append(str(f["area"]))
+    lines = [head + f" ({' '.join(bits)})"]
+    for m in items[:15]:
+        where = m.area or (m.address[:40] if m.address else "")
+        tag = f"{m.beds}-bed " if m.beds else ""
+        lines.append(f"• {tag}{m.title or 'listing'} — "
+                     f"{_short_kobo(m.price_kobo)}"
+                     + (f" · {where}" if where else ""))
+        if m.url:
+            lines.append(f"  {m.url}")
+    if len(items) > 15:
+        lines.append(f"… and {len(items) - 15} more")
+    return "\n".join(lines)
+
+
 def format_search(s: SavedSearch) -> str:
     """One-line summary of a saved search for /watch list."""
     f = s.filters
@@ -596,9 +810,15 @@ def format_search(s: SavedSearch) -> str:
         bits.append(f"under {_short_kobo(f['max_price_kobo'])}")
     days_left = max(0, int((s.expires_at - time.time()) / 86400)) \
         if s.expires_at else 0
+    extra = ""
+    if s.snoozed:
+        extra += f", 😴 snoozed till " + time.strftime(
+            "%m-%d %H:%M", time.localtime(s.snooze_until))
+    if s.digest_at:
+        extra += f", 📦 digest at {s.digest_at}"
     return (f"• `{s.id}` {' '.join(bits)} — every "
             f"{_fmt_cadence(s.cadence_s)}, {s.match_count} match(es), "
-            f"expires in {days_left}d")
+            f"expires in {days_left}d{extra}")
 
 
 def _fmt_cadence(seconds: int) -> str:
@@ -699,6 +919,9 @@ def _usage() -> str:
             "  /watch gig <query> — watch gigs · /watch flight <route>\n"
             "  /watch list — active watches\n"
             "  /watch stop <id> — remove a watch\n"
+            "  /watch snooze <id> <hours> — pause a watch (unsnooze to resume)\n"
+            "  /watch digest <id> HH:MM — one daily batch push at HH:MM\n"
+            "  /watch digest <id> off — back to instant pushes\n"
             "Owner only. Watches auto-expire (default 14d) — stale demand "
             "is how scams recycle.")
 
@@ -730,6 +953,34 @@ def control_watch(tail: str, context: Any = None, chat: Any = None,
             if store.remove(sid):
                 return f"stopped watch `{sid}`."
             return f"no watch `{sid}` — /watch list"
+        if low.startswith("snooze "):
+            parts = tail[7:].split()
+            if len(parts) != 2:
+                return "usage: /watch snooze <id> <hours>"
+            sid, hours = parts
+            try:
+                h = float(hours)
+            except ValueError:
+                return "usage: /watch snooze <id> <hours>"
+            if store.snooze(sid, h):
+                return f"😴 snoozed watch `{sid}` for {h:g}h."
+            return f"no watch `{sid}` — /watch list"
+        if low == "unsnooze" or low.startswith("unsnooze "):
+            sid = tail[8:].strip()
+            if store.unsnooze(sid):
+                return f"woke up watch `{sid}`."
+            return f"no watch `{sid}` — /watch list"
+        if low.startswith("digest "):
+            parts = tail[7:].split()
+            if len(parts) != 2:
+                return "usage: /watch digest <id> HH:MM|off"
+            sid, when = parts
+            when = "" if when.lower() == "off" else when
+            if store.set_digest_at(sid, when):
+                return (f"📦 watch `{sid}` will batch matches daily at "
+                        f"{when}." if when else
+                        f"watch `{sid}` back to instant pushes.")
+            return f"no watch `{sid}` (or bad HH:MM) — /watch list"
         if low.startswith("check"):
             # manual sweep (owner): run due watches now
             sender = getattr(context, "owner_sender", None) \

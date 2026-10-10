@@ -44,9 +44,23 @@ class TriggerStore:
                     created_at REAL NOT NULL,
                     last_fired REAL,
                     last_outcome TEXT,
-                    fire_count INTEGER NOT NULL DEFAULT 0
+                    fire_count INTEGER NOT NULL DEFAULT 0,
+                    conditions TEXT NOT NULL DEFAULT '[]',
+                    mode TEXT NOT NULL DEFAULT 'parallel',
+                    poll_s REAL NOT NULL DEFAULT 0
                 )
             """)
+            # migrate pre-sweep DBs
+            cols = {r["name"] for r in self.db.query(
+                "PRAGMA table_info(trigger_defs)")}
+            for col, ddl in (
+                ("conditions", "TEXT NOT NULL DEFAULT '[]'"),
+                ("mode", "TEXT NOT NULL DEFAULT 'parallel'"),
+                ("poll_s", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if col not in cols:
+                    self.db.execute(
+                        f"ALTER TABLE trigger_defs ADD COLUMN {col} {ddl}")
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS trigger_history (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +75,31 @@ class TriggerStore:
                 CREATE INDEX IF NOT EXISTS idx_trigger_history_id
                 ON trigger_history(trigger_id, seq)
             """)
+            # webhook replay dedup (Stripe idempotency-key pattern):
+            # (trigger_id, event_id) seen inside the TTL is a replay.
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS trigger_webhook_events (
+                    trigger_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    seen_at REAL NOT NULL,
+                    PRIMARY KEY (trigger_id, event_id)
+                )
+            """)
+            # digest buffer: notify/message actions with digest:true queue
+            # rendered texts here until flush_digests() combines them.
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS trigger_digests (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trigger_id TEXT NOT NULL,
+                    queued_at REAL NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trigger_digests_id
+                ON trigger_digests(trigger_id, seq)
+            """)
 
     # ── definitions ──────────────────────────────────────────────────────
 
@@ -69,8 +108,9 @@ class TriggerStore:
             self.db.execute(
                 """INSERT INTO trigger_defs
                    (id, name, enabled, source, condition, action, action_params,
-                    cooldown_s, created_at, last_fired, last_outcome, fire_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cooldown_s, created_at, last_fired, last_outcome, fire_count,
+                    conditions, mode, poll_s)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name, enabled=excluded.enabled,
                      source=excluded.source, condition=excluded.condition,
@@ -78,15 +118,24 @@ class TriggerStore:
                      cooldown_s=excluded.cooldown_s,
                      last_fired=excluded.last_fired,
                      last_outcome=excluded.last_outcome,
-                     fire_count=excluded.fire_count""",
+                     fire_count=excluded.fire_count,
+                     conditions=excluded.conditions,
+                     mode=excluded.mode,
+                     poll_s=excluded.poll_s""",
                 (trigger.id, trigger.name, int(trigger.enabled),
                  trigger.source, json.dumps(trigger.condition),
                  trigger.action, json.dumps(trigger.action_params),
                  trigger.cooldown_s, trigger.created_at, trigger.last_fired,
-                 trigger.last_outcome, trigger.fire_count),
+                 trigger.last_outcome, trigger.fire_count,
+                 json.dumps(trigger.conditions or []), trigger.mode or
+                 "parallel", trigger.poll_s or 0.0),
             )
 
     def _row_to_trigger(self, row: dict[str, Any]) -> Trigger:
+        try:
+            conditions = json.loads(row.get("conditions") or "[]")
+        except (ValueError, TypeError):  # noqa: BLE001 - corrupt row → empty
+            conditions = []
         return Trigger(
             id=row["id"],
             name=row["name"],
@@ -96,6 +145,9 @@ class TriggerStore:
             action=row["action"],
             action_params=json.loads(row["action_params"] or "{}"),
             cooldown_s=float(row["cooldown_s"] or 0.0),
+            conditions=[c for c in conditions if isinstance(c, dict)],
+            mode=str(row.get("mode") or "parallel"),
+            poll_s=float(row.get("poll_s") or 0.0),
             created_at=float(row["created_at"]),
             last_fired=row["last_fired"],
             last_outcome=row["last_outcome"],
@@ -201,3 +253,99 @@ class TriggerStore:
     def count(self) -> int:
         row = self.db.query_one("SELECT COUNT(*) AS n FROM trigger_defs")
         return int(row["n"]) if row else 0
+
+    def count_outcome(self, trigger_id: str, outcome: str,
+                      since_ts: float) -> int:
+        """How many ``outcome`` rows since ``since_ts`` — backs the
+        ``rate`` condition gate."""
+        row = self.db.query_one(
+            "SELECT COUNT(*) AS n FROM trigger_history "
+            "WHERE trigger_id = ? AND outcome = ? AND at >= ?",
+            (trigger_id, outcome, since_ts))
+        return int(row["n"]) if row else 0
+
+    def stats(self, trigger_id: str | None = None) -> dict[str, Any]:
+        """Outcome counts (+ last fire) for one trigger or the whole store."""
+        params: list[Any] = []
+        where = ""
+        if trigger_id:
+            where = "WHERE trigger_id = ?"
+            params.append(trigger_id)
+        rows = self.db.query(
+            f"SELECT outcome, COUNT(*) AS n FROM trigger_history "
+            f"{where} GROUP BY outcome", params)
+        out: dict[str, Any] = {r["outcome"]: int(r["n"]) for r in rows}
+        row = self.db.query_one(
+            "SELECT MAX(at) AS last FROM trigger_history "
+            + where, params)
+        out["last_event_at"] = row["last"] if row else None
+        return out
+
+    # ── webhook idempotency ──────────────────────────────────────────
+
+    def seen_webhook_event(self, trigger_id: str, event_id: str,
+                           *, ttl_s: float = 24 * 3600) -> bool:
+        """True when this (trigger, event_id) was seen inside the TTL —
+        i.e. the delivery is a replay and must be dropped."""
+        if not event_id:
+            return False
+        row = self.db.query_one(
+            "SELECT seen_at FROM trigger_webhook_events "
+            "WHERE trigger_id = ? AND event_id = ?",
+            (trigger_id, event_id))
+        if not row:
+            return False
+        return (time.time() - float(row["seen_at"])) < ttl_s
+
+    def note_webhook_event(self, trigger_id: str, event_id: str) -> None:
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT OR REPLACE INTO trigger_webhook_events "
+                "(trigger_id, event_id, seen_at) VALUES (?, ?, ?)",
+                (trigger_id, event_id, time.time()))
+            self.db.execute(
+                "DELETE FROM trigger_webhook_events WHERE seen_at < ?",
+                (time.time() - 7 * 24 * 3600,))
+
+    # ── digest buffer ────────────────────────────────────────────────
+
+    def digest_append(self, trigger_id: str, title: str, text: str) -> int:
+        """Queue one rendered alert line; returns the buffered count."""
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT INTO trigger_digests (trigger_id, queued_at, title, text)"
+                " VALUES (?, ?, ?, ?)",
+                (trigger_id, time.time(), title or "", text or ""))
+            row = self.db.query_one(
+                "SELECT COUNT(*) AS n FROM trigger_digests WHERE trigger_id = ?",
+                (trigger_id,))
+        return int(row["n"]) if row else 0
+
+    def digest_pending(self, trigger_id: str) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT seq, queued_at, title, text FROM trigger_digests "
+            "WHERE trigger_id = ? ORDER BY seq ASC", (trigger_id,))
+        return [{"seq": r["seq"], "queued_at": r["queued_at"],
+                 "title": r["title"], "text": r["text"]} for r in rows]
+
+    def digest_oldest(self, trigger_id: str) -> float | None:
+        row = self.db.query_one(
+            "SELECT MIN(queued_at) AS oldest FROM trigger_digests "
+            "WHERE trigger_id = ?", (trigger_id,))
+        return float(row["oldest"]) if row and row["oldest"] else None
+
+    def digest_take(self, trigger_id: str) -> list[dict[str, Any]]:
+        """Atomically take (and clear) every buffered line for a trigger."""
+        with self.db.transaction():
+            items = self.digest_pending(trigger_id)
+            self.db.execute(
+                "DELETE FROM trigger_digests WHERE trigger_id = ?",
+                (trigger_id,))
+        return items
+
+    def digest_purge(self, ttl_s: float = 7 * 24 * 3600) -> int:
+        with self.db.transaction():
+            cur = self.db.execute(
+                "DELETE FROM trigger_digests WHERE queued_at < ?",
+                (time.time() - ttl_s,))
+        return cur.rowcount or 0

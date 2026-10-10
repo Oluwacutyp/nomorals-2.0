@@ -14,6 +14,17 @@ subsystems — nothing here reinvents a send path:
   layering test stays green).
 * ``mission`` — starts a mission through ``missions.runner.MissionRunner``.
 
+Evidence templates: ``title``/``body``/``text``/``goal`` may contain
+``{{dotted.path}}`` placeholders resolved against the fire evidence
+(Huginn Liquid parity) — e.g. ``"BTC is now {{price}}"``.  Missing keys
+render as ``""``; never raises.
+
+Digest mode: ``notify``/``message`` params accept ``digest: true`` —
+instead of sending immediately, the rendered alert is buffered in the
+store and ``TriggerEngine.flush_digests()`` sends one combined message
+(Huginn digest-agent parity).  ``digest_every_s`` (default 3600) and
+``digest_max`` (default 25) control the flush.
+
 Every executor is dependency-injected on the engine (``notify_fn``,
 ``send_message``, ``run_command``, ``start_mission``) so tests can use
 fakes and production binds the real paths.
@@ -21,6 +32,7 @@ fakes and production binds the real paths.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import sys
@@ -37,6 +49,54 @@ from .models import (
 )
 
 _log = get_logger(__name__)
+
+_TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}")
+
+
+def _resolve_path(evidence: dict[str, Any], path: str) -> Any:
+    node: Any = evidence
+    for part in path.split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return ""
+    if node is None:
+        return ""
+    if isinstance(node, (dict, list)):
+        import json as _json
+        try:
+            return _json.dumps(node)[:500]
+        except Exception:  # noqa: BLE001
+            return str(node)[:500]
+    return node
+
+
+def render_template(text: str, evidence: dict[str, Any] | None) -> str:
+    """Render ``{{dotted.path}}`` placeholders against fire evidence.
+
+    Missing paths render as ``""``.  Never raises — a broken template
+    must not break a firing action.
+    """
+    if not text or "{{" not in text:
+        return text or ""
+    evidence = evidence or {}
+
+    def _sub(m: "re.Match[str]") -> str:
+        try:
+            return str(_resolve_path(evidence, m.group(1)))
+        except Exception:  # noqa: BLE001 - templates never break firing
+            return ""
+
+    try:
+        return _TEMPLATE_RE.sub(_sub, text)
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def _evidence_of(engine: Any) -> dict[str, Any]:
+    """The evidence of the fire currently being executed (set by the
+    engine around each action call)."""
+    return dict(getattr(engine, "_current_evidence", None) or {})
 
 
 # ── notify ─────────────────────────────────────────────────────────────────
@@ -59,8 +119,17 @@ def default_notify(trigger: Trigger, title: str, body: str,
 
 def execute_notify(trigger: Trigger, engine: Any) -> dict[str, Any]:
     params = trigger.action_params
-    title = str(params.get("title") or trigger.name or trigger.id)
-    body = str(params.get("body") or "")
+    evidence = _evidence_of(engine)
+    title = render_template(str(params.get("title") or trigger.name
+                                or trigger.id), evidence)
+    body = render_template(str(params.get("body") or ""), evidence)
+    if params.get("digest"):
+        buffered = engine.store.digest_append(trigger.id, title, body)
+        _log.info("trigger %s digested notify (%d buffered)",
+                  trigger.id, buffered)
+        return {"digested": True, "buffered": buffered,
+                "digest_every_s": float(params.get("digest_every_s") or 3600),
+                "digest_max": int(params.get("digest_max") or 25)}
     fn = engine.notify_fn or default_notify
     return dict(fn(trigger, title, body, engine) or {})
 
@@ -69,17 +138,37 @@ def execute_notify(trigger: Trigger, engine: Any) -> dict[str, Any]:
 
 def execute_message(trigger: Trigger, engine: Any) -> dict[str, Any]:
     params = trigger.action_params
+    evidence = _evidence_of(engine)
+    chat = str(params["chat"])
+    text = render_template(str(params["text"]), evidence)
+    if params.get("digest"):
+        buffered = engine.store.digest_append(trigger.id, "", text)
+        _log.info("trigger %s digested message (%d buffered)",
+                  trigger.id, buffered)
+        return {"digested": True, "buffered": buffered, "chat": chat,
+                "digest_every_s": float(params.get("digest_every_s") or 3600),
+                "digest_max": int(params.get("digest_max") or 25)}
     sender: Callable[[str, str], Any] | None = engine.send_message
     if sender is None:
         raise TriggerError(
             "message action has no sender bound — start the engine with "
             "TriggerEngine(..., send_message=...) (the live runtime binds "
             "PartnerRuntime.say)")
-    chat = str(params["chat"])
-    text = str(params["text"])
     result = sender(chat, text)
     return {"chat": chat, "sent": True,
             "result": None if result is None else str(result)[:200]}
+
+
+def format_digest(trigger: Trigger,
+                  items: list[dict[str, Any]]) -> tuple[str, str]:
+    """Combine buffered digest lines into one (title, body) pair."""
+    name = trigger.name or trigger.id
+    title = f"📦 {name}: {len(items)} alert(s)"
+    lines = []
+    for it in items:
+        head = f"• {it['title']}: " if it.get("title") else "• "
+        lines.append(f"{head}{it['text']}".rstrip())
+    return title, "\n".join(lines)[:4000]
 
 
 # ── command ────────────────────────────────────────────────────────────────
@@ -145,7 +234,7 @@ def default_start_mission(goal: str, max_iterations: int,
 
 def execute_mission(trigger: Trigger, engine: Any) -> dict[str, Any]:
     params = trigger.action_params
-    goal = str(params["goal"])
+    goal = render_template(str(params["goal"]), _evidence_of(engine))
     max_iterations = int(params.get("max_iterations") or 8)
     fn = engine.start_mission or default_start_mission
     return dict(fn(goal, max_iterations, engine) or {})
