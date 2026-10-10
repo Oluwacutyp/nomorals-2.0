@@ -1108,16 +1108,71 @@ def _router_llm_fn(router: Any) -> Any:
     return llm_fn
 
 
+#: max refinement iterations in research_deep (initial pass + follow-ups).
+_MAX_REFINEMENTS = 3
+
+_REFINE_PROMPT = """You are reviewing research findings for gaps. Read the findings below and decide if more searching is needed.
+
+Reply with either:
+- DONE — the findings fully answer the question, no gaps
+- Or 1-3 follow-up search queries (one per line) that would fill specific gaps, resolve contradictions, or add missing angles
+
+Be specific. Reference what's missing, not what's already covered.
+
+QUESTION: {question}
+
+FINDINGS:
+{numbered}
+"""
+
+
+def _reasoning_pass(question: str, findings: list[ResearchFinding],
+                    llm_fn: Any = None) -> list[str]:
+    """Identify gaps in findings, return follow-up queries or [] if done.
+
+    This is the iterative refinement loop from deep-research systems:
+    read sources → identify contradictions/gaps → decide if more searches
+    are needed. Returns [] when the findings are sufficient.
+    """
+    if not findings or llm_fn is None:
+        return []
+    try:
+        numbered = "\n\n".join(
+            f"[S{i}] {f.title}\n{re.sub(r'\\s+', ' ', f.snippet).strip()[:400]}"
+            for i, f in enumerate(findings[:20], 1)
+        )
+        raw = (llm_fn(_REFINE_PROMPT.format(question=question,
+                                            numbered=numbered)) or "").strip()
+        if "DONE" in raw.upper()[:20]:
+            return []
+        queries = []
+        for line in raw.splitlines():
+            line = line.strip().lstrip("-•*").strip()
+            line = re.sub(r"^\\d+[.)]\\s*", "", line).strip()
+            if len(line) > 5 and "DONE" not in line.upper():
+                queries.append(line)
+        return queries[:3]
+    except Exception as exc:  # noqa: BLE001 - no refinement on failure
+        _log.debug("reasoning pass failed (%s), no follow-ups", exc)
+        return []
+
+
 def research_deep(question: str, rctx: ResearchContext, *,
                   llm_fn: Any = None, progress: Any = None,
                   max_queries: int = 6,
                   budget_usd: float | None = None) -> DeepReport:
     """One-shot deep research: clarify → decompose → concurrent search →
-    synthesize.
+    refine → synthesize.
 
     When the question is ambiguous, returns early with
     ``needs_clarification=True`` and the clarifying questions — the run is
     never burned on a vague query.
+
+    After the initial search, a reasoning pass reviews the findings for
+    gaps and contradictions, generating follow-up queries. This repeats
+    up to ``_MAX_REFINEMENTS`` times (or until the findings are sufficient
+    or the budget is exhausted) — the iterative loop that separates deep
+    research from single-pass search.
 
     ``budget_usd`` caps total spend: the question is clarified first, then
     ``max_queries`` is cut so the planned searches fit the remaining
@@ -1163,9 +1218,35 @@ def research_deep(question: str, rctx: ResearchContext, *,
     job_id = f"deep-{hashlib.sha256(question.encode()).hexdigest()[:12]}"
     job = ResearchJob(id=job_id, topic=question, queries=sub_queries)
     findings = run_job(job, rctx, progress=progress, budget=budget)
+    # Iterative refinement: reasoning pass → follow-up queries → more search.
+    # This is what separates deep research from single-pass search.
+    all_queries = list(sub_queries)
+    for iteration in range(_MAX_REFINEMENTS - 1):
+        if budget is not None and budget.exhausted:
+            _log.info("research_deep: budget exhausted, stopping refinement")
+            break
+        follow_ups = _reasoning_pass(question, findings, llm_fn=bllm)
+        if not follow_ups:
+            _log.info("research_deep: findings sufficient after %d iteration(s)",
+                      iteration + 1)
+            break
+        _log.info("research_deep: refinement %d, %d follow-up quer(ies)",
+                  iteration + 2, len(follow_ups))
+        _emit_progress(progress, "refine", f"iteration {iteration + 2}")
+        all_queries.extend(follow_ups)
+        follow_job = ResearchJob(id=f"{job_id}-r{iteration + 1}",
+                                topic=question, queries=follow_ups)
+        new_findings = run_job(follow_job, rctx, progress=progress,
+                               budget=budget)
+        # Deduplicate by URL against existing findings
+        seen = {f.url for f in findings}
+        for f in new_findings:
+            if f.url not in seen:
+                seen.add(f.url)
+                findings.append(f)
     synthesis = synthesize(question, findings, llm_fn=bllm)
     citations = _citation_audit_trail(findings)
-    return _report(question=question, sub_queries=sub_queries,
+    return _report(question=question, sub_queries=all_queries,
                    findings=findings, synthesis=synthesis,
                    clarifications=[], needs_clarification=False,
                    citations=citations)
