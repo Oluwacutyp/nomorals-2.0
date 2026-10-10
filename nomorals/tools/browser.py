@@ -35,7 +35,8 @@ from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..core.trust import domain_tier
 
-__all__ = ["BrowserSession", "Node", "register",
+__all__ = ["BrowserSession", "RenderedBrowserSession", "Node", "register",
+           "get_session", "get_rendered_session", "drop_session",
            "dom_headings", "dom_tables", "dom_forms", "dom_meta", "dom_nav",
            "parse_html"]
 
@@ -1180,6 +1181,333 @@ class BrowserSession:
             raise ToolError("no page open — use browser open <url> first")
 
 
+# ── rendered engine (Playwright/Chromium) ─────────────────────────────────
+#
+# The spine ``browser`` tool's default engine is stdlib HTTP (zero deps).
+# ``RenderedBrowserSession`` is the same tool with a real browser: it wraps
+# ``nomorals.browser.service.BrowserService`` (Playwright/Chromium) and
+# exposes the same ``do(action, **kw)`` interface, plus rendered-only
+# actions: screenshot, wait, scroll, hover, press, observe.
+#
+# Engine selection: ``engine="auto"`` (default) uses rendered when Playwright
+# + Chromium are installed, else HTTP. ``engine="rendered"`` fails honestly
+# with install instructions when the stack is missing. ``engine="http"``
+# forces the stdlib path (phone/termux profile).
+
+
+def _playwright_available() -> tuple[bool, str]:
+    """(available, reason). Never imports playwright at module load."""
+    import importlib.util
+    if importlib.util.find_spec("playwright") is None:
+        return False, "playwright not installed: pip install playwright && playwright install chromium"
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return False, f"playwright import failed: {exc}"
+    return True, ""
+
+
+class RenderedBrowserSession:
+    """A real Chromium tab behind the spine ``browser`` tool's interface.
+
+    Lazily creates a ``BrowserService`` (Playwright) on first use. Sessions
+    persist cookies via Playwright ``storage_state`` (same ``data/browser``
+    tree the service uses). Every action returns a JSON-able dict; failures
+    raise ``ToolError`` with the honest reason.
+    """
+
+    def __init__(self, *, name: str = "default", proxy_url: str = "",
+                 session_dir: str = "", timeout: float = 30.0) -> None:
+        self.name = name or "default"
+        self.proxy_url = (proxy_url or "").strip()
+        self.session_dir = str(session_dir or "").strip()
+        self.timeout = timeout
+        self._svc: Any = None
+        self._tab: Any = None
+        self._tab_id: str = ""
+        self.created_at = time.time()
+        self.request_count = 0
+
+    # -- lifecycle ---------------------------------------------------------
+    def _service(self) -> Any:
+        if self._svc is not None:
+            return self._svc
+        ok, reason = _playwright_available()
+        if not ok:
+            raise ToolError(f"rendered browser unavailable: {reason}")
+        from ..browser.service import BrowserService
+        kwargs: dict[str, Any] = {}
+        if self.session_dir:
+            kwargs["data_dir"] = self.session_dir
+        if self.proxy_url:
+            kwargs["proxy"] = self.proxy_url
+        self._svc = BrowserService(**kwargs)
+        return self._svc
+
+    def _tab_obj(self) -> Any:
+        if self._tab is not None:
+            return self._tab
+        svc = self._service()
+        self._tab = svc.open_tab()
+        self._tab_id = getattr(self._tab, "tab_id", "")
+        return self._tab
+
+    def _wrap(self, fn: Any, action: str, **kw: Any) -> dict[str, Any]:
+        """Call a Tab method, normalize errors to ToolError."""
+        from ..browser.service import BrowserError
+        try:
+            self.request_count += 1
+            result = fn(**kw)
+        except BrowserError as exc:
+            raise ToolError(f"browser {action} failed: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"browser {action} failed: {classify(exc).message}") from exc
+        if isinstance(result, dict):
+            result.setdefault("engine", "rendered")
+            return result
+        return {"engine": "rendered", "result": result}
+
+    # -- navigation ---------------------------------------------------------
+    def open(self, url: str = "", **_: Any) -> dict[str, Any]:
+        if not (url or "").strip():
+            raise ToolError("browser open needs a url")
+        tab = self._tab_obj()
+        return self._wrap(tab.navigate, "open", url=url.strip())
+
+    # -- observation ----------------------------------------------------------
+    def text(self, max_chars: int = 40000, **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().text, "text", max_chars=max_chars)
+
+    def markdown(self, max_chars: int = 40000, **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().markdown, "text", max_chars=max_chars)
+
+    def observe(self, max_chars: int = 12000, **_: Any) -> dict[str, Any]:
+        """Grounding view: interactive elements with stable indices.
+
+        Returns the page's clickable/typeable/selectable elements as a
+        numbered list (``[0] button "Search"``, ``[1] input name=q``) —
+        the set-of-marks text half. Pair with ``screenshot`` for the visual
+        half. The brain acts with ``click``/``fill`` using the index or the
+        element's label.
+        """
+        tab = self._tab_obj()
+        js = """() => {
+            const els = [];
+            const seen = new Set();
+            const pick = (el, kind) => {
+                if (!el || seen.has(el)) return;
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 && r.height === 0) return;
+                seen.add(el);
+                const label = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.name || el.id || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+                els.push({i: els.length, kind, tag: el.tagName.toLowerCase(), label, name: el.name || '', id: el.id || '', type: el.type || ''});
+            };
+            document.querySelectorAll('a[href], button, input, select, textarea, [role=button], [onclick]').forEach(el => {
+                const t = el.tagName.toLowerCase();
+                pick(el, t === 'a' ? 'link' : t === 'input' || t === 'textarea' || t === 'select' ? 'field' : 'button');
+            });
+            return els.slice(0, 120);
+        }"""
+        try:
+            elements = tab.evaluate(js)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"browser observe failed: {classify(exc).message}") from exc
+        lines = []
+        for el in (elements or []):
+            if isinstance(el, dict):
+                lines.append(f"[{el.get('i')}] {el.get('kind')} <{el.get('tag')}> \"{el.get('label')}\"")
+        out = "\n".join(lines)
+        return {"engine": "rendered", "url": getattr(tab, "url", ""),
+                "elements": len(lines), "list": out[:max_chars],
+                "truncated": len(out) > max_chars}
+
+    def links(self, **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().links, "links")
+
+    def extract(self, target: str = "", kind: str = "", **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().extract, "extract", target=target, kind=kind)
+
+    def screenshot(self, full_page: bool = False, **_: Any) -> dict[str, Any]:
+        """Capture the live rendered page. Returns the PNG path."""
+        return self._wrap(self._tab_obj().screenshot, "screenshot", full_page=bool(full_page))
+
+    # -- interaction ----------------------------------------------------------
+    def click(self, target: str = "", **_: Any) -> dict[str, Any]:
+        if not (target or "").strip():
+            raise ToolError("browser click needs a target (index, label, or selector)")
+        return self._wrap(self._tab_obj().click, "click", target=target.strip())
+
+    def fill(self, name: str = "", value: str = "", **_: Any) -> dict[str, Any]:
+        if not (name or "").strip():
+            raise ToolError("browser fill needs a field name/label")
+        return self._wrap(self._tab_obj().fill, "fill", name=name.strip(), value=value or "")
+
+    def select(self, name: str = "", value: str = "", **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().select, "select", name=(name or "").strip(), value=value or "")
+
+    def check(self, name: str = "", checked: bool = True, **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().check, "check", name=(name or "").strip(), checked=bool(checked))
+
+    def submit(self, target: str = "", **_: Any) -> dict[str, Any]:
+        return self._wrap(self._tab_obj().submit, "submit", target=(target or "").strip())
+
+    def scroll(self, direction: str = "down", pixels: int = 800, **_: Any) -> dict[str, Any]:
+        """Scroll the rendered page. direction: up|down|top|bottom."""
+        tab = self._tab_obj()
+        d = (direction or "down").strip().lower()
+        if d == "top":
+            js = "() => window.scrollTo(0, 0)"
+        elif d == "bottom":
+            js = "() => window.scrollTo(0, document.body.scrollHeight)"
+        else:
+            px = int(pixels or 800) * (-1 if d == "up" else 1)
+            js = f"() => window.scrollBy(0, {px})"
+        try:
+            tab.evaluate(js)
+            tab.wait_for_load_state("load", timeout=3000)
+        except Exception:  # noqa: BLE001 - scroll is best-effort
+            pass
+        return {"engine": "rendered", "url": getattr(tab, "url", ""), "scrolled": d}
+
+    def hover(self, target: str = "", **_: Any) -> dict[str, Any]:
+        tab = self._tab_obj()
+        page = tab._require_loaded()
+        try:
+            page.hover(target.strip())
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"browser hover failed: {classify(exc).message}") from exc
+        return {"engine": "rendered", "hovered": target.strip()}
+
+    def press(self, key: str = "", **_: Any) -> dict[str, Any]:
+        if not (key or "").strip():
+            raise ToolError("browser press needs a key (Enter, Escape, Tab, ...)")
+        tab = self._tab_obj()
+        page = tab._require_loaded()
+        try:
+            page.keyboard.press(key.strip())
+            tab.wait_for_load_state("load", timeout=5000)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"browser press failed: {classify(exc).message}") from exc
+        return {"engine": "rendered", "pressed": key.strip()}
+
+    def wait(self, selector: str = "", text: str = "", timeout: int = 15000, **_: Any) -> dict[str, Any]:
+        """Wait for dynamic content: a selector, visible text, or network idle."""
+        tab = self._tab_obj()
+        if (text or "").strip():
+            return self._wrap(tab.wait_for_text, "wait", text=text.strip(), timeout=int(timeout or 15000))
+        if (selector or "").strip():
+            return self._wrap(tab.wait_for, "wait", selector=selector.strip(), timeout=int(timeout or 15000))
+        return self._wrap(tab.wait_for_network_idle, "wait", timeout=int(timeout or 15000))
+
+    def task(self, steps: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """Multi-step program on the rendered tab.
+
+        Steps: [{act: open|click|fill|select|check|submit|screenshot|wait|
+        scroll|hover|press|extract|observe|text, ...}]. The brain drives
+        complex flows (logins, searches, checkouts) as one call.
+        """
+        if steps is None:
+            raise ToolError("browser task needs steps")
+        if isinstance(steps, str):
+            import json as _json
+            try:
+                steps = _json.loads(steps)
+            except Exception as exc:
+                raise ToolError(f"browser task steps must be a list or JSON: {exc}") from exc
+        if not isinstance(steps, (list, tuple)):
+            raise ToolError("browser task steps must be a list")
+        results: list[dict[str, Any]] = []
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise ToolError(f"browser task step {i} must be an object")
+            act = str(step.get("act") or step.get("action") or "").lower().strip()
+            if act in ("stop", "done"):
+                results.append({"step": i, "act": "stop"})
+                break
+            handler = _RENDERED_ACTIONS.get(act)
+            if handler is None:
+                raise ToolError(f"browser task step {i}: unknown act {act!r}")
+            params = {k: v for k, v in step.items() if k not in ("act", "action")}
+            try:
+                out = handler(self, **params)
+            except ToolError as exc:
+                results.append({"step": i, "act": act, "ok": False, "error": str(exc)})
+                break
+            out["step"] = i
+            out["act"] = act
+            results.append(out)
+        return {"engine": "rendered", "steps": len(results), "results": results}
+
+    # -- state ------------------------------------------------------------------
+    def state(self, **_: Any) -> dict[str, Any]:
+        tab = self._tab
+        return {
+            "session": self.name,
+            "engine": "rendered",
+            "url": getattr(tab, "url", "") if tab else "",
+            "title": getattr(tab, "title", "") if tab else "",
+            "tab_id": self._tab_id,
+            "requests": self.request_count,
+            "seconds_alive": round(time.time() - self.created_at, 1),
+            "playwright": _playwright_available()[0],
+        }
+
+    def close(self, **_: Any) -> dict[str, Any]:
+        if self._tab is not None:
+            try:
+                svc = self._svc
+                if svc is not None and self._tab_id:
+                    svc.close_tab(self._tab_id)
+            except Exception:  # noqa: BLE001 - close is best-effort
+                pass
+        self._tab = None
+        self._tab_id = ""
+        return {"ok": True, "closed": self.name, "engine": "rendered"}
+
+    def do(self, action: str, **kw: Any) -> dict[str, Any]:
+        """Dispatch one action. Returns a JSON-able dict; raises ToolError."""
+        action = (action or "state").lower().strip()
+        handler = _RENDERED_ACTIONS.get(action)
+        if handler is None:
+            raise ToolError(f"unknown browser action {action!r}; "
+                            f"one of: {', '.join(sorted(_RENDERED_ACTIONS))}")
+        return handler(self, **kw)
+
+
+_RENDERED_ACTIONS = {
+    "open": RenderedBrowserSession.open,
+    "text": RenderedBrowserSession.text,
+    "markdown": RenderedBrowserSession.markdown,
+    "observe": RenderedBrowserSession.observe,
+    "links": RenderedBrowserSession.links,
+    "extract": RenderedBrowserSession.extract,
+    "screenshot": RenderedBrowserSession.screenshot,
+    "click": RenderedBrowserSession.click,
+    "fill": RenderedBrowserSession.fill,
+    "select": RenderedBrowserSession.select,
+    "check": RenderedBrowserSession.check,
+    "submit": RenderedBrowserSession.submit,
+    "scroll": RenderedBrowserSession.scroll,
+    "hover": RenderedBrowserSession.hover,
+    "press": RenderedBrowserSession.press,
+    "wait": RenderedBrowserSession.wait,
+    "task": RenderedBrowserSession.task,
+    "state": RenderedBrowserSession.state,
+    "close": RenderedBrowserSession.close,
+}
+
+
+def get_rendered_session(name: str = "default", **settings: Any) -> RenderedBrowserSession:
+    """Named rendered-Chromium sessions (one tab each, cookie-persistent)."""
+    with _sessions_lock:
+        key = f"rendered:{name or 'default'}"
+        session = _sessions.get(key)
+        if session is None or not isinstance(session, RenderedBrowserSession):
+            session = RenderedBrowserSession(name=name or "default", **settings)
+            _sessions[key] = session
+        return session  # type: ignore[return-value]
+
+
 _ACTIONS = {
     "open": BrowserSession.open,
     "text": BrowserSession.text,
@@ -1485,11 +1813,17 @@ def register(registry: Any) -> None:
             "'check_captcha' detects captchas on the current page and solves "
             "them (service backend first, owner takeover as fallback — the "
             "solver is ON by default), stashing tokens that the next "
-            "'submit' posts automatically"
+            "'submit' posts automatically; "
+            "engine='rendered' drives a real Chromium tab (Playwright) for "
+            "JS-heavy sites — screenshot, wait (for selector/text/network), "
+            "scroll, hover, press keys, and 'observe' (numbered interactive "
+            "elements for grounding); engine='auto' (default) picks rendered "
+            "when Playwright is installed, else the stdlib HTTP engine"
         ),
         capability=Capability.NET_BROWSER,
         parameters={
-            "action": "str — open|text|markdown|links|click|fill|submit|extract|walk|task|state|close|check_captcha",
+            "action": "str — open|text|markdown|links|click|fill|submit|extract|walk|task|state|close|check_captcha (+ rendered: observe|screenshot|wait|scroll|hover|press)",
+            "engine": "str — auto|http|rendered (default auto)",
             "solve": "bool — for check_captcha: detect+ solve (default true); false = detect only",
             "url": "str — for open/walk",
             "target": "str — for click (link text/href/index), submit (form index/id), extract (tag, #id, .class)",
@@ -1514,11 +1848,20 @@ def register(registry: Any) -> None:
         session: str = "default",
         max_chars: int = 40000,
         solve: bool = True,
+        engine: str = "auto",
         **_: Any,
     ) -> dict[str, Any]:
-        sess = get_session(session, user_agent=user_agent, timeout=timeout,
-                           respect_robots=respect_robots, proxy_url=proxy_url,
-                           session_dir=session_dir, max_task_steps=max_task_steps)
+        eng = (engine or "auto").strip().lower()
+        if eng == "auto":
+            ok, _ = _playwright_available()
+            eng = "rendered" if ok else "http"
+        if eng == "rendered":
+            sess = get_rendered_session(session, proxy_url=proxy_url,
+                                        session_dir=session_dir, timeout=timeout)
+        else:
+            sess = get_session(session, user_agent=user_agent, timeout=timeout,
+                               respect_robots=respect_robots, proxy_url=proxy_url,
+                               session_dir=session_dir, max_task_steps=max_task_steps)
         try:
             return sess.do(action, url=url, target=target, name=name,
                            value=value, kind=kind, steps=steps, uploads=uploads,
