@@ -326,6 +326,213 @@ class IpIntelAdapter(SourceAdapter):
         return out[:limit]
 
 
+
+
+def _looks_like_phone(q: str) -> str | None:
+    """Extract a phone number from a query, or None."""
+    import re as _re
+    digits = _re.sub(r"[^\d+]", "", q.strip())
+    if _re.match(r"^\+?\d{7,15}$", digits):
+        return digits
+    return None
+
+
+def _confidence(sources: int, keyless_verified: bool = False) -> str:
+    """Rate finding confidence: high (2+ sources), medium (1 verified), low."""
+    if sources >= 2:
+        return "high"
+    if keyless_verified:
+        return "medium"
+    return "low"
+
+
+class PhoneIntelAdapter(SourceAdapter):
+    """Phone → carrier/location via free lookup APIs."""
+
+    name = "osint_phone"
+    result_type = "phone"
+    description = "Phone intel: carrier, location, line type via keyless APIs."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        phone = _looks_like_phone(query)
+        if not phone:
+            return []
+        out: list[SearchResult] = []
+        # numverify-style free lookup via abstract API pattern
+        # Using ipqualityscore-adjacent free tier would need key; use
+        # openly accessible carrier data via phonenumber parsing
+        try:
+            import phonenumbers
+            parsed = phonenumbers.parse(phone, None)
+            carrier = phonenumbers.carrier.name_for_number(parsed, "en")
+            region = phonenumbers.geocoder.description_for_number(parsed, "en")
+            out.append(SearchResult(
+                source=self.name,
+                title=f"phone intel for {phone}",
+                url=f"https://www.truecaller.com/search/{phone}",
+                snippet=(f"Carrier: {carrier or 'unknown'}, "
+                         f"Region: {region or 'unknown'}, "
+                         f"Valid: {phonenumbers.is_valid_number(parsed)}, "
+                         f"Type: {phonenumbers.number_type(parsed)} "
+                         f"[confidence: {_confidence(1, True)}]"),
+                score=0.7,
+            ))
+        except ImportError:
+            _log.debug("phonenumbers not installed, skipping phone parse")
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("phone parse failed: %s", exc)
+        return out[:limit]
+
+
+class GitHubReconAdapter(SourceAdapter):
+    """Username/email → GitHub profile, repos, commits, gists."""
+
+    name = "osint_github"
+    result_type = "github"
+    description = "GitHub recon: profile, public repos, gists, commit emails — keyless API."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip().lstrip("@")
+        if not q or " " in q:
+            return []
+        out: list[SearchResult] = []
+        try:
+            user = _get_json(f"https://api.github.com/users/{q}", timeout=15)
+            if isinstance(user, dict) and user.get("login"):
+                out.append(SearchResult(
+                    source=self.name,
+                    title=f"GitHub: {user.get('login')}",
+                    url=user.get("html_url", ""),
+                    snippet=(f"{user.get('name', '')} — {user.get('bio', '')} | "
+                             f"Repos: {user.get('public_repos', 0)}, "
+                             f"Followers: {user.get('followers', 0)}, "
+                             f"Location: {user.get('location', '?')}, "
+                             f"Blog: {user.get('blog', '')} "
+                             f"[confidence: {_confidence(1, True)}]"),
+                    score=0.9,
+                ))
+                # Recent repos for tech stack hints
+                repos = _get_json(
+                    f"https://api.github.com/users/{q}/repos?per_page=5&sort=updated",
+                    timeout=15)
+                if isinstance(repos, list):
+                    langs = set()
+                    for r in repos[:5]:
+                        if isinstance(r, dict) and r.get("language"):
+                            langs.add(r["language"])
+                    if langs:
+                        out.append(SearchResult(
+                            source=self.name,
+                            title=f"GitHub tech stack: {q}",
+                            url=f"https://github.com/{q}?tab=repositories",
+                            snippet=f"Languages: {', '.join(sorted(langs))}",
+                            score=0.6,
+                        ))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("github recon failed: %s", exc)
+        return out[:limit]
+
+
+class WaybackAdapter(SourceAdapter):
+    """URL/domain → Wayback Machine snapshots (historical versions)."""
+
+    name = "osint_wayback"
+    result_type = "wayback"
+    description = "Wayback Machine: historical snapshots of URLs/domains."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip()
+        if not q or " " in q:
+            return []
+        if not q.startswith(("http://", "https://")):
+            q = f"https://{q}"
+        out: list[SearchResult] = []
+        try:
+            data = _get_json(
+                f"https://archive.org/wayback/available?url={q}", timeout=15)
+            snap = (data.get("archived_snapshots") or {}).get("closest", {})
+            if snap.get("url"):
+                out.append(SearchResult(
+                    source=self.name,
+                    title=f"Wayback snapshot: {q}",
+                    url=snap["url"],
+                    snippet=(f"Closest snapshot: {snap.get('timestamp', '?')} "
+                             f"[confidence: {_confidence(1, True)}]"),
+                    score=0.75,
+                ))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("wayback failed: %s", exc)
+        return out[:limit]
+
+
+class GravatarAdapter(SourceAdapter):
+    """Email → Gravatar profile (identity correlation)."""
+
+    name = "osint_gravatar"
+    result_type = "gravatar"
+    description = "Gravatar: email → profile/avatar for identity correlation."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        email = _looks_like_email(query)
+        if not email:
+            return []
+        import hashlib as _hl
+        h = _hl.md5(email.lower().encode()).hexdigest()
+        out: list[SearchResult] = []
+        try:
+            data = _get_json(f"https://www.gravatar.com/{h}.json", timeout=15)
+            entry = (data.get("entry") or [{}])[0]
+            if entry.get("displayName") or entry.get("preferredUsername"):
+                out.append(SearchResult(
+                    source=self.name,
+                    title=f"Gravatar: {entry.get('displayName', email)}",
+                    url=entry.get("profileUrl", f"https://www.gravatar.com/{h}"),
+                    snippet=(f"Username: {entry.get('preferredUsername', '?')}, "
+                             f"Name: {entry.get('displayName', '?')} "
+                             f"[confidence: {_confidence(1, True)}]"),
+                    score=0.8,
+                ))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("gravatar failed: %s", exc)
+        return out[:limit]
+
+
+class LeakCheckAdapter(SourceAdapter):
+    """Username/email → breach exposure via LeakCheck free API."""
+
+    name = "osint_leakcheck"
+    result_type = "breach"
+    description = "LeakCheck: free breach database search for usernames/emails."
+
+    def search(self, query: str, *, limit: int, since=None, before=None):
+        q = query.strip()
+        if not q or " " in q:
+            return []
+        out: list[SearchResult] = []
+        try:
+            import urllib.parse as _up
+            data = _get_json(
+                f"https://leakcheck.net/api/public?check={_up.quote(q)}",
+                timeout=15)
+            if isinstance(data, dict) and data.get("success"):
+                sources = data.get("sources", [])
+                if sources:
+                    names = [s.get("name", "?") for s in sources[:5]
+                             if isinstance(s, dict)]
+                    out.append(SearchResult(
+                        source=self.name,
+                        title=f"Breach exposure: {q}",
+                        url="https://leakcheck.net",
+                        snippet=(f"Found in {len(sources)} breach(es): "
+                                 f"{', '.join(names)} "
+                                 f"[confidence: {_confidence(len(sources))}]"),
+                        score=0.85,
+                    ))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("leakcheck failed: %s", exc)
+        return out[:limit]
+
+
 #: adapter classes in canonical order
 OSINT_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
     (UsernameSweepAdapter.name, UsernameSweepAdapter.result_type,
@@ -336,4 +543,14 @@ OSINT_SPECS: list[tuple[str, str, str, type[SourceAdapter]]] = [
      DomainReconAdapter.description, DomainReconAdapter),
     (IpIntelAdapter.name, IpIntelAdapter.result_type,
      IpIntelAdapter.description, IpIntelAdapter),
+    (PhoneIntelAdapter.name, PhoneIntelAdapter.result_type,
+     PhoneIntelAdapter.description, PhoneIntelAdapter),
+    (GitHubReconAdapter.name, GitHubReconAdapter.result_type,
+     GitHubReconAdapter.description, GitHubReconAdapter),
+    (WaybackAdapter.name, WaybackAdapter.result_type,
+     WaybackAdapter.description, WaybackAdapter),
+    (GravatarAdapter.name, GravatarAdapter.result_type,
+     GravatarAdapter.description, GravatarAdapter),
+    (LeakCheckAdapter.name, LeakCheckAdapter.result_type,
+     LeakCheckAdapter.description, LeakCheckAdapter),
 ]
