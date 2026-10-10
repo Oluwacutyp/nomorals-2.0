@@ -12,9 +12,15 @@ This is what makes the system feel alive instead of command-driven:
   (``likely_next``) tells her what usually follows a trigger, so idle
   time prepares the *right* thing.
 * **Serendipity** — surfaces genuinely interesting findings without
-  being asked, but respects quiet hours and a hard cooldown (enforced
-  in code, not in a prompt). Never spammy. Every surface is audited in
-  ``presence_surface``.
+  being asked. Candidates are scored on novelty × relevance ×
+  unexpectedness (the RecSys serendipity decomposition), gated by a
+  learned **interruptibility** score (InterruptMe-style: daypart +
+  activity recency + learned quiet hours), and delivered as one
+  **batched digest** — not scattered pings. Quiet hours are learned
+  from the routine model and enforced in code, not in a prompt.
+* **Learns taste** — every surface records the owner's reaction
+  (engaged / dismissed / ignored) and re-weights that surface kind.
+  Surfacing that annoys gets quieter on its own.
 
 Presence never sends directly — it emits events and proposals. The
 existing autonomy agent (``nomorals.agents.autonomy``) owns the actual
@@ -26,6 +32,7 @@ Runs on the idle tick and on a slow heartbeat (every ~30 min).
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -45,6 +52,30 @@ HEARTBEAT_INTERVAL = 1800  # 30 minutes
 
 #: Minimum seconds between research nudges for the same topic.
 NUDGE_COOLDOWN = 24 * 3600  # 24 hours
+
+#: Interruptibility below this holds non-urgent surfaces.
+INTERRUPTIBILITY_FLOOR = 0.35
+
+#: Surface priority tiers (proactive-assistant hierarchy: urgent push,
+#: normal batched, background digest-only).
+PRIORITIES = ("urgent", "normal", "background")
+_PRIORITY_RANK = {"urgent": 0, "normal": 1, "background": 2}
+
+#: Base interruptibility by daypart (before context adjustments).
+_DAYPART_INTERRUPTIBILITY = {
+    "morning": 0.75,
+    "afternoon": 0.65,
+    "evening": 0.55,
+    "night": 0.15,
+}
+
+#: Daypart-aware voice for digests — how she sounds, not just what.
+_DAYPART_TONE = {
+    "morning": ("☀️", "morning briefing", "Quick and useful — the day's ahead."),
+    "afternoon": ("🌤️", "afternoon notes", "A few things worth your eyes."),
+    "evening": ("🌙", "evening roundup", "Winding down? A couple of finds."),
+    "night": ("🌌", "night notes", "Only the important stuff — it's late."),
+}
 
 
 def ensure_schema(db: Any) -> None:
@@ -79,6 +110,45 @@ def ensure_schema(db: Any) -> None:
     )
     db.execute(
         "INSERT OR IGNORE INTO presence_trigger (id) VALUES (1)"
+    )
+    # Candidate queue: bounded-deferral surfacing.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS presence_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            deadline_ts REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued'
+        )
+        """
+    )
+    # Learned per-kind surfacing weights (feedback loop).
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS presence_kind_weights (
+            kind TEXT PRIMARY KEY,
+            weight REAL NOT NULL DEFAULT 1.0,
+            engaged INTEGER NOT NULL DEFAULT 0,
+            dismissed INTEGER NOT NULL DEFAULT 0,
+            ignored INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    # Surface reactions for the feedback loop.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS presence_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            surface_id INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL DEFAULT '',
+            reaction TEXT NOT NULL DEFAULT '',
+            ts REAL NOT NULL DEFAULT 0
+        )
+        """
     )
 
 
@@ -143,10 +213,13 @@ def _last_surface_ts(db: Any) -> float:
     return float(row[0]) if row and row[0] else 0.0
 
 
-def _now_in_tz(tz_offset: float = 0.0) -> dict[str, Any]:
+def _now_in_tz(tz_offset: float = 0.0,
+               ts: float | None = None) -> dict[str, Any]:
     import datetime as _dt
-    now = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(
-        hours=tz_offset)
+    base = (_dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+            if ts is not None
+            else _dt.datetime.now(_dt.timezone.utc))
+    now = base + _dt.timedelta(hours=tz_offset)
     hour = now.hour
     if 5 <= hour < 12:
         part = "morning"
@@ -164,6 +237,290 @@ def _now_in_tz(tz_offset: float = 0.0) -> dict[str, Any]:
     }
 
 
+# ── interruptibility ─────────────────────────────────────────────────
+
+def interruptibility(db: Any, tz_offset: float = 0.0,
+                     ts: float | None = None) -> dict[str, Any]:
+    """How interruptible is the owner right now? 0.0–1.0.
+
+    InterruptMe-style contextual model, learned locally:
+    daypart base × learned quiet hours × recent-activity boost.
+    A score below ``INTERRUPTIBILITY_FLOOR`` holds non-urgent surfaces
+    for a better moment (bounded deferral) instead of pinging into the
+    void — or into sleep.
+    """
+    ensure_schema(db)
+    now = ts if ts is not None else time.time()
+    t = _now_in_tz(tz_offset, ts)
+    score = _DAYPART_INTERRUPTIBILITY.get(t["daypart"], 0.5)
+    reasons = [f"daypart={t['daypart']} base={score}"]
+
+    # Learned quiet hours crush the score — never ping at 3am just
+    # because the cooldown elapsed.
+    try:
+        quiet = _patterns.quiet_hours(db, tz_offset=tz_offset)
+        if t["hour"] in quiet:
+            score = min(score, 0.05)
+            reasons.append(f"quiet hour ({t['hour']:02d}:00)")
+    except Exception:  # noqa: BLE001
+        quiet = []
+
+    # Recently active → highly interruptible (they're right here).
+    # (No activity history at all is NOT "recently active".)
+    try:
+        from . import idle as _idle
+        st = _idle.idle_state(db)
+        idle_for = st.get("idle_seconds", 0.0)
+        last_ts = st.get("last_activity_ts", 0.0)
+        if last_ts > 0 and idle_for < 900:  # active within 15 min
+            score = max(score, 0.9)
+            reasons.append("active <15m ago")
+        elif last_ts > 0 and idle_for > 8 * 3600:
+            score = min(score, 0.2)
+            reasons.append("quiet >8h (probably away/asleep)")
+    except Exception:  # noqa: BLE001
+        pass
+
+    score = max(0.0, min(1.0, score))
+    return {
+        "score": round(score, 2),
+        "daypart": t["daypart"],
+        "hour": t["hour"],
+        "quiet_hours": quiet,
+        "interruptible": score >= INTERRUPTIBILITY_FLOOR,
+        "reasons": reasons,
+        "ts": now,
+    }
+
+
+# ── candidate queue (bounded deferral) ───────────────────────────────
+
+def queue_candidate(db: Any, kind: str, title: str, detail: str = "",
+                    priority: str = "normal",
+                    ttl_hours: float = 24.0,
+                    ts: float | None = None) -> int:
+    """Queue a serendipity candidate with a bounded deferral deadline.
+
+    The candidate waits for a high-interruptibility moment instead of
+    firing immediately; past ``deadline_ts`` it becomes due regardless
+    (bounded — never dropped silently, never held forever).
+    Returns the candidate id.
+    """
+    ensure_schema(db)
+    now = ts if ts is not None else time.time()
+    if priority not in _PRIORITY_RANK:
+        priority = "normal"
+    cur = db.execute(
+        "INSERT INTO presence_candidates "
+        "(ts, kind, title, detail, priority, deadline_ts, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'queued')",
+        (now, kind, title, detail, priority, now + ttl_hours * 3600),
+    )
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    cid = cur.lastrowid if cur is not None else 0
+    _log.info("presence candidate #%s [%s/%s]: %s", cid, priority, kind,
+              title)
+    return int(cid or 0)
+
+
+def due_candidates(db: Any, ts: float | None = None,
+                   limit: int = 10) -> list[dict[str, Any]]:
+    """Queued candidates, best first (priority, then serendipity score).
+
+    A candidate is *due* when its deadline is near (< 1h left) or
+    interruptibility is high — otherwise it keeps waiting. Expired
+    candidates (deadline passed, still queued) are always due.
+    """
+    ensure_schema(db)
+    now = ts if ts is not None else time.time()
+    rows = db.execute(
+        "SELECT id, ts, kind, title, detail, priority, deadline_ts FROM "
+        "presence_candidates WHERE status = 'queued' ORDER BY id "
+        "LIMIT ?", (max(1, int(limit)) * 2,)).fetchall()
+    scored = []
+    for r in rows:
+        cid, cts, kind, title, detail, priority, deadline = r
+        time_left = deadline - now
+        if time_left <= 0:
+            due, why = True, "deadline passed"
+        elif time_left < 3600:
+            due, why = True, "deadline <1h"
+        else:
+            due, why = False, "waiting for a better moment"
+        scored.append({
+            "id": cid, "ts": cts, "kind": kind, "title": title,
+            "detail": detail, "priority": priority,
+            "deadline_ts": deadline,
+            "serendipity": serendipity_score(
+                db, kind, title, detail)["score"],
+            "due": due, "due_why": why,
+        })
+    scored.sort(key=lambda c: (_PRIORITY_RANK.get(c["priority"], 1),
+                               -c["serendipity"]))
+    return scored[:max(1, int(limit))]
+
+
+def drop_candidate(db: Any, candidate_id: int) -> bool:
+    """Withdraw a queued candidate (superseded, no longer relevant)."""
+    ensure_schema(db)
+    cur = db.execute(
+        "UPDATE presence_candidates SET status = 'dropped' "
+        "WHERE id = ? AND status = 'queued'", (int(candidate_id),))
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return bool(cur.rowcount)
+
+
+# ── serendipity scoring ──────────────────────────────────────────────
+
+_WORD_RE = re.compile(r"[a-z][a-z\-']{2,}")
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.lower())
+            if w not in _patterns._STOPWORDS}
+
+
+def serendipity_score(db: Any, kind: str, title: str,
+                      detail: str = "") -> dict[str, Any]:
+    """Score a candidate: novelty × relevance × unexpectedness.
+
+    The RecSys decomposition (Ge et al., RecSys 2010): serendipity is
+    the intersection of surprising AND useful. "You're deep into X
+    lately" is a tautology — this scores whether it's actually worth
+    surfacing, multiplied by the learned per-kind taste weight.
+    """
+    ensure_schema(db)
+    words = _content_words(f"{title} {detail}")
+    # Novelty: dissimilar to recent surfaces.
+    try:
+        rows = db.execute(
+            "SELECT title FROM presence_surface ORDER BY id DESC "
+            "LIMIT 10").fetchall()
+        recent = [_content_words(r[0]) for r in rows]
+        if recent and words:
+            overlap = max(
+                len(words & rw) / max(len(words | rw), 1) for rw in recent)
+        else:
+            overlap = 0.0
+        novelty = 1.0 - overlap
+    except Exception:  # noqa: BLE001
+        novelty = 0.7
+    # Relevance: ties to real current interests.
+    try:
+        interests = {i["topic"] for i in
+                     _patterns.current_interests(db, limit=15)}
+        if words and interests:
+            hits = sum(1 for w in words
+                       if any(w in t or t in w for t in interests))
+            relevance = min(1.0, hits / max(len(words), 1) * 3.0)
+        else:
+            relevance = 0.3
+    except Exception:  # noqa: BLE001
+        relevance = 0.3
+    # Unexpectedness: not the obvious next thing.
+    if kind == "weakness_proposal":
+        unexpectedness = 0.85  # a found fix is genuinely surprising
+    elif kind == "rising_interest":
+        unexpectedness = 0.45  # adjacent to known interests
+    elif kind == "digest":
+        unexpectedness = 0.3
+    else:
+        unexpectedness = 0.6
+    # Learned taste weight for this kind.
+    weight = kind_weight(db, kind)
+    score = (novelty * 0.4 + relevance * 0.35 + unexpectedness * 0.25)
+    score *= weight
+    return {
+        "score": round(max(0.0, min(1.5, score)), 3),
+        "novelty": round(novelty, 2),
+        "relevance": round(relevance, 2),
+        "unexpectedness": round(unexpectedness, 2),
+        "kind_weight": round(weight, 2),
+    }
+
+
+# ── feedback loop (learned taste) ────────────────────────────────────
+
+def kind_weight(db: Any, kind: str) -> float:
+    """Learned surfacing weight for a surface kind (default 1.0)."""
+    ensure_schema(db)
+    row = db.execute(
+        "SELECT weight FROM presence_kind_weights WHERE kind = ?",
+        (str(kind or ""),)).fetchone()
+    return float(row[0]) if row else 1.0
+
+
+def record_surface_feedback(db: Any, surface_id: int,
+                            reaction: str) -> dict[str, Any]:
+    """Record the owner's reaction to a surface.
+
+    ``reaction``: ``engaged`` (opened/acted), ``dismissed`` (swiped
+    away), ``ignored`` (never opened). Tunes the per-kind weight so
+    annoying surface kinds get quieter on their own and welcome ones
+    get bolder. Returns the new weight.
+    """
+    ensure_schema(db)
+    reaction = str(reaction or "").lower()
+    if reaction not in ("engaged", "dismissed", "ignored"):
+        return {"ok": False, "reason": "unknown reaction"}
+    row = db.execute(
+        "SELECT kind FROM presence_surface WHERE id = ?",
+        (int(surface_id),)).fetchone()
+    if not row:
+        return {"ok": False, "reason": "unknown surface"}
+    kind = row[0] or ""
+    db.execute(
+        "INSERT INTO presence_feedback (surface_id, kind, reaction, ts) "
+        "VALUES (?, ?, ?, ?)",
+        (int(surface_id), kind, reaction, time.time()))
+    db.execute(
+        "INSERT INTO presence_kind_weights (kind, weight) VALUES (?, 1.0) "
+        "ON CONFLICT (kind) DO NOTHING", (kind,))
+    col = {"engaged": "engaged", "dismissed": "dismissed",
+           "ignored": "ignored"}[reaction]
+    db.execute(
+        f"UPDATE presence_kind_weights SET {col} = {col} + 1 "
+        "WHERE kind = ?", (kind,))
+    wrow = db.execute(
+        "SELECT weight FROM presence_kind_weights WHERE kind = ?",
+        (kind,)).fetchone()
+    weight = float(wrow[0]) if wrow else 1.0
+    if reaction == "engaged":
+        weight = min(2.0, weight * 1.15)
+    elif reaction == "dismissed":
+        weight = max(0.2, weight * 0.7)
+    else:
+        weight = max(0.3, weight * 0.9)
+    db.execute(
+        "UPDATE presence_kind_weights SET weight = ? WHERE kind = ?",
+        (weight, kind))
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    _log.info("surface #%s %s → kind '%s' weight %.2f", surface_id,
+              reaction, kind, weight)
+    return {"ok": True, "kind": kind, "weight": round(weight, 2)}
+
+
+def kind_stats(db: Any) -> list[dict[str, Any]]:
+    """Per-kind surfacing stats: how each kind is landing."""
+    ensure_schema(db)
+    rows = db.execute(
+        "SELECT kind, weight, engaged, dismissed, ignored FROM "
+        "presence_kind_weights ORDER BY weight DESC").fetchall()
+    return [{"kind": r[0], "weight": round(r[1], 2), "engaged": r[2],
+             "dismissed": r[3], "ignored": r[4]} for r in rows]
+
+
+# ── sensing ──────────────────────────────────────────────────────────
+
 def sense(db: Any, tz_offset: float = 0.0) -> dict[str, Any]:
     """Take a snapshot of what the system knows right now.
 
@@ -180,15 +537,23 @@ def sense(db: Any, tz_offset: float = 0.0) -> dict[str, Any]:
                 db, trig["trigger_sig"])[:3]
         except Exception:  # noqa: BLE001
             anticipation = []
+    try:
+        interrupt = interruptibility(db, tz_offset)
+    except Exception:  # noqa: BLE001
+        interrupt = {"score": 0.5, "interruptible": True}
     return {
         "time": now,
         "active_windows": _patterns.predict_active_windows(
             db, tz_offset=tz_offset),
+        "next_activity": _patterns.next_activity(
+            db, tz_offset=tz_offset),
         "interests": _patterns.current_interests(db, limit=8),
         "rising": _patterns.rising_interests(db, limit=5),
+        "clusters": _patterns.topic_clusters(db)[:3],
         "weaknesses": _weakness.open_weaknesses(db)[:5],
         "last_trigger": trig,
         "anticipation": anticipation,
+        "interruptibility": interrupt,
         "ts": time.time(),
     }
 
@@ -203,8 +568,11 @@ def _ledger(db: Any, kind: str, ref_id: str, summary: str,
         _log.debug("presence ledger write failed", exc_info=True)
 
 
+# ── surfacing ────────────────────────────────────────────────────────
+
 def surface(db: Any, kind: str, title: str, detail: str = "",
             *, force: bool = False,
+            priority: str = "normal",
             ts: float | None = None) -> dict[str, Any]:
     """Propose one serendipitous surface.
 
@@ -213,12 +581,16 @@ def surface(db: Any, kind: str, title: str, detail: str = "",
     the autonomy agent / runtime with its safety vetoes — presence only
     proposes. The cooldown is enforced in code: surfaces more often than
     ``SERENDIPITY_COOLDOWN`` are held (``force=True`` bypasses, for
-    owner-triggered surfaces only).
+    owner-triggered surfaces only). ``priority="urgent"`` also bypasses
+    the interruptibility gate (but never the delivery owner's vetoes).
     """
     ensure_schema(db)
     now = ts if ts is not None else time.time()
+    if priority not in _PRIORITY_RANK:
+        priority = "normal"
     last = _last_surface_ts(db)
-    if not force and now - last < SERENDIPITY_COOLDOWN:
+    if not force and priority != "urgent" and \
+            now - last < SERENDIPITY_COOLDOWN:
         return {"ok": False, "held": True,
                 "reason": "cooldown",
                 "next_due_in": round(SERENDIPITY_COOLDOWN - (now - last), 1)}
@@ -232,15 +604,17 @@ def surface(db: Any, kind: str, title: str, detail: str = "",
     except Exception:  # noqa: BLE001
         pass
     surface_id = cur.lastrowid if cur is not None else 0
-    _log.info("presence surface #%s [%s]: %s", surface_id, kind, title)
+    _log.info("presence surface #%s [%s/%s]: %s", surface_id, priority,
+              kind, title)
     _ledger(db, "surfaced", str(surface_id),
             f"serendipity surfaced [{kind}]: {title}",
-            metadata={"detail": detail[:300]})
+            metadata={"detail": detail[:300], "priority": priority})
     try:
         global_bus.publish(Event(
             topic="presence.serendipity",
             data={"surface_id": surface_id, "kind": kind,
-                  "title": title, "detail": detail[:500]},
+                  "title": title, "detail": detail[:500],
+                  "priority": priority},
             source="nomorals.autonomy.presence",
         ))
     except Exception:  # noqa: BLE001
@@ -253,12 +627,16 @@ def heartbeat(db: Any, context: Any = None,
     """Slow heartbeat — notice, prepare, surface. Returns what it did.
 
     Called every ~30 min by the scheduler and on every idle tick.
-    Never raises; never sends directly.
+    Surfaces are interruptibility-gated and batched: the best due
+    candidate goes out as one surface; the rest wait for a better
+    moment or the digest. Never raises; never sends directly.
     """
     did: dict[str, Any] = {"noticed": [], "prepared": [], "surfaced": []}
     try:
         ensure_schema(db)
         ctx = sense(db, tz_offset)
+        interrupt = ctx.get("interruptibility", {})
+        int_score = float(interrupt.get("score", 0.5))
 
         # ── notice: rising interests → research organ (deduped) ──
         for item in ctx["rising"]:
@@ -322,19 +700,21 @@ def heartbeat(db: Any, context: Any = None,
             except Exception:  # noqa: BLE001
                 _log.debug("pattern→research emit failed", exc_info=True)
 
-        # ── surface: serendipity via the cooldown-guarded path ──
+        # ── surface: one batched, interruptibility-gated surface ──
         # (Actual sends are owned by nomorals.agents.autonomy with its
         # safety vetoes. Presence only proposes.)
-        surfaced = _maybe_surface(db, ctx)
+        surfaced = _maybe_surface(db, ctx, int_score)
         if surfaced:
             did["surfaced"].append(surfaced)
+        did["interruptibility"] = int_score
 
         try:
             global_bus.publish(Event(
                 topic="presence.heartbeat",
                 data={"daypart": ctx["time"]["daypart"],
                       "rising": [r["topic"] for r in ctx["rising"]],
-                      "noticed": did["noticed"]},
+                      "noticed": did["noticed"],
+                      "interruptibility": int_score},
                 source="nomorals.autonomy.presence",
             ))
         except Exception:  # noqa: BLE001
@@ -345,6 +725,7 @@ def heartbeat(db: Any, context: Any = None,
                 f"{len(did['prepared'])} prepared, "
                 f"{len(did['surfaced'])} surfaced",
                 metadata={"daypart": ctx["time"]["daypart"],
+                          "interruptibility": int_score,
                           "noticed": did["noticed"][:5],
                           "prepared": did["prepared"][:5],
                           "surfaced": did["surfaced"][:3]})
@@ -353,29 +734,104 @@ def heartbeat(db: Any, context: Any = None,
     return did
 
 
-def _maybe_surface(db: Any, ctx: dict[str, Any]) -> str | None:
-    """Pick one serendipity candidate, at most one per heartbeat.
+def _auto_candidates(db: Any, ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build serendipity candidates from the current snapshot.
 
-    Candidates in priority order: pending weakness proposals (the owner
-    should know something was found), then the top rising interest.
-    Returns the title surfaced, or None.
+    Priority order: pending weakness proposals (the owner should know
+    something was found), then the top rising interest, then topic
+    clusters ("you're into X+Y lately").
     """
+    cands: list[dict[str, Any]] = []
     for w in ctx["weaknesses"]:
         if w["status"] == "proposed":
-            title = f"Fix proposal ready: {w['subject']}"
-            res = surface(
-                db, "weakness_proposal", title,
-                (w.get("proposal") or "")[:300])
-            return title if res.get("ok") else None
+            cands.append({
+                "kind": "weakness_proposal",
+                "title": f"Fix proposal ready: {w['subject']}",
+                "detail": (w.get("proposal") or "")[:300],
+                "priority": "urgent",
+            })
     rising = ctx["rising"]
     if rising:
         top = rising[0]
-        res = surface(
-            db, "rising_interest",
-            f"You're deep into {top['topic']} lately",
-            f"sightings={top['sightings']} score={top['score']}")
-        if res.get("ok"):
-            return f"You're deep into {top['topic']} lately"
+        cands.append({
+            "kind": "rising_interest",
+            "title": f"You're deep into {top['topic']} lately",
+            "detail": f"sightings={top['sightings']} "
+                      f"score={top['score']}",
+            "priority": "normal",
+        })
+    clusters = ctx.get("clusters") or []
+    if clusters:
+        c = clusters[0]
+        cands.append({
+            "kind": "interest_cluster",
+            "title": f"Noticing a thread: {' + '.join(c[:3])}",
+            "detail": "these topics keep appearing together",
+            "priority": "background",
+        })
+    return cands
+
+
+def _maybe_surface(db: Any, ctx: dict[str, Any],
+                   int_score: float) -> str | None:
+    """Pick one surface candidate, at most one per heartbeat.
+
+    Queued candidates (bounded deferral) compete with fresh auto
+    candidates on serendipity score. Non-urgent winners only go out
+    when interruptibility clears the floor — otherwise they stay
+    queued for a better moment or the digest. Returns the title
+    surfaced, or None.
+    """
+    now = time.time()
+    pool: list[dict[str, Any]] = []
+    for c in due_candidates(db, limit=5):
+        pool.append({
+            "kind": c["kind"], "title": c["title"],
+            "detail": c["detail"], "priority": c["priority"],
+            "candidate_id": c["id"], "due": c["due"],
+        })
+    for c in _auto_candidates(db, ctx):
+        # Fresh candidates carry no deadline pressure — they wait for a
+        # good moment like everything else.
+        pool.append({**c, "candidate_id": None, "due": False})
+    if not pool:
+        return None
+
+    scored = []
+    for c in pool:
+        s = serendipity_score(db, c["kind"], c["title"], c["detail"])
+        scored.append((s["score"], c, s))
+    scored.sort(key=lambda t: (
+        _PRIORITY_RANK.get(t[1]["priority"], 1), -t[0]))
+    best_score, best, _ = scored[0]
+
+    # Gate: urgent always goes; others need interruptibility or a blown
+    # deadline. Background-tier never fires alone — digest only.
+    if best["priority"] == "background":
+        queue_candidate(db, best["kind"], best["title"], best["detail"],
+                        priority="background", ttl_hours=72)
+        return None
+    if best["priority"] != "urgent" and int_score < INTERRUPTIBILITY_FLOOR:
+        if not best["due"]:
+            # Hold for a better moment.
+            if best["candidate_id"] is None:
+                queue_candidate(db, best["kind"], best["title"],
+                                best["detail"], priority=best["priority"])
+            _log.info("presence: holding '%s' (interruptibility %.2f)",
+                      best["title"], int_score)
+            return None
+    res = surface(db, best["kind"], best["title"], best["detail"],
+                  priority=best["priority"])
+    if res.get("ok"):
+        if best.get("candidate_id"):
+            db.execute(
+                "UPDATE presence_candidates SET status = 'surfaced' "
+                "WHERE id = ?", (best["candidate_id"],))
+            try:
+                db.commit()
+            except Exception:  # noqa: BLE001
+                pass
+        return best["title"]
     return None
 
 
@@ -402,6 +858,74 @@ def mark_surface(db: Any, surface_id: int, status: str) -> bool:
     except Exception:  # noqa: BLE001
         pass
     return bool(cur.rowcount)
+
+
+# ── batched digest ───────────────────────────────────────────────────
+
+def digest(db: Any, tz_offset: float = 0.0,
+           theme: str = "plain") -> str:
+    """Compile one batched briefing from everything pending.
+
+    Queued candidates + pending surfaces + open weakness proposals,
+    rendered in a daypart-aware voice. This is the product shape that
+    works (ChatGPT Pulse lesson): one briefing, not scattered pings.
+    The digest itself is audited as a surface (kind ``digest``).
+    """
+    ensure_schema(db)
+    ctx = sense(db, tz_offset)
+    daypart = ctx["time"]["daypart"]
+    icon, title, tagline = _DAYPART_TONE.get(daypart, ("✨", "notes", ""))
+    items: list[tuple[str, str, str]] = []  # (icon, head, sub)
+
+    for w in ctx["weaknesses"]:
+        if w["status"] == "proposed":
+            items.append(("🛠️", f"Fix proposal: {w['subject']}",
+                          (w.get("proposal") or "")[:160]))
+    for c in due_candidates(db, limit=5):
+        items.append(("💡", c["title"], c["detail"][:160]))
+    for s in pending_surfaces(db, limit=5):
+        if s["kind"] == "digest":
+            continue
+        items.append(("🔔", s["title"], s["detail"][:160]))
+    rising = ctx.get("rising") or []
+    if rising and len(items) < 6:
+        top = rising[0]
+        items.append(("📈", f"You're deep into {top['topic']} lately",
+                      f"{top['sightings']} sightings this week"))
+
+    if theme == "rich":
+        lines = [f"╭─ {icon} Devon {title} ─╮",
+                 f"│ {tagline}"]
+        if not items:
+            lines.append("│ nothing pending — enjoy the quiet.")
+        for ic, head, sub in items[:8]:
+            lines.append(f"│ {ic} {head[:52]}")
+            if sub:
+                lines.append(f"│   {sub[:54]}")
+        lines.append("╰─────────────────────────╯")
+        text = "\n".join(lines)
+    else:
+        lines = [f"{icon} Devon {title} — {tagline}"]
+        if not items:
+            lines.append("nothing pending — enjoy the quiet.")
+        for ic, head, sub in items[:8]:
+            lines.append(f"{ic} {head}")
+            if sub:
+                lines.append(f"   {sub}")
+        text = "\n".join(lines)
+
+    # Audit the digest itself.
+    try:
+        db.execute(
+            "INSERT INTO presence_surface (ts, kind, title, detail, "
+            "status) VALUES (?, 'digest', ?, ?, 'pending')",
+            (time.time(), f"{title} ({len(items)} items)",
+             text[:500]),
+        )
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return text
 
 
 def _heartbeat_fire(scheduler: Any, job: Any) -> None:

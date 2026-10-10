@@ -14,7 +14,17 @@ This package is how organs trigger each other through events:
 * **patterns** — time/pattern/interest modeling. She learns routines,
   predicts interests, acts proactively.
 * **presence** — the "alive" layer. Time-aware, notices things, prepares
-  ahead, surfaces serendipity without being asked.
+  ahead, surfaces serendipity without being asked. Serendipity is scored
+  (novelty × relevance × unexpectedness), gated by a learned
+  interruptibility score, and delivered as one batched digest.
+
+Sweep upgrades (2026-10-10): idle runs in graduated stages
+(shallow/deep/night) with inhibitors and an adaptive threshold;
+weakness detection uses fuzzy error signatures, burn-rate severity,
+new agent-failure kinds, and a fixed-weakness memory; patterns use
+YAKE-style topic scoring, routine decay, and smoothed transitions;
+the coordinator budgets per-organ slices with failure backoff and
+renders human-readable cycle reports.
 
 All coordination flows through the existing event bus
 (``nomorals.core.events.global_bus``) and the organ event store

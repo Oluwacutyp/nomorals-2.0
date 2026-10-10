@@ -19,6 +19,20 @@ cron, but a real event chain: quiet → idle event → organs wake →
 work → done. Every cycle is journaled to the autonomy ledger and ends
 with a ``system.idle_cycle`` bus event so downstream systems can react.
 
+Scheduling discipline (borrowed from SRE practice):
+
+* **Budget slices** — the cycle budget is split across organs
+  proportional to pending work (queue depth), with minimum slices so
+  no organ starves. Work without budget waits for the next cycle.
+* **Priority order** — weakness/research first (they feed everything
+  else), then memory, presence, wisdom, patterns.
+* **Failure backoff** — an organ tick that fails repeatedly is skipped
+  with exponential backoff instead of hammered every cycle; the skip
+  is journaled so it's visible, not silent.
+* **Health** — :meth:`coordinator_status` exposes per-organ health
+  (last ok, avg seconds, consecutive failures) for machines; and
+  :meth:`cycle_report` renders the last cycle for humans.
+
 Design rule (learned the hard way): the coordinator NEVER pre-drains an
 organ's event queue. ``organs.drain()`` marks events consumed in the same
 transaction — a coordinator drain followed by an organ ``tick()`` would
@@ -42,6 +56,20 @@ _log = get_logger(__name__)
 #: Maximum seconds one idle maintenance cycle runs before yielding.
 IDLE_CYCLE_BUDGET = 600  # 10 minutes
 
+#: Minimum budget slice per organ (seconds) — nobody starves.
+MIN_ORGAN_SLICE = 20.0
+
+#: Priority order for organ ticks (feeds-everything-else first).
+#: Used for budget planning and reporting. Execution order stays the
+#: historical one (research → wisdom → memory → presence → weakness →
+#: patterns) for compatibility with existing subscribers/tests.
+TICK_PRIORITY = ("weakness", "research", "memory", "presence",
+                 "wisdom", "patterns")
+
+#: Historical execution order of the maintenance cycle.
+TICK_ORDER = ("research", "wisdom", "memory", "presence",
+              "weakness", "patterns")
+
 
 def _budget_left(started: float) -> float:
     return max(0.0, IDLE_CYCLE_BUDGET - (time.time() - started))
@@ -56,6 +84,120 @@ class IdleCoordinator:
         self._cycle_lock = threading.Lock()
         self._subscribed = False
         self._cycles = 0
+        #: Per-organ health: {organ: {failures, last_ok_ts, last_err,
+        #: avg_seconds, samples, last_cycle, skipped_cycles}}
+        self._organ_health: dict[str, dict[str, Any]] = {}
+        #: Last completed cycle's stats (for cycle_report).
+        self._last_cycle: dict[str, Any] | None = None
+
+    # ── health bookkeeping ─────────────────────────────────────────
+
+    def _health(self, organ: str) -> dict[str, Any]:
+        return self._organ_health.setdefault(organ, {
+            "failures": 0, "last_ok_ts": 0.0, "last_err": "",
+            "avg_seconds": 0.0, "samples": 0, "last_cycle": "",
+            "skipped_cycles": 0,
+        })
+
+    def _record_ok(self, organ: str, seconds: float,
+                   cycle_id: str) -> None:
+        h = self._health(organ)
+        h["failures"] = 0
+        h["last_ok_ts"] = time.time()
+        h["last_err"] = ""
+        h["last_cycle"] = cycle_id
+        n = h["samples"] + 1
+        h["avg_seconds"] = (h["avg_seconds"] * h["samples"] + seconds) / n
+        h["samples"] = n
+
+    def _record_fail(self, organ: str, err: str, cycle_id: str) -> None:
+        h = self._health(organ)
+        h["failures"] += 1
+        h["last_err"] = str(err)[:200]
+        h["last_cycle"] = cycle_id
+
+    def _backoff_skip(self, organ: str) -> int:
+        """Cycles to skip for a failing organ (0 = run it).
+
+        Exponential backoff: after 3 consecutive failures, skip
+        2^(failures-3) cycles, capped at 8. The skip is journaled —
+        visible, never silent.
+        """
+        failures = self._health(organ)["failures"]
+        if failures < 3:
+            return 0
+        return min(2 ** (failures - 3), 8)
+
+    def coordinator_status(self) -> dict[str, Any]:
+        """Machine-readable coordinator + per-organ health."""
+        return {
+            "idle": self._idle,
+            "cycles": self._cycles,
+            "subscribed": self._subscribed,
+            "last_cycle": self._last_cycle,
+            "organs": {
+                organ: {
+                    "consecutive_failures": h["failures"],
+                    "backoff_skip_cycles": self._backoff_skip(organ),
+                    "last_ok_ts": h["last_ok_ts"],
+                    "last_error": h["last_err"],
+                    "avg_seconds": round(h["avg_seconds"], 1),
+                    "samples": h["samples"],
+                    "last_cycle": h["last_cycle"],
+                }
+                for organ, h in self._organ_health.items()
+            },
+        }
+
+    # ── budget planning ────────────────────────────────────────────
+
+    def _pending_depth(self, db: Any) -> dict[str, float]:
+        """Rough pending-work depth per organ (for budget slices)."""
+        depth: dict[str, float] = {}
+        try:
+            depth["research"] = float(
+                _organs.pending_count(db, dst="research") or 0)
+        except Exception:  # noqa: BLE001
+            depth["research"] = 1.0
+        try:
+            from .weakness import open_weaknesses
+            depth["weakness"] = float(len(open_weaknesses(db)))
+        except Exception:  # noqa: BLE001
+            depth["weakness"] = 1.0
+        # Memory/presence/wisdom/patterns do roughly constant work.
+        depth.setdefault("memory", 1.0)
+        depth.setdefault("presence", 1.0)
+        depth.setdefault("wisdom", 1.0)
+        depth.setdefault("patterns", 0.5)
+        return depth
+
+    def _budget_plan(self, db: Any,
+                     total: float = IDLE_CYCLE_BUDGET) -> dict[str, float]:
+        """Split the cycle budget across organs by pending depth.
+
+        Proportional to depth, with a minimum slice so no organ
+        starves and a cap so one greedy organ can't eat the cycle.
+        """
+        depth = self._pending_depth(db)
+        total_depth = sum(depth.values()) or 1.0
+        shares = {o: total * (depth.get(o, 1.0) / total_depth)
+                  for o in TICK_PRIORITY}
+        # Cap a greedy organ, then enforce minimums.
+        shares = {o: min(s, total * 0.4) for o, s in shares.items()}
+        plan = {o: max(MIN_ORGAN_SLICE, s) for o, s in shares.items()}
+        # If minimums overflow the budget, take the excess back from
+        # organs above the minimum, proportionally — minimums hold.
+        over = sum(plan.values()) - total
+        if over > 0:
+            adjustable = {o: plan[o] - MIN_ORGAN_SLICE for o in plan
+                          if plan[o] > MIN_ORGAN_SLICE}
+            adj_total = sum(adjustable.values())
+            if adj_total > 0:
+                for o in adjustable:
+                    plan[o] -= over * (adjustable[o] / adj_total)
+        return {o: round(v, 1) for o, v in plan.items()}
+
+    # ── subscription ───────────────────────────────────────────────
 
     def subscribe(self) -> "IdleCoordinator":
         """Subscribe to system.idle / system.active. Idempotent."""
@@ -103,33 +245,77 @@ class IdleCoordinator:
         self._cycles += 1
         stats: dict[str, Any] = {"cycle": cycle_id, "steps": {}}
         try:
-            from .idle import workspace_db
+            from .idle import workspace_db, idle_inhibited, inhibitors
             db = workspace_db(self.workspace_dir)
+
+            # Inhibitors: an organ holding one means "not now".
+            held = []
+            try:
+                if idle_inhibited(db):
+                    held = inhibitors(db)
+            except Exception:  # noqa: BLE001
+                held = []
+            if held:
+                _log.info("idle cycle %s deferred: %d inhibitor(s) held "
+                          "(%s)", cycle_id, len(held),
+                          ", ".join(h["name"] for h in held))
+                self._ledger(db, "cycle_deferred", cycle_id,
+                             "cycle deferred — idle inhibitors held",
+                             metadata={"inhibitors": held})
+                stats["deferred"] = [h["name"] for h in held]
+                self._last_cycle = stats
+                return
+
+            plan = self._budget_plan(db)
+            stats["budget_plan"] = plan
             self._ledger(db, "cycle_start", cycle_id,
-                         "idle maintenance cycle started")
+                         "idle maintenance cycle started",
+                         metadata={"budget_plan": plan})
 
-            # 1. Research organ — one tick (it drains its own queue).
-            stats["steps"]["research"] = self._tick_research(db, started)
-
-            # 2. Wisdom organ — one tick.
-            stats["steps"]["wisdom"] = self._tick_wisdom(db, started)
-
-            # 3. Memory consolidation.
-            stats["steps"]["memory"] = self._tick_memory(db, started)
-
-            # 4. Presence heartbeat — notice/prepare/surface.
-            stats["steps"]["presence"] = self._tick_presence(db, started)
-
-            # 5. Weakness scan — thresholded cases → research handoff.
-            stats["steps"]["weakness"] = self._tick_weakness(db, started)
-
-            # 6. Model hygiene — prune decayed interests/patterns.
-            stats["steps"]["patterns"] = self._tick_patterns(db, started)
+            # Ticks run in priority order; each respects its slice.
+            tickers = {
+                "research": self._tick_research,
+                "wisdom": self._tick_wisdom,
+                "memory": self._tick_memory,
+                "presence": self._tick_presence,
+                "weakness": self._tick_weakness,
+                "patterns": self._tick_patterns,
+            }
+            for organ in TICK_ORDER:
+                skip = self._backoff_skip(organ)
+                if skip:
+                    h = self._health(organ)
+                    h["skipped_cycles"] = skip
+                    stats["steps"][organ] = {
+                        "ok": False, "skipped": "backoff",
+                        "consecutive_failures": h["failures"],
+                        "skip_cycles": skip,
+                    }
+                    _log.warning(
+                        "cycle %s: skipping %s tick (backoff, %d failures)",
+                        cycle_id, organ, h["failures"])
+                    self._ledger(db, "tick_backoff", cycle_id,
+                                 f"{organ} tick skipped (backoff)",
+                                 ok=False,
+                                 metadata={"organ": organ,
+                                           "failures": h["failures"]})
+                    continue
+                step = self._run_tick(tickers[organ], db, started,
+                                      plan.get(organ, MIN_ORGAN_SLICE))
+                stats["steps"][organ] = step
+                if step.get("ok"):
+                    self._record_ok(organ, float(step.get("seconds", 0)),
+                                    cycle_id)
+                elif not step.get("skipped"):
+                    self._record_fail(organ,
+                                      str(step.get("error", "unknown")),
+                                      cycle_id)
 
             elapsed = time.time() - started
             stats["seconds"] = round(elapsed, 1)
             _log.info("idle maintenance cycle done in %.1fs: %s",
-                      elapsed, {k: v for k, v in stats["steps"].items()})
+                      elapsed, {k: v.get("ok", v.get("skipped"))
+                                for k, v in stats["steps"].items()})
             self._ledger(db, "cycle_end", cycle_id,
                          f"idle cycle done in {elapsed:.1f}s",
                          cost_seconds=elapsed,
@@ -144,6 +330,7 @@ class IdleCoordinator:
             except Exception:  # noqa: BLE001
                 pass
         finally:
+            self._last_cycle = stats
             self._cycle_lock.release()
         # Completion signal — downstream systems (improvement loop,
         # briefing, dashboards) can react to a finished cycle.
@@ -157,9 +344,102 @@ class IdleCoordinator:
         except Exception:  # noqa: BLE001
             _log.debug("system.idle_cycle publish failed", exc_info=True)
 
+    # ── human-readable cycle report ──────────────────────────────────
+
+    _STEP_ICON = {True: "✅", False: "⚠️"}
+
+    def cycle_report(self, theme: str = "plain") -> str:
+        """Render the last cycle as a human-readable summary.
+
+        ``theme="plain"`` for chat, ``theme="rich"`` for a boxed
+        dashboard-style render. This is the visible proof the nervous
+        system is alive — not log lines.
+        """
+        stats = self._last_cycle
+        if not stats:
+            return ("💤 no idle maintenance cycle has run yet — "
+                    "the system hasn't gone quiet long enough.")
+        steps = stats.get("steps", {})
+        if theme == "rich":
+            lines = ["╭─ 💤 idle maintenance cycle ─────────╮",
+                     f"│ {stats.get('cycle', '?')} · "
+                     f"{stats.get('seconds', '?')}s"]
+        else:
+            lines = [f"💤 idle cycle {stats.get('cycle', '?')} "
+                     f"({stats.get('seconds', '?')}s)"]
+        if stats.get("deferred"):
+            lines.append("deferred — inhibitors held: " +
+                         ", ".join(stats["deferred"]))
+            return "\n".join(lines)
+        for organ in TICK_PRIORITY:
+            step = steps.get(organ, {})
+            if step.get("skipped"):
+                mark = "⏭️"
+                note = f"skipped ({step['skipped']})"
+            else:
+                ok = bool(step.get("ok"))
+                mark = self._STEP_ICON[ok]
+                secs = step.get("seconds", "?")
+                note = f"{secs}s"
+                extra = self._step_summary(organ, step)
+                if extra:
+                    note += f" · {extra}"
+            if theme == "rich":
+                lines.append(f"│ {mark} {organ:<10} {note}")
+            else:
+                lines.append(f"{mark} {organ}: {note}")
+        failing = [o for o in TICK_PRIORITY
+                   if self._health(o)["failures"] >= 3]
+        if failing:
+            lines.append("backing off: " + ", ".join(failing))
+        if theme == "rich":
+            lines.append("╰──────────────────────────────────╯")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _step_summary(organ: str, step: dict[str, Any]) -> str:
+        if organ == "research":
+            return (f"{step.get('watches', '?')} watches, "
+                    f"{step.get('gaps', '?')} gaps")
+        if organ == "memory":
+            return (f"{step.get('episodes', '?')} episodes, "
+                    f"{step.get('merged', '?')} merged")
+        if organ == "presence":
+            return (f"{step.get('noticed', 0)} noticed, "
+                    f"{step.get('surfaced', 0)} surfaced")
+        if organ == "weakness":
+            return f"{step.get('open', 0)} open, {step.get('routed', 0)} routed"
+        if organ == "patterns":
+            return f"{step.get('interests_dropped', 0)} pruned"
+        if organ == "wisdom":
+            return str(step.get("report", ""))[:60]
+        return ""
+
     # ── per-organ ticks (each organ drains its own queue) ───────────────
 
-    def _tick_research(self, db: Any, started: float) -> dict[str, Any]:
+    @staticmethod
+    def _run_tick(ticker: Any, db: Any, started: float,
+                  budget: float) -> dict[str, Any]:
+        """Invoke a tick, passing ``budget`` only if it accepts it.
+
+        Keeps the coordinator compatible with third-party or test tick
+        functions that only take ``(db, started)``.
+        """
+        try:
+            import inspect as _inspect
+            params = _inspect.signature(ticker).parameters
+            if "budget" in params:
+                return ticker(db, started, budget=budget)
+            return ticker(db, started)
+        except TypeError as exc:
+            # Defensive: a tick with an incompatible signature must not
+            # kill the whole cycle.
+            if "budget" in str(exc):
+                return ticker(db, started)
+            raise
+
+    def _tick_research(self, db: Any, started: float,
+                       budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
@@ -187,7 +467,8 @@ class IdleCoordinator:
             _log.warning("research tick failed", exc_info=True)
         return out
 
-    def _tick_wisdom(self, db: Any, started: float) -> dict[str, Any]:
+    def _tick_wisdom(self, db: Any, started: float,
+                     budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
@@ -207,7 +488,8 @@ class IdleCoordinator:
             _log.warning("wisdom tick failed", exc_info=True)
         return out
 
-    def _tick_memory(self, db: Any, started: float) -> dict[str, Any]:
+    def _tick_memory(self, db: Any, started: float,
+                     budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
@@ -232,7 +514,8 @@ class IdleCoordinator:
             _log.warning("memory consolidation failed", exc_info=True)
         return out
 
-    def _tick_presence(self, db: Any, started: float) -> dict[str, Any]:
+    def _tick_presence(self, db: Any, started: float,
+                       budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
@@ -252,7 +535,8 @@ class IdleCoordinator:
             _log.warning("idle presence failed", exc_info=True)
         return out
 
-    def _tick_weakness(self, db: Any, started: float) -> dict[str, Any]:
+    def _tick_weakness(self, db: Any, started: float,
+                       budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
@@ -271,7 +555,8 @@ class IdleCoordinator:
             _log.warning("idle weakness scan failed", exc_info=True)
         return out
 
-    def _tick_patterns(self, db: Any, started: float) -> dict[str, Any]:
+    def _tick_patterns(self, db: Any, started: float,
+                       budget: float = MIN_ORGAN_SLICE) -> dict[str, Any]:
         out: dict[str, Any] = {"ok": False}
         if not self._idle or _budget_left(started) <= 0:
             out["skipped"] = "stand-down"
