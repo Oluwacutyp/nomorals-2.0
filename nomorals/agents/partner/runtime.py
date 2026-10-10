@@ -168,6 +168,8 @@ class PartnerRuntime(
         try:
             from ...tools.social import set_gateway as _bind_social_gateway
             _bind_social_gateway(self.gateway)
+            from ...tools.whatsapp import set_gateway as _bind_wa_gateway
+            _bind_wa_gateway(self.gateway)
         except Exception:  # noqa: BLE001 — social tools fail closed anyway
             pass
 

@@ -71,6 +71,33 @@ GROUP_CAPABILITIES: tuple[tuple[str, str, str], ...] = (
      "the member roster with admin roles"),
     ("communities", "list my communities",
      "communities and their linked groups"),
+    # ── administration (owner-confirmed; denied to outsiders) ──
+    ("group create", "create a group called <name>",
+     "new WhatsApp group, optional initial members"),
+    ("group members update", "add/remove/promote/demote <user> in <group>",
+     "member management with per-user results"),
+    ("group rename", "rename <group> to <name>",
+     "change the group subject"),
+    ("group description", "set the description of <group>",
+     "change the group description"),
+    ("group picture", "set <group>'s picture to <image>",
+     "change the group picture"),
+    ("group settings", "lock <group> / open <group> to admins only",
+     "announce-only and admin-only-settings toggles"),
+    ("group leave", "leave <group>",
+     "exit a group"),
+    ("group invite", "new invite link for <group>",
+     "revoke and reissue the invite link"),
+    ("community create", "create a community called <name>",
+     "new WhatsApp community"),
+    ("community broadcast", "announce <text> to <community>",
+     "post to the community announcement group"),
+    ("community link", "link <group> into <community>",
+     "attach a subgroup to a community"),
+    ("channel create", "create a channel called <name>",
+     "new WhatsApp channel (newsletter)"),
+    ("channel post", "post <text> to <channel>",
+     "publish to a channel"),
 )
 
 #: How many unsent messages the outbox holds (oldest dropped past this).
@@ -835,6 +862,264 @@ class WhatsAppAdapter(ChatAdapter):
             except (TypeError, ValueError):  # noqa: BLE001 - skip malformed rows
                 continue
         return [c for c in out if c["id"]]
+
+    # ── group administration (bridge/whatsapp-groups-admin.mjs) ──────────
+    # Mutating ops on the owner's personal account. WhatsApp may flag
+    # aggressive automation — every one of these is owner-confirmed on the
+    # spine-tool side (capability-gated, denied to outsiders by the
+    # public/private matrix). The bridge answers ok:false with the real
+    # Baileys reason when WhatsApp refuses; nothing is faked.
+
+    def _admin_cmd(self, cmd: str, payload: dict[str, Any],
+                   *, timeout: float = 30.0) -> dict[str, Any]:
+        """Send a mutating group/community/channel command to the bridge.
+
+        Returns ``{"ok": True, ...}`` or ``{"ok": False, "error": ...}``
+        with the bridge's honest reason. ``{}`` when disconnected.
+        """
+        if not self.connected.is_set():
+            return {"ok": False, "error": "whatsapp bridge not connected"}
+        payload = dict(payload)
+        payload["cmd"] = cmd
+        try:
+            return self._send_cmd(payload, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - honest error, not a crash
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def group_create(self, subject: str,
+                     participants: list[str] | None = None) -> dict[str, Any]:
+        """Create a group. ``participants`` are user JIDs (…@s.whatsapp.net)."""
+        subject = (subject or "").strip()
+        if not subject:
+            return {"ok": False, "error": "missing subject for the new group"}
+        return self._admin_cmd("group_create", {
+            "subject": subject,
+            "participants": [str(p) for p in (participants or []) if p],
+        }, timeout=45)
+
+    def group_members_update(self, chat: ChatRef | str, action: str,
+                             participants: list[str]) -> dict[str, Any]:
+        """Add/remove/promote/demote members. ``action`` ∈ add|remove|promote|demote."""
+        action = (action or "").strip().lower()
+        if action not in ("add", "remove", "promote", "demote"):
+            return {"ok": False,
+                    "error": f"bad action {action!r} (want add|remove|promote|demote)"}
+        parts = [str(p) for p in (participants or []) if p]
+        if not parts:
+            return {"ok": False, "error": "no participants given"}
+        return self._admin_cmd("group_members_update", {
+            "chat": self._group_jid(chat), "action": action,
+            "participants": parts,
+        }, timeout=45)
+
+    def group_set_subject(self, chat: ChatRef | str, subject: str) -> dict[str, Any]:
+        """Rename a group."""
+        return self._admin_cmd("group_set_subject", {
+            "chat": self._group_jid(chat), "subject": (subject or "").strip(),
+        })
+
+    def group_set_description(self, chat: ChatRef | str,
+                              description: str) -> dict[str, Any]:
+        """Set a group's description."""
+        return self._admin_cmd("group_set_description", {
+            "chat": self._group_jid(chat), "description": description or "",
+        })
+
+    def group_set_picture(self, chat: ChatRef | str, path: str) -> dict[str, Any]:
+        """Set a group's picture from a local image file."""
+        return self._admin_cmd("group_set_picture", {
+            "chat": self._group_jid(chat), "path": (path or "").strip(),
+        }, timeout=45)
+
+    def group_leave(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Leave a group."""
+        return self._admin_cmd("group_leave", {"chat": self._group_jid(chat)})
+
+    def group_set_settings(self, chat: ChatRef | str, *,
+                           announce: bool | None = None,
+                           restrict: bool | None = None) -> dict[str, Any]:
+        """Group settings: ``announce`` (only admins send), ``restrict``
+        (only admins change settings). Pass only what should change."""
+        payload: dict[str, Any] = {"chat": self._group_jid(chat)}
+        if announce is not None:
+            payload["announce"] = bool(announce)
+        if restrict is not None:
+            payload["restrict"] = bool(restrict)
+        if len(payload) == 1:
+            return {"ok": False, "error": "nothing to change: pass announce= and/or restrict="}
+        return self._admin_cmd("group_set_settings", payload)
+
+    def group_revoke_invite(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Revoke the invite link and get a fresh one. Returns ``invite``."""
+        return self._admin_cmd("group_revoke_invite",
+                               {"chat": self._group_jid(chat)})
+
+    def group_join_approval(self, chat: ChatRef | str, mode: str) -> dict[str, Any]:
+        """Require admin approval for new members: ``mode`` ∈ on|off."""
+        return self._admin_cmd("group_join_approval", {
+            "chat": self._group_jid(chat), "mode": (mode or "").strip().lower(),
+        })
+
+    def group_member_add_mode(self, chat: ChatRef | str, mode: str) -> dict[str, Any]:
+        """Who may add members: ``mode`` ∈ admin|all."""
+        return self._admin_cmd("group_member_add_mode", {
+            "chat": self._group_jid(chat), "mode": (mode or "").strip().lower(),
+        })
+
+    # ── communities ─────────────────────────────────────────────────────
+
+    def community_create(self, subject: str,
+                         description: str = "") -> dict[str, Any]:
+        """Create a community."""
+        subject = (subject or "").strip()
+        if not subject:
+            return {"ok": False, "error": "missing subject for the new community"}
+        return self._admin_cmd("community_create", {
+            "subject": subject, "description": description or "",
+        }, timeout=45)
+
+    def community_leave(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Leave a community."""
+        return self._admin_cmd("community_leave",
+                               {"chat": self._group_jid(chat)})
+
+    def community_members_update(self, chat: ChatRef | str, action: str,
+                                 participants: list[str]) -> dict[str, Any]:
+        """Add/remove/promote/demote community members."""
+        action = (action or "").strip().lower()
+        if action not in ("add", "remove", "promote", "demote"):
+            return {"ok": False,
+                    "error": f"bad action {action!r} (want add|remove|promote|demote)"}
+        parts = [str(p) for p in (participants or []) if p]
+        if not parts:
+            return {"ok": False, "error": "no participants given"}
+        return self._admin_cmd("community_members_update", {
+            "chat": self._group_jid(chat), "action": action,
+            "participants": parts,
+        }, timeout=45)
+
+    def community_set_subject(self, chat: ChatRef | str,
+                              subject: str) -> dict[str, Any]:
+        """Rename a community."""
+        return self._admin_cmd("community_set_subject", {
+            "chat": self._group_jid(chat), "subject": (subject or "").strip(),
+        })
+
+    def community_set_description(self, chat: ChatRef | str,
+                                  description: str) -> dict[str, Any]:
+        """Set a community's description."""
+        return self._admin_cmd("community_set_description", {
+            "chat": self._group_jid(chat), "description": description or "",
+        })
+
+    def community_link_group(self, community: ChatRef | str,
+                             group: ChatRef | str) -> dict[str, Any]:
+        """Link a subgroup into a community."""
+        return self._admin_cmd("community_link_group", {
+            "community": self._group_jid(community),
+            "group": self._group_jid(group),
+        }, timeout=45)
+
+    def community_unlink_group(self, community: ChatRef | str,
+                               group: ChatRef | str) -> dict[str, Any]:
+        """Unlink a subgroup from a community."""
+        return self._admin_cmd("community_unlink_group", {
+            "community": self._group_jid(community),
+            "group": self._group_jid(group),
+        }, timeout=45)
+
+    def community_broadcast(self, community: ChatRef | str,
+                            text: str) -> dict[str, Any]:
+        """Post an announcement to a community's announcement group.
+
+        Finds the community's announce group and sends there — that is how
+        WhatsApp broadcasts to every member.
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty announcement"}
+        groups = self.groups(limit=500)
+        want = self._group_jid(community)
+        announce_jid = ""
+        for g in groups:
+            if g["id"] == want and g["is_community_announce"]:
+                announce_jid = g["id"]
+                break
+        if not announce_jid:
+            for g in groups:
+                if g.get("linked_parent") == want and g["is_community_announce"]:
+                    announce_jid = g["id"]
+                    break
+        if not announce_jid:
+            return {"ok": False,
+                    "error": "no announcement group found for that community"}
+        chat = ChatRef(platform="whatsapp", chat_id=announce_jid,
+                        kind=ChatKind.GROUP, title="")
+        result = self.send(chat, text)
+        return {"ok": result.ok, "message_id": result.message_id,
+                "error": result.error or ""}
+
+    # ── channels (WhatsApp newsletters) ─────────────────────────────────
+
+    def channel_create(self, name: str,
+                       description: str = "") -> dict[str, Any]:
+        """Create a WhatsApp channel (newsletter)."""
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "missing name for the new channel"}
+        return self._admin_cmd("channel_create", {
+            "name": name, "description": description or "",
+        }, timeout=45)
+
+    def channel_delete(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Delete a channel the account owns."""
+        return self._admin_cmd("channel_delete",
+                               {"chat": self._newsletter_jid(chat)})
+
+    def channel_follow(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Follow a channel."""
+        return self._admin_cmd("channel_follow",
+                               {"chat": self._newsletter_jid(chat)})
+
+    def channel_unfollow(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Unfollow a channel."""
+        return self._admin_cmd("channel_unfollow",
+                               {"chat": self._newsletter_jid(chat)})
+
+    def channel_set_name(self, chat: ChatRef | str, name: str) -> dict[str, Any]:
+        """Rename a channel the account owns."""
+        return self._admin_cmd("channel_set_name", {
+            "chat": self._newsletter_jid(chat), "name": (name or "").strip(),
+        })
+
+    def channel_set_description(self, chat: ChatRef | str,
+                                description: str) -> dict[str, Any]:
+        """Set a channel's description."""
+        return self._admin_cmd("channel_set_description", {
+            "chat": self._newsletter_jid(chat),
+            "description": description or "",
+        })
+
+    def channel_post(self, chat: ChatRef | str, text: str) -> dict[str, Any]:
+        """Post to a channel. Works on channels the account follows/owns —
+        posting is a send to the newsletter JID."""
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty post"}
+        chat_ref = ChatRef(platform="whatsapp",
+                            chat_id=self._newsletter_jid(chat),
+                            kind=ChatKind.CHANNEL, title="")
+        result = self.send(chat_ref, text)
+        return {"ok": result.ok, "message_id": result.message_id,
+                "error": result.error or ""}
+
+    def _newsletter_jid(self, chat: ChatRef | str) -> str:
+        """Normalize a chat ref or raw string to a newsletter JID."""
+        if isinstance(chat, ChatRef):
+            jid = self._jid(chat)
+        else:
+            jid = str(chat or "").strip()
+        return jid
 
     def typing(self, chat: ChatRef, seconds: float = 3.0,
                action: str = "typing") -> bool:

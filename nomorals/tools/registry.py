@@ -284,7 +284,7 @@ class ToolRegistry:
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
             "security",
-            "wisdom", "social",
+            "wisdom", "social", "whatsapp",
             "services",  # 28 service connectors bridged to the spine
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
