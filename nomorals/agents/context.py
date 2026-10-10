@@ -271,11 +271,14 @@ def build_context(
                     )
             except Exception as exc:  # noqa: BLE001 - verification is advisory
                 _log.warning("startup provider verification failed: %s", exc)
-        # Local GGUF auto-start: if the operator promoted a local model
-        # (NM_LLM_PROVIDER=llama_cpp + NM_LLM_LOCAL_AUTO_START=1), make sure
+        # Local GGUF auto-start: if the operator has a local model configured
+        # (NM_LLM_LOCAL_MODEL set, or NM_LLM_PROVIDER=llama_cpp), make sure
         # llama-server is actually running before any chat traffic hits it.
         # Without this the router points at a dead localhost:8080.
-        if settings.llm.provider.lower() in {"llama_cpp", "llamacpp", "gguf"}:
+        # If the owner already started llama-server manually, ensure_local_gguf
+        # detects it ("already serving") and does nothing — no duplicate server.
+        _has_local_model = bool(str(getattr(settings.llm, "local_model", "") or "").strip())
+        if settings.llm.provider.lower() in {"llama_cpp", "llamacpp", "gguf"} or _has_local_model:
             try:
                 ensure_local_gguf(settings)
             except Exception as exc:  # noqa: BLE001 — cloud fallbacks still work
@@ -415,7 +418,15 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                 "endpoint_url": llm.hf_endpoint_url,
             }
         if kind in {"llama_cpp", "llamacpp", "gguf"}:
-            return {**common, "base_url": llm.llama_cpp_url, "model": llm.openai_model or "local"}
+            # Prefer the local GGUF's filename as the model label when the
+            # owner configured NM_LLM_LOCAL_MODEL — clearer in logs than "local".
+            _lm = str(getattr(llm, "local_model", "") or "").strip()
+            _model_label = "local"
+            if _lm:
+                from pathlib import Path as _Path
+                _model_label = _Path(_lm).stem or "local"
+            return {**common, "base_url": llm.llama_cpp_url,
+                    "model": llm.openai_model or _model_label}
         if kind == "groq":
             return {
                 **common,
@@ -466,7 +477,20 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         except Exception as exc:  # noqa: BLE001 - one bad backend must not block startup
             _log.warning("could not register provider %s: %s", kind, exc)
 
-    add(llm.provider, primary=True)
+    # Local GGUF: when the owner has downloaded their own model
+    # (NM_LLM_LOCAL_MODEL set), llama_cpp becomes the primary provider.
+    # The LlamaCppProvider health-checks /health on llama_cpp_url — if the
+    # owner already has llama-server running (e.g. started manually), it
+    # connects to it directly. If not reachable, the router's verify step
+    # skips it and falls through to the next provider in the chain.
+    # This is the "drives the power-mode router cascade" behavior the
+    # LLMSettings.local_model docstring promises.
+    local_model = str(getattr(llm, "local_model", "") or "").strip()
+    if local_model:
+        _log.info("local model configured (%s): llama_cpp is primary", local_model)
+        add("llama_cpp", primary=True)
+
+    add(llm.provider, primary=not local_model)
     for fallback in llm.fallback_chain:
         add(fallback)
     if not router.providers():
