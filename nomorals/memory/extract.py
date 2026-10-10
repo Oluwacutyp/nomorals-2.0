@@ -37,7 +37,14 @@ from .base import ALL_KINDS, MemoryKind
 
 _log = get_logger(__name__)
 
-__all__ = ["ExtractedMemory", "MemoryExtractor", "extract_sentences"]
+__all__ = [
+    "ExtractedMemory",
+    "MemoryDecision",
+    "MemoryExtractor",
+    "decide",
+    "extract_sentences",
+    "forget_targets",
+]
 
 # ── heuristics ───────────────────────────────────────────────────────────────
 
@@ -262,6 +269,100 @@ def _llm_pass(context: Any, user_text: str, assistant_text: str, speaker: str) -
     return out
 
 
+# ── forgetting ────────────────────────────────────────────────────────────────
+# mem0's fourth decision — DELETE — was the missing one: the owner says
+# "forget that I like tea" and the extractor had no move. Forget requests
+# are detected heuristically (cheap, always on) and resolved against
+# recall; the matched record is forgotten, never edited in place.
+
+_FORGET = re.compile(
+    r"\b(?:forget|delete|erase|drop|remove|stop remembering"
+    r"|don'?t remember|never remember|i changed my mind about)\b"
+    r"(?:\s+(?:that|about|the memory(?: of| about)?|this))?"
+    r"\s+(.{6,200}?)(?:[.!?]+|$)",
+    re.IGNORECASE,
+)
+
+
+def forget_targets(text: str) -> list[str]:
+    """What the owner asked to forget — the deletion targets, if any."""
+    targets: list[str] = []
+    for sentence in extract_sentences(text):
+        m = _FORGET.search(sentence)
+        if not m:
+            continue
+        target = _clean(m.group(1))
+        if len(target) >= 6 and target.lower() not in targets:
+            targets.append(target)
+    return targets
+
+
+# ── update decisions ─────────────────────────────────────────────────────────
+# The mem0 two-phase contract made explicit: every candidate resolves to
+# one of ADD / UPDATE / DELETE / NOOP. ``decide()`` is the pure, testable
+# decision function; the extractor's _store() executes it.
+
+
+class MemoryDecision:
+    """One explicit memory-management decision (the mem0 update phase)."""
+
+    ADD = "add"
+    UPDATE = "update"
+    DELETE = "delete"
+    NOOP = "noop"
+
+    def __init__(self, action: str, *, target_id: str | None = None,
+                 reason: str = "") -> None:
+        self.action = action
+        self.target_id = target_id
+        self.reason = reason
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "target_id": self.target_id,
+                "reason": self.reason}
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (f"MemoryDecision({self.action!r}, target_id={self.target_id!r},"
+                f" reason={self.reason!r})")
+
+
+def decide(candidate: str, existing: list[Any],
+           ratio: float = 0.80, *,
+           contradictions: list[Any] | None = None,
+           delete_target: str = "") -> MemoryDecision:
+    """Decide ADD / UPDATE / DELETE / NOOP for one candidate.
+
+    ``existing`` are the near records from recall (already ranked).
+    ``delete_target`` non-empty means this candidate is a forget request:
+    the first near-duplicate of the target is deleted.
+    """
+    if delete_target:
+        for record in existing:
+            if is_duplicate(delete_target, record.content, ratio):
+                return MemoryDecision(
+                    MemoryDecision.DELETE, target_id=record.id,
+                    reason="owner asked to forget; matched stored memory")
+        return MemoryDecision(
+            MemoryDecision.NOOP,
+            reason="forget request matched nothing stored")
+    dup_of = None
+    for record in existing:
+        if is_duplicate(candidate, record.content, ratio):
+            dup_of = record
+            break
+    if contradictions:
+        return MemoryDecision(
+            MemoryDecision.UPDATE,
+            target_id=dup_of.id if dup_of else None,
+            reason="contradicts stored memory; supersede it")
+    if dup_of is not None:
+        return MemoryDecision(
+            MemoryDecision.NOOP, target_id=dup_of.id,
+            reason="near-duplicate of stored memory; reinforce instead")
+    return MemoryDecision(MemoryDecision.ADD,
+                          reason="new durable knowledge")
+
+
 # ── dedupe ───────────────────────────────────────────────────────────────────
 
 _PUNCT = re.compile(r"[^\w\s]")
@@ -345,6 +446,28 @@ class MemoryExtractor:
                 if all(not is_duplicate(cand.content, c.content, self._dedupe_ratio())
                        for c in candidates):
                     candidates.append(cand)
+
+        # DELETE phase (mem0's fourth decision): "forget that X" removes
+        # the matching memory instead of adding one. Runs before the
+        # ADD path so a forget request never also stores.
+        ratio = self._dedupe_ratio()
+        for target in forget_targets(text):
+            try:
+                existing = memory.recall(target, limit=4).records
+                decision = decide("", existing, ratio, delete_target=target)
+                if (decision.action == MemoryDecision.DELETE
+                        and decision.target_id):
+                    memory.forget(decision.target_id)
+                    actions.append({
+                        "action": "deleted", "kind": "",
+                        "content": target[:120], "id": decision.target_id,
+                        "decision": decision.to_dict()})
+                    return actions  # a forget request is the whole turn
+                actions.append({"action": "deleted:nothing-matched",
+                                "kind": "", "content": target[:120], "id": ""})
+            except Exception:  # noqa: BLE001 — never break extraction
+                _log.debug("extraction forget handling failed", exc_info=True)
+
         if not candidates:
             return actions
 

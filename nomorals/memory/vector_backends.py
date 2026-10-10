@@ -116,9 +116,21 @@ class VectorBackend(ABC):
 
     name: str = "backend"
 
-    def __init__(self, db: Database, *, owner_type: str = "memory") -> None:
+    def __init__(self, db: Database, *, owner_type: str = "memory",
+                 truncate_dims: int = 0) -> None:
         self._db = db
         self.owner_type = owner_type
+        #: Matryoshka truncation (0 = off): store only the first N
+        #: dimensions. Matryoshka-trained embedders (Qwen3-Embedding,
+        #: jina-v3, BGE-M3) order dimensions by importance, so 1024→512
+        #: halves storage at a small quality cost. Applies to writes and
+        #: to query vectors, so mixed-dimension stores stay aligned.
+        self.truncate_dims = max(0, int(truncate_dims))
+
+    def _truncate(self, vector: Sequence[float]) -> list[float]:
+        if self.truncate_dims > 0 and len(vector) > self.truncate_dims:
+            return list(vector[: self.truncate_dims])
+        return list(vector)
 
     # ── availability ─────────────────────────────────────────────────────
     @classmethod
@@ -187,8 +199,10 @@ class LegacyStoreBackend(VectorBackend):
         owner_type: str = "memory",
         vectors: VectorStore | None = None,
         model: str = "default",
+        truncate_dims: int = 0,
     ) -> None:
-        super().__init__(db, owner_type=owner_type)
+        super().__init__(db, owner_type=owner_type,
+                         truncate_dims=truncate_dims)
         self._store = vectors if vectors is not None else VectorStore(db)
         self.model = model
 
@@ -198,12 +212,14 @@ class LegacyStoreBackend(VectorBackend):
 
     def put(self, vector: Sequence[float], owner_id: str) -> str:
         return self._store.put(
-            vector, owner_type=self.owner_type, owner_id=str(owner_id), model=self.model
+            self._truncate(vector), owner_type=self.owner_type,
+            owner_id=str(owner_id), model=self.model
         )
 
     def put_many(self, items: Sequence[tuple[Sequence[float], str]]) -> list[str]:
         return self._store.put_many(
-            [(vector, self.owner_type, str(owner_id)) for vector, owner_id in items],
+            [(self._truncate(vector), self.owner_type, str(owner_id))
+             for vector, owner_id in items],
             model=self.model,
         )
 
@@ -217,7 +233,8 @@ class LegacyStoreBackend(VectorBackend):
         self, vector: Sequence[float], *, limit: int = 10, min_score: float = -1.0
     ) -> list[VectorHit]:
         hits = self._store.search(
-            vector, limit=limit, owner_type=self.owner_type, min_score=min_score
+            self._truncate(vector), limit=limit, owner_type=self.owner_type,
+            min_score=min_score
         )
         return [
             VectorHit(
@@ -289,8 +306,9 @@ class SqliteVecBackend(VectorBackend):
     name = "sqlite-vec"
     _TABLE_PREFIX = "memory_vec_"
 
-    def __init__(self, db: Database, *, owner_type: str = "memory", model: str = "default") -> None:
-        super().__init__(db, owner_type=owner_type)
+    def __init__(self, db: Database, *, owner_type: str = "memory", model: str = "default",
+                 truncate_dims: int = 0) -> None:
+        super().__init__(db, owner_type=owner_type, truncate_dims=truncate_dims)
         self.model = model
         self._lock = threading.RLock()
         # id()s of connections already carrying the extension. Database retains
@@ -348,7 +366,7 @@ class SqliteVecBackend(VectorBackend):
 
     # ── writes ───────────────────────────────────────────────────────────
     def put(self, vector: Sequence[float], owner_id: str) -> str:
-        values = _normalize(vector)
+        values = _normalize(self._truncate(vector))
         table = self._table(len(values))
         cursor = self._db.execute(
             f'INSERT INTO "{table}" (owner_id, embedding) VALUES (?, ?)',
@@ -391,7 +409,7 @@ class SqliteVecBackend(VectorBackend):
         if limit <= 0:
             return []
         started = time.perf_counter()
-        values = _normalize(vector)
+        values = _normalize(self._truncate(vector))
         table = f"{self._TABLE_PREFIX}{len(values)}"
         self._ensure_loaded()
         if not self._db.table_exists(table):
@@ -431,6 +449,7 @@ class SqliteVecBackend(VectorBackend):
             **self.stats,
             "backend": self.name,
             "tables": [name for name, _ in self._tables()],
+            "truncate_dims": self.truncate_dims,
         }
 
 
@@ -476,8 +495,9 @@ class USearchBackend(VectorBackend):
         owner_type: str = "memory",
         model: str = "default",
         path: str | None = None,
+        truncate_dims: int = 0,
     ) -> None:
-        super().__init__(db, owner_type=owner_type)
+        super().__init__(db, owner_type=owner_type, truncate_dims=truncate_dims)
         self.model = model
         if path is None and db.path is not None:
             path = str(db.path) + ".usearch"
@@ -546,7 +566,7 @@ class USearchBackend(VectorBackend):
         ids: list[str] = []
         by_dim: dict[int, list[tuple[list[float], str]]] = {}
         for vector, owner_id in materialized:
-            values = _normalize(vector)
+            values = _normalize(self._truncate(vector))
             by_dim.setdefault(len(values), []).append((values, str(owner_id)))
         for dim, rows in by_dim.items():
             index = self._index_for(dim)
@@ -608,7 +628,7 @@ class USearchBackend(VectorBackend):
         if limit <= 0:
             return []
         started = time.perf_counter()
-        values = _normalize(vector)
+        values = _normalize(self._truncate(vector))
         dim = len(values)
         index = self._indexes.get(dim)
         if index is None:

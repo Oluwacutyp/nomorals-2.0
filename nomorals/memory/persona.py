@@ -368,15 +368,68 @@ class PersonEntry:
         }
 
 
+class Community:
+    """A cluster of strongly-connected people — the community subgraph.
+
+    Graphiti's Gc tier: label-propagation clusters over the people graph,
+    each with a synthesized summary. Communities answer "who moves together"
+    — the girlfriend + her family, the work crew, the trading circle — which
+    no per-person lookup can give.
+    """
+
+    def __init__(self, members: list[PersonEntry], edges: int = 0) -> None:
+        self.members = list(members)
+        self.edges = edges
+        self.built_at = time.time()
+
+    @property
+    def size(self) -> int:
+        return len(self.members)
+
+    @property
+    def names(self) -> list[str]:
+        return [m.name for m in self.members]
+
+    def summary(self, max_notes: int = 3) -> str:
+        """One synthesized paragraph: who they are together."""
+        roles = sorted({m.role for m in self.members if m.role})
+        head = ", ".join(self.names[:6])
+        if len(self.names) > 6:
+            head += f" (+{len(self.names) - 6} more)"
+        bits = [f"Circle of {self.size}: {head}."]
+        if roles:
+            bits.append("Roles: " + "; ".join(roles[:4]) + ".")
+        notes: list[str] = []
+        for m in self.members:
+            for n in m.notes:
+                if n not in notes:
+                    notes.append(n)
+                if len(notes) >= max_notes:
+                    break
+            if len(notes) >= max_notes:
+                break
+        if notes:
+            bits.append("Known: " + " ".join(notes))
+        return " ".join(bits)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"members": [m.to_dict() for m in self.members],
+                "edges": self.edges, "size": self.size,
+                "summary": self.summary(), "built_at": self.built_at}
+
+
 class PeopleGraph:
     """Graph view over RELATIONSHIP records: who matters to the owner.
 
     Stores only what the owner stated, verbatim-ish.  No inference beyond
-    what was said.
+    what was said. Co-occurrence edges (two people named in the same
+    record) power the community subgraph — "who moves together".
     """
 
     def __init__(self) -> None:
         self.people: dict[str, PersonEntry] = {}
+        #: (key_a, key_b) → weight: people named in the same record.
+        self.edges: dict[tuple[str, str], int] = {}
 
     @classmethod
     def build(cls, manager: Any) -> "PeopleGraph":
@@ -410,10 +463,84 @@ class PeopleGraph:
                 entry.notes.append(note)
             if record.id not in entry.evidence and len(entry.evidence) < 8:
                 entry.evidence.append(record.id)
+            # Co-occurrence edges: other people named in the same record
+            # move together. ``mentioned`` metadata or extra names found
+            # in the content both count; self-pairs excluded.
+            others = set()
+            mentioned = (record.metadata or {}).get("mentioned") or []
+            if isinstance(mentioned, str):
+                mentioned = [mentioned]
+            for other in mentioned:
+                if other and str(other).lower() != key:
+                    others.add(str(other).lower())
+            for other in others:
+                pair = tuple(sorted((key, other)))
+                graph.edges[pair] = graph.edges.get(pair, 0) + 1
         return graph
 
     def lookup(self, name: str) -> PersonEntry | None:
         return self.people.get((name or "").lower())
+
+    def neighbors(self, name: str) -> list[tuple[PersonEntry, int]]:
+        """People connected to ``name`` with edge weights, strongest first."""
+        key = (name or "").lower()
+        out: list[tuple[PersonEntry, int]] = []
+        for (a, b), weight in self.edges.items():
+            other = b if a == key else a if b == key else None
+            if other is not None and other in self.people:
+                out.append((self.people[other], weight))
+        out.sort(key=lambda t: -t[1])
+        return out
+
+    def communities(self, min_size: int = 2,
+                    max_rounds: int = 20) -> list[Community]:
+        """Label-propagation clustering over the people graph.
+
+        The community subgraph (Graphiti's Gc): clusters of strongly
+        connected people with synthesized summaries. Deterministic —
+        ties break on label id, so the same graph always yields the same
+        communities. Singletons (no edges) are dropped unless
+        ``min_size=1``.
+        """
+        nodes = sorted(self.people)
+        if not nodes:
+            return []
+        adjacency: dict[str, dict[str, int]] = {n: {} for n in nodes}
+        for (a, b), weight in self.edges.items():
+            if a in adjacency and b in adjacency:
+                adjacency[a][b] = adjacency[a].get(b, 0) + weight
+                adjacency[b][a] = adjacency[b].get(a, 0) + weight
+        labels = {n: n for n in nodes}
+        for _ in range(max_rounds):
+            changed = False
+            for node in nodes:
+                counts: dict[str, int] = {}
+                for nbr, weight in adjacency[node].items():
+                    lab = labels[nbr]
+                    counts[lab] = counts.get(lab, 0) + weight
+                if not counts:
+                    continue
+                best = max(sorted(counts), key=lambda lab: counts[lab])
+                if best != labels[node]:
+                    labels[node] = best
+                    changed = True
+            if not changed:
+                break
+        groups: dict[str, list[str]] = {}
+        for node, lab in labels.items():
+            groups.setdefault(lab, []).append(node)
+        out: list[Community] = []
+        for members in groups.values():
+            if len(members) < max(1, min_size):
+                continue
+            edge_count = sum(
+                w for (a, b), w in self.edges.items()
+                if a in members and b in members)
+            out.append(Community(
+                [self.people[m] for m in sorted(members)],
+                edges=edge_count))
+        out.sort(key=lambda c: (-c.size, c.names[0] if c.names else ""))
+        return out
 
     def subgraph(self, name: str) -> dict[str, Any]:
         """The person's entry for recall boosting — synthesized, not raw."""

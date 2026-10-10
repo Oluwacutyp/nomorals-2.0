@@ -26,6 +26,8 @@ __all__ = [
     "TRUSTED",
     "UNTRUSTED",
     "decay_factor",
+    "format_record",
+    "format_recall",
     "infer_trust",
     "score_memory",
 ]
@@ -306,3 +308,103 @@ def normalize_scores(records: list[MemoryRecord]) -> None:
         return
     for record in records:
         record.score = record.score / top
+
+
+# ── presentation ────────────────────────────────────────────────────────────
+# Memory that *looks* god-tier, not functional. Four output styles for the
+# different surfaces that render recall: logs/debug (compact), the model
+# prompt (rich), chat/Telegram (chat), and the morning briefing (briefing).
+
+RECORD_STYLES = ("compact", "rich", "chat", "briefing")
+
+_KIND_GLYPH = {
+    MemoryKind.EPISODE: "📝",
+    MemoryKind.FACT: "📌",
+    MemoryKind.PREFERENCE: "💭",
+    MemoryKind.SKILL: "🛠️",
+    MemoryKind.LESSON: "🎓",
+    MemoryKind.DECISION: "⚖️",
+    MemoryKind.RELATIONSHIP: "🤝",
+}
+
+
+def _age_str(record: MemoryRecord, now: float) -> str:
+    age = record.age(now)
+    if age < 3600:
+        return f"{max(1, int(age // 60))}m ago"
+    if age < 86400:
+        return f"{int(age // 3600)}h ago"
+    days = int(age // 86400)
+    if days < 30:
+        return f"{days}d ago"
+    if days < 365:
+        return f"{days // 30}mo ago"
+    return f"{days // 365}y ago"
+
+
+def format_record(record: MemoryRecord, style: str = "compact",
+                  now: float | None = None) -> str:
+    """Render one record for a surface.
+
+    Styles:
+    - ``"compact"`` — one line for logs/debug: ``📌 fact · 0.87 · content``.
+    - ``"rich"`` — multi-line with provenance, score, age: for prompt
+      context and inspection.
+    - ``"chat"`` — short, human, no scores or metadata: safe to show the
+      user in a Telegram/WhatsApp message.
+    - ``"briefing"`` — magazine-style line with kind glyph and age: for
+      the morning pulse / digest surfaces.
+
+    Unknown styles fall back to ``"compact"``. Never raises.
+    """
+    try:
+        style = (style or "compact").lower()
+        ts = now or time.time()
+        content = (record.content or "").strip()
+        glyph = _KIND_GLYPH.get(record.kind, "•")
+        if style == "rich":
+            trust = ("trusted" if record.is_trusted else "UNTRUSTED")
+            lines = [
+                f"{glyph} [{record.kind}] {content}",
+                f"   score={record.score:.3f} age={_age_str(record, ts)} "
+                f"trust={trust} accesses={record.access_count}",
+            ]
+            if record.requires_confirmation:
+                lines.append("   ⚠ unverified preference — confirm with the "
+                             "owner before applying")
+            if record.tags:
+                lines.append(f"   tags: {record.tags}")
+            return "\n".join(lines)
+        if style == "chat":
+            flag = " (unverified — please confirm)" \
+                if record.requires_confirmation else ""
+            return f"{content}{flag}"
+        if style == "briefing":
+            return f"{glyph} {content} — {_age_str(record, ts)}"
+        # compact
+        score = f" · {record.score:.2f}" if record.score > 0 else ""
+        trust = "" if record.is_trusted else " [untrusted]"
+        return f"{glyph} {record.kind}{score} · {content}{trust}"
+    except Exception:  # noqa: BLE001 — formatting never breaks the surface
+        try:
+            return (record.content or "").strip() or record.id
+        except Exception:  # noqa: BLE001
+            return ""
+
+
+def format_recall(records: list[MemoryRecord], style: str = "compact",
+                  *, header: str = "", now: float | None = None,
+                  numbered: bool = False) -> str:
+    """Render a recall result set in a style. "" when empty."""
+    try:
+        lines = [format_record(r, style, now)
+                 for r in (records or [])]
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            return ""
+        if numbered:
+            lines = [f"{i + 1}. {ln}" for i, ln in enumerate(lines)]
+        body = "\n".join(lines)
+        return f"{header}\n{body}" if header else body
+    except Exception:  # noqa: BLE001
+        return ""

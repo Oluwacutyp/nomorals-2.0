@@ -44,7 +44,195 @@ from .embeddings import Embedder
 from .scopes import normalize_scope, record_matches_scope, scope_tag
 from .vector_backends import VectorBackend, select_vector_backend
 
-__all__ = ["MemoryManager"]
+__all__ = ["CoreBlocks", "MemoryManager"]
+
+
+#: Default char limit per core block (the Letta default is 2000 chars).
+CORE_BLOCK_LIMIT = 2000
+
+
+class CoreBlocks:
+    """Letta-style self-editing core memory: pinned blocks, always in context.
+
+    Archival memory is the recall side (searchable, huge). Core blocks are
+    the working side: small named blocks the agent itself reads and writes
+    across sessions — ``persona`` (who Devon is), ``user`` (who the owner
+    is), ``context`` (what's live right now). Each block has a hard char
+    limit; when a block fills, ``memory_pressure()`` tells the agent to
+    summarize or archive — the OS "memory pressure" signal from MemGPT.
+
+    Persisted in ``memory_core_blocks``. Never raises: a broken block
+    store degrades to an empty workspace, never to a broken reply.
+
+    Usage (agent tools):
+        blocks = manager.core_blocks
+        blocks.replace("user", "Owner's name is death; timezone WAT.")
+        blocks.insert("context", "Morning pulse: markets green.")
+        blocks.render()          # → inject into the system prompt
+        blocks.memory_pressure() # → {"pressured": False, "blocks": {...}}
+    """
+
+    #: Canonical block names; agents may add their own.
+    PERSONA = "persona"
+    USER = "user"
+    CONTEXT = "context"
+
+    def __init__(self, db: Any, *, limit: int = CORE_BLOCK_LIMIT) -> None:
+        self._db = db
+        self.limit = max(1, int(limit))
+        try:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS memory_core_blocks (
+                       name TEXT PRIMARY KEY,
+                       text TEXT NOT NULL DEFAULT '',
+                       updated_at REAL NOT NULL DEFAULT 0
+                   )""")
+        except Exception:  # noqa: BLE001
+            _log.debug("core blocks schema init failed", exc_info=True)
+
+    # -- reads ------------------------------------------------------------
+
+    def get(self, name: str) -> str:
+        """Block text, "" when unset or the store is broken."""
+        try:
+            cur = self._db.execute(
+                "SELECT text FROM memory_core_blocks WHERE name = ?",
+                ((name or "").strip().lower(),))
+            row = cur.fetchone()
+            if row is None:
+                return ""
+            return str(row[0] if not hasattr(row, "keys") else row["text"])
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def all(self) -> dict[str, str]:
+        """Every block as name → text."""
+        try:
+            rows = self._db.execute(
+                "SELECT name, text FROM memory_core_blocks").fetchall()
+            out = {}
+            for r in rows:
+                if hasattr(r, "keys"):
+                    out[str(r["name"])] = str(r["text"])
+                else:
+                    out[str(r[0])] = str(r[1])
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def exists(self, name: str) -> bool:
+        return self.get(name) != ""
+
+    # -- writes -----------------------------------------------------------
+
+    def replace(self, name: str, text: str) -> dict[str, Any]:
+        """Overwrite a block (Letta ``memory_replace``)."""
+        return self._write((name or "").strip().lower(), text or "",
+                           mode="replace")
+
+    def insert(self, name: str, text: str) -> dict[str, Any]:
+        """Append to a block (Letta ``memory_insert``); creates when unset."""
+        return self._write((name or "").strip().lower(), text or "",
+                           mode="insert")
+
+    def rethink(self, name: str, text: str) -> dict[str, Any]:
+        """Rewrite a block in condensed form (Letta ``memory_rethink``).
+
+        Same as replace, but records that the block was deliberately
+        consolidated — the caller is expected to have compressed the
+        content, not just edited it.
+        """
+        result = self._write((name or "").strip().lower(), text or "",
+                             mode="rethink")
+        result["rethink"] = True
+        return result
+
+    def clear(self, name: str) -> bool:
+        """Empty a block. True on success."""
+        try:
+            self._db.execute(
+                "DELETE FROM memory_core_blocks WHERE name = ?",
+                ((name or "").strip().lower(),))
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _write(self, name: str, text: str, mode: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"ok": False, "name": name, "mode": mode,
+                                  "chars": 0, "truncated": False}
+        if not name:
+            result["error"] = "block name required"
+            return result
+        try:
+            if mode == "insert":
+                text = (self.get(name) + "\n" + text).strip()
+            truncated = False
+            if len(text) > self.limit:
+                text = text[:self.limit]
+                truncated = True
+            self._db.execute(
+                """INSERT INTO memory_core_blocks (name, text, updated_at)
+                   VALUES (?,?,?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     text=excluded.text, updated_at=excluded.updated_at""",
+                (name, text, time.time()))
+            result.update(ok=True, chars=len(text), truncated=truncated,
+                          pressure=self._pressure_for(name, len(text)))
+            return result
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = str(exc)
+            return result
+
+    # -- pressure & rendering ----------------------------------------------
+
+    def _pressure_for(self, name: str, chars: int) -> dict[str, Any]:
+        fill = min(1.0, chars / self.limit)
+        return {"name": name, "chars": chars, "limit": self.limit,
+                "fill": round(fill, 3),
+                "pressured": fill >= 0.85,
+                "signal": ("summarize or archive this block" if fill >= 0.85
+                           else "ok")}
+
+    def memory_pressure(self) -> dict[str, Any]:
+        """The MemGPT memory-pressure signal: which blocks need attention.
+
+        Returns ``{"pressured": bool, "blocks": {name: {...}}}``. The agent
+        should summarize/archive any block with ``pressured=True``.
+        """
+        blocks = self.all()
+        detail = {name: self._pressure_for(name, len(text))
+                  for name, text in blocks.items()}
+        return {"pressured": any(d["pressured"] for d in detail.values()),
+                "blocks": detail}
+
+    def render(self, *, names: Sequence[str] | None = None,
+               style: str = "prompt") -> str:
+        """Render blocks for injection into the system prompt.
+
+        ``style="prompt"`` → headed sections; ``"compact"`` → one line
+        per block. Empty blocks are skipped.
+        """
+        blocks = self.all()
+        if names:
+            wanted = {n.strip().lower() for n in names}
+            blocks = {k: v for k, v in blocks.items() if k in wanted}
+        blocks = {k: v for k, v in blocks.items() if v.strip()}
+        if not blocks:
+            return ""
+        if style == "compact":
+            return " | ".join(f"[{k}] {v[:120]}"
+                              for k, v in blocks.items())
+        parts = ["## Core memory (always true — the agent maintains these):"]
+        for name, text in blocks.items():
+            parts.append(f"### {name}\n{text}")
+        return "\n\n".join(parts)
+
+    def stats_snapshot(self) -> dict[str, Any]:
+        blocks = self.all()
+        return {"blocks": len(blocks),
+                "chars": {k: len(v) for k, v in blocks.items()},
+                "limit": self.limit,
+                **self.memory_pressure()}
 
 
 def _is_private(record: MemoryRecord) -> bool:
@@ -179,6 +367,11 @@ class MemoryManager:
             router=getattr(context, "router", None),
         )
         self.stats = {"remembered": 0, "recalls": 0, "consolidations": 0, "forgotten": 0}
+        #: Letta-style self-editing core blocks (pinned in-context memory).
+        self.core_blocks = CoreBlocks(self.db)
+        #: Hashing embedder for recall-time MMR diversification — content
+        #: space, zero provider cost. Built lazily in _mmr_diversify.
+        self._diversity_embedder: Embedder | None = None
         self._last_consolidation = 0.0
         #: Last consolidation report (from consolidate() or
         #: consolidate_additive()); surfaced by health().
@@ -233,6 +426,7 @@ class MemoryManager:
         trust: str = "",
         session_id: str = "",
         scope: str = "",
+        embed_text: str | None = None,
     ) -> str:
         """Store a memory and index it for both vector and lexical recall.
 
@@ -244,6 +438,11 @@ class MemoryManager:
         named memory space: ``recall(scope=...)`` sees that space plus
         global records, and never records scoped to another space.  Empty
         (default) = global, visible everywhere.
+
+        ``embed_text`` overrides what the vector lane embeds while the
+        stored/displayed content stays ``content`` — the contextual-
+        chunking hook (document header + chunk embeds better than the
+        chunk alone).
 
         Trust provenance (mem-false-fact hardening): ``trust`` is
         ``"trusted"`` or ``"untrusted"``; when empty it is derived from
@@ -290,7 +489,10 @@ class MemoryManager:
             # metadata column. A raw db.insert() hands sqlite a dict and blows up.
             self.repo.create(row, commit=False)
             if index:
-                vector = self.embedder.embed(content)
+                # Contextual chunking: the vector lane may see a richer
+                # text (e.g. document header + chunk) than the stored
+                # content. Lexical FTS always indexes the raw content.
+                vector = self.embedder.embed(embed_text or content)
                 embedding_id = self.semantic.put(vector, record_id)
                 self.db.execute(
                     "UPDATE memories SET embedding_id = ? WHERE id = ?", (embedding_id, record_id)
@@ -381,8 +583,15 @@ class MemoryManager:
         trust_filter: str = "",
         explain: bool = False,
         scope: str = "",
+        diversify: float = 0.0,
     ) -> RecallResult:
         """Merged semantic + lexical + recency recall.
+
+        ``diversify`` ∈ [0, 1]: MMR diversification strength. 0 (default)
+        keeps pure relevance order; 0.4–0.6 stops the top-k from being five
+        paraphrases of the same memory and covers the topic instead. The
+        diversity space is content embeddings (hashing, cheap), so it
+        costs no extra provider calls.
 
         ``tags`` (comma-separated) keeps only records carrying ALL of the
         requested tags — the tag lane the /remember command populates.
@@ -581,6 +790,10 @@ class MemoryManager:
 
         scored.sort(key=lambda r: -r.score)
         top = scored[:limit]
+        if diversify > 0.0 and len(top) > 1:
+            # MMR: pick from a wider pool so diversity has room to work.
+            top = self._mmr_diversify(query, scored[: limit * 2],
+                                      limit, diversify)
         if explain and top:
             # normalize_scores rescales so the top hit is 1.0 — record the
             # factor so the explanation traces the final score exactly.
@@ -594,6 +807,33 @@ class MemoryManager:
         if top:
             self._touch([r.id for r in top])
         return RecallResult(records=top, query=query, elapsed_ms=(time.perf_counter() - started) * 1000)
+
+    def _mmr_diversify(self, query: str, candidates: list[MemoryRecord],
+                       limit: int, diversity: float) -> list[MemoryRecord]:
+        """MMR over content-embedding space (hashing, zero provider cost).
+
+        ``diversity`` ∈ (0, 1] maps to MMR's (1 − λ): higher = more
+        coverage, less repetition. Never raises — failure keeps the
+        relevance order.
+        """
+        try:
+            from .hybrid import Hit, mmr_select
+            if self._diversity_embedder is None:
+                self._diversity_embedder = Embedder(provider="hashing",
+                                                    dimensions=256)
+            qv = self._diversity_embedder.embed(query or "")
+            vectors = {r.id: self._diversity_embedder.embed(r.content or "")
+                       for r in candidates}
+            hits = [Hit(id=r.id, text=r.content or "", rrf_score=r.score)
+                    for r in candidates]
+            selected = mmr_select(qv, hits, vectors, limit=limit,
+                                  lambda_mult=max(0.0, 1.0 - diversity))
+            by_id = {r.id: r for r in candidates}
+            ordered = [by_id[h.id] for h in selected if h.id in by_id]
+            return ordered or candidates[:limit]
+        except Exception:  # noqa: BLE001 — diversity is garnish
+            _log.debug("recall MMR diversification failed", exc_info=True)
+            return candidates[:limit]
 
     def _recent(self, limit: int, *, kind: str = "",
                 trust_filter: str = "", scope: str = "") -> list[MemoryRecord]:
@@ -795,6 +1035,7 @@ class MemoryManager:
         kinds: Sequence[str] = (),
         include_recent: int = 3,
         include_private: bool = False,
+        style: str = "prompt",
     ) -> str:
         """Assemble a token-budgeted context block for a model call.
 
@@ -802,6 +1043,11 @@ class MemoryManager:
         the budget is spent — so a huge memory never crowds out the actual task.
 
         Private-marked records are excluded unless ``include_private`` is set.
+
+        ``style``: ``"prompt"`` (default, the classic ``- [kind] content``
+        lines), ``"rich"`` (provenance + scores, for inspection/debugging),
+        ``"chat"`` (human-safe short lines), or ``"briefing"`` (glyph +
+        age lines for digest surfaces).
 
         Untrusted preference records are FLAGGED inline (mem-pref-override):
         they are never applied silently — the flag tells the caller to get
@@ -821,13 +1067,20 @@ class MemoryManager:
                         include_private or not _is_private(record)):
                     pool.append(record)
 
+        from .base import format_record as _format_record
+        styled = style in ("rich", "chat", "briefing")
         for record in pool:
             flag = ""
             if record.requires_confirmation:
                 flag = " [⚠ UNVERIFIED PREFERENCE — needs user confirmation]"
             elif record.is_untrusted:
                 flag = " [untrusted]"
-            line = f"- [{record.kind}]{flag} {record.content}"
+            if styled:
+                line = _format_record(record, style)
+                if flag and style != "chat":
+                    line += flag
+            else:
+                line = f"- [{record.kind}]{flag} {record.content}"
             cost = approx_token_count(line)
             if used + cost > budget:
                 continue
@@ -1171,18 +1424,38 @@ class MemoryManager:
         return summarize(corpus, max_sentences=5)
 
     # ── retrieval over documents ─────────────────────────────────────────────
-    def ingest_document(self, text: str, *, source: str = "", chunk_tokens: int = 512) -> int:
-        """Chunk a document into memory so its contents become recallable."""
+    def ingest_document(self, text: str, *, source: str = "",
+                        chunk_tokens: int = 512,
+                        contextual: bool = True) -> int:
+        """Chunk a document into memory so its contents become recallable.
+
+        ``contextual=True`` (default) prepends a document-context header to
+        each chunk's *embedding text* — the implementable half of
+        "contextual retrieval" (Anthropic) / "late chunking" (Jina): chunks
+        embed with document-level context, so a chunk that says "he doubled
+        the dose" still retrieves for "what did the vet say". The stored
+        text stays raw; only the vector lane sees the header.
+        """
         chunks = chunk_text(text, max_tokens=chunk_tokens, source=source)
         if not chunks:
             return 0
-        return len(
-            self.remember_many(
-                [(c.text, MemoryKind.EPISODE) for c in chunks],
+        header = ""
+        if contextual:
+            from .embeddings import contextualize_chunk
+            header = contextualize_chunk(text, source=source)
+        stored = 0
+        for chunk in chunks:
+            embed_text = f"{header}\n{chunk.text}" if header else chunk.text
+            record_id = self.remember(
+                chunk.text,
+                kind=MemoryKind.EPISODE,
                 source=source or "document",
                 importance=0.45,
+                embed_text=embed_text if header else None,
             )
-        )
+            if record_id:
+                stored += 1
+        return stored
 
     # ── introspection ────────────────────────────────────────────────────────
     def counts_by_kind(self) -> dict[str, int]:

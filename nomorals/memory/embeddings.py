@@ -24,7 +24,12 @@ from ..core.errors import classify
 from ..core.logging_setup import get_logger
 from ..core.text import normalize_text, ngrams
 
-__all__ = ["Embedder", "select_for_profile"]
+__all__ = [
+    "Embedder",
+    "contextualize_chunk",
+    "matryoshka_truncate",
+    "select_for_profile",
+]
 
 _log = get_logger(__name__)
 
@@ -408,6 +413,41 @@ def _l2(vector: Sequence[float]) -> list[float]:
     if norm == 0.0:
         return list(vector)
     return [v / norm for v in vector]
+
+
+def contextualize_chunk(document: str, source: str = "",
+                        head_chars: int = 400) -> str:
+    """Build the document-context header for contextual chunking.
+
+    The implementable half of Anthropic's Contextual Retrieval / Jina's
+    late chunking: a short, stable header ("this is from document X, which
+    is about Y") prepended to each chunk's *embedding text* so chunks that
+    are meaningless alone ("he doubled the dose") still carry document
+    context into the vector. The stored/displayed chunk text is unchanged.
+
+    Heuristic-first (no LLM call): document head + source. Callers with a
+    brain can replace the head with an LLM summary and pass the result
+    through the same ``<header>\\n<chunk>`` shape.
+    """
+    head = re.sub(r"\s+", " ", (document or "").strip())[:head_chars]
+    src = (source or "note").strip()
+    if head:
+        return f"[document: {src} — {head}]"
+    return f"[document: {src}]"
+
+
+def matryoshka_truncate(vector: Sequence[float], dims: int) -> list[float]:
+    """Truncate a vector to ``dims`` (Matryoshka embedding support).
+
+    Matryoshka-trained models (Qwen3-Embedding, jina-v3, BGE-M3) order
+    dimensions by importance, so dropping the tail costs little quality
+    while halving storage/compute. A no-op when ``dims`` is 0 or already
+    ≥ the vector length. The caller should L2-normalize afterwards for
+    cosine backends (the vector backends do this on put).
+    """
+    if dims <= 0 or dims >= len(vector):
+        return list(vector)
+    return list(vector[:dims])
 
 
 def select_for_profile(profile: str | None, *,

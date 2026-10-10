@@ -243,7 +243,14 @@ class EventStore:
 
 @dataclass
 class Fact:
-    """One atomic first-person fact. Versions via ``supersedes`` chain."""
+    """One atomic first-person fact. Versions via ``supersedes`` chain.
+
+    Bi-temporal (the Zep/Graphiti pattern): ``valid_from``/``valid_to`` is
+    the T timeline (when the fact was true in the world);
+    ``created_at``/``closed_at`` is the T′ timeline (when the system
+    learned it / closed it). Superseded facts are closed, never deleted —
+    auditable history, and "what was believed when" stays answerable.
+    """
     id: str
     text: str
     confidence: float = 0.7
@@ -253,12 +260,15 @@ class Fact:
     created_at: float = field(default_factory=time.time)
     valid_from: float = 0.0  # when this became the believed truth
     valid_to: float | None = None  # when superseded; None = current
+    closed_at: float | None = None  # T′ close: when the system retired this version
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "text": self.text,
                 "confidence": round(self.confidence, 3),
                 "source_ts": self.source_ts, "supersedes": self.supersedes,
-                "active": self.active, "created_at": self.created_at}
+                "active": self.active, "created_at": self.created_at,
+                "valid_from": self.valid_from, "valid_to": self.valid_to,
+                "closed_at": self.closed_at}
 
 
 @dataclass
@@ -301,7 +311,8 @@ class FactStore:
                )""")
         # Migrate older DBs: add temporal columns, backfill valid_from.
         for col, ddl in (("valid_from", "REAL NOT NULL DEFAULT 0"),
-                         ("valid_to", "REAL")):
+                         ("valid_to", "REAL"),
+                         ("closed_at", "REAL")):
             try:
                 self.db.execute(
                     f"ALTER TABLE tier_facts ADD COLUMN {col} {ddl}")
@@ -341,6 +352,7 @@ class FactStore:
 
     @staticmethod
     def _row_to_fact(row: dict[str, Any]) -> Fact:
+        closed = row.get("closed_at")
         return Fact(
             id=str(row["id"]), text=str(row["text"]),
             confidence=float(row["confidence"]),
@@ -349,7 +361,8 @@ class FactStore:
             active=bool(row["active"]), created_at=float(row["created_at"]),
             valid_from=float(row.get("valid_from") or row["created_at"]),
             valid_to=(float(row["valid_to"])
-                      if row.get("valid_to") is not None else None))
+                      if row.get("valid_to") is not None else None),
+            closed_at=(float(closed) if closed is not None else None))
 
     def supersede_fact(self, old_id: str, new_text: str, *,
                        confidence: float = 0.7) -> Fact:
@@ -364,15 +377,21 @@ class FactStore:
                 "the chain; supersede the current head instead")
         new = self.add_fact(new_text, confidence=confidence)
         with self.db.transaction():
+            # Both timelines close together: T (valid_to) says when the
+            # world changed; T′ (closed_at) says when the system learned
+            # it. The old version stays readable forever — auditable,
+            # never deleted.
             self.db.execute(
-                "UPDATE tier_facts SET active = 0, valid_to = ? WHERE id = ?",
-                (new.created_at, old_id))
+                "UPDATE tier_facts SET active = 0, valid_to = ?, "
+                "closed_at = ? WHERE id = ?",
+                (new.created_at, new.created_at, old_id))
             self.db.execute(
                 "UPDATE tier_facts SET supersedes = ? WHERE id = ?",
                 (old_id, new.id))
         new.supersedes = old_id
         old.active = False
         old.valid_to = new.created_at
+        old.closed_at = new.created_at
         return new
 
     def history(self, fact_id: str) -> list[Fact]:

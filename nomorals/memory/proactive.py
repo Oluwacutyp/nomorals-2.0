@@ -48,11 +48,13 @@ def surface(message_text: str, memory: Any, *,
         score = float(getattr(record, "score", 0.0) or 0.0)
         if score < threshold:
             continue
-        text = (getattr(record, "text", "") or "").strip()
+        # MemoryRecord exposes .content; be liberal for duck-typed records.
+        text = (getattr(record, "content", "")
+                or getattr(record, "text", "") or "").strip()
         if not text:
             continue
         kind = getattr(record, "kind", "") or "memory"
-        lines.append(f"[remembered {kind}] {text}")
+        lines.append(f"💡 [remembered {kind}] {text}")
         if len(lines) >= limit:
             break
     return lines

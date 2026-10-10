@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from .backup import backup_to, import_records, restore_from, verify_backup
-from .base import TRUSTED, UNTRUSTED, MemoryRecord, score_memory
+from .base import (
+    TRUSTED,
+    UNTRUSTED,
+    MemoryRecord,
+    format_recall,
+    format_record,
+    score_memory,
+)
 from .cadence import (
     consolidate_now,
     ensure_consolidation_job,
@@ -24,8 +31,23 @@ from .deep_recall import (
     related,
     timeline,
 )
-from .embeddings import Embedder, select_for_profile
-from .manager import MemoryManager
+from .embeddings import (
+    Embedder,
+    contextualize_chunk,
+    matryoshka_truncate,
+    select_for_profile,
+)
+from .extract import MemoryDecision, decide, forget_targets
+from .hybrid import Hit, mmr_select, rrf_fuse
+from .manager import CoreBlocks, MemoryManager
+from .persona import Community
+from .repetition import (
+    FSRS,
+    FSCard,
+    RepetitionScheduler,
+    next_interval_days,
+    retrievability,
+)
 from .scopes import (
     normalize_scope,
     record_matches_scope,
@@ -45,12 +67,19 @@ from .vector_backends import (
 
 __all__ = [
     "BACKEND_NAMES",
+    "Community",
     "Contradiction",
+    "CoreBlocks",
     "DeepRecallResult",
     "Embedder",
+    "FSCard",
+    "FSRS",
+    "Hit",
     "LegacyStoreBackend",
+    "MemoryDecision",
     "MemoryManager",
     "MemoryRecord",
+    "RepetitionScheduler",
     "SqliteVecBackend",
     "TRUSTED",
     "UNTRUSTED",
@@ -60,12 +89,20 @@ __all__ = [
     "backup_to",
     "consolidate_now",
     "consolidation_status",
+    "contextualize_chunk",
+    "decide",
     "decisions_about",
     "detect_against",
     "detect_for",
     "ensure_consolidation_job",
+    "forget_targets",
+    "format_recall",
+    "format_record",
     "import_records",
+    "matryoshka_truncate",
     "maybe_consolidate",
+    "mmr_select",
+    "next_interval_days",
     "normalize_scope",
     "recall_deep",
     "recall_window",
@@ -73,6 +110,8 @@ __all__ = [
     "related",
     "resolve_contradiction",
     "restore_from",
+    "retrievability",
+    "rrf_fuse",
     "scope_of",
     "scope_tag",
     "scopes_summary",
