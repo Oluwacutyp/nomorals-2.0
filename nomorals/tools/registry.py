@@ -268,6 +268,7 @@ class ToolRegistry:
 
         for _name in (
             "archive", "attacker", "audio", "browser",
+            "accounts",
             "build_app", "captcha", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
@@ -282,6 +283,7 @@ class ToolRegistry:
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
+            "security",
             "wisdom", "social",
             "services",  # 28 service connectors bridged to the spine
             "research",

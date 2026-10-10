@@ -1297,6 +1297,51 @@ class AccountCreator:
         return wait_code(number_info, sender_hint=sender_hint,
                          timeout=timeout)
 
+    # -- temporary email addresses ----------------------------------
+
+    def get_temp_email(self, provider: str = "1secmail") -> dict:
+        """Grab a free temporary email address for verification.
+
+        Returns a dict with address/login/domain/provider/token.
+        Use :meth:`poll_email_code` to wait for the verification code.
+        """
+        from .temp_mail import grab_address
+
+        a = grab_address(provider=provider)
+        return {"address": a.address, "login": a.login, "domain": a.domain,
+                "provider": a.provider, "token": a.token}
+
+    def get_temp_email_cascade(
+        self,
+        providers: tuple[str, ...] | None = None,
+    ) -> dict:
+        """Grab a temp email, cascading across providers."""
+        from .temp_mail import CASCADE_PROVIDERS, grab_address_cascade
+
+        a = grab_address_cascade(
+            providers=list(providers) if providers else CASCADE_PROVIDERS)
+        return {"address": a.address, "login": a.login, "domain": a.domain,
+                "provider": a.provider, "token": a.token}
+
+    def poll_email_code(self, email_info: dict, *,
+                        sender_hint: str = "",
+                        timeout: float = 180) -> str:
+        """Wait for a verification email and return the extracted code.
+
+        ``email_info`` is the dict returned by :meth:`get_temp_email`.
+        Returns the code or "" on timeout.
+        """
+        from .temp_mail import TempAddress, wait_code
+
+        addr = TempAddress(
+            address=email_info.get("address", ""),
+            login=email_info.get("login", ""),
+            domain=email_info.get("domain", ""),
+            provider=email_info.get("provider", "1secmail"),
+            token=email_info.get("token", ""))
+        return wait_code(addr, sender_hint=sender_hint,
+                         timeout_s=timeout) or ""
+
     # ── account creation (human-in-the-loop) ────────────────────
 
     def _existing_active(self, service: str) -> list[Credential]:
