@@ -16,14 +16,27 @@ nothing reaches for ``os.environ`` after construction.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+import threading
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, TypeVar
 
 from .errors import ConfigError
 
-__all__ = ["Settings", "get_settings", "load_settings", "reset_settings"]
+__all__ = [
+    "Settings",
+    "get_settings",
+    "load_settings",
+    "reset_settings",
+    "set_settings",
+    "env_var_path",
+    "diff_settings",
+    "config_schema",
+    "ConfigWatcher",
+    "watch_settings",
+    "start_global_watcher",
+]
 
 T = TypeVar("T")
 
@@ -261,6 +274,9 @@ class ChatSettings:
     whatsapp_enabled: bool = False
     whatsapp_host: str = "127.0.0.1"
     whatsapp_port: int = 8787
+    # Persistent outbox for bridge outages — sends queued here flush on
+    # reconnect instead of dying (whatsapp.py Outbox).
+    whatsapp_outbox_dir: str = "data/chat/outbox"
     webhook_enabled: bool = False
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 0
@@ -273,6 +289,13 @@ class ChatSettings:
     sms_from_number: str = ""
     sms_host: str = "127.0.0.1"
     sms_port: int = 0
+    # Twilio auth token — enables X-Twilio-Signature verification on the
+    # inbound webhook (forged/unsigned POSTs get 403). Empty = accepted
+    # with a warning; don't expose the webhook without it.
+    sms_auth_token: str = ""
+    # The public URL Twilio is configured to POST to (needed for signature
+    # verification behind a tunnel/reverse proxy).
+    sms_public_url: str = ""
     max_per_hour: int = 60
 
 
@@ -537,7 +560,11 @@ class ProxySettings:
 class RuntimeSettings:
     enabled: bool = False
     profile: str = ""
-    threads: int = 4
+    # 0 = auto: build_tune() derives threads from CPU/RAM. Any nonzero value
+    # is treated as an explicit override and wins over auto-tuning, so the
+    # default must stay 0 — a nonzero default would silently disable
+    # auto-tuning for every deployment that never sets this knob.
+    threads: int = 0
 
 @dataclass
 class HubSettings:
@@ -681,6 +708,47 @@ class Settings:
             node = getattr(node, part)
         return node
 
+    def set(self, dotted: str, value: Any) -> "Settings":
+        """Return a NEW Settings with ``dotted`` path set to ``value``.
+
+        The value is coerced to the declared field type (strings from the
+        outside world are parsed like env vars), then the whole tree is
+        rebuilt and validated — a bad value raises :class:`ConfigError` and
+        the original Settings is untouched. Unknown paths also raise.
+        """
+        data = _settings_to_dict(self)
+        ftype = _find_field_type(Settings, dotted)
+        if ftype is None:
+            # let _build raise the canonical "unknown config key" error
+            _apply_dotted(data, dotted, value)
+            return _build(Settings, data)
+        if isinstance(value, str):
+            target = ftype if isinstance(ftype, type) else str
+            try:
+                value = _coerce(value, target)
+            except (ValueError, TypeError) as exc:
+                raise ConfigError(
+                    f"invalid value for {dotted!r}: {value!r} ({exc})") from exc
+            if value is _EMPTY:
+                raise ConfigError(f"empty value for {dotted!r}: not set")
+        _apply_dotted(data, dotted, value)
+        new = _build(Settings, data)
+        _heal_retired_urls(new)
+        _validate(new)
+        return new
+
+    def with_overrides(self, **overrides: Any) -> "Settings":
+        """Return a NEW Settings with several dotted-path overrides applied.
+
+        Keys are dotted paths (``llm.timeout=30``); values go through the
+        same coerce-and-validate path as :meth:`set`. Applied in sorted key
+        order so the result is deterministic.
+        """
+        result = self
+        for dotted in sorted(overrides):
+            result = result.set(dotted, overrides[dotted])
+        return result
+
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
 
@@ -791,6 +859,9 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_SMS_FROM_NUMBER": "chat.sms_from_number",
     "NM_CHAT_SMS_HOST": "chat.sms_host",
     "NM_CHAT_SMS_PORT": "chat.sms_port",
+    "NM_CHAT_SMS_AUTH_TOKEN": "chat.sms_auth_token",
+    "NM_CHAT_SMS_PUBLIC_URL": "chat.sms_public_url",
+    "NM_CHAT_WHATSAPP_OUTBOX_DIR": "chat.whatsapp_outbox_dir",
     "NM_ARENA_ENABLED": "arena.enabled",
     "NM_ARENA_BUILD": "arena.build",
     "NM_ARENA_INTERVAL_HOURS": "arena.interval_hours",
@@ -941,6 +1012,22 @@ def _mask(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}"
 
 
+def _env_file_candidates(environ: Mapping[str, str],
+                         default_home: str) -> list[Path]:
+    """The .env files load_settings consults, in order. First existing wins."""
+    env_home = environ.get("NM_HOME") or default_home
+    return [Path.cwd() / ".env",
+            Path(os.path.expanduser(env_home)) / ".env"]
+
+
+def _read_env_file(environ: Mapping[str, str], default_home: str) -> dict[str, str]:
+    """Parse the first existing .env candidate; {} when none exists."""
+    for env_path in _env_file_candidates(environ, default_home):
+        if env_path.is_file():
+            return _parse_env_file(env_path)
+    return {}
+
+
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Minimal .env parser: KEY=VALUE, # comments, optional quotes, `export` prefix."""
     values: dict[str, str] = {}
@@ -1018,10 +1105,27 @@ def load_settings(
     # 1. defaults
     merged: dict[str, Any] = _settings_to_dict(Settings())
 
-    # 2. profile — resolved AFTER .env loading (step 4) so env files can set
-    # NM_PROFILE. See step 4b below.
+    # 2. .env file — parsed FIRST so NM_PROFILE from an env file can select
+    # the profile preset. The values themselves merge at step 4 (below) with
+    # setdefault semantics: real environment wins over the file.
+    if use_env_file:
+        for key, value in _read_env_file(environ, merged["home"]).items():
+            environ.setdefault(key, value)
 
-    # 3. TOML config file
+    # 3. profile preset — layered over the defaults and UNDER the TOML file,
+    # exactly as the module docstring promises. (A previous revision resolved
+    # the profile after the TOML, letting the preset silently win over the
+    # config file — the precedence lie the docstring always denied.)
+    # Empty string = not set (fresh template placeholder) → default.
+    profile = environ.get("NM_PROFILE") or merged.get("profile", "workstation")
+    if profile not in PROFILES:
+        raise ConfigError(
+            f"unknown profile {profile!r}; expected one of {sorted(PROFILES)}"
+        )
+    merged = _deep_merge(merged, PROFILES[profile])
+    merged["profile"] = profile
+
+    # 4. TOML config file
     candidates: list[Path] = []
     if config_file:
         candidates.append(Path(os.path.expanduser(str(config_file))))
@@ -1033,26 +1137,6 @@ def load_settings(
             merged = _deep_merge(merged, _load_toml(candidate))
             merged["config_file"] = str(candidate)
             break
-
-    # 4. .env file
-    if use_env_file:
-        env_home = environ.get("NM_HOME") or merged["home"]
-        for env_path in (Path.cwd() / ".env",
-                         Path(os.path.expanduser(env_home)) / ".env"):
-            for key, value in _parse_env_file(env_path).items():
-                environ.setdefault(key, value)
-            if env_path.is_file():
-                break
-
-    # 4b. profile — resolved here (after .env) so env files can set NM_PROFILE.
-    # Empty string = not set (fresh template placeholder) → fall back to default.
-    profile = environ.get("NM_PROFILE") or merged.get("profile", "workstation")
-    if profile not in PROFILES:
-        raise ConfigError(
-            f"unknown profile {profile!r}; expected one of {sorted(PROFILES)}"
-        )
-    merged = _deep_merge(merged, PROFILES[profile])
-    merged["profile"] = profile
 
     # 5. environment variables (NM_PROFILE already resolved; skip it here)
     for key, value in environ.items():
@@ -1200,6 +1284,24 @@ def _validate(settings: Settings) -> None:
         problems.append("backup.keep must be >= 1")
     if settings.concurrency.threads < 1:
         problems.append("concurrency.threads must be >= 1")
+    if settings.concurrency.max_subagents < 1:
+        problems.append("concurrency.max_subagents must be >= 1")
+    if settings.concurrency.network_permits < 1:
+        problems.append("concurrency.network_permits must be >= 1")
+    if settings.concurrency.disk_permits < 1:
+        problems.append("concurrency.disk_permits must be >= 1")
+    if settings.budget.wall_seconds <= 0:
+        problems.append("budget.wall_seconds must be > 0")
+    if settings.budget.tokens < 0:
+        problems.append("budget.tokens must be >= 0")
+    if settings.budget.retries < 0:
+        problems.append("budget.retries must be >= 0")
+    if settings.storage.busy_timeout_ms < 0:
+        problems.append("storage.busy_timeout_ms must be >= 0")
+    if settings.backup.interval_seconds < 60:
+        problems.append("backup.interval_seconds must be >= 60")
+    if settings.memory.recall_limit < 1:
+        problems.append("memory.recall_limit must be >= 1")
     if settings.embedding.dimensions < 16:
         problems.append("embedding.dimensions must be >= 16")
     if settings.memory.context_budget_tokens < 256:
@@ -1241,6 +1343,369 @@ def _validate(settings: Settings) -> None:
         problems.append("memory.weights must not contain negative values")
     if problems:
         raise ConfigError("invalid configuration: " + "; ".join(problems))
+
+
+# ── Diff & schema ──────────────────────────────────────────────────────────────
+
+def diff_settings(old: Settings, new: Settings,
+                  *, redact: bool = True) -> list[dict[str, Any]]:
+    """Dotted-path diff between two Settings trees.
+
+    Returns ``[{"path": "llm.timeout", "old": 120.0, "new": 30.0}, …]``,
+    sorted by path. Lists and scalars compare wholesale; nested sections
+    recurse. Secret-looking values are masked when ``redact`` (the default),
+    so the diff is safe to log and show to operators.
+    """
+    old_d = _asdict(old, redact=False)
+    new_d = _asdict(new, redact=False)
+    out: list[dict[str, Any]] = []
+
+    def _show(path: str, value: Any) -> Any:
+        if redact and _looks_secret(path.rsplit(".", 1)[-1]) and isinstance(value, str) and value:
+            return _mask(value)
+        return value
+
+    def _walk(o: Any, n: Any, prefix: str) -> None:
+        if isinstance(o, dict) and isinstance(n, dict):
+            for key in sorted(set(o) | set(n)):
+                _walk(o.get(key), n.get(key),
+                      f"{prefix}.{key}" if prefix else key)
+            return
+        if o != n:
+            out.append({"path": prefix, "old": _show(prefix, o),
+                        "new": _show(prefix, n)})
+
+    _walk(old_d, new_d, "")
+    return out
+
+
+def _type_label(tp: Any) -> str:
+    """Human-readable label for a resolved field type."""
+    if tp is None:
+        return "any"
+    origin = getattr(tp, "__origin__", None)
+    if origin in (list,):
+        args = getattr(tp, "__args__", ())
+        inner = _type_label(args[0]) if args else "any"
+        return f"list[{inner}]"
+    if origin in (dict,):
+        return "dict"
+    if isinstance(tp, type):
+        if is_dataclass(tp):
+            return tp.__name__
+        return tp.__name__
+    return str(tp)
+
+
+def config_schema() -> dict[str, Any]:
+    """JSON-serializable schema of every settings section and field.
+
+    Powers ``nm config schema`` / generated docs: each section maps to its
+    fields, each field carrying its type label, default, and whether it
+    looks like a secret. No values from a live Settings are included.
+    """
+    blank = _settings_to_dict(Settings())
+    hints = _resolved_types(Settings)
+    sections: dict[str, Any] = {}
+    for f in fields(Settings):
+        ftype = hints.get(f.name)
+        if isinstance(ftype, type) and is_dataclass(ftype):
+            sub_hints = _resolved_types(ftype)
+            fd: dict[str, Any] = {}
+            for sf in fields(ftype):
+                if sf.default is not MISSING:
+                    default = sf.default
+                elif sf.default_factory is not MISSING:  # type: ignore[misc]
+                    try:
+                        default = sf.default_factory()  # type: ignore[misc]
+                    except Exception:  # noqa: BLE001
+                        default = None
+                else:
+                    default = None
+                try:
+                    import json as _json
+                    _json.dumps(default)
+                except (TypeError, ValueError):
+                    default = str(default)
+                fd[sf.name] = {
+                    "type": _type_label(sub_hints.get(sf.name)),
+                    "default": default,
+                    "secret": _looks_secret(sf.name),
+                }
+            sections[f.name] = {"fields": fd}
+        else:
+            default = blank.get(f.name)
+            sections[f.name] = {
+                "type": _type_label(ftype),
+                "default": default,
+                "secret": _looks_secret(f.name),
+            }
+    return {"sections": sections,
+            "profiles": sorted(PROFILES),
+            "env_prefix": _ENV_PREFIX}
+
+
+# ── Hot reload ─────────────────────────────────────────────────────────────────
+
+class ConfigWatcher:
+    """Hot-reload Settings when config sources change on disk.
+
+    Uses ``watchfiles`` when installed (efficient, Rust-backed); otherwise
+    falls back to an mtime-polling daemon thread — the same degrade path
+    uvicorn uses. Change bursts are debounced; the loader runs, and the new
+    Settings only replaces the old one when it builds AND validates cleanly
+    (validate-before-swap: a broken edit is logged and the running config
+    stays live). Reloads are atomic-write safe: a half-written TOML is
+    retried once before being treated as an error.
+
+    ``loader`` is a zero-arg callable returning Settings (usually a
+    ``functools.partial(load_settings, ...)``). ``on_change(old, new,
+    changed)`` receives the diff list from :func:`diff_settings`.
+    """
+
+    def __init__(
+        self,
+        loader: Any,
+        paths: Iterable[str | os.PathLike[str]],
+        *,
+        on_change: Any = None,
+        on_error: Any = None,
+        debounce_s: float = 0.75,
+        poll_interval_s: float = 2.0,
+        use_watchfiles: bool = True,
+        logger: Any = None,
+    ) -> None:
+        from pathlib import Path as _Path
+        self._loader = loader
+        self._paths = [_Path(p).expanduser() for p in paths]
+        self._on_change = on_change
+        self._on_error = on_error
+        self._debounce_s = max(0.05, debounce_s)
+        self._poll_interval_s = max(0.25, poll_interval_s)
+        self._use_watchfiles = use_watchfiles
+        self._log = logger
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._current: Settings | None = None
+        self._reloads = 0
+        self._failures = 0
+        self._last_changed: list[dict[str, Any]] = []
+
+    # -- state -----------------------------------------------------------------
+    @property
+    def current(self) -> Settings | None:
+        with self._lock:
+            return self._current
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def watched_paths(self) -> list[str]:
+        return [str(p) for p in self._paths]
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self.running,
+                "paths": self.watched_paths,
+                "reloads": self._reloads,
+                "failures": self._failures,
+                "last_changed": list(self._last_changed),
+            }
+
+    # -- lifecycle ---------------------------------------------------------------
+    def start(self) -> "ConfigWatcher":
+        """Start the watcher thread. Idempotent; primes the baseline first."""
+        if self.running:
+            return self
+        self._prime()
+        self._stop.clear()
+        import threading as _threading
+        self._thread = _threading.Thread(
+            target=self._run, name="config-watcher", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the watcher thread. Never raises."""
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            try:
+                thread.join(timeout=timeout)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _prime(self) -> None:
+        try:
+            with self._lock:
+                self._current = self._loader()
+        except Exception:  # noqa: BLE001 - loader errors surface on reload
+            pass
+
+    # -- watching ------------------------------------------------------------------
+    def _run(self) -> None:
+        if self._use_watchfiles:
+            try:
+                from watchfiles import watch as _watch
+            except Exception:  # noqa: BLE001 - degrade to polling
+                _watch = None
+            if _watch is not None:
+                try:
+                    self._run_watchfiles(_watch)
+                    return
+                except Exception:  # noqa: BLE001 - degrade to polling
+                    pass
+        self._run_poll()
+
+    def _run_watchfiles(self, _watch: Any) -> None:
+        existing = [str(p) for p in self._paths if p.exists()]
+        if not existing:
+            self._run_poll()
+            return
+        for _changes in _watch(*existing, stop_event=self._stop,
+                               debounce=int(self._debounce_s * 1000),
+                               raise_interrupt=False):
+            if self._stop.is_set():
+                break
+            self._maybe_reload()
+
+    def _run_poll(self) -> None:
+        import time as _time
+        mtimes = self._mtimes()
+        while not self._stop.wait(self._poll_interval_s):
+            now = self._mtimes()
+            if now != mtimes:
+                mtimes = now
+                _time.sleep(self._debounce_s)  # coalesce save bursts
+                if self._stop.is_set():
+                    break
+                mtimes = self._mtimes()  # re-read after debounce
+                self._maybe_reload()
+
+    def _mtimes(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for p in self._paths:
+            try:
+                out[str(p)] = p.stat().st_mtime_ns if p.exists() else -1
+            except OSError:
+                out[str(p)] = -1
+        return out
+
+    # -- reload --------------------------------------------------------------------
+    def _maybe_reload(self) -> bool:
+        """Reload, validate, and swap. True when the live config changed."""
+        import time as _time
+        new: Settings | None = None
+        last_exc: Exception | None = None
+        for _ in range(2):  # retry once: tolerate a half-written TOML
+            try:
+                new = self._loader()
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001 - validate-before-swap
+                last_exc = exc
+                _time.sleep(0.2)
+        with self._lock:
+            old = self._current
+        if new is None:
+            with self._lock:
+                self._failures += 1
+            self._emit_error(last_exc)
+            return False
+        if old is not None and not diff_settings(old, new, redact=False):
+            return False  # mtime moved, content identical
+        changed = diff_settings(old, new) if old is not None else []
+        with self._lock:
+            self._current = new
+            self._reloads += 1
+            self._last_changed = changed
+        self._emit_change(old, new, changed)
+        return True
+
+    def reload_now(self) -> list[dict[str, Any]]:
+        """Force a reload check immediately; returns the diff (maybe empty)."""
+        self._maybe_reload()
+        with self._lock:
+            return list(self._last_changed)
+
+    def _emit_change(self, old: Settings | None, new: Settings,
+                     changed: list[dict[str, Any]]) -> None:
+        if self._on_change is not None:
+            try:
+                self._on_change(old, new, changed)
+            except Exception:  # noqa: BLE001 - callbacks never break reloads
+                if self._log:
+                    self._log.exception("config on_change callback failed")
+        elif self._log:
+            paths = ", ".join(c["path"] for c in changed) or "(no changes)"
+            self._log.info("config reloaded: %s", paths)
+
+    def _emit_error(self, exc: Exception | None) -> None:
+        if self._on_error is not None:
+            try:
+                self._on_error(exc)
+            except Exception:  # noqa: BLE001
+                pass
+        elif self._log and exc is not None:
+            self._log.warning("config reload failed (keeping old config): %s", exc)
+
+
+def watch_settings(*, config_file: str | os.PathLike[str] | None = None,
+                   env: Mapping[str, str] | None = None,
+                   overrides: Mapping[str, Any] | None = None,
+                   on_change: Any = None, on_error: Any = None,
+                   logger: Any = None, **watch_kw: Any) -> tuple[Settings, ConfigWatcher]:
+    """Load settings once and return ``(settings, watcher)``.
+
+    The watcher tracks the TOML file that was actually loaded plus the .env
+    candidates, and hot-reloads on change. Call ``watcher.start()`` to arm
+    it; ``watcher.current`` always holds the latest validated Settings.
+    """
+    from functools import partial
+    settings = load_settings(config_file=config_file, env=env,
+                             overrides=overrides)
+    paths: list[str] = []
+    if settings.config_file:
+        paths.append(settings.config_file)
+    else:
+        base_env = dict(os.environ if env is None else env)
+        paths.extend(str(p) for p in _env_file_candidates(
+            base_env, settings.home))
+    paths.extend(str(p) for p in _env_file_candidates(
+        dict(os.environ if env is None else env), settings.home))
+    # de-dupe, keep order
+    seen: set[str] = set()
+    paths = [p for p in paths if not (p in seen or seen.add(p))]
+    loader = partial(load_settings, config_file=config_file, env=env,
+                     overrides=overrides)
+    watcher = ConfigWatcher(loader, paths, on_change=on_change,
+                            on_error=on_error, logger=logger, **watch_kw)
+    return settings, watcher
+
+
+def start_global_watcher(*, on_change: Any = None, on_error: Any = None,
+                         logger: Any = None, **kwargs: Any) -> ConfigWatcher:
+    """Load, publish process-wide, and hot-reload the global settings.
+
+    ``kwargs`` pass through to :func:`load_settings` (``config_file``,
+    ``env``, ``overrides``). The default ``on_change`` swaps the global via
+    :func:`set_settings` so :func:`get_settings` always returns the latest
+    validated config.
+    """
+    def _default_on_change(_old: Settings, new: Settings,
+                           changed: list[dict[str, Any]]) -> None:
+        set_settings(new)
+
+    settings, watcher = watch_settings(
+        on_change=on_change or _default_on_change,
+        on_error=on_error, logger=logger, **kwargs)
+    set_settings(settings)
+    watcher.start()
+    return watcher
 
 
 # ── Process-wide accessor ──────────────────────────────────────────────────────
