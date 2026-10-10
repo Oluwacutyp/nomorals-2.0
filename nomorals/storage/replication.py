@@ -36,6 +36,7 @@ from typing import Any
 
 from ..core.errors import StorageError
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, kv_lines
 from .db import Database
 
 __all__ = ["SnapshotInfo", "SqliteReplicator"]
@@ -101,6 +102,7 @@ class SqliteReplicator:
         name: str = "replica",
         keep: int = 7,
         ship: Callable[[Path], None] | None = None,
+        compress: bool = False,
     ) -> None:
         self.db = db
         self.replica_dir = Path(replica_dir).expanduser()
@@ -108,6 +110,9 @@ class SqliteReplicator:
         self.name = name
         self.keep = max(1, int(keep))
         self.ship = ship
+        #: Gzip snapshots (bandwidth is the phone's scarcest resource; the
+        #: snapshot stays a plain .db when False).
+        self.compress = compress
         self.stats = {"snapshots": 0, "rotated": 0, "shipped": 0, "errors": 0}
 
     # ── snapshots ──────────────────────────────────────────────────────────
@@ -134,6 +139,16 @@ class SqliteReplicator:
         finally:
             destination.close()
 
+        if self.compress:
+            import gzip
+
+            gz_target = target.with_suffix(target.suffix + ".gz")
+            with target.open("rb") as src, gzip.open(gz_target, "wb",
+                                                     compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst, CHUNK)
+            target.unlink()
+            target = gz_target
+
         info = self._describe(target)
         sidecar = target.with_suffix(target.suffix + SIDECAR_SUFFIX)
         sidecar.write_text(json.dumps(info.to_dict(), indent=2), encoding="utf-8")
@@ -142,22 +157,36 @@ class SqliteReplicator:
         return info
 
     def _describe(self, target: Path) -> SnapshotInfo:
-        pages = 0
-        schema_version = 0
-        conn = sqlite3.connect(str(target))
+        import gzip
+        import tempfile
+
+        check_path = target
+        tmpdir: Path | None = None
+        if target.suffix == ".gz":
+            tmpdir = Path(tempfile.mkdtemp(prefix="nm-replica-"))
+            check_path = tmpdir / target.name[:-3]  # strip ".gz"
+            with gzip.open(target, "rb") as src, check_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst, CHUNK)
         try:
-            result = conn.execute("PRAGMA integrity_check").fetchone()
-            if result is None or result[0] != "ok":
-                target.unlink(missing_ok=True)
-                raise StorageError(f"replica snapshot failed integrity_check: {result}")
-            pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+            pages = 0
+            schema_version = 0
+            conn = sqlite3.connect(str(check_path))
             try:
-                row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-                schema_version = int(row[0] or 0)
-            except sqlite3.Error:
-                schema_version = 0
+                result = conn.execute("PRAGMA integrity_check").fetchone()
+                if result is None or result[0] != "ok":
+                    target.unlink(missing_ok=True)
+                    raise StorageError(f"replica snapshot failed integrity_check: {result}")
+                pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+                try:
+                    row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+                    schema_version = int(row[0] or 0)
+                except sqlite3.Error:
+                    schema_version = 0
+            finally:
+                conn.close()
         finally:
-            conn.close()
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
         digest = hashlib.sha256()
         with target.open("rb") as handle:
             while chunk := handle.read(CHUNK):
@@ -217,8 +246,15 @@ class SqliteReplicator:
         snapshot: SnapshotInfo | str | os.PathLike[str] | None = None,
         *,
         target: str | os.PathLike[str] | None = None,
+        safety_copy: bool = True,
     ) -> Path:
-        """Copy a snapshot to ``target`` (default: ``<name>.restored.db``)."""
+        """Copy a snapshot to ``target`` (default: ``<name>.restored.db``).
+
+        Decompresses gzipped snapshots transparently. With
+        ``safety_copy=True`` (default) an existing target is first copied
+        aside as ``<target>.pre-restore-<stamp>`` — a bad restore must never
+        destroy the database it was meant to rescue.
+        """
         if snapshot is None:
             snapshot = self.latest()
             if snapshot is None:
@@ -234,9 +270,126 @@ class SqliteReplicator:
             raise StorageError(f"replica snapshot missing on disk: {source}")
         destination = Path(target) if target else self.replica_dir / f"{self.name}.restored.db"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if destination.exists() and safety_copy:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            spare = destination.with_name(f"{destination.name}.pre-restore-{stamp}")
+            shutil.copy2(destination, spare)
+            _log.info("pre-restore safety copy: %s", spare)
+        if source.suffix == ".gz":
+            import gzip
+
+            with gzip.open(source, "rb") as src, destination.open("wb") as dst:
+                shutil.copyfileobj(src, dst, CHUNK)
+        else:
+            shutil.copy2(source, destination)
         _log.info("restored replica %s -> %s", snapshot.name, destination)
         return destination
+
+    def restore_at(
+        self,
+        timestamp: float,
+        *,
+        target: str | os.PathLike[str] | None = None,
+        safety_copy: bool = True,
+    ) -> Path:
+        """Point-in-time restore: the newest snapshot at or before ``timestamp``.
+
+        Honest PITR at snapshot granularity (the documented trade of this
+        module): recovery point = the last snapshot before ``timestamp``,
+        so RPO = the snapshot interval.
+        """
+        candidates = [
+            s for s in self.list_snapshots() if s.created_at <= timestamp
+        ]
+        if not candidates:
+            raise StorageError(
+                f"no replica snapshot at or before "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(timestamp))}"
+            )
+        return self.restore(candidates[-1], target=target,
+                            safety_copy=safety_copy)
+
+    def lag_seconds(self) -> float | None:
+        """Seconds since the last snapshot (the current RPO). None if never."""
+        latest = self.latest()
+        if latest is None:
+            return None
+        return max(0.0, time.time() - latest.created_at)
+
+    def verify_all(self) -> dict[str, list[str]]:
+        """Integrity-check every snapshot generation. ``{}`` = all healthy."""
+        report: dict[str, list[str]] = {}
+        for info in self.list_snapshots():
+            problems = self._verify_snapshot(info)
+            if problems:
+                report[info.name] = problems
+        return report
+
+    def _verify_snapshot(self, info: SnapshotInfo) -> list[str]:
+        import gzip
+        import tempfile
+
+        source = Path(info.path)
+        if not source.is_file():
+            return [f"snapshot file missing: {info.path}"]
+        digest = hashlib.sha256()
+        with source.open("rb") as handle:
+            while chunk := handle.read(CHUNK):
+                digest.update(chunk)
+        problems: list[str] = []
+        if info.sha256 and digest.hexdigest() != info.sha256:
+            problems.append("sha256 mismatch with sidecar")
+            return problems
+        tmpdir = Path(tempfile.mkdtemp(prefix="nm-replica-verify-"))
+        try:
+            check_path = tmpdir / "check.db"
+            if source.suffix == ".gz":
+                try:
+                    with gzip.open(source, "rb") as src, check_path.open("wb") as dst:
+                        shutil.copyfileobj(src, dst, CHUNK)
+                except (gzip.BadGzipFile, EOFError, OSError) as exc:
+                    return [f"cannot decompress snapshot: {exc}"]
+            else:
+                shutil.copy2(source, check_path)
+            try:
+                conn = sqlite3.connect(str(check_path))
+                try:
+                    result = conn.execute("PRAGMA integrity_check").fetchone()
+                    if result is None or result[0] != "ok":
+                        problems.append(f"integrity_check failed: {result}")
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                problems.append(f"cannot open snapshot: {exc}")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return problems
+
+    def status(self, theme: Any = None) -> str:
+        """One-screen replication overview through the shared style layer."""
+        theme = theme or active_theme()
+        snapshots = self.list_snapshots()
+        lag = self.lag_seconds()
+        lag_str = f"{lag:.0f}s" if lag is not None else "never"
+        latest_name = snapshots[-1].name if snapshots else "–"
+        return "\n".join([
+            header("replication", theme=theme),
+            *kv_lines(
+                {
+                    "replica dir": str(self.replica_dir),
+                    "generations": len(snapshots),
+                    "bytes": sum(s.size for s in snapshots),
+                    "latest": latest_name,
+                    "lag (RPO)": lag_str,
+                    "keep": self.keep,
+                    "compressed": self.compress,
+                    "snapshots": self.stats["snapshots"],
+                    "shipped": self.stats["shipped"],
+                    "errors": self.stats["errors"],
+                },
+                theme=theme,
+            ),
+        ])
 
     # ── shipping ───────────────────────────────────────────────────────────
     def _ship(self, info: SnapshotInfo) -> None:

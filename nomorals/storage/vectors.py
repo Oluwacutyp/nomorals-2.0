@@ -28,6 +28,7 @@ from ..compat import available, load_optional
 from ..core.errors import StorageError, ValidationError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, kv_lines
 from .db import Database
 
 __all__ = ["VectorRecord", "VectorSearchHit", "VectorStore", "cosine", "normalize"]
@@ -140,6 +141,11 @@ class VectorStore:
         self._dim_set: frozenset[int] = frozenset()
         self._meta: list[dict[str, Any]] = []
         self._centroids: list[_Centroid] = []
+        #: Vector count the trained index covers. Writes after training make
+        #: the IVF buckets stale, so search() falls back to brute force when
+        #: the table drifts — an index must never silently return partial
+        #: results.
+        self._trained_count: int | None = None
         self._index_dirty = True
         self.stats = {"puts": 0, "searches": 0, "search_seconds": 0.0}
 
@@ -271,11 +277,16 @@ class VectorStore:
             self._matrix = vectors
         self._index_dirty = False
 
-    def build_index(self, clusters: int = 0, *, seed: int = 1234) -> int:
-        """Build the coarse quantizer. Returns the number of centroids.
+    def build_index(self, clusters: int = 0, *, seed: int = 1234,
+                    iterations: int = 10) -> int:
+        """Train the coarse quantizer with k-means (FAISS ``index.train``).
 
         ``clusters=0`` auto-selects ``sqrt(n)`` centroids, capped at 256. Below
-        512 vectors no index is built — brute force is faster than the bookkeeping.
+        512 vectors no index is built — brute force is faster than the
+        bookkeeping. Seeding is k-means++ (not uniform random), then Lloyd's
+        algorithm refines for ``iterations`` passes; empty clusters are
+        reseeded from the worst-fit vector. The trained index is persisted to
+        ``<table>_index`` so a restart doesn't retrain.
         """
         self._load()
         total = len(self._meta)
@@ -286,18 +297,179 @@ class VectorStore:
         k = min(k, total)
         rng = random.Random(seed)
         vectors = self._as_lists()
+        centroids = self._kmeans_plus_plus(vectors, k, rng)
+        members: list[list[int]] = [[] for _ in range(k)]
+        for _ in range(max(1, iterations)):
+            members = [[] for _ in range(k)]
+            self._assign(vectors, centroids, members)
+            moved = self._recompute(vectors, centroids, members, rng)
+            if moved == 0:
+                break
         self._centroids = [
-            _Centroid(vector=list(vectors[rng.randrange(total)])) for _ in range(k)
+            _Centroid(vector=centroids[i], members=members[i]) for i in range(k)
         ]
-        for index, vector in enumerate(vectors):
-            best, best_score = 0, -math.inf
-            for ci, centroid in enumerate(self._centroids):
-                score = _dot(vector, centroid.vector)
-                if score > best_score:
-                    best, best_score = ci, score
-            self._centroids[best].members.append(index)
+        self._trained_count = total
+        self._save_index()
         _log.debug("vector index: %d vectors in %d clusters", total, k)
         return k
+
+    # ── k-means internals ────────────────────────────────────────────────
+    @staticmethod
+    def _kmeans_plus_plus(
+        vectors: list[list[float]], k: int, rng: random.Random
+    ) -> list[list[float]]:
+        """k-means++ seeding: each new centroid is sampled with probability
+        proportional to its squared distance from the nearest existing one."""
+        first = rng.randrange(len(vectors))
+        centroids = [list(vectors[first])]
+        closest_sq = [float("inf")] * len(vectors)
+        for _ in range(1, k):
+            newest = centroids[-1]
+            total = 0.0
+            for i, vector in enumerate(vectors):
+                dist_sq = sum(
+                    (a - b) ** 2 for a, b in zip(vector, newest)
+                )
+                if dist_sq < closest_sq[i]:
+                    closest_sq[i] = dist_sq
+                total += closest_sq[i]
+            if total <= 0.0:  # all vectors identical; duplicate the first
+                centroids.append(list(vectors[first]))
+                continue
+            pick = rng.random() * total
+            chosen = 0
+            for i, dist_sq in enumerate(closest_sq):
+                pick -= dist_sq
+                if pick <= 0:
+                    chosen = i
+                    break
+            centroids.append(list(vectors[chosen]))
+        return centroids
+
+    def _assign(
+        self,
+        vectors: list[list[float]],
+        centroids: list[list[float]],
+        members: list[list[int]],
+    ) -> None:
+        """Assign every vector to its nearest centroid (cosine via dot)."""
+        if self._numpy is not None:
+            matrix = self._numpy.asarray(vectors, dtype="float32")
+            cents = self._numpy.asarray(centroids, dtype="float32")
+            sims = matrix @ cents.T
+            best = sims.argmax(axis=1).tolist()
+            for index, ci in enumerate(best):
+                members[int(ci)].append(index)
+            return
+        for index, vector in enumerate(vectors):
+            best, best_score = 0, -math.inf
+            for ci, centroid in enumerate(centroids):
+                score = _dot(vector, centroid)
+                if score > best_score:
+                    best, best_score = ci, score
+            members[best].append(index)
+
+    def _recompute(
+        self,
+        vectors: list[list[float]],
+        centroids: list[list[float]],
+        members: list[list[int]],
+        rng: random.Random,
+    ) -> int:
+        """Move each centroid to its members' mean (renormalized). Returns
+        the number of centroids that moved; reseeds empty ones."""
+        dim = len(centroids[0])
+        moved = 0
+        # Worst-fit vector for empty-cluster reseeding.
+        worst_index, worst_score = 0, math.inf
+        for index, vector in enumerate(vectors):
+            score = max(_dot(vector, c) for c in centroids)
+            if score < worst_score:
+                worst_index, worst_score = index, score
+        for ci in range(len(centroids)):
+            cluster = members[ci]
+            if not cluster:
+                centroids[ci] = list(vectors[worst_index])
+                moved += 1
+                continue
+            mean = [0.0] * dim
+            for index in cluster:
+                vector = vectors[index]
+                for d in range(dim):
+                    mean[d] += vector[d]
+            count = len(cluster)
+            mean = [v / count for v in mean]
+            norm = math.sqrt(sum(v * v for v in mean))
+            if norm > 0:
+                mean = [v / norm for v in mean]
+            if any(abs(a - b) > 1e-9 for a, b in zip(mean, centroids[ci])):
+                moved += 1
+            centroids[ci] = mean
+        return moved
+
+    # ── index persistence ────────────────────────────────────────────────
+    @property
+    def _index_table(self) -> str:
+        return f"{self.table}_index"
+
+    def _save_index(self) -> None:
+        """Persist centroids + member lists so restarts skip retraining."""
+        import json
+
+        table = self._index_table
+        with self.db.transaction():
+            self.db.execute(
+                f'CREATE TABLE IF NOT EXISTS "{table}" ('
+                "centroid_id INTEGER PRIMARY KEY, "
+                "dim INTEGER NOT NULL, "
+                "vector BLOB NOT NULL, "
+                "members TEXT NOT NULL)"
+            )
+            self.db.execute(f'DELETE FROM "{table}"')
+            rows = [
+                (ci, len(c.vector), _pack(c.vector), json.dumps(c.members))
+                for ci, c in enumerate(self._centroids)
+            ]
+            if rows:
+                self.db.executemany(
+                    f'INSERT INTO "{table}" (centroid_id, dim, vector, members) '
+                    "VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+
+    def load_index(self) -> int:
+        """Load a previously trained index. Returns centroid count (0 if none)."""
+        import json
+
+        table = self._index_table
+        if not self.db.table_exists(table):
+            return 0
+        self._load()
+        rows = self.db.query(f'SELECT * FROM "{table}" ORDER BY centroid_id')
+        centroids: list[_Centroid] = []
+        for row in rows:
+            vector = _unpack(bytes(row["vector"]), int(row["dim"]))
+            try:
+                members = [int(m) for m in json.loads(row["members"])]
+            except (ValueError, TypeError):
+                members = []
+            centroids.append(_Centroid(vector=vector, members=members))
+        # A trained index is only valid for the exact vector set it was
+        # trained on; row-count drift means retrain.
+        if centroids and sum(len(c.members) for c in centroids) != len(self._meta):
+            _log.warning(
+                "vector index covers %d vectors but table has %d; ignoring stale index",
+                sum(len(c.members) for c in centroids), len(self._meta),
+            )
+            return 0
+        self._centroids = centroids
+        self._trained_count = len(self._meta)
+        return len(centroids)
+
+    def drop_index(self) -> None:
+        """Delete the trained index (memory and persisted)."""
+        self._centroids = []
+        self.db.execute(f'DROP TABLE IF EXISTS "{self._index_table}"')
 
     def _as_lists(self) -> list[list[float]]:
         if self._numpy is not None and not isinstance(self._matrix, list):
@@ -311,16 +483,26 @@ class VectorStore:
         *,
         limit: int = 10,
         owner_type: str | None = None,
+        owner_ids: set[str] | None = None,
         min_score: float = -1.0,
         nprobe: int = 0,
+        score_mode: str = "similarity",
     ) -> list[VectorSearchHit]:
         """Return the ``limit`` most similar stored vectors.
 
         ``nprobe > 0`` restricts the scan to that many quantizer buckets. It is
-        ignored when no index has been built.
+        ignored when no index has been built, and clamped to the trained
+        cluster count (nprobe can never exceed nlist). ``score_mode`` is
+        ``"similarity"`` (cosine, higher is better) or ``"distance"``
+        (``1 - cosine``, lower is better — ``min_score`` then acts as a
+        maximum-distance threshold).
         """
         if limit <= 0:
             return []
+        if score_mode not in {"similarity", "distance"}:
+            raise ValidationError(
+                f"score_mode must be 'similarity' or 'distance', got {score_mode!r}"
+            )
         started = time.perf_counter()
         self._load()
         total = len(self._meta)
@@ -337,11 +519,20 @@ class VectorStore:
                 f"query dimension {len(query)} does not match stored dimension {next(iter(dims))}"
             )
         candidates: Sequence[int]
-        if nprobe > 0 and self._centroids:
+        index_valid = (
+            bool(self._centroids)
+            and self._trained_count is not None
+            and self._trained_count == total
+        )
+        if nprobe > 0 and index_valid:
+            probed = min(nprobe, len(self._centroids))
+            if probed < nprobe:
+                _log.debug("nprobe %d clamped to %d trained clusters",
+                           nprobe, len(self._centroids))
             ranked = sorted(
                 range(len(self._centroids)),
                 key=lambda ci: -_dot(query, self._centroids[ci].vector),
-            )[:nprobe]
+            )[:probed]
             bucket: list[int] = []
             for ci in ranked:
                 bucket.extend(self._centroids[ci].members)
@@ -393,10 +584,16 @@ class VectorStore:
         scored.sort(key=lambda pair: -pair[0])
         hits: list[VectorSearchHit] = []
         for score, index in scored:
-            if score < min_score:
-                continue
             meta = self._meta[index]
             if owner_type is not None and meta["owner_type"] != owner_type:
+                continue
+            if owner_ids is not None and meta["owner_id"] not in owner_ids:
+                continue
+            if score_mode == "distance":
+                score = 1.0 - score
+                if score > min_score and min_score >= 0:
+                    continue
+            elif score < min_score:
                 continue
             hits.append(
                 VectorSearchHit(
@@ -411,6 +608,45 @@ class VectorStore:
                 break
         self.stats["search_seconds"] += time.perf_counter() - started
         return hits
+
+    def search_many(
+        self,
+        vectors: Sequence[Sequence[float]],
+        *,
+        limit: int = 10,
+        **kwargs: Any,
+    ) -> list[list[VectorSearchHit]]:
+        """Batch search: one ``_load()`` for many queries."""
+        self._load()
+        return [self.search(vector, limit=limit, **kwargs) for vector in vectors]
+
+    def evaluate_recall(
+        self,
+        queries: Sequence[Sequence[float]],
+        *,
+        k: int = 10,
+        nprobe: int = 0,
+    ) -> dict[str, Any]:
+        """Measure IVF recall@k: brute-force top-k vs ``nprobe`` top-k.
+
+        The FAISS-benchmark workflow for tuning ``nprobe``: recall of 1.0
+        means the index loses nothing; lower means speed is costing accuracy.
+        ``queries`` are raw vectors; ground truth is computed by brute force.
+        """
+        if not queries:
+            return {"queries": 0, "k": k, "nprobe": nprobe, "recall_at_k": 0.0}
+        recalls: list[float] = []
+        for vector in queries:
+            truth = {h.id for h in self.search(vector, limit=k)}
+            approx = {h.id for h in self.search(vector, limit=k, nprobe=nprobe)}
+            recalls.append(len(truth & approx) / max(1, len(truth)))
+        return {
+            "queries": len(queries),
+            "k": k,
+            "nprobe": nprobe,
+            "recall_at_k": sum(recalls) / len(recalls),
+            "min_recall": min(recalls),
+        }
 
     def search_by_owner(
         self, owner_type: str, owner_id: str, **kwargs: Any
@@ -439,6 +675,31 @@ class VectorStore:
             "backend": ("native-cpp" if self._native
                         else "numpy" if self._numpy is not None else "pure-python"),
         }
+
+    def format_stats(self, theme: Any = None) -> str:
+        """Human-readable index overview through the shared style layer."""
+        theme = theme or active_theme()
+        snap = self.stats_snapshot()
+        avg_ms = (
+            snap["search_seconds"] / snap["searches"] * 1000
+            if snap["searches"] else 0.0
+        )
+        return "\n".join([
+            header("vector index", theme=theme),
+            *kv_lines(
+                {
+                    "table": self.table,
+                    "model": self.model,
+                    "backend": snap["backend"],
+                    "vectors": snap["vectors"],
+                    "clusters": snap["clusters"],
+                    "searches": snap["searches"],
+                    "avg search": f"{avg_ms:.2f}ms",
+                    "puts": snap["puts"],
+                },
+                theme=theme,
+            ),
+        ])
 
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:

@@ -23,6 +23,7 @@ from typing import Any
 
 __all__ = [
     "AgentRecord",
+    "MissionRecord",
     "TaskRecord",
     "Reflection",
     "ModelRow",
@@ -69,6 +70,100 @@ def _num(row: dict[str, Any], key: str, cast: Any = float, default: Any = 0) -> 
         return default
 
 
+def _diff_records(old: Any, new: Any) -> dict[str, tuple[Any, Any]]:
+    """``{field: (old_value, new_value)}`` for dataclass fields that differ."""
+    import dataclasses
+
+    if type(old) is not type(new):
+        raise TypeError("cannot diff different record types")
+    out: dict[str, tuple[Any, Any]] = {}
+    for field in dataclasses.fields(old):
+        old_value = getattr(old, field.name)
+        new_value = getattr(new, field.name)
+        if old_value != new_value:
+            out[field.name] = (old_value, new_value)
+    return out
+
+
+@dataclass
+class MissionRecord:
+    """A row from ``missions``: one mission's goal, budget, and lifecycle."""
+
+    id: str
+    name: str = ""
+    goal: str = ""
+    status: str = "pending"
+    state: dict[str, Any] = field(default_factory=dict)
+    budget_wall: float = 0.0
+    budget_tokens: int = 0
+    spent_wall: float = 0.0
+    spent_tokens: int = 0
+    iterations: int = 0
+    success: float | None = None
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    finished_at: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {"done", "failed", "cancelled"}
+
+    @property
+    def budget_wall_remaining(self) -> float:
+        if not self.budget_wall:
+            return float("inf")
+        return max(0.0, self.budget_wall - self.spent_wall)
+
+    @property
+    def budget_tokens_remaining(self) -> int:
+        if not self.budget_tokens:
+            return 2**62
+        return max(0, self.budget_tokens - self.spent_tokens)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "MissionRecord":
+        return cls(
+            id=row["id"],
+            name=row.get("name") or "",
+            goal=row.get("goal") or "",
+            status=row.get("status") or "pending",
+            state=decode_json(row.get("state"), {}),
+            budget_wall=_num(row, "budget_wall"),
+            budget_tokens=_num(row, "budget_tokens", int),
+            spent_wall=_num(row, "spent_wall"),
+            spent_tokens=_num(row, "spent_tokens", int),
+            iterations=_num(row, "iterations", int),
+            success=_num(row, "success", float, None),
+            created_at=_num(row, "created_at"),
+            updated_at=_num(row, "updated_at"),
+            finished_at=_num(row, "finished_at", float, None),
+            metadata=decode_json(row.get("metadata"), {}),
+        )
+
+    def to_row(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "goal": self.goal,
+            "status": self.status, "state": encode_json(self.state),
+            "budget_wall": self.budget_wall, "budget_tokens": self.budget_tokens,
+            "spent_wall": self.spent_wall, "spent_tokens": self.spent_tokens,
+            "iterations": self.iterations, "success": self.success,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
+            "metadata": encode_json(self.metadata),
+        }
+
+    def changed_fields(self, other: "MissionRecord") -> dict[str, tuple[Any, Any]]:
+        return _diff_records(self, other)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_row(), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "MissionRecord":
+        return cls.from_row(json.loads(raw))
+
+
 @dataclass
 class AgentRecord:
     """A row from ``agents``: one agent instance, its grant, and its lifecycle.
@@ -100,9 +195,24 @@ class AgentRecord:
         return self.status in {"done", "failed", "cancelled"}
 
     @property
+    def is_running(self) -> bool:
+        return self.status in {"running", "spawned", "active"} and not self.is_terminal
+
+    @property
     def depth(self) -> int:
         """Nesting depth, reconstructed by counting lineage separators."""
         return self.metadata.get("depth", 0)
+
+    def changed_fields(self, other: "AgentRecord") -> dict[str, tuple[Any, Any]]:
+        """``{field: (old, new)}`` for fields that differ from ``other``."""
+        return _diff_records(self, other)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_row(), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "AgentRecord":
+        return cls.from_row(json.loads(raw))
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "AgentRecord":
@@ -162,6 +272,24 @@ class TaskRecord:
     def is_terminal(self) -> bool:
         return self.status in {"done", "failed", "cancelled"}
 
+    @property
+    def elapsed(self) -> float:
+        """Seconds since ``started_at`` (or 0 when never started)."""
+        if not self.started_at:
+            return 0.0
+        end = self.finished_at or time.time()
+        return max(0.0, end - self.started_at)
+
+    def changed_fields(self, other: "TaskRecord") -> dict[str, tuple[Any, Any]]:
+        return _diff_records(self, other)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_row(), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "TaskRecord":
+        return cls.from_row(json.loads(raw))
+
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TaskRecord":
         return cls(
@@ -212,6 +340,16 @@ class Reflection:
     weights: dict[str, float] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
+    def changed_fields(self, other: "Reflection") -> dict[str, tuple[Any, Any]]:
+        return _diff_records(self, other)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_row(), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "Reflection":
+        return cls.from_row(json.loads(raw))
+
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Reflection":
         return cls(
@@ -261,6 +399,16 @@ class ModelRow:
     @property
     def is_local(self) -> bool:
         return bool(self.path)
+
+    def changed_fields(self, other: "ModelRow") -> dict[str, tuple[Any, Any]]:
+        return _diff_records(self, other)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_row(), ensure_ascii=False, default=str)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "ModelRow":
+        return cls.from_row(json.loads(raw))
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "ModelRow":

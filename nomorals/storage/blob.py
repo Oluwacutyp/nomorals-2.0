@@ -19,10 +19,11 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable
+from typing import Any, BinaryIO, Callable, Iterable, Iterator
 
 from ..core.errors import NotFound, StorageError
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, kv_lines, styled_table
 from .db import Database
 
 __all__ = ["BlobInfo", "BlobStore"]
@@ -147,17 +148,24 @@ class BlobStore:
         mime: str = "",
         refcount: int = 1,
         move: bool = False,
+        progress: Callable[[int, int], None] | None = None,
     ) -> BlobInfo:
-        """Store a file, streaming so large files never sit in memory."""
+        """Store a file, streaming so large files never sit in memory.
+
+        ``progress(done_bytes, total_bytes)`` is called per chunk when given.
+        """
         path = Path(source).expanduser()
         if not path.is_file():
             raise NotFound(f"file not found: {path}")
         digest = hashlib.sha256()
         size = 0
+        total = path.stat().st_size
         with path.open("rb") as handle:
             while chunk := handle.read(CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
+                if progress is not None:
+                    progress(size, total)
         sha256 = digest.hexdigest()
 
         existing = self.info(sha256)
@@ -192,18 +200,34 @@ class BlobStore:
         mime: str = "",
         filename: str = "",
         refcount: int = 1,
+        progress: Callable[[int, int], None] | None = None,
     ) -> BlobInfo:
-        """Store from a file-like object, spooling to a temp file first."""
+        """Store from a file-like object, spooling to a temp file first.
+
+        ``progress(done_bytes, total_bytes)`` is called per chunk; the total
+        is 0 when the stream length is unknown up front.
+        """
         import tempfile
 
         with tempfile.NamedTemporaryFile(delete=False, dir=str(self.root)) as tmp:
             tmp_path = Path(tmp.name)
             digest = hashlib.sha256()
             size = 0
+            total = 0
+            if progress is not None:
+                try:
+                    pos = stream.tell()
+                    stream.seek(0, os.SEEK_END)
+                    total = stream.tell() - pos
+                    stream.seek(pos)
+                except (OSError, AttributeError):
+                    total = 0
             while chunk := stream.read(CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
                 tmp.write(chunk)
+                if progress is not None:
+                    progress(size, total)
         try:
             sha256 = digest.hexdigest()
             existing = self.info(sha256)
@@ -258,6 +282,242 @@ class BlobStore:
         import io
 
         return io.BytesIO(self.get_bytes(sha256))
+
+    def read_range(self, sha256: str, offset: int, length: int) -> bytes:
+        """Read ``length`` bytes starting at ``offset`` (HTTP Range semantics).
+
+        Uncompressed blobs seek directly — the media-streaming path. Gzip
+        blobs are not seekable, so they stream through the decompressor and
+        slice (documented cost; compressible blobs are small by policy).
+        """
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be >= 0")
+        info = self.info(sha256)
+        if info is None:
+            raise NotFound(f"blob {sha256} not in store")
+        path = self.path_for(sha256, info.compressed)
+        if not path.is_file():
+            raise StorageError(f"blob {sha256} recorded but missing at {path}")
+        self.stats["gets"] += 1
+        if info.compressed:
+            data = self.get_bytes(sha256)
+            return data[offset : offset + length]
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            return handle.read(length)
+
+    def stream_range(
+        self, sha256: str, offset: int, length: int, *, chunk: int = CHUNK
+    ) -> Iterator[bytes]:
+        """Yield ``length`` bytes from ``offset`` in chunks (streaming reads)."""
+        remaining = length
+        cursor = offset
+        while remaining > 0:
+            piece = self.read_range(sha256, cursor, min(chunk, remaining))
+            if not piece:
+                break
+            yield piece
+            cursor += len(piece)
+            remaining -= len(piece)
+
+    # ── soft delete (trash) ────────────────────────────────────────────────
+    #
+    # vaultfs-style delete markers: ``trash()`` moves the blob aside instead
+    # of destroying it, so an accidental purge is recoverable until
+    # ``empty_trash()`` runs. The index row is parked in a JSON sidecar.
+
+    @property
+    def _trash_dir(self) -> Path:
+        return self.root / ".trash"
+
+    def _trash_meta_path(self, sha256: str) -> Path:
+        return self._trash_dir / f"{sha256}.json"
+
+    def trash(self, sha256: str) -> bool:
+        """Move a blob to the trash (recoverable). Returns False if unknown."""
+        import json
+
+        info = self.info(sha256)
+        if info is None:
+            return False
+        self._trash_dir.mkdir(parents=True, exist_ok=True)
+        src = self.path_for(sha256, info.compressed)
+        dst = self._trash_dir / src.name
+        if src.is_file():
+            shutil.move(str(src), dst)
+        self._trash_meta_path(sha256).write_text(
+            json.dumps({**info.to_dict(), "trashed_at": time.time()}),
+            encoding="utf-8",
+        )
+        self.db.delete(self.TABLE, "sha256 = ?", (sha256,))
+        return True
+
+    def list_trash(self) -> list[dict[str, Any]]:
+        """Trashed blobs with their metadata (newest first)."""
+        import json
+
+        if not self._trash_dir.is_dir():
+            return []
+        out: list[dict[str, Any]] = []
+        for meta_path in self._trash_dir.glob("*.json"):
+            try:
+                out.append(json.loads(meta_path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        return sorted(out, key=lambda m: m.get("trashed_at", 0), reverse=True)
+
+    def restore_trash(self, sha256: str) -> bool:
+        """Restore a trashed blob to the live store. False if not trashed."""
+        import json
+
+        meta_path = self._trash_meta_path(sha256)
+        if not meta_path.is_file():
+            return False
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        compressed = bool(meta.get("compressed"))
+        src = self._trash_dir / f"{sha256}{'.gz' if compressed else ''}"
+        if not src.is_file():
+            return False
+        target = self.path_for(sha256, compressed)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), target)
+        self._record(
+            sha256,
+            int(meta.get("size", 0)),
+            str(meta.get("mime", "")),
+            compressed,
+            target.stat().st_size,
+            int(meta.get("refcount", 1)),
+        )
+        meta_path.unlink(missing_ok=True)
+        return True
+
+    def empty_trash(self, *, older_than_s: float | None = None) -> int:
+        """Permanently delete trashed blobs (optionally only old ones)."""
+        if not self._trash_dir.is_dir():
+            return 0
+        now = time.time()
+        removed = 0
+        for entry in self.list_trash():
+            sha = entry.get("sha256", "")
+            if older_than_s is not None:
+                trashed_at = float(entry.get("trashed_at", 0))
+                if now - trashed_at < older_than_s:
+                    continue
+            compressed = bool(entry.get("compressed"))
+            (self._trash_dir / f"{sha}{'.gz' if compressed else ''}").unlink(
+                missing_ok=True
+            )
+            self._trash_meta_path(sha).unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+    # ── cross-store sync ───────────────────────────────────────────────────
+    def sync_to(
+        self,
+        other: Any,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        """Push every blob missing from ``other`` (same blob API).
+
+        The primitive that backs blob replication: local → S3, phone → VPS.
+        Content addressing makes it idempotent — re-running syncs only the
+        delta. Returns ``{"pushed": n, "skipped": n, "bytes": n}``.
+        """
+        rows = self.db.query(f"SELECT sha256, mime FROM {self.TABLE} ORDER BY sha256")
+        total = len(rows)
+        pushed = skipped = 0
+        sent_bytes = 0
+        for index, row in enumerate(rows):
+            sha = row["sha256"]
+            if progress is not None:
+                progress(index, total)
+            if other.exists(sha):
+                skipped += 1
+                continue
+            info = self.info(sha)
+            if info is None:  # pragma: no cover - raced deletion
+                skipped += 1
+                continue
+            # Re-store through the peer's own pipeline so its compression
+            # policy and metadata stay canonical there.
+            import io as _io
+
+            try:
+                if info.compressed:
+                    payload: BinaryIO = _io.BytesIO(self.get_bytes(sha))
+                else:
+                    payload = self.path_for(sha, False).open("rb")
+            except (OSError, StorageError) as exc:
+                # DB row without a file (trashed mid-sync, partial dir):
+                # skip it loudly rather than aborting the whole sync.
+                _log.warning("sync_to: source file missing for %s: %s", sha, exc)
+                skipped += 1
+                continue
+            try:
+                stored = other.put_stream(payload, mime=info.mime)
+            finally:
+                payload.close()
+            pushed += 1
+            sent_bytes += stored.size if hasattr(stored, "size") else info.size
+        if progress is not None:
+            progress(total, total)
+        return {"pushed": pushed, "skipped": skipped, "bytes": sent_bytes}
+
+    def describe(self) -> dict[str, Any]:
+        """One-dict health overview of the store."""
+        row = self.db.query_one(
+            f"SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS size, "
+            f"COALESCE(SUM(stored), 0) AS stored FROM {self.TABLE}"
+        ) or {}
+        trash_bytes = 0
+        trash_count = 0
+        if self._trash_dir.is_dir():
+            for path in self._trash_dir.iterdir():
+                if path.is_file() and not path.name.endswith(".json"):
+                    trash_count += 1
+                    try:
+                        trash_bytes += path.stat().st_size
+                    except OSError:
+                        pass
+        size = int(row.get("size") or 0)
+        stored = int(row.get("stored") or 0)
+        return {
+            "blobs": int(row.get("n") or 0),
+            "logical_bytes": size,
+            "stored_bytes": stored,
+            "dedup_ratio": round(size / stored, 3) if stored else 1.0,
+            "trashed_blobs": trash_count,
+            "trash_bytes": trash_bytes,
+            "root": str(self.root),
+            **self.stats,
+        }
+
+    def format_stats(self, theme: Any = None) -> str:
+        """Human-readable store overview through the shared style layer."""
+        theme = theme or active_theme()
+        desc = self.describe()
+        return "\n".join([
+            header("blob store", theme=theme),
+            *kv_lines(
+                {
+                    "root": desc["root"],
+                    "blobs": desc["blobs"],
+                    "logical": _blob_bytes(desc["logical_bytes"]),
+                    "stored": _blob_bytes(desc["stored_bytes"]),
+                    "dedup ratio": f"{desc['dedup_ratio']}x",
+                    "puts": desc["puts"],
+                    "dedup hits": desc["dedup_hits"],
+                    "gets": desc["gets"],
+                    "trashed": f"{desc['trashed_blobs']} ({_blob_bytes(desc['trash_bytes'])})",
+                },
+                theme=theme,
+            ),
+        ])
 
     # ── metadata ─────────────────────────────────────────────────────────────
     def info(self, sha256: str) -> BlobInfo | None:
@@ -353,12 +613,22 @@ class BlobStore:
         return problems
 
     def orphans(self) -> list[str]:
-        """Files on disk with no index entry — leftovers from interrupted writes."""
+        """Files on disk with no index entry — leftovers from interrupted writes.
+
+        The ``.trash`` directory is excluded: trashed blobs are accounted for
+        by :meth:`list_trash`, not orphans.
+        """
         indexed = {r["sha256"] for r in self.db.query(f"SELECT sha256 FROM {self.TABLE}")}
+        trash = self._trash_dir.resolve()
         found: list[str] = []
         for path in self.root.rglob("*"):
             if not path.is_file():
                 continue
+            try:
+                if trash in path.resolve().parents:
+                    continue
+            except OSError:
+                pass
             name = path.stem if path.suffix == ".gz" else path.name
             if len(name) == 64 and name not in indexed:
                 found.append(str(path))
@@ -382,6 +652,14 @@ class BlobStore:
             "bytes": self.total_size(),
             "root": str(self.root),
         }
+
+
+def _blob_bytes(num: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num < 1024 or unit == "TB":
+            return f"{num:.1f}{unit}" if unit != "B" else f"{num}B"
+        num /= 1024
+    return f"{num:.1f}TB"  # pragma: no cover
 
 
 def _ext_for(data: bytes) -> str:

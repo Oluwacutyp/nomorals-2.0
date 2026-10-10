@@ -29,9 +29,10 @@ from typing import Any
 
 from ..core.errors import StorageError
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, styled_table
 from .db import Database
 
-__all__ = ["BackupInfo", "BackupManager"]
+__all__ = ["BackupInfo", "BackupManager", "RetentionPolicy"]
 
 _log = get_logger(__name__)
 
@@ -70,6 +71,62 @@ class BackupInfo:
             "blob_count": self.blob_count,
             "blob_files": self.blob_files,
         }
+
+
+@dataclass
+class RetentionPolicy:
+    """Borg-style retention: keep the last N plus periodic samples.
+
+    ``keep_last`` covers the recent window; ``keep_daily``/``keep_weekly``/
+    ``keep_monthly`` each keep one backup per period *outside* the recent
+    window. ``keep_within`` (seconds) keeps everything newer than the
+    cutoff regardless of the other rules (borg ``--keep-within``).
+    """
+
+    keep_last: int = 14
+    keep_daily: int = 7
+    keep_weekly: int = 4
+    keep_monthly: int = 6
+    keep_within: float = 0.0
+
+    def select_keepers(self, backups: list["BackupInfo"]) -> set[str]:
+        """Paths to keep, given backups oldest-first."""
+        if not backups:
+            return set()
+        now = time.time()
+        keepers: set[str] = set()
+        if self.keep_within > 0:
+            for backup in backups:
+                if now - backup.created_at <= self.keep_within:
+                    keepers.add(backup.path)
+        ordered = sorted(backups, key=lambda b: b.created_at, reverse=True)
+        for backup in ordered[: max(0, self.keep_last)]:
+            keepers.add(backup.path)
+        rest = ordered[max(0, self.keep_last):]
+        # One per day, then one per ISO week, then one per month.
+        for attr, count, key in (
+            ("keep_daily", self.keep_daily, lambda b: time.strftime(
+                "%Y-%m-%d", time.gmtime(b.created_at))),
+            ("keep_weekly", self.keep_weekly, lambda b: time.strftime(
+                "%G-W%V", time.gmtime(b.created_at))),
+            ("keep_monthly", self.keep_monthly, lambda b: time.strftime(
+                "%Y-%m", time.gmtime(b.created_at))),
+        ):
+            _ = attr
+            seen: set[str] = set()
+            kept = 0
+            for backup in rest:
+                if backup.path in keepers:
+                    continue
+                bucket = key(backup)
+                if bucket in seen:
+                    continue
+                if kept >= count:
+                    break
+                seen.add(bucket)
+                keepers.add(backup.path)
+                kept += 1
+        return keepers
 
 
 @dataclass
@@ -304,32 +361,44 @@ class BackupManager:
         return backups[-1] if backups else None
 
     # ── rotation ─────────────────────────────────────────────────────────────
-    def rotate(self) -> list[str]:
-        """Delete the oldest backups beyond ``keep``, keeping one per day.
+    def rotate(
+        self,
+        *,
+        policy: RetentionPolicy | None = None,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Delete backups outside the retention policy.
 
-        The daily sample is what makes "restore to last Tuesday" possible without
-        keeping every hourly snapshot forever.
+        Without ``policy`` this keeps the last ``self.keep`` plus one per day
+        (the legacy behavior). With a :class:`RetentionPolicy` the full
+        borg-style daily/weekly/monthly ladder applies. ``dry_run=True``
+        reports what *would* be deleted without touching disk.
         """
         backups = self.list()
-        if len(backups) <= self.keep:
-            return []
-        keepers: set[str] = {b.path for b in backups[-self.keep :]}
-        seen_days: set[str] = set()
-        for backup in reversed(backups):
-            day = time.strftime("%Y-%m-%d", time.gmtime(backup.created_at))
-            if day not in seen_days:
-                seen_days.add(day)
-                keepers.add(backup.path)
+        if policy is None:
+            if len(backups) <= self.keep:
+                return []
+            keepers: set[str] = {b.path for b in backups[-self.keep:]}
+            seen_days: set[str] = set()
+            for backup in reversed(backups):
+                day = time.strftime("%Y-%m-%d", time.gmtime(backup.created_at))
+                if day not in seen_days:
+                    seen_days.add(day)
+                    keepers.add(backup.path)
+        else:
+            keepers = policy.select_keepers(backups)
         removed: list[str] = []
         for backup in backups:
             if backup.path in keepers:
+                continue
+            removed.append(backup.name)
+            if dry_run:
                 continue
             Path(backup.path).unlink(missing_ok=True)
             # A pruned snapshot's blob sidecar goes with it, or disk leaks.
             if backup.blob_name:
                 (self.directory / backup.blob_name).unlink(missing_ok=True)
-            removed.append(backup.name)
-        if removed:
+        if removed and not dry_run:
             removed_names = set(removed)
             entries = [
                 e for e in self._load_manifest()
@@ -394,8 +463,27 @@ class BackupManager:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return problems
 
-    def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None) -> Path:
-        """Extract a backup to ``target`` (default: alongside the backup)."""
+    def verify_all(self) -> dict[str, list[str]]:
+        """Deep-check every backup (restic ``check``): name → problems.
+
+        Empty problem lists are omitted from the result, so ``{}`` means
+        every backup is restorable.
+        """
+        report: dict[str, list[str]] = {}
+        for backup in self.list():
+            problems = self.verify(backup)
+            if problems:
+                report[backup.name] = problems
+        return report
+
+    def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None, overwrite: bool = False, safety_copy: bool = True) -> Path:
+        """Extract a backup to ``target`` (default: alongside the backup).
+
+        Refuses to overwrite an existing target unless ``overwrite=True``;
+        with ``safety_copy=True`` (default) an existing target is first copied
+        aside as ``<target>.pre-restore-<stamp>`` so a bad restore never
+        destroys the database it was meant to rescue.
+        """
         if isinstance(backup, (str, os.PathLike)):
             candidates = [b for b in self.list() if b.name == Path(str(backup)).name or b.path == str(backup)]
             if not candidates:
@@ -404,6 +492,16 @@ class BackupManager:
         destination = Path(target) if target else Path(backup.path).with_suffix("").with_suffix(".restored.db")
         if str(destination).endswith(".gz"):
             destination = destination.with_suffix("")
+        if destination.exists() and not overwrite:
+            raise StorageError(
+                f"restore target exists: {destination} "
+                "(pass overwrite=True to replace it)"
+            )
+        if destination.exists() and safety_copy:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            spare = destination.with_name(f"{destination.name}.pre-restore-{stamp}")
+            shutil.copy2(destination, spare)
+            _log.info("pre-restore safety copy: %s", spare)
         extracted = self._extract(backup, destination)
         _log.info("restored %s -> %s", backup.name, extracted)
         return extracted
@@ -566,6 +664,73 @@ class BackupManager:
             "git_repo": self.git_repo or None,
             "directory": str(self.directory),
         }
+
+    def estimate(self) -> dict[str, Any]:
+        """Project the next backup's size before taking it (borg ``info``)."""
+        pages = int(self.db.scalar("PRAGMA page_count", default=0))
+        page_size = int(self.db.scalar("PRAGMA page_size", default=0))
+        raw_bytes = pages * page_size
+        blob_bytes = 0
+        blob_files = 0
+        if self.include_blobs and self.blob_dir:
+            source = Path(self.blob_dir).expanduser()
+            if source.is_dir():
+                for path in source.rglob("*"):
+                    if path.is_file() and not path.is_symlink():
+                        blob_files += 1
+                        try:
+                            blob_bytes += path.stat().st_size
+                        except OSError:
+                            pass
+        return {
+            "db_pages": pages,
+            "db_raw_bytes": raw_bytes,
+            "db_compressed_estimate_bytes": int(raw_bytes * 0.35) if self.compress else raw_bytes,
+            "blob_files": blob_files,
+            "blob_bytes": blob_bytes,
+            "compressed": self.compress,
+        }
+
+    def format_table(self, theme: Any = None) -> str:
+        """borg-``list``-style backup table through the shared style layer."""
+        theme = theme or active_theme()
+        backups = self.list()
+        now = time.time()
+        rows = []
+        for backup in backups:
+            age_s = now - backup.created_at
+            if age_s < 3600:
+                age = f"{int(age_s // 60)}m"
+            elif age_s < 86400:
+                age = f"{age_s / 3600:.1f}h"
+            else:
+                age = f"{age_s / 86400:.1f}d"
+            rows.append([
+                backup.name,
+                age,
+                _backup_bytes(backup.size),
+                str(backup.blob_count) if backup.blob_count else "–",
+                f"v{backup.schema_version}",
+                backup.label or "–",
+            ])
+        table = styled_table(
+            ["name", "age", "size", "blobs", "schema", "label"],
+            rows, theme=theme,
+        )
+        total = sum(b.size for b in backups)
+        return (
+            header(f"backups ({len(backups)}, {_backup_bytes(total)})",
+                   theme=theme)
+            + "\n" + table
+        )
+
+
+def _backup_bytes(num: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num < 1024 or unit == "TB":
+            return f"{num:.1f}{unit}" if unit != "B" else f"{num}B"
+        num /= 1024
+    return f"{num:.1f}TB"  # pragma: no cover
 
 
 def _sha256_file(path: Path) -> str:

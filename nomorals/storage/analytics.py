@@ -26,6 +26,7 @@ call path degrades to SQLite and keeps working.
 from __future__ import annotations
 
 import threading
+import time as _time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,6 +34,7 @@ from typing import Any, Protocol
 from ..compat import load_optional
 from ..core.errors import StorageError
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, kv_lines, styled_table
 from .db import Database
 
 __all__ = [
@@ -126,7 +128,50 @@ class DuckDBAnalytics:
         self._conn = duckdb.connect(":memory:")
         self._lock = threading.RLock()
         self._loaded: dict[str, int] = {}
-        self.stats = {"tables_loaded": 0, "rows_loaded": 0, "queries": 0}
+        #: Attached SQLite databases: alias → path (zero-copy, always fresh).
+        self._attached: dict[str, str] = {}
+        #: query_cached memo: (sql, params) → (expires_at, rows).
+        self._cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+        self.stats = {"tables_loaded": 0, "rows_loaded": 0, "queries": 0,
+                      "cache_hits": 0}
+
+    # ── zero-copy attach ─────────────────────────────────────────────────
+    #
+    # The "SQLite + DuckDB blending" pattern: ATTACH the live SQLite file
+    # (TYPE SQLITE) instead of copying rows. Analytical queries see fresh
+    # data with no sync step; the SQLite file stays the system of record.
+    # Falls back to copy-sync for :memory: databases (no file to attach).
+
+    def attach(self, db: Database, *, alias: str = "src") -> list[str]:
+        """ATTACH a SQLite database file for zero-copy analytical queries.
+
+        Returns the table names visible under ``alias``. Query them as
+        ``alias.table`` — e.g. ``SELECT … FROM src.memories``.
+        """
+        if db.path is None or not db.path.exists():
+            raise StorageError(
+                "attach needs a file-backed database; use load_table() for :memory:"
+            )
+        path = str(db.path).replace("'", "''")
+        with self._lock:
+            self._conn.execute(
+                f"ATTACH '{path}' AS \"{alias}\" (TYPE SQLITE, READ_ONLY)"
+            )
+            self._attached[alias] = str(db.path)
+            rows = self._conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE table_catalog = '{alias}' AND table_schema = 'main' "
+                "ORDER BY table_name"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def detach(self, alias: str = "src") -> None:
+        with self._lock:
+            self._conn.execute(f'DETACH "{alias}"')
+            self._attached.pop(alias, None)
+
+    def attached(self) -> dict[str, str]:
+        return dict(self._attached)
 
     # ── sync ───────────────────────────────────────────────────────────────
     def load_table(
@@ -210,6 +255,7 @@ class DuckDBAnalytics:
             for table in self.table_names():
                 self._conn.execute(f'DROP TABLE IF EXISTS "{table}"')
             self._loaded.clear()
+            self._cache.clear()
 
     # ── parquet interchange ────────────────────────────────────────────────
     def to_parquet(self, table: str, path: str | Path) -> Path:
@@ -235,6 +281,142 @@ class DuckDBAnalytics:
             count = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
             self._loaded[table] = int(count)
         return int(count)
+
+    # ── analytical helpers ─────────────────────────────────────────────
+
+    def profile(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        """``EXPLAIN ANALYZE`` for a query — the slow-query story, answered."""
+        lowered = sql.lstrip().upper()
+        if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
+            raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        with self._lock:
+            cursor = self._conn.execute("EXPLAIN ANALYZE " + sql, list(params))
+            names = [d[0] for d in cursor.description or []]
+            rows = cursor.fetchall()
+        return [dict(zip(names, row, strict=True)) for row in rows]
+
+    def query_cached(
+        self, sql: str, params: Sequence[Any] = (),
+        *, ttl: float = 300.0,
+    ) -> list[dict[str, Any]]:
+        """Memoized :meth:`query` — expensive analytical queries, cached.
+
+        ``ttl`` seconds of freshness; pass ``ttl=0`` to bypass. The cache key
+        includes the params, and :meth:`clear` / :meth:`refresh` invalidate.
+        """
+        import json as _json
+
+        key = (sql, _json.dumps(list(params), default=str))
+        now = _time.time()
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None and ttl > 0 and hit[0] > now:
+                self.stats["cache_hits"] += 1
+                return [dict(r) for r in hit[1]]
+        rows = self.query(sql, params)
+        if ttl > 0:
+            with self._lock:
+                self._cache[key] = (now + ttl, [dict(r) for r in rows])
+        return rows
+
+    def invalidate_cache(self) -> int:
+        """Drop all cached query results. Returns entries cleared."""
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+        return count
+
+    def describe(self, table: str) -> dict[str, Any]:
+        """Column names/types plus row count — one-dict table overview."""
+        with self._lock:
+            cols = self._conn.execute(f'DESCRIBE SELECT * FROM "{table}"').fetchall()
+            count = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+        return {
+            "table": table,
+            "rows": int(count),
+            "columns": [
+                {"name": c[0], "type": c[1], "null": c[2], "key": c[3]}
+                for c in cols
+            ],
+        }
+
+    def sample(self, table: str, n: int = 100, *, seed: int = 42) -> list[dict[str, Any]]:
+        """Reservoir sample of ``n`` rows (``USING SAMPLE``)."""
+        return self.query(
+            f'SELECT * FROM "{table}" USING SAMPLE {max(1, n)} '
+            f"(reservoir, {seed})"
+        )
+
+    def histogram(
+        self, table: str, column: str, *, bins: int = 20,
+        where: str = "", params: Sequence[Any] = (),
+    ) -> list[dict[str, Any]]:
+        """Bin a numeric column into ``bins`` buckets (DuckDB ``histogram``)."""
+        sql = (
+            f'SELECT UNNEST(histogram("{column}", {max(1, bins)})) AS bin '
+            f'FROM "{table}"'
+        )
+        if where:
+            sql += f" WHERE {where}"
+        rows = self.query(sql, params)
+        out = []
+        for row in rows:
+            binned = row["bin"]
+            out.append({
+                "low": binned.get("low") if isinstance(binned, dict) else None,
+                "high": binned.get("high") if isinstance(binned, dict) else None,
+                "count": binned.get("count") if isinstance(binned, dict) else None,
+                "raw": binned,
+            })
+        return out
+
+    def to_csv(self, table: str, path: str | Path) -> Path:
+        """Export a loaded table to CSV."""
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._conn.execute(
+                f"COPY (SELECT * FROM \"{table}\") TO '{target}' (FORMAT CSV, HEADER)"
+            )
+        return target
+
+    def iter_query(
+        self, sql: str, params: Sequence[Any] = (),
+        *, batch: int = 10_000,
+    ) -> Any:
+        """Yield result batches — analytical results bigger than RAM."""
+        lowered = sql.lstrip().upper()
+        if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
+            raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        with self._lock:
+            cursor = self._conn.execute(sql, list(params))
+            names = [d[0] for d in cursor.description or []]
+            while True:
+                rows = cursor.fetchmany(batch)
+                if not rows:
+                    break
+                yield [dict(zip(names, row, strict=True)) for row in rows]
+        self.stats["queries"] += 1
+
+    def format_stats(self, theme: Any = None) -> str:
+        """Human-readable backend overview through the shared style layer."""
+        theme = theme or active_theme()
+        snap = self.stats_snapshot()
+        return "\n".join([
+            header("analytics (duckdb)", theme=theme),
+            *kv_lines(
+                {
+                    "tables": ", ".join(snap["tables"]) or "–",
+                    "attached": ", ".join(
+                        f"{a}→{p}" for a, p in self._attached.items()) or "–",
+                    "rows loaded": snap["rows_loaded"],
+                    "queries": snap["queries"],
+                    "cache hits": snap["cache_hits"],
+                    "cached queries": len(self._cache),
+                },
+                theme=theme,
+            ),
+        ])
 
     def close(self) -> None:
         with self._lock:
@@ -296,6 +478,100 @@ class SQLiteAnalytics:
     def clear(self) -> None:
         # No synced copies exist; nothing to drop.
         return None
+
+    # ── analytical helpers (same API as the DuckDB backend) ────────────
+
+    def profile(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        """``EXPLAIN QUERY PLAN`` — the portable half of DuckDB's ANALYZE."""
+        return self.db.explain(sql, params)
+
+    def query_cached(
+        self, sql: str, params: Sequence[Any] = (),
+        *, ttl: float = 300.0,
+    ) -> list[dict[str, Any]]:
+        """No cache on the passthrough backend — same signature, direct query."""
+        return self.query(sql, params)
+
+    def invalidate_cache(self) -> int:
+        return 0
+
+    def describe(self, table: str) -> dict[str, Any]:
+        cols = self.db.table_info(table)
+        return {
+            "table": table,
+            "rows": self.db.row_count(table),
+            "columns": [
+                {"name": c["name"], "type": c["type"], "null": not c["notnull"],
+                 "key": "pk" if c["pk"] else ""}
+                for c in cols
+            ],
+        }
+
+    def sample(self, table: str, n: int = 100, *, seed: int = 42) -> list[dict[str, Any]]:
+        # Portable reservoir-ish sample: random ordering is O(n) but this is
+        # the small-data backend by design.
+        return self.db.query(
+            f'SELECT * FROM "{table}" ORDER BY RANDOM() LIMIT ?',
+            (max(1, n),),
+        )
+
+    def histogram(
+        self, table: str, column: str, *, bins: int = 20,
+        where: str = "", params: Sequence[Any] = (),
+    ) -> list[dict[str, Any]]:
+        bounds = self.db.query_one(
+            f'SELECT MIN("{column}") AS lo, MAX("{column}") AS hi FROM "{table}"'
+            + (f" WHERE {where}" if where else ""),
+            params,
+        ) or {}
+        lo, hi = bounds.get("lo"), bounds.get("hi")
+        if lo is None or hi is None or lo == hi:
+            return []
+        width = (hi - lo) / max(1, bins)
+        rows = self.db.query(
+            f'SELECT CAST(("{column}" - ?) / ? AS INTEGER) AS b, COUNT(*) AS n '
+            f'FROM "{table}"' + (f" WHERE {where}" if where else "") +
+            ' GROUP BY b ORDER BY b',
+            (lo, width, *params),
+        )
+        return [
+            {"low": lo + r["b"] * width,
+             "high": lo + (r["b"] + 1) * width,
+             "count": r["n"], "raw": None}
+            for r in rows
+        ]
+
+    def iter_query(
+        self, sql: str, params: Sequence[Any] = (),
+        *, batch: int = 10_000,
+    ) -> Any:
+        """Yield result batches (same API as the DuckDB backend)."""
+        lowered = sql.lstrip().upper()
+        if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
+            raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        cursor = self.db.execute(sql, params)
+        try:
+            while True:
+                rows = cursor.fetchmany(batch)
+                if not rows:
+                    break
+                yield [dict(r) for r in rows]
+        finally:
+            cursor.close()
+        self.stats["queries"] += 1
+
+    def format_stats(self, theme: Any = None) -> str:
+        theme = theme or active_theme()
+        return "\n".join([
+            header("analytics (sqlite passthrough)", theme=theme),
+            *kv_lines(
+                {
+                    "tables": len(self.table_names()),
+                    "queries": self.stats["queries"],
+                },
+                theme=theme,
+            ),
+        ])
 
 
 def open_analytics(db: Database, *, prefer: str = "auto") -> AnalyticsBackend:

@@ -31,8 +31,9 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from ..core.errors import ConstraintViolation, NotFound, StorageError
 from ..core.logging_setup import get_logger
+from ..core.style import active_theme, header, kv_lines, paint, styled_table
 
-__all__ = ["Database", "Row", "split_sql", "transaction", "open_database"]
+__all__ = ["AsyncDatabase", "Database", "Row", "split_sql", "transaction", "open_database"]
 
 _log = get_logger(__name__)
 
@@ -83,6 +84,7 @@ class Database:
         readonly: bool = False,
         wal_autocheckpoint: int = 1000,
         slow_query_threshold_s: float | None = 5.0,
+        journal_size_limit: int = 64 * 1024 * 1024,
     ) -> None:
         self.path = Path(path) if path != ":memory:" else None
         self.wal = wal and self.path is not None
@@ -97,6 +99,10 @@ class Database:
         #: slower than this. None disables. Query observability: a bot that
         #: runs for weeks accrues slow queries silently without this.
         self.slow_query_threshold_s = slow_query_threshold_s
+        #: Cap on the -wal sidecar in bytes. When the WAL rewinds, pages above
+        #: this limit are returned to the filesystem instead of being held
+        #: for reuse — the dev.to "WAL never shrinks" fix. 0 disables.
+        self.journal_size_limit = journal_size_limit
 
         self._local = threading.local()
         self._write_lock = threading.RLock()
@@ -163,6 +169,7 @@ class Database:
                 ("cache_size", -self.cache_size_kb),
                 ("temp_store", "MEMORY"),
                 ("mmap_size", 256 * 1024 * 1024),
+                ("journal_size_limit", self.journal_size_limit),
             ]
             if self.wal:
                 pragmas.append(("wal_autocheckpoint", self.wal_autocheckpoint))
@@ -529,6 +536,92 @@ class Database:
         values = list(row.values())
         return (int(values[1] or 0), int(values[2] or 0))
 
+    def wal_health(self) -> dict[str, Any]:
+        """WAL health snapshot for the maintenance tick.
+
+        A long-running read transaction pins the checkpointer: ``log_pages``
+        keeps growing while ``checkpointed_pages`` stalls, and the -wal file
+        never rewinds. A scheduler tick that calls this and alerts when
+        ``lag_pages`` grows monotonically catches the leak weeks before disk
+        pressure does. (dev.to "Why your SQLite WAL file never shrinks".)
+        """
+        health: dict[str, Any] = {
+            "journal_mode": self.journal_mode(),
+            "wal_size_bytes": self.wal_size_bytes(),
+            "busy": 0,
+            "log_pages": 0,
+            "checkpointed_pages": 0,
+            "lag_pages": 0,
+        }
+        if not self.wal:
+            return health
+        try:
+            row = self.query_one("PRAGMA wal_checkpoint(PASSIVE)")
+            if row is not None:
+                values = list(row.values())
+                health["busy"] = int(values[0] or 0)
+                health["log_pages"] = int(values[1] or 0)
+                health["checkpointed_pages"] = int(values[2] or 0)
+                health["lag_pages"] = max(
+                    0, health["log_pages"] - health["checkpointed_pages"]
+                )
+        except sqlite3.Error:  # pragma: no cover - introspection only
+            pass
+        return health
+
+    def checkpoint_maintenance(self) -> dict[str, Any]:
+        """Idle-time WAL maintenance: TRUNCATE checkpoint with busy retry.
+
+        Call from a quiet-period scheduler tick (not the write hot path):
+        TRUNCATE rewinds the -wal file to zero bytes when no reader pins it.
+        Returns the checkpoint outcome; ``busy=True`` means a reader held the
+        log — retry on the next tick rather than forcing it.
+        """
+        before = self.wal_size_bytes()
+        busy = log_pages = 0
+        for _ in range(3):
+            busy, log_pages = self.checkpoint("TRUNCATE")
+            if not busy:
+                break
+            time.sleep(0.5)
+        after = self.wal_size_bytes()
+        return {
+            "busy": bool(busy),
+            "log_pages": log_pages,
+            "wal_bytes_before": before,
+            "wal_bytes_after": after,
+            "reclaimed_bytes": max(0, before - after),
+        }
+
+    def explain(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> list[dict[str, Any]]:
+        """``EXPLAIN QUERY PLAN`` rows as dicts — makes slow queries actionable."""
+        cursor = self.execute("EXPLAIN QUERY PLAN " + sql, params)
+        try:
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return [
+            {
+                "id": r[0],
+                "parent": r[1],
+                "notused": r[2],
+                "detail": r[3],
+            }
+            for r in rows
+        ]
+
+    def foreign_key_check(self) -> list[dict[str, Any]]:
+        """Rows violating foreign keys (empty = clean). Run after stress."""
+        cursor = self.execute("PRAGMA foreign_key_check")
+        try:
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return [
+            {"table": r[0], "rowid": r[1], "fk_table": r[2], "fk_index": r[3]}
+            for r in rows
+        ]
+
     def vacuum(self) -> None:
         self.execute("VACUUM")
 
@@ -588,6 +681,147 @@ class Database:
             info["size_bytes"] = self.path.stat().st_size
         with self._stats_lock:
             return {**self.stats, **info}
+
+    def format_stats(self, theme: Any = None) -> str:
+        """Human-readable database overview through the shared style layer."""
+        theme = theme or active_theme()
+        snap = self.stats_snapshot()
+        wal = self.wal_health() if not self.is_memory else {}
+        lines = [
+            header("database", theme=theme),
+            *kv_lines(
+                {
+                    "path": snap.get("path"),
+                    "journal": snap.get("journal_mode"),
+                    "tables": snap.get("tables"),
+                    "connections": snap.get("connections"),
+                    "size": _fmt_bytes(snap.get("size_bytes", 0)),
+                    "wal": _fmt_bytes(wal.get("wal_size_bytes", 0)) if wal else "n/a",
+                    "queries": snap.get("queries"),
+                    "writes": snap.get("writes"),
+                    "transactions": snap.get("transactions"),
+                    "retries": snap.get("retries"),
+                    "errors": paint(str(snap.get("errors")), "error", theme=theme)
+                    if snap.get("errors")
+                    else "0",
+                    "slow queries": snap.get("slow_queries"),
+                },
+                theme=theme,
+            ),
+        ]
+        if wal and wal.get("lag_pages"):
+            lines.append(
+                paint(
+                    f"⚠ WAL lag: {wal['lag_pages']} pages uncheckpointed "
+                    f"({wal['log_pages']} log / {wal['checkpointed_pages']} done) — "
+                    "a pinned reader may be blocking the checkpointer",
+                    "warn",
+                    theme=theme,
+                )
+            )
+        return "\n".join(lines)
+
+
+def _fmt_bytes(value: Any) -> str:
+    try:
+        num = float(value or 0)
+    except (TypeError, ValueError):
+        return str(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num < 1024 or unit == "TB":
+            return f"{num:.1f}{unit}" if unit != "B" else f"{int(num)}B"
+        num /= 1024
+    return f"{num:.1f}TB"  # pragma: no cover
+
+
+class AsyncDatabase:
+    """Async offload wrapper around :class:`Database`.
+
+    The stdlib ``sqlite3`` API is blocking; calling it inside ``async def``
+    stalls the event loop for the whole query. This wrapper routes every call
+    through a dedicated single-thread executor (the loom/bateau84 skill's
+    prescription, pinned to one thread so even ``:memory:`` databases keep a
+    single thread-local connection) so async handlers stay responsive. The
+    underlying :class:`Database` is thread-safe by design (thread-local
+    connections, single-writer lock), so this is safe — not a workaround.
+
+        adb = AsyncDatabase(db)
+        rows = await adb.query("SELECT * FROM memories LIMIT 10")
+        async with adb.transaction():
+            await adb.execute("INSERT INTO t (a) VALUES (?)", (1,))
+    """
+
+    def __init__(self, db: Database) -> None:
+        import concurrent.futures
+
+        self._db = db
+        #: One thread for all DB work: calls serialize here (SQLite is
+        #: single-writer anyway) and share one thread-local connection —
+        #: this is what makes ``:memory:`` databases work under async.
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="nm-asyncdb",
+        )
+
+    @property
+    def db(self) -> Database:
+        return self._db
+
+    def close(self) -> None:
+        """Shut down the backing executor (the Database itself is untouched)."""
+        self._executor.shutdown(wait=True)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        attr = getattr(self._db, name)
+        if not callable(attr) or name in {"transaction"}:
+            return attr
+
+        import asyncio
+        import functools
+
+        @functools.wraps(attr)
+        async def _offloaded(*args: Any, **kwargs: Any) -> Any:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._executor, functools.partial(attr, *args, **kwargs)
+            )
+
+        return _offloaded
+
+    def transaction(self, **kwargs: Any) -> "_AsyncTransaction":
+        return _AsyncTransaction(self, **kwargs)
+
+
+class _AsyncTransaction:
+    """``async with adb.transaction():`` — offloads the sync context manager."""
+
+    def __init__(self, adb: AsyncDatabase, **kwargs: Any) -> None:
+        self._adb = adb
+        self._kwargs = kwargs
+        self._cm: Any = None
+
+    async def __aenter__(self) -> AsyncDatabase:
+        import asyncio
+
+        adb, kwargs = self._adb, self._kwargs
+        loop = asyncio.get_running_loop()
+
+        def _enter() -> Any:
+            self._cm = adb.db.transaction(**kwargs)
+            return self._cm.__enter__()
+
+        await loop.run_in_executor(adb._executor, _enter)
+        return adb
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        import asyncio
+
+        cm, self._cm = self._cm, None
+        if cm is None:
+            return False
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._adb._executor, cm.__exit__, *exc)
 
 
 class MigrationSummary:

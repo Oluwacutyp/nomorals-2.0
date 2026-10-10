@@ -46,8 +46,12 @@ __all__ = [
     "S3BlobStore",
     "S3Config",
     "open_blob_store",
+    "presign_url",
     "sign_request",
 ]
+
+#: Part size for multipart uploads (boto3 ``Upload`` default is 8 MiB).
+_MULTIPART_PART_SIZE = 8 * 1024 * 1024
 
 _log = get_logger(__name__)
 
@@ -172,8 +176,62 @@ def sign_request(
     }
 
 
-# ── configuration ──────────────────────────────────────────────────────────
+def presign_url(
+    method: str,
+    url: str,
+    *,
+    access_key: str,
+    secret_key: str,
+    region: str,
+    service: str = "s3",
+    expires_in: int = 3600,
+    timestamp: str | None = None,
+) -> str:
+    """Return a SigV4 presigned URL for ``method`` on ``url`` (query auth).
 
+    Presigned URLs let a phone or browser upload/download blobs directly
+    against the object store without proxying bytes through the bot — the
+    single most useful S3 feature for a personal agent (boto3
+    ``generate_presigned_url`` semantics, stdlib only). ``expires_in`` is
+    capped at 604800 (7 days, the SigV4 maximum). ``timestamp`` pins the
+    signing time for deterministic tests.
+    """
+    if expires_in <= 0 or expires_in > 604800:
+        raise ValueError("expires_in must be within 1..604800 seconds")
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    default_port = (parsed.scheme == "https" and parsed.port == 443) or (
+        parsed.scheme == "http" and parsed.port == 80
+    )
+    if parsed.port and not default_port:
+        host = f"{host}:{parsed.port}"
+    amz_date = timestamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    datestamp = amz_date[:8]
+    scope = f"{datestamp}/{region}/{service}/aws4_request"
+    params = {
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Credential": f"{access_key}/{scope}",
+        "X-Amz-Date": amz_date,
+        "X-Amz-Expires": str(expires_in),
+        "X-Amz-SignedHeaders": "host",
+    }
+    canonical, _signed = _canonical_request(
+        method.upper(), parsed, params, {"host": host}, "UNSIGNED-PAYLOAD"
+    )
+    string_to_sign = (
+        f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n"
+        + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    )
+    signing_key = _signing_key(secret_key, datestamp, region, service)
+    signature = hmac.new(
+        signing_key, string_to_sign.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    params["X-Amz-Signature"] = signature
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return base + "?" + _encode_query(params)
+
+
+# ── configuration ──────────────────────────────────────────────────────────
 @dataclass
 class S3Config:
     """Connection details for an S3-compatible endpoint.
@@ -246,12 +304,19 @@ class S3BlobStore:
         *,
         compress_above: int = 4096,
         compressible: tuple[str, ...] = _DEFAULT_COMPRESSIBLE,
+        multipart_threshold: int = 64 * 1024 * 1024,
+        multipart_part_size: int = _MULTIPART_PART_SIZE,
     ) -> None:
         if not isinstance(config, S3Config):
             raise ConfigError("S3BlobStore needs an S3Config (see S3Config.from_env)")
         self.config = config
         self.compress_above = compress_above
         self.compressible = compressible
+        #: Files at/above this size upload via multipart (boto3 ``Upload``
+        #: behavior): parts stream from disk, a failed part retries without
+        #: restarting the whole file.
+        self.multipart_threshold = multipart_threshold
+        self.multipart_part_size = multipart_part_size
         self.stats = {"puts": 0, "dedup_hits": 0, "gets": 0, "bytes_written": 0}
 
     # ── keys & policy ────────────────────────────────────────────────────────
@@ -442,6 +507,111 @@ class S3BlobStore:
         )
         self._check("PUT", key, status, body)
 
+    # ── multipart upload ─────────────────────────────────────────────────
+    #
+    # boto3's ``Upload`` switches to multipart for large files: parts upload
+    # independently (a failed part retries alone) and the server assembles
+    # them. Implemented here with stdlib HTTP so model files and media stop
+    # being single-shot 2GB PUTs.
+
+    @staticmethod
+    def _xml_text(data: bytes, *tags: str) -> str:
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError:
+            return ""
+        for tag in tags:
+            found = root.findtext(tag) or root.findtext("{*}" + tag)
+            if found:
+                return found
+        return ""
+
+    def _create_multipart(self, key: str, metadata: dict[str, str]) -> str:
+        status, _, body = self._request(
+            "POST", key, query_params={"uploads": ""},
+            extra_headers=self._meta_headers(metadata),
+        )
+        self._check("POST (create multipart)", key, status, body)
+        upload_id = self._xml_text(body, "UploadId")
+        if not upload_id:
+            raise StorageError(f"multipart create for {key} returned no UploadId")
+        return upload_id
+
+    def _upload_part(
+        self, key: str, upload_id: str, part_number: int, data: bytes
+    ) -> str:
+        status, headers, body = self._request(
+            "PUT", key,
+            query_params={"partNumber": str(part_number), "uploadId": upload_id},
+            body=data,
+            payload_hash=hashlib.sha256(data).hexdigest(),
+        )
+        self._check(f"PUT (part {part_number})", key, status, body)
+        etag = headers.get("etag", "")
+        if not etag:
+            raise StorageError(f"multipart part {part_number} for {key} returned no ETag")
+        return etag
+
+    def _complete_multipart(
+        self, key: str, upload_id: str, etags: list[str]
+    ) -> None:
+        parts = "".join(
+            f"<Part><PartNumber>{i + 1}</PartNumber><ETag>{etag}</ETag></Part>"
+            for i, etag in enumerate(etags)
+        )
+        payload = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f"<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>"
+        ).encode("utf-8")
+        status, _, body = self._request(
+            "POST", key,
+            query_params={"uploadId": upload_id},
+            body=payload,
+            payload_hash=hashlib.sha256(payload).hexdigest(),
+            extra_headers={"Content-Type": "application/xml"},
+        )
+        self._check("POST (complete multipart)", key, status, body)
+
+    def _abort_multipart(self, key: str, upload_id: str) -> None:
+        try:
+            status, _, body = self._request(
+                "DELETE", key, query_params={"uploadId": upload_id}, retries=0,
+            )
+            if status not in (200, 204, 404):
+                _log.warning("multipart abort for %s returned %s", key, status)
+        except Exception as exc:  # noqa: BLE001 - abort is best-effort cleanup
+            _log.debug("multipart abort for %s failed: %s", key, exc)
+
+    def _put_file_multipart(
+        self, key: str, path: Path, size: int, payload_hash: str,
+        metadata: dict[str, str],
+        progress: Any = None,
+    ) -> None:
+        """Stream ``path`` to ``key`` in parts. Aborts cleanly on failure."""
+        upload_id = self._create_multipart(key, metadata)
+        etags: list[str] = []
+        sent = 0
+        try:
+            with path.open("rb") as handle:
+                part_number = 1
+                while True:
+                    chunk = handle.read(self.multipart_part_size)
+                    if not chunk:
+                        break
+                    etags.append(
+                        self._upload_part(key, upload_id, part_number, chunk)
+                    )
+                    part_number += 1
+                    sent += len(chunk)
+                    if progress is not None:
+                        progress(sent, size)
+            if not etags:  # pragma: no cover - empty file never reaches here
+                raise StorageError(f"cannot multipart-upload empty file {path}")
+            self._complete_multipart(key, upload_id, etags)
+        except Exception:
+            self._abort_multipart(key, upload_id)
+            raise
+
     def _head(self, key: str) -> dict[str, str] | None:
         status, headers, _ = self._request("HEAD", key)
         if status == 404:
@@ -587,8 +757,13 @@ class S3BlobStore:
         mime: str = "",
         refcount: int = 1,
         move: bool = False,
+        progress: Any = None,
     ) -> BlobInfo:
-        """Store a file, streaming the upload so large files stay off the heap."""
+        """Store a file, streaming the upload so large files stay off the heap.
+
+        Files at/above ``multipart_threshold`` upload in parts (boto3
+        ``Upload`` behavior); ``progress(done, total)`` reports both paths.
+        """
         path = Path(source).expanduser()
         if not path.is_file():
             raise NotFound(f"file not found: {path}")
@@ -623,10 +798,20 @@ class S3BlobStore:
                 upload_path, stored = path, size
                 payload_hash = sha256
             info = BlobInfo(sha256, size, guessed, should_compress, stored, refcount, time.time())
-            with upload_path.open("rb") as handle:
-                self._put_stream_hashed(
-                    key, handle, stored, payload_hash, self._metadata_for(info)
+            metadata = self._metadata_for(info)
+            if stored >= self.multipart_threshold:
+                # Multipart needs a real file path (parts stream from disk).
+                self._put_file_multipart(
+                    key, upload_path, stored, payload_hash, metadata,
+                    progress=progress,
                 )
+            else:
+                with upload_path.open("rb") as handle:
+                    self._put_stream_hashed(
+                        key, handle, stored, payload_hash, metadata,
+                    )
+                if progress is not None:
+                    progress(stored, stored)
         finally:
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
@@ -680,8 +865,117 @@ class S3BlobStore:
         target.write_bytes(data)
         return target
 
+    def get_range(self, sha256: str, start: int, end: int) -> bytes:
+        """Fetch bytes ``[start, end]`` (inclusive, HTTP Range semantics).
+
+        Media streaming without downloading the whole object. Compressed
+        blobs raise :class:`StorageError` — ranges address stored bytes, and
+        a gzip member is not addressable; callers should store media
+        uncompressed (the default policy already does).
+        """
+        if start < 0 or end < start:
+            raise ValueError("invalid range")
+        info = self.info(sha256)
+        if info is None:
+            raise NotFound(f"blob {sha256} not in store")
+        if info.compressed:
+            raise StorageError(
+                f"blob {sha256} is gzip-compressed; byte ranges are not addressable"
+            )
+        key = self._key(sha256, False)
+        status, _, data = self._request(
+            "GET", key, extra_headers={"Range": f"bytes={start}-{end}"}
+        )
+        if status == 404:
+            raise NotFound(f"blob object not found: {key}")
+        if status not in (200, 206):
+            raise StorageError(self._s3_error(status, data))
+        self.stats["gets"] += 1
+        return data
+
     def open(self, sha256: str) -> BinaryIO:
         return io.BytesIO(self.get_bytes(sha256))
+
+    # ── presigned URLs & bucket setup ────────────────────────────────────
+
+    def presigned_get(self, sha256: str, *, expires_in: int = 3600) -> str:
+        """A shareable download URL for ``sha256`` (no credentials needed).
+
+        Hand this to a phone, a browser, or another machine: it downloads the
+        blob directly from object storage without proxying through the bot.
+        """
+        info = self.info(sha256)
+        if info is None:
+            raise NotFound(f"blob {sha256} not in store")
+        url = self._url(self._key(sha256, info.compressed))
+        return presign_url(
+            "GET", url,
+            access_key=self.config.access_key,
+            secret_key=self.config.secret_key,
+            region=self.config.region,
+            expires_in=expires_in,
+        )
+
+    def presigned_put(self, key_hint: str = "", *, expires_in: int = 900,
+                      content_type: str = "") -> dict[str, str]:
+        """A one-shot upload URL: the holder PUTs bytes straight to storage.
+
+        Returns ``{"url": ..., "key": ...}``. The object lands under this
+        store's prefix but outside content addressing — call
+        :meth:`put_file`/:meth:`put_bytes` afterwards (or a ``sync`` pass)
+        to index it. ``content_type`` is advisory for the uploader.
+        """
+        import secrets
+
+        hint = "".join(
+            c for c in key_hint if c.isalnum() or c in "-_.")[:64] or "upload"
+        key = f"{self.config.prefix}incoming/{int(time.time())}-{secrets.token_hex(8)}-{hint}"
+        url = self._url(key)
+        signed = presign_url(
+            "PUT", url,
+            access_key=self.config.access_key,
+            secret_key=self.config.secret_key,
+            region=self.config.region,
+            expires_in=expires_in,
+        )
+        return {"url": signed, "key": key, "content_type": content_type}
+
+    def ensure_bucket(self) -> bool:
+        """Create the bucket if missing. Returns True when created."""
+        url = self._url("")
+        # _url("") with path_style gives "<endpoint>/<bucket>/"; strip the
+        # trailing slash for the bucket-level PUT.
+        bucket_url = url.rstrip("/") if self.config.path_style else url
+        parsed = urllib.parse.urlparse(bucket_url)
+        host = parsed.hostname or ""
+        signed = sign_request(
+            "PUT", bucket_url,
+            access_key=self.config.access_key,
+            secret_key=self.config.secret_key,
+            region=self.config.region,
+        )
+        headers = {
+            "Host": host,
+            "Content-Length": "0",
+            "x-amz-date": signed["x-amz-date"],
+            "Authorization": signed["Authorization"],
+        }
+        path = parsed.path or "/"
+        try:
+            conn_cls = (http.client.HTTPSConnection
+                        if parsed.scheme == "https" else http.client.HTTPConnection)
+            conn = conn_cls(host, parsed.port, timeout=self.config.timeout)
+            try:
+                conn.request("PUT", path, body=b"", headers=headers)
+                response = conn.getresponse()
+                status, data = response.status, response.read()
+            finally:
+                conn.close()
+        except (OSError, http.client.HTTPException) as exc:
+            raise StorageError(f"ensure_bucket failed: {exc}") from exc
+        if status in (200, 409):  # 409 BucketAlreadyOwnedByYou
+            return status == 200
+        raise StorageError(self._s3_error(status, data))
 
     # ── metadata ───────────────────────────────────────────────────────────
     def info(self, sha256: str) -> BlobInfo | None:
