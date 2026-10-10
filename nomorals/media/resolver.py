@@ -421,6 +421,15 @@ class SourceResolver:
         if not permalink:
             raise ResolutionError("soundcloud-api",
                                   "track has no permalink URL")
+        # Preview-only tracks (~30s clips) are useless — fall through to
+        # full-track sources (YouTube, Audiomack, etc.) instead of
+        # silently downloading a preview.
+        policy = str(tr.get("policy") or "").upper()
+        if policy and policy != "ALLOW":
+            raise ResolutionError(
+                "soundcloud-api",
+                f"track {tr.get('title', '')!r} is {policy} "
+                f"(preview-only); trying full-track sources")
         return ResolvedAudio(
             ok=True, path_or_url=permalink,
             title=str(tr.get("title") or permalink),
