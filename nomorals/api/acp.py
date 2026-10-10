@@ -27,6 +27,13 @@ COVERAGE — honest accounting of the spec surface:
     devon/tools (Devon extension, NOT part of the ACP spec: lists the
     tool registry filtered to the session principal's capability grant).
 
+  session/update notifications: agent_message_chunk (completed message in
+    chunks — the loop does not token-stream), tool_call / tool_call_update
+    (live, around each real tool invocation, with spec ToolKind, rawInput,
+    rawOutput, and file locations for follow-along), plan (turn goal,
+    in_progress → completed), available_commands_update (on session/new,
+    from the capability-filtered registry).
+
   NOT implemented → JSON-RPC -32601 (method_not_found), never fake success:
     session/request_permission — agent→client direction; this agent never
     requests permissions because every tool call is gated by the session
@@ -86,6 +93,69 @@ _IMPLEMENTED = frozenset({
     "session/set_model",
     "devon/tools",
 })
+
+#: Registry tool name → ACP ToolKind. First token-prefix match wins;
+#: "other" is the schema default. (Spec: the kind "helps clients choose
+#: appropriate icons and UI treatment".)
+_TOOL_KIND_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("read", ("read", "get", "list", "show", "cat", "load")),
+    ("edit", ("write", "edit", "update", "set", "create", "apply", "patch",
+               "append")),
+    ("delete", ("delete", "remove", "rm", "purge", "drop", "forget")),
+    ("move", ("move", "rename", "mv")),
+    ("search", ("search", "query", "grep", "find", "lookup", "recall")),
+    ("execute", ("run", "exec", "shell", "bash", "command", "eval",
+                 "spawn")),
+    ("fetch", ("fetch", "download", "http", "web", "browser", "curl",
+               "wget", "scrape")),
+    ("think", ("think", "plan", "reason", "reflect", "decide")),
+)
+
+#: Tool kwarg names that carry an absolute file path → ToolCallLocation
+#: ("enables follow-along features in clients").
+_PATH_ARG_KEYS = ("path", "file", "filepath", "filename", "target_path")
+
+
+def _tool_kind(name: str) -> str:
+    """Map a registry tool name to a spec ToolKind by token-prefix."""
+    tokens = [t for t in "".join(
+        c if c.isalnum() else " " for c in name.lower()).split() if t]
+    for kind, prefixes in _TOOL_KIND_RULES:
+        for token in tokens:
+            if token == "tool" or token == "devon":
+                continue
+            if any(token.startswith(p) for p in prefixes):
+                return kind
+    return "other"
+
+
+def _tool_locations(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    """Absolute-path kwargs → ToolCallLocation list."""
+    locations: list[dict[str, Any]] = []
+    for key in _PATH_ARG_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and os.path.isabs(value):
+            locations.append({"path": value})
+    return locations
+
+
+def _safe_json(value: Any, *, max_string: int = 4000) -> Any:
+    """Make ``value`` JSON-safe for rawInput/rawOutput (default=str,
+    long strings truncated, total payload capped). Never raises."""
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 - defensive, should not happen
+        return str(value)[:max_string]
+    if len(text) > 2 * max_string:
+        # Too big for a notification frame: keep a readable prefix.
+        return text[:2 * max_string] + "…"
+    try:
+        decoded = json.loads(text)
+    except Exception:  # noqa: BLE001 - defensive
+        return str(value)[:max_string]
+    if isinstance(decoded, str) and len(decoded) > max_string:
+        return decoded[:max_string] + "…"
+    return decoded
 
 
 class ACPError(Exception):
@@ -165,6 +235,10 @@ class ACPServer:
         # Serializes the default turn's registry.call tracing: two
         # concurrent turns must not interleave their monkeypatches.
         self._turn_lock = threading.RLock()
+        # Client capabilities from initialize (fs.readTextFile/writeTextFile,
+        # terminal, auth, elicitation) — recorded so future agent→client
+        # calls (fs/*, terminal/*) know what the client supports.
+        self.client_capabilities: dict[str, Any] = {}
         if self._principal is None and self._principal_resolver is None:
             from .server import DEFAULT_PRINCIPAL
             self._principal = DEFAULT_PRINCIPAL
@@ -294,16 +368,26 @@ class ACPServer:
             if session.cancel_event.is_set():
                 raise _CancelTurn()
             tool_call_id = f"tc_{new_id()[:8]}"
-            emit(self._session_update(session.id, {
+            kind = _tool_kind(name)
+            raw_input = _safe_json(kwargs if kwargs else list(args))
+            locations = _tool_locations(
+                kwargs if isinstance(kwargs, dict) else {})
+            tool_call: dict[str, Any] = {
                 "sessionUpdate": "tool_call",
                 "toolCallId": tool_call_id,
                 "title": name,
-                "kind": "other",
+                "name": name,
+                "kind": kind,
                 "status": "in_progress",
-            }))
+                "rawInput": raw_input,
+            }
+            if locations:
+                tool_call["locations"] = locations
+            emit(self._session_update(session.id, tool_call))
             outcome = orig_call(name, *args, **kwargs)
             status = "completed"
             content: list[dict[str, Any]] = []
+            raw_output: Any = None
             try:
                 ok = bool(getattr(outcome, "ok", False)) if hasattr(
                     outcome, "ok") else True
@@ -312,17 +396,21 @@ class ACPServer:
                 val = getattr(outcome, "value", outcome)
                 if hasattr(outcome, "error") and not ok:
                     val = getattr(outcome, "error")
+                raw_output = _safe_json(val)
                 content = [{"type": "content",
                             "content": {"type": "text",
                                         "text": str(val)[:4000]}}]
             except Exception:  # noqa: BLE001 - tracing must never break a turn
                 pass
-            emit(self._session_update(session.id, {
+            update: dict[str, Any] = {
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": tool_call_id,
                 "status": status,
                 "content": content,
-            }))
+            }
+            if raw_output is not None:
+                update["rawOutput"] = raw_output
+            emit(self._session_update(session.id, update))
             if session.cancel_event.is_set():
                 raise _CancelTurn()
             return outcome
@@ -365,12 +453,61 @@ class ACPServer:
                             "text": text[i:i + width] or ""},
             }))
 
+    def _emit_plan(self, session: ACPSession, goal: str, emit: EmitFn,
+                   *, status: str) -> None:
+        """Report the turn's execution plan (spec: the client replaces its
+        whole plan with each update). One entry — the real goal of this
+        turn — in_progress at turn start, completed when the turn ends."""
+        try:
+            emit(self._session_update(session.id, {
+                "sessionUpdate": "plan",
+                "entries": [{
+                    "content": (goal[:200] or "Handle the prompt"),
+                    "priority": "medium",
+                    "status": status,
+                }],
+            }))
+        except Exception:  # noqa: BLE001 - plan is visibility, not control
+            _log.debug("acp: plan emit failed", exc_info=True)
+
+    def _emit_available_commands(self, session: ACPSession,
+                                 emit: EmitFn) -> None:
+        """Advertise slash commands from the capability-filtered registry
+        (spec: available_commands_update — "commands are ready or have
+        changed")."""
+        if self.registry is None:
+            return
+        try:
+            schemas = self.registry.schemas(
+                capabilities=self.principal.grant)
+            commands = [
+                {"name": s.get("name"),
+                 "description": str(s.get("description") or "")}
+                for s in schemas
+                if isinstance(s, dict) and s.get("name")
+            ]
+        except Exception:  # noqa: BLE001 - commands are additive
+            _log.debug("acp: available-commands emit failed", exc_info=True)
+            return
+        try:
+            emit(self._session_update(session.id, {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": commands,
+            }))
+        except Exception:  # noqa: BLE001 - commands are additive
+            _log.debug("acp: available-commands emit failed", exc_info=True)
+
     # ── method handlers ───────────────────────────────────────────────
     def _handle(self, method: str, params: dict[str, Any],
                 emit: EmitFn) -> Any:
         if method == "initialize":
             requested = params.get("protocolVersion", PROTOCOL_VERSION)
             version = min(int(requested or PROTOCOL_VERSION), PROTOCOL_VERSION)
+            # Record what the client can do (fs.readTextFile/writeTextFile,
+            # terminal, auth, elicitation) for future agent→client calls.
+            client_caps = params.get("clientCapabilities")
+            if isinstance(client_caps, dict):
+                self.client_capabilities = client_caps
             return {
                 "protocolVersion": version,
                 "agentCapabilities": {
@@ -381,6 +518,8 @@ class ACPServer:
                         "audio": False,
                         "embeddedContext": False,
                     },
+                    # Honest: declared mcpServers are accepted, not wired.
+                    "mcpCapabilities": {"http": False, "sse": False},
                 },
                 "authMethods": [],
                 "agentInfo": {"name": "devon", "version": "2.0"},
@@ -392,6 +531,7 @@ class ACPServer:
         if method == "session/new":
             session = self._new_session(params)
             _log.info("acp: new session %s cwd=%s", session.id, session.cwd)
+            self._emit_available_commands(session, emit)
             return {"sessionId": session.id}
         if method == "session/load":
             session = self._get_session(str(params.get("sessionId") or ""))
@@ -422,6 +562,7 @@ class ACPServer:
                 raise ACPError("session/prompt needs at least one text "
                                "content block", INVALID_PARAMS)
             session.touch()
+            self._emit_plan(session, text, emit, status="in_progress")
             try:
                 final = self._turn_fn(session, text, emit)
             except _CancelTurn:
@@ -437,6 +578,9 @@ class ACPServer:
             else:
                 stop = "end_turn"
                 self._emit_message_chunks(session.id, final, emit)
+            # PlanEntryStatus has no "failed" — a stopped turn still
+            # completes its (single) plan entry.
+            self._emit_plan(session, text, emit, status="completed")
             session.touch()
             return {"stopReason": stop}
         if method == "devon/tools":
@@ -649,7 +793,12 @@ def serve_acp_sse(handler: Any, api_server: Any, acp: ACPServer,
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
     handler.send_header("X-Accel-Buffering", "no")
+    request_id = getattr(handler, "_request_id", "")
+    if request_id:
+        handler.send_header("X-Request-ID", request_id)
     handler.end_headers()
     try:
         for frame in acp.iter_sse(body):

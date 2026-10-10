@@ -38,12 +38,34 @@ Request limits
 without a usable length (chunked transfer encoding) are read through a hard
 cap and minimally decoded. Parsed JSON is walked with guards on nesting depth,
 per-string length, total string bytes, and container element counts.
+
+Cross-cutting HTTP behavior
+---------------------------
+* **Request IDs** — every request gets an ``X-Request-ID`` (a client-sent one
+  is honored, otherwise ``req_<ulid12>``). It is echoed on every response,
+  carried in error bodies (RFC 9457 ``instance``), and included in log lines,
+  so any error can be correlated with server logs.
+* **Error envelope** — non-2xx responses are RFC 9457 problem-details
+  (``application/problem+json``): ``type``/``title``/``status``/``detail``/
+  ``instance`` plus ``code`` (stable machine-readable slug) and the legacy
+  ``error`` message as extension members, so old clients keep working.
+* **Rate limiting** — opt-in token-bucket limiter (the industry default:
+  AWS API Gateway, Stripe) keyed by principal name. Exhaustion → 429 with
+  ``Retry-After``; every response carries GitHub-style
+  ``X-RateLimit-Limit/Remaining/Reset`` headers. The owner principal is
+  exempt; the tokenless ``/live`` probe is exempt.
+* **Readiness** — ``GET /live`` stays the tokenless static liveness probe;
+  ``GET /ready`` (authenticated) verifies the database answers and returns
+  503 when it cannot.
+* **CORS** — off by default; ``cors_origins=[...]`` enables origin echoing
+  plus an ``OPTIONS`` preflight handler.
 """
 
 from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import re
 import threading
@@ -55,6 +77,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..llm.brain import brain_for
 from ..core.errors import CapabilityDenied, NoMoralsError, classify
+from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
 from ..version import __version__
@@ -65,12 +88,25 @@ __all__ = [
     "DEFAULT_PRINCIPAL",
     "OWNER_PRINCIPAL",
     "Principal",
+    "RateLimiter",
+    "ServiceUnavailable",
     "serve",
 ]
 
 _log = get_logger(__name__)
 
 _ROUTE = re.compile(r"^/[a-z0-9_/-]+$")
+#: Client-supplied request ids are echoed verbatim on the response, so
+#: they must be header-safe: anything outside this token charset is
+#: ignored and a fresh id is minted (blocks response-splitting).
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.~+/-]{1,128}$")
+
+
+def _new_request_id(headers: Any) -> str:
+    presented = headers.get("X-Request-ID", "").strip()
+    if presented and _REQUEST_ID_RE.match(presented):
+        return presented
+    return f"req_{new_id()[:12]}"
 
 #: Default cap on a single request body (1 MiB). Constructor-configurable;
 #: when not given, ``settings.api.max_body_mb`` is honored if positive.
@@ -114,6 +150,126 @@ DEFAULT_GRANT = CapabilitySet.of(
 #: The principal every request resolves to when the server runs without an
 #: auth token. Explicit and bounded — never a silent ``CapabilitySet.all()``.
 DEFAULT_PRINCIPAL = Principal(name="local", grant=DEFAULT_GRANT)
+
+
+class ServiceUnavailable(NoMoralsError):
+    """The server cannot serve traffic right now (→ 503). Raised by
+    ``GET /ready`` when the database does not answer."""
+
+    code = "service_unavailable"
+    retryable = True
+
+
+#: RFC 9457 ``title`` for each status we emit.
+_PROBLEM_TITLES = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    413: "Content Too Large",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+
+#: Machine-readable ``code`` slugs for each status we emit.
+_PROBLEM_CODES = {
+    400: "bad_request",
+    401: "auth_required",
+    403: "capability_denied",
+    404: "not_found",
+    405: "method_not_allowed",
+    413: "body_too_large",
+    429: "rate_limited",
+    500: "internal_error",
+    503: "service_unavailable",
+}
+
+
+def _problem_body(
+    status: int,
+    code: str,
+    detail: str,
+    request_id: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build an RFC 9457 problem-details envelope.
+
+    ``type`` stays ``about:blank`` (no public docs URL exists for these
+    codes — explicitly permitted by the RFC); the stable machine-readable
+    slug rides in ``code``, and the legacy ``error`` message is kept as an
+    extension member so old clients keep working.
+    """
+    body: dict[str, Any] = {
+        "type": "about:blank",
+        "title": _PROBLEM_TITLES.get(status, "Error"),
+        "status": status,
+        "detail": detail,
+        "instance": request_id,
+        "code": code,
+        "error": detail,
+    }
+    body.update(extra)
+    return body
+
+
+class RateLimiter:
+    """Token-bucket rate limiter, O(1) state per key (tokens + timestamp).
+
+    Mined from the industry default for public APIs (AWS API Gateway,
+    Stripe): a bucket holds up to ``capacity`` tokens and refills at a
+    steady rate; each request spends one token. Short bursts up to the
+    bucket capacity are allowed *by design* — the long-term rate stays
+    exact. Refill is lazy, computed from elapsed monotonic time on each
+    check, so idle keys cost nothing and there is no sweeper thread.
+
+    ``clock`` is injectable so tests can drive time deterministically.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def check(
+        self, key: str, *, per_minute: float
+    ) -> tuple[bool, int, float, float]:
+        """Try to spend one token for ``key``.
+
+        Returns ``(allowed, remaining, retry_after_s, reset_epoch_s)``:
+        ``retry_after_s`` is 0 when allowed, ``reset_epoch_s`` is the wall
+        time when the bucket refills completely (GitHub-style
+        ``X-RateLimit-Reset``).
+        """
+        rate = per_minute / 60.0  # tokens per second
+        capacity = max(1, int(per_minute))
+        now = self._clock()
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = [float(capacity), now]
+                self._buckets[key] = bucket
+            tokens, updated = bucket
+            tokens = min(float(capacity), tokens + (now - updated) * rate)
+            if tokens >= 1.0:
+                tokens -= 1.0
+                allowed, retry_after = True, 0.0
+            else:
+                allowed = False
+                retry_after = (1.0 - tokens) / rate if rate > 0 else 0.0
+            bucket[0], bucket[1] = tokens, now
+            remaining = int(tokens)
+        reset_in = (capacity - tokens) / rate if rate > 0 else 0.0
+        return allowed, remaining, retry_after, time.time() + reset_in
+
+    def reset(self, key: str | None = None) -> None:
+        """Drop bucket state (``None`` → all keys). Used by tests."""
+        with self._lock:
+            if key is None:
+                self._buckets.clear()
+            else:
+                self._buckets.pop(key, None)
 
 
 def _require_capability(principal: Principal, capability: str) -> None:
@@ -214,6 +370,9 @@ class APIServer:
         max_json_string_len: int = DEFAULT_MAX_JSON_STRING_LEN,
         max_json_total_string_bytes: int = DEFAULT_MAX_JSON_TOTAL_STRING_BYTES,
         max_json_elements: int = DEFAULT_MAX_JSON_ELEMENTS,
+        rate_limit_per_minute: float = 0,
+        rate_limits: dict[str, float] | None = None,
+        cors_origins: list[str] | None = None,
     ) -> None:
         self.context = context
         self.token = token
@@ -246,6 +405,16 @@ class APIServer:
         self.max_json_string_len = max_json_string_len
         self.max_json_total_string_bytes = max_json_total_string_bytes
         self.max_json_elements = max_json_elements
+        # Token-bucket rate limiting, keyed by principal name. 0 disables.
+        # The owner principal is always exempt (operator control).
+        if rate_limit_per_minute < 0:
+            raise ValueError("rate_limit_per_minute must not be negative")
+        self.rate_limit_per_minute = rate_limit_per_minute
+        self.rate_limits = dict(rate_limits or {})
+        self.rate_limiter = RateLimiter()
+        # CORS: None (default) → no CORS headers at all; a list of origins
+        # (or ["*"]) enables origin echoing + the OPTIONS preflight.
+        self.cors_origins = list(cors_origins) if cors_origins else None
         self._tls = threading.local()
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
         # (method, path) -> human description, surfaced by GET /docs.
@@ -288,6 +457,16 @@ class APIServer:
     def _current_principal(self) -> Principal:
         return getattr(self._tls, "principal", None) or self.default_principal
 
+    def _limit_for(self, principal_name: str) -> float:
+        """Requests/minute for ``principal_name``; 0 means unlimited.
+
+        The owner principal is always exempt — whoever holds the owner
+        token runs the machine and must not be throttled by it.
+        """
+        if principal_name == OWNER_PRINCIPAL.name:
+            return 0
+        return self.rate_limits.get(principal_name, self.rate_limit_per_minute)
+
     def dispatch(
         self,
         method: str,
@@ -300,6 +479,15 @@ class APIServer:
         principal, so direct callers get the safe grant, never ``all()``."""
         handler = self._routes.get((method.upper(), path))
         if handler is None:
+            # A known path under a different method is 405, not 404 — the
+            # resource exists, the verb does not.
+            allowed = sorted({m for (m, p) in self._routes if p == path})
+            if allowed:
+                return 405, {
+                    "error": f"method {method.upper()} not allowed for {path}",
+                    "kind": "MethodNotAllowed",
+                    "allow": allowed,
+                }
             return 404, {"error": f"no route {method} {path}"}
         previous = getattr(self._tls, "principal", None)
         self._tls.principal = principal if principal is not None else self.default_principal
@@ -309,6 +497,9 @@ class APIServer:
             except CapabilityDenied as exc:
                 return 403, {"error": str(exc) or "capability denied",
                              "kind": "CapabilityDenied"}
+            except ServiceUnavailable as exc:
+                return 503, {"error": str(exc) or "service unavailable",
+                             "kind": "ServiceUnavailable"}
             except NoMoralsError as exc:
                 outcome = classify(exc)
                 return (429 if outcome.retryable else 400), {
@@ -350,6 +541,21 @@ class APIServer:
             # Deliberately static: a supervisor only needs alive/dead.
             # Anything informative (providers, beacon state, last_error)
             # stays behind the bearer token on /health.
+            return {"ok": True}
+
+        @self.route("GET", "/ready",
+                   description="Readiness probe (authenticated): 200 when "
+                               "the database answers, 503 problem when it "
+                               "cannot. Liveness stays on tokenless /live.")
+        def ready(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            db = getattr(context, "db", None)
+            if db is None:
+                raise ServiceUnavailable("no database configured")
+            try:
+                db.query("SELECT 1")
+            except Exception as exc:  # noqa: BLE001 - readiness must degrade
+                raise ServiceUnavailable(
+                    f"database unreachable: {exc}") from exc
             return {"ok": True}
 
         @self.route("GET", "/health", description="Health check: version, schema, process and bot runtime state")
@@ -750,16 +956,79 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
         server_version = f"NoMoralsCore/{__version__}"
 
         def log_message(self, fmt: str, *args: Any) -> None:  # route through our logger
-            _log.debug("api %s - %s", self.address_string(), fmt % args)
+            request_id = getattr(self, "_request_id", "-")
+            _log.debug("api %s [%s] - %s", self.address_string(), request_id,
+                       fmt % args)
 
-        def _respond(self, status: int, payload: Any) -> None:
+        def _cors_origin(self) -> str | None:
+            """The origin to echo, or ``None`` when CORS is off / no match."""
+            origins = server.cors_origins
+            if not origins:
+                return None
+            if "*" in origins:
+                return "*"
+            origin = self.headers.get("Origin", "").strip()
+            return origin if origin and origin in origins else None
+
+        def _respond(self, status: int, payload: Any, *,
+                     extra_headers: dict[str, str] | None = None,
+                     problem: bool = False) -> None:
             raw = json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            if problem:
+                self.send_header("Content-Type",
+                                 "application/problem+json; charset=utf-8")
+            else:
+                self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            request_id = getattr(self, "_request_id", "")
+            if request_id:
+                self.send_header("X-Request-ID", request_id)
+            cors_origin = self._cors_origin()
+            if cors_origin:
+                self.send_header("Access-Control-Allow-Origin", cors_origin)
+                self.send_header("Vary", "Origin")
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(raw)
+
+        def _send_error(self, status: int, detail: str, *,
+                        code: str = "",
+                        extra: dict[str, Any] | None = None,
+                        extra_headers: dict[str, str] | None = None) -> None:
+            """Send an RFC 9457 problem-details error response."""
+            request_id = getattr(self, "_request_id", "")
+            body = _problem_body(
+                status,
+                code or _PROBLEM_CODES.get(status, "error"),
+                detail,
+                request_id,
+                **(extra or {}),
+            )
+            self._respond(status, body, problem=True,
+                          extra_headers=extra_headers)
+
+        def _wrap_dispatch_error(self, status: int,
+                                 payload: Any) -> tuple[Any, bool]:
+            """Turn a dispatch-level error payload into a problem-details
+            envelope. Returns ``(payload, is_problem)``."""
+            if not isinstance(payload, dict) or "type" in payload:
+                return payload, False
+            request_id = getattr(self, "_request_id", "")
+            detail = str(payload.get("error")
+                         or _PROBLEM_TITLES.get(status, "Error"))
+            body = _problem_body(
+                status,
+                _PROBLEM_CODES.get(status, "error"),
+                detail,
+                request_id,
+                **{k: v for k, v in payload.items() if k != "error"},
+            )
+            return body, True
 
         def _read_exactly(self, n: int) -> bytes:
             chunks: list[bytes] = []
@@ -851,9 +1120,13 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             return bytes(out), None, 200
 
         def _handle(self, method: str) -> None:
+            # One request id per request: honor the client's, else mint one.
+            # It is echoed on the response, stamped into error bodies
+            # (RFC 9457 ``instance``), and carried in log lines.
+            self._request_id = _new_request_id(self.headers)
             parsed = urlparse(self.path)
             if not _ROUTE.match(parsed.path):
-                self._respond(400, {"error": "malformed path"})
+                self._send_error(400, "malformed path")
                 return
             if (method.upper(), parsed.path) in server._public_routes:
                 # Tokenless liveness: skip bearer auth and serve the static
@@ -865,8 +1138,37 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     self.headers.get("Authorization", "")
                 )
                 if principal is None:
-                    self._respond(401, {"error": "missing or invalid bearer token"})
+                    self._send_error(401, "missing or invalid bearer token")
                     return
+            # Token-bucket rate limiting (opt-in), keyed by principal name.
+            # The owner principal and the tokenless liveness probe are
+            # exempt. 401s above never reach this point, so failed logins
+            # do not burn tokens.
+            rate_headers: dict[str, str] = {}
+            if principal is not None and (
+                    method.upper(), parsed.path) not in server._public_routes:
+                limit = server._limit_for(principal.name)
+                if limit > 0:
+                    allowed, remaining, retry_after, reset_at = \
+                        server.rate_limiter.check(
+                            f"api:{principal.name}", per_minute=limit)
+                    rate_headers = {
+                        "X-RateLimit-Limit": str(int(limit)),
+                        "X-RateLimit-Remaining": str(remaining),
+                        "X-RateLimit-Reset": str(int(reset_at)),
+                    }
+                    if not allowed:
+                        self._send_error(
+                            429,
+                            f"rate limit of {int(limit)} requests/minute "
+                            f"exceeded for principal {principal.name!r}",
+                            extra_headers={
+                                **rate_headers,
+                                "Retry-After": str(
+                                    max(1, math.ceil(retry_after))),
+                            },
+                        )
+                        return
             if method == "GET" and parsed.path == "/stream":
                 # SSE cannot go through the JSON dispatch: the connection is
                 # held open and framed as text/event-stream. Reuse the stream
@@ -877,10 +1179,7 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 try:
                     _require_capability(principal, Capability.DB_READ)
                 except CapabilityDenied as exc:
-                    self._respond(403, {
-                        "error": str(exc) or "capability denied",
-                        "kind": "CapabilityDenied",
-                    })
+                    self._send_error(403, str(exc) or "capability denied")
                     return
                 emit_sse(
                     self,
@@ -897,12 +1196,12 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 from .acp import serve_acp_sse
                 acp_server = getattr(server, "_acp_server", None)
                 if acp_server is None:
-                    self._respond(503, {"error": "ACP is not mounted on this "
-                                                "API server (register_acp)"})
+                    self._send_error(503, "ACP is not mounted on this API "
+                                          "server (register_acp)")
                     return
                 data, error, status = self._read_body()
                 if error is not None:
-                    self._respond(status, {"error": error})
+                    self._send_error(status, error)
                     return
                 serve_acp_sse(self, server, acp_server, data or b"")
                 return
@@ -910,22 +1209,22 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             if method != "GET":
                 data, error, status = self._read_body()
                 if error is not None:
-                    self._respond(status, {"error": error})
+                    self._send_error(status, error)
                     return
                 if data:
                     try:
                         parsed_body = json.loads(data.decode("utf-8"))
                     except UnicodeDecodeError:
-                        self._respond(400, {"error": "body is not valid UTF-8"})
+                        self._send_error(400, "body is not valid UTF-8")
                         return
                     except json.JSONDecodeError:
-                        self._respond(400, {"error": "body is not valid JSON"})
+                        self._send_error(400, "body is not valid JSON")
                         return
                     except RecursionError:
-                        self._respond(400, {"error": "body JSON is nested too deeply"})
+                        self._send_error(400, "body JSON is nested too deeply")
                         return
                     if not isinstance(parsed_body, dict):
-                        self._respond(400, {"error": "body must be a JSON object"})
+                        self._send_error(400, "body must be a JSON object")
                         return
                     limit_error = _json_limit_error(
                         parsed_body,
@@ -936,20 +1235,57 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     )
                     if limit_error is not None:
                         message, limit_status = limit_error
-                        self._respond(limit_status, {"error": message})
+                        self._send_error(limit_status, message)
                         return
                     body = parsed_body
             query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             status, payload = server.dispatch(
                 method, parsed.path, body, query, principal=principal
             )
-            self._respond(status, payload)
+            if status >= 400:
+                payload, is_problem = self._wrap_dispatch_error(status, payload)
+                extra = dict(rate_headers)
+                if status == 405 and isinstance(payload, dict):
+                    allow = payload.get("allow")
+                    if allow:
+                        extra["Allow"] = ", ".join(str(m) for m in allow)
+                self._respond(status, payload, problem=is_problem,
+                              extra_headers=extra or None)
+            else:
+                self._respond(status, payload,
+                              extra_headers=rate_headers or None)
 
         def do_GET(self) -> None:  # noqa: N802
             self._handle("GET")
 
         def do_POST(self) -> None:  # noqa: N802
             self._handle("POST")
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            # CORS preflight. Only meaningful when cors_origins is
+            # configured; otherwise OPTIONS is just another unknown method.
+            self._request_id = _new_request_id(self.headers)
+            parsed = urlparse(self.path)
+            if not _ROUTE.match(parsed.path):
+                self._send_error(400, "malformed path")
+                return
+            origin = self._cors_origin()
+            if origin is None:
+                self._send_error(
+                    404, f"no route OPTIONS {parsed.path}")
+                return
+            allowed = sorted({m for (m, p) in server._routes
+                              if p == parsed.path} | {"OPTIONS"})
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods",
+                             ", ".join(allowed))
+            self.send_header("Access-Control-Allow-Headers",
+                             "Authorization, Content-Type, X-Request-ID")
+            self.send_header("Access-Control-Max-Age", "86400")
+            self.send_header("X-Request-ID", self._request_id)
+            self.end_headers()
 
     return Handler
 
@@ -963,14 +1299,36 @@ def serve(
     background: bool = False,
     principals: dict[str, Principal | tuple[str, CapabilitySet]] | None = None,
     max_body_bytes: int | None = None,
+    protocols: bool = True,
 ) -> int:
-    """Start the API. Returns 0 on clean shutdown."""
+    """Start the API. Returns 0 on clean shutdown.
+
+    ``protocols`` (default True) mounts the agent-protocol endpoints on the
+    same port: ``POST /acp`` (Agent Client Protocol, incl. SSE streaming)
+    and ``POST /mcp`` (Model Context Protocol). Pass ``protocols=False``
+    for a bare HTTP API.
+    """
     api = APIServer(
         context,
         token=token or context.settings.api.token,
         principals=principals,
         max_body_bytes=max_body_bytes,
     )
+    if protocols:
+        # The protocol servers share this API's Principal/capability model —
+        # nothing weaker. A mount failure must never break the HTTP API.
+        try:
+            from .acp import ACPServer, register_acp
+
+            register_acp(api, ACPServer(context))
+        except Exception:  # noqa: BLE001 - protocol endpoints are additive
+            _log.warning("acp routes not mounted", exc_info=True)
+        try:
+            from .mcp_server import MCPServer, register_mcp
+
+            register_mcp(api, MCPServer(context))
+        except Exception:  # noqa: BLE001 - protocol endpoints are additive
+            _log.warning("mcp route not mounted", exc_info=True)
     httpd = ThreadingHTTPServer((host, port), _make_handler(api))
     httpd.daemon_threads = True
     _log.info("api listening on http://%s:%s", host, port)
