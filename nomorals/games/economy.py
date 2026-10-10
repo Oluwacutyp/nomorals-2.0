@@ -19,7 +19,11 @@ from typing import Any
 
 from .players import Player, PlayerStore
 
-__all__ = ["ShopItem", "GameEconomy", "DEFAULT_SHOP"]
+__all__ = ["ShopItem", "GameEconomy", "DEFAULT_SHOP",
+           # ledger / health / gems / dynamic pricing
+           "record_ledger", "economy_health", "render_economy_health",
+           "gem_balance", "grant_gems", "spend_gems", "GEM_SHOP",
+           "gem_shop_text", "earn_velocity", "dynamic_price"]
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,7 @@ class GameEconomy:
             dur_note = ("∞ unbreakable — it will never wear or break."
                         if gear_defn.unbreakable
                         else f"{inst.durability} durability.")
+            _ledger_sink(self.store, player, gear_defn.cost, f"shop:{slug}")
             return True, (f"bought {gear_defn.name} for {gear_defn.cost}c — "
                           f"{stats}, {dur_note} "
                           f"/equip {slug} to wear it in the arena.")
@@ -217,6 +222,7 @@ class GameEconomy:
             return False, (f"{item.name} costs {item.cost}c — you have "
                            f"{prof.coins}c. win games to earn more.")
         self.store.grant_item(player, slug)
+        _ledger_sink(self.store, player, item.cost, f"shop:{slug}")
         return True, (f"bought {item.name} for {item.cost}c — "
                       f"{item.effect} (you now have "
                       f"{self.count(player, slug)}).")
@@ -310,3 +316,254 @@ class GameEconomy:
         total, _ = GameEconomy.coin_breakdown(
             won, score=score, difficulty=difficulty, streak_after=streak_after)
         return total
+
+
+# ── ledger: every coin movement, tagged source/sink ─────────────────────────
+#
+# F2P economy design starts with enumerating EVERY source (faucet) and
+# EVERY sink (drain). Without the ledger you're tuning blind. Every
+# coin grant/spend records (kind, category); ``economy_health`` reads
+# the faucet/drain ratio and calls out inflation before players notice.
+
+import time as _etime
+
+
+def _ledger_sink(store: Any, player: Any, amount: int,
+                 category: str) -> None:
+    """Best-effort sink record for a purchase. Never raises."""
+    try:
+        db = getattr(store, "db", None)
+        if db is None:
+            return
+        record_ledger(db, getattr(player, "key", ""), "sink", amount,
+                      category)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ensure_ledger(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS game_ledger ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "player_key TEXT NOT NULL DEFAULT '', "
+            "kind TEXT NOT NULL, "          # "source" | "sink"
+            "category TEXT NOT NULL, "       # win, shop, repair, streak…
+            "amount INTEGER NOT NULL, "
+            "at REAL NOT NULL DEFAULT 0)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_game_ledger_at "
+            "ON game_ledger(at)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_ledger(db: Any, player_key: str, kind: str, amount: int,
+                  category: str) -> None:
+    """Log a coin movement. ``kind`` is "source" (coins created) or
+    "sink" (coins destroyed). Never raises."""
+    if kind not in ("source", "sink") or not amount:
+        return
+    _ensure_ledger(db)
+    try:
+        db.execute(
+            "INSERT INTO game_ledger (player_key, kind, category, amount,"
+            " at) VALUES (?, ?, ?, ?, ?)",
+            (player_key or "", kind, category or "misc", abs(int(amount)),
+             _etime.time()))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def economy_health(db: Any, days: int = 7) -> dict[str, Any]:
+    """Faucet/drain diagnosis over the last ``days`` days.
+
+    Returns ``{'sources', 'sinks', 'ratio', 'verdict', 'top_sources',
+    'top_sinks'}``. Ratio > 1.3 sustained means inflation — coins are
+    being printed faster than destroyed; < 0.7 means the economy is
+    starving players.
+    """
+    _ensure_ledger(db)
+    out: dict[str, Any] = {"sources": 0, "sinks": 0, "ratio": 0.0,
+                           "verdict": "no data yet", "top_sources": [],
+                           "top_sinks": []}
+    try:
+        since = _etime.time() - days * 86400.0
+        rows = db.query(
+            "SELECT kind, category, SUM(amount) AS total FROM game_ledger "
+            "WHERE at >= ? GROUP BY kind, category ORDER BY total DESC",
+            (since,)) or []
+    except Exception:  # noqa: BLE001
+        return out
+    for r in rows:
+        total = int(r.get("total") or 0)
+        if r.get("kind") == "source":
+            out["sources"] += total
+            out["top_sources"].append((r.get("category"), total))
+        else:
+            out["sinks"] += total
+            out["top_sinks"].append((r.get("category"), total))
+    if out["sinks"] > 0:
+        out["ratio"] = round(out["sources"] / out["sinks"], 2)
+    elif out["sources"] > 0:
+        out["ratio"] = float("inf")
+    r = out["ratio"]
+    if out["sources"] == 0 and out["sinks"] == 0:
+        out["verdict"] = "no data yet"
+    elif r == float("inf") or r > 1.5:
+        out["verdict"] = ("🔥 INFLATION RISK — faucets dwarf sinks; "
+                          "add sinks (repairs, prestige items, taxes) "
+                          "or trim win payouts")
+    elif r > 1.3:
+        out["verdict"] = "⚠️ warming — sources outpace sinks, watch it"
+    elif r < 0.7:
+        out["verdict"] = ("🧊 STARVED — sinks eat faster than players earn; "
+                          "loosen payouts or players churn")
+    else:
+        out["verdict"] = "✅ balanced — faucets and sinks in equilibrium"
+    return out
+
+
+def render_economy_health(db: Any, days: int = 7) -> str:
+    h = economy_health(db, days=days)
+    lines = [f"💹 economy health (last {days}d): {h['verdict']}"]
+    lines.append(f"  sources (faucets): {h['sources']}c · "
+                 f"sinks (drains): {h['sinks']}c · ratio {h['ratio']}")
+    if h["top_sources"]:
+        lines.append("  top faucets: " + ", ".join(
+            f"{c} {t}c" for c, t in h["top_sources"][:4]))
+    if h["top_sinks"]:
+        lines.append("  top sinks: " + ", ".join(
+            f"{c} {t}c" for c, t in h["top_sinks"][:4]))
+    return "\n".join(lines)
+
+
+# ── gems: the hard currency ─────────────────────────────────────────────────
+#
+# Two-currency design (soft coins + hard gems) is the F2P standard: coins
+# are the grind, gems are the scarce prestige layer. Gems are NEVER sold
+# here and never drop from regular play — they're earned from
+# achievements, season completion, and tournament championships. They buy
+# prestige: name cosmetics, exclusive loot rerolls, streak freezes.
+
+def _ensure_gems(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS game_gems ("
+            "player_key TEXT PRIMARY KEY, "
+            "gems INTEGER NOT NULL DEFAULT 0)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def gem_balance(db: Any, player_key: str) -> int:
+    _ensure_gems(db)
+    try:
+        row = db.query_one(
+            "SELECT gems FROM game_gems WHERE player_key = ?",
+            (player_key,))
+        return int((row or {}).get("gems") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def grant_gems(db: Any, player_key: str, amount: int,
+               reason: str = "") -> int:
+    """Award gems (achievements, seasons, championships). Returns the new
+    balance. Logs to the ledger as a source."""
+    _ensure_gems(db)
+    amount = max(0, int(amount))
+    if not amount:
+        return gem_balance(db, player_key)
+    try:
+        db.execute(
+            "INSERT INTO game_gems (player_key, gems) VALUES (?, ?) "
+            "ON CONFLICT(player_key) DO UPDATE SET "
+            "gems = game_gems.gems + excluded.gems",
+            (player_key, amount))
+    except Exception:  # noqa: BLE001
+        pass
+    record_ledger(db, player_key, "source", amount,
+                  f"gems:{reason or 'grant'}")
+    return gem_balance(db, player_key)
+
+
+def spend_gems(db: Any, player_key: str, amount: int,
+               reason: str = "") -> bool:
+    """Spend gems. False when the balance is too low. Logs the sink."""
+    _ensure_gems(db)
+    amount = max(0, int(amount))
+    if gem_balance(db, player_key) < amount:
+        return False
+    try:
+        db.execute("UPDATE game_gems SET gems = gems - ? "
+                   "WHERE player_key = ?", (amount, player_key))
+    except Exception:  # noqa: BLE001
+        return False
+    record_ledger(db, player_key, "sink", amount,
+                  f"gems:{reason or 'spend'}")
+    return True
+
+
+#: gem shop: prestige only — nothing here touches win rates.
+GEM_SHOP: tuple[tuple[str, str, int], ...] = (
+    ("loot_reroll", "🎲 loot reroll — reforge your last drop's affixes", 5),
+    ("streak_freeze", "🧊 streak freeze — protects one missed day", 8),
+    ("name_glow", "✨ glowing name on leaderboards (30 days)", 15),
+    ("myth_charm", "💫 myth charm — next raid drop rolls lucky", 25),
+)
+
+
+def gem_shop_text(db: Any, player_key: str) -> str:
+    lines = [f"💎 gem shop — you have {gem_balance(db, player_key)} gems "
+             f"(/game gems buy <slug>)"]
+    for slug, desc, cost in GEM_SHOP:
+        lines.append(f"  {slug:<14} {desc} — {cost}💎")
+    lines.append("gems are earned from achievements, seasons and "
+                 "tournament wins — never sold.")
+    return "\n".join(lines)
+
+
+# ── dynamic pricing: the shop reads the room ────────────────────────────────
+#
+# Static prices rot: as the player base gets richer, fixed costs become
+# trivial. Dynamic pricing nudges shop prices with server-wide earn
+# velocity — when everyone's flush, prices drift up (a soft sink);
+# when the economy is starved, they drift down.
+
+def earn_velocity(db: Any, days: int = 7) -> float:
+    """Average coins earned per active player per day (sources only)."""
+    _ensure_ledger(db)
+    try:
+        since = _etime.time() - days * 86400.0
+        rows = db.query(
+            "SELECT SUM(amount) AS total, "
+            "COUNT(DISTINCT player_key) AS players FROM game_ledger "
+            "WHERE kind = 'source' AND at >= ?", (since,)) or []
+        total = int((rows[0] or {}).get("total") or 0)
+        players = int((rows[0] or {}).get("players") or 0)
+        if not players:
+            return 0.0
+        return total / players / max(1, days)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def dynamic_price(base_cost: int, db: Any = None,
+                  baseline_velocity: float = 120.0) -> int:
+    """Adjust ``base_cost`` to server earn velocity.
+
+    Baseline: 120 coins/player/day → price ×1.0. Every doubling of
+    velocity adds +15% (diminishing), every halving cuts 10%, clamped
+    to [0.7×, 2.0×]. With no ledger data the base price stands.
+    """
+    if db is None:
+        return base_cost
+    vel = earn_velocity(db)
+    if vel <= 0:
+        return base_cost
+    import math as _m
+    steps = _m.log2(max(vel, 1) / baseline_velocity)
+    mult = 1.0 + (0.15 * steps if steps >= 0 else 0.10 * steps)
+    mult = max(0.7, min(2.0, mult))
+    return max(1, int(round(base_cost * mult)))

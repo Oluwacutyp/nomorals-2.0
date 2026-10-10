@@ -14,7 +14,14 @@ from ..storage.db import Database
 
 __all__ = ["Achievement", "ACHIEVEMENTS", "ACHIEVEMENT_UNLOCKS",
            "UNLOCK_SOURCE", "unlock_achievement", "get_achievements",
-           "get_unlocks", "has_unlock", "progression_capabilities"]
+           "get_unlocks", "has_unlock", "progression_capabilities",
+           # live rarity / progress / repeatables / showcase
+           "RARITY_ORDER", "RARITY_EMOJI", "TRACKED_ACHIEVEMENTS",
+           "REPEATABLE_MILESTONES", "SHOWCASE_SIZE",
+           "live_rarity", "rarity_badge", "track_progress", "get_progress",
+           "progress_text", "repeatable_check",
+           "achievement_anniversaries", "set_showcase", "get_showcase",
+           "render_showcase"]
 
 
 @dataclass(frozen=True)
@@ -443,3 +450,350 @@ def get_game_stats(db: Database, player_key: str) -> list[dict[str, Any]]:
         }
         for row in cursor.fetchall()
     ]
+
+
+# ── live rarity: Xbox/Steam-style, computed from real unlock rates ───────────
+#
+# Static rarity strings lie. The live tier is the fraction of all players
+# who hold the achievement: <1% legendary, <5% epic, <10% rare (the Xbox
+# "Rare Achievement" cutoff with its distinct fanfare), <25% uncommon,
+# else common. ``rarity_badge`` renders it for profiles and unlock
+# announcements.
+
+RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary")
+
+RARITY_EMOJI = {
+    "common": "▫️",
+    "uncommon": "🟢",
+    "rare": "🔵",
+    "epic": "🟣",
+    "legendary": "🟠",
+}
+
+
+def _ensure_rarity_tables(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS achievements ("
+            "player_key TEXT NOT NULL, "
+            "achievement_id TEXT NOT NULL, "
+            "unlocked_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (player_key, achievement_id))")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def live_rarity(db: Any, achievement_id: str) -> tuple[str, float]:
+    """(tier, unlock_fraction) across all players holding any achievement.
+
+    ``unlock_fraction`` is the share of the player base that holds this
+    achievement. Under 30 total players the sample is too small to mean
+    anything — falls back to the catalog rarity.
+    """
+    catalog = _achievement_map()
+    fallback = (catalog.get(achievement_id).rarity
+                if catalog.get(achievement_id) else "common")
+    _ensure_rarity_tables(db)
+    try:
+        rows = db.query(
+            "SELECT COUNT(DISTINCT player_key) AS n FROM achievements")
+        total = int((rows[0] or {}).get("n") or 0) if rows else 0
+        if total < 30:
+            return fallback, 0.0
+        rows = db.query(
+            "SELECT COUNT(DISTINCT player_key) AS n FROM achievements "
+            "WHERE achievement_id = ?", (achievement_id,))
+        holders = int((rows[0] or {}).get("n") or 0) if rows else 0
+        frac = holders / total
+    except Exception:  # noqa: BLE001
+        return fallback, 0.0
+    if frac < 0.01:
+        tier = "legendary"
+    elif frac < 0.05:
+        tier = "epic"
+    elif frac < 0.10:
+        tier = "rare"
+    elif frac < 0.25:
+        tier = "uncommon"
+    else:
+        tier = "common"
+    return tier, frac
+
+
+def rarity_badge(db: Any, achievement_id: str) -> str:
+    tier, frac = live_rarity(db, achievement_id)
+    pct = f" · {frac:.1%} hold this" if frac else ""
+    return f"{RARITY_EMOJI[tier]} {tier}{pct}"
+
+
+# ── tracked achievements: multi-step progress, not just binary ──────────────
+#
+# "Win 25 games" as a boolean is a dead end — nobody sees how close they
+# are. Tracked achievements keep a progress counter; the unlock fires
+# when the counter hits the goal, and ``progress_text`` renders the bar.
+
+#: achievement_id → (goal, unit). Only count-based catalog entries here.
+TRACKED_ACHIEVEMENTS: dict[str, tuple[int, str]] = {
+    "games_10": (10, "games played"),
+    "games_100": (100, "games played"),
+    "wins_25": (25, "wins"),
+    "wins_100": (100, "wins"),
+    "arena_100_wins": (100, "arena wins"),
+    "arena_streak_5": (5, "arena win streak"),
+    "arena_streak_10": (10, "arena win streak"),
+    "arena_streak_15": (15, "arena win streak"),
+    "arena_streak_20": (20, "arena win streak"),
+    "arena_streak_25": (25, "arena win streak"),
+    "arena_dual_10": (10, "dual-casts"),
+    "hangman_5_wins": (5, "hangman wins"),
+    "case_streak_3": (3, "cases in a row"),
+    "case_streak_5": (5, "cases in a row"),
+    "arena_underdog_5": (5, "underdog wins"),
+    "rpg_level_5": (5, "RPG levels"),
+}
+
+
+def _ensure_progress_table(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS achievement_progress ("
+            "player_key TEXT NOT NULL, "
+            "achievement_id TEXT NOT NULL, "
+            "progress INTEGER NOT NULL DEFAULT 0, "
+            "updated_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (player_key, achievement_id))")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def track_progress(db: Any, player_key: str, achievement_id: str,
+                   delta: int = 1) -> tuple[int, int, bool]:
+    """Add ``delta`` progress toward a tracked achievement.
+
+    Returns ``(progress, goal, newly_unlocked)``. Unknown ids return
+    ``(0, 0, False)``. The unlock itself goes through
+    :func:`unlock_achievement` so titles and grants fire normally.
+    """
+    goal_unit = TRACKED_ACHIEVEMENTS.get(achievement_id)
+    if not goal_unit:
+        return 0, 0, False
+    goal, _unit = goal_unit
+    _ensure_progress_table(db)
+    try:
+        row = db.query_one(
+            "SELECT progress FROM achievement_progress "
+            "WHERE player_key = ? AND achievement_id = ?",
+            (player_key, achievement_id))
+        progress = int((row or {}).get("progress") or 0) + max(0, delta)
+        db.execute(
+            "INSERT INTO achievement_progress "
+            "(player_key, achievement_id, progress, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(player_key, achievement_id) DO UPDATE SET "
+            "progress = excluded.progress, "
+            "updated_at = excluded.updated_at",
+            (player_key, achievement_id, progress, time.time()))
+    except Exception:  # noqa: BLE001
+        return 0, goal, False
+    newly = False
+    if progress >= goal:
+        newly = unlock_achievement(db, player_key, achievement_id)
+    return progress, goal, newly
+
+
+def get_progress(db: Any, player_key: str,
+                 achievement_id: str) -> tuple[int, int]:
+    """(progress, goal) for a tracked achievement; (0, 0) if untracked."""
+    goal_unit = TRACKED_ACHIEVEMENTS.get(achievement_id)
+    if not goal_unit:
+        return 0, 0
+    _ensure_progress_table(db)
+    try:
+        row = db.query_one(
+            "SELECT progress FROM achievement_progress "
+            "WHERE player_key = ? AND achievement_id = ?",
+            (player_key, achievement_id))
+        return int((row or {}).get("progress") or 0), goal_unit[0]
+    except Exception:  # noqa: BLE001
+        return 0, goal_unit[0]
+
+
+def progress_text(db: Any, player_key: str, achievement_id: str,
+                  width: int = 10) -> str:
+    """``War Machine ██████░░░░ 14/20`` — the bar players check."""
+    progress, goal = get_progress(db, player_key, achievement_id)
+    catalog = _achievement_map()
+    name = catalog[achievement_id].name if achievement_id in catalog else achievement_id
+    if not goal:
+        return name
+    filled = min(width, int(round(width * progress / goal)))
+    bar = "█" * filled + "░" * (width - filled)
+    return f"{name} {bar} {min(progress, goal)}/{goal}"
+
+
+# ── repeatable milestones: re-earn the glory ────────────────────────────────
+#
+# Xbox players asked for it explicitly: if you earned "1000 kills", you
+# should re-earn it at 2000. Repeatable milestones fire every ``every``
+# completions and announce the new tier ("Champion ×3").
+
+#: achievement_id → re-earn every N completions.
+REPEATABLE_MILESTONES: dict[str, int] = {
+    "wins_100": 100,
+    "games_100": 100,
+    "arena_100_wins": 100,
+    "case_streak_5": 5,
+}
+
+
+def repeatable_check(db: Any, player_key: str, achievement_id: str,
+                     total: int) -> int:
+    """Record ``total`` completions; returns the milestone tier reached
+    (0 = none). Tier k means the player just earned it for the k-th time.
+    Announce ``f"{name} ×{tier}"`` when > 0."""
+    every = REPEATABLE_MILESTONES.get(achievement_id)
+    if not every or total < every:
+        return 0
+    tier = total // every
+    _ensure_progress_table(db)
+    try:
+        row = db.query_one(
+            "SELECT progress FROM achievement_progress "
+            "WHERE player_key = ? AND achievement_id = ?",
+            (player_key, f"{achievement_id}:rep"))
+        seen = int((row or {}).get("progress") or 0)
+        if tier > seen:
+            db.execute(
+                "INSERT INTO achievement_progress "
+                "(player_key, achievement_id, progress, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(player_key, achievement_id) DO UPDATE SET "
+                "progress = excluded.progress, "
+                "updated_at = excluded.updated_at",
+                (player_key, f"{achievement_id}:rep", tier, time.time()))
+            return tier
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+# ── anniversaries: celebrate past glories ───────────────────────────────────
+
+def achievement_anniversaries(db: Any, player_key: str,
+                              window_days: float = 3.0) -> list[dict[str, Any]]:
+    """Achievements unlocked ~N years ago today (± window). The "remember
+    when" ping — Xbox players explicitly asked for this."""
+    _ensure_rarity_tables(db)
+    out: list[dict[str, Any]] = []
+    try:
+        rows = db.query(
+            "SELECT achievement_id, unlocked_at FROM achievements "
+            "WHERE player_key = ?", (player_key,)) or []
+    except Exception:  # noqa: BLE001
+        return out
+    now = time.time()
+    catalog = _achievement_map()
+    for r in rows:
+        try:
+            unlocked = float(r.get("unlocked_at") or 0)
+        except Exception:  # noqa: BLE001
+            continue
+        if not unlocked:
+            continue
+        age_days = (now - unlocked) / 86400.0
+        years = round(age_days / 365.25)
+        if years < 1:
+            continue
+        if abs(age_days - years * 365.25) <= window_days:
+            ach = catalog.get(r.get("achievement_id"))
+            if ach:
+                out.append({"id": ach.id, "name": ach.name,
+                            "years": years,
+                            "rarity": ach.rarity})
+    return out
+
+
+# ── showcase: the player's chosen three ────────────────────────────────────
+#
+# Steam/Xbox let players curate what their profile shows. The showcase
+# is three pinned achievements — the ones that *represent* the player,
+# not just the ones the platform counted.
+
+SHOWCASE_SIZE = 3
+
+
+def _ensure_showcase_table(db: Any) -> None:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS achievement_showcase ("
+            "player_key TEXT NOT NULL, "
+            "slot INTEGER NOT NULL, "
+            "achievement_id TEXT NOT NULL, "
+            "PRIMARY KEY (player_key, slot))")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def set_showcase(db: Any, player_key: str,
+                 achievement_ids: list[str]) -> tuple[bool, str]:
+    """Pin up to 3 unlocked achievements to the profile showcase."""
+    _ensure_showcase_table(db)
+    ids = [i for i in (achievement_ids or []) if i][:SHOWCASE_SIZE]
+    if not ids:
+        return False, "pick 1–3 achievements to showcase."
+    catalog = _achievement_map()
+    unlocked = {a["id"] for a in get_achievements(db, player_key)}
+    bad = [i for i in ids if i not in catalog]
+    if bad:
+        return False, f"unknown achievement: {', '.join(bad)}"
+    locked = [i for i in ids if i not in unlocked]
+    if locked:
+        return False, ("you haven't unlocked "
+                       f"{', '.join(catalog[i].name for i in locked)} yet.")
+    try:
+        db.execute("DELETE FROM achievement_showcase WHERE player_key = ?",
+                   (player_key,))
+        for slot, aid in enumerate(ids):
+            db.execute(
+                "INSERT INTO achievement_showcase "
+                "(player_key, slot, achievement_id) VALUES (?, ?, ?)",
+                (player_key, slot, aid))
+    except Exception:  # noqa: BLE001
+        return False, "couldn't save your showcase."
+    names = ", ".join(catalog[i].name for i in ids)
+    return True, f"📌 showcase set: {names}"
+
+
+def get_showcase(db: Any, player_key: str) -> list[dict[str, Any]]:
+    _ensure_showcase_table(db)
+    catalog = _achievement_map()
+    try:
+        rows = db.query(
+            "SELECT achievement_id FROM achievement_showcase "
+            "WHERE player_key = ? ORDER BY slot ASC",
+            (player_key,)) or []
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for r in rows:
+        ach = catalog.get(r.get("achievement_id"))
+        if ach:
+            tier, _frac = live_rarity(db, ach.id)
+            out.append({"id": ach.id, "name": ach.name,
+                        "description": ach.description,
+                        "rarity": tier,
+                        "badge": f"{RARITY_EMOJI[tier]} {tier}"})
+    return out
+
+
+def render_showcase(db: Any, player_key: str, player_name: str = "") -> str:
+    items = get_showcase(db, player_key)
+    who = player_name or player_key
+    if not items:
+        return (f"📌 {who} hasn't pinned a showcase yet — "
+                "/achievements showcase <id> … (up to 3).")
+    lines = [f"📌 {who}'s showcase:"]
+    for it in items:
+        lines.append(f"  {it['badge']} **{it['name']}** — "
+                     f"{it['description']}")
+    return "\n".join(lines)

@@ -34,6 +34,10 @@ __all__ = [
     "LEGACY_GEAR_MAP", "GearStore", "RAID_EXCLUSIVE_GEAR",
     "effective_stats", "detect_set_bonus", "durability_bar",
     "durability_display",
+    # Diablo-style affix loot
+    "Affix", "PREFIXES", "SUFFIXES", "LootItem",
+    "forge_loot", "describe_loot", "grant_loot",
+    "instance_stats", "instance_describe",
 ]
 
 _log = get_logger(__name__)
@@ -324,12 +328,35 @@ class GearInstance:
     max_durability: int
     equipped: bool = False
     created_at: float = field(default_factory=time.time)
+    # Diablo-style rolled affixes: ((affix name, {stat: value}), ...).
+    # () for plain catalog gear.
+    affixes: tuple = ()
 
     @property
     def broken(self) -> bool:
         return self.durability <= 0
 
+    def is_loot(self) -> bool:
+        return self.slug.startswith("loot:") or bool(self.affixes)
+
+    def base_slug(self) -> str:
+        if self.slug.startswith("loot:"):
+            return self.slug.split(":")[1]
+        return self.slug
+
     def display_name(self) -> str:
+        if self.is_loot():
+            base = GEAR_CATALOG.get(self.base_slug())
+            base_label = (base.kind.replace("_", " ").title()
+                          if base else self.base_slug())
+            pre = [n for n, _ in self.affixes
+                   if not n.startswith("the ") and n != "Annihilation"]
+            suf = [n for n, _ in self.affixes if n not in pre]
+            name = (((" ".join(pre) + " ") if pre else "") + base_label
+                    + ((" of " + ", ".join(s[3:] if s.startswith("of ")
+                                           else s for s in suf))
+                       if suf else ""))
+            return " ".join(name.split())
         defn = GEAR_CATALOG.get(self.slug)
         return defn.name if defn else self.slug
 
@@ -361,18 +388,57 @@ class GearStore:
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_game_gear_player "
                 "ON game_gear(player_key)")
+            # affixes column for Diablo-style loot (added post-launch;
+            # older tables get it via ALTER).
+            try:
+                self.db.execute(
+                    "ALTER TABLE game_gear ADD COLUMN affixes TEXT "
+                    "NOT NULL DEFAULT '[]'")
+            except Exception:  # noqa: BLE001 - already there
+                pass
         except Exception:  # noqa: BLE001 - table may already exist
             _log.debug("game_gear ensure failed", exc_info=True)
 
     # ── reads ──────────────────────────────────────────────────────────────
     def _row_to_instance(self, row: dict[str, Any]) -> GearInstance:
-        return GearInstance(
+        inst = GearInstance(
             id=row["id"], player_key=row["player_key"], slug=row["slug"],
             durability=int(row["durability"]),
             max_durability=int(row["max_durability"]),
             equipped=bool(row["equipped"]),
             created_at=float(row.get("created_at") or 0.0),
         )
+        try:
+            import json as _json
+            raw = row.get("affixes") or "[]"
+            inst.affixes = tuple(
+                (a[0], dict(a[1])) for a in _json.loads(raw))
+        except Exception:  # noqa: BLE001
+            inst.affixes = ()
+        return inst
+
+    def grant_loot(self, player_key: str, loot: LootItem) -> GearInstance:
+        """Persist a forged loot piece. Loot keeps its rolled affixes in
+        the ``affixes`` column; stats resolve through
+        :func:`instance_stats`."""
+        import json as _json
+        self._ensure()
+        base = GEAR_CATALOG.get(loot.base_slug)
+        max_dur = base.max_durability if base else 40
+        inst_id = new_id("gear")
+        affixes_json = _json.dumps([[n, m] for n, m in loot.affixes])
+        self.db.execute(
+            "INSERT INTO game_gear (id, player_key, slug, durability, "
+            "max_durability, equipped, created_at, affixes) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            (inst_id, player_key, loot.slug, max_dur, max_dur,
+             time.time(), affixes_json))
+        inst = GearInstance(
+            id=inst_id, player_key=player_key, slug=loot.slug,
+            durability=max_dur, max_durability=max_dur,
+            equipped=False, created_at=time.time())
+        inst.affixes = loot.affixes
+        return inst
 
     def list(self, player_key: str) -> list[GearInstance]:
         """Every piece the player owns, equipped first then newest."""
@@ -692,3 +758,237 @@ class GearStore:
             _log.info("migrated %d legacy gear items for %s", moved,
                       player_key)
         return moved
+
+
+# ── affixes: Diablo-style randomized loot ───────────────────────────────────
+#
+# Shop gear is fixed; the chase loop needs *drops*. Affixes are rolled
+# Diablo-II-style:
+#   * magic items: 1–2 affixes (25% prefix+suffix, 25% prefix only,
+#     50% suffix only)
+#   * rare items: 3–6 affixes, max 3 prefixes / 3 suffixes
+#   * one affix per GROUP max — "Bronze" (+atk) and "Iron" (+atk) never
+#     stack on the same piece, exactly like D2's affix groups
+#   * affix value tiers are gated by item level (ilvl): deeper content
+#     drops bigger numbers
+# The affix names build the item name: "Bronze Broadsword of the Whale".
+
+from dataclasses import dataclass as _dc2  # local alias, same dataclass
+
+
+@_dc2(frozen=True)
+class Affix:
+    """One rollable modifier. ``mods`` maps stat → (lo, hi) per ilvl tier;
+    the rolled value scales with the item's level."""
+    name: str
+    group: str            # one affix per group per item (D2 rule)
+    kind: str             # "prefix" | "suffix"
+    mods: dict[str, tuple[int, int]]
+    min_ilvl: int = 1
+    slots: tuple[str, ...] = ("weapon", "armor")
+
+
+#: (ilvl threshold, value multiplier) — higher ilvl, bigger rolls.
+_ILVL_TIERS: tuple[tuple[int, float], ...] = (
+    (1, 0.6), (15, 0.8), (30, 1.0), (50, 1.3), (70, 1.6),
+)
+
+PREFIXES: tuple[Affix, ...] = (
+    Affix("Bronze", "atk_flat", "prefix", {"atk": (1, 4)}, 1),
+    Affix("Iron", "atk_flat", "prefix", {"atk": (3, 7)}, 12),
+    Affix("Steel", "atk_flat", "prefix", {"atk": (6, 12)}, 28),
+    Affix("Mithril", "atk_flat", "prefix", {"atk": (10, 18)}, 48),
+    Affix("Cruel", "atk_pct", "prefix", {"atk": (4, 8)}, 20),
+    Affix("Merciless", "atk_pct", "prefix", {"atk": (8, 15)}, 45),
+    Affix("Sturdy", "def_flat", "prefix", {"def": (2, 6)}, 1),
+    Affix("Stone", "def_flat", "prefix", {"def": (5, 11)}, 25),
+    Affix("Diamond", "def_flat", "prefix", {"def": (9, 16)}, 50),
+    Affix("Warlord's", "str", "prefix", {"strength": (2, 5)}, 15),
+    Affix("Titan's", "stam", "prefix", {"stamina": (2, 5)}, 15),
+    Affix("Sage's", "int", "prefix", {"intelligence": (2, 5)}, 20),
+    Affix("Archmage's", "mana", "prefix", {"mana": (3, 8)}, 20),
+    Affix("Swift", "speed", "prefix", {"atk": (1, 3), "def": (1, 3)}, 30),
+)
+
+SUFFIXES: tuple[Affix, ...] = (
+    Affix("the Whale", "hp", "suffix", {"stamina": (2, 6)}, 1),
+    Affix("the Bear", "str2", "suffix", {"strength": (1, 4)}, 8),
+    Affix("the Owl", "int2", "suffix", {"intelligence": (1, 4)}, 8),
+    Affix("the Leech", "leech", "suffix", {"atk": (2, 5)}, 35),
+    Affix("the Titan", "big", "suffix",
+          {"strength": (3, 6), "stamina": (3, 6)}, 40),
+    Affix("the Storm", "storm", "suffix", {"atk": (3, 7), "mana": (2, 5)},
+          45),
+    Affix("the Fortress", "fort", "suffix", {"def": (4, 9)}, 30),
+    Affix("Annihilation", "anni", "suffix",
+          {"atk": (6, 12), "strength": (2, 5)}, 60),
+    Affix("the Gods", "gods", "suffix",
+          {"strength": (4, 8), "stamina": (4, 8),
+           "intelligence": (4, 8)}, 70),
+)
+
+#: loot rarity → (magic-style affix budget, grade label)
+_LOOT_RARITY = ("magic", "rare", "unique")
+
+
+def _ilvl_mult(ilvl: int) -> float:
+    mult = 0.6
+    for threshold, m in _ILVL_TIERS:
+        if ilvl >= threshold:
+            mult = m
+    return mult
+
+
+def _roll_affix_count(rarity: str, rng: Any) -> tuple[int, int]:
+    """(prefixes, suffixes) by D2 distribution."""
+    if rarity == "magic":
+        r = rng.random()
+        if r < 0.25:
+            return 1, 1
+        if r < 0.50:
+            return 1, 0
+        return 0, 1
+    if rarity == "rare":
+        total = rng.randint(3, 6)
+        pre = min(3, rng.randint(1, total - 1))
+        return pre, min(3, total - pre)
+    return 2, 2  # unique: fixed-feel, always both
+
+
+def _pick_affixes(pool: tuple[Affix, ...], count: int, ilvl: int,
+                  slot: str, used_groups: set[str], rng: Any
+                  ) -> list[tuple[Affix, dict[str, int]]]:
+    cands = [a for a in pool
+             if a.min_ilvl <= ilvl and a.group not in used_groups
+             and slot in a.slots]
+    rng.shuffle(cands)
+    out: list[tuple[Affix, dict[str, int]]] = []
+    mult = _ilvl_mult(ilvl)
+    for a in cands:
+        if len(out) >= count:
+            break
+        used_groups.add(a.group)
+        rolled = {stat: max(1, int(round(rng.randint(lo, hi) * mult)))
+                  for stat, (lo, hi) in a.mods.items()}
+        out.append((a, rolled))
+    return out
+
+
+@_dc2(frozen=True)
+class LootItem:
+    """A generated loot piece: base + rolled affixes."""
+    slug: str
+    name: str
+    base_slug: str
+    rarity: str            # magic | rare | unique
+    ilvl: int
+    affixes: tuple[tuple[str, dict[str, int]], ...]  # (affix name, rolled mods)
+
+    def stat_bonuses(self) -> dict[str, int]:
+        total: dict[str, int] = {}
+        for _name, mods in self.affixes:
+            for stat, val in mods.items():
+                total[stat] = total.get(stat, 0) + val
+        return total
+
+
+def forge_loot(base_slug: str, ilvl: int,
+               rng: Any = None) -> LootItem | None:
+    """Roll a Diablo-style loot piece on a catalog base item.
+
+    Returns None for unknown/raid-only bases. The slug is unique
+    (``loot:<base>:<hex>``) and the instance is grantable via
+    :func:`grant_loot`.
+    """
+    import random as _random
+    rng = rng or _random.Random()
+    base = GEAR_CATALOG.get(base_slug)
+    if base is None or base.raid_only:
+        return None
+    roll = rng.random()
+    rarity = "magic" if roll < 0.60 else ("rare" if roll < 0.90 else "unique")
+    n_pre, n_suf = _roll_affix_count(rarity, rng)
+    used: set[str] = set()
+    affixes = _pick_affixes(PREFIXES, n_pre, ilvl, base.slot, used, rng)
+    affixes += _pick_affixes(SUFFIXES, n_suf, ilvl, base.slot, used, rng)
+    pre_names = [a.name for a, _ in affixes if a.kind == "prefix"]
+    suf_names = [a.name for a, _ in affixes if a.kind == "suffix"]
+    base_label = base.name.split(" [")[0]
+    if rarity == "rare":
+        # D2 rares get evocative random names, not affix lists
+        syllables = ("Dread", "Grim", "Storm", "Night", "Blood", "Iron",
+                     "Doom", "Fang", "Skull", "Rune")
+        name = (f"{rng.choice(syllables)} {rng.choice(syllables)}"
+                .replace("  ", " "))
+    else:
+        name = ((" ".join(pre_names) + " " if pre_names else "")
+                + base_label
+                + (" of " + ", ".join(
+                    s[3:] if s.startswith("of ") else s
+                    for s in suf_names)
+                   if suf_names else ""))
+        name = " ".join(name.split())
+    slug = f"loot:{base_slug}:{rng.getrandbits(32):08x}"
+    return LootItem(slug=slug, name=name, base_slug=base_slug,
+                    rarity=rarity, ilvl=ilvl,
+                    affixes=tuple((a.name, mods) for a, mods in affixes))
+
+
+def describe_loot(loot: LootItem) -> str:
+    """``🌟 Dread Fang [rare ilvl 42] — Katana base · +9 atk, +4 str``."""
+    base = GEAR_CATALOG.get(loot.base_slug)
+    base_label = base.kind if base else loot.base_slug
+    bonuses = loot.stat_bonuses()
+    stat_words = {"atk": "atk", "def": "def", "strength": "str",
+                  "stamina": "sta", "mana": "mana",
+                  "intelligence": "int"}
+    parts = [f"+{v} {stat_words.get(k, k)}"
+             for k, v in sorted(bonuses.items())]
+    stars = {"magic": "✨", "rare": "🌟", "unique": "💫"}[loot.rarity]
+    return (f"{stars} {loot.name} [{loot.rarity} ilvl {loot.ilvl}] — "
+            f"{base_label} base" + (f" · {', '.join(parts)}" if parts else ""))
+
+
+def grant_loot(store: "GearStore", player_key: str,
+               loot: LootItem) -> GearInstance | None:
+    """Persist a forged loot piece into the player's inventory."""
+    try:
+        return store.grant_loot(player_key, loot)
+    except Exception:  # noqa: BLE001
+        _log.debug("grant_loot failed", exc_info=True)
+        return None
+
+
+def instance_stats(inst: GearInstance) -> dict[str, int]:
+    """Full stat picture for an owned piece: base (attack, defense) plus
+    rolled affix bonuses. Keys: atk, def, strength, stamina, mana,
+    intelligence."""
+    base = GEAR_CATALOG.get(inst.base_slug())
+    atk, df = effective_stats(base) if base else (0, 0)
+    out: dict[str, int] = {"atk": atk, "def": df}
+    for _name, mods in inst.affixes:
+        for stat, val in mods.items():
+            out[stat] = out.get(stat, 0) + val
+    return out
+
+
+def instance_describe(inst: GearInstance) -> str:
+    """``🌟 Bronze Broadsword of the Whale — 24 atk · +4 str``."""
+    stats = instance_stats(inst)
+    parts = []
+    if stats.get("atk"):
+        parts.append(f"{stats['atk']} atk")
+    if stats.get("def"):
+        parts.append(f"{stats['def']} def")
+    for k in ("strength", "stamina", "mana", "intelligence"):
+        if stats.get(k):
+            parts.append(f"+{stats[k]} {k[:3]}")
+    star = "🌟" if inst.is_loot() else "⚔️"
+    dur = f"{inst.durability}/{inst.max_durability} dur"
+    return (f"{star} {inst.display_name()} — {', '.join(parts)} · {dur}")
+    """Persist a forged loot piece into the player's inventory."""
+    try:
+        return store.grant_loot(player_key, loot)
+    except Exception:  # noqa: BLE001
+        _log.debug("grant_loot failed", exc_info=True)
+        return None

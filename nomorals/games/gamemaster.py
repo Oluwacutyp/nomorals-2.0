@@ -42,6 +42,8 @@ __all__ = [
     "feed",
     "validate_quest",
     "validate_item",
+    # quest board / scenes / continuity
+    "SceneCard", "forge_scene", "QuestBoard",
 ]
 
 #: The DM's persona moods. "neutral" is the default; the rest are set
@@ -636,3 +638,191 @@ def validate_item(item: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+# ── quest board + scene cards + continuity ──────────────────────────────────
+#
+# Narration without memory is improv; a campaign needs *continuity*.
+# The QuestBoard persists quests per game (objective, beats, twist,
+# reward, status) to JSON; SceneCards frame each scene (location, mood,
+# stakes, cliffhanger); the continuity log keeps the last N facts so
+# the DM never contradicts itself. All three work fully offline via the
+# template forge — the model only makes them prettier.
+
+from dataclasses import dataclass, field as _dm_field
+
+
+@dataclass
+class SceneCard:
+    """One framed scene: where, how it feels, what's at stake, and the
+    hook that pulls players into the next beat."""
+    location: str
+    mood: str
+    stakes: str
+    hook: str = ""
+    cliffhanger: str = ""
+
+    def render(self) -> str:
+        lines = [f"📍 {self.location}", f"🎭 {self.mood}",
+                 f"⚖️ stakes: {self.stakes}"]
+        if self.hook:
+            lines.append(f"🪝 {self.hook}")
+        if self.cliffhanger:
+            lines.append(f"😱 {self.cliffhanger}")
+        return "\n".join(lines)
+
+
+_SCENE_FORGE: tuple[tuple[str, str, str], ...] = (
+    ("the Hollow Market at dusk", "tense, watchful",
+     "someone here knows more than they're saying"),
+    ("a rain-slicked rooftop", "electric, exposed",
+     "one wrong step and the night notices you"),
+    ("the Sunken Library", "hushed, ancient",
+     "the answer is here — so is whatever guards it"),
+    ("a carnival that never left town", "whimsical, wrong",
+     "the games are rigged, but the prizes are real"),
+    ("the war-room beneath the arena", "grim, urgent",
+     "the plan works only if everyone plays their part"),
+    ("a lighthouse in a dead calm", "lonely, luminous",
+     "the light is the only thing keeping something out"),
+)
+
+
+def forge_scene(seed: int | None = None) -> SceneCard:
+    """A seeded scene card — no model needed."""
+    rng = random.Random(seed)
+    loc, mood, stakes = rng.choice(_SCENE_FORGE)
+    hooks = ("a stranger slides a note across the table",
+             "the lights go out — all of them, at once",
+             "someone laughs, and it isn't anyone you know",
+             "a bell tolls thirteen times")
+    return SceneCard(location=loc, mood=mood, stakes=stakes,
+                     hook=rng.choice(hooks))
+
+
+class QuestBoard:
+    """Persistent quest log per game: post, advance beats, complete.
+
+    Quests are the structured objects the agentic DM pattern calls for —
+    objectives and twists live in data, not buried in prompts. State
+    survives restarts as JSON next to the DM files.
+    """
+
+    def __init__(self, data_dir: Path | str | None = None,
+                 seed: int | None = None) -> None:
+        self.data_dir = Path(data_dir) if data_dir else Path(
+            __file__).resolve().parent / "data" / "quests"
+        self.rng = random.Random(seed)
+        self._lock = threading.RLock()
+
+    def _path(self, game_id: str) -> Path:
+        return self.data_dir / f"{_safe_game_id(game_id)}.json"
+
+    def _load(self, game_id: str) -> dict[str, Any]:
+        try:
+            return json.loads(self._path(game_id).read_text(
+                encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {"quests": [], "continuity": []}
+
+    def _save(self, game_id: str, data: dict[str, Any]) -> None:
+        try:
+            p = self._path(game_id)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            _log.debug("quest board save failed", exc_info=True)
+
+    # ── quests ─────────────────────────────────────────────────────────
+    def post(self, game_id: str, title: str, objective: str, *,
+             beats: list[str] | None = None, twist: str = "",
+             reward_xp: int = 50, reward_coins: int = 25,
+             difficulty: int = 2) -> dict[str, Any]:
+        """Post a quest. Returns the quest dict."""
+        with self._lock:
+            data = self._load(game_id)
+            quest = {
+                "id": f"q{int(time.time())}{self.rng.randint(10, 99)}",
+                "title": title, "objective": objective,
+                "beats": list(beats or []), "beats_done": 0,
+                "twist": twist, "twist_revealed": False,
+                "reward_xp": reward_xp, "reward_coins": reward_coins,
+                "difficulty": max(1, min(5, difficulty)),
+                "status": "active", "posted_at": time.time(),
+            }
+            if not validate_quest({**quest, "reward_xp": reward_xp,
+                                   "reward_coins": reward_coins}):
+                quest["title"] = quest["title"] or "Untitled Quest"
+            data["quests"].append(quest)
+            self._save(game_id, data)
+            return quest
+
+    def active(self, game_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [q for q in self._load(game_id)["quests"]
+                    if q.get("status") == "active"]
+
+    def advance(self, game_id: str, quest_id: str,
+                beat_note: str = "") -> dict[str, Any] | None:
+        """Mark the next beat done; reveals the twist on the final beat.
+        Returns the quest (with reward info when it completes)."""
+        with self._lock:
+            data = self._load(game_id)
+            for q in data["quests"]:
+                if q.get("id") != quest_id or q.get("status") != "active":
+                    continue
+                q["beats_done"] = min(len(q["beats"]),
+                                      q.get("beats_done", 0) + 1)
+                if beat_note:
+                    q.setdefault("log", []).append(beat_note[:200])
+                if q["beats_done"] >= len(q["beats"]) and q["beats"]:
+                    q["status"] = "complete"
+                    q["twist_revealed"] = True
+                    q["completed_at"] = time.time()
+                self._save(game_id, data)
+                return q
+            return None
+
+    def render(self, game_id: str) -> str:
+        quests = self.active(game_id)
+        if not quests:
+            return "📜 no active quests — the board is empty. Ask the DM."
+        lines = ["📜 **quest board**"]
+        for q in quests:
+            beats = q.get("beats") or []
+            done = q.get("beats_done", 0)
+            bar = ("●" * done + "○" * (len(beats) - done)) if beats else "○"
+            diff = "★" * q.get("difficulty", 2)
+            lines.append(f"  🗺️ **{q['title']}** {diff}\n"
+                         f"     {q['objective']}\n"
+                         f"     {bar} {done}/{len(beats)} · "
+                         f"reward {q['reward_xp']}xp + {q['reward_coins']}c")
+            if q.get("twist_revealed") and q.get("twist"):
+                lines.append(f"     🌀 twist: {q['twist']}")
+        return "\n".join(lines)
+
+    # ── continuity: the DM's memory ────────────────────────────────────
+    def note(self, game_id: str, fact: str) -> None:
+        """Record a continuity fact ("Ada owes the barkeep 40c"). The DM
+        reads these back so it never contradicts itself."""
+        fact = (fact or "").strip()[:200]
+        if not fact:
+            return
+        with self._lock:
+            data = self._load(game_id)
+            cont = data.get("continuity") or []
+            if fact not in cont:
+                cont.append(fact)
+            data["continuity"] = cont[-20:]
+            self._save(game_id, data)
+
+    def continuity(self, game_id: str) -> list[str]:
+        with self._lock:
+            return list(self._load(game_id).get("continuity") or [])
+
+    def continuity_prompt(self, game_id: str) -> str:
+        facts = self.continuity(game_id)
+        if not facts:
+            return ""
+        return ("Established facts you must not contradict:\n- "
+                + "\n- ".join(facts))

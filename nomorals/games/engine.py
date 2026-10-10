@@ -29,6 +29,56 @@ from .economy import GameEconomy, ShopItem
 from .games.base import GAME_COMMANDS, MultiGame, Room, parse_command
 from .players import AI_PLAYER, Leaderboard, Player, PlayerStore
 
+
+def render_game_over_card(game_name: str, players: list[Player],
+                          scores: dict[str, int],
+                          winner_label: str = "",
+                          store: Any | None = None,
+                          db: Any | None = None) -> str:
+    """The final table card: standings, scores, balances, tier moves.
+
+    ``players`` in seat order; ``scores`` maps player key → final score.
+    Sorted by score desc (then name). Ranked games get Glicko tier lines
+    when ``db`` is provided. Pure render — never raises, never writes.
+    """
+    try:
+        humans = [p for p in players if not getattr(p, "is_ai", False)]
+        rows = sorted(humans,
+                      key=lambda p: (-scores.get(p.key, 0), p.name))
+        medals = ("🥇", "🥈", "🥉")
+        title = f"🏁 **{game_name}** — final"
+        if winner_label:
+            title += f" · 👑 {winner_label}"
+        lines = [title]
+        for i, p in enumerate(rows):
+            mark = medals[i] if i < 3 else f"{i + 1}."
+            bits = [f"{mark} {p.name}"]
+            sc = scores.get(p.key)
+            if sc is not None:
+                bits.append(f"{sc} pts")
+            if store is not None:
+                try:
+                    prof = store.get_for(p)
+                    bits.append(f"{prof.coins}c")
+                    bits.append(f"lvl {getattr(prof, 'level', 1)}")
+                except Exception:  # noqa: BLE001
+                    pass
+            if db is not None:
+                try:
+                    from .matchmaking import get_glicko
+                    g = get_glicko(db, p.key, game_name)
+                    if int(g.get("games", 0)) > 0:
+                        from .matchmaking import rank_tier_emoji
+                        bits.append(f"{rank_tier_emoji(g['ordinal'])}"
+                                    f"{g['tier']} {int(g['ordinal'])}")
+                except Exception:  # noqa: BLE001
+                    pass
+            lines.append(" · ".join(bits))
+        lines.append("↩️ /game rematch — run it back")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return ""
+
 __all__ = ["GameEngine", "SendFn"]
 
 _log = get_logger(__name__)
@@ -1101,6 +1151,8 @@ class GameEngine:
             return ([extra] if extra else [], None)
         room.status = "finished"
         msgs: list[str] = []
+        card_scores: dict[str, int] = {}
+        winner_label = ""
         if extra:
             msgs.append(extra)
         if game is not None:
@@ -1140,6 +1192,8 @@ class GameEngine:
                 _log.debug("victory loot failed", exc_info=True)
             try:
                 winner = game.winner(room)
+                winner_label = getattr(winner, "name", None) or (
+                    str(winner) if winner not in (None, "draw") else "")
                 # ranked 1v1: move the ELO board (queue matches and
                 # hand-arranged duels alike)
                 try:
@@ -1155,6 +1209,7 @@ class GameEngine:
                     won = self._settle_won(game, room, p, winner)
                     points = GameEconomy.reward_points(won, game.score(room, p))
                     score = game.score(room, p)
+                    card_scores[p.key] = score
                     try:
                         difficulty = game.difficulty(room)
                     except Exception:  # noqa: BLE001
@@ -1189,6 +1244,15 @@ class GameEngine:
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
                     msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
+                    # economy ledger: every faucet tagged for the health
+                    # report (sources/sinks, inflation watch)
+                    try:
+                        from .economy import record_ledger
+                        if coins > 0:
+                            record_ledger(self.db, p.key, "source", coins,
+                                          f"game:{room.game}")
+                    except Exception:  # noqa: BLE001
+                        _log.debug("ledger record failed", exc_info=True)
                     # streak milestones: use the streak from the profile
                     # record_outcome just wrote (not the pre-read estimate
                     # above) so the fanfare matches the stored streak.
@@ -1264,12 +1328,20 @@ class GameEngine:
                         # pays double XP
                         if room.game == "arena" and won is True:
                             try:
-                                from .daily import complete_daily_hunt
+                                from .daily import (bump_streak,
+                                                    complete_daily_hunt)
                                 if complete_daily_hunt(self.db, p.key):
                                     amount *= 2
                                     msgs.append(
                                         "🎯 daily hunt complete! "
                                         "double XP today.")
+                                    st = bump_streak(self.db, p.key)
+                                    if st.get("milestone"):
+                                        msgs.append(f"🏆 {st['milestone']}")
+                                    elif not st.get("continued", True):
+                                        msgs.append(
+                                            "🔥 new streak started — "
+                                            "come back tomorrow.")
                             except Exception:  # noqa: BLE001
                                 _log.debug("daily hunt failed",
                                            exc_info=True)
@@ -1318,6 +1390,17 @@ class GameEngine:
         except Exception:  # noqa: BLE001
             _log.debug("game item reconcile failed", exc_info=True)
         self._persist(room)
+        # the final table card: standings, scores, balances, tier moves
+        try:
+            if game is not None and card_scores:
+                card = render_game_over_card(
+                    room.game, list(room.players), card_scores,
+                    winner_label=winner_label, store=self.store,
+                    db=self.db)
+                if card:
+                    msgs.append(card)
+        except Exception:  # noqa: BLE001
+            _log.debug("game over card failed", exc_info=True)
         self._emit(room, *msgs)
         # remember the table for /game rematch (relay virtual rooms are
         # excluded — a rematch there needs a fresh invite). The wrapper

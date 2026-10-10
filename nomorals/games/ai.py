@@ -30,7 +30,8 @@ from typing import Any, Callable, Sequence
 from ..core.logging_setup import get_logger
 
 __all__ = ["SuggestFn", "GameMind", "pick", "one_of",
-           "connect4_move", "battleship_shot", "reversi_move"]
+           "connect4_move", "connect4_mcts_move", "battleship_shot",
+           "reversi_move", "MCTSAdapter", "MCTSEngine", "AdaptiveBrain"]
 
 _log = get_logger(__name__)
 
@@ -456,8 +457,9 @@ def connect4_move(board: list[list[int]], me: int, *,
     alpha-beta with centre-first ordering —
     each difficulty gets a deeper ceiling and a bigger time budget, and
     the best move of the last fully searched depth is always kept, so
-    the house never stalls the chat. Always returns a legal column (or
-    -1 on a full board)."""
+    the house never stalls the chat. grandmaster: MCTS anytime search
+    (see :func:`connect4_mcts_move`) — stronger the longer it thinks.
+    Always returns a legal column (or -1 on a full board)."""
     rng = rng or random.Random()
     valid = _c4_valid(board)
     if not valid:
@@ -483,6 +485,10 @@ def connect4_move(board: list[list[int]], me: int, *,
             return col
     if difficulty == "easy":
         return rng.choice(valid)
+    if difficulty == "grandmaster":
+        # MCTS: anytime search — stronger the longer it thinks.
+        # Immediate wins/blocks are handled inside.
+        return connect4_mcts_move(board, me, budget=1.2, rng=rng)
     max_depth, budget = _C4_SEARCH.get(difficulty,
                                        _C4_SEARCH["normal"])
     deadline = [time.monotonic() + budget]
@@ -719,3 +725,295 @@ def reversi_move(grid: list[list[str]], side: str, *,
     top = max(s[0] for s in scored)
     tied = [(r, c) for v, r, c in scored if v == top]
     return rng.choice(tied)
+
+
+# ── MCTS: game-agnostic Monte-Carlo tree search ──────────────────────────────
+#
+# The alpha-beta brain is exact but depth-capped; MCTS is the anytime
+# alternative — give it more thinking time and it plays better, on ANY
+# game that implements the adapter protocol below. This is the
+# AlphaGo-family approach: selection (UCT) → expansion → simulation →
+# backpropagation, all under a wall-clock budget so the chat never
+# stalls.
+
+import math as _mcts_math
+
+
+class MCTSAdapter:
+    """Protocol a game implements for MCTS. States must be immutable-ish
+    (or cheaply copyable); ``player`` is the side to move as an int."""
+
+    def legal_moves(self, state: Any) -> list[Any]: ...
+    def apply(self, state: Any, move: Any) -> Any: ...
+    def winner(self, state: Any) -> int | None: ...
+    def player_to_move(self, state: Any) -> int: ...
+
+
+class _MCTSNode:
+    __slots__ = ("state", "player", "parent", "move", "children",
+                 "visits", "wins", "untried")
+
+    def __init__(self, state: Any, player: int, adapter: MCTSAdapter,
+                 parent: "_MCTSNode | None" = None,
+                 move: Any = None) -> None:
+        self.state = state
+        self.player = player
+        self.parent = parent
+        self.move = move
+        self.children: list[_MCTSNode] = []
+        self.visits = 0
+        self.wins = 0.0
+        self.untried = adapter.legal_moves(state)
+
+
+class MCTSEngine:
+    """UCT search with a wall-clock budget.
+
+    ``adapter`` implements the game; ``root_player`` is who we're
+    choosing for (wins counted from their perspective). ``exploration``
+    is the UCT constant (sqrt(2) is the classic); ``budget`` seconds
+    caps thinking time.
+    """
+
+    def __init__(self, adapter: MCTSAdapter, *,
+                 exploration: float = _mcts_math.sqrt(2.0),
+                 budget: float = 0.5,
+                 rng: random.Random | None = None) -> None:
+        self.adapter = adapter
+        self.exploration = exploration
+        self.budget = budget
+        self.rng = rng or random.Random()
+
+    def search(self, state: Any, root_player: int) -> Any | None:
+        root = _MCTSNode(state, root_player, self.adapter)
+        if not root.untried:
+            return None
+        deadline = time.monotonic() + self.budget
+        iters = 0
+        while time.monotonic() < deadline:
+            node = self._select(root)
+            result = self._simulate(node)
+            self._backprop(node, result, root_player)
+            iters += 1
+        self.last_iterations = iters
+        # most-visited child: robust, not greedy
+        best = max(root.children, key=lambda c: c.visits, default=None)
+        return best.move if best else None
+
+    def _select(self, node: _MCTSNode) -> _MCTSNode:
+        a = self.adapter
+        while True:
+            w = a.winner(node.state)
+            if w is not None:
+                return node
+            if node.untried:
+                move = node.untried.pop(self.rng.randrange(
+                    len(node.untried)))
+                child_state = a.apply(node.state, move)
+                child = _MCTSNode(child_state, a.player_to_move(child_state),
+                                  a, parent=node, move=move)
+                node.children.append(child)
+                return child
+            if not node.children:
+                return node
+            node = max(node.children, key=self._uct)
+
+    def _uct(self, node: _MCTSNode) -> float:
+        if node.visits == 0:
+            return float("inf")
+        exploit = node.wins / node.visits
+        explore = self.exploration * _mcts_math.sqrt(
+            _mcts_math.log(node.parent.visits) / node.visits)
+        return exploit + explore
+
+    def _simulate(self, node: _MCTSNode) -> int | None:
+        a = self.adapter
+        state, player = node.state, node.player
+        guard = 0
+        while guard < 500:
+            w = a.winner(state)
+            if w is not None:
+                return w
+            moves = a.legal_moves(state)
+            if not moves:
+                return None  # draw
+            state = a.apply(state, self.rng.choice(moves))
+            player = a.player_to_move(state)
+            guard += 1
+        return None
+
+    def _backprop(self, node: _MCTSNode, result: int | None,
+                  root_player: int) -> None:
+        score = 0.5 if result is None else (
+            1.0 if result == root_player else 0.0)
+        while node is not None:
+            node.visits += 1
+            node.wins += score
+            node = node.parent
+
+
+class _C4Adapter(MCTSAdapter):
+    """Connect4 over the module's board representation."""
+
+    def __init__(self, me: int) -> None:
+        self.me = me
+
+    def legal_moves(self, state: tuple) -> list[int]:
+        board = state
+        return [c for c in range(7)
+                if board[0][c] == 0]
+
+    def apply(self, state: tuple, move: int) -> tuple:
+        board = [list(row) for row in state]
+        player = self.player_to_move(state)
+        for r in range(5, -1, -1):
+            if board[r][move] == 0:
+                board[r][move] = player
+                break
+        return tuple(tuple(row) for row in board)
+
+    def winner(self, state: tuple) -> int | None:
+        board = state
+        for r in range(6):
+            for c in range(7):
+                v = board[r][c]
+                if not v:
+                    continue
+                for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+                    cells = [(r + dr * i, c + dc * i) for i in range(4)]
+                    if all(0 <= rr < 6 and 0 <= cc < 7 and
+                           board[rr][cc] == v for rr, cc in cells):
+                        return v
+        if all(board[0][c] != 0 for c in range(7)):
+            return 0  # full board: draw
+        return None
+
+    def player_to_move(self, state: tuple) -> int:
+        ones = sum(cell == 1 for row in state for cell in row)
+        twos = sum(cell == 2 for row in state for cell in row)
+        return 1 if ones <= twos else 2
+
+
+def connect4_mcts_move(board: list[list[int]], me: int, *,
+                       budget: float = 0.8,
+                       rng: random.Random | None = None) -> int:
+    """MCTS connect-four move: anytime search, stronger with more time.
+
+    Always takes an immediate win / block first (no search needed),
+    then runs UCT for ``budget`` seconds. Returns a legal column
+    (or -1 on a full board)."""
+    rng = rng or random.Random()
+    valid = _c4_valid(board)
+    if not valid:
+        return -1
+    for col in valid:  # immediate win
+        r = _c4_drop_row(board, col)
+        board[r][col] = me
+        won = _c4_won_at(board, r, col, me)
+        board[r][col] = 0
+        if won:
+            return col
+    for col in valid:  # immediate block
+        r = _c4_drop_row(board, col)
+        board[r][col] = 3 - me
+        won = _c4_won_at(board, r, col, 3 - me)
+        board[r][col] = 0
+        if won:
+            return col
+    state = tuple(tuple(row) for row in board)
+    engine = MCTSEngine(_C4Adapter(me), budget=budget, rng=rng)
+    move = engine.search(state, me)
+    if move is None or move not in valid:
+        return rng.choice(valid)
+    return move
+
+
+# ── adaptive difficulty: the house reads the room ───────────────────────────
+#
+# A fixed-strength house is a retention bug: too strong and new players
+# quit, too weak and veterans get bored. The adaptive brain tracks each
+# player's results per game and picks the difficulty that keeps the
+# house win rate near 50% — the flow channel. Stored in KV so it
+# survives restarts.
+
+_DIFFICULTY_LADDER = ("easy", "normal", "hard", "expert", "grandmaster")
+_DIFFICULTY_INDEX = {d: i for i, d in enumerate(_DIFFICULTY_LADDER)}
+
+
+class AdaptiveBrain:
+    """Dynamic difficulty adjustment per player+game.
+
+    After each finished game call :meth:`record`; :meth:`difficulty_for`
+    returns the difficulty that should face this player next. A player
+    crushing the house climbs the ladder; one getting crushed drops.
+    Hysteresis (2+ results in a row) stops it flip-flopping every game.
+    """
+
+    def __init__(self, kv: Any = None, seed: int | None = None) -> None:
+        self._kv = kv
+        self.rng = random.Random(seed)
+        self._mem: dict[str, dict] = {}
+
+    def _key(self, player_key: str, game: str) -> str:
+        return f"adaptive:{game}:{player_key}"
+
+    def _load(self, player_key: str, game: str) -> dict:
+        k = self._key(player_key, game)
+        if k in self._mem:
+            return self._mem[k]
+        d: dict = {"idx": 1, "streak": 0}  # start at normal
+        if self._kv is not None:
+            try:
+                d.update(self._kv.get(k) or {})
+            except Exception:  # noqa: BLE001
+                pass
+        self._mem[k] = d
+        return d
+
+    def _save(self, player_key: str, game: str, d: dict) -> None:
+        if self._kv is not None:
+            try:
+                self._kv.set(self._key(player_key, game), d)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def difficulty_for(self, player_key: str, game: str) -> str:
+        d = self._load(player_key, game)
+        idx = max(0, min(len(_DIFFICULTY_LADDER) - 1,
+                         int(d.get("idx", 1))))
+        return _DIFFICULTY_LADDER[idx]
+
+    def record(self, player_key: str, game: str,
+               player_won: bool | None) -> str:
+        """Record a finished game (True=player won). Returns the new
+        difficulty for next time."""
+        d = self._load(player_key, game)
+        idx = int(d.get("idx", 1))
+        streak = int(d.get("streak", 0))
+        if player_won is True:
+            streak = streak + 1 if streak >= 0 else 1
+        elif player_won is False:
+            streak = streak - 1 if streak <= 0 else -1
+        else:
+            streak = 0
+        if streak >= 2 and idx < len(_DIFFICULTY_LADDER) - 1:
+            idx += 1
+            streak = 0
+        elif streak <= -2 and idx > 0:
+            idx -= 1
+            streak = 0
+        d.update(idx=idx, streak=streak)
+        self._mem[self._key(player_key, game)] = d
+        self._save(player_key, game, d)
+        return _DIFFICULTY_LADDER[idx]
+
+    def describe(self, player_key: str, game: str) -> str:
+        d = self._load(player_key, game)
+        diff = self.difficulty_for(player_key, game)
+        streak = int(d.get("streak", 0))
+        note = ""
+        if streak >= 1:
+            note = f" (🔥 {streak} player win streak — house is warming up)"
+        elif streak <= -1:
+            note = f" (🧊 house has taken {-streak} straight — easing off)"
+        return f"house difficulty vs you in {game}: **{diff}**{note}"

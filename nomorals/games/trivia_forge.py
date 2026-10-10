@@ -35,7 +35,9 @@ from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
 
-__all__ = ["TriviaForge", "TRIVIA_TOPICS", "ANTI_REPEAT_DEFAULT"]
+__all__ = ["TriviaForge", "TRIVIA_TOPICS", "ANTI_REPEAT_DEFAULT",
+           "TriviaLadder", "LADDER_PRIZES", "LADDER_DIFFICULTIES",
+           "LADDER_SAFE_HAVENS", "LIFELINES", "build_options"]
 
 #: question topic pools, weighted by generality. The interest profile
 #: re-weights these per player.
@@ -257,3 +259,208 @@ class TriviaForge:
         for q, _ in out:
             self._mark_seen(q)
         return out[:count]
+
+
+# ── TriviaLadder: Millionaire-style match structure ──────────────────────────
+#
+# Dealt questions are raw material; a *match* needs stakes. The ladder
+# climbs difficulty (and prize) each round: answer to bank the round's
+# coins, miss and fall to the last safe haven. Three lifelines —
+# 50:50, skip, audience — one use each per match. Answer streaks
+# multiply the prize. Wrong answers never end the night empty-handed:
+# safe havens guarantee a floor.
+
+LADDER_PRIZES: tuple[int, ...] = (10, 25, 50, 100, 200, 350, 600, 1000)
+LADDER_DIFFICULTIES: tuple[str, ...] = (
+    "easy", "easy", "normal", "normal", "normal", "hard", "hard", "expert",
+)
+#: rounds that are safe havens — falling later still banks this prize.
+LADDER_SAFE_HAVENS: tuple[int, ...] = (2, 5)
+
+LIFELINES: tuple[tuple[str, str], ...] = (
+    ("fifty", "5️⃣0️⃣ 50:50 — remove two wrong options"),
+    ("skip", "⏭️ skip — swap this question for a fresh one"),
+    ("audience", "🗳️ audience — the crowd votes (usually right)"),
+)
+
+
+class TriviaLadder:
+    """One ladder match: state, lifelines, streaks, prizes.
+
+    ``questions`` is ``[(question, answer, options)]`` — options a list
+    of 4 with the answer included (the forge deals Q&A; the ladder
+    builds options via the model or distractor forge). ``ask()`` renders
+    the current question card; ``answer(text)`` scores it; lifelines via
+    :meth:`use_lifeline`.
+    """
+
+    def __init__(self, questions: list[tuple[str, str, list[str]]],
+                 seed: int | None = None) -> None:
+        self.rng = random.Random(seed)
+        self.questions = [(q, a, list(o)) for q, a, o in questions]
+        self.round = 0
+        self.streak = 0
+        self.banked = 0
+        self.lifelines = {slug: True for slug, _ in LIFELINES}
+        self.over = False
+        self._fifty: list[str] | None = None
+        self._log: list[str] = []
+
+    # ── state ────────────────────────────────────────────────────────────
+    @property
+    def prize(self) -> int:
+        idx = min(self.round, len(LADDER_PRIZES) - 1)
+        return LADDER_PRIZES[idx]
+
+    @property
+    def difficulty(self) -> str:
+        idx = min(self.round, len(LADDER_DIFFICULTIES) - 1)
+        return LADDER_DIFFICULTIES[idx]
+
+    def current(self) -> tuple[str, str, list[str]] | None:
+        if self.over or self.round >= len(self.questions):
+            return None
+        return self.questions[self.round]
+
+    def ask(self) -> str:
+        """The question card."""
+        cur = self.current()
+        if cur is None:
+            return self._final()
+        q, _a, options = cur
+        opts = list(options)
+        if self._fifty is not None:
+            opts = [o for o in opts if o in self._fifty]
+        self.rng.shuffle(opts)
+        letters = "ABCD"
+        lines = [f"❓ round {self.round + 1}/{len(self.questions)} — "
+                 f"**{self.prize}c** ({self.difficulty})"]
+        if self.streak >= 2:
+            lines[0] += f" · 🔥 streak ×{self.streak}"
+        lines.append(q)
+        for i, o in enumerate(opts[:4]):
+            lines.append(f"  {letters[i]}. {o}")
+        avail = [slug for slug, _desc in LIFELINES
+                 if self.lifelines[slug]]
+        if avail:
+            lines.append("lifelines: " + " ".join(
+                f"/lifeline {s}" for s in avail))
+        haven = max([h for h in LADDER_SAFE_HAVENS if h <= self.round],
+                    default=None)
+        if haven is not None:
+            lines.append(f"🛟 safe haven: {LADDER_PRIZES[haven]}c banked")
+        return "\n".join(lines)
+
+    # ── lifelines ────────────────────────────────────────────────────────
+    def use_lifeline(self, slug: str) -> str:
+        slug = (slug or "").strip().lower()
+        if self.over:
+            return "the match is over."
+        if slug not in self.lifelines:
+            return f"unknown lifeline. try: {', '.join(self.lifelines)}"
+        if not self.lifelines[slug]:
+            return "that lifeline is spent."
+        cur = self.current()
+        if cur is None:
+            return "no active question."
+        _q, answer, options = cur
+        self.lifelines[slug] = False
+        if slug == "fifty":
+            wrong = [o for o in options if o != answer]
+            keep = self.rng.sample(wrong, min(2, len(wrong)))
+            self._fifty = [answer] + [o for o in wrong if o not in keep]
+            return "5️⃣0️⃣ two wrong answers removed."
+        if slug == "skip":
+            self._fifty = None
+            self._log.append(f"round {self.round + 1} skipped")
+            self.round += 1
+            if self.round >= len(self.questions):
+                self.over = True
+                return "⏭️ skipped — and that was the last question.\n" \
+                    + self._final()
+            return "⏭️ skipped — fresh question:\n" + self.ask()
+        # audience: weighted vote, usually (not always) right
+        weights = []
+        for o in options:
+            weights.append(55 if o == answer else 15)
+        total = sum(weights)
+        pick = self.rng.choices(options,
+                                weights=[w / total for w in weights])[0]
+        conf = self.rng.randint(52, 88)
+        return (f"🗳️ the audience votes **{pick}** ({conf}% sure). "
+                f"trust them?")
+
+    # ── answering ────────────────────────────────────────────────────────
+    def answer(self, text: str) -> tuple[bool, str]:
+        """Score an answer. Returns (match_over, message)."""
+        cur = self.current()
+        if cur is None or self.over:
+            return True, self._final()
+        _q, answer, _options = cur
+        guess = (text or "").strip().lower()
+        # accept letter or full text
+        letters = "abcd"
+        if len(guess) == 1 and guess in letters:
+            opts = [o for o in _options
+                    if self._fifty is None or o in self._fifty]
+            guess = opts[letters.index(guess)].lower() \
+                if letters.index(guess) < len(opts) else guess
+        correct = guess == answer.strip().lower()
+        self._fifty = None
+        if correct:
+            self.streak += 1
+            mult = 1 + 0.25 * (self.streak - 1)
+            won = int(round(self.prize * mult))
+            self.banked += won
+            self._log.append(f"round {self.round + 1}: +{won}c")
+            self.round += 1
+            if self.round >= len(self.questions):
+                self.over = True
+                return True, (f"✅ correct! +{won}c\n\n{self._final()}")
+            return False, (f"✅ correct! +{won}c (banked {self.banked}c)\n"
+                           + self.ask())
+        # miss: fall to the last safe haven — banked keeps only what
+        # was actually won up to the haven floor
+        haven = max([h for h in LADDER_SAFE_HAVENS if h <= self.round],
+                    default=None)
+        self.banked = LADDER_PRIZES[haven] if haven is not None else 0
+        self.over = True
+        self.streak = 0
+        return True, (f"❌ wrong — the answer was **{answer}**.\n"
+                      f"🛟 you fall to the safe haven: {self.banked}c banked.\n\n"
+                      + self._final())
+
+    def walk_away(self) -> str:
+        """Bank current winnings and end the match."""
+        if self.over:
+            return self._final()
+        self.over = True
+        return (f"🚶 you walk away with **{self.banked}c** — "
+                f"smart money.\n\n" + self._final())
+
+    def _final(self) -> str:
+        self.over = True
+        lines = [f"🏁 ladder complete — banked **{self.banked}c** "
+                 f"in {len(self._log)} rounds"]
+        if self._log:
+            lines.append("  " + " · ".join(self._log[-4:]))
+        spent = [s for s, v in self.lifelines.items() if not v]
+        if spent:
+            lines.append(f"  lifelines used: {', '.join(spent)}")
+        return "\n".join(lines)
+
+
+def build_options(answer: str, distractors: list[str],
+                  rng: random.Random | None = None) -> list[str]:
+    """4 options with the answer shuffled in (deduped, padded)."""
+    rng = rng or random.Random()
+    opts = [answer]
+    for d in distractors:
+        if d and d != answer and d not in opts:
+            opts.append(d)
+        if len(opts) == 4:
+            break
+    while len(opts) < 4:
+        opts.append(f"none of these ({len(opts)})")
+    rng.shuffle(opts)
+    return opts
