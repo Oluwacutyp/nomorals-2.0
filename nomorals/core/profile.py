@@ -23,8 +23,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["EnvironmentProfile", "detect_profile", "memory_mb", "cpu_count",
-           "is_termux"]
+__all__ = ["EnvironmentProfile", "detect_profile", "detect_cloud",
+           "memory_mb", "cpu_count", "is_termux", "KNOWN_CLOUDS"]
 
 #: profile name → (min, target, max) VCPU envelope
 ENVELOPES: dict[str, tuple[int, int, int]] = {
@@ -42,6 +42,61 @@ ENVELOPES: dict[str, tuple[int, int, int]] = {
 }
 
 _KNOWN = set(ENVELOPES)
+
+#: Cloud providers we can identify. "none" = bare metal / unknown.
+KNOWN_CLOUDS: tuple[str, ...] = ("none", "aws", "gcp", "azure", "other")
+
+
+def _read_sys_file(path: str) -> str:
+    """Best-effort read of a /sys file; "" when unreadable."""
+    try:
+        with open(path, "r", encoding="ascii", errors="replace") as fh:
+            return fh.read().strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def detect_cloud() -> str:
+    """Identify the cloud provider hosting this machine, if any.
+
+    Precedence: ``NM_CLOUD`` env var (explicit pin, always wins) → DMI
+    vendor/product heuristics → hypervisor UUID (Xen ``ec2`` prefix is the
+    classic AWS tell). Stdlib-only, never raises, offline-safe (no IMDS
+    calls — detection must work with no network).
+
+    Returns one of :data:`KNOWN_CLOUDS`.
+    """
+    try:
+        pinned = (os.environ.get("NM_CLOUD") or "").strip().lower()
+        if pinned in KNOWN_CLOUDS:
+            return pinned
+        if pinned:  # unknown pin: treat as a named "other" cloud, not none
+            return "other"
+
+        vendor = _read_sys_file(
+            "/sys/devices/virtual/dmi/id/sys_vendor").lower()
+        product = _read_sys_file(
+            "/sys/devices/virtual/dmi/id/product_name").lower()
+
+        if "amazon" in vendor or "amazon ec2" in product:
+            return "aws"
+        if "google" in vendor or "google compute engine" in product:
+            return "gcp"
+        if ("microsoft" in vendor and "virtual machine" in product):
+            return "azure"
+
+        # Xen hypervisor UUID starting with "ec2" — the classic AWS tell on
+        # older Xen-based instances where DMI is scrubbed.
+        uuid = _read_sys_file("/sys/hypervisor/uuid").lower()
+        if uuid.startswith("ec2"):
+            return "aws"
+
+        # Virtualized but unattributable: some cloud we don't recognize.
+        if "hypervisor" in _read_sys_file("/proc/cpuinfo").lower():
+            return "other"
+        return "none"
+    except Exception:  # noqa: BLE001 - detection is best-effort
+        return "none"
 
 
 def cpu_count() -> int:
@@ -84,6 +139,8 @@ class EnvironmentProfile:
     memory_mb: int = 0
     detail: str = ""
     detected: bool = True
+    #: cloud host: none|aws|gcp|azure|other (see detect_cloud)
+    cloud: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +152,7 @@ class EnvironmentProfile:
             "memory_mb": self.memory_mb,
             "detail": self.detail,
             "detected": self.detected,
+            "cloud": self.cloud,
         }
 
     @classmethod
@@ -106,7 +164,8 @@ class EnvironmentProfile:
         lo, mid, hi = ENVELOPES[kind]
         return cls(kind=kind, min_vcpus=lo, target_vcpus=mid, max_vcpus=hi,
                    cpu=cpu_count(), memory_mb=memory_mb(),
-                   detail=f"configured as {kind}", detected=False)
+                   detail=f"configured as {kind}", detected=False,
+                   cloud=detect_cloud())
 
 
 def _looks_like_termux(system: str, machine: str,
@@ -150,6 +209,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
     system = system or _platform.system()
     machine = machine or _platform.machine() or ""
     env = dict(os.environ)
+    cloud = detect_cloud()
 
     if _looks_like_termux(system, machine, env):
         return EnvironmentProfile(
@@ -157,6 +217,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                       ENVELOPES["termux"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"Android/Termux ({machine or 'arm'})",
+            cloud=cloud,
         )
 
     # very small boxes: ≤1 core or ≤1 GB of RAM
@@ -166,6 +227,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                         ENVELOPES["embedded"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"constrained ({ncpu} cpu, {mem} MB)",
+            cloud=cloud,
         )
 
     if mem >= 32 * 1024:
@@ -175,6 +237,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                        ENVELOPES["workstation"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM",
+            cloud=cloud,
         )
 
     # small cloud boxes are usually 1-4 cores with ≤16 GB
@@ -184,6 +247,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                    ENVELOPES["vps"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM (small box)",
+            cloud=cloud,
         )
 
     return EnvironmentProfile(
@@ -191,6 +255,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                               ENVELOPES["pc"])),
         cpu=ncpu, memory_mb=mem,
         detail=f"{ncpu} cpu, {mem // 1024 if mem else '?'} GB RAM",
+        cloud=cloud,
     )
 
 

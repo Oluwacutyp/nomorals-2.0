@@ -46,7 +46,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "termux": {
         "threads": 4, "use_processes": False,
         "max_parallel_chats": 2,
-        "max_concurrent_downloads": 1, "max_download_mb": 25.0, "http_timeout": 45.0,
+        "max_concurrent_downloads": 1, "max_download_mb": 25.0,
+        "max_upload_mb": 25.0, "http_timeout": 45.0,
         "context_budget_tokens": 4000, "memory_pressure": "aggressive",
         "mission_max_concurrent": 1, "mission_autonomy": 0.5,
         "model_pref": "small_local",
@@ -54,7 +55,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "mobile": {
         "threads": 4, "use_processes": False,
         "max_parallel_chats": 2,
-        "max_concurrent_downloads": 1, "max_download_mb": 25.0, "http_timeout": 45.0,
+        "max_concurrent_downloads": 1, "max_download_mb": 25.0,
+        "max_upload_mb": 25.0, "http_timeout": 45.0,
         "context_budget_tokens": 4000, "memory_pressure": "aggressive",
         "mission_max_concurrent": 1, "mission_autonomy": 0.5,
         "model_pref": "small_local",
@@ -63,7 +65,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "embedded": {
         "threads": 2, "use_processes": False,
         "max_parallel_chats": 1,
-        "max_concurrent_downloads": 1, "max_download_mb": 10.0, "http_timeout": 60.0,
+        "max_concurrent_downloads": 1, "max_download_mb": 10.0,
+        "max_upload_mb": 10.0, "http_timeout": 60.0,
         "context_budget_tokens": 2500, "memory_pressure": "aggressive",
         "mission_max_concurrent": 1, "mission_autonomy": 0.25,
         "model_pref": "none",
@@ -72,7 +75,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "vps": {
         "threads": 8, "use_processes": True,
         "max_parallel_chats": 3,
-        "max_concurrent_downloads": 2, "max_download_mb": 150.0, "http_timeout": 30.0,
+        "max_concurrent_downloads": 2, "max_download_mb": 150.0,
+        "max_upload_mb": 100.0, "http_timeout": 30.0,
         "context_budget_tokens": 8000, "memory_pressure": "moderate",
         "mission_max_concurrent": 2, "mission_autonomy": 0.75,
         "model_pref": "hf_router",
@@ -81,7 +85,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "pc": {
         "threads": 16, "use_processes": True,
         "max_parallel_chats": 4,
-        "max_concurrent_downloads": 4, "max_download_mb": 300.0, "http_timeout": 30.0,
+        "max_concurrent_downloads": 4, "max_download_mb": 300.0,
+        "max_upload_mb": 100.0, "http_timeout": 30.0,
         "context_budget_tokens": 8000, "memory_pressure": "moderate",
         "mission_max_concurrent": 2, "mission_autonomy": 1.0,
         "model_pref": "local_full",
@@ -90,7 +95,8 @@ _BASE: dict[str, dict[str, Any]] = {
     "workstation": {
         "threads": 32, "use_processes": True,
         "max_parallel_chats": 4,
-        "max_concurrent_downloads": 8, "max_download_mb": 1000.0, "http_timeout": 30.0,
+        "max_concurrent_downloads": 8, "max_download_mb": 1000.0,
+        "max_upload_mb": 500.0, "http_timeout": 30.0,
         "context_budget_tokens": 12000, "memory_pressure": "relaxed",
         "mission_max_concurrent": 4, "mission_autonomy": 1.0,
         "model_pref": "local_full",
@@ -110,6 +116,7 @@ _CONFIG_SOURCES: dict[str, tuple[str, Any]] = {
     "context_budget_tokens": ("memory.context_budget_tokens", 6000),
     "max_parallel_chats": ("partner.max_parallel_chats", 4),
     "max_concurrent_downloads": ("tools.max_concurrent_downloads", 4),
+    "max_upload_mb": ("tools.max_upload_mb", 100),
     "http_timeout": ("tools.http_timeout", 30.0),
 }
 
@@ -142,6 +149,7 @@ class RuntimeTune:
     # downloads
     max_concurrent_downloads: int
     max_download_mb: float
+    max_upload_mb: float
     http_timeout: float
     # memory
     context_budget_tokens: int
@@ -165,6 +173,7 @@ class RuntimeTune:
             "downloads": {
                 "max_concurrent": self.max_concurrent_downloads,
                 "max_mb": self.max_download_mb,
+                "max_upload_mb": self.max_upload_mb,
                 "http_timeout": self.http_timeout,
             },
             "memory": {
@@ -180,6 +189,20 @@ class RuntimeTune:
             "notes": list(self.notes),
         }
 
+    def summary(self) -> str:
+        """One-line human summary for ``nm profile``."""
+        return (
+            f"{self.profile.kind} (cloud: {self.profile.cloud}): "
+            f"{self.threads} threads, "
+            f"vcpus {self.vcpu_min}/{self.vcpu_target}/{self.vcpu_max}, "
+            f"{self.max_concurrent_downloads} parallel downloads, "
+            f"ctx {self.context_budget_tokens} tokens, "
+            f"pressure {self.memory_pressure}, "
+            f"missions {self.mission_max_concurrent}x @ "
+            f"autonomy {self.mission_autonomy:.2f}, "
+            f"model_pref {self.model_pref}"
+        )
+
 
 def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> RuntimeTune:
     """Compute the effective runtime tuning for ``settings``.
@@ -190,6 +213,7 @@ def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> R
     prof = profile or resolve_profile(getattr(rt, "profile", "") if rt else "")
     base = dict(_BASE.get(prof.kind, _BASE["pc"]))
     notes: list[str] = []
+    notes.append(f"environment: {prof.detail} (cloud: {prof.cloud})")
 
     def resolve(knob: str, scale: Any | None = None) -> Any:
         """explicit runtime.* → deliberate settings value → auto (CPU/RAM)."""
@@ -211,7 +235,14 @@ def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> R
     cpu = max(1, prof.cpu or os.cpu_count() or 2)
     mem_mb = prof.memory_mb
 
-    threads = int(resolve("threads", lambda b, c, _m: int(_clamp(b * max(1.0, c / 8.0), 2, 32))))
+    def _scale_threads(base_threads: float, cpu: int, mem: int) -> int:
+        # Scale by the LIMITING resource: a 64-core box with 4 GB of RAM
+        # must not get the thread pool of a 64-core/256 GB workstation.
+        cpu_f = max(1.0, cpu / 8.0)
+        ram_f = max(1.0, (mem or 8192) / 8192.0)
+        return int(_clamp(base_threads * min(cpu_f, ram_f), 2, 32))
+
+    threads = int(resolve("threads", _scale_threads))
     use_processes = bool(resolve("use_processes"))
 
     def _vcpu(knob: str, env_value: int) -> int:
@@ -243,6 +274,7 @@ def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> R
 
     max_concurrent_downloads = int(resolve("max_concurrent_downloads"))
     max_download_mb = float(resolve("max_download_mb"))
+    max_upload_mb = float(resolve("max_upload_mb"))
     http_timeout = float(resolve("http_timeout"))
     context_budget_tokens = int(resolve("context_budget_tokens"))
     max_parallel_chats = int(resolve("max_parallel_chats"))
@@ -279,6 +311,7 @@ def build_tune(settings: Any, *, profile: EnvironmentProfile | None = None) -> R
         vcpu_max=vcpu_max,
         max_concurrent_downloads=max_concurrent_downloads,
         max_download_mb=max_download_mb,
+        max_upload_mb=max_upload_mb,
         http_timeout=http_timeout,
         context_budget_tokens=context_budget_tokens,
         memory_pressure=str(pressure),
