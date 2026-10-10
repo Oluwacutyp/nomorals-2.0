@@ -51,6 +51,10 @@ class LlamaCppProvider(OpenAICompatProvider):
         self.grammar = grammar
         self.n_slots = n_slots
         self.raw_base = base_url.rstrip("/")
+        # llama-server always runs on the user's own machine (loopback).
+        # The SSRF guard would block 127.0.0.1 — allow it here only.
+        # This is the user's own box talking to itself, not an SSRF attack.
+        self.http.allow_private_ips = True
 
     @property
     def capabilities(self) -> set[str]:
