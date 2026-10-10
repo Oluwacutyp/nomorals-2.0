@@ -208,6 +208,14 @@ class KVStore:
         return max(0.0, float(row["expires_at"]) - self._now())
 
     # ── writes ───────────────────────────────────────────────────────────────
+    def _tx(self):
+        """Transaction context, or a no-op for DBs without transaction support."""
+        tx = getattr(self._db, "transaction", None)
+        if tx is None:
+            from contextlib import nullcontext
+            return nullcontext()
+        return tx()
+
     def _upsert(
         self,
         key: str,
@@ -220,7 +228,7 @@ class KVStore:
             self.delete(key)
             return
         expires_at = (self._now() + ttl) if ttl is not None else None
-        with self._db.transaction():
+        with self._tx():
             self._db.execute(
                 f"INSERT INTO {self.TABLE} (key, value, kind, updated_at, expires_at) "
                 f"VALUES (?, ?, ?, ?, ?) "
@@ -259,7 +267,7 @@ class KVStore:
                 rows.append((self._full(key), value, "text", stamp, expires_at))
             else:
                 rows.append((self._full(key), json.dumps(value), "json", stamp, expires_at))
-        with self._db.transaction():
+        with self._tx():
             self._db.executemany(
                 f"INSERT INTO {self.TABLE} (key, value, kind, updated_at, expires_at) "
                 f"VALUES (?, ?, ?, ?, ?) "
@@ -307,7 +315,7 @@ class KVStore:
         expires_at = (self._now() + ttl) if ttl is not None and ttl > 0 else None
         if ttl is not None and ttl <= 0:
             return self.delete(key)
-        with self._db.transaction():
+        with self._tx():
             row = self._db.query_one(
                 f"SELECT key FROM {self.TABLE} WHERE key = ? AND {self._live_clause()}",
                 (self._full(key), self._now()),
@@ -336,7 +344,7 @@ class KVStore:
         expires_at = (self._now() + ttl) if ttl is not None else None
         new_raw = new if isinstance(new, str) else json.dumps(new)
         new_kind = "text" if isinstance(new, str) else "json"
-        with self._db.transaction():
+        with self._tx():
             current = self.get_raw(key)
             if expected is None:
                 if current is not None:
@@ -366,7 +374,7 @@ class KVStore:
         Tolerates values written as plain strings by legacy callers.
         """
         full = self._full(key)
-        with self._db.transaction():
+        with self._tx():
             current = self.get_float(key, 0.0)
             new_value = current + delta
             # Store integers without a decimal point when exact.
