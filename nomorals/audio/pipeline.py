@@ -359,19 +359,215 @@ def _stage_transcribe(audio: str, **kw: Any) -> dict[str, Any]:
 
 
 def _stage_diarize(audio: str, **kw: Any) -> dict[str, Any]:
-    """Speaker assignment. Default is honest single-speaker; a real
-    diarizer can be registered as a stage override."""
+    """Speaker assignment. Tries real diarization first (WhisperX /
+    pyannote when installed and authorized), degrades honestly to the
+    single-speaker default — never invents speaker turns."""
     try:
         override = kw.get("diarizer")
         if callable(override):
             return override(audio, **kw)
         words = kw.get("words") or []
+        real = diarize_real(
+            audio, words,
+            min_speakers=kw.get("min_speakers"),
+            max_speakers=kw.get("max_speakers"))
+        if real.get("ok"):
+            return real
         # Honest default: one speaker. Never invent speaker turns.
         return {"ok": True, "speakers": ["A"],
                 "segments": [{"speaker": "A", "words": words}],
-                "method": "single-speaker-default"}
+                "method": "single-speaker-default",
+                "note": real.get("reason", "")}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "stage": "diarize", "reason": str(exc)}
+
+
+def _hf_token() -> str:
+    import os as _os
+    for k in ("WHISPERX_HF_TOKEN", "HF_TOKEN", "HUGGINGFACE_TOKEN"):
+        v = (_os.environ.get(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def diarize_real(audio: str, words: Sequence[Any] | None = None, *,
+                 min_speakers: int | None = None,
+                 max_speakers: int | None = None) -> dict[str, Any]:
+    """Real speaker diarization (the WhisperX pattern).
+
+    Tries pyannote.audio's ``speaker-diarization-3.1`` (needs a Hugging
+    Face token with the model EULA accepted — ``WHISPERX_HF_TOKEN`` /
+    ``HF_TOKEN``), then assigns each word to a speaker by timestamp
+    overlap (WhisperX's ``assign_word_speakers`` idea) so labels respect
+    word boundaries.
+
+    Returns ``{"ok", "speakers", "segments", "method"}`` or
+    ``{"ok": False, "reason"}`` — the honest "can't" when pyannote or
+    the token is missing. Never raises.
+    """
+    try:
+        token = _hf_token()
+        if not token:
+            return {"ok": False,
+                    "reason": "no diarization token — set WHISPERX_HF_TOKEN "
+                              "(accept the pyannote/speaker-diarization-3.1 "
+                              "EULA on Hugging Face first)"}
+        try:
+            from pyannote.audio import Pipeline
+        except Exception:
+            return {"ok": False,
+                    "reason": "pyannote.audio not installed "
+                              "(pip install pyannote.audio)"}
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1", use_auth_token=token)
+        if min_speakers or max_speakers:
+            try:
+                import inspect as _inspect
+                sig = _inspect.signature(pipeline.__call__)
+                call_kw: dict[str, Any] = {}
+                if "min_speakers" in sig.parameters and min_speakers:
+                    call_kw["min_speakers"] = int(min_speakers)
+                if "max_speakers" in sig.parameters and max_speakers:
+                    call_kw["max_speakers"] = int(max_speakers)
+                diar = pipeline(audio, **call_kw)
+            except Exception:
+                diar = pipeline(audio)
+        else:
+            diar = pipeline(audio)
+        # diarization segments: (segment, track, speaker)
+        raw: list[tuple[float, float, str]] = []
+        for turn, _, speaker in diar.itertracks(yield_label=True):
+            raw.append((float(turn.start), float(turn.end), str(speaker)))
+        if not raw:
+            return {"ok": False, "reason": "diarizer found no speech"}
+        speakers = sorted({s for _, _, s in raw})
+        label = {s: chr(ord("A") + i) for i, s in enumerate(speakers)}
+        ws = list(words or [])
+
+        def _word_speaker(w: Any) -> str:
+            s = float(getattr(w, "start", 0.0) or 0.0)
+            e = float(getattr(w, "end", s) or s)
+            best, best_ov = "A", 0.0
+            for rs, re_, sp in raw:
+                ov = max(0.0, min(e, re_) - max(s, rs))
+                if ov > best_ov:
+                    best_ov, best = ov, label[sp]
+            return best
+
+        word_speakers = [_word_speaker(w) for w in ws] if ws else []
+        # group consecutive same-speaker words into turns
+        segments: list[dict[str, Any]] = []
+        cur_sp, cur_words = None, []
+        for w, sp in zip(ws, word_speakers):
+            if sp != cur_sp and cur_words:
+                segments.append({"speaker": cur_sp, "words": cur_words})
+                cur_words = []
+            cur_sp = sp
+            cur_words.append(w)
+        if cur_words:
+            segments.append({"speaker": cur_sp, "words": cur_words})
+        if not segments and not ws:
+            segments = [{"speaker": label[s], "start": rs, "end": re_}
+                        for rs, re_, s in raw]
+        return {"ok": True, "speakers": [label[s] for s in speakers],
+                "segments": segments, "method": "pyannote-3.1",
+                "word_speakers": word_speakers}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"real diarization failed: {exc}"}
+
+
+def group_turns(words: Sequence[Any],
+                speakers: Sequence[str] | None = None
+                ) -> list[dict[str, Any]]:
+    """Group word-timed words into speaker turns.
+
+    ``speakers`` parallels ``words`` (as from ``diarize_real``); without
+    it, everything is one turn. Each turn: ``{"speaker", "start", "end",
+    "text"}``. Never raises.
+    """
+    try:
+        ws = list(words or [])
+        sp = list(speakers or [])
+        turns: list[dict[str, Any]] = []
+        cur: dict[str, Any] | None = None
+        for i, w in enumerate(ws):
+            s = sp[i] if i < len(sp) else "A"
+            text = getattr(w, "text", "") or ""
+            st = float(getattr(w, "start", 0.0) or 0.0)
+            en = float(getattr(w, "end", st) or st)
+            if cur is None or cur["speaker"] != s:
+                if cur is not None:
+                    turns.append(cur)
+                cur = {"speaker": s, "start": st, "end": en, "text": text}
+            else:
+                cur["end"] = en
+                cur["text"] = (cur["text"] + " " + text).strip()
+        if cur is not None:
+            turns.append(cur)
+        return turns
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _fmt_ts_srt(s: float) -> str:
+    s = max(0.0, float(s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{int(h):02d}:{int(m):02d}:{sec:06.3f}".replace(".", ",")
+
+
+def _fmt_ts_vtt(s: float) -> str:
+    s = max(0.0, float(s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{int(h):02d}:{int(m):02d}:{sec:06.3f}"
+
+
+def transcript_to_srt(turns: Sequence[dict[str, Any]]) -> str:
+    """Speaker turns → SubRip subtitles. Never raises."""
+    try:
+        out: list[str] = []
+        for i, t in enumerate(turns or [], 1):
+            out.append(str(i))
+            out.append(f"{_fmt_ts_srt(t.get('start', 0.0))} --> "
+                       f"{_fmt_ts_srt(t.get('end', 0.0))}")
+            out.append(f"[{t.get('speaker', 'A')}] {t.get('text', '')}".strip())
+            out.append("")
+        return "\n".join(out).strip() + "\n"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def transcript_to_vtt(turns: Sequence[dict[str, Any]]) -> str:
+    """Speaker turns → WebVTT subtitles. Never raises."""
+    try:
+        out = ["WEBVTT", ""]
+        for t in turns or []:
+            out.append(f"{_fmt_ts_vtt(t.get('start', 0.0))} --> "
+                       f"{_fmt_ts_vtt(t.get('end', 0.0))}")
+            out.append(f"<v {t.get('speaker', 'A')}>{t.get('text', '')}"
+                       "</v>".strip())
+            out.append("")
+        return "\n".join(out).strip() + "\n"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def meeting_minutes(turns: Sequence[dict[str, Any]], *,
+                    title: str = "") -> str:
+    """Speaker-grouped turns → Markdown meeting minutes (the
+    whisperx-transcriber output pattern). Never raises."""
+    try:
+        lines = [f"# {title}" if title else "# Meeting minutes", ""]
+        for t in turns or []:
+            st = t.get("start", 0.0)
+            m, sec = divmod(max(0.0, float(st)), 60)
+            lines.append(f"**[{t.get('speaker', 'A')}]** "
+                         f"`{int(m):02d}:{sec:04.1f}` — {t.get('text', '')}")
+        return "\n".join(lines).strip() + "\n"
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _stage_edit(audio: str, **kw: Any) -> dict[str, Any]:
@@ -545,6 +741,8 @@ class PipelineConfig:
     synthesize: bool = False
     segments: list[dict[str, Any]] = field(default_factory=list)
     speakers: dict[str, str] = field(default_factory=dict)  # speaker -> voice ref
+    min_speakers: int = 0          # diarization hint (0 = auto)
+    max_speakers: int = 0          # diarization hint (0 = auto)
     master: bool = True
     target_lufs: float = -16.0
     tts_backend: str = "auto"
@@ -566,6 +764,8 @@ class PipelineConfig:
                 synthesize=bool(d.get("synthesize", False)),
                 segments=list(d.get("segments") or []),
                 speakers=dict(d.get("speakers") or {}),
+                min_speakers=int(d.get("min_speakers") or 0),
+                max_speakers=int(d.get("max_speakers") or 0),
                 master=bool(d.get("master", True)),
                 target_lufs=float(d.get("target_lufs", -16.0)),
                 tts_backend=str(d.get("tts_backend") or "auto"),
@@ -651,7 +851,10 @@ class VoicePipeline:
 
             # 3. diarize
             if cfg.diarize:
-                r = self._stages["diarize"](cur, words=words)
+                r = self._stages["diarize"](
+                    cur, words=words,
+                    min_speakers=cfg.min_speakers or None,
+                    max_speakers=cfg.max_speakers or None)
                 stage_results["diarize"] = r
                 if not r.get("ok"):
                     return _fail("diarize", r.get("reason", "failed"))
@@ -754,10 +957,32 @@ def transcribe_clean(audio: str | os.PathLike[str], *,
 _USAGE = (
     "🎛️ /voice pipeline <audio> [lang] [private|public] — run the full voice pipeline\n"
     "🎛️ /voice engines — show profile-gated backend picks\n"
+    "🎛️ /voice diarize <audio> [min] [max] — who spoke when (pyannote when available)\n"
+    "🎛️ /voice minutes <audio> [lang] — speaker-grouped meeting minutes\n"
+    "🎛️ /voice srt <audio> [lang] — SubRip subtitles with speaker labels\n"
     "🎛️ /voice keyterms add <term> [kind] [lang] — teach STT your vocabulary\n"
     "🎛️ /voice keyterms list — show the vocabulary\n"
     "🎛️ /voice keyterms remove <term>"
 )
+
+
+def _turns_for(audio: str, lang: str = "en") -> list[dict[str, Any]] | None:
+    """Transcribe + diarize → speaker turns. None on failure."""
+    try:
+        res = run_pipeline(audio, {
+            "lang": lang, "denoise": True, "transcribe": True,
+            "diarize": True, "synthesize": False, "master": False})
+        if not res.get("ok"):
+            return None
+        st = (res.get("stages") or {}).get("transcribe") or {}
+        words = st.get("words") or []
+        dz = (res.get("stages") or {}).get("diarize") or {}
+        speakers = dz.get("word_speakers") or []
+        from ..media_edit.captions import Word
+        ws = [Word.from_dict(w) if isinstance(w, dict) else w for w in words]
+        return group_turns(ws, speakers)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def control_voice(tail: str, *, context: Any = None,
@@ -822,6 +1047,38 @@ def control_voice(tail: str, *, context: Any = None,
                 lines.append(f"📝 {tx}{'…' if len(res['transcript']) > 200 else ''}")
             lines.append(f"📁 {res.get('audio')}")
             return "\n".join(lines)
+
+        if verb == "diarize" and len(parts) >= 2:
+            turns = _turns_for(parts[1])
+            if turns is None:
+                return ("🎛️ couldn't diarize that — needs faster-whisper "
+                        "(pip install faster-whisper) and an audio file. "
+                        "Real speaker labels need pyannote.audio + "
+                        "WHISPERX_HF_TOKEN.")
+            speakers = sorted({t["speaker"] for t in turns})
+            lines = [f"🎛️ {len(speakers)} speaker(s): "
+                     f"{', '.join(speakers)} — {len(turns)} turn(s)"]
+            for t in turns[:20]:
+                m, sec = divmod(max(0.0, t["start"]), 60)
+                lines.append(f"  [{t['speaker']}] {int(m):02d}:{sec:04.1f} — "
+                             f"{t['text'][:80]}")
+            if len(turns) > 20:
+                lines.append(f"  … +{len(turns) - 20} more turns")
+            return "\n".join(lines)
+
+        if verb == "minutes" and len(parts) >= 2:
+            lang = parts[2] if len(parts) >= 3 else "en"
+            turns = _turns_for(parts[1], lang)
+            if turns is None:
+                return "🎛️ couldn't transcribe that — see /voice diarize."
+            return "🎛️ " + meeting_minutes(turns).replace("\n", "\n")
+
+        if verb == "srt" and len(parts) >= 2:
+            lang = parts[2] if len(parts) >= 3 else "en"
+            turns = _turns_for(parts[1], lang)
+            if turns is None:
+                return "🎛️ couldn't transcribe that — see /voice diarize."
+            return "🎛️ subtitles:\n```\n" + transcript_to_srt(turns) + "```"
 
         return _USAGE
     except Exception as exc:  # noqa: BLE001

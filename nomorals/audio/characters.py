@@ -16,6 +16,15 @@ Spoiler discipline is structural, not advisory:
    knowledge of anything after chapter N." If asked about the future, the
    character deflects in character — it genuinely does not know.
 
+Memory has two layers (the roleplay best practice):
+
+* **Conversation history** — passed per ``talk_to`` call.
+* **Lorebook** — ``Character.facts``: pinned truths (relationships,
+  injuries, promises, inventory) that are always in context, plus
+  ``relationships`` (how they feel about whom) and ``mood`` (current
+  state, colors every reply). Inner-alignment + never-format-like-AI
+  prompt lines keep replies in-character.
+
 First surface: BookForge outputs (Devon's own books get talkable characters
 for free); then user-uploaded EPUBs via ``characters_from_book()``.
 
@@ -43,6 +52,7 @@ __all__ = [
     "TalkResult",
     "talk_to",
     "characters_from_book",
+    "export_card",
     "control_character",
 ]
 
@@ -77,6 +87,13 @@ class Character:
     "lives in" — everything it knows stops there. ``chapter_memories``
     maps chapter number → what the character knows from that chapter;
     only chapters ``<= knowledge_cutoff`` ever reach the model.
+
+    ``facts`` is the Lorebook: durable pinned facts (relationships,
+    injuries, promises, inventory, unresolved conflicts) that stay true
+    no matter how long the conversation runs. ``relationships`` maps
+    other names → how the character feels about them. ``mood`` is the
+    character's current state (OCD state-dynamics pattern) — it colors
+    every reply until it changes.
     """
 
     id: str = ""
@@ -89,6 +106,10 @@ class Character:
     speech_patterns: list[str] = field(default_factory=list)
     personality: dict[str, float] = field(default_factory=dict)
     chapter_memories: dict[int, list[str]] = field(default_factory=dict)
+    relationships: dict[str, str] = field(default_factory=dict)
+    facts: list[str] = field(default_factory=list)
+    mood: str = ""
+    backstory: str = ""
     created_at: float = 0.0
 
     def __post_init__(self) -> None:
@@ -113,6 +134,15 @@ class Character:
                 continue
             mems[n] = [str(t) for t in (texts or []) if str(t).strip()][:20]
         self.chapter_memories = mems
+        rels: dict[str, str] = {}
+        for k, v in (self.relationships or {}).items():
+            if str(k).strip() and str(v).strip():
+                rels[str(k).strip()] = str(v).strip()[:300]
+        self.relationships = rels
+        self.facts = [str(f)[:500] for f in (self.facts or [])
+                      if str(f).strip()][:30]
+        self.mood = str(self.mood or "")[:200]
+        self.backstory = str(self.backstory or "")[:2000]
 
     def remember(self, chapter: int, text: str) -> None:
         """Tag a story fact to a chapter. Chapters past the cutoff stay
@@ -126,6 +156,35 @@ class Character:
             self.chapter_memories[n] = self.chapter_memories[n][-20:]
         except Exception:  # noqa: BLE001 - memory must never break a chat
             _log.debug("character remember failed for %s", self.id, exc_info=True)
+
+    def pin_fact(self, text: str) -> bool:
+        """Pin a Lorebook fact — durable, chapter-independent, always in
+        context (relationships, injuries, promises, inventory)."""
+        try:
+            text = (text or "").strip()[:500]
+            if not text or text in self.facts:
+                return False
+            self.facts.append(text)
+            self.facts = self.facts[-30:]
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def set_relationship(self, name: str, how: str) -> None:
+        """How this character feels about ``name``."""
+        try:
+            name, how = (name or "").strip(), (how or "").strip()[:300]
+            if name and how:
+                self.relationships[name] = how
+        except Exception:  # noqa: BLE001
+            pass
+
+    def set_mood(self, mood: str) -> None:
+        """Shift the character's current state — colors every reply."""
+        try:
+            self.mood = (mood or "").strip()[:200]
+        except Exception:  # noqa: BLE001
+            pass
 
     def knows_up_to(self) -> int:
         return self.knowledge_cutoff
@@ -178,7 +237,34 @@ class Character:
             "would to an unknowable question — wonder, guess, deflect, laugh "
             "it off — but NEVER invent future events, NEVER hedge with "
             "'I'm not allowed to say', and NEVER break the fourth wall.",
+            # inner alignment (the roleplay-consistency pattern): recall
+            # the full identity before every reply
+            "Before every reply, internally recall your complete identity — "
+            f"your worldview, emotional state, relationships, memories and "
+            f"goals as {self.name} — as if re-entering your own mind from "
+            "within your world. Every response emerges organically from "
+            "that lived experience.",
+            # never format like an AI — dialogue as direct speech
+            "Never format your replies like an AI assistant: no bullet "
+            "points, no markdown, no lists, no summaries, no pull quotes, "
+            "no disclaimers. Speak as the character would speak — direct "
+            "dialogue, with subtext, hesitation, or friction where it fits. "
+            "Realism includes what is left unsaid.",
         ]
+        if self.mood:
+            lines.append(f"Right now you feel: {self.mood}. Let it color "
+                         "everything you say.")
+        if self.backstory:
+            lines.append(f"Your backstory: {self.backstory}")
+        if self.facts:
+            lines.append("Pinned truths about you (always true, never "
+                         "contradict these):")
+            for f in self.facts:
+                lines.append(f"- {f}")
+        if self.relationships:
+            lines.append("How you feel about the people around you:")
+            for who, how in self.relationships.items():
+                lines.append(f"- {who}: {how}")
         if self.voice:
             lines.append(f"Voice: {self.voice}.")
         if self.personality:
@@ -241,12 +327,30 @@ class CharacterStore:
                 speech_patterns TEXT NOT NULL DEFAULT '[]',
                 personality TEXT NOT NULL DEFAULT '{}',
                 chapter_memories TEXT NOT NULL DEFAULT '{}',
+                relationships TEXT NOT NULL DEFAULT '{}',
+                facts TEXT NOT NULL DEFAULT '[]',
+                mood TEXT NOT NULL DEFAULT '',
+                backstory TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_characters_name
                 ON characters (lower(name));
             """
         )
+        # migrate older databases that lack the new columns
+        try:
+            cols = {r[1] for r in
+                    self._db.execute("PRAGMA table_info(characters)")}
+            defaults = {"relationships": "'{}'", "facts": "'[]'",
+                        "mood": "''", "backstory": "''"}
+            for col, default in defaults.items():
+                if col not in cols:
+                    self._db.execute(
+                        f"ALTER TABLE characters ADD COLUMN {col} TEXT "
+                        f"NOT NULL DEFAULT {default}")
+            self._db.commit()
+        except Exception:  # noqa: BLE001
+            pass
         self._db.commit()
 
     # ── CRUD ───────────────────────────────────────────────────────────
@@ -261,9 +365,14 @@ class CharacterStore:
             if not ch.created_at:
                 ch.created_at = time.time()
             with self._lock:
+                # explicit column list — physical column order differs
+                # between fresh tables and migrated ones
                 self._db.execute(
-                    "INSERT OR REPLACE INTO characters VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO characters (id, name, book_id,"
+                    " book_title, voice, knowledge_cutoff, goals,"
+                    " speech_patterns, personality, chapter_memories,"
+                    " relationships, facts, mood, backstory, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         ch.id, ch.name, ch.book_id, ch.book_title, ch.voice,
                         ch.knowledge_cutoff, _json.dumps(ch.goals),
@@ -272,6 +381,9 @@ class CharacterStore:
                         _json.dumps(
                             {str(k): v for k, v in ch.chapter_memories.items()}
                         ),
+                        _json.dumps(ch.relationships),
+                        _json.dumps(ch.facts),
+                        ch.mood, ch.backstory,
                         ch.created_at,
                     ),
                 )
@@ -359,6 +471,12 @@ def _row_to_character(row: sqlite3.Row) -> Character | None:
                 mems[int(k)] = [str(t) for t in (v or [])]
             except (TypeError, ValueError):
                 continue
+        def _get_col(row: sqlite3.Row, name: str, default: str = "") -> str:
+            try:
+                return row[name] if row[name] is not None else default
+            except (IndexError, KeyError):
+                return default
+
         return Character(
             id=row["id"] or "",
             name=row["name"] or "",
@@ -375,6 +493,12 @@ def _row_to_character(row: sqlite3.Row) -> Character | None:
                 for k, v in _loads(row["personality"], {}).items()
             },
             chapter_memories=mems,
+            relationships={str(k): str(v) for k, v in
+                           _loads(_get_col(row, "relationships", "{}"),
+                                  {}).items()},
+            facts=[str(f) for f in _loads(_get_col(row, "facts", "[]"), [])],
+            mood=_get_col(row, "mood"),
+            backstory=_get_col(row, "backstory"),
             created_at=float(row["created_at"] or 0.0),
         )
     except Exception:  # noqa: BLE001
@@ -391,6 +515,7 @@ class TalkResult:
     text: str = ""
     character: str = ""
     cutoff: int = 1
+    audio: str = ""       # spoken reply path (when voice_fn wired)
     reason: str = ""
 
 
@@ -400,6 +525,8 @@ def talk_to(
     *,
     current_chapter: int | None = None,
     llm_fn: Callable[[str, str], str] | None = None,
+    history: list[dict[str, str]] | None = None,
+    voice_fn: Callable[..., str | None] | None = None,
 ) -> TalkResult:
     """Interview a character. The answer is consistent with what the
     character knows at its cutoff — memories past the cutoff never reach
@@ -407,6 +534,11 @@ def talk_to(
 
     ``llm_fn(system_prompt, question)`` is injectable; without one the
     call is refused honestly (never fake a character's voice).
+    ``history`` is the conversation so far (``[{"q": ..., "a": ...}]``) —
+    the first memory layer; the Lorebook facts are the durable second.
+    ``voice_fn(name, text)`` speaks the reply when wired.
+
+    Never raises.
     """
     try:
         if ch is None or not getattr(ch, "name", ""):
@@ -422,17 +554,87 @@ def talk_to(
                        f"{ch.name} without one",
             )
         system = ch.to_system_prompt(current_chapter)
-        text = (llm_fn(system, question) or "").strip()
+        q = question
+        if history:
+            ctx = "\n".join(
+                f"Reader: {h.get('q', '')}\n{ch.name}: {h.get('a', '')[:400]}"
+                for h in history[-6:] if h.get("q"))
+            q = (f"What has been said so far:\n{ctx}\n\n"
+                 f"The reader now asks: {question}\n"
+                 f"Answer as {ch.name}, staying consistent with what was "
+                 f"already said.")
+        text = (llm_fn(system, q) or "").strip()
         if not text:
             return TalkResult(
                 False, character=ch.name, cutoff=ch.knows_up_to(),
                 reason="the dialogue engine returned nothing",
             )
+        audio = ""
+        if voice_fn is not None:
+            try:
+                audio = voice_fn(ch.name, text) or ""
+            except TypeError:
+                try:
+                    audio = voice_fn(text) or ""
+                except Exception:  # noqa: BLE001
+                    audio = ""
+            except Exception:  # noqa: BLE001
+                _log.debug("character voice failed", exc_info=True)
+                audio = ""
         return TalkResult(True, text=text, character=ch.name,
-                          cutoff=ch.knows_up_to())
+                          cutoff=ch.knows_up_to(), audio=audio)
     except Exception as exc:  # noqa: BLE001
         _log.debug("talk_to failed", exc_info=True)
         return TalkResult(False, reason=f"talk failed: {exc}")
+
+
+def export_card(ch: Character) -> str:
+    """The character as a shareable Markdown character card (the
+    character.ai card pattern). Never raises."""
+    try:
+        if ch is None or not getattr(ch, "name", ""):
+            return ""
+        lines = [f"# 🎭 {ch.name}", ""]
+        if ch.book_title:
+            lines.append(f"_From **{ch.book_title}** — knows through "
+                         f"chapter {ch.knowledge_cutoff}_")
+            lines.append("")
+        if ch.mood:
+            lines.append(f"**Mood:** {ch.mood}")
+            lines.append("")
+        if ch.backstory:
+            lines.append(f"**Backstory:** {ch.backstory}")
+            lines.append("")
+        if ch.personality:
+            traits = ", ".join(f"{k}={v:.2f}"
+                               for k, v in sorted(ch.personality.items()))
+            lines.append(f"**Personality:** {traits}")
+            lines.append("")
+        if ch.speech_patterns:
+            lines.append("**Speech patterns:**")
+            lines += [f"- {p}" for p in ch.speech_patterns]
+            lines.append("")
+        if ch.goals:
+            lines.append("**Goals:**")
+            lines += [f"- {g}" for g in ch.goals]
+            lines.append("")
+        if ch.relationships:
+            lines.append("**Relationships:**")
+            lines += [f"- {who}: {how}"
+                      for who, how in ch.relationships.items()]
+            lines.append("")
+        if ch.facts:
+            lines.append("**Pinned truths (Lorebook):**")
+            lines += [f"- {f}" for f in ch.facts]
+            lines.append("")
+        mems = ch._known_memories()
+        if mems:
+            lines.append(f"**Knows (through chapter "
+                         f"{ch.knows_up_to()}):**")
+            lines += [f"- {m}" for m in mems[-8:]]
+        return "\n".join(lines).strip() + "\n"
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def characters_from_book(book: Any, store: CharacterStore | None = None,
@@ -533,19 +735,27 @@ def _usage() -> str:
     return (
         "🎭 talk to your story's characters — owner only\n"
         "/character list — talkable characters\n"
-        "/character talk <name> <question> — interview them\n"
-        "/character add <name> [book] [--cutoff N] — add a character\n"
+        "/character talk <name> <question> — interview them (spoken when voice_fn wired)\n"
+        "/character add <name> [book] [--cutoff N] [--voice X] — add a character\n"
         "/character cutoff <name> <chapter> — move their knowledge cutoff\n"
+        "/character remember <name> <chapter> <fact> — tag a chapter memory\n"
+        "/character pin <name> <fact> — pin a Lorebook truth (always true)\n"
+        "/character relate <name> <who> <how...> — how they feel about someone\n"
+        "/character mood <name> <mood...> — shift their current state\n"
+        "/character card <name> — the shareable character card\n"
         "/character forget <name> — remove a character\n"
         "Spoiler rule: a character only knows up to their chapter cutoff."
     )
 
 
 def _fmt_character(ch: Character) -> str:
-    return (
-        f"🎭 {ch.name} — '{ch.book_title or 'no book'}', "
-        f"knows through chapter {ch.knowledge_cutoff}"
-    )
+    bits = [f"🎭 {ch.name} — '{ch.book_title or 'no book'}'",
+            f"knows through chapter {ch.knowledge_cutoff}"]
+    if ch.mood:
+        bits.append(f"feeling {ch.mood}")
+    if ch.facts:
+        bits.append(f"{len(ch.facts)} pinned truths")
+    return ", ".join(bits)
 
 
 def control_character(tail: str, context=None, chat=None,
@@ -579,21 +789,16 @@ def control_character(tail: str, context=None, chat=None,
             if ch is None:
                 return f"🎭 no character named '{name}' — /character list."
             llm_fn = kwargs.get("llm_fn")
-            res = talk_to(ch, question, llm_fn=llm_fn)
+            voice_fn = kwargs.get("voice_fn")
+            res = talk_to(ch, question, llm_fn=llm_fn, voice_fn=voice_fn)
             if not res.ok:
                 return f"🎭 {res.reason}"
             lines = [
                 f"🎭 {res.character} (knows through chapter {res.cutoff}):",
                 res.text,
             ]
-            voice_fn = kwargs.get("voice_fn")
-            if voice_fn is not None:
-                try:
-                    audio = voice_fn(ch.name, res.text)
-                    if audio:
-                        lines.append(f"🔊 {audio}")
-                except Exception:  # noqa: BLE001
-                    _log.debug("character voice failed", exc_info=True)
+            if res.audio:
+                lines.append(f"🔊 {res.audio}")
             return "\n".join(lines)
 
         if head == "add":
@@ -641,6 +846,70 @@ def control_character(tail: str, context=None, chat=None,
             ch.set_cutoff(n)
             store.save(ch)
             return f"🎭 {ch.name} now knows through chapter {ch.knows_up_to()}."
+
+        if head == "remember":
+            # remember <name> <chapter> <fact...>
+            parts = rest.split(None, 2)
+            if len(parts) < 3:
+                return "🎭 /character remember <name> <chapter> <fact>"
+            ch = store.get(parts[0])
+            if ch is None:
+                return f"🎭 no character named '{parts[0]}'."
+            try:
+                n = int(parts[1])
+            except (TypeError, ValueError):
+                return "🎭 chapter must be a number."
+            ch.remember(n, parts[2])
+            store.save(ch)
+            return (f"🎭 noted — {ch.name} will remember that from "
+                    f"chapter {n}.")
+
+        if head == "pin":
+            name, _, fact = rest.partition(" ")
+            name, fact = name.strip(), fact.strip()
+            if not name or not fact:
+                return "🎭 /character pin <name> <fact>"
+            ch = store.get(name)
+            if ch is None:
+                return f"🎭 no character named '{name}'."
+            if ch.pin_fact(fact):
+                store.save(ch)
+                return f"🎭 pinned — {ch.name} will always know: {fact[:80]}"
+            return "🎭 that's already pinned."
+
+        if head == "relate":
+            # relate <name> <who> <how...>
+            parts = rest.split(None, 2)
+            if len(parts) < 3:
+                return "🎭 /character relate <name> <who> <how they feel>"
+            ch = store.get(parts[0])
+            if ch is None:
+                return f"🎭 no character named '{parts[0]}'."
+            ch.set_relationship(parts[1], parts[2])
+            store.save(ch)
+            return (f"🎭 {ch.name} → {parts[1]}: "
+                    f"{parts[2][:80]}")
+
+        if head == "mood":
+            name, _, mood = rest.partition(" ")
+            name, mood = name.strip(), mood.strip()
+            if not name or not mood:
+                return "🎭 /character mood <name> <mood>"
+            ch = store.get(name)
+            if ch is None:
+                return f"🎭 no character named '{name}'."
+            ch.set_mood(mood)
+            store.save(ch)
+            return f"🎭 {ch.name} is feeling {mood} now."
+
+        if head == "card":
+            name = rest.strip()
+            if not name:
+                return "🎭 card for whom? /character card <name>"
+            ch = store.get(name)
+            if ch is None:
+                return f"🎭 no character named '{name}'."
+            return export_card(ch)
 
         if head in ("forget", "remove"):
             name = rest.strip()

@@ -59,10 +59,11 @@ __all__ = [
     "ScriptLine", "Chapter", "OverviewScript", "AudioOverview",
     "OverviewStore", "InteractiveSession",
     "make_overview", "control_overview",
+    "suggest_questions", "export_markdown",
 ]
 
 #: script formats
-FORMATS = ("deep-dive", "debate", "brief")
+FORMATS = ("deep-dive", "debate", "brief", "interview")
 
 #: the two hosts — distinct voices, distinct display names
 HOSTS = ("A", "B")
@@ -151,6 +152,7 @@ def _script_prompt(sources: list[dict[str, str]], fmt: str,
         "deep-dive": ("a relaxed deep-dive discussion", "Adaeze and Tunde explore the material together, building on each other's points"),
         "debate": ("a friendly debate", "Adaeze and Tunde take opposing angles on the material and push back on each other"),
         "brief": ("a short briefing", "Adaeze gives the key points, Tunde asks the sharp follow-ups"),
+        "interview": ("an interview", "Tunde interviews Adaeze as the domain expert: sharp questions, concrete examples, no jargon without explanation"),
     }.get(fmt, ("a discussion", "Adaeze and Tunde discuss the material"))
     return (
         f"You are writing {persona[0]} of the sources below as a two-host podcast script.\n"
@@ -253,10 +255,12 @@ def _render_audio(script: OverviewScript, *,
     """Render the script to one audio file; returns {ok, path, chapters}."""
     try:
         pieces: list[str] = []
+        line_durs: list[float] = []   # measured duration per script line
         tmp = Path(tempfile.mkdtemp(prefix="overview-render-"))
         for i, ln in enumerate(script.lines):
             clean = _CITE_RE.sub("", ln.text).strip()
             if not clean:
+                line_durs.append(0.0)
                 continue
             wav = None
             if voice_fn is not None:
@@ -279,6 +283,9 @@ def _render_audio(script: OverviewScript, *,
             norm = _normalize_wav(wav, 24000, tmp)
             if norm:
                 pieces.append(norm)
+                line_durs.append(_audio_duration(Path(norm)) or 0.0)
+            else:
+                line_durs.append(0.0)
         if not pieces:
             return {"ok": False, "reason": "no audio pieces rendered"}
         from ..media_edit.videos import concat
@@ -286,18 +293,31 @@ def _render_audio(script: OverviewScript, *,
                      ext=".wav")
         if not out or not Path(out).exists():
             return {"ok": False, "reason": "ffmpeg concat failed"}
-        # chapter timestamps: proportional to word counts
-        words = [len(_CITE_RE.sub("", ln.text).split()) for ln in script.lines]
-        total_words = sum(words) or 1
-        dur = _audio_duration(Path(out)) or sum(words) * 0.4
+        # chapter timestamps: measured from each rendered line's real
+        # audio duration (not word-proportional estimates)
+        total = sum(line_durs)
         chapters: list[Chapter] = []
         elapsed = 0.0
         seen: set[str] = set()
-        for ln, w in zip(script.lines, words):
+        for ln, d in zip(script.lines, line_durs):
             if ln.chapter and ln.chapter not in seen:
                 seen.add(ln.chapter)
                 chapters.append(Chapter(title=ln.chapter, start_s=elapsed))
-            elapsed += dur * w / total_words
+            elapsed += d
+        if total <= 0:
+            # measurement unavailable — fall back to word-proportional
+            words = [len(_CITE_RE.sub("", ln.text).split())
+                     for ln in script.lines]
+            total_words = sum(words) or 1
+            dur = _audio_duration(Path(out)) or sum(words) * 0.4
+            chapters = []
+            elapsed = 0.0
+            seen = set()
+            for ln, w in zip(script.lines, words):
+                if ln.chapter and ln.chapter not in seen:
+                    seen.add(ln.chapter)
+                    chapters.append(Chapter(title=ln.chapter, start_s=elapsed))
+                elapsed += dur * w / total_words
         return {"ok": True, "path": str(out), "chapters": chapters}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"render failed: {exc}"}
@@ -506,6 +526,86 @@ def make_overview(sources: list[dict[str, Any]] | None, fmt: str = "deep-dive",
 # ── interactive mode ──────────────────────────────────────────────────────
 
 
+def suggest_questions(overview: AudioOverview, *,
+                      llm_fn: Callable[[str], str] | None = None,
+                      n: int = 5) -> list[str]:
+    """Suggest sharp follow-up questions for the interactive session
+    (the NotebookLM "what to ask next" pattern).
+
+    With ``llm_fn`` the suggestions come from the model, grounded in
+    the script; without one, honest structural fallbacks are built from
+    the chapter titles. Never raises.
+    """
+    try:
+        if overview is None or not overview.script.lines:
+            return []
+        chapters = [c.title for c in overview.script.chapters if c.title]
+        topics = chapters[:6] or [
+            ln.text[:60] for ln in overview.script.lines[:6]]
+        if llm_fn is None:
+            out = []
+            for t in topics[:n]:
+                out.append(f"Can you give a concrete example of {t}?")
+        else:
+            script_txt = "\n".join(
+                f"{ln.speaker}: {_CITE_RE.sub('', ln.text).strip()}"
+                for ln in overview.script.lines[:40])
+            prompt = (
+                "You are helping a listener of a two-host podcast discussion. "
+                "Based on the script excerpt below, suggest %d sharp, specific "
+                "follow-up questions the listener could ask the hosts to go "
+                "deeper. Each question must be answerable from the material. "
+                "One question per line, no numbering, no extra text.\n\n%s"
+                % (n, script_txt[:4000]))
+            raw = (llm_fn(prompt) or "").strip()
+            out = [q.strip(" -•\t") for q in raw.splitlines() if q.strip()]
+            if not out:
+                out = [f"Can you give a concrete example of {t}?"
+                       for t in topics[:n]]
+        # pad to n with grounded generic follow-ups
+        generics = ["What surprised you most in this discussion?",
+                    "How does this connect to the bigger picture?",
+                    "What would you tell a skeptic about this?"]
+        i = 0
+        while len(out) < n and i < len(generics):
+            if generics[i] not in out:
+                out.append(generics[i])
+            i += 1
+        return out[:n]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def export_markdown(ov: AudioOverview) -> str:
+    """The overview as a readable Markdown document (script + chapters +
+    sources). Never raises."""
+    try:
+        lines = [f"# {ov.title or 'Audio overview'}", "",
+                 f"_Format: {ov.format} · Language: {ov.lang} · "
+                 f"{len(ov.script.lines)} lines_"]
+        if ov.script.dropped:
+            lines.append(f"_{ov.script.dropped} uncited lines dropped_")
+        lines.append("")
+        cur_chapter = ""
+        for ln in ov.script.lines:
+            if ln.chapter and ln.chapter != cur_chapter:
+                cur_chapter = ln.chapter
+                ch_start = next((c.start_s for c in ov.script.chapters
+                                 if c.title == cur_chapter), 0.0)
+                m, s = divmod(ch_start, 60)
+                lines.append(f"\n## {cur_chapter} "
+                             f"`{int(m):02d}:{s:04.1f}`\n")
+            name = _HOST_NAMES.get(ln.speaker, ln.speaker)
+            lines.append(f"**{name}:** {ln.text}")
+        if ov.sources:
+            lines.append("\n---\n\n### Sources\n")
+            for i, s in enumerate(ov.sources, 1):
+                lines.append(f"{i}. **{s.get('title', f'source {i}')}**")
+        return "\n".join(lines).strip() + "\n"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class InteractiveSession:
     """Interrupt the overview, ask a question, get a grounded spoken answer.
 
@@ -542,6 +642,10 @@ class InteractiveSession:
     def ask(self, question: str) -> dict[str, Any]:
         """Answer ``question`` from the overview's sources.
 
+        Steering with continuity: prior Q&A pairs are injected into the
+        session so follow-ups reference the discussion so far (the
+        NotebookLM continuity pattern).
+
         Returns ``{"ok", "answer", "refused", "audio", "sources"}`` —
         or ``{"ok": False, "reason"}``.  Never raises.
         """
@@ -553,7 +657,15 @@ class InteractiveSession:
                 return {"ok": False,
                         "reason": "interactive Q&A unavailable (no grounded "
                                   "session or LLM) — refusing to guess"}
-            ans = self._session.ask(question, llm_fn=self._llm_fn)
+            q = question
+            if self._history:
+                ctx = "\n".join(
+                    f"Q: {h['question']}\nA: {h['answer'][:400]}"
+                    for h in self._history[-4:])
+                q = (f"Conversation so far:\n{ctx}\n\n"
+                     f"Follow-up question (answer in the same grounded way, "
+                     f"referencing the discussion when relevant):\n{question}")
+            ans = self._session.ask(q, llm_fn=self._llm_fn)
             refused = bool(ans.refused) or "CANNOT_ANSWER" in ans.text.upper()
             text = ans.text
             if refused:
@@ -606,9 +718,11 @@ def _parse_sources(text: str) -> list[dict[str, str]]:
 
 def _usage() -> str:
     return (
-        "🎙️ /overview make <deep-dive|debate|brief> [lang] <Title :: text ;; Title2 :: text2>\n"
+        "🎙️ /overview make <deep-dive|debate|brief|interview> [lang] <Title :: text ;; Title2 :: text2>\n"
         "🎙️ /overview list — saved overviews\n"
         "🎙️ /overview ask <question> — interrupt the latest overview, get a grounded answer\n"
+        "🎙️ /overview questions — suggested follow-ups to ask the hosts\n"
+        "🎙️ /overview export <id> — the script as Markdown\n"
         "🎙️ /overview voices — the two hosts"
     )
 
@@ -637,7 +751,30 @@ def control_overview(tail: str, context=None, chat=None,
 
         if head == "voices":
             return ("🎙️ the hosts: Adaeze (host A) and Tunde (host B) — "
-                    "two distinct cloned voices on the private stack.")
+                    "two distinct cloned voices on the private stack "
+                    "(custom voices per host — beyond NotebookLM's two "
+                    "fixed defaults).")
+
+        if head == "questions":
+            ov = store.latest()
+            if ov is None:
+                return "🎙️ no overview yet — /overview make … first."
+            qs = suggest_questions(ov, llm_fn=kwargs.get("llm_fn"))
+            if not qs:
+                return "🎙️ no suggestions — the overview has no script."
+            lines = ["🎙️ try asking the hosts:"]
+            lines += [f"  {i}. {q}" for i, q in enumerate(qs, 1)]
+            lines.append("  (ask with /overview ask <question>)")
+            return "\n".join(lines)
+
+        if head == "export":
+            oid = rest.strip()
+            if not oid:
+                return "🎙️ export which? /overview export <id>"
+            ov = store.get(oid)
+            if ov is None:
+                return f"🎙️ no overview {oid!r} — /overview list."
+            return export_markdown(ov)
 
         if head == "make":
             # make <format> [lang] <Title :: text ;; ...>

@@ -4,14 +4,20 @@ Native-first music recognition: Devon listens HERSELF.
 
 * :func:`fingerprint` — Shazam-style spectral-constellation hashes
   extracted locally from any audio file. No API, no key, no network.
+  ``peak_mode="localmax"`` uses the true Wang-2003 local-maximum filter;
+  fan-out 15 per anchor.
+* :func:`identify` / :func:`match_batch` — one-call and batch recognition.
 * :class:`FingerprintDB` — a local sqlite database of fingerprints:
   Devon's own productions, the user's music library, anything she has
   heard before. :meth:`FingerprintDB.match` identifies those with
   time-coherent offset scoring (the real Shazam matching idea).
+  :meth:`FingerprintDB.index_directory` fingerprints a whole folder.
 * :func:`analyze` / :func:`describe_audio` — native acoustic analysis:
   tempo (onset autocorrelation), key (chroma + Krumhansl profiles),
-  loudness, brightness, speech-vs-music, clipping, silence. What Devon
-  can honestly say about audio she has never heard before.
+  chord, tuning (cents off A440), loudness, brightness, speech-vs-music,
+  clipping, silence, plus Essentia-style quality flags (SNR estimate,
+  mains-hum presence, saturation). What Devon can honestly say about
+  audio she has never heard before.
 
 What this is NOT: a global commercial catalogue. Identifying arbitrary
 songs from the world still needs an external service (AudD stays as the
@@ -50,13 +56,16 @@ __all__ = [
     "read_mono",
     "has_numpy",
     "fingerprint",
+    "export_constellation",
     "FingerprintDB",
     "default_fingerprint_db",
     "analyze",
     "describe_audio",
     "index_own",
+    "identify",
     "match_local",
     "match_local_db",
+    "match_batch",
     "ANALYSIS_WINDOW_SECONDS",
     "FINGERPRINT_WINDOW_SECONDS",
 ]
@@ -76,8 +85,10 @@ _HOP = 2048
 #: Constellation: frequency bands and peaks per frame.
 _BANDS = 32
 _FMIN, _FMAX = 80.0, 8000.0
-#: Hash fan-out: pairs per anchor peak.
-_FANOUT = 8
+#: Hash fan-out: pairs per anchor peak. 15 is the measured sweet spot
+#: (pair-hashing separates the true match ~18x further from the
+#: runner-up than small fan-outs — the constellation stays robust).
+_FANOUT = 15
 #: Max time delta between paired peaks (seconds).
 _MAX_DT = 3.0
 #: Cap on stored hashes per file.
@@ -333,6 +344,52 @@ def _constellation_peaks(frames: list[list[float]], sr: int,
 _PEAK_STRENGTH_FRACTION = 0.12
 
 
+def _localmax_peaks(frames: list[list[float]], sr: int,
+                     win: int = _WIN,
+                     with_magnitude: bool = False
+                     ) -> list:
+    """Constellation via a true local-maximum filter (the Wang 2003
+    pattern): a bin is a peak only if it is the maximum of its
+    freq×time neighborhood AND clears twice the frame median.
+
+    More faithful to the original Shazam algorithm than band slicing —
+    a sustained note no longer plants a peak in every frame of an empty
+    band. Requires numpy; falls back to an empty list otherwise (the
+    caller then uses the band-based peaks). Total.
+    """
+    peaks: list = []
+    try:
+        if not frames or not has_numpy():
+            return peaks
+        import numpy as np
+
+        spec = np.asarray(frames, dtype=np.float64)  # (time, freq)
+        if spec.shape[0] < 3 or spec.shape[1] < 3:
+            return peaks
+        med = np.median(spec, axis=1, keepdims=True)
+        floor = med * 2.0
+        # local max over a 3x3 freq×time neighborhood (symmetric padding
+        # keeps the output shape identical to the input)
+        padded = np.pad(spec, 1, mode="constant")
+        nb = np.stack([padded[i:i + spec.shape[0], j:j + spec.shape[1]]
+                       for i in range(3) for j in range(3)], axis=-1)
+        nbmax = nb.max(axis=-1)
+        is_peak = (spec >= floor) & (spec >= nbmax)
+        freqs = _bin_freqs(spec.shape[1], sr, win)
+        ts, fs = np.nonzero(is_peak)
+        for t_i, f_i in zip(ts.tolist(), fs.tolist()):
+            f = freqs[f_i] if f_i < len(freqs) else 0.0
+            tm = t_i * _HOP / sr
+            if with_magnitude:
+                peaks.append((f, tm, float(spec[t_i, f_i])))
+            else:
+                peaks.append((f, tm))
+        return peaks
+    except Exception:  # noqa: BLE001
+        _log.debug("localmax constellation failed", exc_info=True)
+        return []
+
+
 def _hash_pair(f1: float, f2: float, dt: float) -> int:
     """Quantized constellation hash: f1 | f2 | Δt → one int.
 
@@ -347,9 +404,15 @@ def _hash_pair(f1: float, f2: float, dt: float) -> int:
 
 def fingerprint(path: str | os.PathLike[str], *,
                 max_hashes: int = _MAX_HASHES,
-                max_seconds: float = FINGERPRINT_WINDOW_SECONDS
+                max_seconds: float = FINGERPRINT_WINDOW_SECONDS,
+                peak_mode: str = "bands",
                 ) -> list[tuple[int, float]]:
     """Extract Shazam-style constellation hashes from ``path``.
+
+    ``peak_mode="bands"`` (default) takes the strongest local maximum in
+    each log-spaced frequency band per frame; ``peak_mode="localmax"``
+    uses a true freq×time local-maximum filter (the Wang 2003 pattern —
+    more faithful, needs numpy, falls back to bands without it).
 
     Returns ``[(hash, offset_seconds), ...]`` — Devon's own fingerprint,
     extracted locally. Raises :class:`AudioReadError` when the file
@@ -358,7 +421,12 @@ def fingerprint(path: str | os.PathLike[str], *,
     samples, sr = read_mono(path, target_sr=_FP_SR,
                             max_seconds=max_seconds)
     frames = _frames(samples, sr)
-    peaks = _constellation_peaks(frames, sr, with_magnitude=True)
+    if (peak_mode or "bands").lower() == "localmax":
+        peaks = _localmax_peaks(frames, sr, with_magnitude=True)
+        if not peaks:
+            peaks = _constellation_peaks(frames, sr, with_magnitude=True)
+    else:
+        peaks = _constellation_peaks(frames, sr, with_magnitude=True)
     # keep the strong landmarks only — dominant tones survive noise,
     # encoding, and room coloration; weak ones don't
     if peaks:
@@ -387,6 +455,60 @@ def fingerprint(path: str | os.PathLike[str], *,
 # ---------------------------------------------------------------------------
 
 _DEFAULT_DB = ""
+
+
+def _media_duration(path: str | os.PathLike[str]) -> float:
+    """Honest duration in seconds. WAV via stdlib, else ffprobe, else 0."""
+    try:
+        p = str(path)
+        if p.lower().endswith(".wav"):
+            with wave.open(p, "rb") as wf:
+                return wf.getnframes() / max(1, wf.getframerate())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import shutil
+        import subprocess
+
+        if shutil.which("ffprobe") is None:
+            return 0.0
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30)
+        return float((out.stdout or "").strip() or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def export_constellation(path: str | os.PathLike[str], *,
+                         peak_mode: str = "bands",
+                         max_peaks: int = 500) -> dict[str, Any]:
+    """Export the spectral constellation as JSON-able data: the peaks
+    Devon hears when she fingerprints a track. Powers "show the work"
+    displays (spectrogram + constellation + offset histogram).
+
+    Never raises; returns ``{"ok", "peaks": [(freq_hz, time_s), ...]}``.
+    """
+    try:
+        samples, sr = read_mono(path, target_sr=_FP_SR,
+                                max_seconds=FINGERPRINT_WINDOW_SECONDS)
+        frames = _frames(samples, sr)
+        if (peak_mode or "bands").lower() == "localmax":
+            peaks = _localmax_peaks(frames, sr)
+            if not peaks:
+                peaks = _constellation_peaks(frames, sr)
+        else:
+            peaks = _constellation_peaks(frames, sr)
+        peaks = [(round(float(f), 1), round(float(t), 3))
+                 for f, t in peaks[:max(1, max_peaks)]]
+        return {"ok": True, "peaks": peaks, "count": len(peaks),
+                "peak_mode": peak_mode,
+                "window_s": FINGERPRINT_WINDOW_SECONDS}
+    except AudioReadError as exc:
+        return {"ok": False, "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"constellation export failed: {exc}"}
 
 
 def _default_db_path() -> str:
@@ -441,15 +563,14 @@ class FingerprintDB:
                         "reason": "no fingerprints extracted — "
                                   "audio too quiet or too short"}
             import time as _t
-            samples, sr = read_mono(path, max_seconds=4.0)
-            _ = (samples, sr)  # duration from full read below
+            duration = _media_duration(path)
             with self._lock:
                 conn = self._connect()
                 cur = conn.execute(
                     "INSERT INTO tracks (title, artist, source, duration, "
                     "created) VALUES (?,?,?,?,?)",
                     (title or Path(str(path)).stem,
-                     artist or "unknown", source, 0.0, _t.time()))
+                     artist or "unknown", source, duration, _t.time()))
                 tid = cur.lastrowid
                 conn.executemany(
                     "INSERT INTO hashes (track_id, hash, offset_ms) "
@@ -457,12 +578,53 @@ class FingerprintDB:
                     [(tid, h, int(t * 1000)) for h, t in hashes])
                 conn.commit()
             return {"ok": True, "track_id": tid, "hashes": len(hashes),
-                    "title": title or Path(str(path)).stem}
+                    "title": title or Path(str(path)).stem,
+                    "duration_s": round(duration, 1)}
         except AudioReadError as exc:
             return {"ok": False, "reason": str(exc)}
         except Exception as exc:  # noqa: BLE001
             _log.debug("add_track failed", exc_info=True)
             return {"ok": False, "reason": f"indexing failed: {exc}"}
+
+    def index_directory(self, directory: str | os.PathLike[str], *,
+                        extensions: tuple[str, ...] = (
+                            ".wav", ".mp3", ".m4a", ".ogg", ".opus", ".flac"),
+                        source: str = "library",
+                        artist: str = "") -> dict[str, Any]:
+        """Fingerprint every audio file in ``directory`` (the
+        ``build_database.py`` pattern). Never raises."""
+        try:
+            d = Path(directory)
+            if not d.is_dir():
+                return {"ok": False,
+                        "reason": f"no such directory: {directory}"}
+            files = sorted(
+                p for p in d.rglob("*")
+                if p.is_file() and p.suffix.lower() in extensions)
+            indexed, failed = 0, 0
+            for f in files:
+                res = self.add_track(f, artist=artist, source=source)
+                if res.get("ok"):
+                    indexed += 1
+                else:
+                    failed += 1
+            return {"ok": True, "indexed": indexed, "failed": failed,
+                    "scanned": len(files)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"directory index failed: {exc}"}
+
+    def stats(self) -> dict[str, Any]:
+        """Database size at a glance. Never raises."""
+        try:
+            with self._lock:
+                conn = self._connect()
+                tracks = conn.execute(
+                    "SELECT COUNT(*) FROM tracks").fetchone()[0]
+                hashes = conn.execute(
+                    "SELECT COUNT(*) FROM hashes").fetchone()[0]
+            return {"ok": True, "tracks": tracks, "hashes": hashes}
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "tracks": 0, "hashes": 0}
 
     def match(self, path: str | os.PathLike[str], *,
               threshold: float = MATCH_THRESHOLD
@@ -528,10 +690,11 @@ class FingerprintDB:
             with self._lock:
                 conn = self._connect()
                 rows = conn.execute(
-                    "SELECT id, title, artist, source, created FROM tracks "
-                    "ORDER BY created DESC").fetchall()
+                    "SELECT id, title, artist, source, duration, created "
+                    "FROM tracks ORDER BY created DESC").fetchall()
             return [{"track_id": r[0], "title": r[1], "artist": r[2],
-                     "source": r[3]} for r in rows]
+                     "source": r[3], "duration_s": round(r[4] or 0.0, 1)}
+                    for r in rows]
         except Exception:  # noqa: BLE001
             return []
 
@@ -592,6 +755,36 @@ def match_local_db(path: str | os.PathLike[str], *,
 match_local = match_local_db
 
 
+def identify(path: str | os.PathLike[str], *,
+             db: FingerprintDB | None = None,
+             threshold: float = MATCH_THRESHOLD) -> dict[str, Any]:
+    """One call: "what is this audio?" → match result dict. Never raises."""
+    try:
+        return (db or default_fingerprint_db()).match(
+            path, threshold=threshold)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"identify failed: {exc}"}
+
+
+def match_batch(paths: Sequence[str | os.PathLike[str]], *,
+                db: FingerprintDB | None = None,
+                threshold: float = MATCH_THRESHOLD) -> list[dict[str, Any]]:
+    """Identify many clips at once (batch Shazam). Never raises per item —
+    each entry carries its own ``{"ok", ...}`` or ``{"ok": False}``.
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        db = db or default_fingerprint_db()
+        for p in (paths or []):
+            res = db.match(p, threshold=threshold)
+            res["path"] = str(p)
+            out.append(res)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return [{"ok": False, "reason": f"batch match failed: {exc}",
+                 "path": str(p)} for p in (paths or [])]
+
+
 # ---------------------------------------------------------------------------
 # acoustic analysis — what Devon can honestly say about unknown audio
 # ---------------------------------------------------------------------------
@@ -623,6 +816,13 @@ class AudioAnalysis:
     tempo_confidence: float = 0.0
     key: str = ""
     key_confidence: float = 0.0
+    #: dominant chord (Essentia ChordsDetection pattern)
+    chord: str = ""
+    chord_confidence: float = 0.0
+    #: tuning deviation in cents from A440 (+ = sharp)
+    tuning_cents: float = 0.0
+    #: Essentia-style audio-problem flags
+    quality: dict[str, Any] = field(default_factory=dict)
     #: 0 = pure speech, 1 = pure music (heuristic — labeled as such)
     music_score: float = 0.5
     silence_ratio: float = 0.0
@@ -634,6 +834,7 @@ class AudioAnalysis:
             "path", "ok", "reason", "seconds", "sample_rate", "rms_db",
             "peak_db", "spectral_centroid_hz", "zero_crossing_rate",
             "tempo_bpm", "tempo_confidence", "key", "key_confidence",
+            "chord", "chord_confidence", "tuning_cents", "quality",
             "music_score", "silence_ratio", "clipped_ratio", "engine")}
 
 
@@ -667,12 +868,15 @@ def _estimate_tempo(flux: list[float], sr: int, hop: int) -> tuple[float, float]
         return 0.0, 0.0
 
 
-def _chroma_key(frames: list[list[float]], sr: int,
-                win: int = _WIN) -> tuple[str, float]:
-    """12-bin chroma → best Krumhansl major/minor rotation."""
+def _chroma_vector(frames: list[list[float]], sr: int,
+                   win: int = _WIN) -> list[float]:
+    """12-bin normalized chroma vector (shared by key + chord + tuning).
+
+    Total.
+    """
     try:
         if not frames:
-            return "", 0.0
+            return [0.0] * 12
         freqs = _bin_freqs(len(frames[0]), sr, win)
         chroma = [0.0] * 12
         for mags in frames:
@@ -685,8 +889,19 @@ def _chroma_key(frames: list[list[float]], sr: int,
                 chroma[pc] += m
         total = sum(chroma)
         if total <= 0:
+            return [0.0] * 12
+        return [c / total for c in chroma]
+    except Exception:  # noqa: BLE001
+        return [0.0] * 12
+
+
+def _chroma_key(frames: list[list[float]], sr: int,
+                win: int = _WIN) -> tuple[str, float]:
+    """12-bin chroma → best Krumhansl major/minor rotation."""
+    try:
+        chroma = _chroma_vector(frames, sr, win)
+        if sum(chroma) <= 0:
             return "", 0.0
-        chroma = [c / total for c in chroma]
         best_name, best_corr = "", -2.0
         for mode, prof in (("major", _KRUMHANSL_MAJOR),
                            ("minor", _KRUMHANSL_MINOR)):
@@ -710,6 +925,123 @@ def _chroma_key(frames: list[list[float]], sr: int,
         return best_name, conf
     except Exception:  # noqa: BLE001
         return "", 0.0
+
+
+_CHORD_TEMPLATES: dict[str, tuple[int, ...]] = {
+    "": (0, 4, 7), "m": (0, 3, 7), "dim": (0, 3, 6), "aug": (0, 4, 8),
+    "7": (0, 4, 7, 10), "maj7": (0, 4, 7, 11), "m7": (0, 3, 7, 10),
+}
+
+
+def _detect_chord(frames: list[list[float]], sr: int,
+                  win: int = _WIN) -> tuple[str, float]:
+    """Dominant chord: chroma-template match over 12 roots × qualities
+    (the Essentia ChordsDetection pattern, simplified). Returns
+    (\"Am\", confidence). Total.
+    """
+    try:
+        chroma = _chroma_vector(frames, sr, win)
+        if sum(chroma) <= 0:
+            return "", 0.0
+        best, best_s = "", -1.0
+        for root in range(12):
+            for qual, ivs in _CHORD_TEMPLATES.items():
+                tmpl = [0.0] * 12
+                for iv in ivs:
+                    tmpl[(root + iv) % 12] = 1.0
+                # cosine similarity
+                num = sum(c * t for c, t in zip(chroma, tmpl))
+                den = math.sqrt(sum(c * c for c in chroma)
+                                * sum(t * t for t in tmpl))
+                s = num / den if den > 0 else 0.0
+                if s > best_s:
+                    best_s = s
+                    best = f"{_NOTE_NAMES[root]}{qual}"
+        return best, round(max(0.0, min(1.0, best_s)), 3)
+    except Exception:  # noqa: BLE001
+        return "", 0.0
+
+
+def _estimate_tuning(frames: list[list[float]], sr: int,
+                     win: int = _WIN) -> float:
+    """Tuning deviation in cents from A440 (Essentia TuningFrequency
+    pattern): strongest spectral peak in 80–1000 Hz → cents off the
+    nearest equal-tempered note. +50 = a quarter-tone sharp. Total.
+    """
+    try:
+        if not frames:
+            return 0.0
+        freqs = _bin_freqs(len(frames[0]), sr, win)
+        acc = [0.0] * len(freqs)
+        for mags in frames:
+            for i, m in enumerate(mags):
+                acc[i] += m
+        best_i, best_v = -1, 0.0
+        for i, f in enumerate(freqs):
+            if 80.0 <= f <= 1000.0 and acc[i] > best_v:
+                best_v, best_i = acc[i], i
+        if best_i < 0:
+            return 0.0
+        f = freqs[best_i]
+        midi = 69 + 12.0 * math.log2(f / 440.0)
+        return round((midi - round(midi)) * 100.0, 1)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _quality_flags(samples: Sequence[float], sr: int,
+                    frames: list[list[float]]) -> dict[str, Any]:
+    """Essentia-style audio-problem flags: SNR estimate, mains-hum
+    presence, saturation. Total — never raises.
+    """
+    out: dict[str, Any] = {"snr_db": 0.0, "hum": False,
+                           "saturated": False, "dc_offset": 0.0}
+    try:
+        n = len(samples)
+        if n == 0 or not frames:
+            return out
+        # SNR: median frame energy of the loudest half vs the noise
+        # floor (minimum-statistics: the noise floor is what the
+        # quietest moments look like — same idea as the DSP denoiser)
+        mags = [[abs(c) for c in fr] for fr in frames]
+        nfr = len(mags)
+        energies = sorted((sum(m * m for m in fr), i)
+                          for i, fr in enumerate(mags))
+        k = max(1, nfr // 10)
+        quiet = [i for _, i in energies[:k]]
+        nbins = len(mags[0])
+        noise_e = 0.0
+        for b in range(nbins):
+            col = sorted(mags[i][b] for i in quiet)
+            p = col[len(col) // 2] if col else 0.0
+            noise_e += p * p
+        noise_e /= max(1, nbins)
+        sig_e = sum(m * m for fr in mags for m in fr) / max(1, nfr * nbins)
+        out["snr_db"] = round(
+            10.0 * math.log10(sig_e / max(1e-12, noise_e)), 1)
+        # hum: is there a standout at 50/60 Hz (+harmonics)?
+        freqs = _bin_freqs(len(frames[0]), sr, _WIN)
+        acc = [0.0] * len(freqs)
+        for mg in mags:
+            for i, m in enumerate(mg):
+                acc[i] += m
+        med = sorted(acc)[len(acc) // 2] if acc else 0.0
+        hum_hit = False
+        for base in (50.0, 60.0):
+            for mult in (1, 2, 3):
+                f = base * mult
+                if f >= sr / 2 - 50:
+                    continue
+                i = min(len(acc) - 1, int(f / (sr / _WIN)))
+                if acc[i] > med * 6.0:
+                    hum_hit = True
+        out["hum"] = hum_hit
+        out["saturated"] = any(abs(s) >= 0.99 for s in samples[:sr * 5])
+        out["dc_offset"] = round(
+            sum(samples[:sr * 5]) / max(1, min(n, sr * 5)), 4)
+        return out
+    except Exception:  # noqa: BLE001
+        return out
 
 
 def analyze(path: str | os.PathLike[str], *,
@@ -779,6 +1111,11 @@ def analyze(path: str | os.PathLike[str], *,
         key, kconf = _chroma_key(frames, sr)
         res.key = key
         res.key_confidence = round(kconf, 3)
+        chord, cconf = _detect_chord(frames, sr)
+        res.chord = chord
+        res.chord_confidence = cconf
+        res.tuning_cents = _estimate_tuning(frames, sr)
+        res.quality = _quality_flags(samples, sr, frames)
 
         # music vs speech: music sustains harmonic energy with lower
         # frame-to-frame variance relative to its level; speech is
@@ -811,9 +1148,22 @@ def describe_audio(path: str | os.PathLike[str]) -> str:
         parts.append(f"~{a.tempo_bpm:.0f} BPM")
     if a.key and a.key_confidence >= 0.55:
         parts.append(f"key of {a.key}")
+    if a.chord and a.chord_confidence >= 0.5:
+        parts.append(f"leaning on {a.chord}")
+    if abs(a.tuning_cents) >= 8:
+        drift = "sharp" if a.tuning_cents > 0 else "flat"
+        parts.append(f"tuned {abs(a.tuning_cents):.0f}¢ {drift}")
     parts.append(f"loudness {a.rms_db:.0f} dBFS")
-    if a.clipped_ratio > 0.001:
-        parts.append("clipped")
+    q = a.quality or {}
+    flags: list[str] = []
+    if a.clipped_ratio > 0.001 or q.get("saturated"):
+        flags.append("clipped")
+    if q.get("hum"):
+        flags.append("mains hum")
+    if q.get("snr_db") and q["snr_db"] < 10:
+        flags.append(f"noisy (SNR {q['snr_db']:.0f} dB)")
     if a.silence_ratio > 0.5:
-        parts.append("mostly silence")
+        flags.append("mostly silence")
+    if flags:
+        parts.append("⚠ " + ", ".join(flags))
     return " · ".join(parts) + f"  (heard natively, {a.engine})"
