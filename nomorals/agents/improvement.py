@@ -217,8 +217,25 @@ class ImprovementLoop:
                 "proposal_failed", f"could not plan an edit: {exc}",
                 "", "skipped", {"error": str(exc)[:200]})
 
-        # 6. approval mode: hold for the owner
+        # 6. approval mode: hold for the owner — also file to the
+        # UpgradeQueue so the owner sees it via the upgrade_queue tool.
         if mode == "approval":
+            try:
+                from .upgrade_queue import UpgradeQueue
+                uq = UpgradeQueue(self.context)
+                uq.propose(
+                    title=f"improve {weakest} ({before:.2f} → target "
+                          f"{self.settings.target:.2f})",
+                    rationale=(
+                        f"Weakest dimension {weakest} at {before:.2f}, "
+                        f"target {self.settings.target:.2f}. "
+                        f"Edit summary: {edit_summary}. "
+                        f"Evidence: {rationale[:500]}"),
+                    files=[lever["file"]],
+                    source="improvement",
+                )
+            except Exception:  # noqa: BLE001 - queue filing is best-effort
+                pass
             return self._record(
                 cycle_id, weakest, before, None, None, proposal_id,
                 "proposed",

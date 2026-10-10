@@ -1429,8 +1429,10 @@ class PartnerRuntime(
                 # (daily 23:00 America/Denver = 06:00 WAT).  Idempotent by
                 # name; the pipeline is news → briefing → voice → delivery.
                 try:
-                    from ..morning_pulse import ensure_pulse_job
+                    from ..morning_pulse import (
+                        ensure_pulse_job, check_pulse_catchup)
                     ensure_pulse_job(self.context)
+                    check_pulse_catchup(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("morning-pulse job not registered: %s",
                                  exc)
