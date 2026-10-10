@@ -49,10 +49,11 @@ OUTCOMES = ("success", "partial", "failed", "unknown")
 _HALF_LIFE_DAYS = 14.0
 _SECONDS_PER_DAY = 86_400.0
 _EMPTY_PRIOR = 0.5
-#: Owner disapproval weighs this much more than a plain failure.
-_FEEDBACK_DOWN_WEIGHT = 2.0
 #: Owner approval weighs a bit more than a plain success.
 _FEEDBACK_UP_WEIGHT = 1.5
+#: Owner disapproval drags a score toward 0 by this flat amount — a
+#: "success" the owner hated can never score above 0.5.
+_FEEDBACK_DOWN_PENALTY = 0.5
 
 _REPRESENTATION_DDL = """
 CREATE TABLE IF NOT EXISTS cog_representation (
@@ -298,16 +299,16 @@ class RepresentationLedger:
         """Map an outcome to a 0..1 quality value.
 
         Unknown outcomes contribute 0 weight (see quality_score) — they
-        never inflate.  Owner -1 hits harder than +1 helps.
+        never inflate.  Owner approval lifts a bit; owner disapproval
+        drags toward 0 by a flat 0.5 — harder than approval helps, so a
+        "successful" action the owner hated can never score above 0.5.
         """
         base = {"success": 1.0, "partial": 0.5,
                 "failed": 0.0, "unknown": 0.5}[outcome]
         if owner_feedback == 1:
             return min(1.0, base * _FEEDBACK_UP_WEIGHT)
         if owner_feedback == -1:
-            # Disapproval drags toward 0 harder than approval lifts.
-            return max(0.0, base - (1.0 - base + 0.5) * _FEEDBACK_DOWN_WEIGHT
-                       / 2.0)
+            return max(0.0, base - _FEEDBACK_DOWN_PENALTY)
         return base
 
     def quality_score(
@@ -396,6 +397,216 @@ class RepresentationLedger:
         patterns.sort(key=lambda p: p["score"])
         return patterns
 
+    # ── learning out (Reflexion verbal-RL / Voyager skill library) ─────
+    def distill(
+        self,
+        action_type: str | None = None,
+        *,
+        threshold: float = 0.7,
+        since_days: float = 30.0,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Turn counterfactuals + owner feedback into lesson cards.
+
+        This is the skill-distillation feed the module docstring
+        promised: per action type, Reflexion-style verbal lessons —
+        "when you do X, do Y instead, because Z" — assembled from the
+        weak patterns, the owner's own words, and recorded
+        counterfactuals.  Cards are prompt-ready; the brain injects
+        ``lesson_text`` into context before the next action of that
+        type (Voyager stores verified programs; we store verified
+        guidance).  Types scoring at or above ``threshold`` are
+        skipped unless ``action_type`` names them explicitly.
+        """
+        cards: list[dict[str, Any]] = []
+        scores = self.scores_by_type(since_days=since_days)
+        types = [action_type] if action_type else sorted(scores)
+        for atype in types:
+            score = scores.get(atype, _EMPTY_PRIOR)
+            if action_type is None and score >= threshold:
+                continue
+            recs = self.recent(action_type=atype, limit=50,
+                               since_days=since_days)
+            if not recs:
+                continue
+            failed = [r for r in recs if r.outcome in ("failed", "partial")]
+            pushback = [(r.feedback_text or "").strip()
+                        for r in recs
+                        if r.owner_feedback == -1 and r.feedback_text]
+            cfs: list[str] = []
+            for rec in recs:
+                for cf in self._counterfactuals_for(rec.id):
+                    why = f" — {cf['why']}" if cf.get("why") else ""
+                    cfs.append(f"{cf['better_action']}{why}")
+            # Dedupe while preserving order.
+            cfs = list(dict.fromkeys(cfs))
+            pushback = list(dict.fromkeys(pushback))
+            lines = [
+                f"LESSON — {atype} (representation quality"
+                f" {score:.0%} over {len(recs)} actions)",
+            ]
+            if failed:
+                weak = failed[0]
+                desc = weak.description[:90]
+                lines.append(f"Weak pattern: {len(failed)} weak of"
+                             f" {len(recs)} — e.g. {desc!r} ({weak.outcome})")
+            if pushback:
+                lines.append("Owner pushed back: "
+                             + "; ".join(f"{p!r}" for p in pushback[:3]))
+            if cfs:
+                lines.append("Do instead:")
+                lines.extend(f"  • {c}" for c in cfs[:4])
+            cards.append({
+                "action_type": atype,
+                "score": round(score, 3),
+                "weak_count": len(failed),
+                "total": len(recs),
+                "counterfactuals": cfs[:4],
+                "owner_pushback": pushback[:3],
+                "lesson_text": "\n".join(lines),
+            })
+            if len(cards) >= max(0, int(limit)):
+                break
+        cards.sort(key=lambda c: c["score"])
+        return cards
+
+    def trend(
+        self,
+        action_type: str | None = None,
+        *,
+        window_days: float = 14.0,
+    ) -> dict[str, Any]:
+        """Improvement trajectory: recent half of ``window_days`` vs the
+        prior half.  ``direction`` is ``"improving"`` / ``"declining"`` /
+        ``"stable"`` (±0.05 hysteresis); ``delta`` is recent − prior."""
+        half = float(window_days) / 2.0
+        recent = self.quality_score(action_type, since_days=half)
+        prior_all = self.quality_score(action_type, since_days=window_days)
+        # prior half ≈ blend of the two windows, solved for the half
+        # before `recent`: prior = 2*all - recent (equal weighting).
+        prior = min(1.0, max(0.0, 2.0 * prior_all - recent))
+        delta = recent - prior
+        direction = ("improving" if delta > 0.05
+                     else "declining" if delta < -0.05 else "stable")
+        return {
+            "direction": direction,
+            "delta": round(delta, 3),
+            "recent_score": round(recent, 3),
+            "prior_score": round(prior, 3),
+        }
+
+    def feedback_rate(
+        self,
+        action_type: str | None = None,
+        *,
+        since_days: float = 30.0,
+    ) -> float:
+        """Fraction of actions in the window that got owner feedback
+        (+1 or -1).  Low rate + low score = flying blind."""
+        sql = ("SELECT COUNT(*) AS n, SUM(CASE WHEN owner_feedback IS NOT"
+               " NULL THEN 1 ELSE 0 END) AS f FROM cog_representation"
+               " WHERE created_at >= ?")
+        params: list[Any] = [time.time() - since_days * _SECONDS_PER_DAY]
+        if action_type:
+            sql += " AND action_type = ?"
+            params.append(action_type)
+        row = self.db.query(sql, params)[0]
+        n = row["n"] or 0
+        return float(row["f"] or 0) / n if n else 0.0
+
+    def inconsistencies(
+        self,
+        *,
+        since_days: float = 30.0,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Evaluator mismatches (Reflexion's evaluator axis): outcomes
+        the owner contradicted — "success" with a 👎, "failed" with a
+        👍.  These are the rows most worth re-examining: either the
+        outcome detector or the owner's expectation is off."""
+        rows = self.db.query(
+            "SELECT id, action_type, description, outcome, owner_feedback,"
+            " feedback_text, created_at FROM cog_representation"
+            " WHERE created_at >= ?"
+            " AND ((outcome = 'success' AND owner_feedback = -1)"
+            " OR (outcome = 'failed' AND owner_feedback = 1))"
+            " ORDER BY created_at DESC LIMIT ?",
+            (time.time() - since_days * _SECONDS_PER_DAY,
+             max(0, int(limit))),
+        )
+        return [
+            {
+                "id": row["id"],
+                "action_type": row["action_type"],
+                "description": row["description"],
+                "outcome": row["outcome"],
+                "owner_feedback": row["owner_feedback"],
+                "feedback_text": row.get("feedback_text") or "",
+                "note": ("owner disapproved a recorded success"
+                         if row["owner_feedback"] == -1
+                         else "owner approved a recorded failure"),
+            }
+            for row in rows
+        ]
+
+    # ── portable artifact (Letta-style export/import) ──────────────────
+    def export_json(self, path: str | Path) -> dict:
+        """Export actions + counterfactuals to JSON.  Returns counts."""
+        actions = self.db.query("SELECT * FROM cog_representation")
+        cfs = self.db.query(
+            "SELECT * FROM cog_representation_counterfactuals")
+        payload = {
+            "kind": "cognition-representation",
+            "version": 1,
+            "exported_at": time.time(),
+            "actions": actions,
+            "counterfactuals": cfs,
+        }
+        out = Path(path)
+        out.write_text(json.dumps(payload), encoding="utf-8")
+        return {"actions": len(actions), "counterfactuals": len(cfs),
+                "path": str(out)}
+
+    def import_json(self, path: str | Path) -> dict:
+        """Import a payload written by :meth:`export_json`.  Upserts by
+        id.  Returns ``{"actions": n, "counterfactuals": m}``."""
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if payload.get("kind") != "cognition-representation":
+            raise ValueError("not a cognition-representation export")
+        n_a = n_c = 0
+        with self._lock:
+            for a in payload.get("actions", []):
+                self.db.execute(
+                    "INSERT OR REPLACE INTO cog_representation (id,"
+                    " action_type, description, outcome, owner_feedback,"
+                    " feedback_text, metadata_json, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (a.get("id") or new_short_id("rep_"),
+                     a.get("action_type") or "",
+                     a.get("description") or "",
+                     a.get("outcome") or "unknown",
+                     a.get("owner_feedback"),
+                     a.get("feedback_text") or "",
+                     a.get("metadata_json") or "{}",
+                     float(a.get("created_at", time.time())),
+                     float(a.get("updated_at", time.time()))),
+                )
+                n_a += 1
+            for c in payload.get("counterfactuals", []):
+                self.db.execute(
+                    "INSERT OR REPLACE INTO"
+                    " cog_representation_counterfactuals (id, action_id,"
+                    " better_action, why, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (c.get("id") or new_short_id("cf_"),
+                     c.get("action_id") or "",
+                     c.get("better_action") or "",
+                     c.get("why") or "",
+                     float(c.get("created_at", time.time()))),
+                )
+                n_c += 1
+        return {"actions": n_a, "counterfactuals": n_c}
+
     # ── review surface ───────────────────────────────────────────────
     def summary(self, *, limit: int = 10,
                 since_days: float = 30.0) -> str:
@@ -409,9 +620,17 @@ class RepresentationLedger:
             return "\n".join(lines)
         scores = self.scores_by_type(since_days=since_days)
         if scores:
-            bits = ", ".join(
-                f"{t} {s:.0%}" for t, s in sorted(scores.items()))
-            lines.append(f"Quality by type: {bits}")
+            bits = []
+            for t, s in sorted(scores.items()):
+                tr = self.trend(t, window_days=min(14.0, since_days))
+                arrow = {"improving": "↗", "declining": "↘"}.get(
+                    tr["direction"], "→")
+                bits.append(f"{t} {s:.0%}{arrow}")
+            lines.append("Quality by type: " + ", ".join(bits))
+        fb_rate = self.feedback_rate(since_days=since_days)
+        lines.append(f"Owner feedback on {fb_rate:.0%} of actions"
+                     + (" — flying partly blind, ask more often"
+                        if fb_rate < 0.3 and len(recs) >= 5 else ""))
         lines.append("")
         lines.append(f"Recent actions ({len(recs)}):")
         for r in recs:
@@ -435,6 +654,14 @@ class RepresentationLedger:
         else:
             lines.append("")
             lines.append("✅ No weak spots in this window.")
+        mismatched = self.inconsistencies(since_days=since_days, limit=5)
+        if mismatched:
+            lines.append("")
+            lines.append(f"🤔 {len(mismatched)} outcome(s) the owner"
+                         " contradicted — worth a second look:")
+            for m in mismatched[:3]:
+                lines.append(f"• [{m['action_type']}]"
+                             f" {m['description'][:70]} — {m['note']}")
         return "\n".join(lines)
 
 

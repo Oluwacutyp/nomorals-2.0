@@ -16,6 +16,21 @@ Design notes:
 """
 
 from .failure_kb import FailureKB
-from .trajectories import TrajectoryStore, normalize_error
+from .trajectories import (
+    TrajectoryStore,
+    cluster_key_for,
+    exception_class_of,
+    normalize_error,
+    wilson_interval,
+    wilson_lower,
+)
 
-__all__ = ["TrajectoryStore", "FailureKB", "normalize_error"]
+__all__ = [
+    "TrajectoryStore",
+    "FailureKB",
+    "normalize_error",
+    "cluster_key_for",
+    "exception_class_of",
+    "wilson_lower",
+    "wilson_interval",
+]
