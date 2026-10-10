@@ -349,17 +349,21 @@ class StructuredPrompt:
             bits.append(comp)
         return " ".join(b for b in bits if b)
 
+    #: alias → canonical backend name (render() always reports canonical)
+    BACKEND_ALIASES = {"hunyuan": "hunyuanvideo",
+                       "cogvideo": "cogvideox",
+                       "sd": "image"}
+
     def render(self, backend: str | None = None) -> dict[str, str]:
         b = (backend or self.backend).lower()
+        b = self.BACKEND_ALIASES.get(b, b)
         fmt = {"ltx": self.for_ltx, "wan": self.for_wan,
                "hunyuanvideo": self.for_hunyuanvideo,
-               "hunyuan": self.for_hunyuanvideo,
                "mochi": self.for_mochi,
                "cogvideox": self.for_cogvideox,
-               "cogvideo": self.for_cogvideox,
                "svd": self.for_svd,
-               "motion": self.for_motion, "image": self.for_image,
-               "sd": self.for_image}.get(b, self.for_ltx)
+               "motion": self.for_motion,
+               "image": self.for_image}.get(b, self.for_ltx)
         neg = self.negative or negative_prompt(b)
         return {"prompt": fmt(), "negative_prompt": neg, "backend": b}
 
@@ -399,8 +403,18 @@ def _extract_camera(text: str) -> tuple[str, str, str]:
     from .camera import parse_camera_language
     prog = parse_camera_language(t)
     if not prog.empty:
-        movement = prog.describe()
-    else:
+        # Bare keywords keep their tuned legacy phrases ("dolly" ->
+        # "slow dolly push-in"); the program wins when it adds real
+        # information: compounds, explicit directions, or speeds.
+        use_program = True
+        if len(prog.moves) == 1:
+            mv = prog.moves[0]
+            if (mv.verb in CAMERA_MOVEMENTS and mv.direction in ("", "in")
+                    and mv.speed == "normal"):
+                use_program = False
+        if use_program:
+            movement = prog.describe()
+    if not movement:
         for key, val in CAMERA_MOVEMENTS.items():
             if key in t:
                 movement = val

@@ -836,13 +836,17 @@ def _guard_stretch(kp: np.ndarray, rest: np.ndarray) -> tuple[np.ndarray, list[s
 def generate_track(description: str, *, suggest: SuggestFn | None = None,
                    n_frames: int = 40, fps: float = 10.0,
                    base: np.ndarray | None = None,
-                   width: int = 512, height: int = 512
+                   width: int = 512, height: int = 512,
+                   audio: str | None = None,
                    ) -> tuple[PoseTrack, dict[str, Any]]:
     """Natural language -> PoseTrack. The open-ended generator.
 
     1. Preset fast path: known actions use the parametric rig, no model.
     2. LLM path: any other description -> motion score -> compiled track.
     3. Without a model and without a preset: honest failure, never a guess.
+
+    ``audio``: when given, phase boundaries snap to the audio's beat
+    grid (via media.contentops.beats) so motion hits land on beats.
 
     Returns (track, meta) where meta has source/notes.
     """
@@ -862,9 +866,17 @@ def generate_track(description: str, *, suggest: SuggestFn | None = None,
             f"no preset matches {desc!r} and no model is connected to "
             "direct it — connect a model or use a preset action")
     score = generate_motion_score(desc, suggest)
+    beat_meta: dict[str, Any] = {}
+    if audio:
+        beats, bpm, backend = beats_for_audio(audio)
+        score, anotes = align_phases_to_beats(score, beats,
+                                              n_frames / fps)
+        beat_meta = {"beats": beats, "bpm": round(bpm, 1),
+                     "beat_backend": backend, "beat_notes": anotes}
     from .validate import validate_score, validate_track
     rep = validate_score(score)
     notes: list[str] = []
+    notes.extend(f"beat: {n}" for n in beat_meta.get("beat_notes", []))
     if rep.warnings:
         notes.extend(f"validator: {w}" for w in rep.warnings)
     if not rep.ok:
@@ -880,9 +892,78 @@ def generate_track(description: str, *, suggest: SuggestFn | None = None,
     notes.extend(f"validator: {w}" for w in trep.warnings)
     track, notes = track, notes + cnotes
     track.width, track.height = width, height
-    return track, {"source": "generated",
-                   "action": score.get("action", desc), "notes": notes,
-                   "plausibility": rep.score}
+    meta: dict[str, Any] = {"source": "generated",
+                            "action": score.get("action", desc),
+                            "notes": notes,
+                            "plausibility": rep.score}
+    meta.update(beat_meta)
+    return track, meta
+
+
+# ── motion <-> audio sync: beat-grid alignment ────────────────────────
+# Phase boundaries snap to the detected beat grid so hits land on beats.
+# Beat detection itself lives in media/contentops/beats.py (librosa ->
+# numpy fallback) — this module only does the alignment math, routed
+# through the one real detector instead of duplicating it.
+
+
+def align_phases_to_beats(score: dict[str, Any], beats: list[float],
+                          duration_s: float, *,
+                          strength: float = 1.0) -> tuple[dict, list[str]]:
+    """Snap a motion score's phase boundaries to the beat grid.
+
+    ``beats``: beat times in seconds; ``duration_s``: the duration the
+    score's normalized [0,1] time maps to. ``strength`` 0..1 blends
+    between the original timing and the full snap. Returns
+    (new_score, notes). Never collapses or reorders phases; empty beat
+    lists pass through untouched.
+    """
+    import copy
+    notes: list[str] = []
+    new = copy.deepcopy(score)
+    phases = new.get("phases") or []
+    beats = sorted(b for b in (beats or []) if 0 <= b <= duration_s)
+    strength = max(0.0, min(1.0, strength))
+    if not beats or strength <= 0 or not phases:
+        return new, ["beat alignment skipped: no beats or zero strength"]
+    grid = [b / duration_s for b in beats]
+
+    def _snap(u: float) -> float:
+        nearest = min(grid, key=lambda g: abs(g - u))
+        return u + (nearest - u) * strength
+
+    prev_end = 0.0
+    for ph in phases:
+        t = ph.get("t", [0.0, 1.0])
+        try:
+            t0, t1 = float(t[0]), float(t[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        s0 = min(max(_snap(t0), prev_end), 1.0)
+        s1 = min(max(_snap(t1), s0 + 1e-3), 1.0)
+        # keep a minimum phase width of ~1/8 beat so snaps can't squash
+        min_w = 0.5 / max(1, len(grid)) * 0.25
+        if s1 - s0 < min_w:
+            s1 = min(1.0, s0 + min_w)
+        if abs(s0 - t0) > 1e-9 or abs(s1 - t1) > 1e-9:
+            notes.append(
+                f"phase '{ph.get('name', '?')}': "
+                f"[{t0:.3f},{t1:.3f}] -> [{s0:.3f},{s1:.3f}] (beat snap)")
+        ph["t"] = [round(s0, 4), round(s1, 4)]
+        prev_end = s1
+    if not notes:
+        notes.append("phase boundaries already on the beat grid")
+    return new, notes
+
+
+def beats_for_audio(audio: str) -> tuple[list[float], float, str]:
+    """Detect beats in an audio file -> (beats, bpm, backend).
+
+    Routes through media.contentops.beats (the one real detector).
+    """
+    from ..contentops.beats import detect_beats_full
+    info = detect_beats_full(audio)
+    return info.beats, info.bpm, info.backend
 
 
 # ── neural text-to-motion (heavy path) ───────────────────────────────

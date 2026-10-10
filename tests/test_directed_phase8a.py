@@ -349,3 +349,85 @@ def test_depth_warp_degenerate_depth():
     assert out.size == img.size
     out1 = an.depth_aware_warp(img, kp0, kp1, n_layers=1)
     assert out1.size == img.size
+
+
+# ── beat-grid alignment ──────────────────────────────────────────────
+def _click_track(path="/tmp/phase8a_click.wav", bpm=120.0, dur=4.0,
+                 sr=22050):
+    import wave as _wave
+    t = np.arange(int(sr * dur)) / sr
+    sig = np.zeros_like(t)
+    for b in np.arange(0, dur, 60.0 / bpm):
+        i = int(b * sr)
+        n = int(0.03 * sr)
+        sig[i:i + n] += np.hanning(n) * 0.9
+    with _wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((sig * 32767).astype(np.int16).tobytes())
+    return path
+
+
+def test_beats_detected_on_click_track():
+    wav = _click_track()
+    beats, bpm, backend = ms.beats_for_audio(wav)
+    assert 115 < bpm < 125, bpm
+    assert len(beats) >= 6
+
+
+def test_align_phases_to_beats_snaps():
+    wav = _click_track()
+    beats, _, _ = ms.beats_for_audio(wav)
+    score = {"action": "x", "phases": [
+        {"name": "a", "t": [0.05, 0.40], "easing": "ease_out", "moves": []},
+        {"name": "b", "t": [0.40, 0.90], "easing": "ease_in_out",
+         "moves": []},
+    ]}
+    new, notes = ms.align_phases_to_beats(score, beats, 4.0)
+    grid = {round(b / 4.0, 4) for b in beats}
+    for p in new["phases"]:
+        assert p["t"][0] in grid and p["t"][1] in grid, p["t"]
+        assert p["t"][1] > p["t"][0]
+    # order preserved: b starts where a ends
+    assert new["phases"][1]["t"][0] >= new["phases"][0]["t"][1]
+    assert any("beat snap" in n for n in notes)
+    # original untouched
+    assert score["phases"][0]["t"] == [0.05, 0.40]
+
+
+def test_align_passthrough_cases():
+    score = {"action": "x", "phases": [
+        {"name": "a", "t": [0.05, 0.40], "easing": "ease_out", "moves": []}]}
+    new, notes = ms.align_phases_to_beats(score, [], 4.0)
+    assert new["phases"][0]["t"] == [0.05, 0.40]
+    assert "skipped" in notes[0]
+    new, _ = ms.align_phases_to_beats(score, [0.5, 1.0], 4.0, strength=0.0)
+    assert new["phases"][0]["t"] == [0.05, 0.40]
+    # partial strength lands between original and grid
+    new, _ = ms.align_phases_to_beats(score, [0.5, 1.0], 4.0, strength=0.5)
+    t0 = new["phases"][0]["t"][0]
+    assert 0.05 < t0 < 0.125
+
+
+def test_generate_track_with_audio_snaps_to_beats():
+    import json as _json
+    wav = _click_track()
+    score = {"action": "punch", "implausible": False, "phases": [
+        {"name": "windup", "t": [0.0, 0.45], "easing": "anticipation",
+         "moves": [{"joint": "r_wrist", "to": [0.40, 0.50]}]},
+        {"name": "strike", "t": [0.45, 0.75], "easing": "overshoot",
+         "moves": [{"joint": "r_wrist", "to": [0.60, 0.35]}]},
+        {"name": "recover", "t": [0.75, 1.0], "easing": "ease_in_out",
+         "moves": []},
+    ]}
+
+    def suggest(prompt):
+        return _json.dumps(score)
+
+    track, meta = ms.generate_track("punch to the beat", suggest=suggest,
+                                    n_frames=40, fps=10.0, audio=wav)
+    assert meta["source"] == "generated"
+    assert 115 < meta["bpm"] < 125
+    assert any("beat" in n for n in meta["notes"])
+    assert track.frames.shape[0] == 40

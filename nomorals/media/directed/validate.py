@@ -22,10 +22,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .motion_score import _BODY_IDX, _MAX_TRAVEL, _parse_phase, HAND_POSES
+from .motion_score import _BODY_IDX, _MAX_TRAVEL, _parse_phase, HAND_POSES, EASE_FUNCS
 from .pose_rig import BODY_NAMES, FINGERS, PoseTrack, rest_pose
 
-_KNOWN_EASINGS = ("ease_in", "ease_out", "ease_in_out", "linear")
+#: every easing the compiler understands (single source of truth)
+_KNOWN_EASINGS = tuple(sorted(EASE_FUNCS))
 # max plausible joint speed: normalized units per unit of normalized time.
 # A wrist crossing half the frame in a 0.1-duration phase = 5.0 -> error.
 _V_MAX_WARN = 3.0
