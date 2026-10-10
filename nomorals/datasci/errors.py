@@ -9,6 +9,7 @@ __all__ = [
     "LoadError",
     "QueryError",
     "PlotError",
+    "ExportError",
 ]
 
 
@@ -34,3 +35,7 @@ class QueryError(DataSciError):
 
 class PlotError(DataSciError):
     """A plot could not be generated."""
+
+
+class ExportError(DataSciError):
+    """A dataset could not be exported to a file."""
