@@ -6,7 +6,13 @@ Schedule kinds, parsed from one flexible spec string:
 * ``every 30m`` / ``2h`` / ``45s`` — repeating interval
 * ``daily 22:00`` (or just ``22:00``) — repeating wall-clock time
 * ``daily 22:00 America/New_York`` — daily in a specific IANA timezone
-* ``cron 0 22 * * *`` (or bare ``0 22 * * *``) — standard cron expression
+* ``cron 0 22 * * *`` (or bare ``0 22 * * *``) — standard cron expression,
+  extended: ``L`` (last day of month), ``LW`` (last weekday), ``15W``
+  (weekday nearest the 15th), ``5#3`` (3rd Friday), ``5L`` (last Friday),
+  ``?`` (no specific value), day names (``MON-FRI``)
+* ``rrule FREQ=WEEKLY;BYDAY=MO,WE`` — RFC 5545 recurrence (calendar-grade:
+  "2nd Tuesday" = ``FREQ=MONTHLY;BYDAY=2TU``, "last Friday" =
+  ``FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1``)
 
 Three payload kinds:
 
@@ -40,6 +46,21 @@ Execution policies (per-job data, not code branches):
   ``consult() -> dict``, e.g. the injected ``ResourceManager``); heavy
   jobs (``heavy=True`` or ``weight >= HEAVY_WEIGHT_THRESHOLD``) defer
   under pressure — never dropped, retried on later ticks.
+* **Real concurrency** — each tick dispatches due jobs onto a bounded
+  worker pool (``max_concurrent`` threads); jobs genuinely overlap, a
+  stuck job no longer stalls the tick loop or the redelivery sweep, and
+  ``overlap_policy=concurrent`` actually runs concurrently.  The pool is
+  per-tick (no leaked threads, no exit hangs); the tick still returns
+  every outcome, in dispatch order.
+* **Run-history retention** — ``schedule_runs`` is pruned to the last
+  ``run_history_limit`` rows per job (default 200), so years of uptime
+  don't grow the table forever.
+* **Blackout dates** — per-job ``blackout_dates`` (``YYYY-MM-DD`` list,
+  evaluated in the job's timezone): a due firing on a blackout day is
+  skipped without running, journaled, and the schedule advances.
+* **Start jitter** — ``start_jitter_s`` spreads a job's first firing by a
+  random 0..N seconds (systemd ``RandomizedDelaySec``), so a fleet of
+  jobs created together doesn't thundering-herd the first tick.
 
 Jobs live in the ``schedule_jobs`` table (migration 15, upgraded by 81
 and 85): a restart resumes them, a disabled job stays put, and one-shot
@@ -60,6 +81,7 @@ import random
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -69,6 +91,12 @@ from ..core.events import Event, global_bus
 from ..core.ids import min_unique_prefix_len, new_id, resolve_id_prefix
 from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
+from ..scheduler.recurrence import (
+    CronSpec,
+    cron_matches as _rec_cron_matches,
+    next_cron as _rec_next_cron,
+    parse_rrule as _rec_parse_rrule,
+)
 from .autonomy_ledger import record_ledger
 from .notifier import Notifier
 
@@ -186,7 +214,8 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
 
     kind: ``at`` (detail = unix ts) | ``every`` (detail = seconds) |
     ``daily`` (detail = "HH:MM" or "HH:MM <tz>") |
-    ``cron`` (detail = cron expression string)
+    ``cron`` (detail = cron expression string) |
+    ``rrule`` (detail = RRULE string, e.g. ``FREQ=WEEKLY;BYDAY=MO``)
     """
     s = (spec or "").strip()
     if not s:
@@ -202,6 +231,8 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
         return "daily", _parse_daily_spec(s[6:].strip())
     if lowered.startswith("cron "):
         return "cron", _parse_cron(s[5:].strip())
+    if lowered.startswith("rrule "):
+        return "rrule", _parse_rrule_spec(s[6:].strip())
     # bare forms: "22:00" → daily, "30m" → every, ISO timestamp → at,
     # "0 22 * * *" → cron
     if _TIME_RE.match(s):
@@ -217,6 +248,9 @@ def parse_schedule_spec(spec: str) -> tuple[str, Any]:
             return "cron", _parse_cron(s)
         except ValueError:
             _log.debug("scheduler: %r matched cron shape but did not parse; trying timestamp", s)
+    # bare RRULE: "FREQ=WEEKLY;BYDAY=MO" (or "RRULE:FREQ=...")
+    if re.match(r"(?i)^(?:RRULE:)?FREQ=", s):
+        return "rrule", _parse_rrule_spec(s)
     ts = _parse_timestamp(s)
     return "at", ts
 
@@ -324,6 +358,69 @@ def _next_daily(hhmm: str, now: datetime, timezone: str = "") -> float:
     return candidate.timestamp()
 
 
+def _rrule_next(spec: str, dtstart_ts: float, after_ts: float,
+                timezone: str = "") -> float | None:
+    """Next RRULE occurrence strictly after ``after_ts`` (unix ts).
+
+    The series is anchored at ``dtstart_ts`` (the job's creation time);
+    both are evaluated in ``timezone`` when given.  Returns None when the
+    series is exhausted (COUNT reached / UNTIL passed).
+    """
+    tz: Any = None
+    if (timezone or "").strip():
+        try:
+            tz = ZoneInfo(timezone.strip())
+        except ZoneInfoNotFoundError:
+            _log.warning("scheduler: unknown timezone %r, using local",
+                         timezone)
+    dtstart = datetime.fromtimestamp(dtstart_ts, tz=tz)
+    after = datetime.fromtimestamp(after_ts, tz=tz)
+    rule = _rec_parse_rrule(spec, dtstart)
+    nxt = rule.after(after)
+    return nxt.timestamp() if nxt is not None else None
+
+
+_BLACKOUT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_blackout_dates(raw: Any) -> list[str]:
+    """Validate ``blackout_dates`` → sorted list of ``YYYY-MM-DD``.
+
+    Accepts a list/tuple, a comma-separated string, or a JSON list
+    string.  Raises ValueError on malformed dates (fail at schedule
+    time, not on a blackout morning).
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except (ValueError, TypeError):
+                raise ValueError(f"bad blackout_dates JSON: {raw!r}")
+        else:
+            items = [p.strip() for p in text.split(",")]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise ValueError(f"bad blackout_dates: {raw!r}")
+    out: list[str] = []
+    for item in items:
+        day = str(item or "").strip()
+        if not day:
+            continue
+        if not _BLACKOUT_RE.match(day):
+            raise ValueError(f"blackout date must be YYYY-MM-DD, got {day!r}")
+        try:
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"not a real date: {day!r}")
+        out.append(day)
+    return sorted(set(out))
+
+
 # ── cron ─────────────────────────────────────────────────────────────────
 
 def _parse_cron_field(field: str, lo: int, hi: int) -> set[int]:
@@ -364,65 +461,38 @@ def _parse_cron(expr: str) -> str:
     """Validate a 5-field cron expression → normalized string.
 
     Fields: minute hour day month weekday.  Weekday 0 and 7 both mean
-    Sunday.  Returns the canonical ``"m h dom mon dow"`` string.
+    Sunday.  Extended fields supported: ``L``, ``LW``, ``nW``, ``n#k``,
+    ``nL``, ``?``, day names.  Returns the canonical
+    ``"m h dom mon dow"`` string.
     """
-    m = _CRON_RE.match(expr.strip())
-    if not m:
-        raise ValueError(f"not a 5-field cron expression: {expr!r}")
-    minute, hour, dom, month, dow = m.groups()
-    # validate each field eagerly (raises on garbage)
-    _parse_cron_field(minute, 0, 59)
-    _parse_cron_field(hour, 0, 23)
-    _parse_cron_field(dom, 1, 31)
-    _parse_cron_field(month, 1, 12)
-    _parse_cron_field(dow, 0, 7)
-    return f"{minute} {hour} {dom} {month} {dow}"
+    return CronSpec(expr).expression
 
 
 def _cron_matches(expr: str, dt: datetime) -> bool:
     """True if ``dt`` (minute precision) matches the cron expression."""
-    minute, hour, dom, month, dow = _parse_cron(expr).split()
-    mins = _parse_cron_field(minute, 0, 59)
-    hrs = _parse_cron_field(hour, 0, 23)
-    doms = _parse_cron_field(dom, 1, 31)
-    mons = _parse_cron_field(month, 1, 12)
-    dows = _parse_cron_field(dow, 0, 7)
-    # cron: dow 0 and 7 both Sunday
-    py_dow = (dt.weekday() + 1) % 7  # Monday=0 → Sunday=6 → map to 0
-    dow_match = py_dow in dows or (py_dow == 0 and 7 in dows)
-    # classic cron semantics: dom AND dow both restricted → OR them;
-    # otherwise each restricted field must match.
-    dom_star = dom.strip() == "*"
-    dow_star = dow.strip() == "*"
-    if not dom_star and not dow_star:
-        day_ok = (dt.day in doms) or dow_match
-    else:
-        day_ok = (dt.day in doms) and dow_match
-    return (dt.minute in mins and dt.hour in hrs
-            and dt.month in mons and day_ok)
+    return _rec_cron_matches(expr, dt)
 
 
 def _next_cron(expr: str, now: datetime, timezone: str = "") -> float:
-    """Next minute at/after ``now`` matching the cron expression.
+    """Next minute strictly after ``now`` matching the cron expression.
 
-    Scans forward minute-by-minute (cap: 366 days) — no external deps.
+    The expression is parsed once (not per probed minute) and the
+    wall-clock scan runs in ``timezone`` when given (DST-safe).
     """
-    tz: Any = None
-    if (timezone or "").strip():
-        try:
-            tz = ZoneInfo(timezone.strip())
-        except ZoneInfoNotFoundError:
-            _log.warning("scheduler: unknown timezone %r, using local",
-                         timezone)
-    probe = now.astimezone(tz) if tz else now
-    # start at the next minute boundary strictly after now
-    probe = probe.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    limit = probe + timedelta(days=366)
-    while probe <= limit:
-        if _cron_matches(expr, probe):
-            return probe.timestamp()
-        probe += timedelta(minutes=1)
-    raise ValueError(f"cron expression never matches within a year: {expr!r}")
+    return _rec_next_cron(expr, now, timezone)
+
+
+def _parse_rrule_spec(text: str) -> str:
+    """Validate an RRULE body → normalized rule string.
+
+    Raises ValueError on garbage.  A leading ``RRULE:`` (iCalendar
+    property form) is tolerated and stripped.
+    """
+    text = (text or "").strip()
+    if text.upper().startswith("RRULE:"):
+        text = text[6:].strip()
+    _rec_parse_rrule(text, datetime.now())  # validate eagerly
+    return text
 
 
 def _like_escape(text: str) -> str:
@@ -459,7 +529,8 @@ class Scheduler:
                  wall_seconds: float = 300.0,
                  redeliver_interval: float = 120.0,
                  resources: Any = None,
-                 missed_grace_s: float = MISSED_GRACE_SECONDS) -> None:
+                 missed_grace_s: float = MISSED_GRACE_SECONDS,
+                 run_history_limit: int = 200) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self.notifier = Notifier(context, gateway=gateway)
@@ -482,6 +553,10 @@ class Scheduler:
         self._resources = resources
         #: Grace window: a job this late is merely late, not missed.
         self.missed_grace_s = max(0.0, float(missed_grace_s))
+        #: Per-job run-history retention: schedule_runs keeps this many
+        #: rows per job (K8s successfulJobsHistoryLimit, but per job).
+        self.run_history_limit = max(1, int(run_history_limit or 200))
+        self._ensure_blackout_column()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running_jobs = 0
@@ -497,6 +572,24 @@ class Scheduler:
         self._last_tick_at: float | None = None
         self._last_redeliver_at = 0.0
         self._tick_errors = 0
+
+    def _ensure_blackout_column(self) -> None:
+        """Lazily add ``schedule_jobs.blackout_dates`` on older databases.
+
+        The column postdates migrations 15/81/85; rather than touching the
+        shared migrations module (another section's file), the scheduler
+        ensures its own column at construction.  Idempotent and
+        best-effort: a failure here must never stop the scheduler.
+        """
+        if self.db is None:
+            return
+        try:
+            self.db.execute(
+                "ALTER TABLE schedule_jobs ADD COLUMN blackout_dates "
+                "TEXT NOT NULL DEFAULT ''")
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                _log.debug("scheduler blackout column ensure failed: %s", exc)
 
     # ── cross-system wiring (bus + ledger; both fail-open) ────────────────
 
@@ -593,6 +686,8 @@ class Scheduler:
         run_timeout_s: float = 0.0,
         heavy: bool = False,
         weight: float = 0.0,
+        blackout_dates: list[str] | str | None = None,
+        start_jitter_s: float = 0.0,
     ) -> dict[str, Any]:
         if self.db is None:
             raise RuntimeError("scheduler needs a database context")
@@ -638,6 +733,8 @@ class Scheduler:
                 f"overlap_policy must be one of {sorted(OVERLAP_POLICIES)}, "
                 f"got {overlap_policy!r}")
         run_timeout_s = max(0.0, float(run_timeout_s or 0.0))
+        blackout = _parse_blackout_dates(blackout_dates)
+        start_jitter_s = max(0.0, float(start_jitter_s or 0.0))
         # explicit timezone arg wins; daily spec may also embed one
         timezone = (timezone or "").strip()
         if timezone:
@@ -653,6 +750,12 @@ class Scheduler:
         if kind == "at" and detail <= now:
             raise ValueError("one-shot time is in the past")
         next_run = self._initial_next_run(kind, detail, now, timezone)
+        if next_run is None:
+            raise ValueError("schedule yields no future occurrences")
+        if start_jitter_s > 0 and kind != "at":
+            # systemd RandomizedDelaySec: spread the first firing so jobs
+            # created together don't thundering-herd the first tick.
+            next_run += self._rng.uniform(0, start_jitter_s)
         job_id = new_id()
         # store the detail; for daily keep "HH:MM [tz]" so the tz survives
         if kind == "every":
@@ -667,9 +770,10 @@ class Scheduler:
                 "enabled, next_run, last_run, last_result, created_at, updated_at, "
                 "timezone, depends_on, depends_policy, max_retries, retry_delay, "
                 "retry_count, backoff, backoff_max_s, backoff_jitter, "
-                "missed_fire_policy, overlap_policy, run_timeout_s, heavy, weight) "
+                "missed_fire_policy, overlap_policy, run_timeout_s, heavy, weight, "
+                "blackout_dates) "
                 "VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, '', ?, ?, ?, ?, ?, ?, ?, "
-                "0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id, (name or "").strip() or "job", kind,
                     spec_str,
@@ -680,6 +784,7 @@ class Scheduler:
                     backoff, backoff_max_s, backoff_jitter,
                     missed_fire_policy, overlap_policy, run_timeout_s,
                     1 if heavy else 0, float(weight or 0.0),
+                    json.dumps(blackout),
                 ),
             )
         self._ledger("schedule", job_id,
@@ -744,6 +849,25 @@ class Scheduler:
             )
         return self._format_job(self._find(ref))
 
+    def set_blackout_dates(self, ref: str,
+                           dates: list[str] | str | None) -> dict[str, Any]:
+        """Replace a job's exclusion-calendar blackout dates.
+
+        ``dates`` is a list of ``YYYY-MM-DD`` (or comma-separated string);
+        empty/None clears the calendar.  Invalid dates raise ValueError.
+        """
+        row = self._find(ref)
+        if not row:
+            raise LookupError(f"no job {ref!r}")
+        blackout = _parse_blackout_dates(dates)
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET blackout_dates = ?, updated_at = ? "
+                "WHERE id = ?",
+                (json.dumps(blackout), time.time(), row["id"]),
+            )
+        return self._format_job(self._find(ref))
+
     def _find(self, ref: str) -> dict[str, Any] | None:
         """Resolve a job by id, name, or id prefix — never guesses.
 
@@ -787,13 +911,15 @@ class Scheduler:
 
     # ── scheduling math ──────────────────────────────────────────────────────
     def _initial_next_run(self, kind: str, detail: Any, now: float,
-                          timezone: str = "") -> float:
+                          timezone: str = "") -> float | None:
         if kind == "at":
             return float(detail)
         if kind == "every":
             return now + float(detail)
         if kind == "cron":
             return _next_cron(str(detail), datetime.fromtimestamp(now), timezone)
+        if kind == "rrule":
+            return _rrule_next(str(detail), now, now, timezone)
         return _next_daily(str(detail), datetime.fromtimestamp(now), timezone)
 
     def _next_after_run(self, row: dict[str, Any], now: float) -> tuple[float | None, bool]:
@@ -806,6 +932,12 @@ class Scheduler:
             return now + float(row["spec"]), True
         if kind == "cron":
             return _next_cron(str(row["spec"]), datetime.fromtimestamp(now), tz), True
+        if kind == "rrule":
+            nxt = _rrule_next(str(row["spec"]),
+                              float(row.get("created_at") or now), now, tz)
+            # an exhausted RRULE (COUNT/UNTIL) retires the job like a
+            # one-shot — it stays in the table, disabled, for the record.
+            return (nxt, True) if nxt is not None else (None, False)
         return _next_daily(str(row["spec"]), datetime.fromtimestamp(now), tz), True
 
     def _dependency_ok(self, row: dict[str, Any]) -> bool:
@@ -874,6 +1006,9 @@ class Scheduler:
         job_id = row["id"]
         next_run = float(row.get("next_run") or now)
         lateness = now - next_run
+        if self._is_blackout_day(row, now):
+            self._skip_blackout(row, now)
+            return None
         policy = str(row.get("missed_fire_policy") or "fire_now").strip().lower()
         if policy not in MISSED_FIRE_POLICIES:
             policy = "fire_now"
@@ -925,6 +1060,14 @@ class Scheduler:
                     else datetime.fromtimestamp(float(row.get("next_run") or now)))
             next_run = _next_cron(str(row["spec"]), base, tz)
             still_enabled = True
+        elif kind == "rrule":
+            tz = str(row.get("timezone") or "")
+            base_ts = (now if policy == "skip"
+                       else float(row.get("next_run") or now))
+            nxt = _rrule_next(str(row["spec"]),
+                              float(row.get("created_at") or now), base_ts, tz)
+            next_run, still_enabled = ((nxt, True) if nxt is not None
+                                       else (None, False))
         else:  # daily
             tz = str(row.get("timezone") or "")
             base = (datetime.fromtimestamp(now)
@@ -938,6 +1081,42 @@ class Scheduler:
                 "retry_count = 0, updated_at = ? WHERE id = ?",
                 (next_run, 1 if still_enabled else 0, time.time(), row["id"]),
             )
+
+    def _is_blackout_day(self, row: dict[str, Any], now: float) -> bool:
+        """True when ``now`` falls on one of the job's blackout dates.
+
+        Evaluated in the job's timezone (Quartz exclusion-calendar
+        semantics): a due firing on a blackout day is skipped without
+        running — the schedule advances, the skip is journaled.
+        """
+        try:
+            dates = json.loads(row.get("blackout_dates") or "[]")
+        except (ValueError, TypeError):
+            return False
+        if not dates:
+            return False
+        tz_name = str(row.get("timezone") or "").strip()
+        try:
+            tz = ZoneInfo(tz_name) if tz_name else None
+        except ZoneInfoNotFoundError:
+            tz = None
+        today = datetime.fromtimestamp(now, tz=tz).strftime("%Y-%m-%d")
+        return today in {str(d) for d in dates}
+
+    def _skip_blackout(self, row: dict[str, Any], now: float) -> None:
+        """Advance past a blackout-day firing without executing."""
+        job_id = row["id"]
+        next_run, still_enabled = self._next_after_run(row, now)
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET next_run = ?, enabled = ?, "
+                "retry_count = 0, updated_at = ? WHERE id = ?",
+                (next_run, 1 if still_enabled else 0, time.time(), job_id),
+            )
+        reason = "skipped: blackout date (exclusion calendar)"
+        self._record_run(job_id, now, 0.0, True, reason, 0, "tick")
+        self._ledger("skipped", job_id, f"{row.get('name')}: {reason}")
+        _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
 
     def catch_up_on_startup(self, *, max_age_hours: float = 24.0) -> list[dict[str, Any]]:
         """Run jobs whose ``next_run`` passed while the bot was down.
@@ -965,6 +1144,9 @@ class Scheduler:
             row = dict(row)
             if not self._dependency_ok(row):
                 continue
+            if self._is_blackout_day(row, now):
+                self._skip_blackout(row, now)
+                continue
             # every due job goes through its missed-fire policy — a merely
             # late job with the default fire_now policy simply fires, which
             # is the historical catch-up contract.
@@ -980,6 +1162,16 @@ class Scheduler:
     # ── execution ────────────────────────────────────────────────────────────
     def tick(self) -> list[dict[str, Any]]:
         """Run everything due right now. Returns the outcomes (for tests too).
+
+        Due jobs are dispatched onto a bounded worker pool
+        (``max_concurrent`` threads) instead of running inline: jobs
+        genuinely overlap now, so a stuck job no longer stalls the tick
+        loop, the redelivery sweep, or the other due jobs — and
+        ``overlap_policy=concurrent`` runs concurrently for real.  The
+        pool is per-tick (no leaked threads, no interpreter-exit hangs);
+        the tick still waits for every dispatched job and returns the
+        outcomes in dispatch order.  Each job's wall clock is still capped
+        by its ``run_timeout_s`` (else the scheduler default).
 
         Also drives the notification redelivery queue (throttled to
         ``redeliver_interval``) so a scheduled job whose delivery failed
@@ -999,12 +1191,18 @@ class Scheduler:
         except Exception:  # noqa: BLE001
             return []
         defer_heavy, pressure_reasons = self._pressure_gate()
-        results = []
+        results: list[dict[str, Any]] = []
+        runnable: list[dict[str, Any]] = []
+        ran_job_ids: set[str] = set()
         for row in due:
             row = dict(row)
             job_id = row["id"]
             if not self._dependency_ok(row):
                 # dependency hasn't succeeded yet — leave for a later tick
+                continue
+            if self._is_blackout_day(row, now):
+                # exclusion calendar: skip without running, advance
+                self._skip_blackout(row, now)
                 continue
             # missed firing?  the job's own policy decides (fire/skip/advance)
             lateness = now - float(row.get("next_run") or now)
@@ -1013,6 +1211,7 @@ class Scheduler:
                     outcome = self._apply_missed_fire(row, now)
                     if outcome is not None:
                         results.append(outcome)
+                        ran_job_ids.add(job_id)
                 except Exception:  # noqa: BLE001
                     self._tick_errors += 1
                     _log.exception("scheduler missed-fire handling crashed: %s",
@@ -1029,7 +1228,7 @@ class Scheduler:
                 if policy == "queue":
                     # leave it for the next tick rather than dropping it
                     continue
-                # concurrent: fall through and run
+                # concurrent: fall through and run alongside the active one
             # resource pressure: heavy jobs defer (never drop) this tick
             if defer_heavy and self._is_heavy(row):
                 self._deferrals[job_id] = self._deferrals.get(job_id, 0) + 1
@@ -1045,19 +1244,46 @@ class Scheduler:
                                  f"pressure (#{n})",
                                  metadata={"reasons": pressure_reasons})
                 continue
-            with self._lock:
-                if self._running_jobs >= self.max_concurrent:
-                    # leave it for the next tick rather than dropping it
-                    continue
-                self._running_jobs += 1
-            try:
-                results.append(self._execute(row))
-            except Exception:  # noqa: BLE001 - one job must not kill the tick
-                self._tick_errors += 1
-                _log.exception("scheduler job crashed: %s", row.get("id"))
-            finally:
+            runnable.append(row)
+        if runnable:
+            # the pool IS the max_concurrent bound: at most this many run
+            # at once, the rest queue inside the pool; the tick waits for
+            # all of them so the outcomes contract is unchanged.
+            if self.db.is_memory:
+                # SQLite :memory: databases are per-connection — a worker
+                # thread would see an empty database.  In-memory DBs only
+                # exist in tests/CLI; production always uses a file DB.
+                # Run inline (serial) instead of dispatching.
+                for row in runnable:
+                    try:
+                        results.append(self._execute(row))
+                        ran_job_ids.add(row["id"])
+                    except Exception:  # noqa: BLE001 - one job must not kill the tick
+                        self._tick_errors += 1
+                        _log.exception("scheduler job crashed: %s",
+                                       row.get("id"))
+            else:
                 with self._lock:
-                    self._running_jobs -= 1
+                    self._running_jobs += len(runnable)
+                try:
+                    with ThreadPoolExecutor(
+                            max_workers=self.max_concurrent,
+                            thread_name_prefix="sched-job") as pool:
+                        futures = [pool.submit(self._execute, row)
+                                   for row in runnable]
+                        for row, fut in zip(runnable, futures):
+                            try:
+                                results.append(fut.result())
+                                ran_job_ids.add(row["id"])
+                            except Exception:  # noqa: BLE001 - one job must not kill the tick
+                                self._tick_errors += 1
+                                _log.exception("scheduler job crashed: %s",
+                                               row.get("id"))
+                finally:
+                    with self._lock:
+                        self._running_jobs -= len(runnable)
+        for job_id in ran_job_ids:
+            self._prune_runs(job_id)
         self._maybe_redeliver()
         return results
 
@@ -1097,6 +1323,60 @@ class Scheduler:
         except Exception:  # noqa: BLE001
             _log.debug("schedule_runs record failed for %s", job_id,
                        exc_info=True)
+
+    def _prune_runs(self, job_id: str) -> None:
+        """Trim ``schedule_runs`` to the newest ``run_history_limit`` rows.
+
+        K8s ``successfulJobsHistoryLimit`` as per-job data: years of
+        uptime must not grow the history table forever.  Best-effort —
+        pruning must never break a job's bookkeeping.
+        """
+        if self.db is None:
+            return
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    "DELETE FROM schedule_runs WHERE job_id = ? AND id NOT IN "
+                    "(SELECT id FROM schedule_runs WHERE job_id = ? "
+                    "ORDER BY started_at DESC, rowid DESC LIMIT ?)",
+                    (job_id, job_id, self.run_history_limit),
+                )
+        except Exception:  # noqa: BLE001
+            _log.debug("schedule_runs prune failed for %s", job_id,
+                       exc_info=True)
+
+    def prune_run_history(self, ref: str | None = None) -> int:
+        """Prune run history now.  Returns rows deleted (best-effort).
+
+        ``ref`` limits pruning to one job (id/name/prefix); None prunes
+        every job with history.
+        """
+        if self.db is None:
+            return 0
+        job_ids: list[str]
+        if ref:
+            row = self._find(ref)
+            job_ids = [row["id"]] if row else []
+        else:
+            try:
+                job_ids = [r["job_id"] for r in self.db.query(
+                    "SELECT DISTINCT job_id FROM schedule_runs")]
+            except Exception:  # noqa: BLE001
+                return 0
+        deleted = 0
+        for job_id in job_ids:
+            try:
+                with self.db.transaction():
+                    cur = self.db.execute(
+                        "DELETE FROM schedule_runs WHERE job_id = ? AND id NOT IN "
+                        "(SELECT id FROM schedule_runs WHERE job_id = ? "
+                        "ORDER BY started_at DESC, rowid DESC LIMIT ?)",
+                        (job_id, job_id, self.run_history_limit))
+                    deleted += cur.rowcount or 0
+            except Exception:  # noqa: BLE001
+                _log.debug("schedule_runs prune failed for %s", job_id,
+                           exc_info=True)
+        return deleted
 
     def recent_runs(self, ref: str, *, limit: int = 20) -> list[dict[str, Any]]:
         """Per-execution history for one job, newest first."""
@@ -1573,10 +1853,18 @@ class Scheduler:
             spec = f"every {int(float(spec))}s" if spec else spec
         elif row.get("kind") == "cron":
             spec = f"cron {spec}" if spec else spec
+        elif row.get("kind") == "rrule":
+            spec = f"rrule {spec}" if spec else spec
         tz = str(row.get("timezone") or "")
-        if tz and row.get("kind") in ("daily", "cron") and tz not in str(spec):
+        if tz and row.get("kind") in ("daily", "cron", "rrule") and tz not in str(spec):
             spec = f"{spec} [{tz}]"
         next_run = row.get("next_run")
+        try:
+            blackout = json.loads(row.get("blackout_dates") or "[]")
+            if not isinstance(blackout, list):
+                blackout = []
+        except (ValueError, TypeError):
+            blackout = []
         return {
             "id": row["id"],
             "name": row.get("name", ""),
@@ -1604,6 +1892,7 @@ class Scheduler:
             "run_timeout_s": float(row.get("run_timeout_s") or 0.0),
             "heavy": bool(int(row.get("heavy") or 0)),
             "weight": float(row.get("weight") or 0.0),
+            "blackout_dates": blackout,
         }
 
 
