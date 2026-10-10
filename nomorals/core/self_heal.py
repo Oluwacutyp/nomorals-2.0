@@ -1,10 +1,12 @@
 """Self-healing loop for broken chat commands.
 
 Pipeline: tour (find broken) → error doctor (diagnose) → auto-fix
-(conservative patterns only) → re-probe (verify) → report.
+(conservative patterns only) → re-probe (verify) → report → learn.
 
-Only TWO fix patterns are auto-applied — both are provably safe because
-they cannot change behavior, only repair structure:
+Fix strategies live in a registry (:data:`FIX_STRATEGIES`), not hardcoded
+branches — new strategies can be added with :func:`register_fix_strategy`.
+Two built-in strategies are auto-applied, both provably safe because they
+cannot change behavior, only repair structure:
 
 1. ``UnboundLocalError`` — a variable assigned in some branches but
    referenced on a path where no assignment ran. Fix: initialize it to
@@ -22,6 +24,10 @@ they cannot change behavior, only repair structure:
 Everything else (missing pip packages, logic TypeErrors, etc.) gets a
 diagnosis + suggestion but is NEVER auto-fixed.
 
+The learning loop: pass an ``ErrorIntelligence`` as ``intelligence`` and
+every outcome (fix verified / fix failed) is reported back, so the error
+catcher learns which fixes actually work per error fingerprint.
+
 Each applied fix is committed to git separately so it's reversible.
 ``diagnose()``/tour probing never raise; neither does anything here.
 """
@@ -36,7 +42,8 @@ import subprocess
 import sys
 import textwrap
 import traceback
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from .error_doctor import diagnose
 
@@ -47,6 +54,9 @@ __all__ = [
     "heal_one",
     "heal_all",
     "HealResult",
+    "FixStrategy",
+    "register_fix_strategy",
+    "FIX_STRATEGIES",
 ]
 
 # ---------------------------------------------------------------------------
@@ -59,8 +69,10 @@ class HealResult:
     def __init__(self, kind: str):
         self.kind = kind
         self.broken: bool = False
+        self.timed_out: bool = False     # probe hung — a finding, not "healthy"
         self.error: str = ""
         self.location: str = ""
+        self.fingerprint: str = ""       # error fingerprint for the learning loop
         self.diagnosis: dict[str, Any] | None = None
         self.fixable: bool = False
         self.fix_kind: str = ""          # "unbound_local" | "dead_method" | ""
@@ -74,8 +86,10 @@ class HealResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind, "broken": self.broken, "error": self.error,
-            "location": self.location, "fixable": self.fixable,
+            "kind": self.kind, "broken": self.broken,
+            "timed_out": self.timed_out, "error": self.error,
+            "location": self.location, "fingerprint": self.fingerprint,
+            "fixable": self.fixable,
             "fix_kind": self.fix_kind, "fix_detail": self.fix_detail,
             "fixed": self.fixed, "dry_run": self.dry_run,
             "skip_reason": self.skip_reason, "suggestion": self.suggestion,
@@ -101,11 +115,25 @@ _ATTR_RE = re.compile(r"'([^']+)' object has no attribute '([^']+)'")
 _MOD_RE = re.compile(r"No module named '([^']+)'")
 
 
-def heal_probe(handle_control, kind: str, chat_key: str = "") -> tuple[bool, BaseException | None, str, str]:
-    """Probe one command, capturing the exception object.
+@dataclass
+class ProbeReport:
+    """Detailed probe outcome. ``heal_probe`` returns the 4-tuple
+    ``(broken, exc, err, loc)`` for backward compatibility; the healer uses
+    the full report so a hung command is a finding, not a clean bill."""
 
-    Returns (is_broken, exc_or_None, error_str, location_str). Never raises.
-    """
+    broken: bool
+    exc: BaseException | None
+    err: str
+    loc: str
+    timed_out: bool = False
+    elapsed: float = 0.0
+
+
+def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
+    """Probe one command, capturing the exception object. Never raises."""
+    import time as _time
+    start = _time.monotonic()
+
     def _run():
         return handle_control(f"/{kind}", chat_key, message=None)
 
@@ -117,7 +145,12 @@ def heal_probe(handle_control, kind: str, chat_key: str = "") -> tuple[bool, Bas
                 fut.result(timeout=_PROBE_TIMEOUT)
             except _cf.TimeoutError:
                 fut.cancel()
-                return False, None, "", ""  # slow → not our problem
+                elapsed = _time.monotonic() - start
+                # A hung command IS a finding — report it distinctly instead
+                # of the old "slow → not our problem" shrug.
+                return ProbeReport(broken=True, exc=None, err="",
+                                   loc="",
+                                   timed_out=True, elapsed=elapsed)
             except Exception as exc:  # noqa: BLE001 - captured, not raised
                 err = f"{type(exc).__name__}: {exc}"
                 loc = ""
@@ -125,10 +158,22 @@ def heal_probe(handle_control, kind: str, chat_key: str = "") -> tuple[bool, Bas
                 if frames:
                     loc = (f"{frames[-1].filename.split('/')[-1]}:"
                            f"{frames[-1].lineno}")
-                return True, exc, err, loc
+                return ProbeReport(broken=True, exc=exc, err=err, loc=loc,
+                                   elapsed=_time.monotonic() - start)
     except Exception:  # noqa: BLE001 - the probe itself must never die
-        return False, None, "", ""
-    return False, None, "", ""
+        return ProbeReport(broken=False, exc=None, err="", loc="",
+                           elapsed=_time.monotonic() - start)
+    return ProbeReport(broken=False, exc=None, err="", loc="",
+                       elapsed=_time.monotonic() - start)
+
+
+def heal_probe(handle_control, kind: str, chat_key: str = "") -> tuple[bool, BaseException | None, str, str]:
+    """Probe one command, capturing the exception object.
+
+    Returns (is_broken, exc_or_None, error_str, location_str). Never raises.
+    """
+    r = _probe_inner(handle_control, kind, chat_key)
+    return (r.broken, r.exc, r.err, r.loc)
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +592,56 @@ def _fix_dead_method_inner(exc, dry_run, out):
 
 
 # ---------------------------------------------------------------------------
+# fix strategy registry — dynamic, not hardcoded branches
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FixStrategy:
+    """One auto-fix strategy.
+
+    ``predicate`` decides whether the strategy applies to an exception;
+    ``fix`` performs it (same contract as :func:`fix_unbound_local`).
+    A ``None`` fix means report-only: the strategy matches, but the fix
+    needs a human (``report_reason`` says why).
+    """
+
+    kind: str
+    predicate: Callable[[BaseException], bool]
+    fix: Callable[[BaseException, bool], dict[str, Any]] | None
+    report_reason: str = ""
+
+
+FIX_STRATEGIES: list[FixStrategy] = []
+
+
+def register_fix_strategy(strategy: FixStrategy) -> FixStrategy:
+    """Register a new auto-fix (or report-only) strategy. Returns it."""
+    FIX_STRATEGIES.append(strategy)
+    return strategy
+
+
+def _is_unbound_local(exc: BaseException) -> bool:
+    return isinstance(exc, UnboundLocalError)
+
+
+def _is_dead_control_method(exc: BaseException) -> bool:
+    m = _ATTR_RE.search(str(exc))
+    return bool(m) and m.group(2).startswith("_control_")
+
+
+def _is_missing_package(exc: BaseException) -> bool:
+    return isinstance(exc, (ModuleNotFoundError, ImportError))
+
+
+register_fix_strategy(FixStrategy("unbound_local", _is_unbound_local,
+                                  fix_unbound_local))
+register_fix_strategy(FixStrategy("dead_method", _is_dead_control_method,
+                                  fix_dead_method))
+register_fix_strategy(FixStrategy("missing_package", _is_missing_package, None,
+                                  report_reason="needs user action (package install)"))
+
+
+# ---------------------------------------------------------------------------
 # git — each fix committed separately so it's reversible
 # ---------------------------------------------------------------------------
 
@@ -577,60 +672,93 @@ def _repo_root_for(filename: str) -> str:
 # the loop
 # ---------------------------------------------------------------------------
 
-# error types we never auto-fix — only diagnose + report
-_REPORT_ONLY = (ModuleNotFoundError, ImportError)
+def _fingerprint_of(exc: BaseException) -> str:
+    """Error fingerprint for the learning loop. Never raises."""
+    try:
+        from .error_intelligence import ErrorFingerprint
+        return ErrorFingerprint.of(exc)
+    except Exception:  # noqa: BLE001 - fingerprinting never breaks healing
+        return ""
+
+
+def _report_outcome(intelligence: Any, fingerprint: str, fixed: bool,
+                    fix_detail: str) -> None:
+    """Feed the heal outcome back into the learning KB. Never raises."""
+    if intelligence is None or not fingerprint:
+        return
+    try:
+        intelligence.record_outcome(fingerprint, fixed=fixed,
+                                    fix=fix_detail or "")
+    except Exception:  # noqa: BLE001 - learning never breaks healing
+        pass
 
 
 def heal_one(handle_control, kind: str, chat_key: str = "",
-             dry_run: bool = False) -> HealResult:
-    """Probe one command; diagnose; auto-fix if a safe pattern matches.
+             dry_run: bool = False, intelligence: Any = None) -> HealResult:
+    """Probe one command; diagnose; auto-fix if a safe strategy matches.
 
-    Never raises. In dry-run mode nothing is written.
+    ``intelligence`` (an :class:`~nomorals.core.error_intelligence.ErrorIntelligence`)
+    closes the learning loop: verified fixes and failed attempts are
+    reported back per error fingerprint. Never raises. In dry-run mode
+    nothing is written and nothing is learned.
     """
     res = HealResult(kind)
     res.dry_run = dry_run
     try:
-        return _heal_one_inner(handle_control, kind, chat_key, dry_run, res)
+        return _heal_one_inner(handle_control, kind, chat_key, dry_run, res,
+                               intelligence)
     except Exception as e:  # noqa: BLE001
         res.skip_reason = f"heal machinery failed: {e}"
         return res
 
 
-def _heal_one_inner(handle_control, kind, chat_key, dry_run, res):
-    broken, exc, err, loc = heal_probe(handle_control, kind, chat_key)
+def _heal_one_inner(handle_control, kind, chat_key, dry_run, res, intelligence):
+    report = _probe_inner(handle_control, kind, chat_key)
+    res.timed_out = report.timed_out
+    if report.timed_out:
+        # A hung command is a finding with its own report — not "healthy",
+        # and never auto-fixed (we don't know WHY it hangs).
+        res.broken = True
+        res.error = (f"probe timed out after {report.elapsed:.1f}s — "
+                     f"/{kind} hangs")
+        res.fixable = False
+        res.skip_reason = ("probe timed out — the command hangs; no safe "
+                           "auto-fix for hangs, investigate the blocking call")
+        res.suggestion = ("The command did not return within "
+                          f"{_PROBE_TIMEOUT:.0f}s. Look for a blocking call "
+                          "without a timeout (network I/O, locks, joins).")
+        return res
+
+    broken, exc, err, loc = report.broken, report.exc, report.err, report.loc
     if not broken or exc is None:
         res.broken = False
         return res
     res.broken = True
     res.error = err
     res.location = loc
+    res.fingerprint = _fingerprint_of(exc)
 
     diag = _safe(lambda: diagnose(exc, context={"command": f"/{kind}"}))
     res.diagnosis = diag
     res.suggestion = (diag.get("suggested_fix", "") if diag else "")
 
-    # report-only types: missing packages etc.
-    if isinstance(exc, _REPORT_ONLY):
-        res.fixable = False
-        res.skip_reason = "needs user action (package install)"
-        return res
-
-    fix_fn = None
-    if isinstance(exc, UnboundLocalError):
-        fix_fn, res.fix_kind = fix_unbound_local, "unbound_local"
-    elif isinstance(exc, AttributeError):
-        # only dead-method-shaped AttributeErrors are fixable
-        m = _ATTR_RE.search(str(exc))
-        if m and m.group(2).startswith("_control_"):
-            fix_fn, res.fix_kind = fix_dead_method, "dead_method"
-
-    if fix_fn is None:
+    # strategy lookup — dynamic registry, not hardcoded branches
+    strategy = next(
+        (s for s in FIX_STRATEGIES
+         if _safe(lambda s=s: s.predicate(exc), default=False)),
+        None)
+    if strategy is None:
         res.fixable = False
         res.skip_reason = "no safe auto-fix pattern matches"
         return res
+    if strategy.fix is None:
+        res.fixable = False
+        res.skip_reason = strategy.report_reason or "needs user action"
+        return res
 
+    res.fix_kind = strategy.kind
     res.fixable = True
-    fix_out = fix_fn(exc, dry_run=dry_run)
+    fix_out = strategy.fix(exc, dry_run=dry_run)
     res.fix_detail = fix_out.get("detail", "")
     res.diff_preview = fix_out.get("diff_preview", "")
     if not fix_out.get("ok"):
@@ -651,16 +779,19 @@ def _heal_one_inner(handle_control, kind, chat_key, dry_run, res):
             res.committed = _git_commit(repo, [filename], msg)
 
     # verify: re-probe the command
-    broken2, _exc2, _err2, _loc2 = heal_probe(handle_control, kind, chat_key)
-    res.fixed = not broken2
+    verify = _probe_inner(handle_control, kind, chat_key)
+    res.fixed = not verify.broken
     if not res.fixed:
         res.skip_reason = "fix applied but command still broken"
+    # learning loop: teach the error catcher what happened
+    _report_outcome(intelligence, res.fingerprint, res.fixed, res.fix_detail)
     return res
 
 
 def heal_all(handle_control, kinds: list[str], chat_key: str = "",
              dry_run: bool = False,
-             skip: frozenset = frozenset()) -> dict[str, Any]:
+             skip: frozenset = frozenset(),
+             intelligence: Any = None) -> dict[str, Any]:
     """Run the full loop over candidate commands. Never raises."""
     results: list[HealResult] = []
     try:
@@ -669,7 +800,8 @@ def heal_all(handle_control, kinds: list[str], chat_key: str = "",
                 continue
             try:
                 results.append(heal_one(handle_control, kind, chat_key,
-                                        dry_run=dry_run))
+                                        dry_run=dry_run,
+                                        intelligence=intelligence))
             except Exception:  # noqa: BLE001 - one bad apple never kills heal
                 r = HealResult(kind)
                 r.skip_reason = "heal probe crashed unexpectedly"
@@ -679,11 +811,13 @@ def heal_all(handle_control, kinds: list[str], chat_key: str = "",
 
     healed = [r for r in results if r.fixed]
     still = [r for r in results if r.broken and not r.fixed]
+    hung = [r for r in results if r.timed_out]
     would = [r for r in results if r.dry_run and r.fixable and r.broken]
     return {
         "results": [r.to_dict() for r in results],
         "healed": [r.to_dict() for r in healed],
         "still_broken": [r.to_dict() for r in still],
+        "timed_out": [r.to_dict() for r in hung],
         "would_fix": [r.to_dict() for r in would],
         "total": len(results),
         "dry_run": dry_run,
