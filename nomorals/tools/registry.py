@@ -440,6 +440,80 @@ class ToolRegistry:
             lines.append(f"- {schema['name']}({params}): {schema['description']}")
         return "\n".join(lines)
 
+    def ranked_listing(
+        self,
+        query: str,
+        *,
+        capabilities: CapabilitySet | None = None,
+        limit: int = 40,
+    ) -> str:
+        """Top-``limit`` tools by relevance to ``query``.
+
+        Deterministic token-overlap scoring (name hits weigh most) —
+        no model call needed. Always includes a small core of
+        universally-useful tools so the model isn't blind when the
+        query matches nothing well. Falls back to the full listing
+        when the query is empty.
+        """
+        schemas = self.schemas(capabilities=capabilities)
+        if not query or not query.strip():
+            return self.prompt_listing(capabilities=capabilities)
+        qtokens = [
+            t.lower() for t in query.replace("_", " ").split()
+            if len(t) >= 3
+        ]
+        if not qtokens:
+            return self.prompt_listing(capabilities=capabilities)
+
+        def _score(schema: dict[str, Any]) -> float:
+            name = str(schema.get("name", ""))
+            desc = str(schema.get("description", "") or "")
+            name_toks = set(name.replace("_", " ").lower().split())
+            desc_toks = set(desc.lower().split())
+            score = 0.0
+            for tok in qtokens:
+                if tok in name_toks:
+                    score += 3.0
+                elif any(tok in nt or nt in tok for nt in name_toks
+                         if len(nt) >= 3):
+                    score += 1.5
+                if tok in desc_toks:
+                    score += 1.0
+            return score
+
+        # Core tools that should always be visible (memory, help, etc.)
+        core = {"memory_recall", "help", "tools_list"}
+        scored = [(_score(s), s) for s in schemas]
+        scored.sort(key=lambda p: -p[0])
+        picked: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for s in schemas:
+            if s["name"] in core:
+                picked.append(s)
+                seen.add(s["name"])
+        for _, s in scored:
+            if s["name"] in seen:
+                continue
+            if len(picked) >= limit:
+                break
+            # Only include tools with some relevance, unless we have
+            # too few — then take the best scorers regardless.
+            picked.append(s)
+            seen.add(s["name"])
+        # Trim to limit, keeping core first then by score.
+        picked = picked[:limit]
+        lines = []
+        for schema in picked:
+            params = ", ".join(schema["parameters"])
+            lines.append(
+                f"- {schema['name']}({params}): {schema['description']}")
+        listing = "\n".join(lines)
+        if len(schemas) > len(picked):
+            listing += (
+                f"\n({len(schemas) - len(picked)} more tools available — "
+                f"ask with 'tools_list' to see them)")
+        return listing
+
     def describe(self, name: str) -> dict[str, Any] | None:
         """Rich introspection for one tool: identity, source location,
         capability, lifecycle, health, and per-tool stats. Powers

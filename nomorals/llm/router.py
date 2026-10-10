@@ -818,6 +818,20 @@ class LLMRouter:
                 last.failure_class = classify_failure(last.error).failure_class.value
             except Exception:  # noqa: BLE001 — tagging never breaks the call
                 pass
+        # Total brain failure is operator-visible: emit a bus event so
+        # monitoring/alerting sees it, not just the caller's error text.
+        try:
+            bus = getattr(self, "bus", None)
+            if bus is not None:
+                bus.emit(
+                    "llm.brain_down",
+                    operation=operation,
+                    attempted=attempted,
+                    failed_providers=[name for name, _ in failed],
+                    error=last.error or "",
+                )
+        except Exception:  # noqa: BLE001 — telemetry never breaks dispatch
+            pass
         return last
 
     def _note_success(self, name: str) -> None:

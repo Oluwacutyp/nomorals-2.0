@@ -42,9 +42,10 @@ _log = logging.getLogger(__name__)
 #: The model emits tool calls as fenced JSON blocks. One or more per turn.
 _TOOL_FENCE_RE = re.compile(
     r"```tool\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-#: Fallback: bare JSON object with a "tool" key on its own.
-_BARE_TOOL_RE = re.compile(
-    r"\{\s*\"tool\"\s*:\s*\"[^\"]+\"\s*,.*?\}", re.DOTALL)
+#: Fallback: bare JSON object with a "tool" key. Matched with a
+#: balanced-brace scanner (not a regex) so nested args survive.
+_BARE_TOOL_START_RE = re.compile(
+    r"\{\s*\"tool\"\s*:\s*\"[^\"]+\"\s*,", re.DOTALL)
 
 
 @dataclass
@@ -80,12 +81,43 @@ class ToolLoopResult:
     error: str = ""
 
 
+def _scan_balanced(text: str, start: int) -> int:
+    """Index just past the closing brace matching ``text[start] == '{'``.
+
+    String-aware: braces inside "..." (with \\ escapes) don't count.
+    Returns -1 when unbalanced.
+    """
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
 def parse_tool_calls(text: str) -> list[ToolCall]:
     """Extract tool calls from model text. Never raises.
 
     Accepts fenced ```tool blocks (preferred) and bare {"tool": ...}
-    JSON objects (fallback). Malformed JSON is skipped with the text
-    preserved — the model sees the parse failure as feedback.
+    JSON objects (fallback, balanced-brace scanned so nested args
+    survive). Malformed JSON is skipped with the text preserved — the
+    model sees the parse failure as feedback.
     """
     calls: list[ToolCall] = []
     seen_spans: list[tuple[int, int]] = []
@@ -112,26 +144,37 @@ def parse_tool_calls(text: str) -> list[ToolCall]:
         calls.append(ToolCall(name=name.strip(), args=args, raw=raw))
         seen_spans.append(span)
 
-    for m in _TOOL_FENCE_RE.finditer(text or ""):
+    text = text or ""
+    for m in _TOOL_FENCE_RE.finditer(text):
         _try_block(m.group(1), m.span())
-    for m in _BARE_TOOL_RE.finditer(text or ""):
-        _try_block(m.group(0), m.span())
+    for m in _BARE_TOOL_START_RE.finditer(text):
+        end = _scan_balanced(text, m.start())
+        if end == -1:
+            continue
+        _try_block(text[m.start():end], (m.start(), end))
     return calls
 
 
 def _strip_tool_blocks(text: str) -> str:
     """Remove tool-call blocks, leaving the model's prose (final answer)."""
     text = _TOOL_FENCE_RE.sub("", text or "")
-    # Only strip bare blocks that parsed as tool calls.
-    def _repl(m: re.Match) -> str:
+    # Only strip bare blocks that parsed as tool calls (balanced scan).
+    out: list[str] = []
+    pos = 0
+    for m in _BARE_TOOL_START_RE.finditer(text):
+        end = _scan_balanced(text, m.start())
+        if end == -1:
+            continue
+        raw = text[m.start():end]
         try:
-            data = json.loads(m.group(0))
+            data = json.loads(raw)
         except json.JSONDecodeError:
-            return m.group(0)
+            continue
         if isinstance(data, dict) and isinstance(data.get("tool"), str):
-            return ""
-        return m.group(0)
-    return _BARE_TOOL_RE.sub(_repl, text).strip()
+            out.append(text[pos:m.start()])
+            pos = end
+    out.append(text[pos:])
+    return "".join(out).strip()
 
 
 _SYSTEM_TEMPLATE = """\
@@ -192,8 +235,24 @@ class ToolCallingLoop:
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="tool-loop")
 
-    def _tool_listing(self, capabilities: Any = None) -> str:
-        """Tool list for the prompt, filtered to what the actor may use."""
+    def _tool_listing(
+        self,
+        capabilities: Any = None,
+        query: str = "",
+    ) -> str:
+        """Tool list for the prompt, filtered to what the actor may use.
+
+        Ranked by relevance to the query (top 40) instead of dumping all
+        400+ tools — saves ~20k tokens per turn. Falls back to the full
+        listing when ranking is unavailable.
+        """
+        try:
+            ranked = self.registry.ranked_listing(
+                query, capabilities=capabilities, limit=40)
+            if ranked.strip():
+                return ranked
+        except (AttributeError, TypeError):
+            pass
         try:
             listing = self.registry.prompt_listing(capabilities=capabilities)
         except TypeError:
@@ -207,8 +266,9 @@ class ToolCallingLoop:
         *,
         capabilities: Any = None,
         persona_extra: str = "",
+        query: str = "",
     ) -> str:
-        listing = self._tool_listing(capabilities)
+        listing = self._tool_listing(capabilities, query)
         n = listing.count("\n- ") + (1 if listing.strip() else 0)
         return _SYSTEM_TEMPLATE.format(
             n_tools=n,
@@ -407,7 +467,8 @@ class ToolCallingLoop:
         tools_used: list[str] = []
 
         system = self._system_prompt(
-            capabilities=capabilities, persona_extra=persona_extra)
+            capabilities=capabilities, persona_extra=persona_extra,
+            query=goal)
 
         user_block = goal
         if context_lines:
@@ -456,7 +517,9 @@ class ToolCallingLoop:
                     degrade_note=f"model error: {err}")
 
             text = getattr(resp, "text", "") or ""
-            calls = parse_tool_calls(text)[:self.max_tool_calls_per_turn]
+            all_calls = parse_tool_calls(text)
+            calls = all_calls[:self.max_tool_calls_per_turn]
+            dropped = len(all_calls) - len(calls)
 
             step = ToolLoopTrace(
                 iteration=iteration, model_text=text[:2000],
@@ -488,6 +551,11 @@ class ToolCallingLoop:
             obs_block = "\n\n".join(
                 f"Observation {i + 1}:\n{o}"
                 for i, o in enumerate(observations))
+            if dropped > 0:
+                obs_block += (
+                    f"\n\nNote: {dropped} tool call(s) were dropped "
+                    f"(limit {self.max_tool_calls_per_turn} per turn) — "
+                    f"re-emit the important ones next turn if still needed.")
             messages.append(Message.user(
                 f"Tool observations (reflect, then continue or answer):\n\n"
                 f"{obs_block}"))
