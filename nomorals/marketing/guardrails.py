@@ -39,9 +39,11 @@ from typing import Any, Callable
 
 _MONEY_METRICS = {"cpa", "cpc", "spend", "cpm"}   # thresholds parsed as naira → kobo
 _RATIO_METRICS = {"roas", "ctr", "cvr"}           # thresholds parsed as floats
+_PLAIN_METRICS = {"frequency", "impressions", "clicks"}  # plain floats
+_ALL_METRICS = _MONEY_METRICS | _RATIO_METRICS | _PLAIN_METRICS
 _DEFAULT_DB = "~/.nomorals/marketing/guardrails.db"
 _MANDATE_SCOPE = "adspend"
-_ACTIONS = ("pause", "scale", "label")
+_ACTIONS = ("pause", "scale", "label", "alert")
 _OPS = (">", "<", ">=", "<=")
 
 
@@ -58,7 +60,7 @@ class Rule:
     threshold: float = 0.0       # kobo for money metrics, ratio for ratio metrics
     threshold_raw: str = ""      # what the owner typed ("₦50000", "3")
     days: int = 1                # consecutive evaluations the condition must hold
-    action: str = "pause"        # pause | scale | label
+    action: str = "pause"        # pause | scale | label | alert
     action_param: float = 0.0    # scale percent (20 → +20%)
     action_text: str = ""        # label action: custom label text to apply
     max_delta_kobo: int = 0      # spend delta cap when budget unknown
@@ -67,6 +69,10 @@ class Rule:
     last_fired_at: float = 0.0
     active: bool = True
     created_at: float = 0.0
+    # ── sweep upgrade: compound conditions + evidence gate ──
+    conditions: list = field(default_factory=list)  # [{metric, op, threshold, threshold_raw}]
+    cond_op: str = "and"         # how conditions combine: and | or
+    min_spend_kobo: int = 0      # don't judge before this spend (learning window)
 
 
 @dataclass
@@ -134,7 +140,8 @@ class GuardrailStore:
         try:
             path = _expand(db_path or _DEFAULT_DB)
             import os
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if path != ":memory:":
+                os.makedirs(os.path.dirname(path), exist_ok=True)
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._init()
@@ -157,12 +164,29 @@ class GuardrailStore:
                 detail TEXT, ok INTEGER, reason TEXT, override INTEGER);
         """)
         self._db.commit()
-        # Migration: rules tables created before action_text existed.
+        # Migrations for tables created before newer columns existed.
         try:
             cols = {r["name"] for r in self._db.execute("PRAGMA table_info(rules)")}
             if "action_text" not in cols:
                 self._db.execute("ALTER TABLE rules ADD COLUMN action_text TEXT DEFAULT ''")
-                self._db.commit()
+            if "conditions_json" not in cols:
+                self._db.execute("ALTER TABLE rules ADD COLUMN conditions_json TEXT DEFAULT '[]'")
+            if "cond_op" not in cols:
+                self._db.execute("ALTER TABLE rules ADD COLUMN cond_op TEXT DEFAULT 'and'")
+            if "min_spend_kobo" not in cols:
+                self._db.execute("ALTER TABLE rules ADD COLUMN min_spend_kobo INTEGER DEFAULT 0")
+            self._db.commit()
+        except Exception:
+            pass
+        # Metric snapshots for creative-fatigue detection.
+        try:
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS metric_history ("
+                "adset_id TEXT, ts REAL, metrics_json TEXT)")
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mh_adset_ts ON "
+                "metric_history(adset_id, ts)")
+            self._db.commit()
         except Exception:
             pass
 
@@ -171,15 +195,30 @@ class GuardrailStore:
         try:
             if self._db is None or not rule.adset_id or rule.action not in _ACTIONS:
                 return None
+            import json as _json
             rule.rule_id = rule.rule_id or ("gr_" + uuid.uuid4().hex[:8])
             rule.created_at = rule.created_at or _now()
-            self._db.execute(
-                "INSERT OR REPLACE INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (rule.rule_id, rule.label, rule.adset_id, rule.platform,
-                 rule.metric, rule.op, rule.threshold, rule.threshold_raw,
-                 rule.days, rule.action, rule.action_param, rule.action_text,
-                 rule.max_delta_kobo, rule.cooldown_s, rule.streak,
-                 rule.last_fired_at, 1 if rule.active else 0, rule.created_at))
+            cols = {r["name"] for r in
+                    self._db.execute("PRAGMA table_info(rules)")}
+            has_new = {"conditions_json", "cond_op", "min_spend_kobo"} <= cols
+            if has_new:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (rule.rule_id, rule.label, rule.adset_id, rule.platform,
+                     rule.metric, rule.op, rule.threshold, rule.threshold_raw,
+                     rule.days, rule.action, rule.action_param, rule.action_text,
+                     rule.max_delta_kobo, rule.cooldown_s, rule.streak,
+                     rule.last_fired_at, 1 if rule.active else 0, rule.created_at,
+                     _json.dumps(list(rule.conditions or [])),
+                     rule.cond_op or "and", int(rule.min_spend_kobo or 0)))
+            else:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (rule.rule_id, rule.label, rule.adset_id, rule.platform,
+                     rule.metric, rule.op, rule.threshold, rule.threshold_raw,
+                     rule.days, rule.action, rule.action_param, rule.action_text,
+                     rule.max_delta_kobo, rule.cooldown_s, rule.streak,
+                     rule.last_fired_at, 1 if rule.active else 0, rule.created_at))
             self._db.commit()
             return rule
         except Exception:
@@ -285,6 +324,22 @@ def _col(row: sqlite3.Row, name: str) -> str:
 
 def _row_to_rule(row: sqlite3.Row) -> Rule:
     try:
+        import json as _json
+        conditions: list = []
+        cond_op = "and"
+        min_spend = 0
+        try:
+            conditions = list(_json.loads(row["conditions_json"] or "[]"))
+        except Exception:
+            conditions = []
+        try:
+            cond_op = (row["cond_op"] or "and").lower()
+        except Exception:
+            pass
+        try:
+            min_spend = int(row["min_spend_kobo"] or 0)
+        except Exception:
+            pass
         return Rule(
             rule_id=row["rule_id"], label=row["label"] or "",
             adset_id=row["adset_id"] or "", platform=row["platform"] or "",
@@ -299,40 +354,92 @@ def _row_to_rule(row: sqlite3.Row) -> Rule:
             streak=int(row["streak"] or 0),
             last_fired_at=float(row["last_fired_at"] or 0),
             active=bool(row["active"]),
-            created_at=float(row["created_at"] or 0))
+            created_at=float(row["created_at"] or 0),
+            conditions=conditions, cond_op=cond_op,
+            min_spend_kobo=min_spend)
     except Exception:
         return Rule()
 
 
 # ── rule parsing ──────────────────────────────────────────────────────────
 
-_RULE_RE = re.compile(
-    r"^(?P<action>pause|scale|label)\s*(?P<param>.*?)\s+\bif\b\s*"
-    r"(?P<metric>cpa|cpc|cpm|spend|roas|ctr|cvr)\s*"
-    r"(?P<op>>=|<=|>|<)\s*(?P<threshold>[₦\d.,km\s]+?)\s*"
-    r"(?:\bfor\b\s*(?P<days>\d+)\s*days?)?\s*"
-    r"\bon\b\s*(?P<adset>[\w\-]+)"
-    r"(?:\s*\bvia\b\s*(?P<platform>meta|google|tiktok))?\s*$",
+_COND_RE = re.compile(
+    r"(?P<metric>cpa|cpc|cpm|spend|roas|ctr|cvr|frequency|impressions|clicks)\s*"
+    r"(?P<op>>=|<=|>|<)\s*(?P<threshold>[₦\d.,km\s]+)",
     re.IGNORECASE)
+_HEAD_RE = re.compile(
+    r"^(?P<action>pause|scale|label|alert)\s*(?P<param>.*?)\s+\bif\b\s+"
+    r"(?P<conds>.+?)\s+\bon\b\s*(?P<adset>[\w\-]+)\s*$",
+    re.IGNORECASE | re.DOTALL)
+_CLAUSE_DAYS = re.compile(r"\bfor\s+(?P<days>\d+)\s*days?\b", re.IGNORECASE)
+_CLAUSE_VIA = re.compile(r"\bvia\s+(?P<platform>meta|google|tiktok)\b", re.IGNORECASE)
+_CLAUSE_MINSPEND = re.compile(r"\bmin\s*-?\s*spend\b\s*(?P<ms>[₦\d.,km\s]+?)(?=\s*$|\s+via\b|\s+for\b)",
+                              re.IGNORECASE)
+
+
+def _parse_condition(text: str) -> dict | None:
+    """One 'metric op threshold' condition → dict. None on garbage."""
+    try:
+        m = _COND_RE.fullmatch((text or "").strip())
+        if not m:
+            return None
+        metric = m.group("metric").lower()
+        op = m.group("op")
+        if op not in _OPS:
+            return None
+        raw_thr = (m.group("threshold") or "").strip()
+        if metric in _MONEY_METRICS:
+            kobo = parse_naira_kobo(raw_thr)
+            if kobo is None:
+                return None
+            threshold = float(kobo)
+        else:
+            try:
+                threshold = float(raw_thr.replace(",", ""))
+            except Exception:
+                return None
+        return {"metric": metric, "op": op, "threshold": threshold,
+                "threshold_raw": raw_thr}
+    except Exception:
+        return None
 
 
 def parse_rule(text: str) -> Rule | None:
     """Parse 'pause if cpa > ₦50000 for 3 days on adset123 [via meta]'.
 
-    Also 'scale 20% if roas > 3 for 2 days on adset123'.
+    Also 'scale 20% if roas > 3 for 2 days on adset123', compound
+    'pause if cpa > ₦50k and frequency > 4 for 3 days on adset1',
+    and 'alert if ctr < 0.5 on adset1 minspend ₦20000'.
     Returns None on garbage — never raises.
     """
     try:
-        m = _RULE_RE.match((text or "").strip())
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        # Pull optional trailing clauses (order-independent).
+        days = 1
+        m = _CLAUSE_DAYS.search(raw)
+        if m:
+            days = int(m.group("days"))
+            raw = (raw[:m.start()] + raw[m.end():]).strip()
+        platform = ""
+        m = _CLAUSE_VIA.search(raw)
+        if m:
+            platform = m.group("platform").lower()
+            raw = (raw[:m.start()] + raw[m.end():]).strip()
+        min_spend_kobo = 0
+        m = _CLAUSE_MINSPEND.search(raw)
+        if m:
+            kobo = parse_naira_kobo(m.group("ms"))
+            if kobo:
+                min_spend_kobo = kobo
+            raw = (raw[:m.start()] + raw[m.end():]).strip()
+
+        m = _HEAD_RE.match(raw)
         if not m:
             return None
         g = m.groupdict()
         action = g["action"].lower()
-        metric = g["metric"].lower()
-        op = g["op"]
-        if op not in _OPS:
-            return None
-
         param_raw = (g["param"] or "").strip()
         action_param = 0.0
         action_text = ""
@@ -344,27 +451,38 @@ def parse_rule(text: str) -> Rule | None:
         elif action == "label":
             # `label "needs creative" if ...` — custom label text to apply.
             action_text = param_raw.strip().strip("\"'")
+        elif action == "alert" and param_raw:
+            action_text = param_raw.strip().strip("\"'")
 
-        raw_thr = (g["threshold"] or "").strip()
-        if metric in _MONEY_METRICS:
-            kobo = parse_naira_kobo(raw_thr)
-            if kobo is None:
+        conds_raw = (g["conds"] or "").strip()
+        cond_op = "and"
+        if re.search(r"\bor\b", conds_raw, re.IGNORECASE):
+            cond_op = "or"
+        splitter = re.compile(r"\s+(?:and|or)\s+", re.IGNORECASE)
+        pieces = [p for p in splitter.split(conds_raw) if p.strip()]
+        # Mixed and/or is refused — keep semantics unambiguous.
+        if (re.search(r"\band\b", conds_raw, re.IGNORECASE)
+                and re.search(r"\bor\b", conds_raw, re.IGNORECASE)):
+            return None
+        conditions = []
+        for piece in pieces:
+            c = _parse_condition(piece)
+            if c is None:
                 return None
-            threshold = float(kobo)
-        else:
-            try:
-                threshold = float(raw_thr.replace(",", ""))
-            except Exception:
-                return None
+            conditions.append(c)
+        if not conditions:
+            return None
 
-        days = int(g["days"] or 1)
         if days < 1 or days > 30:
             return None
+        first = conditions[0]
         return Rule(
-            adset_id=g["adset"].strip(), platform=(g["platform"] or "").lower(),
-            metric=metric, op=op, threshold=threshold, threshold_raw=raw_thr,
+            adset_id=g["adset"].strip(), platform=platform,
+            metric=first["metric"], op=first["op"],
+            threshold=first["threshold"], threshold_raw=first["threshold_raw"],
             days=days, action=action, action_param=action_param,
-            action_text=action_text)
+            action_text=action_text, conditions=conditions, cond_op=cond_op,
+            min_spend_kobo=min_spend_kobo)
     except Exception:
         return None
 
@@ -396,7 +514,186 @@ def _fmt_value(rule: Rule, value: float) -> str:
     return f"{value:.2f}"
 
 
-# ── evaluation ────────────────────────────────────────────────────────────
+# ── presets (Bïrch-style ready-made automation strategies) ───────────────
+
+RULE_PRESETS: dict[str, dict[str, str]] = {
+    "cpa_kill": {
+        "description": "Kill switch — pause when CPA blows past target 3 days running.",
+        "template": "pause if cpa > {thr} for 3 days on {adset}",
+        "default_thr": "₦50000",
+    },
+    "scale_winners": {
+        "description": "Scale proven winners — +20% budget when ROAS > 3 for 2 days.",
+        "template": "scale 20% if roas > 3 for 2 days on {adset}",
+        "default_thr": "",
+    },
+    "fatigue_watch": {
+        "description": "Early warning — alert when CTR sags 5 days running.",
+        "template": "alert creative-fatigue if ctr < {thr} for 5 days on {adset}",
+        "default_thr": "0.8",
+    },
+    "frequency_cap": {
+        "description": "Saturation watch — alert when frequency crosses 4.",
+        "template": "alert saturation if frequency > 4 for 2 days on {adset}",
+        "default_thr": "",
+    },
+    "budget_guard": {
+        "description": "Spend cap — pause when spend exceeds the daily cap.",
+        "template": "pause if spend > {thr} for 1 days on {adset} minspend {thr}",
+        "default_thr": "₦100000",
+    },
+}
+
+
+def add_preset(store: GuardrailStore, name: str, adset_id: str,
+               thr: str = "") -> Rule | None:
+    """Arm a ready-made automation strategy. Never raises."""
+    try:
+        preset = RULE_PRESETS.get((name or "").strip().lower())
+        if not preset or not (adset_id or "").strip() or store is None:
+            return None
+        text = preset["template"].format(
+            adset=adset_id.strip(), thr=(thr or "").strip() or preset["default_thr"])
+        rule = parse_rule(text)
+        if rule is None:
+            return None
+        return store.add_rule(rule)
+    except Exception:
+        return None
+
+
+# ── metric history + creative-fatigue detection ───────────────────────────
+
+def record_metrics(store: GuardrailStore, adset_id: str,
+                   metrics: dict | None) -> bool:
+    """Snapshot an ad set's metrics for fatigue detection. Never raises."""
+    try:
+        if store is None or getattr(store, "_db", None) is None:
+            return False
+        adset_id = (adset_id or "").strip()
+        if not adset_id:
+            return False
+        import json as _json
+        store._db.execute(
+            "INSERT INTO metric_history (adset_id, ts, metrics_json)"
+            " VALUES (?, ?, ?)",
+            (adset_id, _now(), _json.dumps(dict(metrics or {}))))
+        store._db.execute("DELETE FROM metric_history WHERE ts < ?",
+                          (_now() - 60 * 86400.0,))
+        store._db.commit()
+        return True
+    except Exception:
+        return False
+
+
+def fatigue_signal(store: GuardrailStore, adset_id: str,
+                   window_days: int = 7) -> dict:
+    """Creative-fatigue check: CTR down ≥30% (1st→2nd half of window) with
+    frequency rising. Never raises."""
+    out: dict = {"fatigued": False, "ctr_drop_pct": 0.0,
+                 "freq_trend": "flat", "reason": "not enough history"}
+    try:
+        if store is None or getattr(store, "_db", None) is None:
+            return out
+        rows = store._db.execute(
+            "SELECT metrics_json FROM metric_history WHERE adset_id = ?"
+            " AND ts >= ? ORDER BY ts",
+            ((adset_id or "").strip(), _now() - max(2, int(window_days or 7)) * 86400.0)
+        ).fetchall()
+        import json as _json
+        pts: list[tuple[float, float]] = []
+        for r in rows:
+            try:
+                m = _json.loads(r["metrics_json"] or "{}")
+                pts.append((float(m.get("ctr", 0) or 0),
+                            float(m.get("frequency", 0) or 0)))
+            except Exception:
+                continue
+        if len(pts) < 4:
+            return out
+        half = len(pts) // 2
+        c1 = sum(p[0] for p in pts[:half]) / half
+        c2 = sum(p[0] for p in pts[half:]) / (len(pts) - half)
+        f1 = sum(p[1] for p in pts[:half]) / half
+        f2 = sum(p[1] for p in pts[half:]) / (len(pts) - half)
+        drop = ((c1 - c2) / c1 * 100.0) if c1 > 0 else 0.0
+        out["ctr_drop_pct"] = round(drop, 1)
+        out["freq_trend"] = ("rising" if f2 > f1 * 1.1
+                             else "falling" if f2 < f1 * 0.9 else "flat")
+        if drop >= 30 and out["freq_trend"] == "rising":
+            out["fatigued"] = True
+            out["reason"] = (f"CTR down {drop:.0f}% with frequency rising — "
+                             "creative fatigue: pause or refresh creative")
+        elif drop >= 30:
+            out["reason"] = (f"CTR down {drop:.0f}% but frequency flat — "
+                             "check tracking/landing before touching budgets")
+        else:
+            out["reason"] = "no fatigue signal"
+        return out
+    except Exception:
+        return out
+
+
+# ── dry-run preview ───────────────────────────────────────────────────────
+
+def preview(store: GuardrailStore,
+            metrics_fn: MetricsFn | None = None) -> list[dict]:
+    """'What would fire right now' — no streak changes, no firing, no audit.
+    Never raises."""
+    out: list[dict] = []
+    try:
+        if store is None:
+            return out
+        for rule in store.list_rules(active_only=True):
+            try:
+                info: dict = {"rule_id": rule.rule_id,
+                              "adset_id": rule.adset_id,
+                              "action": rule.action,
+                              "would_fire": False, "reason": "",
+                              "streak": f"{rule.streak or 0}/{rule.days}d"}
+                if metrics_fn is None:
+                    info["reason"] = "no metric source"
+                    out.append(info)
+                    continue
+                metrics = metrics_fn(rule.adset_id) or {}
+                conds = _conditions_of(rule)
+                bits: list[str] = []
+                results: list[bool] = []
+                for cond in conds:
+                    v = metrics.get(cond.get("metric", ""))
+                    try:
+                        v = float(v) if v is not None else None
+                    except Exception:
+                        v = None
+                    holds = (v is not None and _condition_holds(
+                        v, cond.get("op", ">"), float(cond.get("threshold", 0))))
+                    results.append(bool(holds))
+                    bits.append(
+                        f"{cond.get('metric', '').upper()} "
+                        f"{_fmt_cond_value(cond, v) if v is not None else '?'} "
+                        f"{cond.get('op', '')} {_fmt_cond(cond)} "
+                        f"{'✓' if holds else '✗'}")
+                holds_all = (any(results) if (rule.cond_op or "and") == "or"
+                             else all(results))
+                if not results:
+                    info["reason"] = "no conditions"
+                elif not holds_all:
+                    info["reason"] = "conditions not met: " + f" {rule.cond_op} ".join(bits)
+                elif (rule.streak or 0) + 1 < rule.days:
+                    info["reason"] = ("holding — streak would be "
+                                      f"{(rule.streak or 0) + 1}/{rule.days}d: "
+                                      + f" {rule.cond_op} ".join(bits))
+                elif rule.last_fired_at and (_now() - rule.last_fired_at) < rule.cooldown_s:
+                    info["reason"] = "cooling down"
+                else:
+                    info["would_fire"] = True
+                    info["reason"] = f"WOULD FIRE: {rule.action} — " + f" {rule.cond_op} ".join(bits)
+                out.append(info)
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 MetricsFn = Callable[[str], dict[str, Any] | None]   # adset_id → metrics
 ExecutorFn = Callable[[str, str, dict[str, Any]], bool]  # (action, adset_id, params) → ok
@@ -436,6 +733,37 @@ def evaluate(store: GuardrailStore, metrics_fn: MetricsFn | None = None,
     return fired
 
 
+def _fmt_cond(cond: dict) -> str:
+    try:
+        metric = cond.get("metric", "")
+        thr = float(cond.get("threshold", 0))
+        if metric in _MONEY_METRICS:
+            return format_naira(thr)
+        return str(thr).rstrip("0").rstrip(".")
+    except Exception:
+        return "?"
+
+
+def _fmt_cond_value(cond: dict, value: float) -> str:
+    try:
+        if cond.get("metric") in _MONEY_METRICS:
+            return format_naira(value)
+        return f"{value:.2f}"
+    except Exception:
+        return "?"
+
+
+def _conditions_of(rule: Rule) -> list[dict]:
+    """Compound conditions, falling back to the legacy single condition."""
+    try:
+        if rule.conditions:
+            return [c for c in rule.conditions if isinstance(c, dict) and c.get("metric")]
+        return [{"metric": rule.metric, "op": rule.op,
+                 "threshold": rule.threshold, "threshold_raw": rule.threshold_raw}]
+    except Exception:
+        return []
+
+
 def _evaluate_rule(store: GuardrailStore, rule: Rule,
                    metrics_fn: MetricsFn | None,
                    executor_fn: ExecutorFn | None) -> FiredAction | None:
@@ -443,17 +771,38 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
         if metrics_fn is None:
             return None  # no metric source — nothing to evaluate
         metrics = metrics_fn(rule.adset_id) or {}
-        value = metrics.get(rule.metric)
-        if value is None:
-            store.update_streak(rule.rule_id, 0)
-            return None
-        try:
-            value = float(value)
-        except Exception:
-            store.update_streak(rule.rule_id, 0)
-            return None
 
-        holds = _condition_holds(value, rule.op, rule.threshold)
+        # Minimum-evidence gate: don't judge a campaign still in learning.
+        if rule.min_spend_kobo:
+            try:
+                spend_now = float(metrics.get("spend", 0) or 0)
+            except Exception:
+                spend_now = 0
+            need = rule.min_spend_kobo / (100.0 if rule.min_spend_kobo > 1000 else 1.0)
+            # metrics spend may be kobo or naira — accept either scale.
+            if spend_now < rule.min_spend_kobo and spend_now < need:
+                return None  # hold streak, no reset: evidence is accruing
+
+        conds = _conditions_of(rule)
+        results: list[tuple[dict, float | None, bool]] = []
+        for cond in conds:
+            value = metrics.get(cond.get("metric", ""))
+            if value is None:
+                results.append((cond, None, False))
+                continue
+            try:
+                value = float(value)
+            except Exception:
+                results.append((cond, None, False))
+                continue
+            results.append((cond, value,
+                            _condition_holds(value, cond.get("op", ">"),
+                                             float(cond.get("threshold", 0)))))
+        if any(v is None for _, v, _ in results):
+            store.update_streak(rule.rule_id, 0)
+            return None
+        holds = (any(h for _, _, h in results) if (rule.cond_op or "and") == "or"
+                 else all(h for _, _, h in results))
         if not holds:
             store.update_streak(rule.rule_id, 0)
             return None
@@ -467,11 +816,37 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
         if rule.last_fired_at and (now - rule.last_fired_at) < rule.cooldown_s:
             return None
 
-        label = (f"{rule.action} — {rule.metric.upper()} {rule.op} "
-                 f"{_fmt_threshold(rule)} (now {_fmt_value(rule, value)}, "
-                 f"{streak}d streak)")
-        detail = (f"rule {rule.rule_id}: {rule.metric.upper()} {_fmt_value(rule, value)} "
-                  f"{rule.op} {_fmt_threshold(rule)} on {rule.adset_id}")
+        cond_txt = (f" {rule.cond_op} ".join(
+            f"{c.get('metric', '').upper()} {c.get('op', '')} {_fmt_cond(c)}"
+            for c in conds))
+        val_txt = ", ".join(
+            f"{c.get('metric', '').upper()} {_fmt_cond_value(c, v)}"
+            for c, v, _ in results)
+        label = f"{rule.action} — {cond_txt} (now {val_txt}, {streak}d streak)"
+        detail = (f"rule {rule.rule_id}: {val_txt} vs {cond_txt} "
+                  f"on {rule.adset_id}")
+
+        # Alert actions notify only — no money moves, no mandate needed.
+        if rule.action == "alert":
+            executed = True
+            if executor_fn is not None:
+                try:
+                    executed = bool(executor_fn(
+                        "alert", rule.adset_id,
+                        {"conditions": conds, "values": {c.get("metric"): v
+                                                        for c, v, _ in results}}))
+                except Exception as e:  # noqa: BLE001
+                    executed = False
+                    fa = FiredAction(rule.rule_id, rule.adset_id, "alert",
+                                     detail, False,
+                                     reason=f"alert dispatch failed: {e}", ts=now)
+                    store.mark_fired(rule.rule_id, label + " [alert-failed]")
+                    return fa
+            store.mark_fired(rule.rule_id, label)
+            return FiredAction(rule.rule_id, rule.adset_id, "alert", detail,
+                               executed,
+                               reason="" if executed else "no alert channel",
+                               ts=now)
 
         # Spend actions need the #69 mandate. Label actions don't move money.
         if rule.action in ("pause", "scale"):
@@ -500,8 +875,12 @@ def _evaluate_rule(store: GuardrailStore, rule: Rule,
         # Execute.
         executed = True
         if executor_fn is not None:
-            params: dict[str, Any] = {"metric": rule.metric, "value": value,
-                                      "threshold": rule.threshold, "pct": rule.action_param}
+            first = conds[0]
+            params: dict[str, Any] = {"metric": first.get("metric"),
+                                      "value": results[0][1],
+                                      "threshold": first.get("threshold"),
+                                      "pct": rule.action_param,
+                                      "conditions": conds}
             if rule.action == "label" and rule.action_text:
                 params["label_text"] = rule.action_text
             try:
@@ -534,7 +913,7 @@ def execute_override(store: GuardrailStore, adset_id: str, action: str,
     try:
         action = (action or "").lower().strip()
         adset_id = (adset_id or "").strip()
-        if action not in ("pause", "scale", "label"):
+        if action not in ("pause", "scale", "label", "alert"):
             return FiredAction("", adset_id, action, "override", False,
                                reason=f"unknown action '{action}'", override=True, ts=now)
         if not adset_id:
@@ -620,14 +999,24 @@ def ensure_schedule(scheduler: Any) -> bool:
 
 def format_rule(rule: Rule) -> str:
     try:
+        conds = _conditions_of(rule)
+        cond_txt = f" {(rule.cond_op or 'and')} ".join(
+            f"{c.get('metric', '').upper()} {c.get('op', '')} {_fmt_cond(c)}"
+            for c in conds)
         when = (f" for {rule.days}d" if rule.days > 1 else "")
         act = rule.action
         if rule.action == "scale":
             act = f"scale +{rule.action_param:g}%"
+        if rule.action in ("label", "alert") and rule.action_text:
+            act = f"{rule.action} '{rule.action_text}'"
+        ms = (f" · min-spend {format_naira(rule.min_spend_kobo)}"
+              if rule.min_spend_kobo else "")
+        streak = (f" · streak {rule.streak or 0}/{rule.days}d"
+                  if rule.streak else "")
         state = "" if rule.active else " [off]"
         lbl = f" — {rule.label}" if rule.label else ""
-        return (f"• `{rule.rule_id}` {act} if {rule.metric.upper()} {rule.op} "
-                f"{_fmt_threshold(rule)}{when} on `{rule.adset_id}`{state}{lbl}")
+        return (f"• `{rule.rule_id}` {act} if {cond_txt}{when} "
+                f"on `{rule.adset_id}`{ms}{streak}{state}{lbl}")
     except Exception:
         return "• (rule)"
 
@@ -648,9 +1037,14 @@ def _usage() -> str:
     return ("usage:\n"
             "  /guardrails add pause if cpa > ₦50000 for 3 days on adset123 [via meta]\n"
             "  /guardrails add scale 20% if roas > 3 for 2 days on adset123\n"
-            "  /guardrails add label if ctr < 0.5 for 5 days on adset123\n"
+            "  /guardrails add pause if cpa > ₦50k and frequency > 4 for 3 days on adset1\n"
+            "  /guardrails add alert if ctr < 0.5 for 5 days on adset123 — notify only\n"
+            "  /guardrails preset <name> on <adset> [threshold] — ready-made strategies\n"
+            "    names: cpa_kill · scale_winners · fatigue_watch · frequency_cap · budget_guard\n"
             "  /guardrails list — active rules\n"
+            "  /guardrails preview — dry run: what would fire right now\n"
             "  /guardrails run — evaluate now\n"
+            "  /guardrails fatigue <adset> — creative-fatigue check\n"
             "  /guardrails override scale adset123 20 — 'scale it anyway' (bypasses rules)\n"
             "  /guardrails stop <rule_id> — disable a rule\n"
             "  /guardrails remove <rule_id>\n"
@@ -690,6 +1084,44 @@ def control_guardrails(tail: str, context=None, chat=None, **kwargs: Any) -> str
             if not rules:
                 return "no guardrails yet — /guardrails add … to arm one."
             return "🛡️ ad guardrails:\n" + "\n".join(format_rule(r) for r in rules)
+
+        if low.startswith("preset"):
+            # /guardrails preset <name> on <adset> [threshold]
+            m = re.match(r"(?P<name>\w+)\s+on\s+(?P<adset>[\w\-]+)(?:\s+(?P<thr>\S+))?\s*$",
+                         rest[6:].strip(), re.IGNORECASE)
+            if not m:
+                names = " · ".join(sorted(RULE_PRESETS))
+                return (f"usage: /guardrails preset <name> on <adset> [threshold]\n"
+                        f"names: {names}")
+            rule = add_preset(store, m.group("name"), m.group("adset"),
+                              m.group("thr") or "")
+            if rule is None:
+                return "couldn't arm that preset — check the name/adset."
+            return ("🛡️ preset armed:\n" + format_rule(rule) +
+                    "\nspend actions still need an active adspend mandate to fire.")
+
+        if low.startswith("preview"):
+            rows = preview(store)
+            if not rows:
+                return "no active rules to preview."
+            lines = ["🔍 guardrail dry run — what would fire right now:"]
+            for r in rows:
+                icon = "🔥" if r["would_fire"] else "▫️"
+                lines.append(f"{icon} `{r['rule_id']}` {r['action']} on "
+                             f"`{r['adset_id']}` [{r['streak']}] — {r['reason'][:110]}")
+            lines.append("nothing fired, no streaks touched, nothing audited.")
+            return "\n".join(lines)
+
+        if low.startswith("fatigue"):
+            adset = rest[7:].strip()
+            if not adset:
+                return "usage: /guardrails fatigue <adset>"
+            sig = fatigue_signal(store, adset)
+            icon = "🚨" if sig["fatigued"] else "✅"
+            return (f"{icon} fatigue check — `{adset}`\n"
+                    f"CTR change: {sig['ctr_drop_pct']:+.0f}% · "
+                    f"frequency: {sig['freq_trend']}\n"
+                    f"{sig['reason']}")
 
         if low.startswith("run"):
             fired = evaluate(store)

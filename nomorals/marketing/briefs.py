@@ -45,7 +45,13 @@ class ContentBrief:
     questions: list[str] = field(default_factory=list)  # people ask these
     angles: list[str] = field(default_factory=list)     # competitor angles
     outline: list[str] = field(default_factory=list)    # section headings
+    term_bands: dict = field(default_factory=dict)  # keyword → [min, max] uses
     created_at: float = 0.0
+
+    @property
+    def clusters(self) -> dict:
+        """Frase-style: questions grouped by topic. Never raises."""
+        return _cluster_questions(self.questions)
 
     def summary(self) -> str:
         try:
@@ -54,10 +60,16 @@ class ContentBrief:
                 lines.append("keywords: " + ", ".join(self.keywords[:8]))
             if self.questions:
                 lines.append("people ask: " + " | ".join(self.questions[:3]))
+            clusters = self.clusters
+            if len(clusters) > 1:
+                lines.append("question clusters: " + ", ".join(
+                    f"{k} ({len(v)})" for k, v in list(clusters.items())[:4]))
             if self.angles:
                 lines.append("angles: " + " | ".join(self.angles[:3]))
             if self.outline:
                 lines.append("outline: " + " → ".join(self.outline[:5]))
+            q = brief_quality(self)
+            lines.append(f"brief quality: {q['score']:.0f}/100 ({q['grade']})")
             return "\n".join(lines)
         except Exception:  # noqa: BLE001
             return "📋 Brief"
@@ -65,23 +77,32 @@ class ContentBrief:
 
 @dataclass
 class ContentScore:
-    """score_draft() result."""
+    """score_draft() result — Surfer-style composite."""
 
     score: float = 0.0            # 0-100
     term_coverage: float = 0.0    # 0-1, brief keywords present in draft
     readability: float = 0.0      # 0-1, Flesch-ish
     brand_voice: float = 0.0      # 0-100, from #44 virality_score
+    structure: float = 0.0        # 0-1, headings/lists/length/outline (Surfer)
+    geo: float = 0.0              # 0-100, AI-citation readiness (Frase GEO score)
     missing_terms: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
     source: str = "brief_pipeline"  # learned | heuristic
 
+    @property
+    def grade(self) -> str:
+        """Clearscope-style letter grade."""
+        return letter_grade(self.score)
+
     def format(self) -> str:
         try:
+            bar = _bar(self.score / 100.0)
             lines = [
-                f"📊 draft score: {self.score:.0f}/100",
+                f"📊 draft score: {self.score:.0f}/100 {bar} grade {self.grade}",
                 f"  term coverage {self.term_coverage:.0%} · "
                 f"readability {self.readability:.0%} · "
                 f"brand voice {self.brand_voice:.0f}/100",
+                f"  structure {self.structure:.0%} · GEO (AI-citation) {self.geo:.0f}/100",
             ]
             if self.missing_terms:
                 lines.append("  missing terms: " + ", ".join(self.missing_terms[:6]))
@@ -211,6 +232,189 @@ def _build_outline(topic: str, keywords: list[str], questions: list[str],
         return ["The takeaway"]
 
 
+def _bar(frac: float, width: int = 14) -> str:
+    try:
+        frac = max(0.0, min(1.0, float(frac or 0.0)))
+        fill = int(round(frac * width))
+        return "[" + "█" * fill + "░" * (width - fill) + "]"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def letter_grade(score: float) -> str:
+    """Clearscope-style letter grade for a 0–100 score. Never raises."""
+    try:
+        s = float(score or 0.0)
+        for bound, grade in ((97, "A++"), (93, "A+"), (90, "A"), (87, "A-"),
+                             (83, "B+"), (80, "B"), (77, "B-"), (73, "C+"),
+                             (70, "C"), (67, "C-"), (60, "D")):
+            if s >= bound:
+                return grade
+        return "F"
+    except Exception:  # noqa: BLE001
+        return "F"
+
+
+def _cluster_questions(questions: list[str]) -> dict:
+    """Group questions by their first significant word (Frase-style topic
+    clusters). Never raises."""
+    try:
+        clusters: dict[str, list[str]] = {}
+        for q in (questions or []):
+            words = [w for w in _WORD_RE.findall((q or "").lower())
+                     if w not in _STOPWORDS and len(w) > 3]
+            key = words[0] if words else "general"
+            clusters.setdefault(key, []).append(q)
+        return clusters
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def brief_quality(brief: ContentBrief) -> dict:
+    """Score the brief itself — bad briefs silently produce bad drafts.
+    Never raises."""
+    try:
+        score, issues = 0.0, []
+        kw = len(brief.keywords or [])
+        score += min(30.0, kw / 8.0 * 30.0)
+        if kw < 5:
+            issues.append(f"only {kw} keywords — research more sources")
+        qs = len(brief.questions or [])
+        score += min(25.0, qs / 4.0 * 25.0)
+        if qs < 3:
+            issues.append("thin on reader questions — add PAA/Reddit mining")
+        an = len(brief.angles or [])
+        score += min(20.0, an / 3.0 * 20.0)
+        if an < 2:
+            issues.append("few competitor angles — the draft will sound generic")
+        ol = len(brief.outline or [])
+        score += min(25.0, ol / 5.0 * 25.0)
+        if ol < 4:
+            issues.append("outline is thin — writers need more scaffolding")
+        score = round(min(100.0, score), 1)
+        return {"score": score, "grade": letter_grade(score), "issues": issues}
+    except Exception:  # noqa: BLE001
+        return {"score": 0.0, "grade": "F", "issues": []}
+
+
+def _term_targets(texts: list[str], keywords: list[str]) -> dict:
+    """Clearscope-style frequency bands: per-term (min, max) from source
+    texts. Never raises."""
+    try:
+        bands: dict[str, tuple[int, int]] = {}
+        lows = [(t or "").lower() for t in (texts or [])]
+        for kw in (keywords or []):
+            k = (kw or "").lower().strip()
+            if not k:
+                continue
+            counts = [low.count(k) for low in lows] if lows else []
+            if counts:
+                lo = max(1, min(counts))
+                hi = max(lo, max(counts), 2)
+            else:
+                lo, hi = 1, 3
+            bands[kw] = (lo, min(hi, 8))
+        return bands
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _structure_score(text: str, brief: ContentBrief | None) -> float:
+    """Surfer-style structure layer: headings, lists, paragraphs, length,
+    outline coverage. Never raises."""
+    try:
+        text = text or ""
+        score = 0.0
+        # Headings (markdown or Title-Case lines).
+        heads = len(re.findall(r"(?m)^(#{1,3}\s+\S|.{4,70})$", text))
+        heads_md = len(re.findall(r"(?m)^#{1,3}\s+\S", text))
+        h = heads_md if heads_md else min(heads, 4)
+        score += 0.35 * min(1.0, h / 3.0)
+        # Lists — citation magnets and scannability.
+        if re.search(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S", text):
+            score += 0.20
+        # Paragraphs.
+        paras = [p for p in text.split("\n\n") if p.strip()]
+        score += 0.15 * min(1.0, len(paras) / 4.0)
+        # Length sanity (social post vs article both handled loosely).
+        words = len(_WORD_RE.findall(text.lower()))
+        if 120 <= words <= 2000:
+            score += 0.20
+        elif words > 40:
+            score += 0.10
+        # Outline coverage: does the draft touch the brief's sections?
+        if brief and brief.outline:
+            low = text.lower()
+            hit = 0
+            for item in brief.outline:
+                keys = [w for w in _WORD_RE.findall(item.lower())
+                        if w not in _STOPWORDS and len(w) > 3][:3]
+                if keys and any(k in low for k in keys):
+                    hit += 1
+            score += 0.10 * (hit / max(1, len(brief.outline)))
+        else:
+            score += 0.05
+        return round(min(1.0, score), 2)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def geo_score(text: str, topic: str = "") -> dict:
+    """Frase-style GEO score: how citable this reads to AI engines (0–100).
+
+    Citation magnets: definition-first opening, FAQ structure, statistics
+    with attribution, lists, answer-first. Never raises.
+    """
+    try:
+        text = (text or "").strip()
+        topic = (topic or "").strip().lower()
+        score, signals = 0.0, []
+        if not text:
+            return {"score": 0.0, "signals": ["empty draft"]}
+        low = text.lower()
+        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        first = sents[0] if sents else ""
+        # 1. Definition-first: first sentence defines the topic.
+        topic_words = [w for w in _WORD_RE.findall(topic)
+                       if w not in _STOPWORDS][:3]
+        if topic_words and all(w in first.lower() for w in topic_words[:2]) \
+                and re.search(r"\bis\b|\bare\b|\bmeans\b", first.lower()):
+            score += 25
+            signals.append("definition-first opening ✓")
+        else:
+            signals.append("open with a one-sentence definition of the topic")
+        # 2. FAQ structure: questions as headings or Q-lines.
+        faqs = len(re.findall(r"(?m)^(#{1,3}\s+.*\?|Q:\s*\S)", text))
+        qmarks = text.count("?")
+        if faqs >= 2 or qmarks >= 3:
+            score += 20
+            signals.append("FAQ structure ✓")
+        else:
+            signals.append("add an FAQ block — questions get cited")
+        # 3. Statistics with attribution.
+        if re.search(r"\d+(?:\.\d+)?\s*%", text) and re.search(
+                r"\b(study|report|data|survey|research|source|according to)\b", low):
+            score += 20
+            signals.append("attributed statistics ✓")
+        else:
+            signals.append("add a stat with its source — engines cite numbers")
+        # 4. Lists.
+        if re.search(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S", text):
+            score += 15
+            signals.append("list structure ✓")
+        else:
+            signals.append("use a list — engines extract lists directly")
+        # 5. Answer-first: topic answered in the first 200 chars.
+        if topic_words and any(w in low[:200] for w in topic_words):
+            score += 20
+            signals.append("answer-first ✓")
+        else:
+            signals.append("answer the question in the first two sentences")
+        return {"score": round(min(100.0, score), 1), "signals": signals}
+    except Exception:  # noqa: BLE001
+        return {"score": 0.0, "signals": []}
+
+
 def _default_search(topic: str) -> list[dict]:
     """No-search honesty: brief from the topic alone, flagged heuristic."""
     return []
@@ -226,7 +430,8 @@ class BriefStore:
 
             path = db_path or os.path.expanduser(
                 "~/.nomorals/marketing/briefs.db")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if path != ":memory:":
+                os.makedirs(os.path.dirname(path), exist_ok=True)
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._db.executescript(
@@ -243,6 +448,15 @@ class BriefStore:
                   draft_id TEXT, score REAL, outcome REAL, ts REAL);
                 """
             )
+            # sweep migration: term frequency bands on older brief tables
+            try:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(briefs)")}
+                if "term_bands" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE briefs ADD COLUMN term_bands TEXT DEFAULT '{}'")
+            except Exception:  # noqa: BLE001
+                pass
             self._db.commit()
         except Exception:  # noqa: BLE001
             self._db = None
@@ -280,22 +494,62 @@ class BriefStore:
                 ]
             angles = _extract_angles(texts, topic)
             outline = _build_outline(topic, keywords, questions, angles)
+            bands = _term_targets(texts, keywords)
             brief = ContentBrief(
                 brief_id="brief_" + uuid.uuid4().hex[:8],
                 topic=topic, keywords=keywords, questions=questions,
-                angles=angles, outline=outline, created_at=time.time(),
+                angles=angles, outline=outline, term_bands=bands,
+                created_at=time.time(),
             )
             if self._db is not None:
                 import json
 
-                self._db.execute(
-                    "INSERT INTO briefs VALUES (?,?,?,?,?,?,?)",
-                    (brief.brief_id, brief.topic, json.dumps(brief.keywords),
-                     json.dumps(brief.questions), json.dumps(brief.angles),
-                     json.dumps(brief.outline), brief.created_at),
-                )
+                try:
+                    cols = {r["name"] for r in
+                            self._db.execute("PRAGMA table_info(briefs)")}
+                    has_bands = "term_bands" in cols
+                except Exception:  # noqa: BLE001
+                    has_bands = False
+                if has_bands:
+                    self._db.execute(
+                        "INSERT INTO briefs (brief_id, topic, keywords, questions,"
+                        " angles, outline, term_bands, created_at)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (brief.brief_id, brief.topic, json.dumps(brief.keywords),
+                         json.dumps(brief.questions), json.dumps(brief.angles),
+                         json.dumps(brief.outline), json.dumps(bands),
+                         brief.created_at),
+                    )
+                else:
+                    self._db.execute(
+                        "INSERT INTO briefs VALUES (?,?,?,?,?,?,?)",
+                        (brief.brief_id, brief.topic, json.dumps(brief.keywords),
+                         json.dumps(brief.questions), json.dumps(brief.angles),
+                         json.dumps(brief.outline), brief.created_at),
+                    )
                 self._db.commit()
             return brief
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _brief_from_row(self, row) -> ContentBrief | None:
+        try:
+            import json
+
+            bands: dict = {}
+            try:
+                bands = json.loads(row["term_bands"] or "{}")
+            except Exception:  # noqa: BLE001
+                bands = {}
+            return ContentBrief(
+                brief_id=row["brief_id"], topic=row["topic"],
+                keywords=json.loads(row["keywords"] or "[]"),
+                questions=json.loads(row["questions"] or "[]"),
+                angles=json.loads(row["angles"] or "[]"),
+                outline=json.loads(row["outline"] or "[]"),
+                term_bands=bands,
+                created_at=row["created_at"] or 0.0,
+            )
         except Exception:  # noqa: BLE001
             return None
 
@@ -303,20 +557,11 @@ class BriefStore:
         try:
             if self._db is None or not brief_id:
                 return None
-            import json
-
             row = self._db.execute(
                 "SELECT * FROM briefs WHERE brief_id = ?", (brief_id,)).fetchone()
             if not row:
                 return None
-            return ContentBrief(
-                brief_id=row["brief_id"], topic=row["topic"],
-                keywords=json.loads(row["keywords"] or "[]"),
-                questions=json.loads(row["questions"] or "[]"),
-                angles=json.loads(row["angles"] or "[]"),
-                outline=json.loads(row["outline"] or "[]"),
-                created_at=row["created_at"] or 0.0,
-            )
+            return self._brief_from_row(row)
         except Exception:  # noqa: BLE001
             return None
 
@@ -324,8 +569,6 @@ class BriefStore:
         try:
             if self._db is None:
                 return None
-            import json
-
             if topic:
                 row = self._db.execute(
                     "SELECT * FROM briefs WHERE topic LIKE ? "
@@ -337,14 +580,7 @@ class BriefStore:
                 ).fetchone()
             if not row:
                 return None
-            return ContentBrief(
-                brief_id=row["brief_id"], topic=row["topic"],
-                keywords=json.loads(row["keywords"] or "[]"),
-                questions=json.loads(row["questions"] or "[]"),
-                angles=json.loads(row["angles"] or "[]"),
-                outline=json.loads(row["outline"] or "[]"),
-                created_at=row["created_at"] or 0.0,
-            )
+            return self._brief_from_row(row)
         except Exception:  # noqa: BLE001
             return None
 
@@ -352,7 +588,9 @@ class BriefStore:
 
     def score_draft(self, draft: str, brief: ContentBrief,
                     platform: str = "x") -> ContentScore:
-        """Term coverage + readability + brand-voice (from #44). Never raises."""
+        """Surfer-style composite: term coverage + readability + brand voice
+        + structure. GEO (AI-citation readiness) scored in parallel,
+        Frase-style. Never raises."""
         try:
             text = (draft or "").strip()
             if not text:
@@ -361,11 +599,19 @@ class BriefStore:
             keywords = [k.lower() for k in (brief.keywords if brief else [])]
             low = text.lower()
 
-            # Term coverage: Surfer-style keyword presence.
+            # Term coverage with Clearscope-style frequency bands.
+            bands = (brief.term_bands or {}) if brief else {}
             hits = [k for k in keywords if k and k in low]
             coverage = len(hits) / max(1, len(keywords))
-            missing = [k for k in (brief.keywords if brief else [])
-                       if k and k.lower() not in low][:12]
+            missing = []
+            for k in (brief.keywords if brief else []):
+                if k and k.lower() not in low:
+                    band = bands.get(k)
+                    if band:
+                        missing.append(f"{k} (aim {band[0]}–{band[1]}x)")
+                    else:
+                        missing.append(k)
+            missing = missing[:12]
 
             # Readability: Flesch-ish, normalized to 0-1.
             words = _WORD_RE.findall(low)
@@ -386,12 +632,19 @@ class BriefStore:
             except Exception:  # noqa: BLE001
                 pass
 
+            # Structure layer (Surfer): headings, lists, length, outline.
+            structure = _structure_score(text, brief)
+
+            # GEO score (Frase): how citable this reads to AI engines.
+            geo = geo_score(text, brief.topic if brief else "")
+
             # Learned calibration from feedback (#40 resurfacing pattern).
             source = "heuristic"
             calib = self._calibration()
-            raw = (0.45 * coverage * 100
-                   + 0.25 * readability * 100
-                   + 0.30 * brand_voice)
+            raw = (0.40 * coverage * 100
+                   + 0.20 * readability * 100
+                   + 0.20 * brand_voice
+                   + 0.20 * structure * 100)
             if calib is not None:
                 raw = raw * calib
                 source = "learned"
@@ -405,12 +658,18 @@ class BriefStore:
                 suggestions.append("shorten sentences — readability is low")
             if brand_voice < 50:
                 suggestions.append("strengthen the hook and add a call to action")
+            if structure < 0.4:
+                suggestions.append("add headings and a list — structure is thin")
+            if geo["score"] < 50:
+                suggestions.append(f"GEO: {geo['signals'][1] if len(geo['signals']) > 1 else 'make it more citable'}")
 
             return ContentScore(
                 score=round(max(0.0, min(100.0, raw)), 1),
                 term_coverage=round(coverage, 2),
                 readability=round(readability, 2),
                 brand_voice=round(brand_voice, 1),
+                structure=structure,
+                geo=geo["score"],
                 missing_terms=missing,
                 suggestions=suggestions,
                 source=source,
@@ -617,6 +876,107 @@ class BriefStore:
         except Exception:  # noqa: BLE001
             return False
 
+    # ── 6b. decay watchdog (Frase Content Guard pattern) ──
+
+    def stale_drafts(self, days: int = 30) -> list[dict]:
+        """Drafts going stale: unscheduled and aging, or published with poor
+        outcomes. Proposes refreshes — humans approve. Never raises."""
+        try:
+            if self._db is None:
+                return []
+            cutoff = time.time() - max(1, int(days or 30)) * 86400.0
+            rows = self._db.execute(
+                "SELECT draft_id, topic, platform, score, predicted_engagement,"
+                " scheduled_for, published_at, outcome_metrics, created_at"
+                " FROM drafts").fetchall()
+            stale: list[dict] = []
+            import json
+            for r in rows:
+                age_d = (time.time() - (r["created_at"] or 0)) / 86400.0
+                reasons: list[str] = []
+                if not r["published_at"] and not r["scheduled_for"] \
+                        and (r["created_at"] or 0) < cutoff:
+                    reasons.append(f"unscheduled for {age_d:.0f}d")
+                try:
+                    oc = json.loads(r["outcome_metrics"] or "{}")
+                except Exception:  # noqa: BLE001
+                    oc = {}
+                eng = oc.get("engagement_score", oc.get("score"))
+                if r["published_at"] and eng is not None:
+                    try:
+                        if float(eng) < 30:
+                            reasons.append(f"poor outcome ({float(eng):.0f}/100)")
+                    except Exception:  # noqa: BLE001
+                        pass
+                if reasons:
+                    stale.append({
+                        "draft_id": r["draft_id"], "topic": r["topic"] or "",
+                        "platform": r["platform"] or "x",
+                        "age_days": round(age_d, 1),
+                        "reasons": reasons,
+                        "suggestion": ("refresh the hook + missing terms, "
+                                       "re-score, then schedule"),
+                    })
+            return sorted(stale, key=lambda d: -d["age_days"])
+        except Exception:  # noqa: BLE001
+            return []
+
+    # ── 6c. platform variants ──
+
+    def platform_variants(self, draft_id: str) -> dict:
+        """Re-package one draft per platform (structural adaptation, honest —
+        not an LLM rewrite). Never raises."""
+        try:
+            draft = self.get_draft(draft_id)
+            if draft is None:
+                return {}
+            content = (draft.content or "").strip()
+            sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", content)
+                     if s.strip()]
+            hook = sents[0] if sents else content[:120]
+            # X: thread of ≤280-char chunks, hook first.
+            chunks, cur = [], ""
+            for s in sents:
+                if len(cur) + len(s) + 1 > 260 and cur:
+                    chunks.append(cur)
+                    cur = s
+                else:
+                    cur = (cur + " " + s).strip()
+            if cur:
+                chunks.append(cur)
+            thread = "\n\n".join(f"{c} [{i + 1}/{len(chunks)}]"
+                                 for i, c in enumerate(chunks[:8]))
+            # LinkedIn: professional framing + CTA.
+            linkedin = (f"{hook}\n\n" + "\n".join(sents[1:5]) +
+                        "\n\nWhat's worked for you? Drop it in the comments. 👇")
+            # Newsletter: subject line + body.
+            subject = hook[:60].rstrip(".!?") or (draft.topic or "Update")
+            newsletter = f"Subject: {subject}\n\n{content}"
+            return {
+                "x": thread, "linkedin": linkedin.strip(),
+                "newsletter": newsletter,
+                "note": "structural re-packaging — run each through "
+                        "/score before scheduling",
+            }
+        except Exception:  # noqa: BLE001
+            return {}
+
+    # ── 6d. content calendar ──
+
+    def calendar(self, limit: int = 10) -> list[dict]:
+        """Upcoming scheduled drafts. Never raises."""
+        try:
+            if self._db is None:
+                return []
+            rows = self._db.execute(
+                "SELECT draft_id, topic, platform, predicted_engagement,"
+                " scheduled_for FROM drafts WHERE scheduled_for > ?"
+                " ORDER BY scheduled_for ASC LIMIT ?",
+                (time.time(), max(1, int(limit or 10)))).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            return []
+
     # ── full pipeline entry ──
 
     def run(self, topic: str, *, search_fn=None, llm_fn=None,
@@ -661,10 +1021,14 @@ def _get_store() -> BriefStore:
 def _usage() -> str:
     return (
         "📋 brief-first content pipeline\n"
-        "/brief <topic> — build a SERP-derived brief\n"
+        "/brief <topic> — build a SERP-derived brief (quality-scored)\n"
         "/score <draft text> — score a draft against the latest brief\n"
         "/content run <topic> — full pipeline: brief → draft → score\n"
         "/content schedule <draft_id> <when> — schedule (refuses without a brief)\n"
+        "/content geo <draft text> — AI-citation readiness (GEO score)\n"
+        "/content variants <draft_id> — re-package for X / LinkedIn / newsletter\n"
+        "/content calendar — upcoming scheduled drafts\n"
+        "/content stale — drafts going stale (decay watchdog)\n"
         "no brief, no draft, no schedule."
     )
 
@@ -741,6 +1105,51 @@ def control_content(tail: str, context=None, chat=None, **kwargs) -> str:
         if low.startswith("run "):
             return control_brief("run " + rest[4:], context=context, chat=chat,
                                  **kwargs)
+
+        if low.startswith("geo "):
+            draft_text = rest[4:].strip()
+            brief = store.latest_brief()
+            topic = brief.topic if brief else ""
+            g = geo_score(draft_text, topic)
+            lines = [f"🤖 GEO score: {g['score']:.0f}/100 {_bar(g['score']/100.0)}"]
+            for s in g.get("signals", [])[:6]:
+                lines.append(f"  • {s}")
+            return "\n".join(lines)
+
+        if low.startswith("variants "):
+            draft_id = rest[9:].strip().split()[0]
+            variants = store.platform_variants(draft_id)
+            if not variants:
+                return "no such draft."
+            lines = [f"🔀 platform variants — {draft_id}",
+                     f"note: {variants.get('note', '')}"]
+            for plat in ("x", "linkedin", "newsletter"):
+                body = variants.get(plat, "")
+                lines.append(f"\n── {plat} ──\n{body[:400]}")
+            return "\n".join(lines)
+
+        if low.startswith("calendar"):
+            cal = store.calendar()
+            if not cal:
+                return "📅 nothing scheduled — /content schedule <draft_id> <when>."
+            lines = ["📅 content calendar"]
+            for c in cal:
+                when = time.strftime("%a %m-%d %H:%M",
+                                    time.localtime(c["scheduled_for"]))
+                lines.append(f"• {when} [{c['platform']}] {c['topic'][:50]} "
+                             f"(pred. {c['predicted_engagement']:.0f}/100) — {c['draft_id']}")
+            return "\n".join(lines)
+
+        if low.startswith("stale"):
+            stale = store.stale_drafts()
+            if not stale:
+                return "✨ nothing stale — every draft is scheduled or fresh."
+            lines = [f"🥀 {len(stale)} stale draft(s) — refresh candidates:"]
+            for d in stale[:8]:
+                lines.append(f"• {d['draft_id']} [{d['platform']}] {d['topic'][:45]} — "
+                             + "; ".join(d["reasons"]))
+                lines.append(f"  → {d['suggestion']}")
+            return "\n".join(lines)
 
         return _usage()
     except Exception:  # noqa: BLE001

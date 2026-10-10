@@ -73,6 +73,10 @@ class Pillar:
     posts: int = 0
     share: float = 0.0           # fraction of analyzed posts
     sample_terms: list[str] = field(default_factory=list)
+    # ── sweep upgrade: per-pillar engagement (Socialinsider's key insight:
+    # a quiet pillar often outperforms a loud one) ──
+    avg_engagement: float = 0.0  # likes + 3*comments + 2*shares per post
+    top_post_excerpt: str = ""
 
 
 @dataclass
@@ -124,10 +128,24 @@ class CompetitorReport:
                 f"{e.avg_comments:.0f} comments · {e.avg_shares:.0f} shares "
                 f"(avg/post, trend: {e.trend} {e.trend_pct:+.0f}%)")
             if self.pillars:
-                lines.append("📌 content pillars:")
-                for p in self.pillars[:5]:
+                # Rank pillars by engagement, not just volume.
+                ranked = sorted(self.pillars,
+                                key=lambda p: -p.avg_engagement)[:5]
+                mx = max((p.avg_engagement for p in ranked), default=0) or 1
+                lines.append("📌 content pillars (by engagement):")
+                for p in ranked:
+                    bar = "█" * max(1, int(round(p.avg_engagement / mx * 10)))
                     lines.append(
-                        f"   • {p.name} — {p.posts} posts ({p.share:.0%})")
+                        f"   • {p.name} — {p.posts} posts ({p.share:.0%}) "
+                        f"{bar} {p.avg_engagement:.0f} eng/post")
+                # The money insight: quiet pillars that punch above weight.
+                quiet = [p for p in ranked
+                         if p.share < 0.25 and p.avg_engagement > e.avg_likes]
+                if quiet:
+                    lines.append("💡 quality > frequency: " +
+                                 ", ".join(f"'{p.name}' ({p.avg_engagement:.0f} eng/post, "
+                                           f"only {p.share:.0%} of posts)"
+                                           for p in quiet[:2]))
             lines.append("public data only — no account access used.")
             return "\n".join(lines)
         except Exception:
@@ -142,8 +160,20 @@ def _terms(text: str) -> list[str]:
             if w.strip("'") and w not in _STOPWORDS and len(w) > 2]
 
 
+def _engagement_of(p: Post) -> float:
+    try:
+        return float(p.likes or 0) + float(p.comments or 0) * 3 + float(p.shares or 0) * 2
+    except Exception:
+        return 0.0
+
+
 def analyze_pillars(posts: list[Post], top_n: int = 5) -> list[Pillar]:
-    """Cluster posts into content pillars by shared keywords. Never raises."""
+    """Cluster posts into content pillars by shared keywords.
+
+    Each pillar carries its own average engagement (Socialinsider pattern) —
+    a pillar with fewer posts often outperforms a louder one.
+    Never raises.
+    """
     try:
         posts = [p for p in (posts or []) if p and p.text]
         if not posts:
@@ -170,13 +200,23 @@ def analyze_pillars(posts: list[Post], top_n: int = 5) -> list[Pillar]:
             co: Counter = Counter()
             for i in members:
                 co.update(t for t in doc_terms[i] if t != term)
+            member_posts = [posts[i] for i in members]
+            avg_eng = (sum(_engagement_of(p) for p in member_posts)
+                       / max(1, len(member_posts)))
+            top_post = max(member_posts, key=_engagement_of, default=None)
             pillars.append(Pillar(
                 name=term, posts=len(members),
                 share=len(members) / len(posts),
-                sample_terms=[t for t, _ in co.most_common(3)]))
+                sample_terms=[t for t, _ in co.most_common(3)],
+                avg_engagement=round(avg_eng, 1),
+                top_post_excerpt=((top_post.text[:90] + "…")
+                                  if top_post and len(top_post.text) > 90
+                                  else (top_post.text if top_post else ""))))
         if not pillars:
+            avg_all = sum(_engagement_of(p) for p in posts) / len(posts)
             pillars.append(Pillar(name="general", posts=len(posts),
-                                  share=1.0, sample_terms=[]))
+                                  share=1.0, sample_terms=[],
+                                  avg_engagement=round(avg_all, 1)))
         return pillars
     except Exception:
         return []
@@ -241,6 +281,217 @@ def analyze_engagement(posts: list[Post]) -> Engagement:
                           trend_pct=trend_pct)
     except Exception:
         return Engagement()
+
+
+# ── deep intel (Socialinsider / Metricool patterns) ──────────────────────
+
+def top_posts(posts: list[Post], n: int = 5) -> list[Post]:
+    """Highest-engagement posts — 'which posts caused the spike'. Never raises."""
+    try:
+        ranked = sorted((p for p in (posts or []) if p),
+                        key=_engagement_of, reverse=True)
+        return ranked[:max(1, int(n or 5))]
+    except Exception:
+        return []
+
+
+def viral_posts(posts: list[Post], multiple: float = 3.0) -> list[Post]:
+    """Posts beating the mean engagement by ``multiple``x. Never raises."""
+    try:
+        posts = [p for p in (posts or []) if p]
+        if not posts:
+            return []
+        mean = sum(_engagement_of(p) for p in posts) / len(posts)
+        if mean <= 0:
+            return []
+        return [p for p in posts
+                if _engagement_of(p) >= mean * max(1.5, float(multiple or 3.0))]
+    except Exception:
+        return []
+
+
+def best_times(posts: list[Post]) -> dict:
+    """Best posting times from public timestamps: top hours and weekdays by
+    average engagement (Metricool pattern). Never raises."""
+    out: dict = {"by_hour": [], "by_weekday": [], "best_hour": None,
+                 "best_weekday": None}
+    try:
+        import datetime
+        posts = [p for p in (posts or []) if p and p.posted_at > 0]
+        if len(posts) < 3:
+            return out
+        hours: dict[int, list[float]] = {}
+        days: dict[int, list[float]] = {}
+        for p in posts:
+            dt = datetime.datetime.fromtimestamp(p.posted_at)
+            eng = _engagement_of(p)
+            hours.setdefault(dt.hour, []).append(eng)
+            days.setdefault(dt.weekday(), []).append(eng)
+        avg = lambda vs: sum(vs) / len(vs)
+        by_hour = sorted(((h, round(avg(vs), 1), len(vs))
+                          for h, vs in hours.items() if len(vs) >= 1),
+                         key=lambda t: -t[1])[:3]
+        by_day = sorted(((d, round(avg(vs), 1), len(vs))
+                         for d, vs in days.items() if len(vs) >= 1),
+                        key=lambda t: -t[1])[:3]
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        out["by_hour"] = [{"hour": h, "avg_eng": a, "posts": c}
+                          for h, a, c in by_hour]
+        out["by_weekday"] = [{"weekday": names[d], "avg_eng": a, "posts": c}
+                             for d, a, c in by_day]
+        out["best_hour"] = by_hour[0][0] if by_hour else None
+        out["best_weekday"] = names[by_day[0][0]] if by_day else None
+        return out
+    except Exception:
+        return out
+
+
+_HASHTAG_RE = re.compile(r"#([a-z0-9_]{2,40})", re.IGNORECASE)
+
+
+def analyze_hashtags(posts: list[Post], n: int = 10) -> list[dict]:
+    """Top hashtags with post counts and average engagement. Never raises."""
+    try:
+        agg: dict[str, list[float]] = {}
+        for p in (posts or []):
+            if not p or not p.text:
+                continue
+            tags = {t.lower() for t in _HASHTAG_RE.findall(p.text)}
+            eng = _engagement_of(p)
+            for t in tags:
+                agg.setdefault(t, []).append(eng)
+        ranked = sorted(agg.items(), key=lambda kv: (-len(kv[1]),
+                                                     -(sum(kv[1]) / len(kv[1]))))
+        return [{"tag": "#" + tag, "posts": len(v),
+                 "avg_eng": round(sum(v) / len(v), 1)}
+                for tag, v in ranked[:max(1, int(n or 10))]]
+    except Exception:
+        return []
+
+
+def key_insights(report: CompetitorReport) -> str:
+    """Socialinsider-style Key Insights: written summary + observations you
+    can forward, not an export you have to interpret. Never raises."""
+    try:
+        if report.post_count == 0:
+            return "no data — nothing to conclude."
+        lines = [f"💡 key insights — @{report.account} ({report.platform})"]
+        c, e = report.cadence, report.engagement
+        lines.append(
+            f"posts {c.posts_per_week:.1f}/week across {c.window_days:.0f} days; "
+            f"avg {e.avg_likes:.0f} likes / {e.avg_comments:.0f} comments / "
+            f"{e.avg_shares:.0f} shares per post; trend {e.trend} "
+            f"({e.trend_pct:+.0f}%).")
+        if report.pillars:
+            ranked = sorted(report.pillars, key=lambda p: -p.avg_engagement)
+            best = ranked[0]
+            lines.append(
+                f"strongest pillar: '{best.name}' at {best.avg_engagement:.0f} "
+                f"eng/post ({best.share:.0%} of output).")
+            quiet = [p for p in ranked[1:]
+                     if p.share < 0.25 and p.avg_engagement > best.avg_engagement * 0.7]
+            if quiet:
+                q = quiet[0]
+                lines.append(
+                    f"opportunity: '{q.name}' punches at {q.avg_engagement:.0f} "
+                    f"eng/post on only {q.share:.0%} of posts — frequency "
+                    f"could increase here.")
+            loud_weak = [p for p in ranked
+                         if p.share >= 0.3 and p.avg_engagement < best.avg_engagement * 0.5]
+            if loud_weak:
+                lines.append(
+                    f"watch: '{loud_weak[0].name}' is {loud_weak[0].share:.0%} of "
+                    f"output but underperforms — volume without resonance.")
+        if c.by_format:
+            top_fmt = max(c.by_format.items(), key=lambda kv: kv[1])
+            lines.append(f"format mix leans {top_fmt[0]} ({top_fmt[1]:.1f}/wk).")
+        if e.trend == "falling":
+            lines.append("engagement is falling — check their recent replies "
+                         "for what changed before copying anything.")
+        elif e.trend == "rising":
+            lines.append("engagement is rising — their current mix is working; "
+                         "mirror the pillars, not the posts.")
+        return "\n".join(lines)
+    except Exception:
+        return "couldn't build key insights."
+
+
+def benchmark(own_posts: list[Post], rival_posts: list[Post],
+              own_name: str = "you", rival_name: str = "rival") -> str:
+    """Side-by-side: your public posts vs theirs. Never raises."""
+    try:
+        def _stats(posts: list[Post]) -> dict:
+            posts = [p for p in (posts or []) if p]
+            n = len(posts)
+            if not n:
+                return {"n": 0, "eng": 0.0, "pw": 0.0}
+            eng = sum(_engagement_of(p) for p in posts) / n
+            cad = analyze_cadence(posts)
+            return {"n": n, "eng": eng, "pw": cad.posts_per_week}
+        a, b = _stats(own_posts), _stats(rival_posts)
+        if not a["n"] and not b["n"]:
+            return "no posts on either side to compare."
+        lines = [f"⚔️ benchmark — {own_name} vs {rival_name}"]
+        lines.append(f"posts analyzed: {a['n']} vs {b['n']}")
+        if a["n"] and b["n"]:
+            lead = "you lead" if a["eng"] >= b["eng"] else "they lead"
+            gap = abs(a["eng"] - b["eng"]) / max(1.0, b["eng"])
+            lines.append(f"avg engagement/post: {a['eng']:.0f} vs {b['eng']:.0f} "
+                         f"({lead} by {gap:.0%})")
+            lines.append(f"cadence: {a['pw']:.1f}/wk vs {b['pw']:.1f}/wk")
+            if a["eng"] < b["eng"]:
+                lines.append("verdict: they earn more per post — study their top "
+                             "pillars, then out-teach them.")
+            else:
+                lines.append("verdict: you're ahead per post — press the advantage "
+                             "with more of what works.")
+        elif b["n"]:
+            lines.append("verdict: no own posts to compare — feed yours in to benchmark.")
+        return "\n".join(lines)
+    except Exception:
+        return "couldn't build that benchmark."
+
+
+def content_gaps(report: CompetitorReport,
+                 own_keywords: list[str] | None = None) -> list[dict]:
+    """Pillars they cover that your keyword list doesn't — the gaps worth
+    stealing (legitimately). Never raises."""
+    try:
+        own = {k.lower().strip() for k in (own_keywords or []) if k and k.strip()}
+        gaps: list[dict] = []
+        for p in (report.pillars or []):
+            terms = {p.name.lower()} | {t.lower() for t in p.sample_terms}
+            if not terms & own:
+                gaps.append({"pillar": p.name, "their_posts": p.posts,
+                             "their_avg_eng": p.avg_engagement,
+                             "sample_terms": p.sample_terms[:3],
+                             "why": (f"they earn {p.avg_engagement:.0f} eng/post "
+                                     f"on '{p.name}' and you cover none of it")})
+        return sorted(gaps, key=lambda g: -g["their_avg_eng"])
+    except Exception:
+        return []
+
+
+def to_briefs(report: CompetitorReport, n: int = 3) -> list[dict]:
+    """Turn their best pillars into content briefs for the #99 pipeline.
+    Never raises."""
+    try:
+        ranked = sorted(report.pillars or [], key=lambda p: -p.avg_engagement)
+        briefs: list[dict] = []
+        for p in ranked[:max(1, int(n or 3))]:
+            briefs.append({
+                "title": f"Own the '{p.name}' conversation",
+                "angle": (f"Competitor @{report.account} earns "
+                          f"{p.avg_engagement:.0f} eng/post on '{p.name}' "
+                          f"({p.posts} posts). Cover it deeper: their top post "
+                          f"went: \"{p.top_post_excerpt[:80]}\""),
+                "gap_pillar": p.name,
+                "sample_terms": p.sample_terms[:5],
+                "why": f"proven demand in your niche — {p.share:.0%} of their output",
+            })
+        return briefs
+    except Exception:
+        return []
 
 
 # ── store ─────────────────────────────────────────────────────────────────
@@ -455,6 +706,11 @@ def aeo_compare(brand: str, competitor: str,
 def _usage() -> str:
     return ("/competitor track <account> [platform] — start tracking a public account\n"
             "/competitor report <account> [platform] — pillars + cadence + engagement\n"
+            "/competitor insights <account> [platform] — written key insights + opportunities\n"
+            "/competitor top <account> [platform] — their highest-engagement posts\n"
+            "/competitor hashtags <account> [platform] — top hashtags by engagement\n"
+            "/competitor besttime <account> [platform] — best posting hours/days\n"
+            "/competitor gaps <account> <your keywords…> — pillars they own that you don't\n"
             "/competitor digest [account] — latest window vs previous\n"
             "/competitor list — tracked accounts\n"
             "/competitor untrack <account> — stop tracking\n"
@@ -529,6 +785,115 @@ def control_competitor(tail: str, context=None, chat=None,
             account, platform = body[0], (body[1] if len(body) > 1 else "instagram")
             report = store.analyze(account, platform, scrape_fn=scrape_fn)
             return report.format()
+
+        def _posts_for(args: list[str]) -> tuple[list[Post], str, str]:
+            account = args[0] if args else ""
+            platform = args[1] if len(args) > 1 else "instagram"
+            posts: list[Post] = []
+            if scrape_fn is not None and account:
+                try:
+                    posts = [p for p in
+                             (scrape_fn(account.strip().lstrip("@").lower(),
+                                        platform.strip().lower()) or [])
+                             if isinstance(p, Post)]
+                except Exception:
+                    posts = []
+            return posts, account, platform
+
+        if low.startswith("insights"):
+            body = rest[8:].strip().split()
+            if not body:
+                return "insights on who? " + _usage()
+            posts, account, platform = _posts_for(body)
+            report = store.analyze(account, platform, scrape_fn=scrape_fn)
+            if posts:
+                # analyze() re-scrapes; prefer the posts we already have.
+                report = CompetitorReport(
+                    report_id=report.report_id, account=report.account,
+                    platform=report.platform, pillars=analyze_pillars(posts),
+                    cadence=analyze_cadence(posts),
+                    engagement=analyze_engagement(posts),
+                    post_count=len(posts), created_at=report.created_at,
+                    source=report.source)
+            return key_insights(report)
+
+        if low.startswith("top"):
+            body = rest[3:].strip().split()
+            if not body:
+                return "top posts of who? " + _usage()
+            posts, account, _platform = _posts_for(body)
+            tops = top_posts(posts, 5)
+            if not tops:
+                return f"no posts found for @{account.lstrip('@')}."
+            lines = [f"🔥 top posts — @{account.lstrip('@')}"]
+            for i, p in enumerate(tops, 1):
+                excerpt = (p.text[:100] + "…") if len(p.text) > 100 else p.text
+                lines.append(f"{i}. {_engagement_of(p):.0f} eng "
+                             f"({p.likes}♥ {p.comments}💬 {p.shares}🔁) — {excerpt}")
+            viral = viral_posts(posts)
+            if viral:
+                lines.append(f"🚨 {len(viral)} viral post(s) (>3x mean) in this window.")
+            return "\n".join(lines)
+
+        if low.startswith("hashtags"):
+            body = rest[8:].strip().split()
+            if not body:
+                return "hashtags of who? " + _usage()
+            posts, account, _platform = _posts_for(body)
+            tags = analyze_hashtags(posts, 10)
+            if not tags:
+                return f"no hashtags found for @{account.lstrip('@')}."
+            lines = [f"#️⃣ top hashtags — @{account.lstrip('@')}"]
+            for t in tags:
+                lines.append(f"• {t['tag']} — {t['posts']} posts, "
+                             f"{t['avg_eng']:.0f} avg eng")
+            return "\n".join(lines)
+
+        if low.startswith("besttime"):
+            body = rest[8:].strip().split()
+            if not body:
+                return "best time for who? " + _usage()
+            posts, account, _platform = _posts_for(body)
+            bt = best_times(posts)
+            if not bt["by_hour"]:
+                return f"not enough timestamped posts for @{account.lstrip('@')}."
+            lines = [f"⏰ best posting times — @{account.lstrip('@')}"]
+            lines.append("hours: " + ", ".join(
+                f"{h['hour']:02d}:00 ({h['avg_eng']:.0f} eng)" for h in bt["by_hour"]))
+            lines.append("days: " + ", ".join(
+                f"{d['weekday']} ({d['avg_eng']:.0f} eng)" for d in bt["by_weekday"]))
+            lines.append(f"sweet spot: {bt['best_weekday']}s around "
+                         f"{bt['best_hour']:02d}:00.")
+            return "\n".join(lines)
+
+        if low.startswith("gaps"):
+            body = rest[4:].strip().split()
+            if len(body) < 2:
+                return ("usage: /competitor gaps <account> [platform] <your keyword1 keyword2 …>\n"
+                        "e.g. /competitor gaps rivalbrand fitness nutrition coaching")
+            account = body[0]
+            if len(body) > 2 and body[1].lower() in (
+                    "instagram", "tiktok", "x", "facebook", "youtube", "linkedin"):
+                platform, keywords = body[1].lower(), body[2:]
+            else:
+                platform, keywords = "instagram", body[1:]
+            posts, account, platform = _posts_for([account, platform])
+            report = CompetitorReport(
+                report_id="cmp_gaps", account=account.strip().lstrip("@").lower(),
+                platform=platform, pillars=analyze_pillars(posts),
+                cadence=analyze_cadence(posts),
+                engagement=analyze_engagement(posts),
+                post_count=len(posts), created_at=time.time(),
+                source="injected" if posts else "no-source")
+            gaps = content_gaps(report, keywords)
+            if not gaps:
+                return (f"no clear gaps — your keywords already cover their "
+                        f"pillars, @{account.lstrip('@')}.")
+            lines = [f"🕳️ content gaps vs @{account.lstrip('@')} — pillars they own:"]
+            for g in gaps[:5]:
+                lines.append(f"• '{g['pillar']}' — {g['why']}")
+            lines.append("feed the best into the content pipeline as briefs.")
+            return "\n".join(lines)
 
         return "didn't catch that.\n" + _usage()
     except Exception:

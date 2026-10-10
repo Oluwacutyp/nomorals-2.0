@@ -215,6 +215,11 @@ def _smtp_send(to: str, subject: str, body: str) -> bool:
     msg["From"] = sender
     msg["To"] = to
     msg["Subject"] = subject or ""
+    # One-click unsubscribe (RFC 2369/8089) — easy, immediate opt-out.
+    unsub = os.environ.get("DEVON_UNSUBSCRIBE_URL", "").strip()
+    if unsub:
+        msg["List-Unsubscribe"] = f"<{unsub}>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(body)
     with smtplib.SMTP(host, port, timeout=30) as s:
         s.starttls()
@@ -411,7 +416,227 @@ CREATE TABLE IF NOT EXISTS send_costs (
     cost_kobo INTEGER NOT NULL,
     at REAL NOT NULL
 );
+-- sweep upgrade: A/B variants, suppression list, warmup state
+CREATE TABLE IF NOT EXISTS send_variants (
+    variant_id TEXT PRIMARY KEY,
+    template TEXT NOT NULL,
+    variant_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS send_suppressions (
+    address TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,          -- unsubscribe | complaint | manual
+    detail TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS send_warmup (
+    provider TEXT PRIMARY KEY,
+    day0 REAL NOT NULL,
+    daily_target INTEGER NOT NULL DEFAULT 100
+);
 """
+
+
+#: Spam-trigger patterns (Mail-Tester pattern, offline heuristic).
+_SPAM_TRIGGERS = (
+    (r"\bfree\b.{0,20}(money|gift|prize|winner|cash)", 12, "free-money phrasing"),
+    (r"\b(buy now|act now|click here|limited time|order now)\b", 10, "pushy CTA phrasing"),
+    (r"\b(guarantee[ds]?|no risk|risk free|100% (free|safe))\b", 10, "guarantee phrasing"),
+    (r"\b(congratulations|you('ve| have) (won|been selected)|dear friend)\b", 12, "lottery-scam phrasing"),
+    (r"\$\$\$|!!!+", 8, "excessive !!! / $$$"),
+    (r"\b(make money|earn \$|get rich|double your)\b", 12, "get-rich phrasing"),
+    (r"\b(viagra|cialis|pharmacy|pills)\b", 15, "pharma spam terms"),
+)
+
+
+def spam_score(subject: str, body: str) -> dict:
+    """0–100 spam-likelihood heuristic + fix suggestions. Never raises.
+
+    Mail-Tester pattern, fully offline: trigger phrases, caps ratio,
+    exclamation density, link count. Aim < 30 before sending bulk.
+    """
+    try:
+        text = f"{subject or ''}\n{body or ''}"
+        low = text.lower()
+        score = 0
+        issues: list[str] = []
+        for pat, weight, label in _SPAM_TRIGGERS:
+            if re.search(pat, low):
+                score += weight
+                issues.append(label)
+        words = re.findall(r"[A-Za-z]{2,}", text)
+        if words:
+            caps = sum(1 for w in words if w.isupper())
+            if caps / len(words) > 0.25:
+                score += 10
+                issues.append(f"{caps/len(words):.0%} ALL-CAPS words — tone it down")
+        excl = text.count("!")
+        if excl > 3:
+            score += min(12, (excl - 3) * 3)
+            issues.append(f"{excl} exclamation marks")
+        links = len(re.findall(r"https?://", low))
+        if links > 3:
+            score += min(10, (links - 3) * 4)
+            issues.append(f"{links} links — trim to the essential")
+        if len(body or "") < 50:
+            score += 8
+            issues.append("very short body — looks like spam")
+        score = min(100, score)
+        verdict = ("likely spam-folder" if score >= 60 else
+                   "risky — clean it up" if score >= 30 else "clean")
+        return {"score": score, "verdict": verdict, "issues": issues}
+    except Exception:  # noqa: BLE001
+        return {"score": 0, "verdict": "unknown", "issues": []}
+
+
+def warmup_plan(daily_target: int, days: int = 21) -> list[dict]:
+    """Gradual warmup ramp: start small, ~1.35x/day, cap at target.
+
+    Deliverability canon: never blast a fresh domain. Never raises.
+    """
+    try:
+        target = max(10, int(daily_target or 100))
+        days = max(3, min(60, int(days or 21)))
+        start = min(25, target // 4 or 10)
+        plan, cap = [], float(start)
+        for d in range(1, days + 1):
+            plan.append({"day": d, "cap": int(min(target, round(cap)))})
+            cap *= 1.35
+        plan[-1]["cap"] = target
+        return plan
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _dns_txt(name: str, timeout: float = 4.0) -> list[str]:
+    """Minimal DNS TXT lookup over UDP (stdlib only). Never raises.
+
+    Used for SPF (v=spf1) / DMARC checks without dnspython.
+    """
+    out: list[str] = []
+    try:
+        import random
+        import socket
+        import struct
+
+        qid = random.randint(0, 65535)
+        header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+        qname = b"".join(
+            bytes([len(p)]) + p.encode("ascii", "ignore")
+            for p in name.split(".") if p) + b"\x00"
+        pkt = header + qname + struct.pack(">HH", 16, 1)  # TXT IN
+
+        def _skip(nb: bytes, off: int) -> int:
+            while off < len(nb):
+                ln = nb[off]
+                if ln == 0:
+                    return off + 1
+                if ln & 0xC0:  # compression pointer
+                    return off + 2
+                off += 1 + ln
+            return off
+
+        for resolver in ("8.8.8.8", "1.1.1.1"):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(timeout)
+                s.sendto(pkt, (resolver, 53))
+                data, _ = s.recvfrom(2048)
+                s.close()
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                if len(data) < 12 or struct.unpack(">H", data[:2])[0] != qid:
+                    continue
+                off = _skip(data, 12) + 4  # question
+                ancount = struct.unpack(">H", data[6:8])[0]
+                for _ in range(ancount):
+                    off = _skip(data, off)
+                    rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", data[off:off + 10])
+                    rdata = data[off + 10:off + 10 + rdlen]
+                    off += 10 + rdlen
+                    if rtype == 16:  # TXT
+                        i = 0
+                        txt = ""
+                        while i < len(rdata):
+                            ln = rdata[i]
+                            txt += rdata[i + 1:i + 1 + ln].decode("utf-8", "replace")
+                            i += 1 + ln
+                        if txt:
+                            out.append(txt)
+                if out:
+                    return out
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def deliverability_check(domain: str) -> dict:
+    """Grade a sending domain: SPF, DMARC, MX/A reachability. Never raises.
+
+    'Fix your DNS first' — misconfigured SPF/DKIM/DMARC is the #1 reason
+    self-hosted mail lands in spam. DKIM can't be checked without knowing
+    the selector, so it's reported as manual.
+    """
+    result: dict = {"domain": (domain or "").strip().lower(),
+                    "score": 0, "grade": "F", "checks": []}
+    try:
+        dom = result["domain"]
+        if not dom or "." not in dom:
+            return result
+        checks: list[dict] = []
+        score = 0
+
+        txts = _dns_txt(dom)
+        spf = [t for t in txts if t.lower().startswith("v=spf1")]
+        if spf:
+            checks.append({"name": "SPF", "ok": True,
+                           "detail": spf[0][:80]})
+            score += 35
+        elif txts:
+            checks.append({"name": "SPF", "ok": False,
+                           "detail": "TXT records exist but no v=spf1 — add one"})
+        else:
+            checks.append({"name": "SPF", "ok": None,
+                           "detail": "no TXT records found (DNS unreachable?)"})
+
+        dmarc = _dns_txt(f"_dmarc.{dom}")
+        if any(t.lower().startswith("v=dmarc1") for t in dmarc):
+            checks.append({"name": "DMARC", "ok": True,
+                           "detail": dmarc[0][:80]})
+            score += 35
+        else:
+            checks.append({"name": "DMARC", "ok": False,
+                           "detail": "no _dmarc TXT — publish at least p=none"})
+
+        try:
+            import socket as _s
+            _s.gethostbyname(dom)
+            checks.append({"name": "domain resolves", "ok": True,
+                           "detail": "A record present"})
+            score += 15
+        except Exception:  # noqa: BLE001
+            checks.append({"name": "domain resolves", "ok": False,
+                           "detail": "no A record"})
+
+        checks.append({"name": "DKIM", "ok": None,
+                       "detail": "needs your selector — check with "
+                                 "mail-tester.com after sending a seed"})
+        checks.append({"name": "sending subdomain", "ok": None,
+                       "detail": "send from mail." + dom + " to isolate the "
+                                 "main domain's reputation"})
+        result["checks"] = checks
+        result["score"] = min(100, score)
+        g = result["score"]
+        result["grade"] = ("A" if g >= 80 else "B" if g >= 60 else
+                           "C" if g >= 40 else "D" if g >= 20 else "F")
+        return result
+    except Exception:  # noqa: BLE001
+        return result
 
 
 class SendEngine:
@@ -441,6 +666,19 @@ class SendEngine:
                 self._tracker = _CostTracker()
         except Exception:  # noqa: BLE001
             self._tracker = None
+        # sweep migration: campaign tracking columns on older queue tables
+        try:
+            if self._db is not None:
+                for _col, _ddl in (("campaign_id", "TEXT DEFAULT ''"),
+                                   ("variant", "TEXT DEFAULT ''")):
+                    try:
+                        self._db.execute(
+                            f"ALTER TABLE send_queue ADD COLUMN {_col} {_ddl}")
+                    except Exception:  # noqa: BLE001 — already there
+                        pass
+                self._db.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── templates ──
 
@@ -525,8 +763,15 @@ class SendEngine:
     # ── queue ──
 
     def enqueue(self, to: str, template: str, vars_: dict | None = None,
-                provider: str = "", *, subject: str = "") -> str:
-        """Stage a send. Returns the send_id ("" on failure). Never raises."""
+                provider: str = "", *, subject: str = "",
+                campaign_id: str = "", variant: str = "",
+                send_at: float = 0.0) -> str:
+        """Stage a send. Returns the send_id ("" on failure). Never raises.
+
+        ``campaign_id``/``variant`` tag A/B sends; ``send_at`` schedules
+        the send for a future time (process() picks it up when due).
+        Suppressed (unsubscribed/complained) addresses are refused.
+        """
         try:
             to = (to or "").strip()
             template = (template or "").strip()
@@ -536,14 +781,21 @@ class SendEngine:
             if self.is_blocklisted(to):
                 self._log("", provider, "blocked", f"blocklisted: {to}")
                 return ""
+            if self.is_suppressed(to):
+                self._log("", provider, "suppressed",
+                          f"suppressed (unsub/complaint): {to}")
+                return ""
             import json
             send_id = "snd_" + uuid.uuid4().hex[:10]
             self._db.execute(
                 "INSERT INTO send_queue (send_id, recipient, template, vars,"
-                " provider, subject, status, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
+                " provider, subject, status, created_at, campaign_id, variant,"
+                " next_attempt_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
                 (send_id, to, template, json.dumps(vars_ or {}),
-                 provider, subject or "", time.time()))
+                 provider, subject or "", time.time(),
+                 campaign_id or "", variant or "",
+                 float(send_at or 0.0)))
             self._db.commit()
             return send_id
         except Exception:  # noqa: BLE001
@@ -614,12 +866,23 @@ class SendEngine:
             if self.is_blocklisted(row["recipient"]):
                 self._set_status(send_id, "blocked", "recipient blocklisted")
                 return "blocked"
+            if self.is_suppressed(row["recipient"]):
+                self._set_status(send_id, "blocked", "recipient suppressed (unsub/complaint)")
+                return "blocked"
             if not self._rate_ok(row["provider"], int(prov["rate_per_minute"])):
                 return "deferred"  # leave queued; window will clear
+            if not self._warmup_ok(row["provider"]):
+                return "deferred"  # warmup cap for today reached
             # Cost gate (#68): budget check before spend.
             if not self._cost_ok(prov):
                 return "deferred"
             tpl = self.get_template(row["template"])
+            variant = (row.get("variant") or "").strip()
+            if variant:
+                # A/B: variant body overrides the base template.
+                var = self.get_variant(row["template"], variant)
+                if var is not None:
+                    tpl = {"body": var.get("body", ""), "subject": var.get("subject", "")}
             if tpl is None:
                 self._set_status(send_id, "failed", "template not found")
                 return "failed"
@@ -754,6 +1017,300 @@ class SendEngine:
         except Exception:  # noqa: BLE001
             return {"count": 0, "per_kobo": 0, "total_kobo": 0, "text": ""}
 
+    # ── A/B testing ──
+
+    def save_variant(self, template: str, variant_name: str,
+                     body: str, subject: str = "") -> bool:
+        """Save a named variant of a template for A/B tests. Never raises."""
+        try:
+            template = (template or "").strip()
+            variant_name = (variant_name or "").strip()
+            if not template or not variant_name or self._db is None:
+                return False
+            vid = f"var_{template}_{variant_name}".replace(" ", "_")[:80]
+            self._db.execute(
+                "INSERT OR REPLACE INTO send_variants "
+                "(variant_id, template, variant_name, body, subject, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (vid, template, variant_name, body or "", subject or "",
+                 time.time()))
+            self._db.commit()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def list_variants(self, template: str = "") -> list[dict]:
+        try:
+            if self._db is None:
+                return []
+            if (template or "").strip():
+                rows = self._db.execute(
+                    "SELECT template, variant_name, subject, created_at"
+                    " FROM send_variants WHERE template = ? ORDER BY variant_name",
+                    (template.strip(),)).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT template, variant_name, subject, created_at"
+                    " FROM send_variants ORDER BY template, variant_name").fetchall()
+            return [dict(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def get_variant(self, template: str, variant_name: str) -> dict | None:
+        try:
+            if self._db is None:
+                return None
+            row = self._db.execute(
+                "SELECT * FROM send_variants WHERE template = ? AND variant_name = ?",
+                ((template or "").strip(), (variant_name or "").strip())).fetchone()
+            return dict(row) if row else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def create_ab_campaign(self, name: str, template: str,
+                           variant_names: list[str], recipients: list[str],
+                           provider: str, vars_fn=None) -> dict:
+        """Split recipients across variants (round-robin), enqueue all.
+
+        Returns ``{campaign_id, per_variant}``. Never raises.
+        """
+        try:
+            variants = [v for v in (variant_names or []) if v and v.strip()]
+            recips = [r.strip() for r in (recipients or []) if r and r.strip()]
+            if not variants or not recips or not (provider or "").strip():
+                return {"campaign_id": "", "per_variant": {}}
+            campaign_id = "cmp_" + uuid.uuid4().hex[:8]
+            per_variant: dict[str, int] = {}
+            for i, recip in enumerate(recips):
+                variant = variants[i % len(variants)]
+                vv = vars_fn(recip, variant) if vars_fn else {}
+                sid = self.enqueue(recip, template, vv, provider,
+                                   campaign_id=campaign_id, variant=variant)
+                if sid:
+                    per_variant[variant] = per_variant.get(variant, 0) + 1
+            return {"campaign_id": campaign_id, "per_variant": per_variant,
+                    "name": name or campaign_id}
+        except Exception:  # noqa: BLE001
+            return {"campaign_id": "", "per_variant": {}}
+
+    def ab_report(self, campaign_id: str) -> dict:
+        """Per-variant funnel for an A/B campaign. Never raises."""
+        out: dict = {"campaign_id": campaign_id or "", "variants": {}}
+        try:
+            if self._db is None or not campaign_id:
+                return out
+            rows = self._db.execute(
+                "SELECT variant, status, COUNT(*) c FROM send_queue"
+                " WHERE campaign_id = ? GROUP BY variant, status",
+                (campaign_id,)).fetchall()
+            for r in rows:
+                v = out["variants"].setdefault(r["variant"] or "control",
+                                               {"sent": 0, "failed": 0,
+                                                "dead": 0, "queued": 0,
+                                                "blocked": 0})
+                v[r["status"]] = v.get(r["status"], 0) + int(r["c"])
+            for v, stats in out["variants"].items():
+                done = stats.get("sent", 0) + stats.get("failed", 0) + stats.get("dead", 0)
+                stats["fail_rate"] = round(
+                    (stats.get("failed", 0) + stats.get("dead", 0)) / max(1, done), 3)
+            return out
+        except Exception:  # noqa: BLE001
+            return out
+
+    def ab_winner(self, campaign_id: str) -> dict:
+        """Winning variant = lowest fail rate (ties → most sent).
+
+        Engagement-based winners need an injected signal — wire your
+        open/click webhook into send_log with event='engaged' and this
+        prefers the variant with the most engagement. Never raises.
+        """
+        try:
+            rep = self.ab_report(campaign_id)
+            variants = rep.get("variants", {})
+            if not variants:
+                return {"winner": "", "reason": "no data"}
+            # Prefer engagement when the signal exists.
+            eng: dict[str, int] = {}
+            if self._db is not None:
+                try:
+                    for r in self._db.execute(
+                            "SELECT q.variant, COUNT(*) c FROM send_log l"
+                            " JOIN send_queue q ON q.send_id = l.send_id"
+                            " WHERE q.campaign_id = ? AND l.event = 'engaged'"
+                            " GROUP BY q.variant", (campaign_id,)):
+                        eng[r["variant"] or "control"] = int(r["c"])
+                except Exception:  # noqa: BLE001
+                    pass
+            if eng:
+                winner = max(eng.items(), key=lambda kv: kv[1])[0]
+                return {"winner": winner, "reason": f"most engagement ({eng[winner]})",
+                        "by": "engagement"}
+            ranked = sorted(variants.items(),
+                            key=lambda kv: (kv[1].get("fail_rate", 1),
+                                            -kv[1].get("sent", 0)))
+            w, stats = ranked[0]
+            return {"winner": w, "reason": f"lowest fail rate ({stats['fail_rate']:.1%})",
+                    "by": "fail_rate"}
+        except Exception:  # noqa: BLE001
+            return {"winner": "", "reason": "unavailable"}
+
+    # ── scheduled campaigns + seeds ──
+
+    def schedule_campaign(self, template: str, recipients: list[str],
+                          provider: str, send_at: float,
+                          vars_fn=None, subject: str = "") -> dict:
+        """Enqueue a campaign for a future time. Never raises."""
+        try:
+            recips = [r.strip() for r in (recipients or []) if r and r.strip()]
+            campaign_id = "cmp_" + uuid.uuid4().hex[:8]
+            queued = 0
+            for r in recips:
+                vv = vars_fn(r) if vars_fn else {}
+                if self.enqueue(r, template, vv, provider, subject=subject,
+                                campaign_id=campaign_id,
+                                send_at=float(send_at or 0.0)):
+                    queued += 1
+            return {"campaign_id": campaign_id, "queued": queued,
+                    "send_at": float(send_at or 0.0)}
+        except Exception:  # noqa: BLE001
+            return {"campaign_id": "", "queued": 0, "send_at": 0.0}
+
+    def send_seed(self, template: str, seeds: list[str],
+                  provider: str, vars_: dict | None = None) -> dict:
+        """'Always send a test email first' (Listmonk rule) — seed inboxes
+        get a [SEED] copy before the real campaign. Never raises."""
+        try:
+            seeds = [s.strip() for s in (seeds or []) if s and s.strip()]
+            sent = [self.enqueue(s, template, vars_, provider,
+                                 subject="[SEED] test send")
+                    for s in seeds]
+            return {"seeded": sum(1 for s in sent if s), "of": len(seeds)}
+        except Exception:  # noqa: BLE001
+            return {"seeded": 0, "of": 0}
+
+    def campaign_report(self, campaign_id: str) -> dict:
+        """Funnel: queued → sent → failed → dead → blocked, per provider.
+        Never raises."""
+        out: dict = {"campaign_id": campaign_id or "", "total": 0,
+                     "by_status": {}, "by_provider": {}, "spent_kobo": 0}
+        try:
+            if self._db is None or not campaign_id:
+                return out
+            rows = self._db.execute(
+                "SELECT status, provider, COUNT(*) c FROM send_queue"
+                " WHERE campaign_id = ? GROUP BY status, provider",
+                (campaign_id,)).fetchall()
+            for r in rows:
+                c = int(r["c"])
+                out["total"] += c
+                out["by_status"][r["status"]] = out["by_status"].get(r["status"], 0) + c
+                p = out["by_provider"].setdefault(r["provider"], {})
+                p[r["status"]] = p.get(r["status"], 0) + c
+            return out
+        except Exception:  # noqa: BLE001
+            return out
+
+    def spam_check_template(self, name: str) -> dict:
+        """Spam-score a saved template before it goes anywhere. Never raises."""
+        try:
+            tpl = self.get_template(name or "")
+            if not tpl:
+                return {"score": 0, "verdict": "template not found", "issues": []}
+            return spam_score(tpl.get("subject", ""), tpl.get("body", ""))
+        except Exception:  # noqa: BLE001
+            return {"score": 0, "verdict": "unknown", "issues": []}
+
+    # ── suppression (unsubscribe / complaints — distinct from bounces) ──
+
+    def unsubscribe(self, address: str, reason: str = "unsubscribe",
+                    detail: str = "") -> bool:
+        """One-click unsubscribe / complaint handling. Immediate, permanent.
+        Never raises."""
+        try:
+            address = (address or "").strip().lower()
+            reason = (reason or "unsubscribe").strip().lower()
+            if not address or "@" not in address or self._db is None:
+                return False
+            if reason not in ("unsubscribe", "complaint", "manual"):
+                reason = "unsubscribe"
+            self._db.execute(
+                "INSERT OR REPLACE INTO send_suppressions"
+                " (address, reason, detail, at) VALUES (?, ?, ?, ?)",
+                (address, reason, (detail or "")[:200], time.time()))
+            self._db.commit()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def is_suppressed(self, address: str) -> bool:
+        try:
+            if self._db is None:
+                return False
+            row = self._db.execute(
+                "SELECT 1 FROM send_suppressions WHERE address = ?",
+                ((address or "").strip().lower(),)).fetchone()
+            return row is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def suppression_count(self) -> int:
+        try:
+            if self._db is None:
+                return 0
+            row = self._db.execute("SELECT COUNT(*) c FROM send_suppressions").fetchone()
+            return int(row["c"]) if row else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
+    # ── warmup enforcement ──
+
+    def set_warmup(self, provider: str, daily_target: int) -> bool:
+        """Start/restart a warmup ramp for a provider. Never raises."""
+        try:
+            provider = (provider or "").strip()
+            if not provider or self._db is None:
+                return False
+            self._db.execute(
+                "INSERT OR REPLACE INTO send_warmup (provider, day0, daily_target)"
+                " VALUES (?, ?, ?)",
+                (provider, time.time(), max(10, int(daily_target or 100))))
+            self._db.commit()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def warmup_status(self, provider: str) -> dict:
+        """Today's warmup cap for a provider ({} = no warmup). Never raises."""
+        try:
+            if self._db is None:
+                return {}
+            row = self._db.execute(
+                "SELECT * FROM send_warmup WHERE provider = ?",
+                ((provider or "").strip(),)).fetchone()
+            if not row:
+                return {}
+            day = int((time.time() - float(row["day0"])) / 86400.0) + 1
+            plan = warmup_plan(int(row["daily_target"]), 21)
+            cap = plan[min(day, len(plan)) - 1]["cap"] if plan else int(row["daily_target"])
+            sent_today = self._db.execute(
+                "SELECT COUNT(*) c FROM send_log WHERE provider = ?"
+                " AND event = 'sent' AND at >= ?",
+                (row["provider"], time.time() - 86400.0)).fetchone()
+            used = int(sent_today["c"]) if sent_today else 0
+            return {"provider": row["provider"], "day": day, "cap": cap,
+                    "used": used, "remaining": max(0, cap - used)}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _warmup_ok(self, provider: str) -> bool:
+        try:
+            st = self.warmup_status(provider)
+            if not st:
+                return True
+            return st.get("remaining", 1) > 0
+        except Exception:  # noqa: BLE001
+            return True
+
     # ── bounces / blocklist ──
 
     def process_bounce(self, dsn_text: str) -> dict:
@@ -811,7 +1368,8 @@ class SendEngine:
     def status(self) -> dict:
         """Queue stats, provider health, spend. Never raises."""
         out: dict = {"queued": 0, "sent_24h": 0, "failed": 0, "dead": 0,
-                     "blocklisted": 0, "spent_24h_kobo": 0, "providers": []}
+                     "blocklisted": 0, "suppressed": 0, "spent_24h_kobo": 0,
+                     "providers": []}
         try:
             if self._db is None:
                 return out
@@ -825,6 +1383,7 @@ class SendEngine:
             row = self._db.execute(
                 "SELECT COUNT(*) c FROM send_blocklist").fetchone()
             out["blocklisted"] = int(row["c"]) if row else 0
+            out["suppressed"] = self.suppression_count()
             row = self._db.execute(
                 "SELECT COALESCE(SUM(cost_kobo), 0) s FROM send_costs"
                 " WHERE at >= ?", (day,)).fetchone()
@@ -858,12 +1417,20 @@ def _usage() -> str:
     return ("usage:\n"
             "  /send template add <name> | <body> — save a template\n"
             "  /send template list — list templates\n"
+            "  /send variant add <template> <name> | <body> — A/B variant\n"
             "  /send provider add <name> <kind> [rate/min] — register a provider\n"
             "  /send campaign <template> to <a@b.com, c@d.com> [via <provider>] — enqueue\n"
+            "  /send ab <template> <v1,v2> to <a@b.com, c@d.com> via <provider> — A/B test\n"
+            "  /send abreport <campaign_id> — per-variant results + winner\n"
+            "  /send seed <template> to <a@b.com> via <provider> — test send first\n"
+            "  /send spamcheck <template> — spam-score before bulk\n"
+            "  /send deliver <domain> — SPF/DMARC deliverability audit\n"
+            "  /send warmup <provider> <daily_target> — start a warmup ramp\n"
             "  /send process — drain the queue now\n"
             "  /send queue — pending sends\n"
-            "  /send status — providers, blocklist, spend\n"
+            "  /send status — providers, blocklist, suppression, spend\n"
             "  /send bounce <address> — manually blocklist (hard bounce)\n"
+            "  /send unsub <address> — one-click unsubscribe (suppression)\n"
             "kinds: smtp, ses, twilio, whatsapp, telegram, mock (test).")
 
 
@@ -941,7 +1508,7 @@ def control_send(tail: str, context=None, chat=None, **kwargs) -> str:
             st = eng.status()
             lines = [f"📊 send status — queued {st['queued']} · sent(24h) {st['sent_24h']} · "
                      f"failed {st['failed']} · dead {st['dead']} · "
-                     f"blocklisted {st['blocklisted']} · "
+                     f"blocklisted {st['blocklisted']} · suppressed {st['suppressed']} · "
                      f"spent(24h) ₦{st['spent_24h_kobo']/100:,.0f}"]
             for p in st["providers"]:
                 lines.append(f"• {p['name']} ({p['kind']}, {p['rate_per_minute']}/min, "
@@ -954,6 +1521,120 @@ def control_send(tail: str, context=None, chat=None, **kwargs) -> str:
                 return "usage: /send bounce <address>"
             eng.blocklist(addr, "manual hard bounce")
             return f"{addr} blocklisted — no more sends to it."
+
+        if low.startswith("unsub"):
+            addr = rest[5:].strip()
+            if not addr:
+                return "usage: /send unsub <address>"
+            ok = eng.unsubscribe(addr)
+            return (f"🚫 {addr} unsubscribed — suppressed immediately, "
+                    f"permanently." if ok else "couldn't suppress that address.")
+
+        if low.startswith("variant"):
+            body = rest[7:].strip()
+            if body.lower().startswith("add"):
+                rest2 = body[3:].strip()
+                if "|" not in rest2:
+                    return "usage: /send variant add <template> <name> | <body>"
+                head, vbody = rest2.split("|", 1)
+                parts = head.strip().split(None, 1)
+                if len(parts) < 2:
+                    return "usage: /send variant add <template> <name> | <body>"
+                ok = eng.save_variant(parts[0], parts[1], vbody.strip())
+                return (f"variant '{parts[1]}' of '{parts[0]}' saved."
+                        if ok else "couldn't save that variant.")
+            if body.lower().startswith("list"):
+                vs = eng.list_variants(body[4:].strip())
+                if not vs:
+                    return "no variants yet."
+                return "variants:\n" + "\n".join(
+                    f"• {v['template']} / {v['variant_name']}" for v in vs)
+            return _usage()
+
+        if low.startswith("abreport"):
+            cid = rest[8:].strip()
+            if not cid:
+                return "usage: /send abreport <campaign_id>"
+            rep = eng.ab_report(cid)
+            if not rep.get("variants"):
+                return f"no data for campaign {cid}."
+            lines = [f"🧪 A/B report — {cid}"]
+            for v, s in sorted(rep["variants"].items()):
+                lines.append(
+                    f"• {v}: sent {s.get('sent', 0)} · failed {s.get('failed', 0)} · "
+                    f"fail rate {s.get('fail_rate', 0):.1%}")
+            win = eng.ab_winner(cid)
+            if win.get("winner"):
+                lines.append(f"🏆 winner: {win['winner']} ({win.get('reason', '')})")
+            return "\n".join(lines)
+
+        if low.startswith("ab"):
+            # /send ab <template> <v1,v2> to <a,b> via <provider>
+            m = re.match(r"(?P<tpl>\S+)\s+(?P<vars>\S+)\s+to\s+(?P<recips>[^;]+?)\s+via\s+(?P<prov>\S+)\s*$",
+                         rest[2:].strip(), re.IGNORECASE)
+            if not m:
+                return "usage: /send ab <template> <v1,v2> to <a@b.com, c@d.com> via <provider>"
+            variants = [v.strip() for v in m.group("vars").split(",") if v.strip()]
+            recips = [r.strip() for r in m.group("recips").split(",") if r.strip()]
+            res = eng.create_ab_campaign("chat-ab", m.group("tpl"), variants,
+                                         recips, m.group("prov"))
+            if not res.get("campaign_id"):
+                return "couldn't start that A/B test — check template/variants."
+            pv = ", ".join(f"{k}: {v}" for k, v in res["per_variant"].items())
+            return (f"🧪 A/B test {res['campaign_id']} started — {pv}.\n"
+                    f"/send abreport {res['campaign_id']} for results.")
+
+        if low.startswith("seed"):
+            m = re.match(r"(?P<tpl>\S+)\s+to\s+(?P<recips>[^;]+?)\s+via\s+(?P<prov>\S+)\s*$",
+                         rest[4:].strip(), re.IGNORECASE)
+            if not m:
+                return "usage: /send seed <template> to <a@b.com> via <provider>"
+            recips = [r.strip() for r in m.group("recips").split(",") if r.strip()]
+            res = eng.send_seed(m.group("tpl"), recips, m.group("prov"))
+            return (f"🌱 seed test sent to {res['seeded']}/{res['of']} — "
+                    f"check the inbox, then launch the campaign.")
+
+        if low.startswith("spamcheck"):
+            name = rest[9:].strip()
+            if not name:
+                return "usage: /send spamcheck <template>"
+            sc = eng.spam_check_template(name)
+            lines = [f"🔍 spam score for '{name}': {sc['score']}/100 — {sc['verdict']}"]
+            for i in sc.get("issues", [])[:6]:
+                lines.append(f"  • {i}")
+            if sc["score"] < 30:
+                lines.append("clean enough for bulk. 🌱 send a seed first anyway.")
+            return "\n".join(lines)
+
+        if low.startswith("deliver"):
+            domain = rest[7:].strip()
+            if not domain:
+                return "usage: /send deliver <domain>"
+            res = deliverability_check(domain)
+            lines = [f"📬 deliverability — {res['domain']}  "
+                     f"grade {res['grade']} ({res['score']}/100)"]
+            for c in res.get("checks", []):
+                icon = "✅" if c.get("ok") else "❌" if c.get("ok") is False else "❔"
+                lines.append(f"{icon} {c['name']}: {c.get('detail', '')}")
+            lines.append("fix DNS first — authentication beats content tweaks.")
+            return "\n".join(lines)
+
+        if low.startswith("warmup"):
+            parts = rest[6:].strip().split()
+            if len(parts) < 2:
+                return "usage: /send warmup <provider> <daily_target>"
+            try:
+                target = int(parts[1])
+            except ValueError:
+                return "usage: /send warmup <provider> <daily_target>"
+            ok = eng.set_warmup(parts[0], target)
+            if not ok:
+                return "couldn't start that warmup."
+            plan = warmup_plan(target)
+            preview = ", ".join(f"d{p['day']}:{p['cap']}" for p in plan[:5])
+            return (f"🔥 warmup started for {parts[0]} → {target}/day over 21 days.\n"
+                    f"ramp: {preview} …\n"
+                    f"the engine caps daily sends until the ramp completes.")
 
         return _usage()
     except Exception:  # noqa: BLE001
